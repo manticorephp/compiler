@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Optional micro-benchmark harness: compiles each bench/cases/*.php with
+# manticore and times native vs the `php` interpreter (best-of-3 wall clock).
+# Verifies output parity first — a mismatch is reported and not timed.
+#
+#   bash bench/run.sh            # all cases
+#   bash bench/run.sh -k sort    # only cases whose name matches "sort"
+#   REPS=5 bash bench/run.sh     # best-of-5 instead of best-of-3
+#
+# Not part of any gate — run it by hand to refresh the perf snapshot.
+set -u
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+mant="$root/bin/manticore"
+cases_dir="$here/cases"
+out_dir="${TMPDIR:-/tmp}/manticore_bench.$$"
+mkdir -p "$out_dir"
+trap 'rm -rf "$out_dir"' EXIT
+
+filter="${2:-}"
+[ "${1:-}" = "-k" ] && filter="${2:-}"
+reps="${REPS:-3}"
+php_bin="${PHP:-php}"
+
+if [ ! -x "$mant" ]; then echo "no $mant — run bin/build first" >&2; exit 1; fi
+
+# min wall-clock (seconds) of $reps runs of "$@", via /usr/bin/time -p.
+best_time() {
+    local best="" t
+    for _ in $(seq 1 "$reps"); do
+        t=$( { /usr/bin/time -p "$@" >/dev/null; } 2>&1 | awk '/^real/{print $2}' )
+        if [ -z "$best" ] || awk "BEGIN{exit !($t < $best)}"; then best="$t"; fi
+    done
+    echo "$best"
+}
+
+printf '%-18s %10s %10s %9s   %s\n' "case" "native(s)" "php(s)" "speedup" "parity"
+printf '%s\n' "-------------------------------------------------------------------"
+
+shopt -s nullglob
+total=0; faster=0
+for f in "$cases_dir"/*.php; do
+    name="$(basename "$f" .php)"
+    [ -n "$filter" ] && [[ "$name" != *"$filter"* ]] && continue
+    bin="$out_dir/$name"
+
+    if ! "$mant" compile "$f" -o "$bin" >"$out_dir/$name.cerr" 2>&1; then
+        printf '%-18s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "COMPILE-FAIL"
+        continue
+    fi
+
+    n_out="$("$bin")"
+    p_out="$("$php_bin" "$f" 2>/dev/null)"
+    if [ "$n_out" != "$p_out" ]; then
+        printf '%-18s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "DIFF"
+        continue
+    fi
+
+    nt="$(best_time "$bin")"
+    pt="$(best_time "$php_bin" "$f")"
+    sp="$(awk "BEGIN{ if ($nt>0) printf \"%.1fx\", $pt/$nt; else print \"inf\" }")"
+    total=$((total + 1))
+    awk "BEGIN{exit !($pt > $nt)}" && faster=$((faster + 1))
+    printf '%-18s %10s %10s %9s   %s\n' "$name" "$nt" "$pt" "$sp" "ok"
+done
+printf '%s\n' "-------------------------------------------------------------------"
+echo "ran $total · native faster on $faster · php $($php_bin -r 'echo PHP_VERSION;')"
