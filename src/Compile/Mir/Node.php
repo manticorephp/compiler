@@ -105,4 +105,12 @@ abstract class Node
      * until that pass runs.
      */
     public ?string $allocKind = null;
+
+    /**
+     * 1-based source line this node lowered from (0 = unknown). Stamped
+     * centrally in {@see Passes\LowerFromAst::lowerStmt} / `lowerExpr` from
+     * the AST node's {@see \Parser\Ast\Span}, so compile-time diagnostics
+     * (the {@see Passes\TypeCheck} analyzer) can point at a real location.
+     */
+    public int $line = 0;
 }

@@ -56,6 +56,10 @@ final class TypeCheck
         // index i maps to param i+1. A free function has no receiver; a static
         // call (incl. `parent::__construct`) already passes `this` explicitly in
         // args, so both align at offset 0.
+        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
+            || $k === Node::KIND_DIV || $k === Node::KIND_MOD) {
+            $this->checkArith($n, $inFn);
+        }
         if ($k === Node::KIND_CALL) {
             $c = $this->asCall($n);
             $this->checkArgs($c->function, $c->function, $c->args, $inFn, 0);
@@ -97,11 +101,51 @@ final class TypeCheck
             $p = $params[$pi];
             if ($p->variadic) { break; }
             if ($this->incompatible($arg->type, $p->type)) {
-                $this->errors[] = $inFn . '(): argument ' . (string)($ai + 1) . ' to '
+                $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected';
             }
         }
+    }
+
+    /**
+     * Strict arithmetic: `+ - * / %` on a DEFINITELY-string operand is rejected
+     * (Manticore follows strict_types and a bit beyond — a numeric string is not
+     * silently coerced to a number; cast explicitly). Only fires when an operand
+     * is statically KIND_STRING — a `cell`/`unknown`/scalar operand is left
+     * alone, so the self-host corpus (which never does string arithmetic) is
+     * unaffected. The `.` concat operator is the string path and is not checked.
+     */
+    private function checkArith(Node $n, string $inFn): void
+    {
+        // Add/Sub/Mul/Div/Mod share the (left, right) layout — pin to Add so the
+        // field read resolves (the load-bearing-subclass idiom; same offsets).
+        $a = $this->asArith($n);
+        $bad = $a->left->type->kind === Type::KIND_STRING
+            || $a->right->type->kind === Type::KIND_STRING;
+        if ($bad) {
+            $op = $this->arithOp($n->kind);
+            $this->errors[] = $this->at($n) . 'arithmetic (`' . $op
+                . '`) on a string operand in ' . $inFn
+                . '() — cast explicitly ((int)/(float)) to compute on it';
+        }
+    }
+
+    private function asArith(Node $n): \Compile\Mir\Add { return $n; }
+
+    private function arithOp(string $kind): string
+    {
+        if ($kind === Node::KIND_ADD) { return '+'; }
+        if ($kind === Node::KIND_SUB) { return '-'; }
+        if ($kind === Node::KIND_MUL) { return '*'; }
+        if ($kind === Node::KIND_DIV) { return '/'; }
+        return '%';
+    }
+
+    /** `line N: error: ` prefix from a node's stamped source line (0 → ''). */
+    private function at(Node $n): string
+    {
+        return $n->line > 0 ? 'line ' . (string)$n->line . ': error: ' : 'error: ';
     }
 
     private function checkReturns(FunctionDef $fn): void
@@ -119,7 +163,7 @@ final class TypeCheck
         if ($n->kind === Node::KIND_RETURN) {
             $r = $this->asReturn($n);
             if ($r->value !== null && $this->incompatible($r->value->type, $rt)) {
-                $this->errors[] = $fnName . '(): return ' . $r->value->type->toString()
+                $this->errors[] = $this->at($r) . $fnName . '(): return ' . $r->value->type->toString()
                     . ' incompatible with declared ' . $rt->toString();
             }
         }

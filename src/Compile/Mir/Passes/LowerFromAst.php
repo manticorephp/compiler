@@ -1446,6 +1446,7 @@ final class LowerFromAst implements Pass
         if ($cf) { $this->constCallables = []; }
         $node = $this->lowerStmtInner($stmt);
         if ($cf) { $this->constCallables = []; }
+        if ($node->line === 0) { $node->line = $stmt->span->line; }
         return $node;
     }
 
@@ -2321,6 +2322,16 @@ final class LowerFromAst implements Pass
     }
 
     private function lowerExpr(\Parser\Ast\Expr $expr): Node
+    {
+        $node = $this->lowerExprInner($expr);
+        // Stamp the source line centrally (0 = not yet set) so a later
+        // diagnostic can point at this expression. Nested lowerExpr calls
+        // already stamped their own sub-nodes; only fill an unset one.
+        if ($node->line === 0) { $node->line = $expr->span->line; }
+        return $node;
+    }
+
+    private function lowerExprInner(\Parser\Ast\Expr $expr): Node
     {
         if ($expr->kind === 'IntLiteral') {
             return new IntConst($expr->value, Type::int_());

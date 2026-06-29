@@ -1343,12 +1343,18 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // default — it never runs during a normal build / self-host. When on,
         // any genuinely-incompatible type use (array↔scalar / object↔scalar at
         // a call arg or return) is fatal.
+        // Strict static analyzer (MANTICORE_TYPECHECK=1) — OFF by default for
+        // now; turning it on is a larger epic (the cold-seed / self-host corpus
+        // still leans on patterns it would flag). The pass already emits clean
+        // `line N: error: …` diagnostics (string arithmetic, array-ness arg /
+        // return mismatches) when enabled. Any reported error is fatal — a clean
+        // diagnostic beats a downstream clang failure or wrong codegen.
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
         if (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0") {
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $module = $tc->run($module);
             if (\count($tc->errors) > 0) {
-                foreach ($tc->errors as $te) { dprint("type error: " . $te); }
+                foreach ($tc->errors as $te) { dprint($te); }
                 return null;
             }
         }
