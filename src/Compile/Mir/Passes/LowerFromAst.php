@@ -1778,6 +1778,7 @@ final class LowerFromAst implements Pass
 
     private function asLoadLocal(Node $n): LoadLocal { return $n; }
     private function asFloatLiteral(\Parser\Ast\Expr $e): \Parser\Ast\FloatLiteral { return $e; }
+    private function asPropAccess(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess { return $e; }
 
     /**
      * `foo(...)` first-class callable → a 0-capture closure whose body
@@ -2542,7 +2543,15 @@ final class LowerFromAst implements Pass
         if ($expr->kind === 'ArrayLit')       { return $this->lowerArrayLit($expr); }
         if ($expr->kind === 'ArrayAccess')    { return $this->lowerArrayAccess($expr); }
         if ($expr->kind === 'New')            { return $this->lowerNewExpr($expr); }
-        if ($expr->kind === 'PropertyAccess') { return $this->lowerPropertyAccess($expr); }
+        if ($expr->kind === 'PropertyAccess') {
+            // Pin to PropertyAccess before reading `nullsafe`: on the base `Expr`
+            // the field offset is the load-bearing subclass's (poly-prop trap) —
+            // PropertyAccess holds `nullsafe` at a different slot than MethodCall,
+            // so a base read returns garbage and routes EVERY `->prop` through the
+            // nullsafe desugar.
+            $pa = $this->asPropAccess($expr);
+            return $pa->nullsafe ? $this->lowerNullsafeProp($pa) : $this->lowerPropertyAccess($pa);
+        }
         if ($expr->kind === 'DynProp') {
             return new DynProp_($this->lowerExpr($this->dynPropObject($expr)), $this->lowerExpr($this->dynPropName($expr)), Type::cell());
         }
@@ -3055,6 +3064,26 @@ final class LowerFromAst implements Pass
     {
         $obj = $this->lowerExpr($expr->object);
         return new PropertyAccess_($obj, $expr->property, Type::unknown());
+    }
+
+    /**
+     * Nullsafe `$obj?->prop` — short-circuits to null when the receiver is null
+     * (without the guard the property read derefs null+offset → SEGV). Desugar
+     * (evaluating `$obj` ONCE via a temp) to `($t = $obj) === null ? null :
+     * $t->prop`, mirroring the nullsafe method-call path. NOTE: the null arm
+     * renders as the non-null type's zero (int(0), not NULL) — a nullable-type
+     * limitation (the result is really `T|null`); correct NULL rendering needs a
+     * real nullable/union type (the type-system-v2 epic). The CRASH is fixed.
+     */
+    private function lowerNullsafeProp(\Parser\Ast\PropertyAccess $expr): Node
+    {
+        $obj = $this->lowerExpr($expr->object);
+        $tmp = '__ns_' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $store = new StoreLocal($tmp, $obj, $obj->type);
+        $cond = new Cmp($store, new NullConst(Type::null_()), '===');
+        $prop = new PropertyAccess_(new LoadLocal($tmp, $obj->type), $expr->property, Type::unknown());
+        return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown());
     }
 
     private function lowerMethodCall(\Parser\Ast\MethodCallExpr $expr): Node

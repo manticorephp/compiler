@@ -4453,6 +4453,12 @@ final class EmitLlvm
         $subjStrish = $subjK === Type::KIND_STRING || $subjK === Type::KIND_UNKNOWN;
         // Heterogeneous arms (see inferMatch) → box each arm to a uniform cell.
         $wantCell = $n->type->kind === Type::KIND_CELL;
+        // A boxed-cell subject (e.g. an untyped `$x` param) carries NaN-boxed
+        // bits — a raw `icmp eq` against a literal cond NEVER matches, so every
+        // arm fell through to default. Compare by tag instead: int/bool conds vs
+        // the unboxed int payload, string conds via a tag-guarded strcmp.
+        $subjIsCell = $subjK === Type::KIND_CELL;
+        $subjInt = '';   // lazily-unboxed int carrier (cell subject, scalar cond)
         $endLabel = $this->allocLabel('match.end');
         foreach ($m->arms as $arm) {
             $bodyLabel = $this->allocLabel('match.body');
@@ -4462,22 +4468,41 @@ final class EmitLlvm
                 $out .= '  br label %' . $bodyLabel . "\n";
             } else {
                 foreach ($conds as $c) {
-                    $out .= $this->emitNode($c);
-                    $out .= $this->coerceToI64();
-                    $cv = $this->lastValue;
                     $vk = $this->nodeTypeKind($c);
-                    $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
-                        && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
                     $eq = $this->allocSsa();
-                    if ($useStr) {
-                        $this->needsStrcmp = true;
-                        $sp = $this->allocSsa();
-                        $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
-                        $cp = $this->allocSsa();
-                        $out .= '  ' . $cp . ' = inttoptr i64 ' . $cv . " to ptr\n";
-                        $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                    if ($subjIsCell) {
+                        if ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN) {
+                            // string cond: tag-guarded strcmp (a non-string
+                            // subject is never strictly === a string).
+                            $out .= $this->emitCellStrEq($subj, $c, $eq);
+                        } else {
+                            // int/bool/null cond: unbox the subject's payload
+                            // once, then `icmp eq` against the raw cond value.
+                            if ($subjInt === '') {
+                                $this->needsTagged = true;
+                                $subjInt = $this->allocSsa();
+                                $out .= '  ' . $subjInt . ' = call i64 @__manticore_unbox_int(i64 ' . $subj . ")\n";
+                            }
+                            $out .= $this->emitNode($c);
+                            $out .= $this->coerceToI64();
+                            $out .= '  ' . $eq . ' = icmp eq i64 ' . $subjInt . ', ' . $this->lastValue . "\n";
+                        }
                     } else {
-                        $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $cv . "\n";
+                        $out .= $this->emitNode($c);
+                        $out .= $this->coerceToI64();
+                        $cv = $this->lastValue;
+                        $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
+                            && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
+                        if ($useStr) {
+                            $this->needsStrcmp = true;
+                            $sp = $this->allocSsa();
+                            $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
+                            $cp = $this->allocSsa();
+                            $out .= '  ' . $cp . ' = inttoptr i64 ' . $cv . " to ptr\n";
+                            $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                        } else {
+                            $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $cv . "\n";
+                        }
                     }
                     $condNext = $this->allocLabel('match.cond');
                     $out .= '  br i1 ' . $eq . ', label %' . $bodyLabel . ', label %' . $condNext . "\n";
@@ -4505,6 +4530,40 @@ final class EmitLlvm
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
         }
+        return $out;
+    }
+
+    /**
+     * Strict `cell === string`: leaves an i1 in `$eq`. The cell subject `$subj`
+     * (boxed i64) equals the string cond iff its NaN tag is PTR (4) and the
+     * bytes match — a non-string cell is never strictly === a string. Mirrors
+     * the `string === cell` path in {@see emitCmp}.
+     */
+    private function emitCellStrEq(string $subj, Node $cond, string $eq): string
+    {
+        $this->needsStrcmp = true;
+        $out = $this->emitNode($cond);
+        $out .= $this->coerceToPtr();
+        $cp = $this->lastValue;
+        $out .= $this->cellTagIr($subj);
+        $tag = $this->cellTagReg;
+        $isStr = $this->allocSsa();
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
+        $cmpL = $this->allocLabel('match.streq');
+        $nsL  = $this->allocLabel('match.strne');
+        $jnL  = $this->allocLabel('match.strjoin');
+        $out .= '  br i1 ' . $isStr . ', label %' . $cmpL . ', label %' . $nsL . "\n";
+        $out .= $cmpL . ":\n";
+        $payload = $this->allocSsa();
+        $out .= '  ' . $payload . ' = and i64 ' . $subj . ", 281474976710655\n";
+        $sp = $this->allocSsa();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+        $eqc = $this->allocSsa();
+        $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+        $out .= '  br label %' . $jnL . "\n";
+        $out .= $nsL . ":\n  br label %" . $jnL . "\n";
+        $out .= $jnL . ":\n";
+        $out .= '  ' . $eq . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
         return $out;
     }
 
