@@ -105,6 +105,15 @@ final class InferTypes implements Pass
      *  Typed assoc[cell,*] so the key rides a tagged cell (key_cell_at/set_cell)
      *  end-to-end, preserving int AND string keys through the array. */
     private array $cellKeyLocals = [];
+    /** @var array<string,bool> locals that receive a definitively INT-keyed element
+     *  store (`$m[5]=…`). When a local has BOTH an int key here AND a string key
+     *  ({@see $assocLocals}), it is a MIXED-key array → promoted to cellKeyLocals
+     *  so foreach reads key_cell_at (a tagged int|string cell) instead of key_at
+     *  (raw i64) — else the int key is read as a string ptr and faults. */
+    private array $intKeyLocals = [];
+    /** @var array<string,bool> locals that receive a LITERAL string-keyed store
+     *  (`$m["a"]=…`); paired with {@see $intKeyLocals} → a mixed-key cell array. */
+    private array $strLitKeyLocals = [];
     /** @var array<string,bool> array locals whose element stores carry ≥2 distinct
      *  value KINDS (e.g. int + string + array) → a genuinely mixed array, so its
      *  element is seeded CELL up front and held there. Without the pre-seed, a
@@ -288,9 +297,17 @@ final class InferTypes implements Pass
         // an assoc buffer.
         $this->assocLocals = [];
         $this->cellKeyLocals = [];
+        $this->intKeyLocals = [];
+        $this->strLitKeyLocals = [];
         $this->cellElemLocals = [];
         $this->assocValClasses = [];
         $this->scanAssocLocals($fn->body);
+        // A MIXED-key array — string-keyed ($m["a"]=…) AND int-keyed ($m[5]=…) —
+        // must ride a tagged cell key end-to-end (key_cell_at boxes each entry by
+        // its KIND), else foreach reads the int key as a string ptr → SIGSEGV.
+        foreach ($this->intKeyLocals as $name => $unused) {
+            if (isset($this->strLitKeyLocals[$name])) { $this->cellKeyLocals[$name] = true; }
+        }
         // A local whose element stores carry ≥2 distinct value kinds is a mixed
         // array: seed a CELL element up front so EVERY load/store sees it (a
         // single forward pass would leave the early stores typed by the
@@ -948,6 +965,15 @@ final class InferTypes implements Pass
                 $key = $c->function . '#' . (string)$i;
                 $i = $i + 1;
                 if (!isset($cand[$key]) || isset($conflict[$key])) { continue; }
+                // A self-recursive / forwarded arg whose OWN element type is
+                // still unknown (a recursive `f($a,...)` passing its own bare
+                // `array` param, or a vec[unknown]) carries NO element info — it
+                // IS the type being inferred. Skip it instead of conflicting:
+                // counting the param's own unresolved state as a conflict would
+                // poison a concrete observation from another call site. (Recursive
+                // quicksort's `&$a` erased to int → `<` compiled as an integer
+                // compare on string pointers; see preserve_known_type_principle.)
+                if ($this->isUnknownArrayElem($a->type)) { continue; }
                 if (!$a->type->isVec()) { $conflict[$key] = true; continue; }
                 $elem = $a->type->element;
                 $ek = $elem === null ? '' : $elem->kind;
@@ -1080,6 +1106,16 @@ final class InferTypes implements Pass
                         $this->cellKeyLocals[$name] = true;
                     } elseif ($this->isStringKey($se->index)) {
                         $this->assocLocals[$name] = true;
+                        // A LITERAL string key (`$m["a"]=…`) — paired with a literal
+                        // int key below it makes a mixed-key array (cell key). Only
+                        // literals qualify: a variable int/string key is the
+                        // generic dynamic case (handled by the CELL-key branch) and
+                        // must not force every string-keyed map to a cell key.
+                        if ($se->index->kind === Node::KIND_STRING_CONST) {
+                            $this->strLitKeyLocals[$name] = true;
+                        }
+                    } elseif ($se->index->kind === Node::KIND_INT_CONST) {
+                        $this->intKeyLocals[$name] = true;
                     }
                 }
                 // Track the coarse value KIND of every element store (any key,
@@ -2009,9 +2045,13 @@ final class InferTypes implements Pass
             // $k the yielded key type (explicit) or the auto-int default.
             if ($at->element !== null) { $elem = $at->element; }
             if ($at->key !== null) { $keyT = $at->key; }
-        } elseif ($at->isAssoc()) {
+        } elseif ($at->isAssoc()
+            || ($at->isArray() && $at->key !== null && $at->key->kind === Type::KIND_CELL)) {
             // Use the assoc's actual key type — a cell-keyed assoc (dynamic
-            // int-or-string keys) yields a tagged-cell key, not a string.
+            // int-or-string keys, incl. a MIXED literal-key array) yields a
+            // tagged-cell key, not a string. `isAssoc()` is string-key-only, so
+            // the cell-key case is matched explicitly (else keyT defaults to int
+            // and the cell key prints as a raw integer).
             $keyT = $at->key ?? Type::string_();
             if ($at->element !== null) { $elem = $at->element; }
         } elseif ($at->isVec()) {
@@ -2296,7 +2336,14 @@ final class InferTypes implements Pass
                 $cur = $at->isAssoc() ? ($at->element ?? null) : null;
                 $elem = isset($this->cellElemLocals[$name])
                     ? Type::cell() : $this->arrayElemMerge($cur, $vt);
-                $key = $at->isAssoc() ? ($at->key ?? Type::string_()) : Type::string_();
+                // A MIXED-key local (cellKeyLocals) rides a tagged cell key — a
+                // string-keyed store must NOT re-narrow it to assoc[string], which
+                // would drop the int keys (foreach then reads an int key as a
+                // string ptr → SIGSEGV). `isAssoc()` is string-key-only, so a
+                // cell-keyed assoc reports isVec() and its key would otherwise
+                // collapse to string here.
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell()
+                    : ($at->isAssoc() ? ($at->key ?? Type::string_()) : Type::string_());
                 $this->localTypes[$name] = Type::assoc($key, $elem);
             } elseif ($at->isVec() || $at->kind === Type::KIND_UNKNOWN) {
                 $cur = $at->element ?? null;

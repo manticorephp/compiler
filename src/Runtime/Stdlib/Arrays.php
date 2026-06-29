@@ -31,6 +31,30 @@ function in_array(string $needle, array $haystack, bool $strict = false): bool
     return false;
 }
 
+/**
+ * `array_search` — non-concrete fallback (the InlineClosures per-call synthesis
+ * only fires on a CONCRETE haystack). String-needle / value shape: both sides go
+ * through libc strcmp so bytes are compared, not pointers. Returns the matching
+ * key or false. Mirrors {@see in_array}.
+ *
+ * LIMITATION: handles a vec (int-keyed) haystack only. A non-concrete ASSOC
+ * (string-key result) and STRICT (===) search need a tagged cell-equality
+ * compare the backend doesn't emit yet, so those are not supported here — a
+ * concrete haystack still routes through the precise InlineClosures synthesis.
+ *
+ * @param string[] $haystack
+ * @return int|false
+ */
+function array_search(string $needle, array $haystack, bool $strict = false): int|false
+{
+    foreach ($haystack as $k => $v) {
+        if (\Runtime\Libc\strcmp((string)$v, $needle) === 0) {
+            return $k;
+        }
+    }
+    return false;
+}
+
 function array_key_exists(int|string $key, array $arr): bool
 {
     foreach ($arr as $k => $_) {

@@ -1,0 +1,9 @@
+a=1
+5=2
+b=3
+10=ten
+x=99
+20=twenty
+x=99 10=ten count=3
+a:1 b:2 
+5:f 6:g 
