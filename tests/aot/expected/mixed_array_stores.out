@@ -1,0 +1,19 @@
+array(3) {
+  ["n"]=>
+  int(5)
+  ["s"]=>
+  string(2) "hi"
+  ["arr"]=>
+  array(2) {
+    [0]=>
+    int(10)
+    [1]=>
+    int(20)
+  }
+}
+array(2) {
+  [0]=>
+  string(5) "first"
+  [1]=>
+  string(6) "second"
+}

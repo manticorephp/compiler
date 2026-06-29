@@ -1,0 +1,10 @@
+x=1
+y=2
+count=2
+get z=nine
+isset y=Y
+isset q=N
+after unset count=3
+y->2
+z->nine
+0->app

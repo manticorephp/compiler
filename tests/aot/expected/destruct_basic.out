@@ -1,0 +1,12 @@
+open A
+in scope
+close A
+after scope
+open X
+close X
+after unset
+open Y
+open Z
+close Y
+after overwrite
+close Z

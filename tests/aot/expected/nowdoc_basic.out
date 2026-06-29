@@ -1,0 +1,3 @@
+Raw $name no interp
+literal {$x} and \n stays
+string(0) ""

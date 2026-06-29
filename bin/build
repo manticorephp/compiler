@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+# Canonical compiler rebuild — SELF-HOST by default.
+#
+#   bin/build [--seed] [--verify] [output]
+#
+# Manticore builds Manticore. The self-built `bin/manticore` is the
+# canonical builder; the Zend front-end (`bin/compile`) is only the COLD
+# bootstrap seed used when no working binary exists yet.
+#
+#   default        self-host: bin/manticore compiles src/ -> new bin/manticore
+#                  (falls back to the Zend seed automatically if no binary)
+#   --seed         force the cold bootstrap (Zend front-end via bin/compile)
+#   --verify       after rebuilding, run the fixpoint + suite gate
+#   output         target path (default bin/manticore)
+#
+# The self build goes to a temp path, is smoke-tested (compile+run a
+# trivial program), and only then atomically swapped into place — a
+# broken self build never clobbers the working binary.
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+SEED=0
+VERIFY=0
+OUT="bin/manticore"
+for arg in "$@"; do
+    case "$arg" in
+        --seed)   SEED=1 ;;
+        --verify) VERIFY=1 ;;
+        -*)       echo "unknown flag: $arg" >&2; exit 2 ;;
+        *)        OUT="$arg" ;;
+    esac
+done
+
+if [[ $SEED -eq 0 && ! -x bin/manticore ]]; then
+    echo "no bin/manticore yet — cold bootstrap via Zend seed" >&2
+    SEED=1
+fi
+
+if [[ $SEED -eq 1 ]]; then
+    echo "── cold bootstrap: Zend front-end (bin/compile) ──"
+    bin/compile "$OUT"
+else
+    echo "── self-host: bin/manticore build manticore.json ──"
+    # Single source of truth: the manifest defines the self-contained
+    # compiler target. Build to a temp output, smoke-test, then atomically
+    # swap — a broken self build never clobbers the working binary.
+    TMP="$(mktemp -d)/manticore_new"
+    TMP_MANIFEST="$(mktemp).json"
+    # Redirect the manifest's output to the temp path (the only edit).
+    sed "s#\"$OUT\"#\"$TMP\"#" manticore.json > "$TMP_MANIFEST"
+    if ! grep -q "\"$TMP\"" "$TMP_MANIFEST"; then
+        echo "fatal: manticore.json has no application output '$OUT' to redirect" >&2
+        exit 1
+    fi
+    bin/manticore build "$TMP_MANIFEST"
+    echo "── smoke test the self build ──"
+    echo '<?php echo "selfhost-ok\n";' > "$TMP.smoke.php"
+    "$TMP" compile "$TMP.smoke.php" -o "$TMP.smoke" >/dev/null
+    OUTPUT="$("$TMP.smoke")"
+    if [[ "$OUTPUT" != "selfhost-ok" ]]; then
+        echo "fatal: self build smoke test failed (got '$OUTPUT') — keeping current binary" >&2
+        exit 1
+    fi
+    mv "$TMP" "$OUT"
+    echo "ok: $OUT (self-built via manifest, smoke-tested)"
+fi
+
+if [[ $VERIFY -eq 1 ]]; then
+    echo "── verify: fixpoint + suite gate ──"
+    bash tools/selfhost_fixpoint.sh
+fi

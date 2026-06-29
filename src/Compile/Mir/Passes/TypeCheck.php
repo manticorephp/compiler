@@ -1,0 +1,160 @@
+<?php
+
+namespace Compile\Mir\Passes;
+
+use Compile\Mir\Call;
+use Compile\Mir\FunctionDef;
+use Compile\Mir\MethodCall_;
+use Compile\Mir\Module;
+use Compile\Mir\NewObj;
+use Compile\Mir\Node;
+use Compile\Mir\Return_;
+use Compile\Mir\StaticCall_;
+use Compile\Mir\Type;
+use Compile\Mir\Walk;
+
+/**
+ * Gated compile-time type checker (`MANTICORE_TYPECHECK=1`). Reports
+ * GENUINELY-incompatible type uses — the kind PHP rejects even with
+ * strict_types off — at two boundaries:
+ *   - a call argument vs the callee parameter type, and
+ *   - a `return` value vs the declared return type.
+ *
+ * Conservative on purpose (no false positives on a loosely-typed corpus or the
+ * self-host build): a check fires only when BOTH sides are a concrete kind
+ * (int/float/string/bool/array/obj) and they disagree on array-ness or
+ * object-ness. Anything `unknown` / `cell` (mixed) / `null` / `void` / closure
+ * on either side is skipped, as is obj↔obj (subtyping not modelled) and
+ * scalar↔scalar (PHP coerces). Off by default — the driver runs it only when
+ * the env flag is set and decides fatality from {@see $errors}.
+ */
+final class TypeCheck
+{
+    /** @var string[] collected, human-readable type errors */
+    public array $errors = [];
+
+    /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
+    private array $paramsByFn = [];
+
+    public function run(Module $module): Module
+    {
+        foreach ($module->functions as $fn) {
+            $this->paramsByFn[$fn->name] = $fn->params;
+        }
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $this->checkReturns($fn);
+            $this->checkNode($fn->body, $fn->name);
+        }
+        return $module;
+    }
+
+    private function checkNode(Node $n, string $inFn): void
+    {
+        $k = $n->kind;
+        // $recv = 1 when the receiver (`this`) is IMPLICIT (not in args) so arg
+        // index i maps to param i+1. A free function has no receiver; a static
+        // call (incl. `parent::__construct`) already passes `this` explicitly in
+        // args, so both align at offset 0.
+        if ($k === Node::KIND_CALL) {
+            $c = $this->asCall($n);
+            $this->checkArgs($c->function, $c->function, $c->args, $inFn, 0);
+        } elseif ($k === Node::KIND_NEW_OBJ) {
+            $no = $this->asNew($n);
+            $this->checkArgs($no->class . '____construct', 'new ' . $no->class, $no->args, $inFn, 1);
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            $sc = $this->asStaticCall($n);
+            $this->checkArgs($sc->class . '__' . $sc->method, $sc->class . '::' . $sc->method, $sc->args, $inFn, 0);
+        } elseif ($k === Node::KIND_METHOD_CALL) {
+            $mc = $this->asMethodCall($n);
+            $cls = $mc->object->type->class ?? '';
+            if ($cls !== '') {
+                $this->checkArgs($cls . '__' . $mc->method, $cls . '->' . $mc->method, $mc->args, $inFn, 1);
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->checkNode($c, $inFn); }
+    }
+
+    /**
+     * @param Node[] $args
+     *
+     * Map each positional arg to its declared param. An implicit leading
+     * `this` param (instance methods / ctors) is skipped via an offset so the
+     * arg/param indices line up. An unresolved callee (builtin, dynamic,
+     * inherited method on a parent class) is skipped — no callee, no check.
+     */
+    private function checkArgs(string $fnName, string $label, array $args, string $inFn, int $recv): void
+    {
+        $params = $this->paramsByFn[$fnName] ?? null;
+        if ($params === null) { return; }
+        // Apply the implicit-receiver offset only when the callee actually has a
+        // leading `this` param (guards a malformed resolution).
+        $offset = 0;
+        if ($recv === 1 && \count($params) > 0 && $params[0]->name === 'this') { $offset = 1; }
+        foreach ($args as $ai => $arg) {
+            $pi = $ai + $offset;
+            if (!isset($params[$pi])) { break; }
+            $p = $params[$pi];
+            if ($p->variadic) { break; }
+            if ($this->incompatible($arg->type, $p->type)) {
+                $this->errors[] = $inFn . '(): argument ' . (string)($ai + 1) . ' to '
+                    . $label . '() — ' . $arg->type->toString()
+                    . ' given, ' . $p->type->toString() . ' expected';
+            }
+        }
+    }
+
+    private function checkReturns(FunctionDef $fn): void
+    {
+        // A generator's `return X` sets the FINAL value (getReturn), not the
+        // declared `Generator` return type — never a mismatch.
+        if ($fn->isGenerator) { return; }
+        $rt = $fn->returnType;
+        if (!$this->concrete($rt)) { return; }
+        $this->checkReturnNodes($fn->body, $rt, $fn->name);
+    }
+
+    private function checkReturnNodes(Node $n, Type $rt, string $fnName): void
+    {
+        if ($n->kind === Node::KIND_RETURN) {
+            $r = $this->asReturn($n);
+            if ($r->value !== null && $this->incompatible($r->value->type, $rt)) {
+                $this->errors[] = $fnName . '(): return ' . $r->value->type->toString()
+                    . ' incompatible with declared ' . $rt->toString();
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->checkReturnNodes($c, $rt, $fnName); }
+    }
+
+    /**
+     * True when both types are concrete and disagree on ARRAY-ness (a compound
+     * where a scalar/object is expected, or vice versa) — the reliably-inferred
+     * incompatibility. Object↔scalar is intentionally NOT flagged yet: our
+     * inference is too imprecise on polymorphic AST field reads (a node's
+     * `->value` is int for one subclass, an Expr for another → spurious
+     * `int given, obj expected`) and FFI deliberately passes `Ffi\Ptr` as a
+     * string. Scalar↔scalar is always allowed (PHP coerces, non-strict).
+     */
+    private function incompatible(Type $a, Type $b): bool
+    {
+        if (!$this->concrete($a) || !$this->concrete($b)) { return false; }
+        $aArr = $a->kind === Type::KIND_ARRAY;
+        $bArr = $b->kind === Type::KIND_ARRAY;
+        return $aArr !== $bArr;
+    }
+
+    /** A kind we can reason about (excludes unknown / cell / null / void / closure). */
+    private function concrete(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL
+            || $k === Type::KIND_ARRAY || $k === Type::KIND_OBJ;
+    }
+
+    private function asCall(Call $n): Call { return $n; }
+    private function asNew(NewObj $n): NewObj { return $n; }
+    private function asStaticCall(StaticCall_ $n): StaticCall_ { return $n; }
+    private function asMethodCall(MethodCall_ $n): MethodCall_ { return $n; }
+    private function asReturn(Return_ $n): Return_ { return $n; }
+}

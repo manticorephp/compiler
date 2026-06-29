@@ -1,0 +1,11 @@
+NULL
+NULL
+string(4) "root"
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  NULL
+  [2]=>
+  string(1) "x"
+}

@@ -1,0 +1,33 @@
+array(3) {
+  [0]=>
+  int(10)
+  [1]=>
+  string(2) "hi"
+  [2]=>
+  float(3.5)
+}
+10
+hi
+3.5
+array(0) {
+}
+array(3) {
+  [0]=>
+  int(10)
+  [1]=>
+  int(20)
+  [2]=>
+  int(30)
+}
+array(2) {
+  [0]=>
+  string(1) "p"
+  [1]=>
+  string(1) "q"
+}
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  float(2.5)
+}

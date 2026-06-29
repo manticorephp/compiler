@@ -1,0 +1,6 @@
+foo(1,2,3)
+bar(x)
+noargs()
+static::create/2
+static::find/0
+15 110

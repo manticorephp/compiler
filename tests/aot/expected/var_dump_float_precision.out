@@ -1,0 +1,16 @@
+float(0.1)
+float(0.30000000000000004)
+float(0.3333333333333333)
+float(1.5)
+float(100)
+float(1000000)
+float(0)
+float(-0.5)
+float(-3.14159)
+float(0.6666666666666666)
+float(1.5)
+float(0.25)
+int(42)
+string(1) "x"
+bool(true)
+NULL

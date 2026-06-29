@@ -1,0 +1,5 @@
+float(INF)
+float(-INF)
+float(NAN)
+float(0.30000000000000004)
+bool(true)

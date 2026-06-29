@@ -1,0 +1,13 @@
+{
+  "extensions": {
+    "zlib": { "src": "ext/zlib", "link": ["z"], "static": false }
+  },
+  "applications": [{
+    "name": "zlibtest",
+    "src": "ext/zlib_test",
+    "output": "/tmp/zlibtest_bin",
+    "entry": "ext/zlib_test/main.php",
+    "libraries": [],
+    "extensions": ["zlib"]
+  }]
+}

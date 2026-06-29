@@ -1,0 +1,6 @@
+# Self-compile artifacts. Only the driver script is checked in.
+manticore
+manticore.ll
+manticore.o
+manticore_stubs.c
+manticore_stubs.o

@@ -1,0 +1,14 @@
+count=3
+a=1
+b=2
+c=3
+d=4 has_b=Y
+after unset: b:2 c:3 d:4 0:99 
+appended count=5
+ao count=2
+ao x=10
+ao y=20
+ao z=30
+gi x=10
+gi y=20
+gi z=30

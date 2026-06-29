@@ -1,0 +1,42 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+
+fn grow(int %n) -> int {
+  %0 = int_const 0 : int
+  %1 = array_lit [_ => %0] : vec[int]
+  %2 = store_local a <- %1 : vec[int]
+  %3 = load_local a : vec[int]
+  %4 = null_const : null
+  %5 = load_local n : int
+  %6 = store_element %3[%4] <- %5 : int
+  %7 = load_local a : vec[int]
+  %8 = int_const 1 : int
+  %9 = array_access %7[%8] : int
+  return %9
+  mem_rc_release vec a
+}
+
+fn aliased(int %n) -> int {
+  %0 = int_const 1 : int
+  %1 = int_const 2 : int
+  %2 = array_lit [_ => %0, _ => %1] : vec[int]
+  %3 = store_local xs <- %2 : vec[int]
+  %4 = load_local xs : vec[int]
+  %5 = store_local ys <- %4 : vec[int]
+  %6 = load_local ys : vec[int]
+  %7 = null_const : null
+  %8 = int_const 3 : int
+  %9 = store_element %6[%7] <- %8 : int
+  %10 = load_local xs : vec[int]
+  %11 = int_const 0 : int
+  %12 = array_access %10[%11] : int
+  return %12
+}
+
+fn __main() -> int {
+  %0 = int_const 7 : int
+  %1 = call grow(%0) : int
+  echo %1
+  %2 = int_const 0 : int
+  %3 = call aliased(%2) : int
+  echo %3
+}

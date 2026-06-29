@@ -1,0 +1,42 @@
+array(2) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  int(2)
+}
+array(2) {
+  ["x"]=>
+  string(1) "p"
+  ["y"]=>
+  string(1) "q"
+}
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  float(2.5)
+}
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+}
+array(2) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  string(1) "y"
+}
+array(1) {
+  ["k"]=>
+  int(10)
+}
+array(2) {
+  ["one"]=>
+  int(1)
+  ["two"]=>
+  int(2)
+}

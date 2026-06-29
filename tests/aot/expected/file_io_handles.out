@@ -1,0 +1,9 @@
+wrote 17 bytes
+at 6: beta
+line: alpha
+line: beta
+line: gamma
+eof=yes lines=3
+contents=XYZ
+bad-open=failed
+exists=no

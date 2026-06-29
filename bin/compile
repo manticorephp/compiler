@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Cold bootstrap → native, self-built compiler via the manifest.
+#
+#   bin/compile [output_path]      (default output: bin/manticore)
+#
+# Two stages, because the manifest build (`manticore build`) cannot run under
+# Zend — its file IO fills mutable libc buffers, which Zend's immutable strings
+# can't provide:
+#
+#   1. Zend front-end compiles src/ → a THROWAWAY *seed* binary (the only
+#      Zend-built artifact). Runtime-free: every external symbol is resolved by
+#      libc at link time or stubbed via the generated stubs.c (void* → 0).
+#   2. The seed runs `build manticore.json` → the SHIPPED native compiler
+#      (self-contained) AND the prebuilt stdlib library
+#      (lib/manticore_stdlib.{o,sig}). One manifest now defines every artifact,
+#      so this seed path and `bin/build`'s self-host path share a definition.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+# The Zend seed front-end (compile_files_mir.php) can't resolve the prelude via
+# argv0 (the libc argv binding is a stub under Zend), so point it at the
+# canonical dir — prelude fns the COMPILER ITSELF uses (e.g. explode) must be
+# injected into the seed, or the seed links with `@manticore_<fn>` undefined.
+export MANTICORE_PRELUDE="$ROOT/prelude"
+
+OUT="${1:-bin/manticore}"
+mkdir -p "$(dirname "$OUT")"
+
+SEED_DIR="$(mktemp -d)"
+SEED="$SEED_DIR/manticore_seed"
+LL="$SEED_DIR/seed.ll"
+OBJ="$SEED_DIR/seed.o"
+STUBS_C="$SEED_DIR/seed_stubs.c"
+STUBS_O="$SEED_DIR/seed_stubs.o"
+
+echo "[1/5] Zend bootstrap: src/ -> seed IR"
+# `find | sort` puts zzz_entry.php (the top-level driver) last so every class /
+# function is registered by the time its top-level lowers into main().
+find src -name "*.php" | sort | xargs php -d memory_limit=2048M tools/compile_files_mir.php > "$LL"
+
+echo "[2/5] assemble seed -> $OBJ"
+clang -c "$LL" -o "$OBJ" -Wno-override-module
+
+echo "[3/5] stub undefined symbols -> $STUBS_C"
+# Probe the linker without the runtime lib — every symbol it still can't find
+# gets a void* fallback. macOS underscores names in errors; strip it defensively.
+set +e
+LINK_ERR="$(cc "$OBJ" -o /dev/null 2>&1)"
+set -e
+echo "$LINK_ERR" \
+    | grep '^  "_' \
+    | awk -F'"' '{print $2}' \
+    | sort -u \
+    | grep -vE '^_(main|manticore_cli_argc|manticore_cli_argv)$' \
+    | awk '{name=$1; sub(/^_/, "", name); print "void* "name"() { return 0; }"}' > "$STUBS_C" \
+    || true
+clang -c "$STUBS_C" -o "$STUBS_O"
+
+echo "[4/5] link seed -> $SEED"
+cc "$OBJ" "$STUBS_O" -o "$SEED"
+
+echo "[5/5] seed builds the manifest -> $OUT + lib/manticore_stdlib.{o,sig}"
+# The manifest's application output is bin/manticore; redirect it to $OUT when a
+# custom path was requested (bin/build --seed passes a temp). The seed lives in
+# a temp dir, never $OUT, so it never overwrites the binary it's running as.
+MANIFEST="manticore.json"
+if [[ "$OUT" != "bin/manticore" ]]; then
+    MANIFEST="$SEED_DIR/manticore.json"
+    sed "s#\"bin/manticore\"#\"$OUT\"#" manticore.json > "$MANIFEST"
+fi
+"$SEED" build "$MANIFEST"
+
+echo "── smoke test the native build ──"
+echo '<?php echo "selfhost-ok\n";' > "$SEED_DIR/smoke.php"
+"$OUT" compile "$SEED_DIR/smoke.php" -o "$SEED_DIR/smoke" >/dev/null
+OUTPUT="$("$SEED_DIR/smoke")"
+if [[ "$OUTPUT" != "selfhost-ok" ]]; then
+    echo "fatal: smoke test failed (got '$OUTPUT')" >&2
+    exit 1
+fi
+echo "ok: $OUT (native, self-built via manifest) + lib/manticore_stdlib.o"

@@ -1,0 +1,386 @@
+<?php
+
+namespace Compile\Mir\Passes;
+
+use Compile\Mir\Call;
+use Compile\Mir\FunctionDef;
+use Compile\Mir\Module;
+use Compile\Mir\Node;
+use Compile\Mir\NodeClone;
+use Compile\Mir\Param;
+use Compile\Mir\Pass;
+use Compile\Mir\Type;
+use Compile\Mir\Walk;
+
+/**
+ * Non-reified monomorphization — specialize functions whose behaviour
+ * depends on an erased / polymorphic parameter (a bare `array` with an
+ * `unknown` element) into one concrete copy per call-site argument
+ * shape.
+ *
+ * The motivating root: bare-`array` element-type ERASURE. A generic
+ * helper (`function head(array $a){return $a[0];}`) used over `int[]` in
+ * one place and `string[]` in another cannot pick a single element type
+ * via all-agree inference, so its param erases to `unknown` and a
+ * non-int element is read with the wrong representation. Specialization
+ * gives each call-group its OWN concrete copy (`head$mono$p0_vec_int`
+ * over `vec[int]`, `head$mono$p0_vec_str` over `vec[string]`) — no
+ * boxing, no cell.
+ *
+ * Runs AFTER InferTypes (so call-site argument types are known) and
+ * re-runs InferTypes when it specializes anything, so each fresh copy's
+ * body is typed precisely against its concrete param types.
+ *
+ * Phase 1 scope (see docs/design/monomorphization.md):
+ * - User functions only — no prelude, no closures/invoke, no generators,
+ *   no static locals (those share module globals that a clone must not
+ *   duplicate).
+ * - Specialize only when a candidate has >=2 DISTINCT concrete array
+ *   specialization keys across its call sites (the genuinely-erased
+ *   case). Single-type helpers keep the existing all-agree path
+ *   untouched — no behaviour change, self-host unaffected.
+ * - Call sites whose argument shape is not fully concrete stay on the
+ *   original function (the future `$cell` fallback, Phase 3).
+ */
+final class Monomorphize implements Pass
+{
+    public const NAME = 'monomorphize';
+
+    /** Max distinct specializations per function (code-size backstop). */
+    private const SPEC_CAP = 8;
+
+    /** @var array<string, Call[]> call-site nodes grouped by callee name */
+    private array $callsByName = [];
+
+    public function name(): string { return self::NAME; }
+
+    /** @return string[] */
+    public function requires(): array { return [InferTypes::NAME]; }
+
+    public function run(Module $module): Module
+    {
+        // Worklist fixpoint: a round specializes every polymorphic fn whose
+        // call sites are now concrete, re-types, then repeats — so a clone
+        // whose body calls ANOTHER polymorphic helper (e.g. `process$vec_int`
+        // calling `array_map`) lets that helper specialize on the next round.
+        // Specializations have concrete params, so they are never candidates
+        // (isCandidate skips `$mono$`) → the worklist converges. The round cap
+        // is a runaway backstop.
+        $maxRounds = \count($module->functions) + 8;
+        $round = 0;
+        while ($round < $maxRounds) {
+            $round = $round + 1;
+            if (!$this->runOnce($module)) { break; }
+        }
+        $module->markPassApplied(self::NAME);
+        return $module;
+    }
+
+    /** One specialization round. Returns true if anything was specialized
+     *  (and the module re-typed), false at the fixpoint. */
+    private function runOnce(Module $module): bool
+    {
+        $this->callsByName = [];
+        foreach ($module->functions as $fn) {
+            $this->collectCalls($fn->body);
+        }
+
+        // originalName → [ specializedFunctionDef, ... ]
+        $clonesByOrig = [];
+        $changed = false;
+
+        foreach ($module->functions as $fn) {
+            if (!$this->isCandidate($fn)) { continue; }
+            $clones = $this->specialize($fn);
+            if (\count($clones) === 0) { continue; }
+            $clonesByOrig[$fn->name] = $clones;
+            $changed = true;
+        }
+
+        if (!$changed) { return false; }
+
+        // Splice each specialization in right after its original, so a
+        // specialized callee precedes call sites defined later and the
+        // scalar-return adoption in InferTypes sees its sig in order.
+        $rebuilt = [];
+        foreach ($module->functions as $fn) {
+            $rebuilt[] = $fn;
+            if (isset($clonesByOrig[$fn->name])) {
+                foreach ($clonesByOrig[$fn->name] as $clone) { $rebuilt[] = $clone; }
+            }
+        }
+        $module->functions = $rebuilt;
+
+        // Re-type: specialized bodies now have concrete params; rewritten
+        // call sites resolve to the specialized sigs (and nested polymorphic
+        // calls inside the clones become concrete for the next round).
+        $infer = new InferTypes();
+        $infer->run($module);
+        return true;
+    }
+
+    /**
+     * Build (and register, by mutating call sites in place) the set of
+     * specialized copies of `$fn`. Returns the new FunctionDefs, or [] if
+     * the function is not a profitable / supported specialization target.
+     *
+     * @return FunctionDef[]
+     */
+    private function specialize(FunctionDef $fn): array
+    {
+        $calls = $this->callsByName[$fn->name] ?? [];
+        if (\count($calls) < 2) { return []; }
+
+        $dims = $this->dimensions($fn, $calls);
+        if (\count($dims) === 0) { return []; }
+
+        // Per call site: a specialization key over the dimension arg types,
+        // or '' when the site is not fully concrete (stays on the original).
+        // A representative Call per key carries the concrete arg types into
+        // cloning — avoids holding a nested array<int,Type> (a self-host
+        // miscompile hazard).
+        $callKeys = [];          // index-parallel to $calls: key string or ''
+        $keyToCall = [];         // key → representative Call
+        foreach ($calls as $ci => $call) {
+            $key = $this->callKey($call, $dims);
+            $callKeys[$ci] = $key;
+            if ($key !== '' && !isset($keyToCall[$key])) {
+                $keyToCall[$key] = $call;
+            }
+        }
+        if (\count($keyToCall) < 2) { return []; }
+
+        // Per-fn specialization cap (code-size / compile-time backstop). On
+        // overflow, leave the function unspecialized — every call site falls
+        // back to the original (the name-addressable dynamic entry, with
+        // today's erased/all-agree behaviour). Rare: >SPEC_CAP distinct
+        // concrete element types of ONE helper in a single program.
+        if (\count($keyToCall) > self::SPEC_CAP) { return []; }
+
+        // Clone one copy per distinct key. NodeClone throws on a node kind
+        // it does not yet support (closures/invoke) — bail on the whole
+        // function rather than emit a partial specialization.
+        $keyToName = [];
+        $clones = [];
+        foreach ($keyToCall as $key => $repCall) {
+            $specName = $fn->name . '$mono$' . $key;
+            $clone = $this->cloneWith($fn, $specName, $repCall, $dims);
+            if ($clone === null) { return []; }
+            $keyToName[$key] = $specName;
+            $clones[] = $clone;
+        }
+
+        // Repoint each fully-concrete call site to its specialization.
+        foreach ($calls as $ci => $call) {
+            $k = $callKeys[$ci];
+            if ($k !== '' && isset($keyToName[$k])) {
+                $call->function = $keyToName[$k];
+            }
+        }
+        return $clones;
+    }
+
+    /**
+     * Parameter indices that are an erased-array "specialization
+     * dimension": an `unknown` / `vec[unknown]` param that receives a
+     * concrete array at >=1 call site. By-ref and variadic params are
+     * never dimensions.
+     *
+     * @param Call[] $calls
+     * @return int[]
+     */
+    private function dimensions(FunctionDef $fn, array $calls): array
+    {
+        $dims = [];
+        foreach ($fn->params as $idx => $p) {
+            // Variadic stays unspecializable. By-ref IS specializable: a
+            // `sort(array &$arr)` called over int[] AND string[] in one program
+            // erases its element (all-agree conflict) -> the string case does a
+            // pointer compare. cloneWith keeps `byRef` and the call keeps passing
+            // the lvalue, so in-place mutation is preserved.
+            if ($p->variadic) { continue; }
+            if (!$this->isErasedArrayParam($p->type)) { continue; }
+            foreach ($calls as $call) {
+                if ($idx < \count($call->args)
+                    && $this->isConcreteArray($call->args[$idx]->type)) {
+                    $dims[] = $idx;
+                    break;
+                }
+            }
+        }
+        return $dims;
+    }
+
+    /**
+     * Specialization key for a call over `$dims` — a token per dimension
+     * built from the concrete argument type at that position. Returns ''
+     * when any dimension's argument is not a concrete array (the site is
+     * not specializable and stays on the original function).
+     *
+     * @param int[] $dims
+     */
+    private function callKey(Call $call, array $dims): string
+    {
+        $parts = [];
+        foreach ($dims as $di) {
+            if ($di >= \count($call->args)) { return ''; }
+            $t = $call->args[$di]->type;
+            if (!$this->isConcreteArray($t)) { return ''; }
+            $parts[] = 'p' . $di . '_' . $this->typeToken($t);
+        }
+        return \implode('_', $parts);
+    }
+
+    /**
+     * Clone `$fn` as `$specName`, substituting each dimension param's type
+     * with the concrete argument type from the representative call site.
+     * Returns null if the body uses a node kind NodeClone cannot copy yet.
+     *
+     * @param int[] $dims
+     */
+    private function cloneWith(FunctionDef $fn, string $specName, Call $repCall, array $dims): ?FunctionDef
+    {
+        $isDim = [];
+        foreach ($dims as $di) { $isDim[$di] = true; }
+        $newParams = [];
+        foreach ($fn->params as $idx => $p) {
+            $t = $p->type;
+            if (isset($isDim[$idx]) && $idx < \count($repCall->args)) {
+                $t = $repCall->args[$idx]->type;
+            }
+            $newParams[] = new Param($p->name, $t, $p->byRef, $p->variadic, $p->default);
+        }
+        try {
+            $body = NodeClone::block($fn->body);
+        } catch (\Throwable $e) {
+            return null;
+        }
+        return new FunctionDef(
+            $specName,
+            $newParams,
+            $fn->returnType,
+            $body,
+            $fn->returnsByRef,
+            $fn->isPrelude,
+        );
+    }
+
+    /** LLVM-symbol-safe token for a type (no brackets / spaces / commas). */
+    private function typeToken(Type $t): string
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT)    { return 'int'; }
+        if ($k === Type::KIND_FLOAT)  { return 'flt'; }
+        if ($k === Type::KIND_STRING) { return 'str'; }
+        if ($k === Type::KIND_BOOL)   { return 'bool'; }
+        if ($k === Type::KIND_NULL)   { return 'null'; }
+        if ($k === Type::KIND_CELL)   { return 'cell'; }
+        if ($k === Type::KIND_OBJ)    { return 'obj_' . $this->sanitize($t->class ?? '?'); }
+        if ($k === Type::KIND_ARRAY) {
+            $elem = $t->element === null ? 'unk' : $this->typeToken($t->element);
+            if ($t->isAssoc()) {
+                $key = $t->key === null ? 'unk' : $this->typeToken($t->key);
+                return 'assoc_' . $key . '_' . $elem;
+            }
+            return 'vec_' . $elem;
+        }
+        return 'unk';
+    }
+
+    private function sanitize(string $s): string
+    {
+        $out = '';
+        $n = \strlen($s);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $c = \substr($s, $i, 1);
+            $ok = ($c >= 'a' && $c <= 'z') || ($c >= 'A' && $c <= 'Z')
+                || ($c >= '0' && $c <= '9');
+            $out .= $ok ? $c : '_';
+        }
+        return $out;
+    }
+
+    /** A param worth specializing: a bare array hint / untyped (`unknown`)
+     *  or a vec with an unknown element. */
+    private function isErasedArrayParam(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_UNKNOWN) { return true; }
+        if ($t->isVec()) {
+            $e = $t->element;
+            return $e === null || $e->kind === Type::KIND_UNKNOWN;
+        }
+        return false;
+    }
+
+    /** A concretely-shaped array: an array whose element (and key, if assoc)
+     *  is a definite type — not unknown / not a cell. */
+    private function isConcreteArray(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $e = $t->element;
+        if ($e === null || !$this->isConcreteElem($e)) { return false; }
+        if ($t->isAssoc()) {
+            $key = $t->key;
+            if ($key === null || !$this->isConcreteElem($key)) { return false; }
+        }
+        return true;
+    }
+
+    private function isConcreteElem(Type $t): bool
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_CELL || $k === Type::KIND_VOID) {
+            return false;
+        }
+        // A nested array element must itself be concrete.
+        if ($k === Type::KIND_ARRAY) { return $this->isConcreteArray($t); }
+        return true;
+    }
+
+    private function isCandidate(FunctionDef $fn): bool
+    {
+        if ($fn->name === '__main') { return false; }
+        if ($fn->isExtern || $fn->isGenerator) { return false; }
+        if ($fn->ffiSymbol !== null) { return false; }
+        // Already a specialization (`f$mono$…`) — its params are concrete, so
+        // it is never a candidate; this also keeps the worklist terminating.
+        if (\str_contains($fn->name, '$mono$')) { return false; }
+        // A leading `this` param marks a lowered method — skip (free functions
+        // only; object layout / dispatch is out of scope).
+        if (\count($fn->params) > 0 && $fn->params[0]->name === 'this') { return false; }
+        if ($this->bodyHasUnsupported($fn->body)) { return false; }
+        return true;
+    }
+
+    /** A body that DEFINES a closure (captures the enclosing scope) or a static
+     *  local (a module global a clone must not duplicate), or yields, can't be
+     *  cloned safely yet. A dynamic INVOKE of a passed-in callable IS fine —
+     *  the callee is a parameter, not duplicated (the array_map / array_filter
+     *  prelude shape). */
+    private function bodyHasUnsupported(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CLOSURE
+            || $k === Node::KIND_STATIC_LOCAL_DECL || $k === Node::KIND_YIELD) {
+            return true;
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->bodyHasUnsupported($c)) { return true; }
+        }
+        return false;
+    }
+
+    private function collectCalls(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $c = $this->asCall($n);
+            if (!isset($this->callsByName[$c->function])) {
+                $this->callsByName[$c->function] = [];
+            }
+            $this->callsByName[$c->function][] = $c;
+        }
+        foreach (Walk::children($n) as $c) { $this->collectCalls($c); }
+    }
+
+    private function asCall(Node $n): Call { return $n; }
+}

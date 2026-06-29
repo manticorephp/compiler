@@ -1,0 +1,16 @@
+{
+  "libraries": [{
+    "name": "stdlib",
+    "src": "src/Runtime",
+    "output": "lib/manticore_stdlib.o",
+    "exclude": [],
+    "runtime": true
+  }],
+  "applications": [{
+    "name": "compiler",
+    "src": "src",
+    "output": "bin/manticore",
+    "entry": "src/zzz_entry.php",
+    "stdlib": false
+  }]
+}

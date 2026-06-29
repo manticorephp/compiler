@@ -1,0 +1,46 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+
+fn calc(int %a, int %b) -> int {
+  %0 = load_local a : int
+  %1 = load_local b : int
+  %2 = add %0, %1 : int
+  %3 = store_local sum <- %2 : int
+  %4 = load_local a : int
+  %5 = load_local b : int
+  %6 = sub %4, %5 : int
+  %7 = store_local diff <- %6 : int
+  %8 = load_local a : int
+  %9 = load_local b : int
+  %10 = mul %8, %9 : int
+  %11 = store_local prod <- %10 : int
+  %12 = load_local a : int
+  %13 = load_local b : int
+  %14 = div %12, %13 : float
+  %15 = store_local quot <- %14 : float
+  %16 = load_local a : int
+  %17 = load_local b : int
+  %18 = mod %16, %17 : int
+  %19 = store_local rem <- %18 : int
+  %20 = load_local a : int
+  %21 = neg %20 : int
+  %22 = store_local neg <- %21 : int
+  %23 = load_local sum : int
+  %24 = load_local diff : int
+  %25 = add %23, %24 : int
+  %26 = load_local prod : int
+  %27 = add %25, %26 : int
+  %28 = load_local quot : float
+  %29 = add %27, %28 : float
+  %30 = load_local rem : int
+  %31 = add %29, %30 : float
+  %32 = load_local neg : int
+  %33 = add %31, %32 : float
+  return %33
+}
+
+fn __main() -> int {
+  %0 = int_const 10 : int
+  %1 = int_const 3 : int
+  %2 = call calc(%0, %1) : int
+  echo %2
+}

@@ -1,0 +1,10 @@
+object(Profile)#1 (4) {
+  ["age"]=>
+  int(30)
+  ["name"]=>
+  string(3) "Ada"
+  ["active"]=>
+  bool(true)
+  ["score"]=>
+  float(9.5)
+}

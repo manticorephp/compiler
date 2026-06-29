@@ -1,0 +1,39 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+
+fn confined(int %n) -> int {
+  mem_arena_enter
+  %0 = string_const "tmp" : string
+  %1 = load_local n : int
+  %2 = concat %0, %1 : string
+  %3 = store_local local <- %2 : string
+  %4 = load_local n : int
+  %5 = load_local n : int
+  %6 = int_const 1 : int
+  %7 = add %5, %6 : int
+  %8 = array_lit [_ => %4, _ => %7] : vec[int]
+  %9 = store_local arr <- %8 : vec[int]
+  %10 = load_local local : string
+  echo %10
+  %11 = load_local arr : vec[int]
+  %12 = int_const 0 : int
+  %13 = array_access %11[%12] : int
+  return %13
+  mem_rc_release vec arr
+  mem_arena_leave
+}
+
+fn escapes(int %n) -> string {
+  %0 = string_const "keep" : string
+  %1 = load_local n : int
+  %2 = concat %0, %1 : string
+  %3 = store_local kept <- %2 : string
+  %4 = load_local kept : string
+  return %4
+  mem_rc_release str kept
+}
+
+fn __main() -> int {
+  %0 = int_const 1 : int
+  %1 = call escapes(%0) : string
+  echo %1
+}

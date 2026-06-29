@@ -1,0 +1,22 @@
+caught: boom
+1
+2
+1
+in try
+2
+0
+1
+caught: injected
+100
+101
+1
+consumer caught: from gen
+1
+2
+cleanup
+3
+1
+2
+app: inner
+3
+outer fin

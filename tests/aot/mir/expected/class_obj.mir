@@ -1,0 +1,30 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+
+fn Point____construct(obj<Point> %this, int %x, int %y) -> unknown {
+  %0 = load_local this : obj<Point>
+  %1 = load_local x : int
+  %2 = store_property %0->x <- %1 : int
+  %3 = load_local this : obj<Point>
+  %4 = load_local y : int
+  %5 = store_property %3->y <- %4 : int
+}
+
+fn Point__sum(obj<Point> %this) -> int {
+  %0 = load_local this : obj<Point>
+  %1 = property_access %0->x : int
+  %2 = load_local this : obj<Point>
+  %3 = property_access %2->y : int
+  %4 = add %1, %3 : int
+  return %4
+}
+
+fn __main() -> int {
+  %0 = int_const 3 : int
+  %1 = int_const 4 : int
+  %2 = new Point(%0, %1) : obj<Point>
+  %3 = store_local p <- %2 : obj<Point>
+  %4 = load_local p : obj<Point>
+  %5 = method_call %4->sum() : int
+  echo %5
+  mem_rc_release obj p
+}

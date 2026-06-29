@@ -1,0 +1,14 @@
+int:1
+str:x
+float:2.5
+bool:1
+array(4) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "x"
+  [2]=>
+  float(2.5)
+  [3]=>
+  bool(true)
+}

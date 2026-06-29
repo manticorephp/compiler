@@ -1,0 +1,10 @@
+int(42)
+string(3) "two"
+int(3)
+string(1) "x"
+float(2.5)
+int(10)
+string(2) "hi"
+float(2.5)
+bool(true)
+NULL
