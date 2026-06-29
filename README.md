@@ -94,8 +94,6 @@ O(n·log n) heapsort; `explode` round-trips through the boxed array path).
 - **`clang`** and **`cc`** on `PATH` (Xcode CLT on macOS, `build-essential` on
   Debian/Ubuntu).
 
-No Rust, no Cargo, no Composer required to build or run.
-
 ## Quick start
 
 ```bash
@@ -266,8 +264,7 @@ catch layout roulette.
   objects (user `.o` + prebuilt `stdlib.o`) is correct and byte-identical:
   class ids are content-hashed (stable across objects), and object drops go
   through a per-class `linkonce_odr` descriptor + indirect drop_fn, so a class
-  one object doesn't know still drops correctly. (Earlier two-object faults —
-  the rc=139 era — are fixed.) The compiler still self-builds self-contained
+  one object doesn't know still drops correctly. The compiler still self-builds self-contained
   (stdlib embedded) for simplicity; user programs link the cached `stdlib.o`.
 - Cycle collector is manual-trigger only; static/global roots not scanned.
 
