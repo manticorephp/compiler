@@ -980,12 +980,20 @@ final class InferTypes implements Pass
     private function scanCallSiteArrayElems(Module $module): bool
     {
         $cand = [];                      // "fn#idx" → true
+        $refined = [];                   // "fn#idx" → true (heuristic vec[scalar])
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
             $idx = 0;
             foreach ($fn->params as $p) {
                 if (!$p->variadic && $this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
+                } elseif (!$p->variadic && $p->type->isArray()) {
+                    // A param the per-fn heuristic already refined (e.g. vec[string]
+                    // from an ambiguous `$x=$p[$i]; $x[j]` subscript) stays
+                    // re-examinable: if call sites CONCRETELY pass a nested array,
+                    // that ground truth overrides the guess (see nbody `split`).
+                    $cand[$fn->name . '#' . (string)$idx] = true;
+                    $refined[$fn->name . '#' . (string)$idx] = true;
                 }
                 $idx = $idx + 1;
             }
@@ -1005,6 +1013,10 @@ final class InferTypes implements Pass
                 $idx = $idx + 1;
                 if (!isset($cand[$key])) { continue; }
                 if (isset($conflict[$key]) || !isset($observed[$key])) { continue; }
+                // An already-refined param is only overridden by a NESTED-array
+                // observation — never fight a legitimate vec[string] whose call
+                // sites pass scalar-element arrays.
+                if (isset($refined[$key]) && !$observed[$key]->isArray()) { continue; }
                 $param = $fn->params[$idx - 1];
                 $param->type = Type::vec($observed[$key]);
                 $changed = true;
@@ -1045,17 +1057,37 @@ final class InferTypes implements Pass
                 // and the return stays a cell (a consumer dispatches by tag
                 // instead of box_int'ing a boxed string back to int(ptr)). The
                 // P3 $cell fallback for genuinely-heterogeneous args.
+                // A NESTED array element (vec[vec[T]] / vec[assoc]) refines too,
+                // so `$b[$i][$j]` carries the inner type instead of erasing to
+                // unknown — without this a nested float read is compiled as an
+                // integer op on the raw double bits (see nbody).
+                $nested = $elem !== null && $elem->isArray();
                 $refinable = $ek === Type::KIND_STRING || $ek === Type::KIND_INT
                     || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
-                    || $ek === Type::KIND_CELL;
+                    || $ek === Type::KIND_CELL || $nested;
                 if (!$refinable) { $conflict[$key] = true; continue; }
                 if (!isset($observed[$key])) { $observed[$key] = $elem; }
-                elseif ($observed[$key]->kind !== $ek) { unset($observed[$key]); $conflict[$key] = true; }
+                elseif (!$this->sameElemShape($observed[$key], $elem)) { unset($observed[$key]); $conflict[$key] = true; }
             }
         }
         foreach (Walk::children($n) as $ch) {
             $this->collectCallArgElems($ch, $cand, $observed, $conflict);
         }
+    }
+
+    /** Two observed call-site element types agree for refinement: same kind,
+     *  and for a nested array the one-level-deeper element kind matches too
+     *  (so vec[float] and vec[int] conflict instead of merging). */
+    private function sameElemShape(Type $a, Type $b): bool
+    {
+        if ($a->kind !== $b->kind) { return false; }
+        if ($a->isArray()) {
+            $ae = $a->element;
+            $be = $b->element;
+            if ($ae === null || $be === null) { return $ae === $be; }
+            return $ae->kind === $be->kind;
+        }
+        return true;
     }
 
     private function asStoreLocal(Node $n): StoreLocal { return $n; }
