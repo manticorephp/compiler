@@ -589,6 +589,14 @@ final class EmitLlvm
         if ($this->needsConcat || $this->needsIntStr || $this->needsTaggedToStr) {
             $out .= $this->intToStrRuntime();
         }
+        // box_int/unbox_int: needed by the full tagged runtime AND by every
+        // tagged render helper (asint arm calls unbox_int). Emit once, under the
+        // union of those gates, else a helper links an undefined ref (→ identity
+        // stub → boxed bits printed).
+        if ($this->needsTagged || $this->needsTaggedToStr || $this->needsTaggedToInt
+            || $this->needsTaggedToFloat || $this->needsTaggedEcho || $this->needsIntStr) {
+            $out .= $this->boxIntRuntime();
+        }
         if ($this->needsTagged) {
             $out .= $this->taggedRuntime();
         }
@@ -693,22 +701,60 @@ final class EmitLlvm
      * NaN header 0xFFF0000000000000. TAG_INT=1. Mirrors the AST
      * backend's TaggedValues so box/unbox/tag round-trip identically.
      */
-    private function taggedRuntime(): string
+    /**
+     * `__manticore_box_int` / `__manticore_unbox_int` — int↔cell boxing. An int
+     * in [-2^47, 2^47) fits the 48-bit payload (tag INT=1); a WIDER int is
+     * heap-boxed (malloc 8, store the full i64) and tagged BIGINT=5 (tagBits
+     * 0xFFF5.. = -3096224743817216), so a 64-bit int survives a cell round-trip.
+     * The 8-byte cell is immortal (ints carry no rc) — a bounded leak for the
+     * rare large-int-in-cell case. Emitted under a broad gate (boxIntRuntime is
+     * called by the render helpers too — they call unbox_int for the int arm).
+     */
+    private function boxIntRuntime(): string
     {
-        // PAYLOAD_MASK = 0xFFFFFFFFFFFF = 281474976710655
-        // tagBits(int) = (1<<48)|0xFFF0000000000000 = -4222124650659840
         $out  = "\ndefine i64 @__manticore_box_int(i64 %v) {\n";
         $out .= "entry:\n";
+        $out .= "  %s = shl i64 %v, 16\n";
+        $out .= "  %se = ashr i64 %s, 16\n";
+        $out .= "  %fits = icmp eq i64 %se, %v\n";
+        $out .= "  br i1 %fits, label %inl, label %heap\n";
+        $out .= "inl:\n";
         $out .= "  %m = and i64 %v, 281474976710655\n";
         $out .= "  %b = or i64 %m, -4222124650659840\n";
         $out .= "  ret i64 %b\n";
+        $out .= "heap:\n";
+        $out .= "  %p = call ptr @malloc(i64 8)\n";
+        $out .= "  store i64 %v, ptr %p\n";
+        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %pm = and i64 %pi, 281474976710655\n";
+        $out .= "  %pb = or i64 %pm, -3096224743817216\n";
+        $out .= "  ret i64 %pb\n";
         $out .= "}\n";
         $out .= "define i64 @__manticore_unbox_int(i64 %v) {\n";
         $out .= "entry:\n";
+        $out .= "  %sh = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %sh, 15\n";
+        $out .= "  %big = icmp eq i64 %nib, 5\n";
+        $out .= "  br i1 %big, label %fromheap, label %inl\n";
+        $out .= "fromheap:\n";
+        $out .= "  %pm = and i64 %v, 281474976710655\n";
+        $out .= "  %hp = inttoptr i64 %pm to ptr\n";
+        $out .= "  %hv = load i64, ptr %hp\n";
+        $out .= "  ret i64 %hv\n";
+        $out .= "inl:\n";
         $out .= "  %s = shl i64 %v, 16\n";
         $out .= "  %r = ashr i64 %s, 16\n";
         $out .= "  ret i64 %r\n";
         $out .= "}\n";
+        return $out;
+    }
+
+    private function taggedRuntime(): string
+    {
+        // PAYLOAD_MASK = 0xFFFFFFFFFFFF = 281474976710655
+        // tagBits(int) = (1<<48)|0xFFF0000000000000 = -4222124650659840
+        // box_int/unbox_int live in boxIntRuntime() (broader gate).
+        $out = '';
         // __manticore_tag: a tagged cell has header bits > 0xFFF0000000000000
         // (int=0xFFF1 … object=0xFFF8); anything else (a finite double, ±Inf,
         // canonical NaN) is a raw double → synthetic FLOAT tag 6.
@@ -716,7 +762,10 @@ final class EmitLlvm
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
         $out .= "  %s = lshr i64 %v, 48\n";
-        $out .= "  %nib = and i64 %s, 15\n";
+        $out .= "  %nibr = and i64 %s, 15\n";
+        // BIGINT (nibble 5, a heap-boxed int) is an INT for every tag consumer.
+        $out .= "  %is5 = icmp eq i64 %nibr, 5\n";
+        $out .= "  %nib = select i1 %is5, i64 1, i64 %nibr\n";
         $out .= "  %t = select i1 %istag, i64 %nib, i64 6\n";
         $out .= "  ret i64 %t\n";
         $out .= "}\n";
@@ -808,9 +857,13 @@ final class EmitLlvm
         $nib = $this->allocSsa();
         $tag = $this->allocSsa();
         $this->cellTagReg = $tag;
+        $nibr = $this->allocSsa();
+        $is5 = $this->allocSsa();
         return '  ' . $istag . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n"
             . '  ' . $ts . ' = lshr i64 ' . $v . ", 48\n"
-            . '  ' . $nib . ' = and i64 ' . $ts . ", 15\n"
+            . '  ' . $nibr . ' = and i64 ' . $ts . ", 15\n"
+            . '  ' . $is5 . ' = icmp eq i64 ' . $nibr . ", 5\n"
+            . '  ' . $nib . ' = select i1 ' . $is5 . ', i64 1, i64 ' . $nibr . "\n"
             . '  ' . $tag . ' = select i1 ' . $istag . ', i64 ' . $nib . ", i64 6\n";
     }
 
@@ -902,8 +955,7 @@ final class EmitLlvm
         $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr @.tagstr.array)\n";
         $out .= "  ret void\n";
         $out .= "asint:\n";
-        $out .= "  %s = shl i64 %v, 16\n";
-        $out .= "  %i = ashr i64 %s, 16\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.d, i64 %i)\n";
         $out .= "  ret void\n";
         $out .= "asbool:\n";
@@ -959,8 +1011,7 @@ final class EmitLlvm
         $out .= "    i64 7, label %asarray\n";
         $out .= "  ]\n";
         $out .= "asint:\n";
-        $out .= "  %s = shl i64 %v, 16\n";
-        $out .= "  %i = ashr i64 %s, 16\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  %is = call ptr @__mir_int_to_str(i64 %i)\n";
         $out .= "  ret ptr %is\n";
         $out .= "asbool:\n";
@@ -1067,8 +1118,7 @@ final class EmitLlvm
         $out .= "    i64 7, label %asarray\n";
         $out .= "  ]\n";
         $out .= "asint:\n";
-        $out .= "  %s = shl i64 %v, 16\n";
-        $out .= "  %i = ashr i64 %s, 16\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  ret i64 %i\n";
         $out .= "asbool:\n";
         $out .= "  %bb = and i64 %v, 1\n";
@@ -1118,8 +1168,7 @@ final class EmitLlvm
         $out .= "    i64 7, label %asarray\n";
         $out .= "  ]\n";
         $out .= "asint:\n";
-        $out .= "  %s = shl i64 %v, 16\n";
-        $out .= "  %i = ashr i64 %s, 16\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  %id = sitofp i64 %i to double\n";
         $out .= "  ret double %id\n";
         $out .= "asbool:\n";
@@ -1216,8 +1265,7 @@ final class EmitLlvm
         $out .= "    i64 8, label %astrue\n";
         $out .= "  ]\n";
         $out .= "asint:\n";
-        $out .= "  %s = shl i64 %v, 16\n";
-        $out .= "  %i = ashr i64 %s, 16\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  %inz = icmp ne i64 %i, 0\n";
         $out .= "  %ir = zext i1 %inz to i64\n";
         $out .= "  ret i64 %ir\n";
