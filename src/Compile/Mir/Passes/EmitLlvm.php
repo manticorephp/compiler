@@ -5143,6 +5143,12 @@ final class EmitLlvm
         // By-handle rc for obj / vec / string / assoc (buffer rc).
         $tk = $valueNode->type->kind;
         $cls = $valueNode->type->class ?? '';
+        // A KIND_UNION value is a bare object pointer (an all-object union — its
+        // arms are concrete classes); rc-manage it exactly like KIND_OBJ so a
+        // borrowed union read stored into an obj slot/array gets a co-owner
+        // retain to balance the obj release. Without this the array's
+        // release_obj over-frees the borrowed arm → double-free.
+        if ($tk === Type::KIND_UNION) { $tk = Type::KIND_OBJ; $cls = ''; }
         // Value type erased to unknown but the destination (e.g. a property)
         // is a known rc-managed kind → co-own per the destination's type.
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {

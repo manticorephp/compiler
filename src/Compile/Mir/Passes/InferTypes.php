@@ -2495,6 +2495,11 @@ final class InferTypes implements Pass
             $node->type = Type::cell();
             return $node->type;
         }
+        if ($objType->kind === Type::KIND_UNION) {
+            $pt = $this->unionPropType($objType, $node->property);
+            if ($pt !== null) { $node->type = $pt; }
+            return $node->type;
+        }
         // Enum ->name (string) / ->value (backing type).
         if ($objType->kind === Type::KIND_OBJ
             && $objType->class !== null
@@ -2565,14 +2570,37 @@ final class InferTypes implements Pass
      */
     private function subclassPropType(string $base, string $prop): ?Type
     {
+        $types = [];
+        $first = null;
         foreach ($this->classes as $cd) {
             if ($cd->name === $base) { continue; }
             if (!$this->classExtends($cd->name, $base)) { continue; }
             if (isset($cd->propertyTypes[$prop])) {
-                return $cd->propertyTypes[$prop];
+                $t = $cd->propertyTypes[$prop];
+                if ($first === null) { $first = $t; }
+                $types[] = $t;
             }
         }
-        return null;
+        if ($first === null) { return null; }
+        $allObj = true;
+        foreach ($types as $t) {
+            if ($t->kind !== Type::KIND_OBJ) { $allObj = false; break; }
+        }
+        if ($allObj) { return Type::union($types); }
+        return $first;
+    }
+
+    private function unionPropType(Type $u, string $prop): ?Type
+    {
+        $found = null;
+        foreach ($u->atoms as $atom) {
+            $cd = $this->classes[$atom->class ?? ''] ?? null;
+            if ($cd === null || !isset($cd->propertyTypes[$prop])) { continue; }
+            $t = $cd->propertyTypes[$prop];
+            if ($found === null) { $found = $t; }
+            elseif ($found->kind !== $t->kind) { return null; }
+        }
+        return $found;
     }
 
     /** Whether class `$name` transitively extends `$base`. */

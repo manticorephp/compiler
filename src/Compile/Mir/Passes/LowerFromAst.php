@@ -1778,6 +1778,10 @@ final class LowerFromAst implements Pass
 
     private function asLoadLocal(Node $n): LoadLocal { return $n; }
     private function asFloatLiteral(\Parser\Ast\Expr $e): \Parser\Ast\FloatLiteral { return $e; }
+    /** Pin to IntLiteral so `->value` is INT-typed: a base-`Expr` read borrows a
+     * subclass type and (under a union perturbation) can resolve to CELL — a
+     * large int then truncates through the 48-bit inline box round-trip. */
+    private function asIntLiteral(\Parser\Ast\Expr $e): \Parser\Ast\IntLiteral { return $e; }
     private function asPropAccess(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess { return $e; }
 
     /**
@@ -2335,7 +2339,7 @@ final class LowerFromAst implements Pass
     private function lowerExprInner(\Parser\Ast\Expr $expr): Node
     {
         if ($expr->kind === 'IntLiteral') {
-            return new IntConst($expr->value, Type::int_());
+            return new IntConst($this->asIntLiteral($expr)->value, Type::int_());
         }
         if ($expr->kind === 'FloatLiteral') {
             // Pin to the FloatLiteral subclass so `->value` is FLOAT-typed: a

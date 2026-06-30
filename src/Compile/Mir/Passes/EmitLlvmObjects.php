@@ -245,6 +245,9 @@ trait EmitLlvmObjects
             $this->lastValueType = 'i64';
             return $out;
         }
+        if ($pa->object->type->kind === Type::KIND_UNION) {
+            return $this->emitUnionPropertyAccess($pa);
+        }
         // Dynamic property on a bag-bearing class (stdClass / dynamic):
         // an undeclared name reads from the property-bag assoc.
         $bcls = $pa->object->type->class ?? '';
@@ -1375,6 +1378,79 @@ trait EmitLlvmObjects
             $out .= '  call void @__mir_rc_release_str(ptr ' . $tp . ")\n";
             $this->needsStrRc = true;
         }
+        return $out;
+    }
+
+    private function emitUnionPropertyAccess(PropertyAccess_ $pa): string
+    {
+        $atoms = $pa->object->type->atoms;
+        $offByClass = [];
+        $firstOff = -1;
+        $agree = true;
+        foreach ($atoms as $atom) {
+            $ac = $atom->class ?? '';
+            $cd = $this->classes[$ac] ?? null;
+            $o = $cd !== null ? $cd->propertyOffset($pa->property) : -1;
+            if ($o < 0) { $o = 16; }
+            $offByClass[$ac] = $o;
+            if ($firstOff === -1) { $firstOff = $o; }
+            elseif ($firstOff !== $o) { $agree = false; }
+        }
+        $out = $this->emitNode($pa->object);
+        $out .= $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+        if ($agree) {
+            $gep = $this->allocSsa();
+            $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                  . ', i64 ' . (string)$firstOff . "\n";
+            $loaded = $this->allocSsa();
+            $out .= '  ' . $loaded . ' = load i64, ptr ' . $gep . "\n";
+            $this->lastValue = $loaded;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $res = $this->allocSsa();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $endL = $this->allocLabel('up.end');
+        $defL = $this->allocLabel('up.def');
+        $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
+        $bodies = '';
+        $seen = [];
+        foreach ($atoms as $atom) {
+            $ac = $atom->class ?? '';
+            foreach ($this->selfAndDescendants($ac) as $c) {
+                $cd = $this->classes[$c] ?? null;
+                if ($cd === null || isset($seen[$c])) { continue; }
+                $seen[$c] = true;
+                $caseL = $this->allocLabel('up.case');
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
+                $g = $this->allocSsa();
+                $bodies .= $caseL . ":\n";
+                $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                         . ', i64 ' . (string)$offByClass[$ac] . "\n";
+                $vv = $this->allocSsa();
+                $bodies .= '  ' . $vv . ' = load i64, ptr ' . $g . "\n";
+                $bodies .= '  store i64 ' . $vv . ', ptr ' . $res . "\n";
+                $bodies .= '  br label %' . $endL . "\n";
+            }
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $gd = $this->allocSsa();
+        $out .= $defL . ":\n";
+        $out .= '  ' . $gd . ' = getelementptr inbounds i8, ptr ' . $objPtr
+              . ', i64 ' . (string)$firstOff . "\n";
+        $vd = $this->allocSsa();
+        $out .= '  ' . $vd . ' = load i64, ptr ' . $gd . "\n";
+        $out .= '  store i64 ' . $vd . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->allocSsa();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
