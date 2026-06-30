@@ -1,0 +1,150 @@
+diff --git a/src/Compile/Mir/Passes/EmitLlvmObjects.php b/src/Compile/Mir/Passes/EmitLlvmObjects.php
+index a5224d6..4739806 100644
+--- a/src/Compile/Mir/Passes/EmitLlvmObjects.php
++++ b/src/Compile/Mir/Passes/EmitLlvmObjects.php
+@@ -245,6 +245,9 @@ trait EmitLlvmObjects
+             $this->lastValueType = 'i64';
+             return $out;
+         }
++        if ($pa->object->type->kind === Type::KIND_UNION) {
++            return $this->emitUnionPropertyAccess($pa);
++        }
+         // Dynamic property on a bag-bearing class (stdClass / dynamic):
+         // an undeclared name reads from the property-bag assoc.
+         $bcls = $pa->object->type->class ?? '';
+@@ -1378,6 +1381,79 @@ trait EmitLlvmObjects
+         return $out;
+     }
+ 
++    private function emitUnionPropertyAccess(PropertyAccess_ $pa): string
++    {
++        $atoms = $pa->object->type->atoms;
++        $offByClass = [];
++        $firstOff = -1;
++        $agree = true;
++        foreach ($atoms as $atom) {
++            $ac = $atom->class ?? '';
++            $cd = $this->classes[$ac] ?? null;
++            $o = $cd !== null ? $cd->propertyOffset($pa->property) : -1;
++            if ($o < 0) { $o = 16; }
++            $offByClass[$ac] = $o;
++            if ($firstOff === -1) { $firstOff = $o; }
++            elseif ($firstOff !== $o) { $agree = false; }
++        }
++        $out = $this->emitNode($pa->object);
++        $out .= $this->coerceToPtr();
++        $objPtr = $this->lastValue;
++        if ($agree) {
++            $gep = $this->allocSsa();
++            $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
++                  . ', i64 ' . (string)$firstOff . "\n";
++            $loaded = $this->allocSsa();
++            $out .= '  ' . $loaded . ' = load i64, ptr ' . $gep . "\n";
++            $this->lastValue = $loaded;
++            $this->lastValueType = 'i64';
++            return $out;
++        }
++        $out .= $this->emitLoadClassId($objPtr);
++        $cid = $this->classIdReg;
++        $res = $this->allocSsa();
++        $out .= '  ' . $res . " = alloca i64\n";
++        $endL = $this->allocLabel('up.end');
++        $defL = $this->allocLabel('up.def');
++        $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
++        $bodies = '';
++        $seen = [];
++        foreach ($atoms as $atom) {
++            $ac = $atom->class ?? '';
++            foreach ($this->selfAndDescendants($ac) as $c) {
++                $cd = $this->classes[$c] ?? null;
++                if ($cd === null || isset($seen[$c])) { continue; }
++                $seen[$c] = true;
++                $caseL = $this->allocLabel('up.case');
++                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
++                $g = $this->allocSsa();
++                $bodies .= $caseL . ":\n";
++                $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
++                         . ', i64 ' . (string)$offByClass[$ac] . "\n";
++                $vv = $this->allocSsa();
++                $bodies .= '  ' . $vv . ' = load i64, ptr ' . $g . "\n";
++                $bodies .= '  store i64 ' . $vv . ', ptr ' . $res . "\n";
++                $bodies .= '  br label %' . $endL . "\n";
++            }
++        }
++        $switch .= "  ]\n";
++        $out .= $switch . $bodies;
++        $gd = $this->allocSsa();
++        $out .= $defL . ":\n";
++        $out .= '  ' . $gd . ' = getelementptr inbounds i8, ptr ' . $objPtr
++              . ', i64 ' . (string)$firstOff . "\n";
++        $vd = $this->allocSsa();
++        $out .= '  ' . $vd . ' = load i64, ptr ' . $gd . "\n";
++        $out .= '  store i64 ' . $vd . ', ptr ' . $res . "\n";
++        $out .= '  br label %' . $endL . "\n";
++        $out .= $endL . ":\n";
++        $loaded = $this->allocSsa();
++        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
++        $this->lastValue = $loaded;
++        $this->lastValueType = 'i64';
++        return $out;
++    }
++
+     /**
+      * Byte offset of `$prop` on `$objExpr`, resolved through the
+      * object's inferred `obj<Class>` type and the class table.
+diff --git a/src/Compile/Mir/Passes/InferTypes.php b/src/Compile/Mir/Passes/InferTypes.php
+index 74eebfb..795cba7 100644
+--- a/src/Compile/Mir/Passes/InferTypes.php
++++ b/src/Compile/Mir/Passes/InferTypes.php
+@@ -2495,6 +2495,11 @@ final class InferTypes implements Pass
+             $node->type = Type::cell();
+             return $node->type;
+         }
++        if ($objType->kind === Type::KIND_UNION) {
++            $pt = $this->unionPropType($objType, $node->property);
++            if ($pt !== null) { $node->type = $pt; }
++            return $node->type;
++        }
+         // Enum ->name (string) / ->value (backing type).
+         if ($objType->kind === Type::KIND_OBJ
+             && $objType->class !== null
+@@ -2565,14 +2570,37 @@ final class InferTypes implements Pass
+      */
+     private function subclassPropType(string $base, string $prop): ?Type
+     {
++        $types = [];
++        $first = null;
+         foreach ($this->classes as $cd) {
+             if ($cd->name === $base) { continue; }
+             if (!$this->classExtends($cd->name, $base)) { continue; }
+             if (isset($cd->propertyTypes[$prop])) {
+-                return $cd->propertyTypes[$prop];
++                $t = $cd->propertyTypes[$prop];
++                if ($first === null) { $first = $t; }
++                $types[] = $t;
+             }
+         }
+-        return null;
++        if ($first === null) { return null; }
++        $allObj = true;
++        foreach ($types as $t) {
++            if ($t->kind !== Type::KIND_OBJ) { $allObj = false; break; }
++        }
++        if ($allObj) { return Type::union($types); }
++        return $first;
++    }
++
++    private function unionPropType(Type $u, string $prop): ?Type
++    {
++        $found = null;
++        foreach ($u->atoms as $atom) {
++            $cd = $this->classes[$atom->class ?? ''] ?? null;
++            if ($cd === null || !isset($cd->propertyTypes[$prop])) { continue; }
++            $t = $cd->propertyTypes[$prop];
++            if ($found === null) { $found = $t; }
++            elseif ($found->kind !== $t->kind) { return null; }
++        }
++        return $found;
+     }
+ 
+     /** Whether class `$name` transitively extends `$base`. */
