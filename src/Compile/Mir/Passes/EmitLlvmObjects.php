@@ -1274,11 +1274,34 @@ trait EmitLlvmObjects
         // resolves `$method` to a different class, switch on the
         // runtime class_id. Monomorphic sites stay direct calls.
         $cands = $this->selfAndDescendants($static);
+        // A union receiver (`B|C`): candidates are exactly the union's atoms and
+        // their descendants — a PRECISE set, not every class declaring the method
+        // (the classless fallback below). The fallback impl is the first atom that
+        // resolves it.
+        $isUnion = $mc->object->type->kind === Type::KIND_UNION;
+        if ($isUnion) {
+            // Dedupe: atoms can be in a subclass relation (`A|B` with B extends
+            // A), so A's descendants already include B — a duplicate class_id
+            // would emit a duplicate switch case.
+            $cands = [];
+            $seen = [];
+            foreach ($mc->object->type->atoms as $atom) {
+                foreach ($this->selfAndDescendants($atom->class ?? '') as $d) {
+                    if (!isset($seen[$d])) { $seen[$d] = true; $cands[] = $d; }
+                }
+            }
+            if ($fallback === '' || $fallback === $static) {
+                foreach ($mc->object->type->atoms as $atom) {
+                    $r = $this->resolveMethodClass($atom->class ?? '', $mc->method);
+                    if ($r !== '') { $fallback = $r; break; }
+                }
+            }
+        }
         // Interface-typed / unknown receiver (e.g. `catch (\Throwable $e)`):
         // candidates are every class that resolves `$method`, since such
         // a receiver isn't reachable via the extends chain. The thrown
         // object's runtime class_id selects the right impl.
-        if (!isset($this->classes[$static])) {
+        if (!$isUnion && !isset($this->classes[$static])) {
             $firstImpl = '';
             foreach ($this->classes as $cd) {
                 if ($this->resolveMethodClass($cd->name, $mc->method) !== '') {

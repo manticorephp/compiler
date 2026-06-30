@@ -32,6 +32,17 @@ final class Type
     public const KIND_CLOSURE = 'closure';
     public const KIND_CELL    = 'cell';
     public const KIND_UNKNOWN = 'unknown';
+    /**
+     * A STATIC union of object classes (`B|C` from `cond ? new B : new C`, a
+     * heterogeneous object array, or a `subclassPropType`). {@see $atoms} holds
+     * the member `obj<…>` types. Same representation as a bare object pointer
+     * (all arms are ptr) — NO boxing; the method-call site dispatches on the
+     * runtime class_id over the atoms' descendants. A union it can't handle
+     * degrades to {@see KIND_UNKNOWN} (raw i64) at every other consumer, so the
+     * kind is inert until a consumer opts in. Non-object unions are NOT formed
+     * (they stay `cell`/`unknown`) — this is the object-polymorphism lattice.
+     */
+    public const KIND_UNION   = 'union';
 
     public function __construct(
         public readonly string $kind,
@@ -125,12 +136,63 @@ final class Type
     }
 
     /**
+     * Build a static union from object arms (a member may itself be a union —
+     * its atoms are spread in). ONLY all-object unions form: a non-object arm,
+     * or more than 6 distinct classes, degrades to `unknown` (the union stays
+     * inert at consumers that can't reason about it). A single distinct class
+     * collapses to that `obj<…>`.
+     *
+     * @param self[] $arms
+     */
+    public static function union(array $arms): self
+    {
+        $classes = [];   // distinct class name → obj Type, insertion order
+        foreach ($arms as $a) {
+            if ($a->kind === self::KIND_UNION) {
+                foreach ($a->atoms as $at) {
+                    $cn = $at->class ?? '';
+                    if ($cn === '') { return self::unknown(); }
+                    if (!isset($classes[$cn])) { $classes[$cn] = $at; }
+                }
+                continue;
+            }
+            if ($a->kind !== self::KIND_OBJ) { return self::unknown(); }
+            $cn = $a->class ?? '';
+            if ($cn === '') { return self::unknown(); }
+            if (!isset($classes[$cn])) { $classes[$cn] = $a; }
+        }
+        $atoms = \array_values($classes);
+        $n = \count($atoms);
+        if ($n === 0) { return self::unknown(); }
+        if ($n === 1) { return $atoms[0]; }
+        if ($n > 6)   { return self::unknown(); }
+        return new self(self::KIND_UNION, atoms: $atoms);
+    }
+
+    /** A static object union (`B|C`) — {@see $atoms} are the member obj types. */
+    public function isUnion(): bool
+    {
+        return $this->kind === self::KIND_UNION;
+    }
+
+    /**
      * Join two types at a control-flow merge point. Same kind →
      * same type, anything else → `unknown`. Future passes refine
      * with proper union types (`int|float` → number, …).
      */
     public function unionWith(Type $other): Type
     {
+        // Object arms (either side already a union) join into a static object
+        // union so a control-flow merge of `new B` / `new C` stays dispatchable
+        // (runtime class_id) instead of collapsing to unknown.
+        if (($this->kind === self::KIND_OBJ || $this->kind === self::KIND_UNION)
+            && ($other->kind === self::KIND_OBJ || $other->kind === self::KIND_UNION)) {
+            if ($this->kind === self::KIND_OBJ && $other->kind === self::KIND_OBJ
+                && $this->class === $other->class) {
+                return $this;
+            }
+            return self::union([$this, $other]);
+        }
         if ($this->kind !== $other->kind) { return self::unknown(); }
         if ($this->kind === self::KIND_OBJ) {
             if ($this->class !== $other->class) { return self::unknown(); }
@@ -188,6 +250,11 @@ final class Type
             $parts = [];
             foreach ($this->atoms as $atom) { $parts[] = $atom->toString(); }
             return 'cell{' . implode('|', $parts) . '}';
+        }
+        if ($this->kind === self::KIND_UNION) {
+            $parts = [];
+            foreach ($this->atoms as $atom) { $parts[] = $atom->toString(); }
+            return implode('|', $parts);
         }
         return $this->kind;
     }

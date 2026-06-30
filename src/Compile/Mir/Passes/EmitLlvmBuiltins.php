@@ -200,7 +200,10 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
-        if ($k === Type::KIND_OBJ) {
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION) {
+            // A union arm is a bare object pointer (all-object union) — box it as
+            // an object cell so a tagged consumer (var_dump / a mixed param)
+            // dispatches on the object tag and the class_id resolves the type.
             $out = $this->coerceToPtr();
             $r = $this->allocSsa();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";

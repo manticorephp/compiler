@@ -2012,6 +2012,14 @@ final class InferTypes implements Pass
         // the non-null type is what a concat / echo must render).
         if ($t->kind === Type::KIND_NULL)     { $node->type = $e; }
         elseif ($e->kind === Type::KIND_NULL) { $node->type = $t; }
+        elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
+            && ($e->kind === Type::KIND_OBJ || $e->kind === Type::KIND_UNION)) {
+            // Object arms (`cond ? new B : new C`, or one side already a union) →
+            // a static `B|C` union, so the method-call site dispatches on the
+            // runtime class_id instead of binding to the then-branch's class. A
+            // single shared class collapses back to `obj<…>` in Type::union.
+            $node->type = Type::union([$t, $e]);
+        }
         elseif ($t->kind === $e->kind)        { $node->type = $t; }
         elseif ($t->kind === Type::KIND_CELL || $e->kind === Type::KIND_CELL) {
             // Heterogeneous branches where one side is a NaN-boxed cell
@@ -2711,7 +2719,34 @@ final class InferTypes implements Pass
             $rt = $this->cellMethodReturn($node->method);
             if ($rt !== null) { $node->type = $rt; }
         }
+        // A union receiver (`B|C`): resolve the method's return type from the
+        // ATOMS — when every member agrees on the kind, the result is typed (so
+        // a string-returning base method on `$union->name()` reads its pointer as
+        // a string, not a raw int). Dispatch is the runtime class_id switch.
+        if ($objType->kind === Type::KIND_UNION) {
+            $rt = $this->unionMethodReturn($objType, $node->method);
+            if ($rt !== null) { $node->type = $rt; }
+        }
         return $node->type;
+    }
+
+    /** Return type of `$method` across a union's atoms — the agreed type when
+     *  every atom resolves it to the same kind, else null (unresolved). */
+    private function unionMethodReturn(Type $u, string $method): ?Type
+    {
+        $found = null;
+        foreach ($u->atoms as $atom) {
+            $cls = $this->resolveMethodClass($atom->class ?? '', $method);
+            if ($cls === '') { return null; }
+            $sig = $this->sigs[$cls . '__' . $method] ?? null;
+            if ($sig === null) {
+                $sig = $this->concreteOverrideSig($cls, $method);
+            }
+            if ($sig === null) { return null; }
+            if ($found === null) { $found = $sig; }
+            elseif ($found->kind !== $sig->kind) { return null; }
+        }
+        return $found;
     }
 
     /** Return type of `$method` when every class declaring it agrees on the
