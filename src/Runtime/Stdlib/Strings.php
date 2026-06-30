@@ -241,6 +241,37 @@ function lcfirst(string $s): string
     return \strtolower(\substr($s, 0, 1)) . \substr($s, 1);
 }
 
+/** Uppercase the first letter of each word (PHP `ucwords`, default delimiters
+ *  whitespace " \t\r\n\f\v"). */
+function ucwords(string $s): string
+{
+    $n = \strlen($s);
+    $out = "";
+    $cap = true;
+    $delims = " \t\r\n\x0C\x0B";
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = \substr($s, $i, 1);
+        if ($cap) { $out = $out . \strtoupper($c); } else { $out = $out . $c; }
+        $cap = \strpos($delims, $c) !== false;
+    }
+    return $out;
+}
+
+/** Count non-overlapping occurrences of `$needle` in `$haystack` (PHP
+ *  `substr_count`). */
+function substr_count(string $haystack, string $needle): int
+{
+    if ($needle === "") { return 0; }
+    $count = 0;
+    $nl = \strlen($needle);
+    $pos = \strpos($haystack, $needle, 0);
+    while ($pos !== false) {
+        $count = $count + 1;
+        $pos = \strpos($haystack, $needle, $pos + $nl);
+    }
+    return $count;
+}
+
 /** Reverse a string byte-wise (1:1 with PHP `strrev`). */
 function strrev(string $s): string
 {

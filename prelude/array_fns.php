@@ -48,6 +48,45 @@ function array_sum(array $a): int|float
     return $sum;
 }
 
+function array_product(array $a): int|float
+{
+    $p = 1;
+    foreach ($a as $v) { $p = $p * $v; }
+    return $p;
+}
+
+/**
+ * `array_flip(a)` — swap keys and values. PRELUDE so call-site inference types
+ * `$a` concretely (the values become keys, so they must carry a real int/string
+ * type — an erased stdlib `array` would store them raw and misbox the new keys).
+ */
+function array_flip(array $a): array
+{
+    $out = [];
+    foreach ($a as $k => $v) { $out[$v] = $k; }
+    return $out;
+}
+
+/**
+ * `str_split(s [, length])` — split `$s` into chunks of `$length` bytes (1 by
+ * default). PRELUDE (like explode): each chunk is a `substr`, so the return
+ * narrows to vec[string] compiled with the program; an erased stdlib `array`
+ * return would box-tag each chunk into a vec[cell].
+ */
+function str_split(string $s, int $length = 1): array
+{
+    if ($length < 1) { $length = 1; }
+    $out = [];
+    $n = \strlen($s);
+    if ($n === 0) { $out[] = ""; return $out; }
+    $i = 0;
+    while ($i < $n) {
+        $out[] = \substr($s, $i, $length);
+        $i = $i + $length;
+    }
+    return $out;
+}
+
 function array_reduce(array $a, callable $callback, mixed $initial = null): mixed
 {
     $carry = $initial;

@@ -1257,6 +1257,9 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
             || \strpos($source, 'array_reduce(') !== false
             || \strpos($source, 'array_map(') !== false
             || \strpos($source, 'array_sum(') !== false
+            || \strpos($source, 'array_product(') !== false
+            || \strpos($source, 'array_flip(') !== false
+            || \strpos($source, 'str_split(') !== false
             || \strpos($source, 'array_filter(') !== false
             || \strpos($source, 'array_reverse(') !== false
             || \strpos($source, 'array_pad(') !== false
