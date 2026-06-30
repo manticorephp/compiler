@@ -3705,6 +3705,13 @@ final class EmitLlvm
         // default entirely, and an int-valued assoc reads a missing key as
         // 0 — indistinguishable from a present 0 by a value-null check.
         if ($nc->left->kind === Node::KIND_ARRAY_ACCESS) {
+            // A cell result (a `mixed`-element array — e.g. ArrayAccess offsetGet)
+            // must store BOTH arms as cells: the left rides a cell already (the
+            // cell-element read), the right (a raw scalar default) is boxed, so a
+            // downstream `mixed` return / var_dump reads a uniform tagged value
+            // instead of re-boxing the cell arm (the double-box masked by the
+            // 48-bit truncation).
+            $wantCell = $n->type->kind === Type::KIND_CELL;
             $res = $this->allocSsa();
             $out = '  ' . $res . " = alloca i64\n";
             $out .= $this->emitIssetTarget($nc->left);
@@ -3717,12 +3724,12 @@ final class EmitLlvm
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
             $out .= $this->emitNode($nc->left);
-            $out .= $this->coerceToI64();
+            $out .= $wantCell ? $this->boxToCell($nc->left->type) : $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
             $out .= $this->emitNode($nc->right);
-            $out .= $this->coerceToI64();
+            $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $end . ":\n";

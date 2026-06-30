@@ -197,6 +197,14 @@ final class InferTypes implements Pass
         // sees `unknown`), so the caller over-releases the shared element —
         // e.g. peek() freeing the Parser token vec out from under itself.
         $this->scanPropElementReturns($module);
+        // Module pre-scan: an array property that ever receives a MIXED/cell
+        // value element store (`$this->prop[$k] = $mixed`, e.g. an ArrayAccess
+        // `offsetSet(mixed $v)`) physically holds NaN-boxed cells, so its element
+        // type must be CELL — else a read (`$this->prop[$k]`) returns a cell but
+        // is typed scalar, and a `mixed`-return / `??` re-boxes it → double-box
+        // (previously MASKED by the 48-bit truncation; see
+        // representation_consistency_root).
+        $this->scanCellElemProps($module);
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
         }
@@ -615,6 +623,60 @@ final class InferTypes implements Pass
             }
             $cd->propertyTypes[$prop] = Type::vec($elem);
         }
+    }
+
+    /** @var array<string,bool> "Class::prop" → receives a mixed-value elem store */
+    private array $cellElemPropsFound = [];
+
+    private function scanCellElemProps(Module $module): void
+    {
+        $this->cellElemPropsFound = [];
+        foreach ($module->functions as $fn) {
+            $cls = '';
+            if (\count($fn->params) > 0 && $fn->params[0]->name === 'this'
+                && $fn->params[0]->type->kind === Type::KIND_OBJ
+                && $fn->params[0]->type->class !== null) {
+                $cls = $fn->params[0]->type->class;
+            }
+            if ($cls === '') { continue; }
+            $this->findCellElemStores($fn->body, $cls);
+        }
+        foreach ($this->cellElemPropsFound as $key => $_) {
+            $cut = \strpos($key, '::');
+            if ($cut === false || $cut < 0) { continue; }
+            $cls = \substr($key, 0, $cut);
+            $prop = \substr($key, $cut + 2, \strlen($key) - $cut - 2);
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd === null) { continue; }
+            $cur = $cd->propertyTypes[$prop] ?? null;
+            if ($cur === null || !$cur->isArray()) { continue; }
+            if (($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
+            // Preserve the key shape (assoc vs vec); only the element → cell.
+            $cd->propertyTypes[$prop] = ($cur->key !== null)
+                ? Type::assoc($cur->key, Type::cell())
+                : Type::vec(Type::cell());
+        }
+    }
+
+    private function findCellElemStores(Node $n, string $cls): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $this->asStoreElement($n);
+            if ($se->array->kind === Node::KIND_PROPERTY_ACCESS
+                && $se->index->kind !== Node::KIND_NULL_CONST) {
+                $pa = $this->asPropertyAccess($se->array);
+                if ($pa->object->kind === Node::KIND_LOAD_LOCAL
+                    && $this->asLoadLocal($pa->object)->name === 'this') {
+                    // A definitely-mixed stored value (a `mixed` param / cell):
+                    // the slot holds NaN-boxed cells.
+                    $vk = $se->value->type->kind;
+                    if ($vk === Type::KIND_CELL) {
+                        $this->cellElemPropsFound[$cls . '::' . $pa->property] = true;
+                    }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->findCellElemStores($c, $cls); }
     }
 
     private function findPropReturns(Node $n, string $cls, Type $rt): void
