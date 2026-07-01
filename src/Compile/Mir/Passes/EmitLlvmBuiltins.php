@@ -124,6 +124,7 @@ trait EmitLlvmBuiltins
         if ($name === 'array_unshift')                { return $this->biArrayUnshift($c); }
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
         if ($name === '__mc_json_escape')             { return $this->biJsonEscape($args); }
+        if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
         if ($name === 'var_export')                   { return $this->biVarExport($args); }
@@ -2225,6 +2226,122 @@ trait EmitLlvmBuiltins
         $out .= "  store i8 0, ptr %np\n";
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %j)\n";
         $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
+     * `__mir_str_replace_one($search, $replace, $subject)` — native single
+     * pair worker (the stdlib str_replace loop's inner call). Two passes:
+     * count matches to size the output exactly, then memcpy each inter-match
+     * chunk straight subject→out (no per-chunk `substr` malloc, unlike the PHP
+     * worker). @param Node[] $args
+     */
+    private function biStrReplaceOne(array $args): string
+    {
+        $this->needsStrReplaceOne = true;
+        $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
+        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $se = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $rp = $this->lastValue;
+        $out .= $this->emitPtrArg($args[2]);
+        $sj = $this->lastValue;
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = call ptr @__mir_str_replace_one(ptr ' . $se
+              . ', ptr ' . $rp . ', ptr ' . $sj . ")\n";
+        $out .= $this->freeStrTemp($args[0], $se);
+        $out .= $this->freeStrTemp($args[1], $rp);
+        $out .= $this->freeStrTemp($args[2], $sj);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** Runtime: replace every non-overlapping `%se` in `%sj` with `%rp`, left
+     * to right (PHP str_replace semantics; the replacement is never rescanned).
+     * Always returns a FRESH string. Empty/absent search → a plain copy. */
+    private function strReplaceOneRuntime(): string
+    {
+        $out  = "\ndefine ptr @__mir_str_replace_one(ptr %se, ptr %rp, ptr %sj) {\n";
+        $out .= "entry:\n";
+        $out .= "  %slen = call i64 @strlen(ptr %se)\n";
+        $out .= "  %rlen = call i64 @strlen(ptr %rp)\n";
+        $out .= "  %jlen = call i64 @strlen(ptr %sj)\n";
+        // Empty search or search longer than subject → copy subject verbatim.
+        $out .= "  %semp = icmp eq i64 %slen, 0\n";
+        $out .= "  %stoolong = icmp ugt i64 %slen, %jlen\n";
+        $out .= "  %nomatchposs = or i1 %semp, %stoolong\n";
+        $out .= "  br i1 %nomatchposs, label %copy, label %count\n";
+        // ── Pass 1: count matches ──
+        $out .= "count:\n";
+        $out .= "  br label %cloop\n";
+        $out .= "cloop:\n";
+        $out .= "  %cpos = phi i64 [0, %count], [%cpos2, %chit]\n";
+        $out .= "  %ccnt = phi i64 [0, %count], [%ccnt1, %chit]\n";
+        $out .= "  %cfrom = getelementptr inbounds i8, ptr %sj, i64 %cpos\n";
+        $out .= "  %cf = call ptr @strstr(ptr %cfrom, ptr %se)\n";
+        $out .= "  %cnull = icmp eq ptr %cf, null\n";
+        $out .= "  br i1 %cnull, label %sized, label %chit\n";
+        $out .= "chit:\n";
+        $out .= "  %cfi = ptrtoint ptr %cf to i64\n";
+        $out .= "  %sji = ptrtoint ptr %sj to i64\n";
+        $out .= "  %choff = sub i64 %cfi, %sji\n";
+        $out .= "  %cpos2 = add i64 %choff, %slen\n";
+        $out .= "  %ccnt1 = add i64 %ccnt, 1\n";
+        $out .= "  br label %cloop\n";
+        // outlen = jlen + count*rlen - count*slen ; alloc outlen+1
+        $out .= "sized:\n";
+        $out .= "  %crep = mul i64 %ccnt, %rlen\n";
+        $out .= "  %csea = mul i64 %ccnt, %slen\n";
+        $out .= "  %o1 = add i64 %jlen, %crep\n";
+        $out .= "  %outlen = sub i64 %o1, %csea\n";
+        $out .= "  %ocap = add i64 %outlen, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %ocap)\n";
+        // ── Pass 2: fill ──
+        $out .= "  br label %floop\n";
+        $out .= "floop:\n";
+        $out .= "  %src = phi i64 [0, %sized], [%src2, %fhit]\n";
+        $out .= "  %dst = phi i64 [0, %sized], [%dst2, %fhit]\n";
+        $out .= "  %ffrom = getelementptr inbounds i8, ptr %sj, i64 %src\n";
+        $out .= "  %ff = call ptr @strstr(ptr %ffrom, ptr %se)\n";
+        $out .= "  %fnull = icmp eq ptr %ff, null\n";
+        $out .= "  br i1 %fnull, label %tail, label %fhit\n";
+        $out .= "fhit:\n";
+        $out .= "  %ffi = ptrtoint ptr %ff to i64\n";
+        $out .= "  %sji2 = ptrtoint ptr %sj to i64\n";
+        $out .= "  %fhoff = sub i64 %ffi, %sji2\n";
+        $out .= "  %chunk = sub i64 %fhoff, %src\n";
+        // copy subject[src .. hit) then the replacement
+        $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %dst\n";
+        $out .= "  call ptr @memcpy(ptr %dp, ptr %ffrom, i64 %chunk)\n";
+        $out .= "  %dst1 = add i64 %dst, %chunk\n";
+        $out .= "  %dp2 = getelementptr inbounds i8, ptr %buf, i64 %dst1\n";
+        $out .= "  call ptr @memcpy(ptr %dp2, ptr %rp, i64 %rlen)\n";
+        $out .= "  %dst2 = add i64 %dst1, %rlen\n";
+        $out .= "  %src2 = add i64 %fhoff, %slen\n";
+        $out .= "  br label %floop\n";
+        // tail: copy subject[src .. jlen)
+        $out .= "tail:\n";
+        $out .= "  %rem = sub i64 %jlen, %src\n";
+        $out .= "  %dpt = getelementptr inbounds i8, ptr %buf, i64 %dst\n";
+        $out .= "  call ptr @memcpy(ptr %dpt, ptr %ffrom, i64 %rem)\n";
+        $out .= "  %fin = add i64 %dst, %rem\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %fin\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %fin)\n";
+        $out .= "  ret ptr %buf\n";
+        // ── copy path (empty/too-long search) ──
+        $out .= "copy:\n";
+        $out .= "  %ccap = add i64 %jlen, 1\n";
+        $out .= "  %cbuf = call ptr @__mir_str_alloc(i64 %ccap)\n";
+        $out .= "  call ptr @memcpy(ptr %cbuf, ptr %sj, i64 %jlen)\n";
+        $out .= "  %cnp = getelementptr inbounds i8, ptr %cbuf, i64 %jlen\n";
+        $out .= "  store i8 0, ptr %cnp\n";
+        $out .= "  call void @__mir_str_set_len(ptr %cbuf, i64 %jlen)\n";
+        $out .= "  ret ptr %cbuf\n";
         $out .= "}\n";
         return $out;
     }

@@ -308,6 +308,7 @@ final class EmitLlvm
     private bool $needsIpow = false;
     private bool $needsAddslashes = false;
     private bool $needsJsonEscape = false;
+    private bool $needsStrReplaceOne = false;
     /** Main captured argc/argv → emit @manticore_cli_argc/argv definitions. */
     private bool $needsCliArgv = false;
     /** STDIN/STDOUT/STDERR used → emit @manticore_std{in,out,err} accessors. */

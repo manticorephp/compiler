@@ -1852,6 +1852,7 @@ final class InferTypes implements Pass
             || $n === 'str_repeat' || $n === 'strtolower' || $n === 'strtoupper'
             || $n === 'sprintf' || $n === 'implode' || $n === 'join'
             || $n === 'addslashes' || $n === 'var_export' || $n === '__mc_json_escape'
+            || $n === '__mir_str_replace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'
             || $n === '__mir_float_repr') {
