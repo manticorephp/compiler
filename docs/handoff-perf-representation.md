@@ -98,12 +98,22 @@ RHS). The win was the native escape, not restructuring PHP.
    concat approach.
 3. ~~json call-site specialization~~ — SUBSUMED by #2 Phase 2 (built, reverted:
    concat chains lose to the walker).
-4. **Native recursive json encoder** `__mir_json_encode(cell)` (MED-HIGH) — NOW THE
-   BEST remaining json lever: a runtime that tag-switch walks the array into ONE
-   growing buffer (no intermediate strings — the exact thing Phase 2's concat chain
-   lacked). Can consume the record `fields` for per-field static dispatch. General
-   ≤1×, but hand-written recursive IR over packed+hashed = higher Heisenbug surface.
-   Other shape uses: var_dump / property-access specialization off the record.
+4. **Native recursive json encoder** `__mir_json_encode(cell)` (MED-HIGH) — DEFERRED
+   (2026-07-01, user call). WHY DEFERRED: the current walker already uses amortized
+   in-place self-append (`$out = $out . …` → `str_append`, one growing buffer) +
+   native escape, so at the bench's SMALL sizes a native encoder's only edge is
+   dropping the per-scalar format alloc (`int_to_str`/`float_shortest` → pooled
+   string before memcpy) — marginal (<0.03s) for ~150 lines of risky IR, and two
+   perf hypotheses already lost this session. REVISIT AT SCALE: on multi-MB JSON the
+   per-scalar format allocs + repeated buffer doublings compound, and a single-pass
+   tag-switch encoder that formats ints/escapes DIRECTLY into one buffer (no
+   intermediate strings, no per-node PHP call) should pull clearly ahead. Design:
+   runtime that tag-switches (INT=1/BOOL=2/NULL=3/STR=4/FLOAT=6/ARRAY=7/OBJ=8, see
+   `taggedToIntRuntime` for the exact nibble dispatch) over a grow-on-demand buffer
+   {data,len,cap}; can consume record `fields` for per-field static dispatch. Bench
+   a MULTI-MB input first to prove the win before building. Self-host risk LOW (the
+   compiler never `json_encode`s); correctness risk is the object/(array)$obj +
+   list-vs-object + nested paths. Other shape uses: var_dump / property specialization.
 Systemic pattern behind ALL library losses: PHP-level loops that allocate per
 iteration. Two fixes — (a) native single-buffer runtime workers for hot stdlib
 string/encode fns; (b) shape/type specialization so consumers skip tag-dispatch.
