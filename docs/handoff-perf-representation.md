@@ -17,6 +17,26 @@ session. This session's 100 GB memory leak came from a deep change made tired.
   data-dependent + `$argc`-seeded so LLVM can't fold the loop — see
   [[bench_suite_2026_06_30]].
 
+## SCALE FINDING + double-box fix (2026-07-01)
+Benched json at 1–10 MB (array-of-records). Two results:
+- **CORRECTNESS BUG FIXED (`c9c5a4c`):** a vec/assoc of MIXED (cell-element) inner
+  arrays — the "array of records" pattern `$d[]=["id"=>1,"name"=>"x"]` — printed raw
+  NaN-bits for every inner scalar in BOTH json_encode AND var_dump. Root: boxToCell's
+  deep-rebuild (`emitAssocToCellArrayUnified`) hit the `else` branch on an inner value
+  whose element was ALREADY cell → `box_int` of an already-boxed cell = double-box. Fix:
+  a nested array whose element kind is CELL is boxed as a plain array cell (box_array,
+  no rebuild — already cell-repr). Test `json_vec_of_records`.
+- **json at SCALE beats php:** once correct, a 1.2 MB encode is 0.01s vs php 0.06s
+  (**6×**); 10 MB ~parity-to-faster. The walker's amortized in-place append + native
+  escape scale well — so the native encoder (#4) is NOT needed even at MB scale. #4
+  stays deferred/unneeded barring a much larger workload.
+- **explode is NOT slow** — native parity (0.11 vs php 0.12). It's inherent
+  O(bytes+segments) work (strstr + pooled alloc + memcpy + ~2 array reallocs, growth =
+  max(2×,4)); php's C explode does the same. The fib/dispatch 16–35× wins come from
+  killing php's INTERPRETER loop overhead — explode is one C call on both sides, no
+  interpreter overhead to remove → parity is expected, not a defect. A pre-count to
+  drop the 2 reallocs would DOUBLE the (dominant) strstr scan → net loss. Leave it.
+
 ## Perf snapshot (best-of-5, honest/non-hoistable)
 Compute/algorithms strong: spectralnorm 44× · oop 28× · fib 19× · closures 18× ·
 mathf 14× · loop 11× · sieve/matmul/dijkstra 7–9× · array 4× · strcat 3×.
