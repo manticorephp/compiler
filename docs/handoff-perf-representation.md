@@ -37,23 +37,22 @@ value-class set from an array-LITERAL StoreLocal too (not just store_element), s
 literal `num` + store `string` = 2 classes → cell element. Homogeneous arrays
 untouched (matmul still 7×).
 
-**OPEN — the hard part: dynamic nested-subscript array.**
+**DONE (`402b6f6`): dynamic nested-subscript array.**
 ```php
-$a = []; $a["k"] = []; $a["k"][] = "v"; echo $a["k"][0];   // php: v · mant: <pointer>
+$a = []; $a["k"] = []; $a["k"][] = "v"; echo $a["k"][0];   // now: v
 ```
-The inner array `$a["k"]` is a SUBSCRIPT, not a stable local, so its stores aren't
-tracked and its element stays `vec[unknown]` → the string is stored raw.
-- DO NOT: box all unknown-element arrays (breaks the suite); force every
-  nested-stored array to cell (regresses matmul's `$m[$i][$j]=int` → boxing).
-- PRECISE RULE to try: a local `$a` whose array-valued element is built from an
-  EMPTY `[]` literal (→ `vec[unknown]`) AND that receives a nested SCALAR store
-  (`$a[k][…] = scalar`, where `$se->array` is an ArrayAccess of `$a`) → promote
-  `$a`'s value element to CELL. The empty-literal gate distinguishes edge1 from
-  matmul (`$m[0]=[1,2]` — non-empty, concrete inner element → don't touch).
-  Track in `scanAssocLocals`: `emptyArrValLocals[$a]` when `$a[k] = <empty
-  array_lit>`; detect nested scalar stores; combine in the promotion loop (~L323,
-  where `cellElemLocals` is set from `assocValClasses`).
-- Verify: edge1 MATCH, matmul still 7× (no boxing), fixpoint + difftest + stab.
+`scanAssocLocals` tracks `emptyArrValLocals` (`$a[k] = <empty []>`) +
+`nestedScalarStoreLocals` (`$a[k][…] = scalar-LITERAL`, i.e. `$se->array` is an
+ArrayAccess of `$a` and the value's `coarseValueClass` is num/string/bool/null).
+Both set → `nestedCellVecLocals[$a]`, value element promoted to `vec[cell]`; held
+across the outer `[]` binding (inferStoreLocal) + store refinement
+(inferStoreElement). Matmul untouched: its inner value is a VARIABLE (`$m[$i]=$row`,
+class `''`) and its nested store is a COMPUTED expr (`$m[$i][$j]=$i*3+$j`, class
+`''`) — neither gate fires, so no boxing (matmul still 7×). Test
+`nested_subscript_mixed`. Gate: FIXPOINT OK, suite 360/360, difftest 351/0/0, stab 5×2.
+LIMIT: only literal-valued nested stores promote; a nested store of a VARIABLE
+string (`$a[k][]=$s`) still writes raw (class `''` → no trigger) — a deeper gap,
+same shape as the general unknown-element problem.
 
 ## (b) Codegen builtin for json_encode (perf) — NOT started
 `json_encode(scalar)` is 8× slower than php PURELY from the `mixed` dispatch
