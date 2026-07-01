@@ -70,11 +70,15 @@ measured SLOWER (0.34, more tiny append-calls than one self-append of a prebuilt
 RHS). The win was the native escape, not restructuring PHP.
 
 ## NEXT PERF PATHS (analysis 2026-07-01) — ROI order
-1. **str_replace native worker** (LOW risk, best strops win 2.7×→~1.5×): the PHP
-   `__mir_str_replace_one` does `substr()` (malloc+copy) THEN concat (copy) per
-   chunk = double copy. A native worker memcpy's chunk bytes straight subject→out
-   buffer (same pattern as `__mir_json_escape`). Plus a 0-match fast path (share
-   subject, no final-substr alloc).
+1. ✅ **DONE (`fc46a76`) str_replace native worker.** `__mir_str_replace_one`
+   intercepted as a codegen builtin → native two-pass runtime (count matches → size
+   the buffer exactly → memcpy each subject chunk + replacement into one buffer). No
+   per-chunk `substr` double-copy. strops now ~3× faster vs php. NB: strops was
+   ALREADY 2.7× (a win, not a loss — the earlier "2.7× slower" framing was a misread
+   of the handoff's speedup list). Empty/too-long search copies verbatim; same
+   non-overlapping left-to-right PHP semantics. Test `str_replace_native`. (Did NOT
+   add the share-subject 0-match fast path — always returns a fresh string to keep rc
+   simple; a future tweak.) REAL remaining perf losses: json (1.2×) + explode (1.0×).
 2. **Shape/record types for array literals** (DEEP, foundational): stop collapsing
    a literal-built mixed assoc to `assoc[string,cell]`; keep `{id:int,name:string,
    price:float,tags:vec[string]}`. Then consumers (json/var_dump/implode) skip
