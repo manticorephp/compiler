@@ -56,6 +56,17 @@ final class Type
          *  cell-arith path). A plain mixed cell keeps the integer path. A bool,
          *  not a Type[] atom list — the latter is a self-host miscompile hazard. */
         public readonly bool $numeric = false,
+        /**
+         * RECORD shape: a string-key literal's per-field types, in insertion
+         * order (`{id:int, name:string, …}`). A record is REPRESENTATIONALLY an
+         * `assoc[string, <join of field types>]` (same runtime PhpArray, same
+         * `element`/`key`) — every consumer that ignores this payload treats it
+         * as that assoc. Only shape-aware code ({@see isRecord}) reads it. Any
+         * control-flow merge or element mutation drops it (the array-join branch
+         * rebuilds a plain array), degrading to today's `assoc[string,cell]`.
+         * @var array<string,self>|null
+         */
+        public readonly ?array $fields = null,
     ) {}
 
     public static function void():    self { return new self(self::KIND_VOID); }
@@ -75,6 +86,31 @@ final class Type
     public static function assoc(self $key, self $value): self
     {
         return new self(self::KIND_ARRAY, element: $value, key: $key);
+    }
+
+    /**
+     * A record shape (a string-key literal with known per-field types). The
+     * caller passes the already-computed `$element` (the same assoc element
+     * inferArrayLit derives — cell for a mixed literal, else the concrete
+     * type), so a record is IDENTICAL in memory to the plain assoc; only
+     * `fields` is extra. Key is string. Every shape-unaware consumer treats it
+     * as `assoc[string, $element]`.
+     * @param array<string,self> $fields
+     */
+    public static function record(array $fields, self $element): self
+    {
+        return new self(
+            self::KIND_ARRAY,
+            element: $element,
+            key: self::string_(),
+            fields: $fields,
+        );
+    }
+
+    /** True when this array carries a known per-field shape ({@see $fields}). */
+    public function isRecord(): bool
+    {
+        return $this->kind === self::KIND_ARRAY && $this->fields !== null;
     }
 
     /** Any array (vec or assoc — they share {@see KIND_ARRAY}). */

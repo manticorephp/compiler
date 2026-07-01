@@ -5,6 +5,7 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\Add;
 use Compile\Mir\ArrayAccess_;
 use Compile\Mir\ArrayLit;
+use Compile\Mir\StringConst;
 use Compile\Mir\Walk;
 use Compile\Mir\Spread_;
 use Compile\Mir\Block;
@@ -137,6 +138,16 @@ final class InferTypes implements Pass
     /** @var array<string,bool> array locals promoted to a vec-of-cell VALUE element
      *  (nested subscript case). Held across binding + store refinement. */
     private array $nestedCellVecLocals = [];
+    /** @var array<string,bool> locals ever assigned an all-string-literal-key
+     *  array literal (a record CANDIDATE). */
+    private array $recordLitLocals = [];
+    /** @var array<string,bool> locals disqualified from record shape — element-
+     *  mutated (`$x[k]=…`) or assigned a non-record value. */
+    private array $recordDisqualified = [];
+    /** @var array<string,bool> locals whose type keeps a {@see Type::record}
+     *  shape (candidate ∧ not disqualified) — held across binding so a consumer
+     *  (json_encode) can specialize by field type. */
+    private array $recordLocals = [];
     /** @var array<string,bool> scalar locals that ever receive a float-producing
      *  value — a float SLOT, so an int init/store (`$s = 0` before a `$s += 1.5`
      *  loop) is coerced, not bit-stored, and a loop back-edge can't erase it to
@@ -326,6 +337,9 @@ final class InferTypes implements Pass
         $this->emptyArrValLocals = [];
         $this->nestedScalarStoreLocals = [];
         $this->nestedCellVecLocals = [];
+        $this->recordLitLocals = [];
+        $this->recordDisqualified = [];
+        $this->recordLocals = [];
         $this->scanAssocLocals($fn->body);
         // A MIXED-key array — string-keyed ($m["a"]=…) AND int-keyed ($m[5]=…) —
         // must ride a tagged cell key end-to-end (key_cell_at boxes each entry by
@@ -333,12 +347,20 @@ final class InferTypes implements Pass
         foreach ($this->intKeyLocals as $name => $unused) {
             if (isset($this->strLitKeyLocals[$name])) { $this->cellKeyLocals[$name] = true; }
         }
+        // A record local = a candidate (all-string-key literal) never disqualified
+        // (never element-mutated, never assigned a non-record value). Its type
+        // keeps the {@see Type::record} shape (set by inferStoreLocal) — same assoc
+        // repr, plus per-field types for a shape-aware consumer.
+        foreach ($this->recordLitLocals as $name => $unused) {
+            if (!isset($this->recordDisqualified[$name])) { $this->recordLocals[$name] = true; }
+        }
         // A local whose element stores carry ≥2 distinct value kinds is a mixed
         // array: seed a CELL element up front so EVERY load/store sees it (a
         // single forward pass would leave the early stores typed by the
         // unrefined scalar element → stored raw → read back as garbage).
         foreach ($this->assocValClasses as $name => $classes) {
             if (\count($classes) < 2) { continue; }
+            if (isset($this->recordLocals[$name])) { continue; } // record keeps its shape
             $this->cellElemLocals[$name] = true;
             if (isset($this->assocLocals[$name])) {
                 $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
@@ -1227,6 +1249,7 @@ final class InferTypes implements Pass
             $se = $this->asStoreElement($n);
             if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $this->asLoadLocal($se->array)->name;
+                $this->recordDisqualified[$name] = true; // element-mutated → not a record
                 if ($se->index->kind !== Node::KIND_NULL_CONST) {
                     if ($se->index->type->kind === Type::KIND_CELL) {                    // Dynamic int-or-string key (a tagged cell, e.g. an erased
                         // foreach key) → cell-keyed assoc, not a vec.
@@ -1263,9 +1286,11 @@ final class InferTypes implements Pass
                 // the OUTER base local so an empty inner `[]` promotes to vec[cell].
                 $base = $this->asArrayAccess($se->array)->array;
                 if ($base->kind === Node::KIND_LOAD_LOCAL) {
+                    $bname = $this->asLoadLocal($base)->name;
+                    $this->recordDisqualified[$bname] = true; // nested mutation
                     $cls = $this->coarseValueClass($se->value);
                     if ($cls === 'num' || $cls === 'string' || $cls === 'bool' || $cls === 'null') {
-                        $this->nestedScalarStoreLocals[$this->asLoadLocal($base)->name] = true;
+                        $this->nestedScalarStoreLocals[$bname] = true;
                     }
                 }
             }
@@ -1277,14 +1302,26 @@ final class InferTypes implements Pass
             // string is written raw into a vec[int] (read back as garbage bits).
             $sl = $this->asStoreLocal($n);
             if ($sl->value->kind === Node::KIND_ARRAY_LIT) {
-                foreach ($this->asArrayLit($sl->value)->elements as $el) {
+                $elems = $this->asArrayLit($sl->value)->elements;
+                $allStr = \count($elems) > 0;
+                foreach ($elems as $el) {
                     if ($el->value === null) { continue; }
                     $cls = $this->coarseValueClass($el->value);
                     if ($cls !== '') {
                         if (!isset($this->assocValClasses[$sl->name])) { $this->assocValClasses[$sl->name] = []; }
                         $this->assocValClasses[$sl->name][$cls] = true;
                     }
+                    if ($el->key === null || $el->key->kind !== Node::KIND_STRING_CONST) {
+                        $allStr = false;
+                    }
                 }
+                // An all-string-literal-key literal is a record candidate; any
+                // other literal shape (vec / dynamic keys) disqualifies the local.
+                if ($allStr) { $this->recordLitLocals[$sl->name] = true; }
+                else { $this->recordDisqualified[$sl->name] = true; }
+            } else {
+                // Assigned a non-literal value → can't be a static record.
+                $this->recordDisqualified[$sl->name] = true;
             }
         }
         foreach (Walk::children($n) as $c) { $this->scanAssocLocals($c); }
@@ -1428,6 +1465,14 @@ final class InferTypes implements Pass
     private function inferStoreLocal(StoreLocal $node): Type
     {
         $valueType = $this->inferNode($node->value);
+        // A record local (all-string-key literal, never mutated) keeps its
+        // {@see Type::record} shape — the literal already carries the field
+        // types; hold them on the slot so json_encode($local) can specialize.
+        if (isset($this->recordLocals[$node->name]) && $valueType->isRecord()) {
+            $this->localTypes[$node->name] = $valueType;
+            $node->type = $valueType;
+            return $valueType;
+        }
         // An empty `[]` bound to a string-keyed local is an assoc, not a vec:
         // retype the literal so it emits an assoc buffer (its element type is
         // refined by the subsequent string-keyed stores in inferStoreElement).
@@ -2139,6 +2184,7 @@ final class InferTypes implements Pass
     private function asStoreElement(StoreElement $n): StoreElement { return $n; }
     private function asPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }
     private function asArrayLit(ArrayLit $n): ArrayLit { return $n; }
+    private function asStringConst(StringConst $n): StringConst { return $n; }
 
     private function inferIncDec(IncDec $node): Type
     {
@@ -2442,11 +2488,16 @@ final class InferTypes implements Pass
         $first = true;
         $concreteKinds = [];
         $subArrElemKinds = [];   // distinct concrete element kinds of array-typed values
+        $allStrConstKeys = true; // every element keyed by a string literal → record
+        $recordFields = [];      // string key → value Type (insertion order)
         foreach ($node->elements as $el) {
             if ($el->key !== null) {
                 $hasKey = true;
                 $kt = $this->inferNode($el->key);
                 $keyType = $first ? $kt : $keyType->unionWith($kt);
+                if ($el->key->kind !== Node::KIND_STRING_CONST) { $allStrConstKeys = false; }
+            } else {
+                $allStrConstKeys = false;
             }
             // A spread element contributes its source's element type.
             $vt = $this->inferNode($el->value);
@@ -2458,6 +2509,10 @@ final class InferTypes implements Pass
             if ($vt->isArray() && $vt->element !== null
                 && $vt->element->kind !== Type::KIND_UNKNOWN) {
                 $subArrElemKinds[$vt->element->kind] = true;
+            }
+            if ($allStrConstKeys && $el->key !== null
+                && $el->key->kind === Node::KIND_STRING_CONST) {
+                $recordFields[$this->asStringConst($el->key)->value] = $vt;
             }
             $valType = $first ? $vt : $this->unionTypes($valType, $vt);
             $first = false;
@@ -2478,6 +2533,14 @@ final class InferTypes implements Pass
             $vt = $valType ?? Type::unknown();
             if ($vt->kind === Type::KIND_UNKNOWN) { $vt = Type::cell(); }
             elseif ($hetSubArrays && $vt->isArray()) { $vt = Type::cell(); }
+            // All keys are string literals and the element shape is regular
+            // (no het-sub-array cell coercion) → a RECORD: same assoc repr
+            // ({@see Type::record} recomputes the same element), plus the
+            // per-field types so a consumer (json_encode) can specialize.
+            if ($allStrConstKeys && !$hetSubArrays && \count($recordFields) > 0) {
+                $node->type = Type::record($recordFields, $vt);
+                return $node->type;
+            }
             $node->type = Type::assoc($keyType ?? Type::unknown(), $vt);
             return $node->type;
         }
