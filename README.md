@@ -23,8 +23,8 @@ potential for creating a fully self-contained PHP runtime environment.
   manticore output matches the reference on every plain-runnable case.
 - ✅ **Rebuild-stable** — 5×2 cold/self rebuilds, every binary smoke-clean (no
   build-to-build heap-layout roulette).
-- ✅ **5–20× faster than Zend** on compute, ~24× faster cold start — see
-  [Benchmarks](#benchmarks).
+- ✅ **10–45× faster than Zend** on compute/algorithms, ~24× faster cold start —
+  see [Benchmarks](#benchmarks).
 - ✅ Refcount + copy-on-write (assoc + objects) and a Bacon–Rajan cycle
   collector v1 (opt-in, zero-overhead unless `gc_collect_cycles()` is reached).
 - ✅ Cargo-like module system: `manticore.json`, `.sig` module interfaces,
@@ -44,35 +44,49 @@ potential for creating a fully self-contained PHP runtime environment.
 ## Benchmarks
 
 Native AOT output vs the Zend `php` interpreter (PHP 8.5.3). Apple M1 Pro,
-`-O2`, median of 5 runs, each compiled program verified byte-equal to `php`
-output first.
+`-O2`, best of 5, each compiled program verified byte-equal to `php` first.
+Every loop is **data-dependent and `$argc`-seeded** so the LLVM optimizer can't
+fold it away — these numbers are real codegen throughput, not a deleted loop.
+Reproduce with `bash bench/run.sh` (cases in `bench/cases/`).
 
 **Compute-bound** — native codegen dominates (the interpreter's per-op dispatch
 is the tax we skip):
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |-----------|----------|------:|----------:|--------:|
-| `oop`     | 2 M polymorphic virtual `area()`  | 0.122 s | 0.004 s | **28×** |
-| `fib`     | `fib(32)` naive recursion         | 0.170 s | 0.009 s | **19×** |
-| `strcat`  | 200 K-iter string append          | 0.055 s | 0.003 s | **18×** |
-| `loop`    | 50 M-iter integer accumulate      | 0.297 s | 0.024 s | **12×** |
-| `closures`| 2 M closure build + call          | 0.213 s | 0.019 s | **11×** |
-| `array`   | build + sum a 1 M-element vec      | 0.066 s | 0.007 s | **10×** |
-| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.149 s | 0.018 s |  **8×** |
-| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.186 s | 0.028 s |  **7×** |
+| `oop`     | 20 M polymorphic virtual `area()` (LCG-indexed) | 1.11 s | 0.04 s | **28×** |
+| `fib`     | recursive fib, data-dependent depth [30,33] | 1.87 s | 0.10 s | **19×** |
+| `closures`| 2 M closure build + call          | 0.18 s | 0.01 s | **18×** |
+| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.15 s | 0.01 s | **14×** |
+| `loop`    | 50 M-iter data-dependent accumulate | 0.68 s | 0.06 s | **11×** |
+| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.18 s | 0.02 s |  **9×** |
+| `array`   | 30× build + sum a 500 K-element vec | 0.34 s | 0.08 s |  **4×** |
+| `strcat`  | 30 M-iter string append           | 0.38 s | 0.12 s |  **3×** |
+
+**Algorithms** (Computer Language Benchmarks Game style — float math, tight
+loops, 2-D arrays):
+
+| Benchmark | `php` | manticore | Speedup |
+|-----------|------:|----------:|--------:|
+| `spectralnorm` | 0.45 s | 0.01 s | **44×** |
+| `mandelbrot`   | 0.26 s | 0.03 s |  **9×** |
+| `matmul`       | 0.07 s | 0.01 s |  **7×** |
+| `dijkstra`     | 0.14 s | 0.02 s |  **7×** |
+| `nbody`        | 0.16 s | 0.04 s |  **4×** |
 
 **Library-bound** — time is spent in the PHP-level stdlib/prelude (arrays,
-strings, JSON), so the win is smaller and tracks how optimized that helper is:
+strings, JSON), so the win is smaller and tracks how optimized that helper is,
+and how much it competes with PHP's hand-tuned C:
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |-----------|----------|------:|----------:|--------:|
-| `strops`  | `strtoupper`/`str_replace` loop   | 0.062 s | 0.019 s | **3.3×** |
-| `wordcount`| assoc map build + iterate        | 0.100 s | 0.039 s | **2.6×** |
-| `funcarr` | `array_map`/`filter`/`reduce`     | 0.104 s | 0.051 s | **2.0×** |
-| `sprintf` | `sprintf` formatting loop         | 0.120 s | 0.068 s | **1.8×** |
-| `json`    | `json_encode` loop                | 0.070 s | 0.043 s | **1.6×** |
-| `sort`    | `sort()` 3 K ints × 200           | 0.105 s | 0.075 s | **1.4×** |
-| `explode` | `explode`/`implode` loop          | 0.105 s | 0.111 s | **0.95×** |
+| `funcarr` | `array_map`/`filter`/`reduce`     | 0.15 s | 0.02 s | **8×** |
+| `wordcount`| assoc map build + iterate        | 0.07 s | 0.01 s | **7×** |
+| `strops`  | `strtoupper`/`str_replace` loop   | 0.08 s | 0.03 s | **2.7×** |
+| `sort`    | `sort()` 3 K ints × 200           | 0.11 s | 0.05 s | **2.2×** |
+| `sprintf` | `sprintf` formatting loop         | 0.09 s | 0.04 s | **2.2×** |
+| `explode` | `explode`/`implode` loop          | 0.14 s | 0.14 s | **1.0×** |
+| `json`    | `json_encode` loop                | 0.12 s | 0.20 s | **0.6×** |
 
 - **Cold start** (`echo "hello"`): `php` 62 ms vs manticore **2.6 ms** (~24×) —
   no interpreter/extension init.
@@ -81,11 +95,11 @@ strings, JSON), so the win is smaller and tracks how optimized that helper is:
 - **Output size**: a trivial program links to a **~50 KB** fully-static binary
   (libc only); the self-hosted compiler is ~2.9 MB.
 
-Reproduce: compile each program with `bin/manticore compile … -o` and time the
-binary against `php`. These are arithmetic/array/string microbenchmarks — they
-exercise codegen + memory paths, not a real-app mix. The library-bound cases are
-where the PHP-level stdlib is still being optimized (e.g. `sort` is an
-O(n·log n) heapsort; `explode` round-trips through the boxed array path).
+The library-bound tail is where the PHP-level stdlib is still being optimized:
+`json_encode` is a `mixed`-recursive walker (its cost is per-value tag dispatch,
+not string building — a codegen builtin is the next step), and `explode` competes
+with PHP's C. String builders (`$s = $s . …`) are amortized in place, not the
+former O(n²) copy.
 
 ## Requirements
 
