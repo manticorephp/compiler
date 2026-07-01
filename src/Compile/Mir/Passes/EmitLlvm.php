@@ -3205,17 +3205,38 @@ final class EmitLlvm
         // O(n²) concat. The helper owns the old value's lifetime, so this
         // path deliberately skips the standard release-before-overwrite.
         $sv = $sl->value;
+        // NB: no ARENA gate here — a `$s = $s . …` accumulator ESCAPES across a
+        // loop back-edge, so even if InferAllocKind confined the concat, it must
+        // become a heap str_append: str_append converts the (immortal-rc) arena
+        // buffer to a heap copy on the first append, then mutates in place. That
+        // also lets the per-iteration arena reset free the small operand temps,
+        // so an arena-confined self-concat no longer grows the arena unbounded.
         if ($sv->kind === Node::KIND_CONCAT
             && $sv->type->kind === Type::KIND_STRING
-            && $sv->allocKind !== \Compile\Mir\AllocationKind::ARENA
             && !isset($this->refLocals[$sl->name])
             && !isset($this->globalBackedLocals[$sl->name])
             && isset($this->slots[$sl->name])) {
-            $c = $this->castConcat($sv);
-            if ($c->left->kind === Node::KIND_LOAD_LOCAL
-                && $c->left->type->kind === Type::KIND_STRING
-                && $this->castLoadLocal($c->left)->name === $sl->name) {
-                return $this->emitSelfAppend($sl, $c);
+            // Flatten `$s = $s . a . b . …` (left-nested, so the outer concat's
+            // left is a nested concat, NOT `$s`) to its leaves; if the first leaf
+            // is `$s`, rebuild the suffix `a.b.…` as ONE right-hand concat and
+            // reuse emitSelfAppend (str_append of a prebuilt rhs). Without this a
+            // multi-way self-concat missed the append fast path AND leaked: the
+            // general StoreLocal release-before-overwrite drops only owned obj/vec
+            // locals, never a string, so the old accumulator was never freed
+            // (O(n²) memory + time — json/sprintf builders).
+            $ops = [];
+            $this->flattenConcat($sv, $ops);
+            $ops = $this->mergeAdjacentStrConsts($ops);
+            if (\count($ops) >= 2
+                && $ops[0]->kind === Node::KIND_LOAD_LOCAL
+                && $ops[0]->type->kind === Type::KIND_STRING
+                && $this->castLoadLocal($ops[0])->name === $sl->name) {
+                $rest = $ops[1];
+                $k = \count($ops);
+                for ($j = 2; $j < $k; $j = $j + 1) {
+                    $rest = new \Compile\Mir\Concat($rest, $ops[$j]);
+                }
+                return $this->emitSelfAppend($sl, new \Compile\Mir\Concat($ops[0], $rest));
             }
         }
         // Flow-sensitive cell-merge box-back (`$x = box($x)` planted by

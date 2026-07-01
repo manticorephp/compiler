@@ -1282,6 +1282,7 @@ trait EmitLlvmBuiltins
     {
         $this->needsStrExplode = true;
         $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $delim = $this->lastValue;
         $out .= $this->emitPtrArg($args[1]);

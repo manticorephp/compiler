@@ -1404,8 +1404,9 @@ trait EmitLlvmRuntime
         }
         if ($this->needsStrExplode) {
             // `__mir_str_explode(delim, subj, limit) -> ptr` — single-scan split
-            // into a fresh vec[string]. Each segment is a headered `__mir_str_new`
-            // (len set, rc=1); the array owns it (append stores, release_str drops).
+            // into a fresh vec[string]. Each segment is a POOLED `__mir_str_alloc`
+            // (size-class free-list, sets len=n-1 & rc=1) + memcpy — NOT raw-malloc
+            // str_new: the pool reuse is what makes N-segment splitting cheap.
             // limit>1 keeps splitting; the tail block appends the remainder. An
             // empty delim yields [subj] (matches the prelude explode). Replaces the
             // PHP-level prelude explode's 8×(strpos-cell + substr-malloc + append)
@@ -1437,7 +1438,11 @@ trait EmitLlvmRuntime
             $out .= "  %hstarti = ptrtoint ptr %hstart to i64\n";
             $out .= "  %hiti = ptrtoint ptr %hit to i64\n";
             $out .= "  %seglen = sub i64 %hiti, %hstarti\n";
-            $out .= "  %seg = call ptr @__mir_str_new(ptr %hstart, i64 %seglen)\n";
+            $out .= "  %segsz = add i64 %seglen, 1\n";
+            $out .= "  %seg = call ptr @__mir_str_alloc(i64 %segsz)\n";
+            $out .= "  call ptr @memcpy(ptr %seg, ptr %hstart, i64 %seglen)\n";
+            $out .= "  %segnul = getelementptr inbounds i8, ptr %seg, i64 %seglen\n";
+            $out .= "  store i8 0, ptr %segnul\n";
             $out .= "  %segi = ptrtoint ptr %seg to i64\n";
             $out .= "  %arrc = load ptr, ptr %arrp\n";
             $out .= "  %arrn = call ptr @__mir_array_append(ptr %arrc, i64 %segi)\n";
@@ -1454,7 +1459,11 @@ trait EmitLlvmRuntime
             $out .= "  %fpos = load i64, ptr %posp\n";
             $out .= "  %tstart = getelementptr inbounds i8, ptr %subj, i64 %fpos\n";
             $out .= "  %tlen = sub i64 %slen, %fpos\n";
-            $out .= "  %tseg = call ptr @__mir_str_new(ptr %tstart, i64 %tlen)\n";
+            $out .= "  %tsegsz = add i64 %tlen, 1\n";
+            $out .= "  %tseg = call ptr @__mir_str_alloc(i64 %tsegsz)\n";
+            $out .= "  call ptr @memcpy(ptr %tseg, ptr %tstart, i64 %tlen)\n";
+            $out .= "  %tsegnul = getelementptr inbounds i8, ptr %tseg, i64 %tlen\n";
+            $out .= "  store i8 0, ptr %tsegnul\n";
             $out .= "  %tsegi = ptrtoint ptr %tseg to i64\n";
             $out .= "  %arrc2 = load ptr, ptr %arrp\n";
             $out .= "  %arrn2 = call ptr @__mir_array_append(ptr %arrc2, i64 %tsegi)\n";
