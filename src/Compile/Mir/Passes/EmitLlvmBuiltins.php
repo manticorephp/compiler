@@ -324,15 +324,25 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_ARRAY) {
-            // Nested array value → recursively rebuild as a cell-array (see the
-            // vec variant) so its own elements render.
-            $this->lastValue = $ev;
-            $this->lastValueType = 'i64';
             $nestElem = $elem->element ?? Type::unknown();
-            $out .= $elem->isAssoc()
-                ? $this->emitAssocToCellArrayUnified($nestElem)
-                : $this->emitVecToCellArrayUnified($nestElem);
-            $boxed = $this->lastValue;
+            if ($nestElem->kind === Type::KIND_CELL) {
+                // The inner array is ALREADY cell-repr (its values are boxed
+                // cells) — box it as a plain array cell. Rebuilding would re-box
+                // each already-boxed cell (else-branch box_int) → double-box
+                // garbage (a vec of mixed assocs read raw by var_dump/json).
+                $ep = $this->allocSsa();
+                $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+                $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
+            } else {
+                // Nested array value → recursively rebuild as a cell-array (see
+                // the vec variant) so its own concrete elements render.
+                $this->lastValue = $ev;
+                $this->lastValueType = 'i64';
+                $out .= $elem->isAssoc()
+                    ? $this->emitAssocToCellArrayUnified($nestElem)
+                    : $this->emitVecToCellArrayUnified($nestElem);
+                $boxed = $this->lastValue;
+            }
         } else {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
         }

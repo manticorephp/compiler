@@ -1,0 +1,18 @@
+[{"id":1,"name":"alpha","on":true},{"id":2,"name":"beta","on":false}]
+[{"id":10,"tags":["a","b"]},{"id":20,"tags":["c"]}]
+array(2) {
+  [0]=>
+  array(2) {
+    ["k"]=>
+    int(1)
+    ["s"]=>
+    string(1) "x"
+  }
+  [1]=>
+  array(2) {
+    ["k"]=>
+    int(2)
+    ["s"]=>
+    string(1) "y"
+  }
+}
