@@ -1220,6 +1220,23 @@ final class InferTypes implements Pass
                     $this->assocValClasses[$name][$cls] = true;
                 }
             }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
+            // Seed the value-class set from an array-LITERAL assignment too, so a
+            // later differing store promotes to a cell element: `$r = [1,2]` (num)
+            // then `$r[0] = "a"` (string) is a genuinely mixed array — without the
+            // literal's `num` the store's lone `string` looks homogeneous and the
+            // string is written raw into a vec[int] (read back as garbage bits).
+            $sl = $this->asStoreLocal($n);
+            if ($sl->value->kind === Node::KIND_ARRAY_LIT) {
+                foreach ($this->asArrayLit($sl->value)->elements as $el) {
+                    if ($el->value === null) { continue; }
+                    $cls = $this->coarseValueClass($el->value);
+                    if ($cls !== '') {
+                        if (!isset($this->assocValClasses[$sl->name])) { $this->assocValClasses[$sl->name] = []; }
+                        $this->assocValClasses[$sl->name][$cls] = true;
+                    }
+                }
+            }
         }
         foreach (Walk::children($n) as $c) { $this->scanAssocLocals($c); }
     }
