@@ -54,7 +54,43 @@ LIMIT: only literal-valued nested stores promote; a nested store of a VARIABLE
 string (`$a[k][]=$s`) still writes raw (class `''` → no trigger) — a deeper gap,
 same shape as the general unknown-element problem.
 
-## (b) Codegen builtin for json_encode (perf) — NOT started
+## (b) json_encode — PARTLY done (`14ec1d3`); native escape shipped
+**DONE:** (1) correctness — object/assoc branches now escape KEYS (were invalid
+JSON for `"`/`\`/control keys). (2) perf — `__mc_json_escape` is a codegen builtin
+backed by native `__mir_json_escape` runtime (models `__mir_addslashes`, tight IR,
+one buffer). json bench 0.34→0.16 (php 0.13) = **1.6× → 1.2×**. Tests
+`json_key_escape`. `bin/build` twice (emitter → stdlib.o).
+**PRE-EXISTING BUG (out of scope):** `json_encode($stdClassObject)` SIGSEGVs — the
+`(array)$v`-of-recursion path in the stdlib-compiled `__mc_json_enc`. Confirmed at
+clean HEAD (`bin/build --seed`, rc=139), NOT a regression. Isolated pieces (cast on
+cell, native escape, recursion, dispatch) all work standalone; only the
+stdlib-compiled object branch faults. Needs a fresh look.
+**REJECTED:** rewriting the PHP walker (piecewise `.=` / inline scalar leaves) —
+measured SLOWER (0.34, more tiny append-calls than one self-append of a prebuilt
+RHS). The win was the native escape, not restructuring PHP.
+
+## NEXT PERF PATHS (analysis 2026-07-01) — ROI order
+1. **str_replace native worker** (LOW risk, best strops win 2.7×→~1.5×): the PHP
+   `__mir_str_replace_one` does `substr()` (malloc+copy) THEN concat (copy) per
+   chunk = double copy. A native worker memcpy's chunk bytes straight subject→out
+   buffer (same pattern as `__mir_json_escape`). Plus a 0-match fast path (share
+   subject, no final-substr alloc).
+2. **Shape/record types for array literals** (DEEP, foundational): stop collapsing
+   a literal-built mixed assoc to `assoc[string,cell]`; keep `{id:int,name:string,
+   price:float,tags:vec[string]}`. Then consumers (json/var_dump/implode) skip
+   runtime tag-dispatch. Unblocks #3, aligns with the strict-analyzer
+   "monolithic predictable base" direction. See [[strict_analyzer_epic_2026_06_29]].
+3. **json call-site specialization** (MED, nails the bench): `json_encode(<literal/
+   typed>)` with statically-known field types → emit straight-line
+   `"{\"id\":".int_to_str($i).",..."`, no dispatch/recursion. Needs #2's shapes.
+4. **Native recursive json encoder** `__mir_json_encode(cell)` (MED-HIGH): tag-switch
+   walk over the array runtime into one buffer — general ≤1×, but hand-written
+   recursive IR over packed+hashed. Higher Heisenbug surface.
+Systemic pattern behind ALL library losses: PHP-level loops that allocate per
+iteration. Two fixes — (a) native single-buffer runtime workers for hot stdlib
+string/encode fns; (b) shape/type specialization so consumers skip tag-dispatch.
+
+## (b-OLD) Original codegen-builtin sketch (superseded by the escape approach)
 `json_encode(scalar)` is 8× slower than php PURELY from the `mixed` dispatch
 (box → is_null?/is_bool?/is_int?… chain → unbox). The bench (assoc) is dominated
 by this per-value cost, not string building (string builders are now amortized —
