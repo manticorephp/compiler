@@ -277,6 +277,7 @@ final class EmitLlvm
     private bool $needsImplodeCell = false;
     private bool $needsTaggedToInt = false;
     private bool $needsTaggedToFloat = false;
+    private bool $needsTaggedCompare = false;
     private bool $needsTaggedArith = false;
     private bool $needsTaggedTruthy = false;
     /** Module indexes an array with a `mixed`/cell key → emit the
@@ -614,6 +615,9 @@ final class EmitLlvm
         }
         if ($this->needsTaggedToFloat) {
             $out .= $this->taggedToFloatRuntime();
+        }
+        if ($this->needsTaggedCompare) {
+            $out .= $this->taggedCompareRuntime();
         }
         if ($this->needsTaggedArith) {
             $out .= $this->taggedArithRuntime();
@@ -1192,6 +1196,58 @@ final class EmitLlvm
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %az = uitofp i1 %ane to double\n";
         $out .= "  ret double %az\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
+     * `__manticore_tagged_compare(a, b) -> i64` (-1 / 0 / +1) — a runtime,
+     * tag-dispatched ordering of two NaN-boxed cells (PHP-ish `<=>` semantics for
+     * the common homogeneous cases). Both string → strcmp; both int → signed int
+     * compare (no double-precision loss on large ints); otherwise numeric compare
+     * via the double promotion. Used when both operands of an ordering compare are
+     * statically CELL (guaranteed boxed) — e.g. sorting `array_keys` output or an
+     * erased mixed array, where a raw int compare would order string keys by
+     * pointer. Callers do `icmp <pred> result, 0`.
+     */
+    private function taggedCompareRuntime(): string
+    {
+        $out  = "\ndefine i64 @__manticore_tagged_compare(i64 %a, i64 %b) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
+        $out .= "  %tb = call i64 @__manticore_tag(i64 %b)\n";
+        $out .= "  %as = icmp eq i64 %ta, 4\n";
+        $out .= "  %bs = icmp eq i64 %tb, 4\n";
+        $out .= "  %bothstr = and i1 %as, %bs\n";
+        $out .= "  br i1 %bothstr, label %scmp, label %chkint\n";
+        $out .= "scmp:\n";
+        $out .= "  %pa = and i64 %a, 281474976710655\n";
+        $out .= "  %ppa = inttoptr i64 %pa to ptr\n";
+        $out .= "  %pb = and i64 %b, 281474976710655\n";
+        $out .= "  %ppb = inttoptr i64 %pb to ptr\n";
+        $out .= "  %sc = call i64 @__mir_str_cmp(ptr %ppa, ptr %ppb)\n";
+        $out .= "  ret i64 %sc\n";
+        $out .= "chkint:\n";
+        $out .= "  %ai = icmp eq i64 %ta, 1\n";
+        $out .= "  %bi = icmp eq i64 %tb, 1\n";
+        $out .= "  %bothint = and i1 %ai, %bi\n";
+        $out .= "  br i1 %bothint, label %icmp, label %fcmp\n";
+        $out .= "icmp:\n";
+        $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
+        $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
+        $out .= "  %ilt = icmp slt i64 %ua, %ub\n";
+        $out .= "  %igt = icmp sgt i64 %ua, %ub\n";
+        $out .= "  %isel = select i1 %igt, i64 1, i64 0\n";
+        $out .= "  %ires = select i1 %ilt, i64 -1, i64 %isel\n";
+        $out .= "  ret i64 %ires\n";
+        $out .= "fcmp:\n";
+        $out .= "  %da = call double @__manticore_tagged_to_double(i64 %a)\n";
+        $out .= "  %db = call double @__manticore_tagged_to_double(i64 %b)\n";
+        $out .= "  %flt = fcmp olt double %da, %db\n";
+        $out .= "  %fgt = fcmp ogt double %da, %db\n";
+        $out .= "  %fsel = select i1 %fgt, i64 1, i64 0\n";
+        $out .= "  %fres = select i1 %flt, i64 -1, i64 %fsel\n";
+        $out .= "  ret i64 %fres\n";
         $out .= "}\n";
         return $out;
     }
@@ -5531,6 +5587,31 @@ final class EmitLlvm
             return $out;
         }
 
+        // Both operands are statically CELL (guaranteed NaN-boxed) in an ORDERING
+        // compare — their runtime types (string / int / float) are only known at
+        // runtime, so dispatch by tag: string→strcmp, else numeric. Without this a
+        // string cell orders by raw pointer bits (sorting array_keys / an erased
+        // mixed array). Eq/ne keep the existing tag/carrier paths above.
+        if (!$isEq && !$isNe
+            && $lk === Type::KIND_CELL && $rk === Type::KIND_CELL) {
+            $this->needsTaggedCompare = true;
+            $this->needsTagged = true;
+            $this->needsTaggedToFloat = true;
+            $this->needsStrcmp = true;
+            $li = $l;
+            if ($lt === 'ptr') { $li = $this->allocSsa(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            $ri = $r;
+            if ($rt === 'ptr') { $ri = $this->allocSsa(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            $cmp = $this->allocSsa();
+            $out .= '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
+            $cmpReg = $this->allocSsa();
+            $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
+            $extReg = $this->allocSsa();
+            $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+            $this->lastValue = $extReg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // Float comparison when either side carries a double.
         if ($lt === 'double' || $rt === 'double'
             || $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT) {

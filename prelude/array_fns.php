@@ -229,6 +229,85 @@ function rsort(array &$arr): bool
 }
 
 /**
+ * `ksort` / `krsort` — sort by KEY (ascending / descending), preserving the
+ * key=>value association. Self-contained insertion sort over the KEY vector;
+ * `array_keys` returns NaN-boxed cell keys, so `$keys[$j] > $kk` dispatches by
+ * tag (string→strcmp, int→numeric) via __manticore_tagged_compare — correct for
+ * both string and int keys. Does NOT call the shared sort() (that would add a
+ * conflicting call site and erase sort's element type).
+ */
+function ksort(array &$arr): bool
+{
+    $keys = array_keys($arr);
+    $n = count($keys);
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $kk = $keys[$i];
+        $j = $i - 1;
+        while ($j >= 0 && $keys[$j] > $kk) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
+        $keys[$j + 1] = $kk;
+    }
+    $new = [];
+    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    $arr = $new;
+    return true;
+}
+
+function krsort(array &$arr): bool
+{
+    $keys = array_keys($arr);
+    $n = count($keys);
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $kk = $keys[$i];
+        $j = $i - 1;
+        while ($j >= 0 && $keys[$j] < $kk) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
+        $keys[$j + 1] = $kk;
+    }
+    $new = [];
+    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    $arr = $new;
+    return true;
+}
+
+/**
+ * `asort` / `arsort` — sort by VALUE (ascending / descending), preserving the
+ * key=>value association. Insertion sort over the KEY vector, comparing the
+ * by-key value reads `$arr[$key]` (tagged cells → __manticore_tagged_compare).
+ */
+function asort(array &$arr): bool
+{
+    $keys = array_keys($arr);
+    $n = count($keys);
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $kk = $keys[$i];
+        $vv = $arr[$kk];
+        $j = $i - 1;
+        while ($j >= 0 && $arr[$keys[$j]] > $vv) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
+        $keys[$j + 1] = $kk;
+    }
+    $new = [];
+    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    $arr = $new;
+    return true;
+}
+
+function arsort(array &$arr): bool
+{
+    $keys = array_keys($arr);
+    $n = count($keys);
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $kk = $keys[$i];
+        $vv = $arr[$kk];
+        $j = $i - 1;
+        while ($j >= 0 && $arr[$keys[$j]] < $vv) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
+        $keys[$j + 1] = $kk;
+    }
+    $new = [];
+    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    $arr = $new;
+    return true;
+}
+
+/**
  * `array_reverse(arr)` — values in reverse order, reindexed. In the PRELUDE so
  * call-site element inference / monomorphization types `$a` CONCRETELY (vec[int]
  * etc.) — array_values then re-boxes each typed element to a tagged cell. A
