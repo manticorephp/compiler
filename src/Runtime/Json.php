@@ -63,7 +63,7 @@ function json_decode(string $json, bool $associative = true): mixed {
 
 function __mc_json_enc(mixed $v): string {
     if (is_null($v)) { return "null"; }
-    if (is_bool($v)) { $s = (string)$v; return $s === "1" ? "true" : "false"; }
+    if (is_bool($v)) { return $v ? "true" : "false"; }
     if (is_int($v)) { return (string)$v; }
     if (is_float($v)) { return (string)$v; }
     if (is_string($v)) { return '"' . __mc_json_escape($v) . '"'; }
@@ -73,7 +73,8 @@ function __mc_json_enc(mixed $v): string {
         foreach ((array)$v as $k => $val) {
             if (!$first) { $out = $out . ","; }
             $first = false;
-            $out = $out . '"' . $k . '":' . __mc_json_enc($val);
+            $ks = is_string($k) ? $k : (string)$k;
+            $out = $out . '"' . __mc_json_escape($ks) . '":' . __mc_json_enc($val);
         }
         return $out . "}";
     }
@@ -95,7 +96,8 @@ function __mc_json_enc(mixed $v): string {
     foreach ($v as $k => $val) {
         if (!$first) { $out = $out . ","; }
         $first = false;
-        $out = $out . '"' . $k . '":' . __mc_json_enc($val);
+        $ks = is_string($k) ? $k : (string)$k;
+        $out = $out . '"' . __mc_json_escape($ks) . '":' . __mc_json_enc($val);
     }
     return $out . "}";
 }

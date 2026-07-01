@@ -123,6 +123,7 @@ trait EmitLlvmBuiltins
         if ($name === 'array_shift')                  { return $this->biArrayShift($c); }
         if ($name === 'array_unshift')                { return $this->biArrayUnshift($c); }
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
+        if ($name === '__mc_json_escape')             { return $this->biJsonEscape($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
         if ($name === 'var_export')                   { return $this->biVarExport($args); }
@@ -2122,6 +2123,92 @@ trait EmitLlvmBuiltins
         $out .= "  %j1 = add i64 %j, 1\n";
         $out .= "  %dp2 = getelementptr inbounds i8, ptr %buf, i64 %j1\n";
         $out .= "  store i8 %c, ptr %dp2\n";
+        $out .= "  %je = add i64 %j1, 1\n";
+        $out .= "  br label %cont\n";
+        $out .= "plain:\n";
+        $out .= "  %dp3 = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 %c, ptr %dp3\n";
+        $out .= "  %jp = add i64 %j, 1\n";
+        $out .= "  br label %cont\n";
+        $out .= "cont:\n";
+        $out .= "  %j2 = phi i64 [%je, %esc], [%jp, %plain]\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %j)\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
+     * `__mc_json_escape($s)` — native replacement for the PHP stdlib escaper
+     * (hot: called once per string key + string value while encoding). Escapes
+     * `"` `\` and the C0 controls \b \t \n \f \r; other bytes pass through raw
+     * (matches the PHP {@see \__mc_json_escape}). @param Node[] $args
+     */
+    private function biJsonEscape(array $args): string
+    {
+        $this->needsJsonEscape = true;
+        $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
+        $out = $this->emitPtrArg($args[0]);
+        $a0 = $this->lastValue;
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = call ptr @__mir_json_escape(ptr ' . $a0 . ")\n";
+        $out .= $this->freeStrTemp($args[0], $a0);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** Runtime: JSON-escape `"` `\` \b \t \n \f \r (worst case doubles len).
+     * For `"`/`\` the escape byte is the char itself; the controls map to
+     * their letter (b/t/n/f/r). All other bytes copy raw. */
+    private function jsonEscapeRuntime(): string
+    {
+        $out  = "\ndefine ptr @__mir_json_escape(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %slen = call i64 @strlen(ptr %s)\n";
+        $out .= "  %cap0 = mul i64 %slen, 2\n";
+        $out .= "  %cap = add i64 %cap0, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont]\n";
+        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont]\n";
+        $out .= "  %done = icmp sge i64 %i, %slen\n";
+        $out .= "  br i1 %done, label %fin, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %c = load i8, ptr %sp\n";
+        $out .= "  %is34 = icmp eq i8 %c, 34\n";   // "
+        $out .= "  %is92 = icmp eq i8 %c, 92\n";   // backslash
+        $out .= "  %is10 = icmp eq i8 %c, 10\n";   // \n
+        $out .= "  %is9  = icmp eq i8 %c, 9\n";    // \t
+        $out .= "  %is13 = icmp eq i8 %c, 13\n";   // \r
+        $out .= "  %is8  = icmp eq i8 %c, 8\n";    // \b
+        $out .= "  %is12 = icmp eq i8 %c, 12\n";   // \f
+        // Escape byte: char itself for " and \\; the letter for the controls.
+        $out .= "  %e1 = select i1 %is10, i8 110, i8 %c\n";
+        $out .= "  %e2 = select i1 %is9,  i8 116, i8 %e1\n";
+        $out .= "  %e3 = select i1 %is13, i8 114, i8 %e2\n";
+        $out .= "  %e4 = select i1 %is8,  i8 98,  i8 %e3\n";
+        $out .= "  %e5 = select i1 %is12, i8 102, i8 %e4\n";
+        $out .= "  %o1 = or i1 %is34, %is92\n";
+        $out .= "  %o2 = or i1 %o1, %is10\n";
+        $out .= "  %o3 = or i1 %o2, %is9\n";
+        $out .= "  %o4 = or i1 %o3, %is13\n";
+        $out .= "  %o5 = or i1 %o4, %is8\n";
+        $out .= "  %spec = or i1 %o5, %is12\n";
+        $out .= "  br i1 %spec, label %esc, label %plain\n";
+        $out .= "esc:\n";
+        $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 92, ptr %dp\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  %dp2 = getelementptr inbounds i8, ptr %buf, i64 %j1\n";
+        $out .= "  store i8 %e5, ptr %dp2\n";
         $out .= "  %je = add i64 %j1, 1\n";
         $out .= "  br label %cont\n";
         $out .= "plain:\n";
