@@ -123,6 +123,20 @@ final class InferTypes implements Pass
     /** @var array<string,array<string,bool>> per-array-local set of coarse store
      *  value classes, collected pre-inference to detect heterogeneity. */
     private array $assocValClasses = [];
+    /** @var array<string,bool> array locals whose element is an inner array built
+     *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
+     *  vec[unknown] (raw). Paired with {@see $nestedScalarStoreLocals}. */
+    private array $emptyArrValLocals = [];
+    /** @var array<string,bool> array locals receiving a nested SCALAR store into a
+     *  subscript element (`$a[k][…] = scalar`). Combined with a prior empty inner
+     *  `[]` this makes the inner array genuinely mixed → its element must be a
+     *  CELL, else the scalar is written raw into a vec[unknown] and read as
+     *  garbage. Distinct from the flat mixed case ({@see $cellElemLocals}): here
+     *  the local's VALUE is a vec[cell], not a bare cell. */
+    private array $nestedScalarStoreLocals = [];
+    /** @var array<string,bool> array locals promoted to a vec-of-cell VALUE element
+     *  (nested subscript case). Held across binding + store refinement. */
+    private array $nestedCellVecLocals = [];
     /** @var array<string,bool> scalar locals that ever receive a float-producing
      *  value — a float SLOT, so an int init/store (`$s = 0` before a `$s += 1.5`
      *  loop) is coerced, not bit-stored, and a loop back-edge can't erase it to
@@ -309,6 +323,9 @@ final class InferTypes implements Pass
         $this->strLitKeyLocals = [];
         $this->cellElemLocals = [];
         $this->assocValClasses = [];
+        $this->emptyArrValLocals = [];
+        $this->nestedScalarStoreLocals = [];
+        $this->nestedCellVecLocals = [];
         $this->scanAssocLocals($fn->body);
         // A MIXED-key array — string-keyed ($m["a"]=…) AND int-keyed ($m[5]=…) —
         // must ride a tagged cell key end-to-end (key_cell_at boxes each entry by
@@ -328,6 +345,23 @@ final class InferTypes implements Pass
                 $this->localTypes[$name] = Type::assoc($key, Type::cell());
             } else {
                 $this->localTypes[$name] = Type::vec(Type::cell());
+            }
+        }
+        // Nested-subscript mixed array: a local whose element is an inner array
+        // built from an empty `[]` (→ vec[unknown]) that then receives a nested
+        // SCALAR store (`$a[k][…] = "v"`) — the scalar would be written raw into
+        // the untyped inner vec and read back as garbage. Promote the local's
+        // VALUE element to vec[cell] so the inner store/read box. The empty-literal
+        // gate excludes matmul (`$m[0]=[1,2]` — non-empty inner, concrete element).
+        foreach ($this->emptyArrValLocals as $name => $unused) {
+            if (!isset($this->nestedScalarStoreLocals[$name])) { continue; }
+            $this->nestedCellVecLocals[$name] = true;
+            $val = Type::vec(Type::cell());
+            if (isset($this->assocLocals[$name])) {
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+                $this->localTypes[$name] = Type::assoc($key, $val);
+            } else {
+                $this->localTypes[$name] = Type::vec($val);
             }
         }
         // Float-slot pre-pass: a local that ever receives a float-producing value
@@ -1219,6 +1253,21 @@ final class InferTypes implements Pass
                     if (!isset($this->assocValClasses[$name])) { $this->assocValClasses[$name] = []; }
                     $this->assocValClasses[$name][$cls] = true;
                 }
+                // `$a[k] = []` — an empty inner array value (infers vec[unknown]).
+                if ($se->value->kind === Node::KIND_ARRAY_LIT
+                    && \count($this->asArrayLit($se->value)->elements) === 0) {
+                    $this->emptyArrValLocals[$name] = true;
+                }
+            } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
+                // A nested store `$a[k][…] = v` where the value is a scalar: mark
+                // the OUTER base local so an empty inner `[]` promotes to vec[cell].
+                $base = $this->asArrayAccess($se->array)->array;
+                if ($base->kind === Node::KIND_LOAD_LOCAL) {
+                    $cls = $this->coarseValueClass($se->value);
+                    if ($cls === 'num' || $cls === 'string' || $cls === 'bool' || $cls === 'null') {
+                        $this->nestedScalarStoreLocals[$this->asLoadLocal($base)->name] = true;
+                    }
+                }
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
             // Seed the value-class set from an array-LITERAL assignment too, so a
@@ -1390,6 +1439,19 @@ final class InferTypes implements Pass
             // keys → assoc[cell,*]; a plain string-keyed local → assoc[string,*].
             $keyType = isset($this->cellKeyLocals[$node->name]) ? Type::cell() : Type::string_();            $valueType = Type::assoc($keyType, Type::unknown());
             $node->value->type = $valueType;
+        }
+        // A nested-subscript mixed local (nestedCellVecLocals) keeps a vec[cell]
+        // VALUE element across binding: the outer `[]` init must emit an array
+        // whose elements are inner cell-vecs, so `$a[k][…] = scalar` boxes.
+        if (isset($this->nestedCellVecLocals[$node->name]) && $valueType->isArray()) {
+            $val = Type::vec(Type::cell());
+            $keyType = isset($this->cellKeyLocals[$node->name]) ? Type::cell() : Type::string_();
+            $shape = isset($this->assocLocals[$node->name])
+                ? Type::assoc($keyType, $val) : Type::vec($val);
+            $node->value->type = $shape;
+            $this->localTypes[$node->name] = $shape;
+            $node->type = $shape;
+            return $shape;
         }
         // A mixed-array slot (cellElemLocals) keeps its CELL element when bound
         // to an array literal: the `[]`/`[…]` init would otherwise re-narrow the
@@ -2472,8 +2534,10 @@ final class InferTypes implements Pass
                 || isset($this->assocLocals[$name]) && $at->isVec()) {
                 // assoc local: refine the value element across string-keyed stores.
                 $cur = $at->isAssoc() ? ($at->element ?? null) : null;
-                $elem = isset($this->cellElemLocals[$name])
-                    ? Type::cell() : $this->arrayElemMerge($cur, $vt);
+                $elem = isset($this->nestedCellVecLocals[$name])
+                    ? Type::vec(Type::cell())
+                    : (isset($this->cellElemLocals[$name])
+                        ? Type::cell() : $this->arrayElemMerge($cur, $vt));
                 // A MIXED-key local (cellKeyLocals) rides a tagged cell key — a
                 // string-keyed store must NOT re-narrow it to assoc[string], which
                 // would drop the int keys (foreach then reads an int key as a
@@ -2485,8 +2549,10 @@ final class InferTypes implements Pass
                 $this->localTypes[$name] = Type::assoc($key, $elem);
             } elseif ($at->isVec() || $at->kind === Type::KIND_UNKNOWN) {
                 $cur = $at->element ?? null;
-                $elem = isset($this->cellElemLocals[$name])
-                    ? Type::cell() : $this->arrayElemMerge($cur, $vt);
+                $elem = isset($this->nestedCellVecLocals[$name])
+                    ? Type::vec(Type::cell())
+                    : (isset($this->cellElemLocals[$name])
+                        ? Type::cell() : $this->arrayElemMerge($cur, $vt));
                 $this->localTypes[$name] = Type::vec($elem);
             }
         }
