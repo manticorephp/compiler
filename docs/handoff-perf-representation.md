@@ -79,17 +79,31 @@ RHS). The win was the native escape, not restructuring PHP.
    non-overlapping left-to-right PHP semantics. Test `str_replace_native`. (Did NOT
    add the share-subject 0-match fast path — always returns a fresh string to keep rc
    simple; a future tweak.) REAL remaining perf losses: json (1.2×) + explode (1.0×).
-2. **Shape/record types for array literals** (DEEP, foundational): stop collapsing
-   a literal-built mixed assoc to `assoc[string,cell]`; keep `{id:int,name:string,
-   price:float,tags:vec[string]}`. Then consumers (json/var_dump/implode) skip
-   runtime tag-dispatch. Unblocks #3, aligns with the strict-analyzer
-   "monolithic predictable base" direction. See [[strict_analyzer_epic_2026_06_29]].
-3. **json call-site specialization** (MED, nails the bench): `json_encode(<literal/
-   typed>)` with statically-known field types → emit straight-line
-   `"{\"id\":".int_to_str($i).",..."`, no dispatch/recursion. Needs #2's shapes.
-4. **Native recursive json encoder** `__mir_json_encode(cell)` (MED-HIGH): tag-switch
-   walk over the array runtime into one buffer — general ≤1×, but hand-written
-   recursive IR over packed+hashed. Higher Heisenbug surface.
+2. ◑ **Shape/record types — Phase 1 DONE (`d8b9dbc`), Phase 2 REVERTED.**
+   FOUNDATION SHIPPED + INERT: `Type` has a `fields` payload + `Type::record()`/
+   `isRecord()`; a record is an assoc that ALSO remembers per-field types (same
+   element/key repr — element cell for mixed). `inferArrayLit` forms a record for
+   an all-string-literal-key literal; InferTypes preserves it on a never-mutated,
+   record-only local (`recordLocals`). Any merge/mutation degrades to
+   `assoc[string,cell]`. No consumer reads `fields` → zero behaviour change, gated
+   (362/362, difftest 353/0/0, fixpoint, stab). PHASE 2 (json specialization off
+   the shape) was BUILT then REVERTED: a straight-line encoder (read each field by
+   `array_value_at` positional / `get_str`, encode by static type, concat) measured
+   SLOWER than the native-escape linear walker (0.16 → 0.22–0.25). Why: O(fields)
+   intermediate-string allocations in the concat chain + the nested field still
+   falling to the PHP encoder beat the one-pass amortized-append walker. LESSON: the
+   real lever to beat php is a SINGLE-BUFFER native encoder (path #4 — write bytes
+   into one growing buffer, no intermediate strings), NOT concat chains. The record
+   foundation stays for that (or var_dump/property specialization). Do NOT redo the
+   concat approach.
+3. ~~json call-site specialization~~ — SUBSUMED by #2 Phase 2 (built, reverted:
+   concat chains lose to the walker).
+4. **Native recursive json encoder** `__mir_json_encode(cell)` (MED-HIGH) — NOW THE
+   BEST remaining json lever: a runtime that tag-switch walks the array into ONE
+   growing buffer (no intermediate strings — the exact thing Phase 2's concat chain
+   lacked). Can consume the record `fields` for per-field static dispatch. General
+   ≤1×, but hand-written recursive IR over packed+hashed = higher Heisenbug surface.
+   Other shape uses: var_dump / property-access specialization off the record.
 Systemic pattern behind ALL library losses: PHP-level loops that allocate per
 iteration. Two fixes — (a) native single-buffer runtime workers for hot stdlib
 string/encode fns; (b) shape/type specialization so consumers skip tag-dispatch.
