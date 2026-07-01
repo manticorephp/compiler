@@ -1402,6 +1402,65 @@ trait EmitLlvmRuntime
             $out .= "  ret i64 -3940649673949184\n";
             $out .= "}\n";
         }
+        if ($this->needsStrExplode) {
+            // `__mir_str_explode(delim, subj, limit) -> ptr` — single-scan split
+            // into a fresh vec[string]. Each segment is a headered `__mir_str_new`
+            // (len set, rc=1); the array owns it (append stores, release_str drops).
+            // limit>1 keeps splitting; the tail block appends the remainder. An
+            // empty delim yields [subj] (matches the prelude explode). Replaces the
+            // PHP-level prelude explode's 8×(strpos-cell + substr-malloc + append)
+            // per call with one C loop.
+            $out .= "\ndefine ptr @__mir_str_explode(ptr %delim, ptr %subj, i64 %limit) {\n";
+            $out .= "entry:\n";
+            $out .= "  %dlen = call i64 @__mir_strlen(ptr %delim)\n";
+            $out .= "  %slen = call i64 @__mir_strlen(ptr %subj)\n";
+            $out .= "  %arr0 = call ptr @__mir_array_alloc(i64 0)\n";
+            $out .= "  %arrp = alloca ptr\n";
+            $out .= "  store ptr %arr0, ptr %arrp\n";
+            $out .= "  %posp = alloca i64\n";
+            $out .= "  store i64 0, ptr %posp\n";
+            $out .= "  %limp = alloca i64\n";
+            $out .= "  store i64 %limit, ptr %limp\n";
+            $out .= "  %de0 = icmp eq i64 %dlen, 0\n";
+            $out .= "  br i1 %de0, label %tail, label %loop\n";
+            $out .= "loop:\n";
+            $out .= "  %lim = load i64, ptr %limp\n";
+            $out .= "  %limok = icmp sgt i64 %lim, 1\n";
+            $out .= "  br i1 %limok, label %search, label %tail\n";
+            $out .= "search:\n";
+            $out .= "  %pos = load i64, ptr %posp\n";
+            $out .= "  %hstart = getelementptr inbounds i8, ptr %subj, i64 %pos\n";
+            $out .= "  %hit = call ptr @strstr(ptr %hstart, ptr %delim)\n";
+            $out .= "  %miss = icmp eq ptr %hit, null\n";
+            $out .= "  br i1 %miss, label %tail, label %emit\n";
+            $out .= "emit:\n";
+            $out .= "  %hstarti = ptrtoint ptr %hstart to i64\n";
+            $out .= "  %hiti = ptrtoint ptr %hit to i64\n";
+            $out .= "  %seglen = sub i64 %hiti, %hstarti\n";
+            $out .= "  %seg = call ptr @__mir_str_new(ptr %hstart, i64 %seglen)\n";
+            $out .= "  %segi = ptrtoint ptr %seg to i64\n";
+            $out .= "  %arrc = load ptr, ptr %arrp\n";
+            $out .= "  %arrn = call ptr @__mir_array_append(ptr %arrc, i64 %segi)\n";
+            $out .= "  store ptr %arrn, ptr %arrp\n";
+            $out .= "  %subji = ptrtoint ptr %subj to i64\n";
+            $out .= "  %hitoff = sub i64 %hiti, %subji\n";
+            $out .= "  %newpos = add i64 %hitoff, %dlen\n";
+            $out .= "  store i64 %newpos, ptr %posp\n";
+            $out .= "  %lim2 = load i64, ptr %limp\n";
+            $out .= "  %lim3 = sub i64 %lim2, 1\n";
+            $out .= "  store i64 %lim3, ptr %limp\n";
+            $out .= "  br label %loop\n";
+            $out .= "tail:\n";
+            $out .= "  %fpos = load i64, ptr %posp\n";
+            $out .= "  %tstart = getelementptr inbounds i8, ptr %subj, i64 %fpos\n";
+            $out .= "  %tlen = sub i64 %slen, %fpos\n";
+            $out .= "  %tseg = call ptr @__mir_str_new(ptr %tstart, i64 %tlen)\n";
+            $out .= "  %tsegi = ptrtoint ptr %tseg to i64\n";
+            $out .= "  %arrc2 = load ptr, ptr %arrp\n";
+            $out .= "  %arrn2 = call ptr @__mir_array_append(ptr %arrc2, i64 %tsegi)\n";
+            $out .= "  ret ptr %arrn2\n";
+            $out .= "}\n";
+        }
         return $out;
     }
 

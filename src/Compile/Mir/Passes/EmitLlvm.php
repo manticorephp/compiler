@@ -312,6 +312,7 @@ final class EmitLlvm
     /** STDIN/STDOUT/STDERR used → emit @manticore_std{in,out,err} accessors. */
     private bool $needsStdStreams = false;
     private bool $needsStrpos = false;
+    private bool $needsStrExplode = false;
     /** Scratch: address reg set by foreachElemAddr / foreachKeyAddr. */
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */
@@ -3481,6 +3482,18 @@ final class EmitLlvm
         if ($isFloat) {
             return $this->coerceDoubleOperand($op);
         }
+        // A STRING operand in integer arithmetic is PHP-coerced to its leading
+        // numeric value (strtol base 10), NOT ptrtoint'd — else `"2026" + "06"`
+        // adds the raw pointers. (`explode(...)[i] + …` is the canonical case.)
+        if ($op->type->kind === Type::KIND_STRING) {
+            $this->needsStrtol = true;
+            $out = $this->coerceToPtr();
+            $reg = $this->allocSsa();
+            $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $out = $this->coerceTo('i64');
         if ($op->type->kind === Type::KIND_CELL) {
             $out .= $this->unboxCellInt($this->lastValue);
@@ -3492,6 +3505,17 @@ final class EmitLlvm
      *  (int→sitofp, float→bits, …) instead of bitcasting the NaN-boxed bits. */
     private function coerceDoubleOperand(Node $op): string
     {
+        // A STRING operand in float arithmetic → its numeric value via strtod
+        // (PHP numeric-string coercion), not a bitcast of the pointer.
+        if ($op->type->kind === Type::KIND_STRING) {
+            $this->needsStrtod = true;
+            $out = $this->coerceToPtr();
+            $reg = $this->allocSsa();
+            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ', ptr null)' . "\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'double';
+            return $out;
+        }
         if ($op->type->kind !== Type::KIND_CELL) {
             return $this->coerceTo('double');
         }

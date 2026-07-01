@@ -98,6 +98,8 @@ trait EmitLlvmBuiltins
         if ($name === 'strtolower')                   { return $this->biCaseConv($args, '__mir_strtolower'); }
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
+        if ($name === 'explode' && \count($args) >= 2) { return $this->biExplode($args); }
+        if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
         if ($name === 'printf')                       { return $this->biSprintf($args, true); }
@@ -1256,6 +1258,49 @@ trait EmitLlvmBuiltins
         $out .= $this->freeStrTemp($args[0], $h);
         $out .= $this->freeStrTemp($args[1], $n);
         return $this->finishI64($out, $reg);
+    }
+
+    /** @param Node[] $args  print_r($v [, $return]) — echo form only. DEEP-boxes
+     *  the value (a nested array's elements become tagged cells, so the recursive
+     *  __mir_print_r reads real cells, not raw pointers) then calls the prelude
+     *  backend. The `$return` arg is ignored; the echo form yields true (1). */
+    private function biPrintR(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type);
+        $bv = $this->lastValue;
+        $out .= '  call i64 @manticore___mir_print_r(i64 ' . $bv . ', i64 0)' . "\n";
+        $this->lastValue = '1';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** @param Node[] $args  explode($delim, $subject [, $limit]) → vec[string].
+     *  A codegen builtin (single-scan __mir_str_explode) — replaces the prelude
+     *  PHP explode's per-segment strpos-cell + substr-malloc + append overhead. */
+    private function biExplode(array $args): string
+    {
+        $this->needsStrExplode = true;
+        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $out = $this->emitPtrArg($args[0]);
+        $delim = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $subj = $this->lastValue;
+        if (\count($args) >= 3) {
+            $out .= $this->emitNode($args[2]);
+            $out .= $this->coerceToI64();
+            $limit = $this->lastValue;
+        } else {
+            $limit = '9223372036854775807';
+        }
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = call ptr @__mir_str_explode(ptr ' . $delim
+              . ', ptr ' . $subj . ', i64 ' . $limit . ")\n";
+        $out .= $this->freeStrTemp($args[0], $delim);
+        $out .= $this->freeStrTemp($args[1], $subj);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /** @param Node[] $args  implode($sep, $vec) / join. */

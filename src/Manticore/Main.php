@@ -1237,6 +1237,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     $useArrayClasses = false;
     $useArrayFns = false;
     $useCli = false;
+    $usePrintR = false;
     // Detect a REAL `var_dump(` call, not the mere identifier: the compiler
     // IMPLEMENTS var_dump (its source is full of `__mir_var_dump(` and the
     // `var_dump` dispatch string), so a substring test was always-true for the
@@ -1269,6 +1270,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         if (\strpos($source, 'argv') !== false
             || \strpos($source, 'argc') !== false
             || \strpos($source, 'getopt(') !== false) { $useCli = true; }
+        if (\strpos($source, 'print_r(') !== false) { $usePrintR = true; }
     }
     $program = new \Parser\Ast\Program($stmts, '', $aliases);
     // The pipeline throws RuntimeException on an unsupported construct.
@@ -1279,6 +1281,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $module = new \Compile\Mir\Module();
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
+        $lower->includePrintR = $usePrintR;
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
@@ -1305,6 +1308,13 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
                 $lower->cliSrc = find_prelude_src("cli.php");
             } catch (\Throwable $e) {
                 $lower->cliSrc = "";
+            }
+        }
+        if ($usePrintR) {
+            try {
+                $lower->printRSrc = find_prelude_src("print_r.php");
+            } catch (\Throwable $e) {
+                $lower->printRSrc = "";
             }
         }
         // Bundled-stdlib signatures (declare-only externs) so user calls

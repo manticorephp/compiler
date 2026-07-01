@@ -182,6 +182,9 @@ final class LowerFromAst implements Pass
     private array $staticPropTypes = [];
 
     public bool $includeVarDump = false;
+    public bool $includePrintR = false;
+    /** print_r prelude source, read by Main from `prelude/print_r.php`. */
+    public string $printRSrc = '';
     /** Inject the built-in SPL ArrayIterator / ArrayObject classes (gated on
      *  the user program referencing them — see Main.php). */
     public bool $includeArrayClasses = false;
@@ -540,6 +543,9 @@ final class LowerFromAst implements Pass
         }
         if ($this->includeCli && $this->cliSrc !== '') {
             $src = $src . $this->cliSrc;
+        }
+        if ($this->includePrintR && $this->printRSrc !== '') {
+            $src = $src . $this->printRSrc;
         }
         $program = \Parser\Parser::parseSource($src);
         return $program->statements;

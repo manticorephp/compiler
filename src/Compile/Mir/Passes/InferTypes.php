@@ -1722,6 +1722,10 @@ final class InferTypes implements Pass
         // {@see EmitLlvmBuiltins::biArrayKeys}); uniform cell elements work for
         // both a plain and a cell/`mixed` source.
         if ($n === 'array_keys') { return Type::vec(Type::cell()); }
+        // explode → a fresh vec of string segments (codegen builtin
+        // {@see EmitLlvmBuiltins::biExplode}); the string element keeps implode /
+        // foreach on the fast (non-cell) path.
+        if ($n === 'explode') { return Type::vec(Type::string_()); }
         // array_values is a codegen builtin ({@see EmitLlvmBuiltins::biArrayValues})
         // for a CELL/`mixed` source OR a typed array with a concrete element
         // kind → vec[cell]. An unknown-element source falls through to the
@@ -2357,6 +2361,7 @@ final class InferTypes implements Pass
         $valType = null;
         $first = true;
         $concreteKinds = [];
+        $subArrElemKinds = [];   // distinct concrete element kinds of array-typed values
         foreach ($node->elements as $el) {
             if ($el->key !== null) {
                 $hasKey = true;
@@ -2370,9 +2375,19 @@ final class InferTypes implements Pass
                 $vt = $st->element !== null ? $st->element : Type::unknown();
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
+            if ($vt->isArray() && $vt->element !== null
+                && $vt->element->kind !== Type::KIND_UNKNOWN) {
+                $subArrElemKinds[$vt->element->kind] = true;
+            }
             $valType = $first ? $vt : $this->unionTypes($valType, $vt);
             $first = false;
         }
+        // Values are ARRAYS whose element kinds DIFFER (e.g. vec[int] and
+        // assoc[string,string]) — the merge erased the element to unknown, so a
+        // shallow box would leak a raw string sub-element when the array is later
+        // read as mixed (var_dump / print_r). Type the outer element CELL so each
+        // sub-array is deep-boxed individually at its store with its own type.
+        $hetSubArrays = \count($subArrElemKinds) >= 2;
         if ($first) {
             $node->type = Type::vec(Type::unknown());
             return $node->type;
@@ -2382,6 +2397,7 @@ final class InferTypes implements Pass
             // cells so each entry carries its own runtime type tag.
             $vt = $valType ?? Type::unknown();
             if ($vt->kind === Type::KIND_UNKNOWN) { $vt = Type::cell(); }
+            elseif ($hetSubArrays && $vt->isArray()) { $vt = Type::cell(); }
             $node->type = Type::assoc($keyType ?? Type::unknown(), $vt);
             return $node->type;
         }
@@ -2392,10 +2408,13 @@ final class InferTypes implements Pass
         $vt = $valType ?? Type::unknown();
         if ($vt->kind === Type::KIND_UNKNOWN && count($concreteKinds) >= 2) {
             $vt = Type::cell();
+        } elseif ($hetSubArrays && $vt->isArray()) {
+            $vt = Type::cell();
         }
         $node->type = Type::vec($vt);
         return $node->type;
     }
+
 
     private function inferArrayAccess(ArrayAccess_ $node): Type
     {
