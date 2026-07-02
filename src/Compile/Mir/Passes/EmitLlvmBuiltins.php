@@ -1020,10 +1020,14 @@ trait EmitLlvmBuiltins
         $bytes = $this->llvmStringBytes($value);
         $content = \strlen($value);
         $len = $content + 1; // bytes incl. NUL
-        return $sym . ' = private unnamed_addr constant { i64, i64, i64, ['
-            . (string)$len . ' x i8] } { i64 ' . (string)$content . ', i64 '
-            . (string)$content . ', i64 -1, [' . (string)$len . ' x i8] c"'
-            . $bytes . '\\00" }, align 8' . "\n";
+        // Header [hash, cap, len, rc]; hash is the compile-time FNV of the
+        // content (bit-matches __mir_array_hash_str), so a literal map key never
+        // hashes at runtime. rc -1 = immortal. Data at +STRING_HEADER_SIZE.
+        $hash = $this->fnvHash64($value);
+        return $sym . ' = private unnamed_addr constant { i64, i64, i64, i64, ['
+            . (string)$len . ' x i8] } { i64 ' . (string)$hash . ', i64 '
+            . (string)$content . ', i64 ' . (string)$content . ', i64 -1, ['
+            . (string)$len . ' x i8] c"' . $bytes . '\\00" }, align 8' . "\n";
     }
 
     /**

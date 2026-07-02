@@ -70,7 +70,16 @@ final class MemoryAbi
      * place when `rc==1` and `len+addlen < cap`. Immortal strings (literals,
      * arena) carry rc=-1; literals carry a full header so `len` reads are valid.
      */
-    public const STRING_HEADER_SIZE = 24;
+    public const STRING_HEADER_SIZE = 32;
+
+    /**
+     * Cached FNV-1a hash of the content, at `data_ptr - 32`. 0 = not yet
+     * computed ({@see \Compile\Runtime\UnifiedArrayRuntime} hashStr fills it on
+     * first hash of a HEADERED string and reuses it after — php's zend_string
+     * hash cache, making repeated map lookups key-length-independent). String
+     * literals bake the hash in at compile time (never hashed at runtime).
+     */
+    public const STRING_HASH_OFFSET = -32;
 
     /** Byte capacity of the data region, at `data_ptr - 24`. */
     public const STRING_CAP_OFFSET = -24;
@@ -87,6 +96,7 @@ final class MemoryAbi
      * The runtime writes the header off the malloc base; readers use the
      * negative data-relative offsets above.
      */
+    public const STRING_HASH_AT  = self::STRING_HEADER_SIZE + self::STRING_HASH_OFFSET;
     public const STRING_CAP_AT   = self::STRING_HEADER_SIZE + self::STRING_CAP_OFFSET;
     public const STRING_LEN_AT   = self::STRING_HEADER_SIZE + self::STRING_LEN_OFFSET;
     public const STRING_RC_AT    = self::STRING_HEADER_SIZE + self::STRING_RC_OFFSET;

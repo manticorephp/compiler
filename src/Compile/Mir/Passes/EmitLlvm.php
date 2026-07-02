@@ -446,7 +446,8 @@ final class EmitLlvm
         // Headered empty sentinel (cap0/len0/rc-1, immortal): data ptr is +24.
         // Reachable by __mir_strlen (emitPtrArg maps a null string here), so it
         // must carry a valid len. Use {@see strSymBytes} for the data pointer.
-        $out .= "@.cstr.empty = private unnamed_addr constant { i64, i64, i64, [1 x i8] } { i64 0, i64 0, i64 -1, [1 x i8] c\"\\00\" }, align 8\n";
+        $out .= "@.cstr.empty = private unnamed_addr constant { i64, i64, i64, i64, [1 x i8] } { i64 "
+            . (string)$this->fnvHash64('') . ", i64 0, i64 0, i64 -1, [1 x i8] c\"\\00\" }, align 8\n";
         $out .= "@.fmt.pg = private unnamed_addr constant [6 x i8] c\"%.14g\\00\", align 1\n";
         $out .= "@.fmt.x = private unnamed_addr constant [5 x i8] c\"%llx\\00\", align 1\n";
         // var_dump of a typed float: shortest round-trip (`%.*g` probed) wrapped

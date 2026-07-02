@@ -91,6 +91,7 @@ trait EmitLlvmRuntime
         // String-header layout constants (single source of truth: MemoryAbi).
         // base = data - HEADER; cap/len/rc live at their base-relative slots.
         $H     = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $hashAt = (string)\Compile\MemoryAbi::STRING_HASH_AT;
         $capAt = (string)\Compile\MemoryAbi::STRING_CAP_AT;
         $lenAt = (string)\Compile\MemoryAbi::STRING_LEN_AT;
         $rcAt  = (string)\Compile\MemoryAbi::STRING_RC_AT;
@@ -156,6 +157,8 @@ trait EmitLlvmRuntime
         $out .= "  store i64 %len0, ptr %lenp\n";
         $out .= "  %rcp = getelementptr inbounds i8, ptr %p, i64 " . $rcAt . "\n";
         $out .= "  store i64 1, ptr %rcp\n";
+        $out .= "  %hashp = getelementptr inbounds i8, ptr %p, i64 " . $hashAt . "\n";
+        $out .= "  store i64 0, ptr %hashp\n";                        // hash = 0 (uncomputed)
         $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $H . "\n";
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
@@ -198,6 +201,8 @@ trait EmitLlvmRuntime
             $out .= "  store i64 %len0, ptr %lenp\n";
             $out .= "  %rcp = getelementptr inbounds i8, ptr %p, i64 " . $rcAt . "\n";
             $out .= "  store i64 -1, ptr %rcp\n";
+            $out .= "  %hashp = getelementptr inbounds i8, ptr %p, i64 " . $hashAt . "\n";
+            $out .= "  store i64 0, ptr %hashp\n";                    // hash = 0 (uncomputed)
             $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $H . "\n";
             $out .= "  ret ptr %d\n";
             $out .= "}\n";
@@ -1219,6 +1224,7 @@ trait EmitLlvmRuntime
         $out .= "  ret void\n}\n";
 
         $nH     = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $nHashAt = (string)\Compile\MemoryAbi::STRING_HASH_AT;
         $nCapAt = (string)\Compile\MemoryAbi::STRING_CAP_AT;
         $nLenAt = (string)\Compile\MemoryAbi::STRING_LEN_AT;
         $nRcAt  = (string)\Compile\MemoryAbi::STRING_RC_AT;
@@ -1232,6 +1238,8 @@ trait EmitLlvmRuntime
         $out .= "  store i64 %n, ptr %lp\n";                     // len
         $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 " . $nRcAt . "\n";
         $out .= "  store i64 1, ptr %rp\n";                      // rc
+        $out .= "  %hp = getelementptr inbounds i8, ptr %p, i64 " . $nHashAt . "\n";
+        $out .= "  store i64 0, ptr %hp\n";                      // hash = 0 (uncomputed)
         $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $nH . "\n";
         $out .= "  %has = icmp sgt i64 %n, 0\n";
         $out .= "  %sn = icmp ne ptr %src, null\n";
@@ -1338,6 +1346,9 @@ trait EmitLlvmRuntime
         $out .= "  %lb1 = add i64 %lb, 1\n";          // copy b + its NUL
         $out .= "  call ptr @memcpy(ptr %dst, ptr %b, i64 %lb1)\n";
         $out .= "  call void @__mir_str_set_len(ptr %s, i64 %need)\n";
+        // Content changed under the same ptr → invalidate the cached hash.
+        $out .= "  %hinv = getelementptr inbounds i8, ptr %s, i64 " . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $out .= "  store i64 0, ptr %hinv\n";
         $out .= "  ret ptr %s\n";
         $out .= "grow:\n";
         $out .= "  %la2 = call i64 @__mir_strlen(ptr %s)\n";

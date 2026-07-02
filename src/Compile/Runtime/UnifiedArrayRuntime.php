@@ -92,16 +92,60 @@ final class UnifiedArrayRuntime
      */
     private function emitHashStr(): void
     {
+        // FNV-1a over the content, with a per-string hash CACHE at
+        // {@see MemoryAbi::STRING_HASH_OFFSET} (php's zend_string cache): a
+        // repeated map key is hashed once. The cache is gated by a header
+        // sanity check (the same rc/len/cap heuristic __mir_strlen uses) — a
+        // RAW headerless key skips it (reading hash@-32 would be OOB) and hashes
+        // uncached via libc strlen. The cache is WRITTEN only for a heap string
+        // (rc > 0); an immortal literal (.rodata, rc=-1) is read-only so it
+        // relies on its compile-time-baked hash, and an arena string (rc=-1)
+        // recomputes (rare as a key). String literals never hash at runtime.
+        $ro  = (string)MemoryAbi::STRING_RC_OFFSET;   // -8
+        $lo  = (string)MemoryAbi::STRING_LEN_OFFSET;  // -16
+        $co  = (string)MemoryAbi::STRING_CAP_OFFSET;  // -24
+        $ho  = (string)MemoryAbi::STRING_HASH_OFFSET; // -32
         $fn = $this->module->func('__mir_array_hash_str', Type::i64());
         $key = $fn->param(Type::ptr(), 'key');
         $k = $key->operand;
         $e = $fn->block('entry');
         $e->raw('  %isn = icmp eq ptr ' . $k . ', null');
-        $e->raw('  br i1 %isn, label %znull, label %start');
+        $e->raw('  br i1 %isn, label %znull, label %hdrchk');
         $zn = $fn->block('znull');
         $zn->raw('  ret i64 0');
-        $start = $fn->block('start');
-        $start->raw('  %klen = call i64 @__mir_strlen(ptr ' . $k . ')'); // binary-safe length
+        // Header sanity: is this a real headered string (safe to touch -32)?
+        $hc = $fn->block('hdrchk');
+        $hc->raw('  %rcp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $ro);
+        $hc->raw('  %rc = load i64, ptr %rcp');
+        $hc->raw('  %lp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $lo);
+        $hc->raw('  %hlen = load i64, ptr %lp');
+        $hc->raw('  %cp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $co);
+        $hc->raw('  %cap = load i64, ptr %cp');
+        $hc->raw('  %rlo = icmp slt i64 %rc, -1');
+        $hc->raw('  %rhi = icmp sgt i64 %rc, 268435456');
+        $hc->raw('  %llo = icmp slt i64 %hlen, 0');
+        $hc->raw('  %lhi = icmp sgt i64 %hlen, %cap');
+        $hc->raw('  %b1 = or i1 %rlo, %rhi');
+        $hc->raw('  %b2 = or i1 %llo, %lhi');
+        $hc->raw('  %bad = or i1 %b1, %b2');
+        $hc->raw('  br i1 %bad, label %raw, label %hdr');
+        // Headered: check the cache, else fall to FNV with len from the header.
+        $hdr = $fn->block('hdr');
+        $hdr->raw('  %hp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $ho);
+        $hdr->raw('  %cached = load i64, ptr %hp');
+        $hdr->raw('  %hit = icmp ne i64 %cached, 0');
+        $hdr->raw('  br i1 %hit, label %rethit, label %fnvh');
+        $rh = $fn->block('rethit');
+        $rh->raw('  ret i64 %cached');
+        // Raw (headerless): libc strlen, hash uncached.
+        $raw = $fn->block('raw');
+        $raw->raw('  %rawlen = call i64 @strlen(ptr ' . $k . ')');
+        $raw->raw('  br label %fnv');
+        $fh = $fn->block('fnvh');
+        $fh->raw('  br label %fnv');
+        // Shared FNV-1a loop over %uselen bytes.
+        $start = $fn->block('fnv');
+        $start->raw('  %uselen = phi i64 [ %hlen, %fnvh ], [ %rawlen, %raw ]');
         $start->raw('  %h.addr = alloca i64');
         $start->raw('  store i64 -3750763034362895579, ptr %h.addr'); // FNV offset basis
         $start->raw('  %i.addr = alloca i64');
@@ -109,7 +153,7 @@ final class UnifiedArrayRuntime
         $start->raw('  br label %loop');
         $loop = $fn->block('loop');
         $loop->raw('  %i = load i64, ptr %i.addr');
-        $loop->raw('  %atend = icmp sge i64 %i, %klen');
+        $loop->raw('  %atend = icmp sge i64 %i, %uselen');
         $loop->raw('  br i1 %atend, label %done, label %body');
         $body = $fn->block('body');
         $body->raw('  %bptr = getelementptr inbounds i8, ptr ' . $k . ', i64 %i');
@@ -122,9 +166,20 @@ final class UnifiedArrayRuntime
         $body->raw('  %inext = add i64 %i, 1');
         $body->raw('  store i64 %inext, ptr %i.addr');
         $body->raw('  br label %loop');
+        // Cache the result only for a headered HEAP string (rc > 0): never a
+        // .rodata literal or arena string (both rc=-1, read-only / abandoned).
         $done = $fn->block('done');
         $done->raw('  %hf = load i64, ptr %h.addr');
-        $done->raw('  ret i64 %hf');
+        $done->raw('  %heap = icmp sgt i64 %rc, 0');
+        $done->raw('  %notraw = icmp eq i1 %bad, false');
+        $done->raw('  %docache = and i1 %heap, %notraw');
+        $done->raw('  br i1 %docache, label %store, label %retf');
+        $st = $fn->block('store');
+        $st->raw('  %hp2 = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $ho);
+        $st->raw('  store i64 %hf, ptr %hp2');
+        $st->raw('  br label %retf');
+        $rf = $fn->block('retf');
+        $rf->raw('  ret i64 %hf');
     }
 
     /**
