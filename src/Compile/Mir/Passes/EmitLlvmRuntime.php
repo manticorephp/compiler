@@ -88,15 +88,25 @@ trait EmitLlvmRuntime
         // by cap and the data region is always big enough. Cuts malloc traffic
         // on the small-string hot paths (PHP's pooled emalloc analogue). The
         // intrusive next-ptr lives at base+0 while a buffer sits in a bin.
+        // String-header layout constants (single source of truth: MemoryAbi).
+        // base = data - HEADER; cap/len/rc live at their base-relative slots.
+        $H     = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $capAt = (string)\Compile\MemoryAbi::STRING_CAP_AT;
+        $lenAt = (string)\Compile\MemoryAbi::STRING_LEN_AT;
+        $rcAt  = (string)\Compile\MemoryAbi::STRING_RC_AT;
+        $p0a   = (string)\Compile\MemoryAbi::STRING_POOL0_ALLOC;
+        $p1a   = (string)\Compile\MemoryAbi::STRING_POOL1_ALLOC;
+        $p0c   = (string)\Compile\MemoryAbi::STRING_POOL0_CAP;
+        $p1c   = (string)\Compile\MemoryAbi::STRING_POOL1_CAP;
         $out .= "@__mir_strpool0 = internal global ptr null\n";
         $out .= "@__mir_strpool1 = internal global ptr null\n";
         $out .= "define ptr @__mir_str_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(0);
-        $out .= "  %le40 = icmp ule i64 %n, 40\n";
+        $out .= "  %le40 = icmp ule i64 %n, " . $p0c . "\n";
         $out .= "  br i1 %le40, label %c0, label %chk1\n";
         $out .= "chk1:\n";
-        $out .= "  %le104 = icmp ule i64 %n, 104\n";
+        $out .= "  %le104 = icmp ule i64 %n, " . $p1c . "\n";
         $out .= "  br i1 %le104, label %c1, label %big\n";
         // class 0 (64-byte alloc, data cap 40)
         $out .= "c0:\n";
@@ -108,11 +118,12 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %nx0, ptr @__mir_strpool0\n";
         $out .= "  br label %i0\n";
         $out .= "m0:\n";
-        $out .= "  %a0 = call ptr @malloc(i64 64)\n";
+        $out .= "  %a0 = call ptr @malloc(i64 " . $p0a . ")\n";
         $out .= "  br label %i0\n";
         $out .= "i0:\n";
         $out .= "  %b0 = phi ptr [ %h0, %pop0 ], [ %a0, %m0 ]\n";
-        $out .= "  store i64 40, ptr %b0\n";                             // cap@0 = 40
+        $out .= "  %capp0 = getelementptr inbounds i8, ptr %b0, i64 " . $capAt . "\n";
+        $out .= "  store i64 " . $p0c . ", ptr %capp0\n";
         $out .= "  br label %fin\n";
         // class 1 (128-byte alloc, data cap 104)
         $out .= "c1:\n";
@@ -124,26 +135,28 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %nx1, ptr @__mir_strpool1\n";
         $out .= "  br label %i1\n";
         $out .= "m1:\n";
-        $out .= "  %a1 = call ptr @malloc(i64 128)\n";
+        $out .= "  %a1 = call ptr @malloc(i64 " . $p1a . ")\n";
         $out .= "  br label %i1\n";
         $out .= "i1:\n";
         $out .= "  %b1 = phi ptr [ %h1, %pop1 ], [ %a1, %m1 ]\n";
-        $out .= "  store i64 104, ptr %b1\n";                            // cap@0 = 104
+        $out .= "  %capp1 = getelementptr inbounds i8, ptr %b1, i64 " . $capAt . "\n";
+        $out .= "  store i64 " . $p1c . ", ptr %capp1\n";
         $out .= "  br label %fin\n";
         // large: exact malloc, cap = n
         $out .= "big:\n";
-        $out .= "  %tb = add i64 %n, 24\n";
+        $out .= "  %tb = add i64 %n, " . $H . "\n";
         $out .= "  %ab = call ptr @malloc(i64 %tb)\n";
-        $out .= "  store i64 %n, ptr %ab\n";                             // cap@0 = n
+        $out .= "  %cappb = getelementptr inbounds i8, ptr %ab, i64 " . $capAt . "\n";
+        $out .= "  store i64 %n, ptr %cappb\n";
         $out .= "  br label %fin\n";
         $out .= "fin:\n";
         $out .= "  %p = phi ptr [ %b0, %i0 ], [ %b1, %i1 ], [ %ab, %big ]\n";
-        $out .= "  %lenp = getelementptr inbounds i8, ptr %p, i64 8\n";
+        $out .= "  %lenp = getelementptr inbounds i8, ptr %p, i64 " . $lenAt . "\n";
         $out .= "  %len0 = sub i64 %n, 1\n";
-        $out .= "  store i64 %len0, ptr %lenp\n";                        // len@8 = n-1
-        $out .= "  %rcp = getelementptr inbounds i8, ptr %p, i64 16\n";
-        $out .= "  store i64 1, ptr %rcp\n";                             // rc@16
-        $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 24\n";
+        $out .= "  store i64 %len0, ptr %lenp\n";
+        $out .= "  %rcp = getelementptr inbounds i8, ptr %p, i64 " . $rcAt . "\n";
+        $out .= "  store i64 1, ptr %rcp\n";
+        $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $H . "\n";
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
         // Reclaim a freed string base: recycle into its size-class bin (cap
@@ -151,8 +164,9 @@ trait EmitLlvmRuntime
         // free (only ever called at rc==0, i.e. no live references).
         $out .= "define void @__mir_str_reclaim(ptr %sbase) {\n";
         $out .= "entry:\n";
-        $out .= "  %cap = load i64, ptr %sbase\n";
-        $out .= "  %is0 = icmp eq i64 %cap, 40\n";
+        $out .= "  %capp = getelementptr inbounds i8, ptr %sbase, i64 " . $capAt . "\n";
+        $out .= "  %cap = load i64, ptr %capp\n";
+        $out .= "  %is0 = icmp eq i64 %cap, " . $p0c . "\n";
         $out .= "  br i1 %is0, label %p0, label %k1\n";
         $out .= "p0:\n";
         $out .= "  %o0 = load ptr, ptr @__mir_strpool0\n";
@@ -160,7 +174,7 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %sbase, ptr @__mir_strpool0\n";
         $out .= "  ret void\n";
         $out .= "k1:\n";
-        $out .= "  %is1 = icmp eq i64 %cap, 104\n";
+        $out .= "  %is1 = icmp eq i64 %cap, " . $p1c . "\n";
         $out .= "  br i1 %is1, label %p1, label %df\n";
         $out .= "p1:\n";
         $out .= "  %o1 = load ptr, ptr @__mir_strpool1\n";
@@ -175,15 +189,16 @@ trait EmitLlvmRuntime
         if ($this->needsArena) {
             $out .= "define ptr @__mir_str_alloc_arena(i64 %n) {\n";
             $out .= "entry:\n";
-            $out .= "  %t = add i64 %n, 24\n";
+            $out .= "  %t = add i64 %n, " . $H . "\n";
             $out .= "  %p = call ptr @__mir_arena_alloc(i64 %t)\n";
-            $out .= "  store i64 %n, ptr %p\n";
-            $out .= "  %lenp = getelementptr inbounds i8, ptr %p, i64 8\n";
+            $out .= "  %capp = getelementptr inbounds i8, ptr %p, i64 " . $capAt . "\n";
+            $out .= "  store i64 %n, ptr %capp\n";
+            $out .= "  %lenp = getelementptr inbounds i8, ptr %p, i64 " . $lenAt . "\n";
             $out .= "  %len0 = sub i64 %n, 1\n";
             $out .= "  store i64 %len0, ptr %lenp\n";
-            $out .= "  %rcp = getelementptr inbounds i8, ptr %p, i64 16\n";
+            $out .= "  %rcp = getelementptr inbounds i8, ptr %p, i64 " . $rcAt . "\n";
             $out .= "  store i64 -1, ptr %rcp\n";
-            $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 24\n";
+            $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $H . "\n";
             $out .= "  ret ptr %d\n";
             $out .= "}\n";
             // Arena unified-array allocators (Debug::$arenaArrays; flag ⇒
@@ -329,7 +344,7 @@ trait EmitLlvmRuntime
             $out .= "  %szero = icmp sle i64 %src1, 0\n";
             $out .= "  br i1 %szero, label %sfree, label %done\n";
             $out .= "sfree:\n";
-            $out .= "  %sbase = getelementptr i8, ptr %tagp, i64 -16\n";
+            $out .= "  %sbase = getelementptr i8, ptr %tagp, i64 -" . (string)\Compile\MemoryAbi::STRING_RC_AT . "\n";
             $out .= "  call void @__mir_str_reclaim(ptr %sbase)\n";
             $out .= "  br label %done\n";
             $out .= "done:\n";
@@ -403,7 +418,7 @@ trait EmitLlvmRuntime
             $out .= "  %zero = icmp sle i64 %rc1, 0\n";
             $out .= "  br i1 %zero, label %free, label %done\n";
             $out .= "free:\n";
-            $out .= "  %sbase = getelementptr i8, ptr %h, i64 -16\n";
+            $out .= "  %sbase = getelementptr i8, ptr %h, i64 -" . (string)\Compile\MemoryAbi::STRING_RC_AT . "\n";
             $out .= "  call void @__mir_str_reclaim(ptr %sbase)\n";
             $out .= "  br label %done\n";
             $out .= "done:\n";
@@ -1203,15 +1218,21 @@ trait EmitLlvmRuntime
         $out .= "  store i64 %n, ptr %lp\n";
         $out .= "  ret void\n}\n";
 
+        $nH     = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $nCapAt = (string)\Compile\MemoryAbi::STRING_CAP_AT;
+        $nLenAt = (string)\Compile\MemoryAbi::STRING_LEN_AT;
+        $nRcAt  = (string)\Compile\MemoryAbi::STRING_RC_AT;
+        $nTot   = (string)(\Compile\MemoryAbi::STRING_HEADER_SIZE + 1); // header + NUL
         $out .= "\ndefine ptr @__mir_str_new(ptr %src, i64 %n) {\nentry:\n";
-        $out .= "  %t = add i64 %n, 25\n";                       // 24 header + n + NUL
+        $out .= "  %t = add i64 %n, " . $nTot . "\n";            // header + n + NUL
         $out .= "  %p = call ptr @malloc(i64 %t)\n";
-        $out .= "  store i64 %n, ptr %p\n";                      // cap@0
-        $out .= "  %lp = getelementptr inbounds i8, ptr %p, i64 8\n";
-        $out .= "  store i64 %n, ptr %lp\n";                     // len@8
-        $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 16\n";
-        $out .= "  store i64 1, ptr %rp\n";                      // rc@16
-        $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 24\n";
+        $out .= "  %ncp = getelementptr inbounds i8, ptr %p, i64 " . $nCapAt . "\n";
+        $out .= "  store i64 %n, ptr %ncp\n";                    // cap
+        $out .= "  %lp = getelementptr inbounds i8, ptr %p, i64 " . $nLenAt . "\n";
+        $out .= "  store i64 %n, ptr %lp\n";                     // len
+        $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 " . $nRcAt . "\n";
+        $out .= "  store i64 1, ptr %rp\n";                      // rc
+        $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $nH . "\n";
         $out .= "  %has = icmp sgt i64 %n, 0\n";
         $out .= "  %sn = icmp ne ptr %src, null\n";
         $out .= "  %cp = and i1 %has, %sn\n";

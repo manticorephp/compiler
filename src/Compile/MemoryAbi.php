@@ -81,6 +81,26 @@ final class MemoryAbi
     /** Refcount word, at `data_ptr - 8` (small count, or -1 immortal). */
     public const STRING_RC_OFFSET = -8;
 
+    /**
+     * Header-relative (base = data_ptr - {@see STRING_HEADER_SIZE}) field
+     * positions, derived so a single {@see STRING_HEADER_SIZE} change cascades.
+     * The runtime writes the header off the malloc base; readers use the
+     * negative data-relative offsets above.
+     */
+    public const STRING_CAP_AT   = self::STRING_HEADER_SIZE + self::STRING_CAP_OFFSET;
+    public const STRING_LEN_AT   = self::STRING_HEADER_SIZE + self::STRING_LEN_OFFSET;
+    public const STRING_RC_AT    = self::STRING_HEADER_SIZE + self::STRING_RC_OFFSET;
+
+    /**
+     * Small-string free-list size classes: two malloc bucket sizes that recycle
+     * freed buffers (the pooled analogue of emalloc). A class's DATA capacity is
+     * `alloc - STRING_HEADER_SIZE`; a freed buffer is recognised by that cap.
+     */
+    public const STRING_POOL0_ALLOC = 64;
+    public const STRING_POOL1_ALLOC = 128;
+    public const STRING_POOL0_CAP = self::STRING_POOL0_ALLOC - self::STRING_HEADER_SIZE;
+    public const STRING_POOL1_CAP = self::STRING_POOL1_ALLOC - self::STRING_HEADER_SIZE;
+
     // ─── Object header (16 bytes) ─────────────────────────────────
 
     /** Non-`#[Struct]` instances reserve this much before properties. */

@@ -1001,10 +1001,11 @@ trait EmitLlvmBuiltins
         return $this->strSymBytes('@.str.' . (string)$id);
     }
 
-    /** `global + 24` bytes ptr for any headered string-literal symbol. */
+    /** Data ptr (`global + STRING_HEADER_SIZE`) for any headered string-literal symbol. */
     private function strSymBytes(string $sym): string
     {
-        return 'getelementptr inbounds (i8, ptr ' . $sym . ', i64 24)';
+        return 'getelementptr inbounds (i8, ptr ' . $sym
+            . ', i64 ' . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . ')';
     }
 
     /**

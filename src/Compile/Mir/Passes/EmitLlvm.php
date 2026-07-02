@@ -2002,10 +2002,11 @@ final class EmitLlvm
         // dominant one). MUST match the string header size ({@see
         // __mir_str_alloc}) — the string release computes free base = ptr-24.
         $this->needsStrRc = true;
+        $strHdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
         $base = $this->allocSsa();
-        $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . (string)($frameSize + 24) . ")\n";
+        $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . (string)($frameSize + $strHdr) . ")\n";
         $fr = $this->allocSsa();
-        $out .= '  ' . $fr . ' = getelementptr inbounds i8, ptr ' . $base . ", i64 24\n";
+        $out .= '  ' . $fr . ' = getelementptr inbounds i8, ptr ' . $base . ", i64 " . (string)$strHdr . "\n";
         $out .= $this->genStoreAt($fr, -24, '0');                     // cap@-24 = 0 (unused)
         $out .= $this->genStoreAt($fr, -16, '0');                     // len@-16 = 0 (unused)
         $out .= $this->genStoreAt($fr, -8, '1');                      // rc@-8 = 1
