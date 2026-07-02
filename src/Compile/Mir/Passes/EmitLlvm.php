@@ -224,6 +224,9 @@ final class EmitLlvm
     /** True while emitting a function that opened an arena scope — its
      *  every `ret` must run `@__mir_arena_leave` first. */
     private bool $currentFnHasArena = false;
+    /** Body of the function currently being emitted — used by the loop
+     *  arena-reset liveness check to see uses OUTSIDE the loop. */
+    private ?Node $currentFnBody = null;
     /** @var array<string, \Compile\Mir\MemoryOp_> owned RcHeap obj/vec/str
      *  locals of the current fn → their rc_release MemoryOp node (flavor is
      *  re-derived per use via rcReleaseFlavor; storing the flavor string
@@ -1576,6 +1579,7 @@ final class EmitLlvm
         }
         $this->nextId = 0;
         $this->nextLabel = 0;
+        $this->currentFnBody = $fn->body;
         $this->currentFnHasArena = false;
         $this->vecAllocArena = false;
         $this->arenaVecLocals = [];
@@ -6370,17 +6374,26 @@ final class EmitLlvm
 
     /** Set by arenaScan: the loop subtree contains an Arena allocation. */
     private bool $arenaHasAlloc = false;
-    /** Set by arenaScan: a store binds an Arena value to a name (→ unsafe
-     *  to reset per iteration, that value may be read in a later one). */
-    private bool $arenaBindsEscape = false;
+    /** Set by arenaScan: an Arena value is bound to a NON-local sink
+     *  (property / element / static / dyn prop) — always unsafe to reset,
+     *  the value outlives the frame. */
+    private bool $arenaBindsNonLocal = false;
+    /** @var array<string,bool> locals a store binds an Arena value to in the
+     *  loop — each must pass the reset-liveness check (written-before-read
+     *  each iteration AND not read outside the loop). */
+    private array $arenaBoundLocals = [];
     private string $arenaSaveCurReg = '';
     private string $arenaSaveUsedReg = '';
 
     /**
      * A loop may reset the arena each iteration iff its body (+cond/step)
-     * allocates Arena temporaries and never *binds* one to a name (local /
-     * property / element / static) that could outlive the iteration.
-     * `$step` may be null (while / foreach).
+     * allocates Arena temporaries and every Arena value it *binds* is safe to
+     * free at the iteration boundary. Binding to a non-local sink (property /
+     * element / static) is never safe. Binding to a LOCAL is safe when the
+     * local is (A) written before it is read on each iteration (so the prior
+     * iteration's freed value is never observed) AND (B) not read anywhere in
+     * the function outside this loop (so the last iteration's value — freed by
+     * the pre-exit reset — is never observed either). `$step` may be null.
      */
     private function loopArenaResettable(?Node $cond, Node $body, ?Node $step): bool
     {
@@ -6390,11 +6403,25 @@ final class EmitLlvm
         // arena loop optimization inside generators.
         if ($this->inGenerator) { return false; }
         $this->arenaHasAlloc = false;
-        $this->arenaBindsEscape = false;
+        $this->arenaBindsNonLocal = false;
+        $this->arenaBoundLocals = [];
         if ($cond !== null) { $this->arenaScan($cond); }
         $this->arenaScan($body);
         if ($step !== null) { $this->arenaScan($step); }
-        return $this->arenaHasAlloc && !$this->arenaBindsEscape;
+        if (!$this->arenaHasAlloc || $this->arenaBindsNonLocal) { return false; }
+        foreach ($this->arenaBoundLocals as $name => $ignored) {
+            // (B) read outside the loop? Reads within the loop are cond+body+step;
+            // any surplus in the whole function body is an outside read.
+            $inLoop = $this->countLocalReads($name, $body)
+                + ($cond !== null ? $this->countLocalReads($name, $cond) : 0)
+                + ($step !== null ? $this->countLocalReads($name, $step) : 0);
+            $total = $this->currentFnBody !== null
+                ? $this->countLocalReads($name, $this->currentFnBody) : $inLoop;
+            if ($total > $inLoop) { return false; }
+            // (A) written before read on each iteration.
+            if (!$this->writtenBeforeRead($name, $body)) { return false; }
+        }
+        return true;
     }
 
     private function arenaScan(Node $n): void
@@ -6402,11 +6429,77 @@ final class EmitLlvm
         if ($n->allocKind === \Compile\Mir\AllocationKind::ARENA) {
             $this->arenaHasAlloc = true;
         }
-        $sv = $this->storeBoundValue($n);
-        if ($sv !== null && $this->bindsArenaValue($sv)) {
-            $this->arenaBindsEscape = true;
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $sl = $this->castStoreLocal($n);
+            if ($this->bindsArenaValue($sl->value)) {
+                $this->arenaBoundLocals[$sl->name] = true;
+            }
+        } else {
+            $sv = $this->storeBoundValue($n);
+            if ($sv !== null && $this->bindsArenaValue($sv)) {
+                $this->arenaBindsNonLocal = true;
+            }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->arenaScan($c); }
+    }
+
+    /** Count LOAD_LOCAL reads of `$name` in the subtree. */
+    private function countLocalReads(string $name, Node $n): int
+    {
+        $c = 0;
+        if ($n->kind === Node::KIND_LOAD_LOCAL && $this->castLoadLocal($n)->name === $name) {
+            $c = 1;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $ch) {
+            $c = $c + $this->countLocalReads($name, $ch);
+        }
+        return $c;
+    }
+
+    /**
+     * Whether, in `$body`, `$name` is assigned by a plain StoreLocal (whose
+     * value does NOT read `$name`) before any read of it — sound if the body
+     * is a statement sequence: the first statement that mentions `$name` must
+     * be that fresh assignment. Conservative (false) for any other first use
+     * (a read, an element/compound store, or a self-referential value).
+     */
+    private function writtenBeforeRead(string $name, Node $body): bool
+    {
+        foreach ($this->stmtList($body) as $stmt) {
+            if ($stmt->kind === Node::KIND_STORE_LOCAL
+                && $this->castStoreLocal($stmt)->name === $name) {
+                // Fresh re-init iff the value doesn't read $name itself.
+                return $this->countLocalReads($name, $this->castStoreLocal($stmt)->value) === 0;
+            }
+            // Any other statement that mentions $name (read, or a nested/
+            // conditional/element write) reaches a use before a clean write.
+            if ($this->countLocalReads($name, $stmt) > 0
+                || $this->mentionsLocalStore($name, $stmt)) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** Statement list of a block body (else a one-element list). */
+    private function stmtList(Node $body): array
+    {
+        if ($body->kind === Node::KIND_BLOCK) {
+            return $this->castBlock($body)->stmts;
+        }
+        return [$body];
+    }
+
+    /** Whether the subtree contains a StoreLocal targeting `$name` (any depth). */
+    private function mentionsLocalStore(string $name, Node $n): bool
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $this->castStoreLocal($n)->name === $name) {
+            return true;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $ch) {
+            if ($this->mentionsLocalStore($name, $ch)) { return true; }
+        }
+        return false;
     }
 
     /** The value a store binds to a name, or null for a non-store node. */

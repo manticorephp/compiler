@@ -51,6 +51,14 @@ final class InferAllocKind implements Pass
     /** @var array<string, bool> locals whose value may escape the frame */
     private array $escaping = [];
 
+    /**
+     * @var array<string, bool> local name → whether it is a scalar int-keyed
+     * vec (per its converged loads). Lets a `$a = []` empty literal — whose own
+     * node type carries no element — inherit the local's refined type for the
+     * arena decision. false is sticky (a proven-heap load disqualifies it).
+     */
+    private array $localArrayEligible = [];
+
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
@@ -82,8 +90,40 @@ final class InferAllocKind implements Pass
             if ($guard > 100) { break; }
         }
 
+        // Refined per-local array types (for the empty-literal arena upgrade).
+        $this->localArrayEligible = [];
+        $this->collectLocalTypes($fn->body);
+
         // Assign verdicts with the settled escaping set.
         $this->traverse($fn->body, false, false);
+    }
+
+    /**
+     * Record, per local, whether it is a scalar int-keyed vec (from its
+     * converged array-typed LOADS). A `$a = []` literal has an empty node type,
+     * so the store upgrade uses this instead. isset (not `?? null`): a missing
+     * assoc key reads back as false under the self-hosted runtime. false is
+     * sticky — a concretely-heap load (string/cell key, string/array/obj/cell
+     * value) disqualifies; an unknown-element load is neutral (skipped).
+     */
+    private function collectLocalTypes(Node $n): void
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL) {
+            $t = $n->type;
+            if ($t !== null && $t->isArray()) {
+                $name = $this->asLoadLocal($n)->name;
+                $latchedFalse = isset($this->localArrayEligible[$name])
+                    && $this->localArrayEligible[$name] === false;
+                if (!$latchedFalse) {
+                    if ($this->isArenaEligibleType($t)) {
+                        $this->localArrayEligible[$name] = true;
+                    } elseif ($this->isDefinitelyHeapArray($t)) {
+                        $this->localArrayEligible[$name] = false;
+                    }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectLocalTypes($c); }
     }
 
     /**
@@ -190,6 +230,21 @@ final class InferAllocKind implements Pass
             }
             $tgtEscapes = isset($this->escaping[$sl->name]);
             $this->traverse($val, $tgtEscapes, $collecting);
+            // Empty-literal arena upgrade: a fresh `[]` (heap by its own empty
+            // type) stored to a NON-escaping local whose converged type is a
+            // scalar int-keyed vec becomes arena. Its appends then grow via the
+            // arena realloc path; int keys / scalar values need no drop on the
+            // release-bail. The loop arena-reset liveness check bounds RSS when
+            // such a local is rebuilt each iteration.
+            if (!$collecting
+                && \Compile\Debug::$arenaArrays
+                && $val->kind === Node::KIND_ARRAY_LIT
+                && $val->allocKind === AllocationKind::RC_HEAP
+                && !$tgtEscapes
+                && isset($this->localArrayEligible[$sl->name])
+                && $this->localArrayEligible[$sl->name] === true) {
+                $val->allocKind = AllocationKind::NO_REFCOUNT;
+            }
             return;
         }
         if ($k === Node::KIND_STORE_PROPERTY) {
@@ -359,7 +414,12 @@ final class InferAllocKind implements Pass
     private function isArenaScalarArray(Node $n): bool
     {
         if (!\Compile\Debug::$arenaArrays) { return false; }
-        $t = $n->type;
+        return $this->isArenaEligibleType($n->type);
+    }
+
+    /** {@see isArenaScalarArray} on a raw type: flat int/float/bool value, int key. */
+    private function isArenaEligibleType(?\Compile\Mir\Type $t): bool
+    {
         if ($t === null || !$t->isArray()) { return false; }
         $el = $t->element;
         if ($el === null) { return false; }
@@ -370,6 +430,32 @@ final class InferAllocKind implements Pass
         if (!$scalarVal) { return false; }
         $key = $t->key;
         return $key === null || $key->kind === \Compile\Mir\Type::KIND_INT;
+    }
+
+    /**
+     * An array type that PROVABLY needs heap (would leak under an arena
+     * release-bail): a string / cell KEY (set_str rc-retains keys) OR a
+     * concrete heap-payload VALUE (string / array / obj / closure / cell /
+     * union element). An unknown / null element is NOT proven-heap — neutral.
+     */
+    private function isDefinitelyHeapArray(\Compile\Mir\Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $key = $t->key;
+        if ($key !== null
+            && ($key->kind === \Compile\Mir\Type::KIND_STRING
+                || $key->kind === \Compile\Mir\Type::KIND_CELL)) {
+            return true;
+        }
+        $el = $t->element;
+        if ($el === null) { return false; }
+        $ek = $el->kind;
+        return $ek === \Compile\Mir\Type::KIND_STRING
+            || $ek === \Compile\Mir\Type::KIND_ARRAY
+            || $ek === \Compile\Mir\Type::KIND_OBJ
+            || $ek === \Compile\Mir\Type::KIND_CLOSURE
+            || $ek === \Compile\Mir\Type::KIND_CELL
+            || $ek === \Compile\Mir\Type::KIND_UNION;
     }
 
     private function isMutableContainer(\Compile\Mir\Type $t): bool
