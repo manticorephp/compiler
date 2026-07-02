@@ -1387,6 +1387,81 @@ final class EmitLlvm
         if ($this->needsArena) {
             $out .= $this->intToStrImpl('@__mir_int_to_str_arena', '@__mir_str_alloc_arena');
         }
+        $out .= $this->intFmtRuntime();
+        return $out;
+    }
+
+    /**
+     * `__mir_int_len(v) -> i64` decimal char count (digits + '-'), and
+     * `__mir_int_fmt(base, off, v)` writing that decimal at `base+off` (no NUL).
+     * Lets a concat with an int operand format it straight into the fused
+     * buffer — no `__mir_int_to_str` temp string, memcpy, or release. Same
+     * unsigned-magnitude digit loop as {@see intToStrImpl} (INT_MIN-safe).
+     */
+    private function intFmtRuntime(): string
+    {
+        $out  = "\ndefine i64 @__mir_int_len(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %isz = icmp eq i64 %v, 0\n";
+        $out .= "  br i1 %isz, label %zero, label %nz\n";
+        $out .= "zero:\n  ret i64 1\n";
+        $out .= "nz:\n";
+        $out .= "  %neg = icmp slt i64 %v, 0\n";
+        $out .= "  %nvneg = sub i64 0, %v\n";
+        $out .= "  %av = select i1 %neg, i64 %nvneg, i64 %v\n";
+        $out .= "  br label %cnt\n";
+        $out .= "cnt:\n";
+        $out .= "  %ct = phi i64 [ %av, %nz ], [ %cq, %cnt ]\n";
+        $out .= "  %cn = phi i64 [ 0, %nz ], [ %cn1, %cnt ]\n";
+        $out .= "  %cq = udiv i64 %ct, 10\n";
+        $out .= "  %cn1 = add i64 %cn, 1\n";
+        $out .= "  %cmore = icmp ne i64 %cq, 0\n";
+        $out .= "  br i1 %cmore, label %cnt, label %done\n";
+        $out .= "done:\n";
+        $out .= "  %signb = zext i1 %neg to i64\n";
+        $out .= "  %total = add i64 %cn1, %signb\n";
+        $out .= "  ret i64 %total\n";
+        $out .= "}\n";
+
+        $out .= "\ndefine void @__mir_int_fmt(ptr %base, i64 %off, i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %buf = getelementptr inbounds i8, ptr %base, i64 %off\n";
+        $out .= "  %isz = icmp eq i64 %v, 0\n";
+        $out .= "  br i1 %isz, label %zero, label %nz\n";
+        $out .= "zero:\n  store i8 48, ptr %buf\n  ret void\n";
+        $out .= "nz:\n";
+        $out .= "  %neg = icmp slt i64 %v, 0\n";
+        $out .= "  %nvneg = sub i64 0, %v\n";
+        $out .= "  %av = select i1 %neg, i64 %nvneg, i64 %v\n";
+        $out .= "  br label %cnt\n";
+        $out .= "cnt:\n";
+        $out .= "  %ct = phi i64 [ %av, %nz ], [ %cq, %cnt ]\n";
+        $out .= "  %cn = phi i64 [ 0, %nz ], [ %cn1, %cnt ]\n";
+        $out .= "  %cq = udiv i64 %ct, 10\n";
+        $out .= "  %cn1 = add i64 %cn, 1\n";
+        $out .= "  %cmore = icmp ne i64 %cq, 0\n";
+        $out .= "  br i1 %cmore, label %cnt, label %cntdone\n";
+        $out .= "cntdone:\n";
+        $out .= "  %signb = zext i1 %neg to i64\n";
+        $out .= "  %total = add i64 %cn1, %signb\n";
+        $out .= "  %mb = select i1 %neg, i8 45, i8 0\n";
+        $out .= "  store i8 %mb, ptr %buf\n";
+        $out .= "  %lastpos = sub i64 %total, 1\n";
+        $out .= "  br label %wr\n";
+        $out .= "wr:\n";
+        $out .= "  %wt = phi i64 [ %av, %cntdone ], [ %wq, %wr ]\n";
+        $out .= "  %wp = phi i64 [ %lastpos, %cntdone ], [ %wp1, %wr ]\n";
+        $out .= "  %wq = udiv i64 %wt, 10\n";
+        $out .= "  %wr10 = urem i64 %wt, 10\n";
+        $out .= "  %wch = add i64 %wr10, 48\n";
+        $out .= "  %wch8 = trunc i64 %wch to i8\n";
+        $out .= "  %wdst = getelementptr inbounds i8, ptr %buf, i64 %wp\n";
+        $out .= "  store i8 %wch8, ptr %wdst\n";
+        $out .= "  %wp1 = sub i64 %wp, 1\n";
+        $out .= "  %wmore = icmp ne i64 %wq, 0\n";
+        $out .= "  br i1 %wmore, label %wr, label %wrdone\n";
+        $out .= "wrdone:\n  ret void\n";
+        $out .= "}\n";
         return $out;
     }
 
@@ -4757,12 +4832,18 @@ final class EmitLlvm
         // constant pair bottom-up, so `$x."a"."b"` still arrives as two lits):
         // fewer operands, fewer memcpys, and their length is compile-time known.
         $ops = $this->mergeAdjacentStrConsts($ops);
-        if (count($ops) > 2) { return $this->emitConcatFused($ops, $arena); }
         if (count($ops) === 1) {
             // Everything merged to one literal (only if ConstFold somehow left
             // it) — just yield that value; immortal, nothing to free.
             $out = $this->emitNode($ops[0]);
             return $out . $this->coerceToStr($ops[0], $arena);
+        }
+        // The fused path formats int operands straight into the buffer (no
+        // int_to_str temp). Use it for >2 operands, and for a 2-operand concat
+        // that has an int operand (e.g. `"key".$i`, `$id.":"`); a pure string
+        // pair keeps the single-__mir_concat fast path.
+        if (count($ops) > 2 || $this->hasIntConcatOperand($ops)) {
+            return $this->emitConcatFused($ops, $arena);
         }
         return $this->emitConcatPair($ops[0], $ops[1], $arena);
     }
@@ -4841,10 +4922,26 @@ final class EmitLlvm
     {
         $empty = $this->strSymBytes('@.cstr.empty');
         $out = '';
-        $raws = [];   // coerced operand temp (for the post-copy release)
-        $gptrs = [];  // null→"" guarded ptr (what we memcpy from)
+        $raws = [];   // coerced operand temp (for the post-copy release); '' for int
+        $gptrs = [];  // null→"" guarded ptr (what we memcpy from); '' for int
         $lens = [];   // byte length: a compile-time const for a literal, else strlen
+        $intVals = []; // int operand's i64 value reg (formatted in-place), else ''
         foreach ($ops as $op) {
+            // An int operand is formatted straight into the buffer via
+            // __mir_int_fmt — no int_to_str temp string / memcpy / release.
+            if ($op->type->kind === Type::KIND_INT) {
+                $out .= $this->emitNode($op);
+                $out .= $this->coerceToI64();
+                $iv = $this->lastValue;
+                $intVals[] = $iv;
+                $raws[] = '';
+                $gptrs[] = '';
+                $l = $this->allocSsa();
+                $out .= '  ' . $l . ' = call i64 @__mir_int_len(i64 ' . $iv . ")\n";
+                $lens[] = $l;
+                continue;
+            }
+            $intVals[] = '';
             $out .= $this->emitNode($op);
             $out .= $this->coerceToStr($op, $arena);
             $raw = $this->lastValue;
@@ -4884,29 +4981,50 @@ final class EmitLlvm
         $alloc = $arena ? '@__mir_str_alloc_arena' : '@__mir_str_alloc';
         $buf = $this->allocSsa();
         $out .= '  ' . $buf . ' = call ptr ' . $alloc . '(i64 ' . $sz . ")\n";
-        $out .= '  call ptr @memcpy(ptr ' . $buf . ', ptr ' . $gptrs[0]
-              . ', i64 ' . $lens[0] . ")\n";
-        $off = $lens[0];
-        for ($i = 1; $i < $n; $i++) {
-            $d = $this->allocSsa();
-            $out .= '  ' . $d . ' = getelementptr inbounds i8, ptr ' . $buf
-                  . ', i64 ' . $off . "\n";
-            $out .= '  call ptr @memcpy(ptr ' . $d . ', ptr ' . $gptrs[$i]
-                  . ', i64 ' . $lens[$i] . ")\n";
-            $no = $this->allocSsa();
-            $out .= '  ' . $no . ' = add i64 ' . $off . ', ' . $lens[$i] . "\n";
-            $off = $no;
+        // Copy each operand at a running offset: an int operand is formatted
+        // in place (__mir_int_fmt), a string operand is memcpy'd.
+        $off = '0';
+        for ($i = 0; $i < $n; $i++) {
+            if ($intVals[$i] !== '') {
+                $out .= '  call void @__mir_int_fmt(ptr ' . $buf . ', i64 '
+                      . $off . ', i64 ' . $intVals[$i] . ")\n";
+            } elseif ($off === '0') {
+                $out .= '  call ptr @memcpy(ptr ' . $buf . ', ptr ' . $gptrs[$i]
+                      . ', i64 ' . $lens[$i] . ")\n";
+            } else {
+                $d = $this->allocSsa();
+                $out .= '  ' . $d . ' = getelementptr inbounds i8, ptr ' . $buf
+                      . ', i64 ' . $off . "\n";
+                $out .= '  call ptr @memcpy(ptr ' . $d . ', ptr ' . $gptrs[$i]
+                      . ', i64 ' . $lens[$i] . ")\n";
+            }
+            if ($i < $n - 1) {
+                $no = $this->allocSsa();
+                $out .= '  ' . $no . ' = add i64 ' . $off . ', ' . $lens[$i] . "\n";
+                $off = $no;
+            }
         }
         $dend = $this->allocSsa();
         $out .= '  ' . $dend . ' = getelementptr inbounds i8, ptr ' . $buf
               . ', i64 ' . $sum . "\n";
         $out .= '  store i8 0, ptr ' . $dend . "\n";
         foreach ($ops as $i => $op) {
+            // Int operands were formatted in place — no temp to release.
+            if ($intVals[$i] !== '') { continue; }
             $out .= $this->concatTempRelease($op, $raws[$i]);
         }
         $this->lastValue = $buf;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /** @param Node[] $ops  Any operand an int (formatted in-place by the fused path)? */
+    private function hasIntConcatOperand(array $ops): bool
+    {
+        foreach ($ops as $op) {
+            if ($op->type->kind === Type::KIND_INT) { return true; }
+        }
+        return false;
     }
 
     /** Release a fresh (owned) concat operand temp; '' for a borrow. */
