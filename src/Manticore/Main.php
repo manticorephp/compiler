@@ -1352,6 +1352,11 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // re-runs InferTypes internally when it specializes anything).
         $mono = new \Compile\Mir\Passes\Monomorphize();
         $module = $mono->run($module);
+        // Fuse implode(explode()) split-join round-trips into one native
+        // str_replace (zero intermediate array/segment allocs). After Mono so
+        // types + explode arg-counts are settled; before InferEffects so the
+        // analysis sees the fused form.
+        $module = (new \Compile\Mir\Passes\FuseSplitJoin())->run($module);
         // Gated compile-time type checker (MANTICORE_TYPECHECK=1). Off by
         // default — it never runs during a normal build / self-host. When on,
         // any genuinely-incompatible type use (array↔scalar / object↔scalar at

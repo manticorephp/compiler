@@ -1,0 +1,7 @@
+a|b|c|d
+x--y
+a|b|c
+trailing,
+1|2,3
+m|n|o=3
+p|q
