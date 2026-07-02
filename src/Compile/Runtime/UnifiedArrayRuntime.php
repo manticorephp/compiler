@@ -147,6 +147,21 @@ final class UnifiedArrayRuntime
         $chk->brIf($chk->icmp('eq', $nb, Value::int(Type::i64(), 0)), $ret, $doFree);
         $bAddr = $this->hdr($doFree, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET);
         $b = $doFree->load(Type::ptr(), $bAddr);
+        if (Debug::$arenaArrays) {
+            // Arena arrays hold an arena-allocated bucket side-array — never
+            // free() it; just invalidate the index (arena reclaims the buffer).
+            $doFreeH = $fn->block('idrop_freeh');
+            $zero = $fn->block('idrop_zero');
+            $tag = $doFree->load(Type::i64(), $this->hdr($doFree, $arr, MemoryAbi::RC_TAG_OFFSET));
+            $doFree->brIf($doFree->icmp('eq', $tag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $zero, $doFreeH);
+            $doFreeH->call('free', Type::void(), [$b]);
+            $doFreeH->br($zero);
+            $zero->store(Value::int(Type::i64(), 0), $this->hdr($zero, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+            $zero->store(Value::null(), $this->hdr($zero, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+            $zero->br($ret);
+            $ret->retVoid();
+            return;
+        }
         $doFree->call('free', Type::void(), [$b]);
         $doFree->store(Value::int(Type::i64(), 0), $nbAddr);
         $doFree->store(Value::null(), $bAddr);
@@ -185,9 +200,26 @@ final class UnifiedArrayRuntime
 
         $len = $e->load(Type::i64(), $arr);
         $oldb = $e->load(Type::ptr(), $this->hdr($e, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        // Arena arrays: bucket side-array lives in the arena — never free() it,
+        // and allocate a fresh index from the arena (old abandoned). $isA
+        // dominates every block below (all reached from entry).
+        $isA = null;
+        $bkSlot = null;
+        if (Debug::$arenaArrays) {
+            $atag = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::RC_TAG_OFFSET));
+            $isA = $e->icmp('eq', $atag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA));
+            $bkSlot = $e->alloca(Type::ptr(), 'bk_slot');
+        }
         $e->brIf($e->icmp('ne', $oldb, Value::null()), $hasOld, $sizeIt);
-        $hasOld->call('free', Type::void(), [$oldb]);
-        $hasOld->br($sizeIt);
+        if (Debug::$arenaArrays) {
+            $hfree = $fn->block('build_freeold');
+            $hasOld->brIf($isA, $sizeIt, $hfree);
+            $hfree->call('free', Type::void(), [$oldb]);
+            $hfree->br($sizeIt);
+        } else {
+            $hasOld->call('free', Type::void(), [$oldb]);
+            $hasOld->br($sizeIt);
+        }
 
         $need = $sizeIt->mul($len, Value::int(Type::i64(), 2));
         $nbSlot = $sizeIt->alloca(Type::i64(), 'nb');
@@ -200,7 +232,20 @@ final class UnifiedArrayRuntime
 
         $nb = $capdone->load(Type::i64(), $nbSlot);
         $bytes = $capdone->mul($nb, Value::int(Type::i64(), 8));
-        $buckets = $capdone->call('malloc', Type::ptr(), [$bytes]);
+        if (Debug::$arenaArrays) {
+            $bAr = $fn->block('build_bkarena');
+            $bHp = $fn->block('build_bkheap');
+            $bMg = $fn->block('build_bkdone');
+            $capdone->brIf($isA, $bAr, $bHp);
+            $bAr->store($bAr->call('__mir_arena_alloc', Type::ptr(), [$bytes]), $bkSlot);
+            $bAr->br($bMg);
+            $bHp->store($bHp->call('malloc', Type::ptr(), [$bytes]), $bkSlot);
+            $bHp->br($bMg);
+            $buckets = $bMg->load(Type::ptr(), $bkSlot);
+            $capdone = $bMg;
+        } else {
+            $buckets = $capdone->call('malloc', Type::ptr(), [$bytes]);
+        }
         $capdone->call('memset', Type::ptr(), [$buckets, Value::int(Type::i32(), 0), $bytes]);
         $capdone->store($nb, $this->hdr($capdone, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $capdone->store($buckets, $this->hdr($capdone, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
@@ -846,7 +891,25 @@ final class UnifiedArrayRuntime
             $e->mul($newcap, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE)),
             Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
         );
-        $nu = $e->call('__mir_alloc_array_tagged', Type::ptr(), [$bytes]);
+        // An arena PACKED source stays arena after promotion (still confined) —
+        // allocate the hashed buffer from the arena and DON'T free the old
+        // (arena-abandoned; bulk-freed at scope exit). Detect via the source tag.
+        if (Debug::$arenaArrays) {
+            $pa = $fn->block('promote_arena');
+            $ph = $fn->block('promote_heap');
+            $pd = $fn->block('promote_alloced');
+            $nuSlot = $e->alloca(Type::ptr(), 'nu_slot');
+            $ptag = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::RC_TAG_OFFSET));
+            $e->brIf($e->icmp('eq', $ptag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $pa, $ph);
+            $pa->store($pa->call('__mir_alloc_array_tagged_arena', Type::ptr(), [$bytes]), $nuSlot);
+            $pa->br($pd);
+            $ph->store($ph->call('__mir_alloc_array_tagged', Type::ptr(), [$bytes]), $nuSlot);
+            $ph->br($pd);
+            $nu = $pd->load(Type::ptr(), $nuSlot);
+            $e = $pd;
+        } else {
+            $nu = $e->call('__mir_alloc_array_tagged', Type::ptr(), [$bytes]);
+        }
         $e->call('memset', Type::ptr(), [$nu, Value::int(Type::i32(), 0), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE)]);
         $e->store($len, $nu);
         $e->store($newcap, $this->hdr($e, $nu, MemoryAbi::ARRAY_CAPACITY_OFFSET));
@@ -866,6 +929,19 @@ final class UnifiedArrayRuntime
         $body->store($body->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $body->br($head);
 
+        if (Debug::$arenaArrays) {
+            // Never free() an arena base — the arena owns it. Skip on the
+            // arena tag; the old buffer is abandoned until scope-exit reset.
+            $skip = $fn->block('promote_skipfree');
+            $dofree = $fn->block('promote_dofree');
+            $dtag = $done->load(Type::i64(), $this->hdr($done, $arr, MemoryAbi::RC_TAG_OFFSET));
+            $done->brIf($done->icmp('eq', $dtag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $skip, $dofree);
+            $base = $dofree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+            $dofree->call('free', Type::void(), [$base]);
+            $dofree->br($skip);
+            $skip->ret($nu);
+            return;
+        }
         $base = $done->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
         $done->call('free', Type::void(), [$base]);
         $done->ret($nu);

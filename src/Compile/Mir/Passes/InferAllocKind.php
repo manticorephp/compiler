@@ -134,7 +134,19 @@ final class InferAllocKind implements Pass
                 // — otherwise isOwnedObj never gives it a scope-exit release and
                 // it leaks every call. Force RC_HEAP for objects; other allocs
                 // (vec/assoc/string) keep the arena-eligible NoRefcount path.
-                $n->allocKind = ($escCtx || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE || $uniArr)
+                //
+                // A unified array literal is normally forced RC_HEAP (no arena
+                // path). Under Debug::$arenaArrays a NON-ESCAPING array whose
+                // elements need NO per-element drop (plain int/float/bool
+                // scalars) becomes arena: its release bails on the arena tag,
+                // which is sound precisely because there is nothing to free per
+                // element. Arrays with string / cell / nested-array / object
+                // elements stay RC_HEAP (an arena outer whose release bails
+                // would leak those owned heap payloads).
+                $arenaArr = $uniArr && !$escCtx && $this->isArenaScalarArray($n);
+                $forceHeap = $escCtx || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+                    || ($uniArr && !$arenaArr);
+                $n->allocKind = $forceHeap
                     ? AllocationKind::RC_HEAP
                     : AllocationKind::NO_REFCOUNT;
             }
@@ -330,6 +342,35 @@ final class InferAllocKind implements Pass
     }
 
     private function asConcat(Node $n): \Compile\Mir\Concat { return $n; }
+
+    /**
+     * Arena-eligible iff the array needs NO per-element AND no per-key drop:
+     *  - VALUE element is a plain int / float / bool scalar (raw i64 / double
+     *    slots — nothing to rc-release). String / cell / nested-array / object
+     *    values are heap payloads an arena outer (whose release bails on the
+     *    tag) would leak.
+     *  - KEYS are int (vec, key===null) or explicitly int — NEVER string or
+     *    cell. `__mir_array_set_str` rc-retains string keys; on an arena
+     *    release-bail those retained heap-string keys would leak. Int keys are
+     *    stored raw (no retain), so a vec that later promotes to a hashed
+     *    INT-keyed map via a sparse key stays sound.
+     * First cut of the arena-arrays epic: the numeric-array hot paths.
+     */
+    private function isArenaScalarArray(Node $n): bool
+    {
+        if (!\Compile\Debug::$arenaArrays) { return false; }
+        $t = $n->type;
+        if ($t === null || !$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null) { return false; }
+        $ek = $el->kind;
+        $scalarVal = $ek === \Compile\Mir\Type::KIND_INT
+            || $ek === \Compile\Mir\Type::KIND_FLOAT
+            || $ek === \Compile\Mir\Type::KIND_BOOL;
+        if (!$scalarVal) { return false; }
+        $key = $t->key;
+        return $key === null || $key->kind === \Compile\Mir\Type::KIND_INT;
+    }
 
     private function isMutableContainer(\Compile\Mir\Type $t): bool
     {

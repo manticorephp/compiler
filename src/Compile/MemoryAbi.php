@@ -218,6 +218,18 @@ final class MemoryAbi
     public const ARRAY_TAG_MAGIC = 0x7E66000000000002;
 
     /**
+     * Sentinel at `ptr-8` for an ARENA-allocated unified array (non-escaping,
+     * bump-allocated, bulk-freed at scope exit). Distinct from
+     * {@see ARRAY_TAG_MAGIC} so the rc helpers ({@see \Compile\Runtime\
+     * UnifiedArrayRuntime} retain/release, which proceed ONLY on the heap
+     * magic) bail immediately — an arena array is never rc-bumped or freed by
+     * `free()`; the arena reclaims it. The grow / promote / index paths
+     * detect this tag and route to the arena allocator instead of libc.
+     * Behind `Debug::$arenaArrays` only. One greater than the heap tag.
+     */
+    public const ARRAY_TAG_ARENA = 0x7E66000000000003;
+
+    /**
      * ONE header for every array, packed or hashed (56 bytes). The
      * structural heisenbug kill: rc lives at {@see ARRAY_RC_OFFSET} for
      * EVERY array regardless of mode, so a value can never have its rc

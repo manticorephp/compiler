@@ -328,6 +328,10 @@ final class EmitLlvm
 
     public function emit(Module $module): string
     {
+        // Arena arrays force the arena runtime on: the unified-array grow /
+        // promote / index paths reference @__mir_arena_* under this flag, so
+        // those symbols must be emitted even if no string took the arena path.
+        if (\Compile\Debug::$arenaArrays) { $this->needsArena = true; }
         $this->stringPool = [];
         $this->classes = $module->classes;
         $this->enums = $module->enums;
@@ -6746,10 +6750,18 @@ final class EmitLlvm
         $cellVals = $al->type->element !== null
             && $al->type->element->kind === Type::KIND_CELL;
         $count = \count($al->elements);
+        // A non-escaping scalar array (InferAllocKind → NoRefcount → ApplyMemory
+        // Mode → Arena; gated by Debug::$arenaArrays) bump-allocates in the
+        // arena and is bulk-freed at frame leave — no malloc/rc/free. Its grow /
+        // promote / index ops self-route via the ARRAY_TAG_ARENA tag, and its
+        // retain/release bail on that tag, so nothing else in codegen changes.
+        $arena = $al->allocKind === \Compile\Mir\AllocationKind::ARENA;
+        $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
+        if ($arena) { $this->needsArena = true; $this->vecAllocArena = true; }
         $slot = $this->allocSsa();
         $out  = '  ' . $slot . " = alloca ptr\n";
         $init = $this->allocSsa();
-        $out .= '  ' . $init . ' = call ptr @__mir_array_alloc(i64 ' . (string)$count . ")\n";
+        $out .= '  ' . $init . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
         $out .= '  store ptr ' . $init . ', ptr ' . $slot . "\n";
         foreach ($al->elements as $el) {
             if ($el->value->kind === Node::KIND_SPREAD) {

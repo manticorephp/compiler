@@ -33,6 +33,38 @@ trait EmitLlvmRuntime
         $out .= "define ptr @__mir_realloc_tagged(ptr %p, i64 %n) {\n";
         $out .= "entry:\n";
         $out .= "  %base = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        if (\Compile\Debug::$arenaArrays) {
+            // Arena-array grow (Debug::$arenaArrays): an ARRAY_TAG_ARENA buffer
+            // is arena-bumped, so libc realloc/free would corrupt — route to
+            // __mir_arena_realloc. The old byte size is recovered from the
+            // array's OWN header (cap@+8, flags@+32; packed slot 8B / hashed
+            // entry 24B), still holding the pre-grow capacity at this point.
+            // Only unified arrays ever carry this tag (vec/insert callers pass
+            // heap arrays), so reading the array header here is sound. The tag
+            // rides along the copy/in-place; re-stamp defensively.
+            $atag = (string)\Compile\MemoryAbi::ARRAY_TAG_ARENA;
+            $aesz = (string)\Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
+            $ahdr = (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE;
+            $out .= "  %tag = load i64, ptr %base\n";
+            $out .= "  %isarena = icmp eq i64 %tag, " . $atag . "\n";
+            $out .= "  br i1 %isarena, label %arena, label %heap\n";
+            $out .= "arena:\n";
+            $out .= "  %capp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_CAPACITY_OFFSET . "\n";
+            $out .= "  %ocap = load i64, ptr %capp\n";
+            $out .= "  %flagp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+            $out .= "  %flags = load i64, ptr %flagp\n";
+            $out .= "  %ishash = icmp ne i64 %flags, 0\n";
+            $out .= "  %esz = select i1 %ishash, i64 " . (string)\Compile\MemoryAbi::ARRAY_ENTRY_SIZE . ", i64 " . $aesz . "\n";
+            $out .= "  %obody = mul i64 %ocap, %esz\n";
+            $out .= "  %obytes = add i64 %obody, " . $ahdr . "\n";
+            $out .= "  %osz = add i64 %obytes, 8\n";
+            $out .= "  %nsz = add i64 %n, 8\n";
+            $out .= "  %nbase = call ptr @__mir_arena_realloc(ptr %base, i64 %osz, i64 %nsz)\n";
+            $out .= "  store i64 " . $atag . ", ptr %nbase\n";
+            $out .= "  %nd = getelementptr inbounds i8, ptr %nbase, i64 8\n";
+            $out .= "  ret ptr %nd\n";
+            $out .= "heap:\n";
+        }
         $out .= "  %t = add i64 %n, 8\n";
         $out .= "  %nb = call ptr @realloc(ptr %base, i64 %t)\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %nb, i64 8\n";
@@ -154,6 +186,44 @@ trait EmitLlvmRuntime
             $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 24\n";
             $out .= "  ret ptr %d\n";
             $out .= "}\n";
+            // Arena unified-array allocators (Debug::$arenaArrays; flag ⇒
+            // needsArena so this lives inside the arena block). Mirror the
+            // heap __mir_alloc_array_tagged / __mir_array_alloc, but bump the
+            // base buffer from the arena and stamp ARRAY_TAG_ARENA so the rc
+            // helpers bail (retain/release proceed only on ARRAY_TAG_MAGIC) and
+            // the grow/promote/index paths route to the arena allocator. rc is
+            // set to 1 (immaterial — retain/release bail on the tag — but a
+            // stray cow sees rc<=1 and never clones/decrements). The arena
+            // bulk-frees the whole buffer at scope exit; no free() ever runs.
+            if (\Compile\Debug::$arenaArrays) {
+            $atag = (string)\Compile\MemoryAbi::ARRAY_TAG_ARENA;
+            $ahdr = (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE;
+            $aesz = (string)\Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
+            $acap = (string)\Compile\MemoryAbi::ARRAY_CAPACITY_OFFSET;
+            $arc  = (string)\Compile\MemoryAbi::ARRAY_RC_OFFSET;
+            $out .= "define ptr @__mir_alloc_array_tagged_arena(i64 %n) {\n";
+            $out .= "entry:\n";
+            $out .= "  %t = add i64 %n, 8\n";
+            $out .= "  %base = call ptr @__mir_arena_alloc(i64 %t)\n";
+            $out .= "  store i64 " . $atag . ", ptr %base\n";
+            $out .= "  %d = getelementptr inbounds i8, ptr %base, i64 8\n";
+            $out .= "  ret ptr %d\n";
+            $out .= "}\n";
+            $out .= "define ptr @__mir_array_alloc_arena(i64 %capin) {\n";
+            $out .= "entry:\n";
+            $out .= "  %neg = icmp slt i64 %capin, 0\n";
+            $out .= "  %cap = select i1 %neg, i64 0, i64 %capin\n";
+            $out .= "  %body = mul i64 %cap, " . $aesz . "\n";
+            $out .= "  %bytes = add i64 %body, " . $ahdr . "\n";
+            $out .= "  %arr = call ptr @__mir_alloc_array_tagged_arena(i64 %bytes)\n";
+            $out .= "  call ptr @memset(ptr %arr, i32 0, i64 " . $ahdr . ")\n";
+            $out .= "  %capp = getelementptr inbounds i8, ptr %arr, i64 " . $acap . "\n";
+            $out .= "  store i64 %cap, ptr %capp\n";
+            $out .= "  %rcp = getelementptr inbounds i8, ptr %arr, i64 " . $arc . "\n";
+            $out .= "  store i64 1, ptr %rcp\n";
+            $out .= "  ret ptr %arr\n";
+            $out .= "}\n";
+            }
         }
         if ($this->needsRc) {
             // Reference counting for escaping (RcHeap) vec / obj. Both

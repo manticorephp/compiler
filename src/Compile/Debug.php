@@ -52,6 +52,20 @@ final class Debug
     public static string $memoryMode = self::MEM_RC;
 
     /**
+     * Arena allocation for non-escaping UNIFIED ARRAYS. When set, an array
+     * literal / array-producing builtin whose value provably does not escape
+     * its frame bump-allocates in the arena (tag {@see \Compile\MemoryAbi::
+     * ARRAY_TAG_ARENA}) and is bulk-freed at scope exit — no malloc/rc/free.
+     * Mirrors the arena path strings already take. Off ⇒ every array is
+     * malloc+rc. DEFAULT ON (proven: self-hosts, fixpoint byte-identical,
+     * 363/363, difftest 354/0/0). Disable with `MANTICORE_ARENA_ARRAYS=0`.
+     * First cut: only FLAT int/float/bool int-keyed arrays go arena; nested /
+     * string-value / string-key / object arrays stay rc-heap (see
+     * InferAllocKind::isArenaScalarArray).
+     */
+    public static bool $arenaArrays = true;
+
+    /**
      * Names of functions / methods that carry `#[Arena]` (per-function arena
      * hint). Reserved hook — not yet populated; consumed by codegen once the
      * per-scope memory control lands. Method keys use `ClassName::methodName`.
@@ -83,6 +97,12 @@ final class Debug
         $env = \getenv('MANTICORE_MEMORY');
         if ($env !== false && $env !== '') {
             self::applyMemoryMode($env);
+        }
+        $env = \getenv('MANTICORE_ARENA_ARRAYS');
+        if ($env === '0') {
+            self::$arenaArrays = false;
+        } elseif ($env !== false && $env !== '') {
+            self::$arenaArrays = true;
         }
     }
 }
