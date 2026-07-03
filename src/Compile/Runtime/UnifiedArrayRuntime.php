@@ -1479,12 +1479,33 @@ final class UnifiedArrayRuntime
         $fn->param(Type::ptr(), 'arr');
         $e = $fn->block('entry');
         $e->raw('  %len = load i64, ptr %arr');
-        $e->raw('  %seplen = call i64 @strlen(ptr %sep)');
-        $e->raw('  %accp = alloca i64');
-        $e->raw('  store i64 0, ptr %accp');
-        $e->raw('  %ip = alloca i64');
-        $e->raw('  store i64 0, ptr %ip');
-        $e->raw('  br label %sumc');
+        // implode(sep, []) === "" — MUST short-circuit an empty array. The size
+        // math in %alloc is `acc + seplen*(len-1) + 1`; for len==0 that is
+        // `-seplen + 1`, which for a multi-char separator is NEGATIVE. str_alloc
+        // then tests the size UNSIGNED, routing a negative size to the big path →
+        // malloc(size+HEADER) of a wrapped tiny value → the returned data ptr is
+        // PAST the allocation → OOB read/write (layout-flaky heap corruption).
+        // The cell variant already guards this. str_alloc(1) is a valid len-0
+        // buffer (cap 32, len n-1 = 0); NUL-terminate its data byte.
+        $e->raw('  %isempty = icmp sle i64 %len, 0');
+        $e->raw('  br i1 %isempty, label %empty, label %init');
+        $empty = $fn->block('empty');
+        $empty->raw('  %eb = call ptr @__mir_str_alloc(i64 1)');
+        $empty->raw('  store i8 0, ptr %eb');
+        $empty->raw('  ret ptr %eb');
+        $init = $fn->block('init');
+        // Header length (binary-safe, O(1)) NOT libc strlen: a manticore string
+        // may carry no trailing NUL (str_set_len writes none), so libc strlen
+        // over-reads into adjacent heap — and since the sizing pass and the copy
+        // pass strlen independently, a str_alloc landing next door between them
+        // yields el2 > el → the copy overruns the buffer. __mir_strlen reads
+        // len@-16, identical across both passes.
+        $init->raw('  %seplen = call i64 @__mir_strlen(ptr %sep)');
+        $init->raw('  %accp = alloca i64');
+        $init->raw('  store i64 0, ptr %accp');
+        $init->raw('  %ip = alloca i64');
+        $init->raw('  store i64 0, ptr %ip');
+        $init->raw('  br label %sumc');
         $sumc = $fn->block('sumc');
         $sumc->raw('  %i = load i64, ptr %ip');
         $sumc->raw('  %sd = icmp slt i64 %i, %len');
@@ -1492,7 +1513,7 @@ final class UnifiedArrayRuntime
         $sumb = $fn->block('sumb');
         $sumb->raw('  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)');
         $sumb->raw('  %es = inttoptr i64 %ev to ptr');
-        $sumb->raw('  %el = call i64 @strlen(ptr %es)');
+        $sumb->raw('  %el = call i64 @__mir_strlen(ptr %es)');
         $sumb->raw('  %a = load i64, ptr %accp');
         $sumb->raw('  %a2 = add i64 %a, %el');
         $sumb->raw('  store i64 %a2, ptr %accp');
@@ -1528,7 +1549,7 @@ final class UnifiedArrayRuntime
         $nosep = $fn->block('nosep');
         $nosep->raw('  %ev2 = call i64 @__mir_array_value_at(ptr %arr, i64 %j)');
         $nosep->raw('  %es2 = inttoptr i64 %ev2 to ptr');
-        $nosep->raw('  %el2 = call i64 @strlen(ptr %es2)');
+        $nosep->raw('  %el2 = call i64 @__mir_strlen(ptr %es2)');
         $nosep->raw('  %w1 = load i64, ptr %wp');
         $nosep->raw('  %dst1 = getelementptr inbounds i8, ptr %buf, i64 %w1');
         $nosep->raw('  call ptr @memcpy(ptr %dst1, ptr %es2, i64 %el2)');

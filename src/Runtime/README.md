@@ -21,9 +21,12 @@ self-contained compiler.
   `strcpy`, `strcat`), stdio (`puts`, `write`, `read`), and
   files/filesystem (`fopen`, `fclose`, `fread`, `fwrite`, `fseek`,
   `ftell`, `access`, `sys_unlink`, `sys_getcwd`).
-- `Json.php` — global-namespace `json_encode` / `json_decode`. The
-  encoder (`__mc_json_enc`) is a recursive walker (null/bool/int/float
-  /string/object/array). `json_decode` delegates to
+- `Json.php` — global-namespace `json_encode` / `json_decode`. A
+  `json_encode($x)` call is lowered to the native single-buffer codegen
+  builtin `@__mir_json_enc` (a recursive cell walk into one growing
+  buffer — see `EmitLlvmBuiltins::jsonEncRuntime`); the PHP walker
+  `__mc_json_enc` (null/bool/int/float/string/object/array) stays as the
+  reference and the object-cell fallback. `json_decode` delegates to
   `Runtime\Json\Parser`.
 - `Json/Parser.php` — `Runtime\Json\Parser`, a recursive-descent JSON
   parser. Position is **instance state** (`$pos` field), not a by-ref

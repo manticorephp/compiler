@@ -311,6 +311,7 @@ final class EmitLlvm
     private bool $needsIpow = false;
     private bool $needsAddslashes = false;
     private bool $needsJsonEscape = false;
+    private bool $needsJsonEnc = false;
     private bool $needsStrReplaceOne = false;
     /** Main captured argc/argv → emit @manticore_cli_argc/argv definitions. */
     private bool $needsCliArgv = false;
@@ -1072,7 +1073,12 @@ final class EmitLlvm
         $out .= "  br i1 %ez, label %empty, label %init\n";
         $out .= "empty:\n  ret ptr " . $this->strSymBytes('@.ts.empty') . "\n";
         $out .= "init:\n";
-        $out .= "  %seplen = call i64 @strlen(ptr %sep)\n";
+        // Header length (binary-safe), NOT libc strlen: tagged_to_str returns the
+        // RAW element string ptr for a string cell (no copy), which may carry no
+        // trailing NUL — libc strlen over-reads, and since the sizing and copy
+        // passes strlen independently, an intervening alloc can make el2 > el and
+        // overrun the buffer (layout-flaky heap corruption). See __mir_array_implode.
+        $out .= "  %seplen = call i64 @__mir_strlen(ptr %sep)\n";
         $out .= "  %accp = alloca i64\n  store i64 0, ptr %accp\n";
         $out .= "  %ip = alloca i64\n  store i64 0, ptr %ip\n  br label %sumc\n";
         $out .= "sumc:\n  %i = load i64, ptr %ip\n  %sd = icmp slt i64 %i, %len\n";
@@ -1080,7 +1086,7 @@ final class EmitLlvm
         $out .= "sumb:\n";
         $out .= "  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
         $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
-        $out .= "  %el = call i64 @strlen(ptr %es)\n";
+        $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
         $out .= "  %a = load i64, ptr %accp\n  %a2 = add i64 %a, %el\n  store i64 %a2, ptr %accp\n";
         $out .= "  %i2 = add i64 %i, 1\n  store i64 %i2, ptr %ip\n  br label %sumc\n";
         $out .= "alloc:\n";
@@ -1098,7 +1104,7 @@ final class EmitLlvm
         $out .= "nosep:\n";
         $out .= "  %ev2 = call i64 @__mir_array_value_at(ptr %arr, i64 %j)\n";
         $out .= "  %es2 = call ptr @__manticore_tagged_to_str(i64 %ev2)\n";
-        $out .= "  %el2 = call i64 @strlen(ptr %es2)\n";
+        $out .= "  %el2 = call i64 @__mir_strlen(ptr %es2)\n";
         $out .= "  %w1 = load i64, ptr %wp\n";
         $out .= "  %dst1 = getelementptr inbounds i8, ptr %buf, i64 %w1\n";
         $out .= "  call ptr @memcpy(ptr %dst1, ptr %es2, i64 %el2)\n";

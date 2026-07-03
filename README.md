@@ -23,8 +23,9 @@ potential for creating a fully self-contained PHP runtime environment.
   manticore output matches the reference on every plain-runnable case.
 - ✅ **Rebuild-stable** — 5×2 cold/self rebuilds, every binary smoke-clean (no
   build-to-build heap-layout roulette).
-- ✅ **10–45× faster than Zend** on compute/algorithms, ~24× faster cold start —
-  see [Benchmarks](#benchmarks).
+- ✅ **Faster than Zend on every benchmark** — up to **45×** on compute/algorithms,
+  1.5–3.5× on the stdlib-bound tail, ~24× faster cold start — see
+  [Benchmarks](#benchmarks).
 - ✅ Refcount + copy-on-write (assoc + objects) and a Bacon–Rajan cycle
   collector v1 (opt-in, zero-overhead unless `gc_collect_cycles()` is reached).
 - ✅ Cargo-like module system: `manticore.json`, `.sig` module interfaces,
@@ -54,23 +55,23 @@ is the tax we skip):
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |-----------|----------|------:|----------:|--------:|
-| `oop`     | 20 M polymorphic virtual `area()` (LCG-indexed) | 1.11 s | 0.04 s | **28×** |
-| `fib`     | recursive fib, data-dependent depth [30,33] | 1.87 s | 0.10 s | **19×** |
+| `oop`     | 20 M polymorphic virtual `area()` (LCG-indexed) | 1.10 s | 0.04 s | **28×** |
+| `fib`     | recursive fib, data-dependent depth [30,33] | 1.85 s | 0.10 s | **19×** |
 | `closures`| 2 M closure build + call          | 0.18 s | 0.01 s | **18×** |
-| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.15 s | 0.01 s | **14×** |
-| `loop`    | 50 M-iter data-dependent accumulate | 0.68 s | 0.06 s | **11×** |
-| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.18 s | 0.02 s |  **9×** |
-| `array`   | 30× build + sum a 500 K-element vec | 0.34 s | 0.08 s |  **4×** |
-| `strcat`  | 30 M-iter string append           | 0.38 s | 0.12 s |  **3×** |
+| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.15 s | 0.01 s | **15×** |
+| `loop`    | 50 M-iter data-dependent accumulate | 0.67 s | 0.06 s | **11×** |
+| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.19 s | 0.02 s | **9.5×** |
+| `array`   | 30× build + sum a 500 K-element vec | 0.34 s | 0.07 s |  **4.9×** |
+| `strcat`  | 30 M-iter string append           | 0.37 s | 0.11 s | **3.4×** |
 
 **Algorithms** (Computer Language Benchmarks Game style — float math, tight
 loops, 2-D arrays):
 
 | Benchmark | `php` | manticore | Speedup |
 |-----------|------:|----------:|--------:|
-| `spectralnorm` | 0.45 s | 0.01 s | **44×** |
-| `mandelbrot`   | 0.26 s | 0.03 s |  **9×** |
-| `matmul`       | 0.07 s | 0.01 s |  **7×** |
+| `spectralnorm` | 0.45 s | 0.01 s | **45×** |
+| `mandelbrot`   | 0.27 s | 0.03 s |  **9×** |
+| `matmul`       | 0.08 s | 0.01 s |  **8×** |
 | `dijkstra`     | 0.14 s | 0.02 s |  **7×** |
 | `nbody`        | 0.16 s | 0.04 s |  **4×** |
 
@@ -80,13 +81,15 @@ and how much it competes with PHP's hand-tuned C:
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |-----------|----------|------:|----------:|--------:|
-| `funcarr` | `array_map`/`filter`/`reduce`     | 0.15 s | 0.02 s | **8×** |
+| `funcarr` | `array_map`/`filter`/`reduce`     | 0.15 s | 0.02 s | **7.5×** |
 | `wordcount`| assoc map build + iterate        | 0.07 s | 0.01 s | **7×** |
-| `strops`  | `strtoupper`/`str_replace` loop   | 0.08 s | 0.03 s | **2.7×** |
+| `strops`  | `strtoupper`/`str_replace` loop   | 0.07 s | 0.02 s | **3.5×** |
 | `sort`    | `sort()` 3 K ints × 200           | 0.11 s | 0.05 s | **2.2×** |
 | `sprintf` | `sprintf` formatting loop         | 0.09 s | 0.04 s | **2.2×** |
-| `explode` | `explode`/`implode` loop          | 0.14 s | 0.14 s | **1.0×** |
-| `json`    | `json_encode` loop                | 0.12 s | 0.20 s | **0.6×** |
+| `in_array`| `in_array` linear scan over a vec | 0.15 s | 0.07 s | **2.1×** |
+| `explode` | `explode`/`implode` loop (fused)  | 0.14 s | 0.07 s | **2.0×** |
+| `assoc`   | string-keyed map build + lookup   | 0.13 s | 0.07 s | **1.9×** |
+| `json`    | `json_encode` loop                | 0.12 s | 0.08 s | **1.5×** |
 
 - **Cold start** (`echo "hello"`): `php` 62 ms vs manticore **2.6 ms** (~24×) —
   no interpreter/extension init.
@@ -95,11 +98,13 @@ and how much it competes with PHP's hand-tuned C:
 - **Output size**: a trivial program links to a **~50 KB** fully-static binary
   (libc only); the self-hosted compiler is ~2.9 MB.
 
-The library-bound tail is where the PHP-level stdlib is still being optimized:
-`json_encode` is a `mixed`-recursive walker (its cost is per-value tag dispatch,
-not string building — a codegen builtin is the next step), and `explode` competes
-with PHP's C. String builders (`$s = $s . …`) are amortized in place, not the
-former O(n²) copy.
+The library-bound tail is the tightest race — these lean on stdlib/prelude
+helpers competing with PHP's hand-tuned C, yet native still wins every one.
+`json_encode` is a native single-buffer codegen builtin (a recursive cell walk
+that formats ints/floats and escapes strings straight into one growing buffer),
+`explode`/`implode` round-trips fuse into a single native `str_replace`, assoc
+lookups cache each string's hash in its header (Zend `zend_string` style), and
+string builders (`$s = $s . …`) append in place, not the former O(n²) copy.
 
 ## Requirements
 

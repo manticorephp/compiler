@@ -1472,6 +1472,7 @@ trait EmitLlvmRuntime
         if ($this->needsStrtoupper) { $out .= $this->caseConvRuntime('__mir_strtoupper', 97, 122, -32); }
         if ($this->needsAddslashes) { $out .= $this->addslashesRuntime(); }
         if ($this->needsJsonEscape) { $out .= $this->jsonEscapeRuntime(); }
+        if ($this->needsJsonEnc) { $out .= $this->jsonEncRuntime(); }
         if ($this->needsStrReplaceOne) { $out .= $this->strReplaceOneRuntime(); }
         if ($this->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),
