@@ -635,6 +635,12 @@ final class Parser
             if ($this->match(TokenKind::Equals)) {
                 $default = $this->parseExpression();
             }
+            // PHP 8.4 property hooks: `$x { get => …; set(t $v) => …; }`. Only a
+            // single property per declaration may carry hooks (no comma list).
+            $hooks = [];
+            if ($this->check(TokenKind::OpenBrace)) {
+                $hooks = $this->parsePropertyHooks();
+            }
             $out[] = new PropertyDecl(
                 $name,
                 $modifiers->visibility,
@@ -645,11 +651,58 @@ final class Parser
                 $attrs,
                 $span,
                 $docComment,
+                $hooks,
             );
+            if ($hooks !== []) { return $out; }
             if (!$this->match(TokenKind::Comma)) { break; }
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after property declaration");
         return $out;
+    }
+
+    /**
+     * Parse a `{ get … set … }` property-hook block. Each hook is `get`/`set`,
+     * an optional `(type $v)` value parameter (set only), and either an arrow
+     * body `=> expr;` or a block body `{ … }`. A leading `&` (by-ref get) or
+     * `final` modifier is accepted and ignored.
+     *
+     * @return \Parser\Ast\PropertyHook[]
+     */
+    private function parsePropertyHooks(): array
+    {
+        $this->expect(TokenKind::OpenBrace, "expected '{' to open property hooks");
+        $hooks = [];
+        while (!$this->check(TokenKind::CloseBrace)) {
+            if ($this->checkKeyword('final')) { $this->advance(); }
+            $this->match(TokenKind::Ampersand); // by-ref get: accepted, not modelled
+            $kwTok = $this->advance();
+            $kind = strtolower($kwTok->lexeme);
+            if ($kind !== 'get' && $kind !== 'set') {
+                throw $this->error("expected 'get' or 'set' in property hook");
+            }
+            $paramName = null;
+            $paramType = null;
+            if ($this->check(TokenKind::OpenParen)) {
+                $this->advance();
+                if (!$this->check(TokenKind::Variable)) {
+                    $paramType = $this->parseTypeHint();
+                }
+                $pvar = $this->expect(TokenKind::Variable, 'expected $value in set hook');
+                $paramName = substr($pvar->lexeme, 1);
+                $this->expect(TokenKind::CloseParen, "expected ')' after hook parameter");
+            }
+            $exprBody = null;
+            $blockBody = null;
+            if ($this->match(TokenKind::DoubleArrow)) {
+                $exprBody = $this->parseExpression();
+                $this->expect(TokenKind::Semicolon, "expected ';' after hook arrow body");
+            } else {
+                $blockBody = $this->parseBlock();
+            }
+            $hooks[] = new \Parser\Ast\PropertyHook($kind, $paramName, $paramType, $exprBody, $blockBody);
+        }
+        $this->expect(TokenKind::CloseBrace, "expected '}' to close property hooks");
+        return $hooks;
     }
 
     /**

@@ -830,7 +830,29 @@ final class LowerFromAst implements Pass
                 $types[$tprop->name] = $this->lowerTypeHint($tveff);
             }
         }
+        // PHP 8.4 property hooks: inherit the parent's map, then record each
+        // hooked property's get/set accessor symbol. The property keeps its
+        // storage slot (allocated above) — a virtual hook just never uses it.
+        $propHooks = [];
+        if ($parent !== '' && isset($this->classTable[$parent])) {
+            foreach ($this->classTable[$parent]->propHooks as $pn => $ph) {
+                $propHooks[$pn] = $ph;
+            }
+        }
         $methodNames = [];
+        foreach ($decl->properties as $prop) {
+            if ($prop->isStatic || $prop->hooks === []) { continue; }
+            // Empty-string = absent hook (never null — a null assoc value trips
+            // the self-host missing-key-reads-false hazard downstream).
+            $get = '';
+            $set = '';
+            foreach ($prop->hooks as $hook) {
+                $sym = $decl->name . '____hook_' . $prop->name . '_' . $hook->kind;
+                if ($hook->kind === 'get') { $get = $sym; $methodNames['__hook_' . $prop->name . '_get'] = true; }
+                if ($hook->kind === 'set') { $set = $sym; $methodNames['__hook_' . $prop->name . '_set'] = true; }
+            }
+            $propHooks[$prop->name] = ['get' => $get, 'set' => $set];
+        }
         foreach ($decl->methods as $m) {
             $methodNames[$m->name] = true;
         }
@@ -877,7 +899,7 @@ final class LowerFromAst implements Pass
         $isStruct = $this->hasStructAttr($decl->attributes);
         $hasBag = $this->hasDynamicPropsAttr($decl->attributes);
         $this->currentLowerClass = $savedLowerClass;
-        return new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag);
+        return new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
     }
 
     /**
@@ -959,11 +981,14 @@ final class LowerFromAst implements Pass
             if ($prop->isStatic) { continue; }
             if ($prop->default === null) { continue; }
             $ptype = $cd->propertyTypes[$prop->name] ?? Type::unknown();
+            // A hooked property's default initialises the backing slot DIRECTLY —
+            // PHP does not route the default through the set hook.
             $defaultStores[] = new StoreProperty(
                 new LoadLocal('this', Type::obj($decl->name)),
                 $prop->name,
                 $this->lowerExpr($prop->default),
                 $ptype,
+                $prop->hooks !== [],
             );
         }
         // Mixed-in trait property defaults too — the layout merge in
@@ -994,6 +1019,43 @@ final class LowerFromAst implements Pass
         // `$this->classDecls[$class]->methods` still points to → UAF.
         $methods = [];
         foreach ($decl->methods as $m) { $methods[] = $m; }
+        // Synthesize a method per property hook: `<prop>` get/set hooks become
+        // `__hook_<prop>_get` / `__hook_<prop>_set`, lowered like any method so
+        // `$this` / `$value` and the body pass through InferTypes. A get arrow
+        // returns the expr; a set arrow stores the expr to the backing slot.
+        // Both bodies reference `$this-><prop>` DIRECTLY (EmitLlvm's hook
+        // dispatch suppresses re-entry while emitting the property's own hook).
+        foreach ($decl->properties as $prop) {
+            if ($prop->isStatic || $prop->hooks === []) { continue; }
+            foreach ($prop->hooks as $hook) {
+                $sp = $prop->span;
+                if ($hook->kind === 'get') {
+                    $body = $hook->blockBody
+                        ?? new \Parser\Ast\Block([\Parser\Ast\Stmt::return_($hook->exprBody, $sp)]);
+                    $methods[] = new \Parser\Ast\MethodDecl(
+                        '__hook_' . $prop->name . '_get',
+                        'public', false, false, false, [],
+                        $prop->typeHint, $body, [], $sp,
+                    );
+                } else {
+                    $pname = $hook->paramName ?? 'value';
+                    $ptypeHint = $hook->paramType ?? $prop->typeHint;
+                    $param = new \Parser\Ast\Param($pname, $ptypeHint, null, false, false, '', false, [], $sp);
+                    $body = $hook->blockBody
+                        ?? new \Parser\Ast\Block([\Parser\Ast\Stmt::expression(
+                            \Parser\Ast\Expr::assign(
+                                \Parser\Ast\Expr::propertyAccess(
+                                    \Parser\Ast\Expr::variable('this', $sp), $prop->name, false, $sp),
+                                $hook->exprBody, $sp),
+                            $sp)]);
+                    $methods[] = new \Parser\Ast\MethodDecl(
+                        '__hook_' . $prop->name . '_set',
+                        'public', false, false, false, [$param],
+                        null, $body, [], $sp,
+                    );
+                }
+            }
+        }
         $ownNames = [];
         foreach ($decl->methods as $m) { $ownNames[$m->name] = true; }
         foreach ($decl->uses as $traitName) {

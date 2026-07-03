@@ -171,6 +171,9 @@ final class EmitLlvm
     private string $genNextKeyPtr = '';
     /** SSA ptr to the frame's `sent` word (value passed in via send()). */
     private string $genSentPtr = '';
+    /** Name of the function currently being emitted (property-hook self-ref guard). */
+    private string $currentFnName = '';
+
     /** SSA ptr to the frame's `retval` word (return value for getReturn()). */
     private string $genRetvalPtr = '';
 
@@ -1661,6 +1664,7 @@ final class EmitLlvm
         }
         $this->nextId = 0;
         $this->nextLabel = 0;
+        $this->currentFnName = $fn->name;
         $this->currentFnBody = $fn->body;
         $this->currentFnHasArena = false;
         $this->vecAllocArena = false;

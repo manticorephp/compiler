@@ -784,6 +784,9 @@ final class StoreProperty extends Node
         public readonly string $property,
         public Node $value,
         Type $type,
+        /** Write straight to the backing slot, skipping any set hook (default
+         *  initialisation of a hooked property). */
+        public bool $bypassHook = false,
     ) {
         parent::__construct(Node::KIND_STORE_PROPERTY, $type);
     }

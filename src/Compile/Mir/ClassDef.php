@@ -39,6 +39,13 @@ final class ClassDef
         public array $staticPropTypes = [],
         public bool $isStruct = false,
         public bool $hasBag = false,
+        /**
+         * PHP 8.4 property hooks: property name → ['get' => symbol|null,
+         * 'set' => symbol|null], where symbol is the pre-mangle hook-method name
+         * (`<DeclaringClass>____hook_<prop>_get`). Inherited from the parent.
+         * @var array<string, array{get: ?string, set: ?string}>
+         */
+        public array $propHooks = [],
     ) {}
 
     /** Whether this class carries a dynamic-property bag. */

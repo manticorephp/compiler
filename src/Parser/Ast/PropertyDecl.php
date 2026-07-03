@@ -24,5 +24,7 @@ final class PropertyDecl
         public readonly array $attributes,
         public readonly Span $span,
         public readonly ?string $docComment = null,
+        /** @var PropertyHook[] PHP 8.4 get/set hooks (empty for a plain property). */
+        public readonly array $hooks = [],
     ) {}
 }

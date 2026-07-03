@@ -236,6 +236,16 @@ trait EmitLlvmObjects
         if ($pa->object->type->kind === Type::KIND_UNION) {
             return $this->emitUnionPropertyAccess($pa);
         }
+        // PHP 8.4 property hook: a get hook replaces the read, UNLESS we are
+        // emitting this property's own hook (then read the backing slot direct,
+        // no infinite re-entry).
+        if ($ecls !== '' && isset($this->classes[$ecls])
+            && isset($this->classes[$ecls]->propHooks[$pa->property])) {
+            $hk = $this->classes[$ecls]->propHooks[$pa->property];
+            if ($hk['get'] !== '' && !$this->insideOwnHook($hk)) {
+                return $this->emitHookGet($pa->object, $hk['get'], $n->type);
+            }
+        }
         // Dynamic property on a bag-bearing class (stdClass / dynamic):
         // an undeclared name reads from the property-bag assoc.
         $bcls = $pa->object->type->class ?? '';
@@ -410,6 +420,53 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** True while emitting `$prop`'s own get/set hook — its `$this->$prop`
+     *  accesses read/write the backing slot directly (no hook re-entry). */
+    private function insideOwnHook(array $hk): bool
+    {
+        return ($hk['get'] !== '' && $this->currentFnName === $hk['get'])
+            || ($hk['set'] !== '' && $this->currentFnName === $hk['set']);
+    }
+
+    /** Emit a property get-hook call: `<hookSym>($this)` → the hooked value,
+     *  coerced from the i64 carrier to `$resultType`. */
+    private function emitHookGet(Node $objNode, string $hookSym, Type $resultType): string
+    {
+        $out = $this->emitNode($objNode);
+        $out .= $this->coerceToI64();
+        $thisArg = $this->lastValue;
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($hookSym)
+              . '(i64 ' . $thisArg . ")\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        if ($resultType->kind === Type::KIND_FLOAT) {
+            $rf = $this->allocSsa();
+            $out .= '  ' . $rf . ' = bitcast i64 ' . $reg . " to double\n";
+            $this->lastValue = $rf;
+            $this->lastValueType = 'double';
+        }
+        return $out;
+    }
+
+    /** Emit a property set-hook call: `<hookSym>($this, $value)`. The
+     *  assignment expression yields the assigned value. */
+    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode): string
+    {
+        $out = $this->emitNode($objNode);
+        $out .= $this->coerceToI64();
+        $thisArg = $this->lastValue;
+        $out .= $this->emitNode($valueNode);
+        $out .= $this->coerceToI64();
+        $val = $this->lastValue;
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($hookSym)
+              . '(i64 ' . $thisArg . ', i64 ' . $val . ")\n";
+        $this->lastValue = $val;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** `$enumCase->name` / `->value` via the global tables. */
     private function emitEnumProp(PropertyAccess_ $pa, string $ecls): string
     {
@@ -464,6 +521,16 @@ trait EmitLlvmObjects
     private function emitStoreProperty(Node $n): string
     {
         $sp = $this->castStoreProperty($n);
+        // PHP 8.4 property hook: a set hook replaces the write (unless bypassed —
+        // default init — or we are inside this property's own hook).
+        $hcls = $sp->object->type->class ?? '';
+        if (!$sp->bypassHook && $hcls !== '' && isset($this->classes[$hcls])
+            && isset($this->classes[$hcls]->propHooks[$sp->property])) {
+            $hk = $this->classes[$hcls]->propHooks[$sp->property];
+            if ($hk['set'] !== '' && !$this->insideOwnHook($hk)) {
+                return $this->emitHookSet($sp->object, $hk['set'], $sp->value);
+            }
+        }
         // Dynamic property on a bag class → set the boxed value in the
         // property-bag assoc, threading any realloc back to the slot.
         $bcls = $sp->object->type->class ?? '';
