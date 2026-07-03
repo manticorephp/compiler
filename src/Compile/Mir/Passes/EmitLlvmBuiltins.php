@@ -110,6 +110,10 @@ trait EmitLlvmBuiltins
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
         if ($name === 'array_keys')                   { return $this->biArrayKeys($args); }
+        if ($name === 'array_first' && \count($args) === 1)     { return $this->biArrayEndpoint($args, false, false); }
+        if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
+        if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
+        if ($name === 'array_key_last' && \count($args) === 1)  { return $this->biArrayEndpoint($args, true, true); }
         if ($name === 'array_values') {
             $vt = $args[0]->type;
             if ($vt->kind === Type::KIND_CELL) { return $this->biArrayValues($args, null); }
@@ -537,6 +541,159 @@ trait EmitLlvmBuiltins
         $reg = $this->allocSsa();
         $out .= '  ' . $reg . ' = load i64, ptr ' . $safe . "\n";
         return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `array_first` / `array_last` (PHP 8.5) and `array_key_first` /
+     * `array_key_last`: the first/last VALUE (or KEY) of `$a` as a tagged cell,
+     * `null` (box_null) on an empty array. A codegen builtin — it sees the
+     * concrete array type at the call site, so the returned VALUE is boxed by the
+     * source's static element kind. An erased PHP-level helper would box every
+     * element as int (the reason the stdlib `array_key_last` was omitted); here
+     * KEY variants read `__mir_array_key_cell_at`, already a NaN-boxed int|string,
+     * so the full int|string|null union renders correctly. Result type is
+     * `mixed`/cell ({@see InferTypes::builtinReturnType}).
+     *
+     * @param Node[] $args
+     */
+    private function biArrayEndpoint(array $args, bool $last, bool $wantKey): string
+    {
+        $this->needsTagged = true;
+        if ($wantKey) { $this->needsCellKey = true; }
+        $arrT = $args[0]->type;
+        $out = $this->emitNode($args[0]);
+        if ($arrT->kind === Type::KIND_CELL) {
+            $out .= $this->cellToPtr();
+        } else {
+            $out .= $this->coerceToPtr();
+        }
+        // Empty `[]` → null ptr; redirect to the zero-word so len reads 0
+        // (mirrors biCount / biArrayKeys).
+        $rawSrc = $this->lastValue;
+        $isNull = $this->allocSsa();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
+        $src = $this->allocSsa();
+        $out .= '  ' . $src . ' = select i1 ' . $isNull
+              . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
+        $len = $this->allocSsa();
+        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $res = $this->allocSsa();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $empty = $this->allocLabel('ae.empty');
+        $take  = $this->allocLabel('ae.take');
+        $done  = $this->allocLabel('ae.done');
+        $isEmpty = $this->allocSsa();
+        $out .= '  ' . $isEmpty . ' = icmp eq i64 ' . $len . ", 0\n";
+        $out .= '  br i1 ' . $isEmpty . ', label %' . $empty . ', label %' . $take . "\n";
+        // Empty → null cell.
+        $out .= $empty . ":\n";
+        $bn = $this->allocSsa();
+        $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $bn . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        // Non-empty → index 0 (first) or len-1 (last).
+        $out .= $take . ":\n";
+        if ($last) {
+            $idx = $this->allocSsa();
+            $out .= '  ' . $idx . ' = sub i64 ' . $len . ", 1\n";
+        } else {
+            $idx = '0';
+        }
+        if ($wantKey) {
+            $boxed = $this->allocSsa();
+            $out .= '  ' . $boxed . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
+        } else {
+            $ev = $this->allocSsa();
+            $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
+            $out .= $this->boxRawElem($ev, $arrT);
+            $boxed = $this->lastValue;
+        }
+        $out .= '  store i64 ' . $boxed . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * Box a raw element value (i64 SSA `$ev`, as stored by __mir_array_value_at)
+     * into a tagged cell per the source array's STATIC element kind; lastValue ←
+     * the boxed i64. An already-cell element (heterogeneous / `mixed` source)
+     * passes through untouched. Mirrors the element switch in
+     * {@see emitAssocToCellArrayUnified}.
+     */
+    private function boxRawElem(string $ev, Type $arrT): string
+    {
+        $elem = ($arrT->isVec() || $arrT->isAssoc()) ? $arrT->element : null;
+        return $this->boxRawValue($ev, $elem);
+    }
+
+    /**
+     * Box a raw i64 value (`$ev`) into a tagged cell per its static Type `$t`;
+     * lastValue ← the boxed i64. A cell/unknown/null type (untyped or already-
+     * boxed value) passes through untouched. Shared by array_first/last element
+     * boxing and cell-receiver property reads.
+     */
+    private function boxRawValue(string $ev, ?Type $t): string
+    {
+        $ek = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;
+        // Already a tagged cell (heterogeneous / `mixed` / untyped) — passthrough.
+        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) {
+            $this->lastValue = $ev;
+            $this->lastValueType = 'i64';
+            return '';
+        }
+        // An enum case is an ORDINAL, not an object cell — pass it through raw
+        // so `->name` / `->value` dispatch via emitEnumProp (the caller types the
+        // result as the enum). box_object would tag the ordinal as a pointer.
+        if ($ek === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class])) {
+            $this->lastValue = $ev;
+            $this->lastValueType = 'i64';
+            return '';
+        }
+        $elem = $t;
+        $this->needsTagged = true;
+        $boxed = $this->allocSsa();
+        $out = '';
+        if ($ek === Type::KIND_STRING) {
+            $ep = $this->allocSsa();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
+        } elseif ($ek === Type::KIND_FLOAT) {
+            $ed = $this->allocSsa();
+            $out .= '  ' . $ed . ' = bitcast i64 ' . $ev . " to double\n";
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
+        } elseif ($ek === Type::KIND_BOOL) {
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+        } elseif ($ek === Type::KIND_OBJ) {
+            $ep = $this->allocSsa();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
+        } elseif ($ek === Type::KIND_ARRAY) {
+            $nestElem = $elem->element ?? Type::unknown();
+            if ($nestElem->kind === Type::KIND_CELL || $nestElem->kind === Type::KIND_UNKNOWN) {
+                // Inner array already cell-repr (or erased) — box as a plain
+                // array cell (mirrors emitAssocToCellArrayUnified's array branch).
+                $ep = $this->allocSsa();
+                $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+                $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
+            } else {
+                // Nested concrete array → recursively rebuild as a cell-array so
+                // its own elements render (else var_dump reads raw ints as float).
+                $this->lastValue = $ev;
+                $this->lastValueType = 'i64';
+                $out .= $elem->isAssoc()
+                    ? $this->emitAssocToCellArrayUnified($nestElem)
+                    : $this->emitVecToCellArrayUnified($nestElem);
+                $boxed = $this->lastValue;
+            }
+        } else {
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
+        }
+        $this->lastValue = $boxed;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**

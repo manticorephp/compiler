@@ -1846,6 +1846,26 @@ final class InferTypes implements Pass
         // {@see EmitLlvmBuiltins::biArrayKeys}); uniform cell elements work for
         // both a plain and a cell/`mixed` source.
         if ($n === 'array_keys') { return Type::vec(Type::cell()); }
+        // array_first/array_last (8.5) + array_key_first/array_key_last — the
+        // first/last value or key as a tagged cell, null on empty (codegen
+        // builtin {@see EmitLlvmBuiltins::biArrayEndpoint}). A cell result lets
+        // the key variants carry the full int|string|null union.
+        if (($n === 'array_first' || $n === 'array_last'
+            || $n === 'array_key_first' || $n === 'array_key_last')
+            && \count($args) === 1) {
+            // A homogeneous ENUM-case array: return the enum type (not a cell) so
+            // `array_first($cases)->name` dispatches through emitEnumProp — an
+            // enum case is an ordinal, not a boxable object cell.
+            if ($n === 'array_first' || $n === 'array_last') {
+                $at = $args[0]->type;
+                $el = ($at->isVec() || $at->isAssoc()) ? $at->element : null;
+                if ($el !== null && $el->kind === Type::KIND_OBJ
+                    && $el->class !== null && isset($this->enums[$el->class])) {
+                    return $el;
+                }
+            }
+            return Type::cell();
+        }
         // explode → a fresh vec of string segments (codegen builtin
         // {@see EmitLlvmBuiltins::biExplode}); the string element keeps implode /
         // foreach on the fast (non-cell) path.

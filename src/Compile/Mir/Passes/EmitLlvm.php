@@ -2857,6 +2857,7 @@ final class EmitLlvm
         if ($tk === Type::KIND_OBJ) {
             if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
             if ($this->isClosureClass($cls)) { return false; }
+            if ($this->isEnumClass($cls)) { return false; }
         }
         return true;
     }
@@ -5145,14 +5146,14 @@ final class EmitLlvm
         if ($mo->flavor === 'vec') {
             if ($t === null || $shared) { return 'vec'; }
             $el = $t->type->element;
-            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vecobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             return 'vec';
         }
         if ($mo->flavor === 'assoc') {
             if ($t === null || $shared) { return 'assoc'; }
             $el = $t->type->element;
-            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assocobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             return 'assoc';
         }
@@ -5217,6 +5218,7 @@ final class EmitLlvm
             $cls = $t->class ?? '';
             if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
             if ($this->isClosureClass($cls)) { return ''; }
+            if ($this->isEnumClass($cls)) { return ''; }
             // A Generator frame carries a string-style rc header (rc@-8, free
             // base = ptr-16) — release it via the str rc path so the frame
             // buffer is freed on its last reference.
@@ -5225,13 +5227,13 @@ final class EmitLlvm
         }
         if ($t->isVec()) {
             $el = $t->element;
-            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vecobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             return 'vec';
         }
         if ($t->isAssoc()) {
             $el = $t->element;
-            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assocobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             return 'assoc';
         }
@@ -5353,6 +5355,7 @@ final class EmitLlvm
             $cls = $t->class ?? '';
             if ($cls === 'Ffi\\Ptr' || $cls === 'Generator' || $this->isClosureClass($cls)) { return ''; }
             if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
+            if ($this->isEnumClass($cls)) { return ''; }
             $this->needsRc = true;
             $p = $this->allocSsa();
             $o  = '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
@@ -5407,6 +5410,7 @@ final class EmitLlvm
                 return '';
             }
             if ($this->isClosureClass($scls)) { return ''; }
+            if ($this->isEnumClass($scls)) { return ''; }
             // A Generator frame uses a string-style rc header (rc@-8) — retain
             // it via the str path (treat as KIND_STRING below). The owned vs
             // borrowed logic still applies: a gen() call / $g() invoke is a
@@ -6149,6 +6153,13 @@ final class EmitLlvm
     private function isClosureClass(string $cls): bool
     {
         return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
+    }
+
+    /** An enum case is a value-type ORDINAL (no rc header) — never rc-managed,
+     *  like an int. `$cls` is an obj type's class name. */
+    private function isEnumClass(string $cls): bool
+    {
+        return $cls !== '' && isset($this->enums[$cls]);
     }
 
     private function objTypeIsStruct(Type $t): bool

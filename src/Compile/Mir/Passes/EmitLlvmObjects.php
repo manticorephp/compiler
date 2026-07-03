@@ -5,6 +5,7 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\Node;
 use Compile\Mir\Type;
 use Compile\Mir\PropertyAccess_;
+use Compile\Mir\ClassDef;
 use Compile\Mir\DynProp_;
 use Compile\Mir\StoreDynProp_;
 use Compile\Mir\ClassName_;
@@ -227,23 +228,10 @@ trait EmitLlvmObjects
         if ($ecls !== '' && isset($this->enums[$ecls])) {
             return $this->emitEnumProp($pa, $ecls);
         }
-        // `$cell->prop` — a tagged object cell (e.g. json_decode result):
-        // unbox to the stdClass ptr and read the bag by static name.
+        // `$cell->prop` — a tagged object cell (array_first over an obj array,
+        // a `mixed` field, a json_decode stdClass): resolve the holder's slot.
         if ($pa->object->type->kind === Type::KIND_CELL) {
-            $out = $this->emitNode($pa->object);
-            $out .= $this->cellToPtr();
-            $objPtr = $this->lastValue;
-            $std = $this->classes['stdClass'] ?? null;
-            $bagOff = $std === null ? 16 : $std->bagOffset();
-            $out .= $this->emitBagPtr($pa->object, $objPtr, $bagOff);
-            $bagP = $this->bagPtrReg;
-            $kid = $this->internString($pa->property);
-            $reg = $this->allocSsa();
-                        $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
-                  . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
-            $this->lastValue = $reg;
-            $this->lastValueType = 'i64';
-            return $out;
+            return $this->emitCellPropertyRead($pa);
         }
         if ($pa->object->type->kind === Type::KIND_UNION) {
             return $this->emitUnionPropertyAccess($pa);
@@ -310,6 +298,115 @@ trait EmitLlvmObjects
             $out .= '  ' . $masked . ' = and i64 ' . $loaded . ", 281474976710655\n";
             $this->lastValue = $masked;
         }
+        return $out;
+    }
+
+    /**
+     * `$cell->prop` on a tagged object cell whose static class is erased (a
+     * `mixed` value, an array_first over an obj array, a json_decode stdClass).
+     * The runtime class is recovered from the object's class_id:
+     *
+     *  - No class declares `$prop` as a fixed slot → a dynamic-property bag
+     *    object (stdClass); read the bag by name (the historical json path).
+     *  - Exactly one fixed holder and NO bag class exists → the cell can only be
+     *    that class; load its slot directly (static fast path, no class_id read).
+     *  - Otherwise → a class_id switch: each fixed holder reads its OWN slot
+     *    (boxed by that slot's declared type); the default falls back to the bag
+     *    read (stdClass dynamic prop) or a null cell.
+     *
+     * Every arm yields a tagged cell so the erased-type consumer (echo /
+     * var_dump / arithmetic) dispatches on the runtime tag.
+     */
+    private function emitCellPropertyRead(PropertyAccess_ $pa): string
+    {
+        $prop = $pa->property;
+        $fixed = [];
+        $hasBag = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+            if ($cd->usesBag()) { $hasBag = true; }
+        }
+        $out = $this->emitNode($pa->object);
+        $out .= $this->cellToPtr();
+        $objPtr = $this->lastValue;
+        // Pure dynamic-bag receiver — no concrete holder of $prop.
+        if (\count($fixed) === 0) {
+            return $out . $this->emitBagReadInto($pa, $objPtr);
+        }
+        // Static fast path: a single holder and no bag class anywhere, so the
+        // cell can only be that class — read the slot with no class_id switch.
+        if (\count($fixed) === 1 && !$hasBag) {
+            return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
+        }
+        // Runtime dispatch on the object's class_id.
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $res = $this->allocSsa();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->allocLabel('cp.end');
+        $def = $this->allocLabel('cp.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($fixed as $cd) {
+            $lbl = $this->allocLabel('cp.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $out .= $def . ":\n";
+        if ($hasBag) {
+            $out .= $this->emitBagReadInto($pa, $objPtr);
+        } else {
+            $this->needsTagged = true;
+            $bn = $this->allocSsa();
+            $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+            $this->lastValue = $bn;
+        }
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Load `$prop` from `$objPtr` at `$cd`'s fixed slot and box it to a tagged
+     * cell by the slot's declared type (an untyped / cell slot already holds a
+     * cell → passthrough). lastValue ← the cell.
+     */
+    private function emitFixedPropLoad(string $objPtr, ClassDef $cd, string $prop): string
+    {
+        $off = $cd->propertyOffset($prop);
+        $gep = $this->allocSsa();
+        $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+             . ', i64 ' . (string)$off . "\n";
+        $ld = $this->allocSsa();
+        $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
+        $out .= $this->boxRawValue($ld, $cd->propertyTypes[$prop] ?? null);
+        return $out;
+    }
+
+    /** The dynamic-property bag read (`__mir_array_get_str` by name) given an
+     *  already-unboxed object pointer; lastValue ← the cell value. */
+    private function emitBagReadInto(PropertyAccess_ $pa, string $objPtr): string
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $bagOff = $std === null ? 16 : $std->bagOffset();
+        $out = $this->emitBagPtr($pa->object, $objPtr, $bagOff);
+        $bagP = $this->bagPtrReg;
+        $kid = $this->internString($pa->property);
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
+              . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
