@@ -593,14 +593,12 @@ final class Parser
                 $this->advance();
                 // PHP 8.4 asymmetric visibility: `public private(set)` scopes the
                 // WRITE visibility separately. The `(set)` suffix is parsed and
-                // (for now) not enforced — correct code never writes out of scope.
-                if ($this->check(TokenKind::OpenParen)) {
-                    $this->advance();
-                    $setTok = $this->advance();
-                    if (strtolower($setTok->lexeme) !== 'set') {
-                        throw $this->error("expected 'set' in visibility modifier");
-                    }
-                    $this->expect(TokenKind::CloseParen, "expected ')' after set-visibility");
+                // (for now) not enforced. A `(` that is NOT `(set)` is a DNF type
+                // (`public (X&Y) $p`) — leave it for the type-hint parser.
+                if ($this->isSetVisibilitySuffix()) {
+                    $this->advance(); // '('
+                    $this->advance(); // 'set'
+                    $this->advance(); // ')'
                 } else {
                     $visibility = $kw;
                 }
@@ -847,14 +845,12 @@ final class Parser
             if ($kw === 'public' || $kw === 'protected' || $kw === 'private') {
                 $this->advance();
                 // Asymmetric visibility on a promoted param: `public private(set)`.
-                // The `(set)` write-scope is parsed and (for now) not enforced.
-                if ($this->check(TokenKind::OpenParen)) {
-                    $this->advance();
-                    $setTok = $this->advance();
-                    if (strtolower($setTok->lexeme) !== 'set') {
-                        throw $this->error("expected 'set' in visibility modifier");
-                    }
-                    $this->expect(TokenKind::CloseParen, "expected ')' after set-visibility");
+                // A `(` that is NOT `(set)` is a DNF type — leave it for the type
+                // parser (`function __construct(public (X&Y) $p)`).
+                if ($this->isSetVisibilitySuffix()) {
+                    $this->advance(); // '('
+                    $this->advance(); // 'set'
+                    $this->advance(); // ')'
                     if ($promoted === '') { $promoted = $kw; }
                 } else {
                     $promoted = $kw;
@@ -2592,6 +2588,19 @@ final class Parser
     private function peek(): Token
     {
         return $this->tokens[$this->pos];
+    }
+
+    /**
+     * Distinguish a `(set)` asymmetric-visibility suffix from a DNF type in
+     * parens (`public (X&Y) $p`): true only for the exact `( set )` shape.
+     */
+    private function isSetVisibilitySuffix(): bool
+    {
+        if (!$this->check(TokenKind::OpenParen)) { return false; }
+        $inner = $this->tokens[$this->pos + 1] ?? null;
+        $close = $this->tokens[$this->pos + 2] ?? null;
+        return $inner !== null && \strtolower($inner->lexeme) === 'set'
+            && $close !== null && $close->kind === TokenKind::CloseParen;
     }
 
     private function advance(): Token
