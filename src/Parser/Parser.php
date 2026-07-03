@@ -590,8 +590,20 @@ final class Parser
         while ($this->peek()->kind === TokenKind::Keyword) {
             $kw = strtolower($this->peek()->lexeme);
             if ($kw === 'public' || $kw === 'protected' || $kw === 'private') {
-                $visibility = $kw;
                 $this->advance();
+                // PHP 8.4 asymmetric visibility: `public private(set)` scopes the
+                // WRITE visibility separately. The `(set)` suffix is parsed and
+                // (for now) not enforced — correct code never writes out of scope.
+                if ($this->check(TokenKind::OpenParen)) {
+                    $this->advance();
+                    $setTok = $this->advance();
+                    if (strtolower($setTok->lexeme) !== 'set') {
+                        throw $this->error("expected 'set' in visibility modifier");
+                    }
+                    $this->expect(TokenKind::CloseParen, "expected ')' after set-visibility");
+                } else {
+                    $visibility = $kw;
+                }
                 continue;
             }
             if ($kw === 'static')   { $static   = true; $this->advance(); continue; }
@@ -780,8 +792,20 @@ final class Parser
         while ($this->peek()->kind === TokenKind::Keyword) {
             $kw = strtolower($this->peek()->lexeme);
             if ($kw === 'public' || $kw === 'protected' || $kw === 'private') {
-                $promoted = $kw;
                 $this->advance();
+                // Asymmetric visibility on a promoted param: `public private(set)`.
+                // The `(set)` write-scope is parsed and (for now) not enforced.
+                if ($this->check(TokenKind::OpenParen)) {
+                    $this->advance();
+                    $setTok = $this->advance();
+                    if (strtolower($setTok->lexeme) !== 'set') {
+                        throw $this->error("expected 'set' in visibility modifier");
+                    }
+                    $this->expect(TokenKind::CloseParen, "expected ')' after set-visibility");
+                    if ($promoted === '') { $promoted = $kw; }
+                } else {
+                    $promoted = $kw;
+                }
                 continue;
             }
             if ($kw === 'readonly') {
