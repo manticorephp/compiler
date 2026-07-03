@@ -499,6 +499,7 @@ final class Parser
         $consts = [];
         $cases = [];
         $uses = [];
+        $traitAdaptations = [];
 
         while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
             // `$vec[$i] ?? null` doesn't shield against OOB reads on
@@ -523,7 +524,12 @@ final class Parser
                 while ($this->match(TokenKind::Comma)) {
                     $uses[] = $this->parseClassName();
                 }
-                $this->expect(TokenKind::Semicolon, "expected ';' after `use` in class body");
+                // `use A, B { A::m insteadof B; m as x; }` conflict resolution.
+                if ($this->check(TokenKind::OpenBrace)) {
+                    foreach ($this->parseTraitAdaptations() as $a) { $traitAdaptations[] = $a; }
+                } else {
+                    $this->expect(TokenKind::Semicolon, "expected ';' after `use` in class body");
+                }
                 continue;
             }
 
@@ -574,7 +580,51 @@ final class Parser
             $enumBacking,
             $span,
             $uses,
+            $traitAdaptations,
         );
+    }
+
+    /**
+     * Parse a trait conflict-resolution block: `{ A::m insteadof B, C; m as x;
+     * m as protected; A::m as protected y; }`.
+     *
+     * @return \Parser\Ast\TraitAdaptation[]
+     */
+    private function parseTraitAdaptations(): array
+    {
+        $this->expect(TokenKind::OpenBrace, "expected '{' for trait adaptations");
+        $out = [];
+        while (!$this->check(TokenKind::CloseBrace)) {
+            $first = $this->parseClassName();
+            $trait = '';
+            $method = $first;
+            if ($this->match(TokenKind::DoubleColon)) {
+                $trait = $first;
+                $method = $this->advance()->lexeme;
+            }
+            if ($this->checkKeyword('insteadof')) {
+                $this->advance();
+                $exclude = [$this->parseClassName()];
+                while ($this->match(TokenKind::Comma)) { $exclude[] = $this->parseClassName(); }
+                $out[] = new \Parser\Ast\TraitAdaptation('insteadof', $trait, $method, $exclude, '', '');
+            } elseif ($this->checkKeyword('as')) {
+                $this->advance();
+                $visibility = '';
+                if ($this->checkKeyword('public') || $this->checkKeyword('protected') || $this->checkKeyword('private')) {
+                    $visibility = \strtolower($this->advance()->lexeme);
+                }
+                $alias = '';
+                if (!$this->check(TokenKind::Semicolon)) {
+                    $alias = $this->advance()->lexeme;
+                }
+                $out[] = new \Parser\Ast\TraitAdaptation('as', $trait, $method, [], $visibility, $alias);
+            } else {
+                throw $this->error("expected 'insteadof' or 'as' in trait adaptation");
+            }
+            $this->expect(TokenKind::Semicolon, "expected ';' after trait adaptation");
+        }
+        $this->expect(TokenKind::CloseBrace, "expected '}' to close trait adaptations");
+        return $out;
     }
 
     /**

@@ -40,5 +40,12 @@ final class ClassDecl
         public readonly ?string $enumBackingType,
         public readonly Span $span,
         public readonly array $uses = [],
+        /**
+         * Trait `use A, B { … }` conflict-resolution adaptations. The `@var`
+         * element type is REQUIRED: without it the bare-`array` element erases,
+         * so a lowering read of `$a->kind` lands on a wrong offset (garbage).
+         * @var TraitAdaptation[]
+         */
+        public readonly array $traitAdaptations = [],
     ) {}
 }

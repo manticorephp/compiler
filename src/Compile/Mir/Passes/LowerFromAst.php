@@ -755,6 +755,44 @@ final class LowerFromAst implements Pass
         return $decl->name;
     }
 
+    /**
+     * `insteadof` losers as a flat set keyed `<trait>::<method>` (a flat map,
+     * NOT a nested array). `as` aliases are read off the TraitAdaptation objects
+     * at the call sites. Relies on ClassDecl::$traitAdaptations being typed
+     * `TraitAdaptation[]` so the element field reads land on the right offsets.
+     *
+     * @return array<string,bool>
+     */
+    private function traitExclusions(\Parser\Ast\ClassDecl $decl): array
+    {
+        $excluded = [];
+        foreach ($decl->traitAdaptations as $a) {
+            if ($a->kind !== 'insteadof') { continue; }
+            foreach ($a->exclude as $ex) {
+                $excluded[\ltrim($ex, '\\') . '::' . $a->method] = true;
+            }
+        }
+        return $excluded;
+    }
+
+    /**
+     * Find a trait method for an `as` alias: `$trait` names the source trait
+     * (or '' to search every used trait). Returns the MethodDecl or null.
+     */
+    private function findTraitMethod(\Parser\Ast\ClassDecl $decl, string $trait, string $method): ?\Parser\Ast\MethodDecl
+    {
+        foreach ($decl->uses as $traitName) {
+            $tn = \ltrim($traitName, '\\');
+            if ($trait !== '' && $tn !== $trait) { continue; }
+            $td = $this->traitTable[$tn] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->methods as $tm) {
+                if ($tm->name === $method) { return $tm; }
+            }
+        }
+        return null;
+    }
+
     private function buildClassDef(\Parser\Ast\ClassDecl $decl, int $classId): ClassDef
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
@@ -862,13 +900,19 @@ final class LowerFromAst implements Pass
         }
         // Mixed-in trait methods count as the class's own (for dispatch
         // + ctor resolution); the class's own method wins on conflict.
+        // `use … { A::m insteadof B; }` excludes the loser; `m as x;` adds an alias.
+        $excluded = $this->traitExclusions($decl);
         foreach ($decl->uses as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
             foreach ($td->methods as $tm) {
+                if (isset($excluded[$tn . '::' . $tm->name])) { continue; }
                 if (!isset($methodNames[$tm->name])) { $methodNames[$tm->name] = true; }
             }
+        }
+        foreach ($decl->traitAdaptations as $a) {
+            if ($a->kind === 'as' && $a->alias !== '') { $methodNames[$a->alias] = true; }
         }
         // A class with defaulted properties but no user ctor gets a
         // synthesised one (see lowerClassMethods) — flag it so NewObj
@@ -1062,13 +1106,27 @@ final class LowerFromAst implements Pass
         }
         $ownNames = [];
         foreach ($decl->methods as $m) { $ownNames[$m->name] = true; }
+        $excluded = $this->traitExclusions($decl);
         foreach ($decl->uses as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
             foreach ($td->methods as $tm) {
+                if (isset($excluded[$tn . '::' . $tm->name])) { continue; }
                 if (!isset($ownNames[$tm->name])) { $methods[] = $tm; }
             }
+        }
+        // `m as alias` / `A::m as alias`: emit a renamed copy of the source
+        // trait method (a visibility change without an alias is not enforced).
+        foreach ($decl->traitAdaptations as $a) {
+            if ($a->kind !== 'as' || $a->alias === '') { continue; }
+            $src = $this->findTraitMethod($decl, \ltrim($a->trait, '\\'), $a->method);
+            if ($src === null || isset($ownNames[$a->alias])) { continue; }
+            $methods[] = new \Parser\Ast\MethodDecl(
+                $a->alias, $src->visibility, $src->isStatic, $src->isFinal, $src->isAbstract,
+                $src->params, $src->returnType, $src->body, $src->attributes, $src->span,
+                $src->returnsByRef, $src->docComment,
+            );
         }
         $sawCtor = false;
         foreach ($methods as $m) {
