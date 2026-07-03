@@ -2193,6 +2193,16 @@ final class InferTypes implements Pass
         } elseif ($lt->kind === Type::KIND_UNKNOWN
             && $rt->kind !== Type::KIND_NULL && $rt->kind !== Type::KIND_UNKNOWN) {
             $node->type = $rt;
+        } elseif ($lt->kind !== $rt->kind
+            && ($this->isValueKind($lt) || $lt->kind === Type::KIND_CELL)
+            && ($this->isValueKind($rt) || $rt->kind === Type::KIND_CELL)) {
+            // Arms carry DIFFERENT concrete reprs (e.g. an int array element
+            // `?? "default"` string, or a chained `?? (… ?? …)` cell): the result
+            // rides as a tagged cell so a consumer (echo / var_dump) dispatches on
+            // the arm actually taken. Without this a chosen string fallback's
+            // pointer renders as an int (the missing-key `??` garbage) — the
+            // array-access emit path already boxes both arms for a cell node.
+            $node->type = $this->unifyToCell($lt, $rt);
         } else {
             $node->type = $lt;
         }
