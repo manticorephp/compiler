@@ -3138,6 +3138,11 @@ final class LowerFromAst implements Pass
      */
     private function lowerNullCoalesce(\Parser\Ast\NullCoalesce $e): Node
     {
+        // NOTE: `$a->b->c ?? $d` should suppress a null-deref of the `$a->b`
+        // intermediate (PHP treats it as null → the default). Lowering the left
+        // as a null-safe chain works for user code but REGRESSED the self-host
+        // (the compiler's own `??` chains over erased types crash Stage-2 emit),
+        // so it stays a bare read for now — use `$a->b?->c ?? $d` explicitly.
         return new NullCoalesce_(
             $this->lowerExpr($e->left),
             $this->lowerExpr($e->right),
