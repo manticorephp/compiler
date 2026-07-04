@@ -1,0 +1,8 @@
+fail / 7 / line 5
+frames=4
+  inner
+  middle
+  Svc->run
+  Svc::boot
+second=1
+bt=2: d0,d1

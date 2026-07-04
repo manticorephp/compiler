@@ -1238,6 +1238,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     $useArrayFns = false;
     $useCli = false;
     $usePrintR = false;
+    $useBacktrace = false;
     // Detect a REAL `var_dump(` call, not the mere identifier: the compiler
     // IMPLEMENTS var_dump (its source is full of `__mir_var_dump(` and the
     // `var_dump` dispatch string), so a substring test was always-true for the
@@ -1271,6 +1272,15 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
             || \strpos($source, 'argc') !== false
             || \strpos($source, 'getopt(') !== false) { $useCli = true; }
         if (\strpos($source, 'print_r(') !== false) { $usePrintR = true; }
+        // Stack traces: only instrument calls when the program actually queries
+        // a trace. Match the CALL forms (`->getTrace(` etc.) not the method
+        // definitions, and BUILD the needles (not literal) so this gate source
+        // and the prelude `function getTrace(...)` definitions do not trip a
+        // self-build (the var_dump-needle problem above).
+        if (\strpos($source, '->get' . 'Trace') !== false
+            || \strpos($source, 'debug_' . 'backtrace(') !== false
+            || \strpos($source, '->get' . 'Line(') !== false
+            || \strpos($source, '->get' . 'File(') !== false) { $useBacktrace = true; }
     }
     $program = new \Parser\Ast\Program($stmts, '', $aliases);
     // The pipeline throws RuntimeException on an unsupported construct.
@@ -1279,6 +1289,8 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     // path longjmps on an unset handler jmp_buf → PAC fault → SIGSEGV).
     try {
         $module = new \Compile\Mir\Module();
+        $module->needsBacktrace = $useBacktrace;
+        $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
         $lower->includePrintR = $usePrintR;

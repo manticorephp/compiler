@@ -504,32 +504,50 @@ final class LowerFromAst implements Pass
      * `message` + `getMessage()` (no is_string/tagged-value deps).
      * @return \Parser\Ast\Stmt[]
      */
+    /**
+     * A Throwable class body (Exception / Error). Carries the message/code/
+     * previous plus the thrown-location (`line`/`file`) and the captured call
+     * stack (`traceNames`/`traceLines`, filled at `new` by EmitLlvm when the
+     * program queries a trace). The trace getters read those; the trace-usage
+     * gate matches the arrow-call form of these getters, so their bare
+     * `function get...(` definitions here do not trip a self-build.
+     */
+    private function throwableClassSrc(string $name, string $iface): string
+    {
+        return "class " . $name . " implements " . $iface . " {\n"
+            . "  public string \$message;\n"
+            . "  public int \$code;\n"
+            . "  public ?Throwable \$previous;\n"
+            . "  public int \$line = 0;\n"
+            . "  public string \$file = \"\";\n"
+            . "  /** @var string[] */ public array \$traceNames = [];\n"
+            . "  /** @var int[] */ public array \$traceLines = [];\n"
+            . "  public function __construct(string \$message = \"\", int \$code = 0, ?Throwable \$previous = null) {\n"
+            . "    \$this->message = \$message; \$this->code = \$code; \$this->previous = \$previous;\n"
+            . "  }\n"
+            . "  public function getMessage(): string { return \$this->message; }\n"
+            . "  public function getCode(): int { return \$this->code; }\n"
+            . "  public function getPrevious(): ?Throwable { return \$this->previous; }\n"
+            . "  public function getLine(): int { return \$this->line; }\n"
+            . "  public function getFile(): string { return \$this->file; }\n"
+            . "  public function getTrace(): array { return \$this->traceNames; }\n"
+            . "  public function getTraceAsString(): string {\n"
+            . "    \$s = \"\"; \$n = \\count(\$this->traceNames); \$i = 0;\n"
+            . "    while (\$i < \$n) {\n"
+            . "      \$s = \$s . \"#\" . \$i . \" \" . \$this->file . \"(\" . \$this->traceLines[\$i] . \"): \" . \$this->traceNames[\$i] . \"()\\n\";\n"
+            . "      \$i = \$i + 1;\n"
+            . "    }\n"
+            . "    return \$s . \"#\" . \$n . \" {main}\";\n"
+            . "  }\n"
+            . "}\n";
+    }
+
     private function preludeStatements(): array
     {
         $src = "<?php\n"
             . "interface Throwable {}\n"
-            . "class Exception implements Throwable {\n"
-            . "  public string \$message;\n"
-            . "  public int \$code;\n"
-            . "  public ?Throwable \$previous;\n"
-            . "  public function __construct(string \$message = \"\", int \$code = 0, ?Throwable \$previous = null) {\n"
-            . "    \$this->message = \$message; \$this->code = \$code; \$this->previous = \$previous;\n"
-            . "  }\n"
-            . "  public function getMessage(): string { return \$this->message; }\n"
-            . "  public function getCode(): int { return \$this->code; }\n"
-            . "  public function getPrevious(): ?Throwable { return \$this->previous; }\n"
-            . "}\n"
-            . "class Error implements Throwable {\n"
-            . "  public string \$message;\n"
-            . "  public int \$code;\n"
-            . "  public ?Throwable \$previous;\n"
-            . "  public function __construct(string \$message = \"\", int \$code = 0, ?Throwable \$previous = null) {\n"
-            . "    \$this->message = \$message; \$this->code = \$code; \$this->previous = \$previous;\n"
-            . "  }\n"
-            . "  public function getMessage(): string { return \$this->message; }\n"
-            . "  public function getCode(): int { return \$this->code; }\n"
-            . "  public function getPrevious(): ?Throwable { return \$this->previous; }\n"
-            . "}\n"
+            . $this->throwableClassSrc("Exception", "Throwable")
+            . $this->throwableClassSrc("Error", "Throwable")
             . "class RuntimeException extends Exception {}\n"
             . "class LogicException extends Exception {}\n"
             . "class InvalidArgumentException extends LogicException {}\n"

@@ -134,8 +134,50 @@ trait EmitLlvmObjects
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
         }
+        // Capture the thrown location + call stack into a Throwable at `new`
+        // (PHP records these at construction), when the program queries a trace.
+        if ($this->needsBacktrace && $cd !== null
+            && $this->classImplements($no->class, 'Throwable')) {
+            $out .= $this->emitThrowableCapture($obj, $no);
+        }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * Store the current call stack (@__mir_bt_name / @__mir_bt_line, innermost
+     * first) into a freshly-constructed Throwable's traceNames / traceLines, and
+     * the `new` site's line/file into line/file. `$no` is the NewObj.
+     */
+    private function emitThrowableCapture(string $obj, \Compile\Mir\NewObj $no): string
+    {
+        $cd = $this->classes[$no->class];
+        $lineOff = $cd->propertyOffset('line');
+        $fileOff = $cd->propertyOffset('file');
+        $nmOff = $cd->propertyOffset('traceNames');
+        $lnOff = $cd->propertyOffset('traceLines');
+        $out = '';
+        // line = the `new` site line; file = the source path.
+        $lp = $this->allocSsa();
+        $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lineOff . "\n";
+        $out .= '  store i64 ' . (string)$no->line . ', ptr ' . $lp . "\n";
+        $fp = $this->allocSsa();
+        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fileOff . "\n";
+        $fstr = $this->allocSsa();
+        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->internString($this->sourceFile)) . " to i64\n";
+        $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
+        // Two packed vecs of the active frames, innermost first.
+        $out .= $this->emitBtVec('@__mir_bt_name');
+        $namesVec = $this->lastValue;
+        $np = $this->allocSsa();
+        $out .= '  ' . $np . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$nmOff . "\n";
+        $out .= '  store i64 ' . $namesVec . ', ptr ' . $np . "\n";
+        $out .= $this->emitBtVec('@__mir_bt_line');
+        $linesVec = $this->lastValue;
+        $lnp = $this->allocSsa();
+        $out .= '  ' . $lnp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lnOff . "\n";
+        $out .= '  store i64 ' . $linesVec . ', ptr ' . $lnp . "\n";
         return $out;
     }
 
@@ -1193,9 +1235,15 @@ trait EmitLlvmObjects
         // arrive short — never leave a trailing optional unset.
         $out .= $this->emitDefaultArgPad($cls . '__' . $sc->method, $ai, !$first);
         $argList .= $this->lastPadArgs;
+        $btName = '';
+        if ($this->needsBacktrace) {
+            $btName = $sc->class . '::' . $sc->method;
+            $out .= $this->btPush($btName, $n->line);
+        }
         $reg = $this->allocSsa();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
+        if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -1534,6 +1582,12 @@ trait EmitLlvmObjects
         if (!isset($this->fnParamTypes[$fallbackFull])) {
             $fallbackFull = $distinct[0] ?? $fallbackFull;
         }
+        $btName = '';
+        if ($this->needsBacktrace) {
+            $rcls = $mc->object->type->class ?? '';
+            $btName = $rcls !== '' ? $rcls . '->' . $mc->method : $mc->method;
+            $out .= $this->btPush($btName, $n->line);
+        }
         if (\count($distinct) <= 1) {
             $reg = $this->allocSsa();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($distinct[0] ?? $fallbackFull)
@@ -1542,6 +1596,7 @@ trait EmitLlvmObjects
             $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method);
             $reg = $this->vdResult;
         }
+        if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';

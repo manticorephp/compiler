@@ -110,6 +110,7 @@ trait EmitLlvmBuiltins
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
         if ($name === 'array_keys')                   { return $this->biArrayKeys($args); }
+        if ($name === 'debug_backtrace')              { return $this->biDebugBacktrace(); }
         if ($name === 'array_first' && \count($args) === 1)     { return $this->biArrayEndpoint($args, false, false); }
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
@@ -365,6 +366,18 @@ trait EmitLlvmBuiltins
         $r = $this->allocSsa();
         $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $dst . ")\n";
         return $this->finishI64($out, $r);
+    }
+
+    /**
+     * The debug-backtrace builtin — a packed list of the active call frames'
+     * NAMES, innermost first (from the runtime call-stack {@see needsBacktrace}).
+     * V1 returns vec[string] of names (not PHP's assoc frames); count() and
+     * `[0]` work. Reads @__mir_bt_depth / @__mir_bt_name filled by btPush.
+     */
+    private function biDebugBacktrace(): string
+    {
+        $out = $this->emitBtVec('@__mir_bt_name');
+        return $this->finishI64($out, $this->lastValue);
     }
 
     /** @param Node[] $args  NaN-boxing helper call: i64 -> i64. */

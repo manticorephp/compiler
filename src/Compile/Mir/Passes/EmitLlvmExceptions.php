@@ -80,6 +80,16 @@ trait EmitLlvmExceptions
         return $out;
     }
 
+    /** Restore the backtrace depth saved at try entry (a caught throw skipped
+     *  the per-call bt_pop()s). No-op when traces are off. */
+    private function btRestore(string $btSlot): string
+    {
+        if ($btSlot === '') { return ''; }
+        $b = $this->allocSsa();
+        return '  ' . $b . ' = load i64, ptr ' . $btSlot . "\n"
+             . '  store i64 ' . $b . ", ptr @__mir_bt_depth\n";
+    }
+
     private function emitTryCatch(Node $n): string
     {
         $this->needsExceptions = true;
@@ -90,6 +100,17 @@ trait EmitLlvmExceptions
         $joinLbl = $hasFinally ? $finLbl : $endLbl;
 
         $out = '';
+        // Save the backtrace depth at try entry; a caught throw longjmps past
+        // the per-call bt_pop()s, so the catch restores it (else the stack keeps
+        // the unwound frames and later traces grow). alloca survives setjmp.
+        $btSlot = '';
+        if ($this->needsBacktrace) {
+            $btSlot = $this->allocSsa();
+            $out .= '  ' . $btSlot . " = alloca i64\n";
+            $bd = $this->allocSsa();
+            $out .= '  ' . $bd . " = load i64, ptr @__mir_bt_depth\n";
+            $out .= '  store i64 ' . $bd . ', ptr ' . $btSlot . "\n";
+        }
         $pendFlag = '';
         $pendVal = '';
         if ($hasFinally) {
@@ -173,6 +194,7 @@ trait EmitLlvmExceptions
             $out .= $catchLbl . ":\n";
             $out .= $this->tryReloadDepth($tc->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
+            $out .= $this->btRestore($btSlot);
             $clt = $this->allocSsa();
             $out .= '  ' . $clt . " = load ptr, ptr @__mir_thrown\n";
             $out .= '  store ptr ' . $clt . ', ptr ' . $pendVal . "\n";
@@ -185,6 +207,7 @@ trait EmitLlvmExceptions
             $out .= $catchLbl . ":\n";
             $out .= $this->tryReloadDepth($tc->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
+            $out .= $this->btRestore($btSlot);
             $thrown = $this->allocSsa();
             $out .= '  ' . $thrown . " = load ptr, ptr @__mir_thrown\n";
             $out .= $this->emitLoadClassId($thrown);

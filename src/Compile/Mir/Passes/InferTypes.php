@@ -1846,6 +1846,9 @@ final class InferTypes implements Pass
         // {@see EmitLlvmBuiltins::biArrayKeys}); uniform cell elements work for
         // both a plain and a cell/`mixed` source.
         if ($n === 'array_keys') { return Type::vec(Type::cell()); }
+        // debug_backtrace → a packed list of frame function-name strings
+        // (codegen builtin {@see EmitLlvmBuiltins::biDebugBacktrace}).
+        if ($n === 'debug_backtrace') { return Type::vec(Type::string_()); }
         // array_first/array_last (8.5) + array_key_first/array_key_last — the
         // first/last value or key as a tagged cell, null on empty (codegen
         // builtin {@see EmitLlvmBuiltins::biArrayEndpoint}). A cell result lets

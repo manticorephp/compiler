@@ -49,6 +49,16 @@ final class Module
      */
     public array $globalVarNames = [];
 
+    /** The program asks for a stack trace (an exception trace query or a
+     *  backtrace call): emit the runtime call-stack and instrument every user
+     *  call with push/pop. Off by default so a program that never asks pays zero
+     *  per-call cost. Gated in Main on the source text (kept free of the literal
+     *  needles here so a self-build does not trip its own gate). */
+    public bool $needsBacktrace = false;
+
+    /** Source file path, for exception file() / trace frames. */
+    public string $sourceFile = '';
+
     /** Register a global cell once (idempotent by name). */
     public function addGlobalCell(string $name, Node $default): void
     {

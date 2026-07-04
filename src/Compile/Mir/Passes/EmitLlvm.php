@@ -174,6 +174,15 @@ final class EmitLlvm
     /** Name of the function currently being emitted (property-hook self-ref guard). */
     private string $currentFnName = '';
 
+    /** Emit the runtime call-stack + instrument user calls (backtrace support). */
+    private bool $needsBacktrace = false;
+
+    /** Program source path (exception file() / trace frames). */
+    private string $sourceFile = '';
+
+    /** Display name of the function currently being emitted, for a trace frame. */
+    private string $currentFnDisplay = '';
+
     /** SSA ptr to the frame's `retval` word (return value for getReturn()). */
     private string $genRetvalPtr = '';
 
@@ -348,6 +357,8 @@ final class EmitLlvm
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
         $this->globalVarNames = $module->globalVarNames;
+        $this->needsBacktrace = $module->needsBacktrace;
+        $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         $this->fnRefParams = [];
         $this->fnTaggedParams = [];
@@ -484,6 +495,35 @@ final class EmitLlvm
         // stores `[]` as a null ptr) is redirected here so a foreach length
         // load reads 0 instead of faulting.
         $out .= "@__mir_zero_word = internal global i64 0\n";
+        if ($this->needsBacktrace) {
+            // Runtime call-stack for backtraces: parallel name/line rings + depth.
+            // linkonce_odr so user.o + stdlib.o share one stack.
+            $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
+            $out .= "@__mir_bt_line = linkonce_odr global [4096 x i64] zeroinitializer\n";
+            $out .= "@__mir_bt_depth = linkonce_odr global i64 0\n";
+            $out .= "define void @__mir_bt_push(ptr %name, i64 %line) {\n";
+            $out .= "entry:\n";
+            $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
+            $out .= "  %ok = icmp slt i64 %d, 4096\n";
+            $out .= "  br i1 %ok, label %st, label %inc\n";
+            $out .= "st:\n";
+            $out .= "  %ni = ptrtoint ptr %name to i64\n";
+            $out .= "  %np = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %d\n";
+            $out .= "  store i64 %ni, ptr %np\n";
+            $out .= "  %lp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %d\n";
+            $out .= "  store i64 %line, ptr %lp\n";
+            $out .= "  br label %inc\n";
+            $out .= "inc:\n";
+            $out .= "  %d1 = add i64 %d, 1\n";
+            $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
+            $out .= "  ret void\n}\n";
+            $out .= "define void @__mir_bt_pop() {\n";
+            $out .= "entry:\n";
+            $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
+            $out .= "  %d1 = sub i64 %d, 1\n";
+            $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
+            $out .= "  ret void\n}\n";
+        }
         if ($this->needsExceptions) {
             // setjmp/longjmp exception runtime. 16 nested-try slots ×
             // 256B jmp_buf (macOS arm64 needs 192). @thrown holds the
@@ -6321,6 +6361,73 @@ final class EmitLlvm
         return $out;
     }
 
+    /** Push a trace frame (`display` name + call-site `line`) before a user call;
+     *  no-op unless the program queries traces. */
+    private function btPush(string $display, int $line): string
+    {
+        if (!$this->needsBacktrace) { return ''; }
+        return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->internString($display))
+             . ', i64 ' . (string)$line . ")\n";
+    }
+
+    /** Pop the frame pushed by {@see btPush} after the call returns. */
+    private function btPop(): string
+    {
+        return $this->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
+    }
+
+    /**
+     * Build a packed vec of the active call frames from `$global`
+     * (@__mir_bt_name or @__mir_bt_line), innermost first (index depth-1 → 0);
+     * lastValue ← the vec ptr as i64. Shared by the backtrace builtin and the
+     * Throwable trace capture.
+     */
+    private function emitBtVec(string $global): string
+    {
+        $dep = $this->allocSsa();
+        $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
+        $slot = $this->allocSsa();
+        $out .= '  ' . $slot . " = alloca ptr\n";
+        $nv = $this->allocSsa();
+        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $dep . ")\n";
+        $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
+        $iSlot = $this->allocSsa();
+        $out .= '  ' . $iSlot . " = alloca i64\n";
+        $i0 = $this->allocSsa();
+        $out .= '  ' . $i0 . ' = sub i64 ' . $dep . ", 1\n";
+        $out .= '  store i64 ' . $i0 . ', ptr ' . $iSlot . "\n";
+        $cond = $this->allocLabel('bt.cond');
+        $body = $this->allocLabel('bt.body');
+        $end  = $this->allocLabel('bt.end');
+        $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
+        $i = $this->allocSsa();
+        $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
+        $c = $this->allocSsa();
+        $out .= '  ' . $c . ' = icmp sge i64 ' . $i . ", 0\n";
+        $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
+        $out .= $body . ":\n";
+        $ep = $this->allocSsa();
+        $out .= '  ' . $ep . ' = getelementptr inbounds [4096 x i64], ptr ' . $global . ', i64 0, i64 ' . $i . "\n";
+        $ev = $this->allocSsa();
+        $out .= '  ' . $ev . ' = load i64, ptr ' . $ep . "\n";
+        $cur = $this->allocSsa();
+        $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
+        $nx = $this->allocSsa();
+        $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $ev . ")\n";
+        $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
+        $i2 = $this->allocSsa();
+        $out .= '  ' . $i2 . ' = sub i64 ' . $i . ", 1\n";
+        $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
+        $out .= '  br label %' . $cond . "\n" . $end . ":\n";
+        $dst = $this->allocSsa();
+        $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = ptrtoint ptr ' . $dst . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitByRefArg(Node $a): string
     {
         $name = $this->castLoadLocal($a)->name;
@@ -6504,8 +6611,17 @@ final class EmitLlvm
             $this->rtExterns[$mangled] =
                 'declare i64 @manticore_' . $mangled . '(' . $ptypes . ')';
         }
+        // Backtrace frame around a user call (not an rt_ FFI primitive).
+        $btName = '';
+        if ($this->needsBacktrace && \substr($mangled, 0, 13) !== 'manticore_rt_') {
+            $btName = $c->function;
+            $bs = \strrpos($btName, '\\');
+            if ($bs !== false) { $btName = \substr($btName, $bs + 1); }
+            $out .= $this->btPush($btName, $n->line);
+        }
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
               . '(' . $argList . ")\n";
+        if ($btName !== '') { $out .= $this->btPop(); }
         // Free fresh string-temp args now the callee has read (and retained
         // if kept) them. Skipped when the call returns one of them by ref.
         if (!($this->fnReturnsByRef[$c->function] ?? false)) {
