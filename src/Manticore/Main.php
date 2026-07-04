@@ -1297,6 +1297,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
+        $lower->includeBacktrace = $useBacktrace;
         // Prefer the readable on-disk prelude (`prelude/spl_arrays.php`); the
         // read goes through the libc fopen binding (a throwing stub under the
         // Zend cold-seed), so guard — on failure LowerFromAst uses its embedded

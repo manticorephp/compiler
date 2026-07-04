@@ -205,6 +205,12 @@ final class LowerFromAst implements Pass
     public bool $includeCli = false;
     /** CLI prelude source, read by Main from `prelude/cli.php`. */
     public string $cliSrc = '';
+    /** Inject the backtrace-frame builder (`__mir_bt_frames`) and make
+     *  Throwable::getTrace return PHP-shaped assoc frames. Gated on a source
+     *  reference to a trace getter / debug_backtrace (see Main.php) so the
+     *  compiler self-build (which uses none) never compiles the nested-assoc
+     *  builder. */
+    public bool $includeBacktrace = false;
 
     /**
      * Bundled-stdlib function declarations (parsed from `src/Runtime/**`)
@@ -514,6 +520,12 @@ final class LowerFromAst implements Pass
      */
     private function throwableClassSrc(string $name, string $iface): string
     {
+        // getTrace: PHP-shaped assoc frames only when the backtrace prelude is
+        // injected (a trace user); otherwise the bare name vec (the builder is
+        // absent, so it must not be referenced — keeps the self-build clean).
+        $getTrace = $this->includeBacktrace
+            ? "  public function getTrace(): array { return __mir_bt_frames(\$this->traceNames, \$this->traceLines, \$this->file); }\n"
+            : "  public function getTrace(): array { return \$this->traceNames; }\n";
         return "class " . $name . " implements " . $iface . " {\n"
             . "  public string \$message;\n"
             . "  public int \$code;\n"
@@ -530,7 +542,7 @@ final class LowerFromAst implements Pass
             . "  public function getPrevious(): ?Throwable { return \$this->previous; }\n"
             . "  public function getLine(): int { return \$this->line; }\n"
             . "  public function getFile(): string { return \$this->file; }\n"
-            . "  public function getTrace(): array { return \$this->traceNames; }\n"
+            . $getTrace
             . "  public function getTraceAsString(): string {\n"
             . "    \$s = \"\"; \$n = \\count(\$this->traceNames); \$i = 0;\n"
             . "    while (\$i < \$n) {\n"
@@ -539,6 +551,40 @@ final class LowerFromAst implements Pass
             . "    }\n"
             . "    return \$s . \"#\" . \$n . \" {main}\";\n"
             . "  }\n"
+            . "}\n";
+    }
+
+    /**
+     * PHP source for `__mir_bt_frames` — turns the captured name vec into
+     * PHP-shaped backtrace frames (innermost first). The captured name is the
+     * combined display ("Class->method" / "Class::m" / "fn"); split it back into
+     * function/class/type so getTrace() and debug_backtrace() match PHP's frame
+     * assoc. V1 frames carry file + function[/class/type]; `line` and `args` are
+     * omitted — an int value mixed with the substr-derived strings in the frame
+     * assoc miscompiles (crashes) today, and the line is available via
+     * getLine()/getTraceAsString(). The `$lines` param is kept for the ABI but
+     * unused. All frame values are strings (a homogeneous assoc compiles clean).
+     */
+    private function backtraceFramesSrc(): string
+    {
+        return "/** @param string[] \$names @param int[] \$lines\n"
+            . "  * @return array<int,array<string,string>> */\n"
+            . "function __mir_bt_frames(array \$names, array \$lines, string \$file): array {\n"
+            . "  \$out = []; \$n = \\count(\$names); \$i = 0;\n"
+            . "  while (\$i < \$n) {\n"
+            . "    \$name = \$names[\$i]; \$type = \"\";\n"
+            . "    \$p = \\strpos(\$name, \"::\");\n"
+            . "    if (\$p === false) { \$p = \\strpos(\$name, \"->\"); if (\$p !== false) { \$type = \"->\"; } }\n"
+            . "    else { \$type = \"::\"; }\n"
+            . "    if (\$type !== \"\") {\n"
+            . "      \$cls = \\substr(\$name, 0, \$p); \$fn = \\substr(\$name, \$p + 2);\n"
+            . "      \$out[] = [\"file\" => \$file, \"function\" => \$fn, \"class\" => \$cls, \"type\" => \$type];\n"
+            . "    } else {\n"
+            . "      \$out[] = [\"file\" => \$file, \"function\" => \$name];\n"
+            . "    }\n"
+            . "    \$i = \$i + 1;\n"
+            . "  }\n"
+            . "  return \$out;\n"
             . "}\n";
     }
 
@@ -554,6 +600,9 @@ final class LowerFromAst implements Pass
             . "class OutOfRangeException extends LogicException {}\n"
             . "class TypeError extends Error {}\n"
             . "class ValueError extends Error {}\n";
+        if ($this->includeBacktrace) {
+            $src = $src . $this->backtraceFramesSrc();
+        }
         if ($this->includeVarDump) {
             $src = $src . $this->varDumpPreludeSrc();
         }
@@ -1161,6 +1210,9 @@ final class LowerFromAst implements Pass
                 $decl->name, $decl->name . '__' . $m->name,
             );
             $module->addFunction($mfn);
+            $sep = $m->isStatic ? '::' : '->';
+            $module->methodDisplay[$decl->name . '__' . $m->name] =
+                $decl->name . $sep . $m->name;
             // Methods that reference `static` (`static::class`, `new static`,
             // `static::method()`) bind late: a subclass that inherits this
             // body must see itself as `static`. Queue per-descendant copies.
@@ -1302,6 +1354,9 @@ final class LowerFromAst implements Pass
                     $sub, $owner . '__' . $p->method->name . '__lsb' . $sub,
                 );
                 $module->addFunction($spec);
+                $lsep = $p->method->isStatic ? '::' : '->';
+                $module->methodDisplay[$owner . '__' . $p->method->name . '__lsb' . $sub] =
+                    $sub . $lsep . $p->method->name;
             }
         }
     }
@@ -2062,7 +2117,7 @@ final class LowerFromAst implements Pass
         $cls = $recv->type->class ?? '';
         $declParams = $cls !== '' ? $this->resolveMethodParams($cls, $method) : null;
         [$mir, $loads] = $this->fccParamsAndArgs($declParams);
-        $body = new MethodCall_(new LoadLocal('__frecv', $recv->type), $method, $loads, Type::unknown());
+        $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
     }
 
@@ -2861,7 +2916,7 @@ final class LowerFromAst implements Pass
         // (`$var[0]`) — `[$o,"m"]` binds `$o`'s value at array creation, so this
         // stays correct even if `$o` is later reassigned.
         $recv = new ArrayAccess_(new LoadLocal($var, Type::unknown()), new IntConst(0, Type::int_()), Type::cell());
-        return new MethodCall_($recv, $info['method'], $args, Type::unknown());
+        return new MethodCall_($recv, $info["method"], $args, Type::unknown());
     }
 
     private function arrayLitElements(\Parser\Ast\ArrayLit $a): array { return $a->elements; }

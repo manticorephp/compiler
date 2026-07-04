@@ -376,8 +376,20 @@ trait EmitLlvmBuiltins
      */
     private function biDebugBacktrace(): string
     {
+        // Build the raw name + line vecs (innermost first), then hand them to
+        // the prelude frame builder so the result matches getTrace()/PHP:
+        // a list of {file, line, function[, class, type]} assoc frames.
         $out = $this->emitBtVec('@__mir_bt_name');
-        return $this->finishI64($out, $this->lastValue);
+        $names = $this->lastValue;
+        $out .= $this->emitBtVec('@__mir_bt_line');
+        $lines = $this->lastValue;
+        $fp = $this->allocSsa();
+        $out .= '  ' . $fp . ' = ptrtoint ptr '
+              . $this->strLitId($this->internString($this->sourceFile)) . " to i64\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = call i64 @manticore___mir_bt_frames(i64 '
+              . $names . ', i64 ' . $lines . ', i64 ' . $fp . ")\n";
+        return $this->finishI64($out, $r);
     }
 
     /** @param Node[] $args  NaN-boxing helper call: i64 -> i64. */

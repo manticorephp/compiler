@@ -127,9 +127,15 @@ trait EmitLlvmObjects
             // Late static binding: `new C()` constructs with `static == C` even
             // when the ctor body is inherited — route to the C specialisation.
             $ctorTarget = $this->lsbTarget($ctorClass, '__construct', $no->class);
+            // Push a frame for the ctor call so __construct's entry btNameFix
+            // stamps its OWN (soon-popped) slot, not the caller's top frame.
+            // Popped before the throwable capture below, so — like PHP — the
+            // constructor never appears in the trace.
+            $out .= $this->btPush('__construct', $no->line);
             $cr = $this->allocSsa();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
+            $out .= $this->btPop();
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
@@ -1584,8 +1590,10 @@ trait EmitLlvmObjects
         }
         $btName = '';
         if ($this->needsBacktrace) {
-            $rcls = $mc->object->type->class ?? '';
-            $btName = $rcls !== '' ? $rcls . '->' . $mc->method : $mc->method;
+            // Push a bare method-name placeholder + the call-site line. The
+            // callee overwrites the name with "Class->method" at its entry
+            // (a stable receiver class isn't available here under the self-host).
+            $btName = $mc->method;
             $out .= $this->btPush($btName, $n->line);
         }
         if (\count($distinct) <= 1) {

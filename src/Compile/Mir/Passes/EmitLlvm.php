@@ -130,6 +130,15 @@ final class EmitLlvm
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
 
+    /** Method FunctionDef name → backtrace frame display ("Class->method" /
+     *  "Class::method"), from {@see \Compile\Mir\Module::$methodDisplay}. Used
+     *  at a method's entry to stamp the correct frame name (the call-site
+     *  receiver-class read drifts under the self-host).
+     *  @var array<string, string> — @var pins the string value type (a bare
+     *  `array` erases it: values read back as raw pointer ints). */
+    private array $methodDisplay = [];
+
+
     /** @var array<string, \Compile\Mir\EnumDef> */
     private array $enums = [];
 
@@ -351,6 +360,7 @@ final class EmitLlvm
         $this->stringPool = [];
         $this->classes = $module->classes;
         $this->enums = $module->enums;
+        $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
         $this->traitNames = $module->traitNames;
         $this->closureCaptures = $module->closureCaptures;
@@ -1848,9 +1858,40 @@ final class EmitLlvm
             $body .= '  store i64 ' . $bi . ', ptr ' . $this->slots[$bname] . "\n";
             $this->refLocals[$bname] = true;
         }
+        // Stamp the correct backtrace frame name for a method now that the
+        // callee identity is exact ($fn->name is stable — it drives the define
+        // header). The caller pushed a bare method-name placeholder because a
+        // stable receiver class isn't available at the call site under the
+        // self-host. Overwrites this frame's name slot (index depth-1).
+        if ($this->needsBacktrace && isset($this->methodDisplay[$fn->name])) {
+            $body .= $this->btNameFix($this->methodDisplay[$fn->name]);
+        }
         $body .= $this->emitNode($fn->body);
         $body .= "  ret i64 0\n";
         return $header . $body . "}\n\n";
+    }
+
+    /** Overwrite the top backtrace frame's name (index depth-1) with `$disp`,
+     *  guarded on depth>0. Emitted at a method's entry so the frame carries
+     *  the exact "Class->method" / "Class::method" the callee knows. */
+    private function btNameFix(string $disp): string
+    {
+        $d = $this->allocSsa();
+        $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
+        $c = $this->allocSsa();
+        $out .= '  ' . $c . ' = icmp sgt i64 ' . $d . ", 0\n";
+        $set = $this->allocLabel('btfix.set');
+        $end = $this->allocLabel('btfix.end');
+        $out .= '  br i1 ' . $c . ', label %' . $set . ', label %' . $end . "\n" . $set . ":\n";
+        $i = $this->allocSsa();
+        $out .= '  ' . $i . ' = sub i64 ' . $d . ", 1\n";
+        $ep = $this->allocSsa();
+        $out .= '  ' . $ep . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 ' . $i . "\n";
+        $sv = $this->allocSsa();
+        $out .= '  ' . $sv . ' = ptrtoint ptr ' . $this->strLitId($this->internString($disp)) . " to i64\n";
+        $out .= '  store i64 ' . $sv . ', ptr ' . $ep . "\n";
+        $out .= '  br label %' . $end . "\n" . $end . ":\n";
+        return $out;
     }
 
     /**

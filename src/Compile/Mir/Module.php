@@ -59,6 +59,14 @@ final class Module
     /** Source file path, for exception file() / trace frames. */
     public string $sourceFile = '';
 
+    /** Method FunctionDef name ("Class__method") → backtrace frame display
+     *  ("Class->method" / "Class::method"). Built at lowering (stable string
+     *  ops); EmitLlvm stamps the correct name at a method's entry, because the
+     *  call-site receiver-class read drifts under the self-host.
+     *  @var array<string, string> — the @var pins the string value type; a
+     *  bare `array` erases it (values read back as raw pointer ints). */
+    public array $methodDisplay = [];
+
     /** Register a global cell once (idempotent by name). */
     public function addGlobalCell(string $name, Node $default): void
     {

@@ -35,10 +35,7 @@ fi
 # NEW findings. Keep each with a one-line reason.
 #   assoc_missing.php — typed-int assoc read of a missing key yields 0, not
 #     null/"" (a typed-slot i64 can't carry null without boxing).
-#   exception_backtrace.php — getTrace() is a V1 list of frame name strings, not
-#     PHP's assoc frames; getTraceAsString keeps the path as passed (php realpaths
-#     it, adding the macOS /private prefix). Both are intentional divergences.
-is_known_divergence() { case "$1" in assoc_missing.php|exception_backtrace.php) return 0;; esac; return 1; }
+is_known_divergence() { case "$1" in assoc_missing.php) return 0;; esac; return 1; }
 
 match=0 diff=0 compile=0 phpskip=0
 declare -a DIFFS COMPILES
