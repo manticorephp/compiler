@@ -3242,7 +3242,7 @@ final class LowerFromAst implements Pass
         $store = new StoreLocal($tmp, $obj, $obj->type);
         $cond = new Cmp($store, new NullConst(Type::null_()), '===');
         $prop = new PropertyAccess_(new LoadLocal($tmp, $obj->type), $expr->property, Type::unknown());
-        return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown());
+        return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown(), true);
     }
 
     private function lowerMethodCall(\Parser\Ast\MethodCallExpr $expr): Node

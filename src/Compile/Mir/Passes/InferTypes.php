@@ -2251,6 +2251,22 @@ final class InferTypes implements Pass
         return Type::cell();
     }
 
+    /** Pair a concrete branch type with a NULL sibling: a tagged cell so null is
+     *  representable and renders as NULL. A numeric scalar → numeric cell (arith
+     *  still promotes); a pointer/other value → a plain cell. null / unknown /
+     *  an already-cell type are returned unchanged. */
+    private function nullableOf(Type $t): Type
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL) {
+            return Type::numericCell();
+        }
+        if ($k === Type::KIND_STRING || $k === Type::KIND_OBJ || $k === Type::KIND_ARRAY) {
+            return Type::cell();
+        }
+        return $t;
+    }
+
     private function inferTernary(Ternary $node): Type
     {
         $this->inferNode($node->cond);
@@ -2261,11 +2277,16 @@ final class InferTypes implements Pass
         $this->localTypes = $saved;
         $e = $this->inferNode($node->else_);
         $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
-        // A null branch carries no value type — let the other branch drive
-        // the result repr (`$x?->m()` desugars to `… ? null : $x->m()`, and
-        // the non-null type is what a concat / echo must render).
-        if ($t->kind === Type::KIND_NULL)     { $node->type = $e; }
-        elseif ($e->kind === Type::KIND_NULL) { $node->type = $t; }
+        // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value
+        // branch as a NULLABLE cell so the null case renders as NULL (not the
+        // value type's zero); emitTernary boxes the value branch. A PLAIN ternary
+        // keeps the historical "null arm takes the other branch's type" (a
+        // broad flip perturbs the self-host — clone lowering regressed).
+        if ($t->kind === Type::KIND_NULL) {
+            $node->type = $node->nullable ? $this->nullableOf($e) : $e;
+        } elseif ($e->kind === Type::KIND_NULL) {
+            $node->type = $node->nullable ? $this->nullableOf($t) : $t;
+        }
         elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
             && ($e->kind === Type::KIND_OBJ || $e->kind === Type::KIND_UNION)) {
             // Object arms (`cond ? new B : new C`, or one side already a union) →

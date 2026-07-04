@@ -533,6 +533,10 @@ final class Ternary extends Node
         public ?Node $then,     // null for short ternary `?:`
         public Node $else_,
         Type $type,
+        // Nullsafe desugar (`$o?->prop`): the null arm must stay representable
+        // (a tagged cell), so InferTypes unifies to a nullable cell. A plain
+        // ternary keeps its historical "null arm takes the other branch's type".
+        public bool $nullable = false,
     ) {
         parent::__construct(Node::KIND_TERNARY, $type);
     }

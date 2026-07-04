@@ -1,25 +1,30 @@
 <?php
-// Nullsafe property `?->` must short-circuit on a null receiver instead of
-// dereferencing null (which SIGSEGV'd before the fix). Non-null reads and a
-// genuinely-null property compared with `=== null` match the interpreter.
+// Nullsafe `?->` property access renders NULL (not the value type's zero) when
+// the receiver is null, across scalar / string / object / chained properties.
 class Node {
     public ?Node $next = null;
     public int $v = 0;
-    public function val(): int { return $this->v; }
+    public string $label = "";
+    public function __construct(int $v = 0, string $label = "") {
+        $this->v = $v; $this->label = $label;
+    }
 }
-$a = new Node();
-$a->v = 1;
-$a->next = new Node();
-$a->next->v = 2;
+$n = new Node(5, "head");
+var_dump($n->next?->v);          // NULL
+var_dump($n->next?->label);      // NULL
+var_dump($n->next?->next?->v);   // NULL (chain)
+echo "[", $n->next?->v, "]\n";   // [] — echo of null is ""
+echo ($n->next?->v ?? -1), "\n"; // -1 via ??
 
-echo $a?->v, "\n";              // 1
-echo $a?->next?->v, "\n";       // 2
-echo $a?->next?->val(), "\n";   // 2 (nullsafe method on non-null)
-echo (($a->next?->next) === null ? "tail" : "more"), "\n";  // tail
+$n->next = new Node(9, "tail");
+var_dump($n->next?->v);          // int(9)
+var_dump($n->next?->label);      // string(4) "tail"
+echo $n->next?->v, " ", $n->next?->label, "\n";
+echo ($n->next?->v ?? -1), "\n"; // 9
 
-// null receiver: short-circuits, no crash (value unused — it renders as the
-// non-null zero, a known nullable-type limitation, so we only prove no-SEGV).
-$x = null;
-$ignore = $x?->v;
-$ignore2 = $x?->val();
-echo "no-crash\n";
+// nullsafe on an object property
+class Wrap { public ?Node $inner = null; }
+$w = new Wrap();
+var_dump($w->inner?->v);
+$w->inner = new Node(42);
+var_dump($w->inner?->v);

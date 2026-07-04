@@ -1,5 +1,11 @@
-1
-2
-2
-tail
-no-crash
+NULL
+NULL
+NULL
+[]
+-1
+int(9)
+string(4) "tail"
+9 tail
+9
+NULL
+int(42)
