@@ -838,9 +838,14 @@ final class LowerFromAst implements Pass
             $veff = $this->effectiveHint($prop->typeHint, $vdoc);
             $pt = $this->lowerTypeHint($veff);
             // Bare `array` with no docblock: recover the element type from a
-            // homogeneous list-literal default so element reads stay typed.
-            if ($this->isBareArrayHint($veff) && $prop->default !== null) {
-                $elem = $this->inferBareArrayPropElem($prop->default);
+            // homogeneous list-literal default, else from how the class's methods
+            // push into it (usage inference) — both keep reads typed instead of
+            // erased. Static props keep the default-only recovery (no $this stores).
+            if ($this->isBareArrayHint($veff)) {
+                $elem = $prop->default !== null ? $this->inferBareArrayPropElem($prop->default) : null;
+                if ($elem === null && !$prop->isStatic) {
+                    $elem = $this->inferPropElemFromStores($decl, $prop->name);
+                }
                 if ($elem !== null) { $pt = Type::vec($elem); }
             }
             if ($prop->isStatic) {
@@ -1913,6 +1918,26 @@ final class LowerFromAst implements Pass
      * large int then truncates through the 48-bit inline box round-trip. */
     private function asIntLiteral(\Parser\Ast\Expr $e): \Parser\Ast\IntLiteral { return $e; }
     private function asPropAccess(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess { return $e; }
+
+    // Pin AST nodes to their concrete type before reading subclass fields — a
+    // base-`Stmt`/`Expr` read off a bare array element resolves the wrong offset
+    // under self-host (the poly-prop trap). Used by the usage-inference scan.
+    private function asExprStmt(\Parser\Ast\Stmt $s): \Parser\Ast\ExpressionStmt { return $s; }
+    private function asIfStmt(\Parser\Ast\Stmt $s): \Parser\Ast\IfStmt { return $s; }
+    private function asWhileStmt(\Parser\Ast\Stmt $s): \Parser\Ast\WhileStmt { return $s; }
+    private function asDoWhileStmt(\Parser\Ast\Stmt $s): \Parser\Ast\DoWhileStmt { return $s; }
+    private function asForStmt(\Parser\Ast\Stmt $s): \Parser\Ast\ForStmt { return $s; }
+    private function asForeachStmt(\Parser\Ast\Stmt $s): \Parser\Ast\ForeachStmt { return $s; }
+    private function asTryCatchStmt(\Parser\Ast\Stmt $s): \Parser\Ast\TryCatchStmt { return $s; }
+    private function asSwitchStmt(\Parser\Ast\Stmt $s): \Parser\Ast\SwitchStmt { return $s; }
+    private function asElseIfArm(\Parser\Ast\ElseIfArm $a): \Parser\Ast\ElseIfArm { return $a; }
+    private function asCatchClause(\Parser\Ast\CatchClause $c): \Parser\Ast\CatchClause { return $c; }
+    private function asSwitchArm(\Parser\Ast\SwitchArm $a): \Parser\Ast\SwitchArm { return $a; }
+    private function asAssign(\Parser\Ast\Expr $e): \Parser\Ast\Assign { return $e; }
+    private function asArrayAccessExpr(\Parser\Ast\Expr $e): \Parser\Ast\ArrayAccess { return $e; }
+    private function asNewExpr(\Parser\Ast\Expr $e): \Parser\Ast\NewExpr { return $e; }
+    private function asVariableExpr(\Parser\Ast\Expr $e): \Parser\Ast\Variable { return $e; }
+    private function asArrayLit(\Parser\Ast\Expr $e): \Parser\Ast\ArrayLit { return $e; }
 
     /**
      * `foo(...)` first-class callable → a 0-capture closure whose body
@@ -3634,6 +3659,166 @@ final class LowerFromAst implements Pass
         if ($kind === 'FloatLiteral')  { return Type::float_(); }
         if ($kind === 'BoolLiteral')   { return Type::bool_(); }
         return null;
+    }
+
+    /**
+     * Recover a bare-`array` property's element type from how the class's own
+     * methods STORE into it — the usage-inference fallback when neither a `@var`
+     * docblock nor a list-literal default carried the element. A property has no
+     * call site to refine its element, so an unknown element leaves every read
+     * raw (an object field lands on a wrong offset, a string echoes as its
+     * pointer). CONSERVATIVE: only push stores `$this->$prop[] = <resolvable>`
+     * count; a keyed store, a wholesale non-empty reassign, or an unresolvable
+     * value bails to null (stay erased). Every counted store must agree on one
+     * concrete element type. Keeps the concrete fast path (no cell boxing).
+     */
+    private function inferPropElemFromStores(\Parser\Ast\ClassDecl $decl, string $prop): ?Type
+    {
+        $found = null;
+        foreach ($decl->methods as $m) {
+            if ($m->body === null) { continue; }
+            $paramTypes = [];
+            foreach ($m->params as $p) {
+                if ($p->typeHint !== null) {
+                    $paramTypes[$p->name] = $this->lowerTypeHint($p->typeHint);
+                }
+            }
+            $types = $this->scanStorePropTypes($m->body->statements, $prop, $paramTypes);
+            foreach ($types as $t) {
+                // An unknown entry marks an unresolvable / keyed / wholesale store.
+                if ($t->kind === Type::KIND_UNKNOWN) { return null; }
+                if ($found === null) { $found = $t; }
+                elseif (!$this->sameElemType($found, $t)) { return null; }
+            }
+        }
+        return $found;
+    }
+
+    /**
+     * Element types stored to `$this->$prop` across a statement list (recurses
+     * into if/loop/try/switch bodies so a conflicting store is never missed). A
+     * `Type::unknown()` entry signals "bail" to the caller.
+     *
+     * @param \Parser\Ast\Stmt[]     $stmts
+     * @param array<string, Type>    $paramTypes
+     * @return Type[]
+     */
+    private function scanStorePropTypes(array $stmts, string $prop, array $paramTypes): array
+    {
+        $out = [];
+        foreach ($stmts as $s) {
+            $k = $s->kind;
+            if ($k === 'Expression') {
+                $t = $this->storeElemTypeOf($this->asExprStmt($s)->expr, $prop, $paramTypes);
+                if ($t !== null) { $out[] = $t; }
+            } elseif ($k === 'If') {
+                $if = $this->asIfStmt($s);
+                $out = \array_merge($out, $this->scanStorePropTypes($if->then->statements, $prop, $paramTypes));
+                foreach ($if->elseifs as $ei) {
+                    $out = \array_merge($out, $this->scanStorePropTypes($this->asElseIfArm($ei)->body->statements, $prop, $paramTypes));
+                }
+                $else = $if->else;
+                if ($else !== null) {
+                    $out = \array_merge($out, $this->scanStorePropTypes($else->statements, $prop, $paramTypes));
+                }
+            } elseif ($k === 'While') {
+                $out = \array_merge($out, $this->scanStorePropTypes($this->asWhileStmt($s)->body->statements, $prop, $paramTypes));
+            } elseif ($k === 'DoWhile') {
+                $out = \array_merge($out, $this->scanStorePropTypes($this->asDoWhileStmt($s)->body->statements, $prop, $paramTypes));
+            } elseif ($k === 'For') {
+                $out = \array_merge($out, $this->scanStorePropTypes($this->asForStmt($s)->body->statements, $prop, $paramTypes));
+            } elseif ($k === 'Foreach') {
+                $out = \array_merge($out, $this->scanStorePropTypes($this->asForeachStmt($s)->body->statements, $prop, $paramTypes));
+            } elseif ($k === 'TryCatch') {
+                $tc = $this->asTryCatchStmt($s);
+                $out = \array_merge($out, $this->scanStorePropTypes($tc->try->statements, $prop, $paramTypes));
+                foreach ($tc->catches as $c) {
+                    $out = \array_merge($out, $this->scanStorePropTypes($this->asCatchClause($c)->body->statements, $prop, $paramTypes));
+                }
+                $fin = $tc->finally;
+                if ($fin !== null) {
+                    $out = \array_merge($out, $this->scanStorePropTypes($fin->statements, $prop, $paramTypes));
+                }
+            } elseif ($k === 'Switch') {
+                foreach ($this->asSwitchStmt($s)->cases as $case) {
+                    $out = \array_merge($out, $this->scanStorePropTypes($this->asSwitchArm($case)->body, $prop, $paramTypes));
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The element type of an `$this->$prop[] = X` push store, or null when the
+     * expression is not a store to `$prop`. Returns `Type::unknown()` (bail) for
+     * a keyed element store, a wholesale non-empty `$this->$prop = X` reassign,
+     * or an unresolvable pushed value.
+     *
+     * @param array<string, Type> $paramTypes
+     */
+    private function storeElemTypeOf(\Parser\Ast\Expr $e, string $prop, array $paramTypes): ?Type
+    {
+        if ($e->kind !== 'Assign') { return null; }
+        $as = $this->asAssign($e);
+        $target = $as->target;
+        if ($target->kind === 'ArrayAccess') {
+            $aa = $this->asArrayAccessExpr($target);
+            if (!$this->isThisProp($aa->array, $prop)) { return null; }
+            if ($aa->index !== null) { return Type::unknown(); } // keyed → can't assume a vec
+            return $this->syntacticValueType($as->value, $paramTypes);
+        }
+        if ($this->isThisProp($target, $prop)) {
+            // `$this->prop = []` re-init is fine (no element info); any other
+            // wholesale assignment could seed a foreign element type → bail.
+            $rhs = $as->value;
+            if ($rhs->kind === 'ArrayLit' && $this->asArrayLit($rhs)->elements === []) { return null; }
+            return Type::unknown();
+        }
+        return null;
+    }
+
+    /** Whether `$e` is `$this->$prop`. */
+    private function isThisProp(\Parser\Ast\Expr $e, string $prop): bool
+    {
+        if ($e->kind !== 'PropertyAccess') { return false; }
+        $pa = $this->asPropAccess($e);
+        if ($pa->property !== $prop) { return false; }
+        $obj = $pa->object;
+        return $obj->kind === 'Variable' && $this->asVariableExpr($obj)->name === 'this';
+    }
+
+    /**
+     * A conservative SYNTACTIC type for a stored value at class-build time: a
+     * `new C` → obj<C>, a typed param → its hint, a scalar literal → its kind.
+     * Anything else (a call, a ternary, an untyped local) → unknown (bail).
+     *
+     * @param array<string, Type> $paramTypes
+     */
+    private function syntacticValueType(\Parser\Ast\Expr $v, array $paramTypes): Type
+    {
+        $k = $v->kind;
+        if ($k === 'New') {
+            $cls = \ltrim($this->asNewExpr($v)->class, '\\');
+            if ($cls === 'self' || $cls === 'static') { $cls = $this->currentLowerClass; }
+            return $cls !== '' ? Type::obj($cls) : Type::unknown();
+        }
+        if ($k === 'Variable') {
+            $name = $this->asVariableExpr($v)->name;
+            return $paramTypes[$name] ?? Type::unknown();
+        }
+        if ($k === 'IntLiteral')    { return Type::int_(); }
+        if ($k === 'StringLiteral') { return Type::string_(); }
+        if ($k === 'FloatLiteral')  { return Type::float_(); }
+        if ($k === 'BoolLiteral')   { return Type::bool_(); }
+        return Type::unknown();
+    }
+
+    /** Element-type equality (kind, plus class for objects). */
+    private function sameElemType(Type $a, Type $b): bool
+    {
+        if ($a->kind !== $b->kind) { return false; }
+        if ($a->kind === Type::KIND_OBJ) { return ($a->class ?? '') === ($b->class ?? ''); }
+        return true;
     }
 
     /**
