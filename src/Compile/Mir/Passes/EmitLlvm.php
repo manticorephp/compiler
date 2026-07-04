@@ -3993,24 +3993,41 @@ final class EmitLlvm
         if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
             return $this->emitNode($nc->left);
         }
-        // Runtime: use left when it isn't null (ptr != 0), else right.
+        // Runtime: use left when it isn't null. A null POINTER is 0
+        // (string/obj/array), a null SCALAR is the boxed-NULL sentinel (a
+        // nullable `?int`/`?float`/`?bool` rides a numeric cell) — reject both.
+        // The raw int/float/bool cases returned above, so box_null can't collide.
         $res = $this->allocSsa();
         $out = '  ' . $res . " = alloca i64\n";
         $out .= $this->emitNode($nc->left);
         $out .= $this->coerceToI64();
         $lv = $this->lastValue;
+        $nz = $this->allocSsa();
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $lv . ", 0\n";
+        $nnul = $this->allocSsa();
+        $out .= '  ' . $nnul . ' = icmp ne i64 ' . $lv . ", -3659174697238528\n";
         $bit = $this->allocSsa();
-        $out .= '  ' . $bit . ' = icmp ne i64 ' . $lv . ", 0\n";
+        $out .= '  ' . $bit . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
+        // A cell result (arms of differing repr) boxes BOTH arms so a consumer
+        // (echo / var_dump) dispatches on the arm actually taken.
+        $wantCell = $n->type->kind === Type::KIND_CELL;
         $useL = $this->allocLabel('nc.left');
         $useR = $this->allocLabel('nc.right');
         $end  = $this->allocLabel('nc.end');
         $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
         $out .= $useL . ":\n";
-        $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
+        if ($wantCell) {
+            $this->lastValue = $lv;
+            $this->lastValueType = 'i64';
+            $out .= $this->boxToCell($nc->left->type);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        } else {
+            $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
+        }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
         $out .= $this->emitNode($nc->right);
-        $out .= $this->coerceToI64();
+        $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";

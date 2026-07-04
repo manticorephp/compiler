@@ -877,7 +877,27 @@ trait EmitLlvmObjects
                 } else {
                     $out .= '  ' . $r . ' = call i64 @__mir_array_isset_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
                 }
-                $this->lastValue = $r;
+                // PHP isset()/`??` treat a PRESENT-but-NULL value as unset — zero
+                // the presence bit when the stored value is a boxed NULL (the get
+                // reuses the already-emitted arr/key; a miss returns a non-NULL
+                // default and is masked by the presence bit anyway). A raw-valued
+                // array never holds the NULL sentinel, so the check is a no-op
+                // there. `array_key_exists` keeps pure presence (a different path).
+                $val = $this->allocSsa();
+                if ($keyIsCell) {
+                    $out .= '  ' . $val . ' = call i64 @__mir_array_get_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
+                } elseif ($keyIsString) {
+                    $out .= '  ' . $val . ' = call i64 @__mir_array_get_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
+                } else {
+                    $out .= '  ' . $val . ' = call i64 @__mir_array_get_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
+                }
+                $nn = $this->allocSsa();
+                $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n"; // != box_null
+                $nnz = $this->allocSsa();
+                $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
+                $rr = $this->allocSsa();
+                $out .= '  ' . $rr . ' = and i64 ' . $r . ', ' . $nnz . "\n";
+                $this->lastValue = $rr;
                 $this->lastValueType = 'i64';
                 return $out;
             }
@@ -961,8 +981,15 @@ trait EmitLlvmObjects
                 $out .= $this->emitNode($t);
                 $out .= $this->coerceToI64();
                 $rv = $this->lastValue;
+                // Set iff non-null: a null POINTER is 0 (`?string`/`?obj`), a
+                // null SCALAR is the boxed-NULL sentinel (`?int`/`?float`/`?bool`
+                // ride a numeric cell). PHP isset() is false for either.
+                $nz = $this->allocSsa();
+                $out .= '  ' . $nz . ' = icmp ne i64 ' . $rv . ", 0\n";
+                $nnul = $this->allocSsa();
+                $out .= '  ' . $nnul . ' = icmp ne i64 ' . $rv . ", -3659174697238528\n";
                 $setc = $this->allocSsa();
-                $out .= '  ' . $setc . ' = icmp ne i64 ' . $rv . ", 0\n";
+                $out .= '  ' . $setc . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
                 $setz = $this->allocSsa();
                 $out .= '  ' . $setz . ' = zext i1 ' . $setc . " to i64\n";
                 $out .= '  store i64 ' . $setz . ', ptr ' . $rSlot . "\n";

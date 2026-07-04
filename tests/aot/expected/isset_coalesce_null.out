@@ -1,0 +1,13 @@
+bool(false)
+bool(true)
+bool(false)
+dx 2 dz
+bool(false)
+bool(true)
+n 3
+bool(false)
+bool(false)
+bool(false)
+-1 none
+bool(true)
+5 root
