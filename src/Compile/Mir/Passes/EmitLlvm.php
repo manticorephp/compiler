@@ -3946,6 +3946,13 @@ final class EmitLlvm
     private function emitNullCoalesce(Node $n): string
     {
         $nc = $this->castNullCoalesce($n);
+        if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS) {
+            $lpa = $this->castPropertyAccess($nc->left);
+            if ($lpa->object->kind === Node::KIND_PROPERTY_ACCESS
+                && $lpa->object->type->kind === Type::KIND_OBJ) {
+                return $this->emitCoalesceChain($nc, $n->type);
+            }
+        }
         // An array/assoc access can be ABSENT (PHP: missing key/index →
         // null → use the default). Decide by key/index PRESENCE, not by
         // the value: the int short-circuit below would otherwise drop the
@@ -4023,6 +4030,79 @@ final class EmitLlvm
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
             $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $end . "\n";
+        $out .= $useR . ":\n";
+        $out .= $this->emitNode($nc->right);
+        $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $loaded = $this->allocSsa();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private function emitCoalesceChain(NullCoalesce_ $nc, Type $resultType): string
+    {
+        $chain = [];
+        $node = $nc->left;
+        while ($node->kind === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $this->castPropertyAccess($node);
+            $rc = $pa->object->type->class ?? '';
+            if ($pa->object->type->kind === Type::KIND_OBJ && $rc !== ''
+                && isset($this->classes[$rc]) && !isset($this->enums[$rc])
+                && !$this->classes[$rc]->usesBag()
+                && $this->classes[$rc]->propertyOffset($pa->property) >= 0
+                && !isset($this->classes[$rc]->propHooks[$pa->property])) {
+                $chain[] = $pa;
+                $node = $pa->object;
+            } else {
+                break;
+            }
+        }
+        $hops = \count($chain);
+        $leafPa = $this->castPropertyAccess($chain[0]);
+        $leafCls = $leafPa->object->type->class ?? '';
+        $leafType = ($leafCls !== '' && isset($this->classes[$leafCls]))
+            ? ($this->classes[$leafCls]->propertyTypes[$leafPa->property] ?? Type::unknown())
+            : Type::unknown();
+        $wantCell = $resultType->kind === Type::KIND_CELL;
+        $res = $this->allocSsa();
+        $out = '  ' . $res . " = alloca i64\n";
+        $useR = $this->allocLabel('ncc.right');
+        $keep = $this->allocLabel('ncc.keep');
+        $end  = $this->allocLabel('ncc.end');
+        $out .= $this->emitNode($node);
+        $out .= $this->coerceToI64();
+        $cur = $this->lastValue;
+        for ($i = $hops - 1; $i >= 0; $i = $i - 1) {
+            $hop = $this->castPropertyAccess($chain[$i]);
+            $hoff = $this->propertyOffset($hop->object, $hop->property);
+            $z0 = $this->allocSsa();
+            $out .= '  ' . $z0 . ' = icmp eq i64 ' . $cur . ", 0\n";
+            $cont = $this->allocLabel('ncc.hop');
+            $out .= '  br i1 ' . $z0 . ', label %' . $useR . ', label %' . $cont . "\n";
+            $out .= $cont . ":\n";
+            $op = $this->allocSsa();
+            $out .= '  ' . $op . ' = inttoptr i64 ' . $cur . " to ptr\n";
+            $fp = $this->allocSsa();
+            $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $op . ', i64 ' . (string)$hoff . "\n";
+            $nx = $this->allocSsa();
+            $out .= '  ' . $nx . ' = load i64, ptr ' . $fp . "\n";
+            $cur = $nx;
+        }
+        // A present-but-NULL leaf value also takes the default.
+        $vn = $this->allocSsa();
+        $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
+        $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
+        if ($wantCell) {
+            $out .= $this->boxRawValue($cur, $leafType);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        } else {
+            $out .= '  store i64 ' . $cur . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
