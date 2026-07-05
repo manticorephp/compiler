@@ -1,8 +1,8 @@
 fail / 7 / line 6
 frames=4
-  inner
-  middle
-  Svc->run
-  Svc::boot
+  7 inner
+  9 middle
+  10 Svc->run
+  13 Svc::boot
 second=1
 bt=2: d0,d1

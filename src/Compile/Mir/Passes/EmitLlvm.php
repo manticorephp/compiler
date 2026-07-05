@@ -5560,6 +5560,32 @@ final class EmitLlvm
         return '';
     }
 
+    /**
+     * Co-owner retain for a borrowed rc payload boxed into a CELL array slot.
+     * A cell array stores the value by pointer (box_ptr / box_object keep the
+     * payload ptr); without a retain the payload is freed by its source local's
+     * scope-exit release while the array still references it — the int+substr
+     * assoc scramble / UAF. Only string / obj / union box in place (a concrete
+     * vec/assoc is REBUILT fresh by boxToCell, so it must NOT be retained);
+     * {@see rcRetainByType} further skips owned producers (call/concat/new)
+     * whose fresh +1 transfers. Preserves lastValue across the coercion so the
+     * following boxToCell sees the original payload.
+     */
+    private function retainCellPayload(Node $value): string
+    {
+        $k = $value->type->kind;
+        if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION) {
+            return '';
+        }
+        $saveV = $this->lastValue;
+        $saveT = $this->lastValueType;
+        $out = $this->coerceToI64();
+        $out .= $this->rcRetainByType($value, $this->lastValue, null, 2);
+        $this->lastValue = $saveV;
+        $this->lastValueType = $saveT;
+        return $out;
+    }
+
     private function rcRetainByType(Node $valueNode, string $i64reg, ?Type $fallback = null, int $cat = 6): string
     {
         // By-handle rc for obj / vec / string / assoc (buffer rc).
@@ -7263,6 +7289,7 @@ final class EmitLlvm
                 $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                 $keyReg = $this->lastValue;
                 $out .= $this->emitNode($el->value);
+                if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
                 $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
                 $val = $this->lastValue;
                 if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
@@ -7277,6 +7304,7 @@ final class EmitLlvm
                 $out .= '  store ptr ' . $next . ', ptr ' . $slot . "\n";
             } else {
                 $out .= $this->emitNode($el->value);
+                if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
                 $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
                 $val = $this->lastValue;
                 if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }

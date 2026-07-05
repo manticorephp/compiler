@@ -96,6 +96,10 @@ final class LowerFromAst implements Pass
     /** @var array<string, ClassDef> built during the class pre-pass */
     private array $classTable = [];
 
+    /** Set by the store scan when a bare `array` property is written with a
+     *  string key (→ assoc, not vec). Reset per property in buildClassDef. */
+    private bool $propStoreStrKey = false;
+
     /** @var array<string, bool> every class name (known before defs are built) */
     private array $knownClassNames = [];
 
@@ -559,28 +563,27 @@ final class LowerFromAst implements Pass
      * PHP-shaped backtrace frames (innermost first). The captured name is the
      * combined display ("Class->method" / "Class::m" / "fn"); split it back into
      * function/class/type so getTrace() and debug_backtrace() match PHP's frame
-     * assoc. V1 frames carry file + function[/class/type]; `line` and `args` are
-     * omitted — an int value mixed with the substr-derived strings in the frame
-     * assoc miscompiles (crashes) today, and the line is available via
-     * getLine()/getTraceAsString(). The `$lines` param is kept for the ABI but
-     * unused. All frame values are strings (a homogeneous assoc compiles clean).
+     * assoc. Frames carry file + line + function[/class/type]; `args` is still
+     * omitted. `line` is a real int mixed with the substr-derived strings (a
+     * cell assoc) — this used to miscompile; fixed by retaining string payloads
+     * boxed into a cell array (see EmitLlvm::retainCellPayload).
      */
     private function backtraceFramesSrc(): string
     {
         return "/** @param string[] \$names @param int[] \$lines\n"
-            . "  * @return array<int,array<string,string>> */\n"
+            . "  * @return array<int,array<string,mixed>> */\n"
             . "function __mir_bt_frames(array \$names, array \$lines, string \$file): array {\n"
             . "  \$out = []; \$n = \\count(\$names); \$i = 0;\n"
             . "  while (\$i < \$n) {\n"
-            . "    \$name = \$names[\$i]; \$type = \"\";\n"
+            . "    \$name = \$names[\$i]; \$ln = \$lines[\$i]; \$type = \"\";\n"
             . "    \$p = \\strpos(\$name, \"::\");\n"
             . "    if (\$p === false) { \$p = \\strpos(\$name, \"->\"); if (\$p !== false) { \$type = \"->\"; } }\n"
             . "    else { \$type = \"::\"; }\n"
             . "    if (\$type !== \"\") {\n"
             . "      \$cls = \\substr(\$name, 0, \$p); \$fn = \\substr(\$name, \$p + 2);\n"
-            . "      \$out[] = [\"file\" => \$file, \"function\" => \$fn, \"class\" => \$cls, \"type\" => \$type];\n"
+            . "      \$out[] = [\"file\" => \$file, \"line\" => \$ln, \"function\" => \$fn, \"class\" => \$cls, \"type\" => \$type];\n"
             . "    } else {\n"
-            . "      \$out[] = [\"file\" => \$file, \"function\" => \$name];\n"
+            . "      \$out[] = [\"file\" => \$file, \"line\" => \$ln, \"function\" => \$name];\n"
             . "    }\n"
             . "    \$i = \$i + 1;\n"
             . "  }\n"
@@ -909,11 +912,14 @@ final class LowerFromAst implements Pass
             // push into it (usage inference) — both keep reads typed instead of
             // erased. Static props keep the default-only recovery (no $this stores).
             if ($this->isBareArrayHint($veff)) {
+                $this->propStoreStrKey = false;
                 $elem = $prop->default !== null ? $this->inferBareArrayPropElem($prop->default) : null;
                 if ($elem === null && !$prop->isStatic) {
                     $elem = $this->inferPropElemFromStores($decl, $prop->name);
                 }
-                if ($elem !== null) { $pt = Type::vec($elem); }
+                if ($elem !== null) {
+                    $pt = $this->propStoreStrKey ? Type::assoc(Type::string_(), $elem) : Type::vec($elem);
+                }
             }
             if ($prop->isStatic) {
                 $spNames[] = $prop->name;
@@ -2011,6 +2017,8 @@ final class LowerFromAst implements Pass
     private function asNewExpr(\Parser\Ast\Expr $e): \Parser\Ast\NewExpr { return $e; }
     private function asVariableExpr(\Parser\Ast\Expr $e): \Parser\Ast\Variable { return $e; }
     private function asArrayLit(\Parser\Ast\Expr $e): \Parser\Ast\ArrayLit { return $e; }
+    private function asBinaryOp(\Parser\Ast\Expr $e): \Parser\Ast\BinaryOp { return $e; }
+    private function asCastExpr(\Parser\Ast\Expr $e): \Parser\Ast\Cast { return $e; }
 
     /**
      * `foo(...)` first-class callable → a 0-capture closure whose body
@@ -3842,7 +3850,15 @@ final class LowerFromAst implements Pass
         if ($target->kind === 'ArrayAccess') {
             $aa = $this->asArrayAccessExpr($target);
             if (!$this->isThisProp($aa->array, $prop)) { return null; }
-            if ($aa->index !== null) { return Type::unknown(); } // keyed → can't assume a vec
+            if ($aa->index !== null) {
+                // A string-keyed store implies an ASSOC; keep a resolvable value
+                // type so untyped reads aren't erased to raw pointers (the bare
+                // `array` assoc-value bug). An int / dynamic key can't be assumed
+                // packed → bail (stay erased).
+                if (!$this->syntacticKeyIsString($aa->index, $paramTypes)) { return Type::unknown(); }
+                $this->propStoreStrKey = true;
+                return $this->syntacticValueType($as->value, $paramTypes);
+            }
             return $this->syntacticValueType($as->value, $paramTypes);
         }
         if ($this->isThisProp($target, $prop)) {
@@ -3888,7 +3904,32 @@ final class LowerFromAst implements Pass
         if ($k === 'StringLiteral') { return Type::string_(); }
         if ($k === 'FloatLiteral')  { return Type::float_(); }
         if ($k === 'BoolLiteral')   { return Type::bool_(); }
+        // A concat / interpolation (BinaryOp `.`) and a `(string)` cast are
+        // always string — the common assoc-value shape (`$this->d[$k] = "$a->$b"`).
+        if ($k === 'BinaryOp' && $this->asBinaryOp($v)->op === '.') { return Type::string_(); }
+        if ($k === 'Cast' && $this->asCastExpr($v)->cast === 'string') { return Type::string_(); }
         return Type::unknown();
+    }
+
+    /**
+     * Whether `$k` is syntactically a string at class-build time — a string
+     * literal, a concat / interpolation (`BinaryOp .`), a `(string)` cast, or a
+     * string-typed param. Drives the vec-vs-assoc decision for a bare `array`
+     * property's keyed stores.
+     *
+     * @param array<string, Type> $paramTypes
+     */
+    private function syntacticKeyIsString(\Parser\Ast\Expr $k, array $paramTypes): bool
+    {
+        $kk = $k->kind;
+        if ($kk === 'StringLiteral') { return true; }
+        if ($kk === 'BinaryOp' && $this->asBinaryOp($k)->op === '.') { return true; }
+        if ($kk === 'Cast' && $this->asCastExpr($k)->cast === 'string') { return true; }
+        if ($kk === 'Variable') {
+            $t = $paramTypes[$this->asVariableExpr($k)->name] ?? null;
+            return $t !== null && $t->kind === Type::KIND_STRING;
+        }
+        return false;
     }
 
     /** Element-type equality (kind, plus class for objects). */

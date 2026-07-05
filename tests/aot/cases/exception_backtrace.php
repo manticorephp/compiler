@@ -17,7 +17,7 @@ try {
     echo "frames=", count($t), "\n";
     foreach ($t as $f) {
         $cls = isset($f['class']) ? $f['class'] . $f['type'] : "";
-        echo "  ", $cls, $f['function'], "\n";
+        echo "  ", $f['line'], " ", $cls, $f['function'], "\n";
     }
 }
 // depth is restored after a catch — a second trace is not inflated.
