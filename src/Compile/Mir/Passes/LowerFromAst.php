@@ -1373,6 +1373,7 @@ final class LowerFromAst implements Pass
             params: $params,
             returnType: $mret,
             body: new Block($stmts, Type::void()),
+            returnsByRef: (bool)($m->returnsByRef ?? false),
         );
         $mfn->isGenerator = $isGen;
         return $mfn;
@@ -2944,8 +2945,13 @@ final class LowerFromAst implements Pass
         if ($expr->target->kind === 'Variable' && $expr->source->kind === 'Variable') {
             return new RefAlias_($expr->target->name, $expr->source->name, Type::void());
         }
-        // `$r = &fn(...)` — bind $r as a reference to the by-ref return.
-        if ($expr->target->kind === 'Variable' && $expr->source->kind === 'Call') {
+        // `$r = &fn(...)` / `$r = &$obj->m()` / `$r = &Cls::m()` — bind $r as a
+        // reference to the by-ref return (the callee yields the raw address;
+        // emitRefBind sets rawRefCall so the value-context deref is suppressed).
+        if ($expr->target->kind === 'Variable'
+            && ($expr->source->kind === 'Call'
+                || $expr->source->kind === 'MethodCall'
+                || $expr->source->kind === 'StaticCall')) {
             return new RefBind_($expr->target->name, $this->lowerExpr($expr->source), Type::void());
         }
         // `$r = &$obj->prop` / `$r = &$a[$k]` — bind $r to the container slot's

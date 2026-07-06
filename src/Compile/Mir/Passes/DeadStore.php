@@ -168,6 +168,14 @@ final class DeadStore implements Pass
             $this->collectUses($ra->lvalue);
             return;
         }
+        if ($k === Node::KIND_REF_BIND) {
+            // The target holds a by-ref return address; a store to it writes
+            // THROUGH to the aliased slot (observable), so keep it used.
+            $rb = $this->asRefBind($n);
+            $this->usedLocals[$rb->target] = true;
+            $this->collectUses($rb->call);
+            return;
+        }
         if ($k === Node::KIND_THROW) { $this->collectUses($this->asThrow($n)->value); return; }
         if ($k === Node::KIND_TRY_CATCH) {
             $tc = $this->asTryCatch($n);
@@ -441,6 +449,7 @@ final class DeadStore implements Pass
     private function asClassName(ClassName_ $n): ClassName_ { return $n; }
     private function asRefAlias(RefAlias_ $n): RefAlias_ { return $n; }
     private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
+    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
     private function asThrow(Throw_ $n): Throw_ { return $n; }
     private function asTryCatch(TryCatch_ $n): TryCatch_ { return $n; }
     private function asTernary(Ternary $n): Ternary { return $n; }

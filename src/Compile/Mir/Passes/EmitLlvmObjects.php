@@ -1286,6 +1286,15 @@ trait EmitLlvmObjects
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
+        // By-ref return (`static function &m()`): the callee yields the slot
+        // ADDRESS; deref in value context, keep raw under rawRefCall (RefBind).
+        if (($this->fnReturnsByRef[$target] ?? false) && !$this->rawRefCall) {
+            $p = $this->allocSsa();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
+            $dv = $this->allocSsa();
+            $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            $reg = $dv;
+        }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
@@ -1641,6 +1650,16 @@ trait EmitLlvmObjects
         }
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
+        // By-ref return (`function &m()`): the callee yields the field/slot
+        // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
+        // (rawRefCall) keeps the raw address so RefBind can alias through it.
+        if (($this->fnReturnsByRef[$fallbackFull] ?? false) && !$this->rawRefCall) {
+            $p = $this->allocSsa();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
+            $dv = $this->allocSsa();
+            $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            $reg = $dv;
+        }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
