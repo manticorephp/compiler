@@ -2977,7 +2977,7 @@ final class EmitLlvm
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $arr = $this->castStoreElement($n)->array;
             if ($arr->kind === Node::KIND_LOAD_LOCAL
-                && $arr->type->isVec()) {
+                && $arr->type->isArray()) {
                 $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
             }
         }
@@ -3003,13 +3003,13 @@ final class EmitLlvm
         }
     }
 
-    /** Mark the vec local under an `$a[$k]` element as mutated (its element may
-     *  be written through a reference). No-op for non-element / non-vec-local. */
+    /** Mark the array local under an `$a[$k]` element as mutated (its element may
+     *  be written through a reference). No-op for non-element / non-array-local. */
     private function markVecElemBase(Node $a): void
     {
         if ($a->kind !== Node::KIND_ARRAY_ACCESS) { return; }
         $arr = $this->castArrayAccess($a)->array;
-        if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isVec()) {
+        if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
             $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
         }
     }
@@ -3508,13 +3508,14 @@ final class EmitLlvm
         if ($this->vecAllocArena) {
             $this->arenaVecLocals[$sl->name] = true;
         }
-        // PHP arrays are values: `$b = $a` between vecs needs an
-        // independent copy when either side is later mutated, else a grow
-        // of one would relocate the other's buffer. Read-only aliases
-        // share. Objects are by-handle (never copied); strings immutable.
+        // PHP arrays are values: `$b = $a` (vec OR assoc) needs an independent
+        // copy when either side is later mutated, else a store into one would
+        // clobber the other's shared buffer. Read-only aliases share safely
+        // (`mutatedVecLocals` only records mutated locals). Objects are by-handle
+        // (never copied); strings immutable. __mir_array_copy is mode-agnostic.
         $v = $sl->value;
         if ($v->kind === Node::KIND_LOAD_LOCAL
-            && $v->type->isVec()
+            && $v->type->isArray()
             && (isset($this->mutatedVecLocals[$this->castLoadLocal($v)->name])
                 || isset($this->mutatedVecLocals[$sl->name]))) {
             $out .= $this->coerceToPtr();
