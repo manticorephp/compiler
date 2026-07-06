@@ -6640,10 +6640,7 @@ final class EmitLlvm
      */
     private function arrayElemAddressable(ArrayAccess_ $aa): bool
     {
-        $ik = $aa->index->type->kind;
-        if ($ik !== Type::KIND_INT && $aa->index->kind !== Node::KIND_INT_CONST) {
-            return false;
-        }
+        if (!$this->arrayElemKeyKind($aa->index)) { return false; }
         if (!$this->containerAddressable($aa->array)) { return false; }
         // Base must be a genuine (raw-pointer) array container. A bare-array
         // property read can infer UNKNOWN, so consult the declared prop type.
@@ -6657,6 +6654,21 @@ final class EmitLlvm
             }
         }
         return false;
+    }
+
+    /** The runtime ref-slot helpers key on int or string; `true` when `$index`
+     *  is one of those (a `null` append, cell, or float key is not addressable).
+     *  Returns 'int' or 'str' for {@see byRefAddrOf}, or null when unsupported. */
+    private function arrayElemKeyKind(Node $index): ?string
+    {
+        $k = $index->type->kind;
+        if ($k === Type::KIND_INT || $index->kind === Node::KIND_INT_CONST) {
+            return 'int';
+        }
+        if ($k === Type::KIND_STRING || $index->kind === Node::KIND_STRING_CONST) {
+            return 'str';
+        }
+        return null;
     }
 
     /** Pure predicate: `$base` has a stable i64 cell holding its array pointer
@@ -6759,18 +6771,26 @@ final class EmitLlvm
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $this->castArrayAccess($a);
-            if (!$this->arrayElemAddressable($aa)) { return null; }
+            $keyKind = $this->arrayElemKeyKind($aa->index);
+            if ($keyKind === null || !$this->arrayElemAddressable($aa)) { return null; }
             // ptr to the cell holding the array (for COW write-back).
             $out = $this->containerCellPtr($aa->array);
             if ($out === null) { return null; }
             $slotPtr = $this->lastValue;
-            // the int key.
-            $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceToI64();
-            $keyReg = $this->lastValue;
             $ep = $this->allocSsa();
-            $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot(ptr ' . $slotPtr
-                  . ', i64 ' . $keyReg . ")\n";
+            if ($keyKind === 'str') {
+                $out .= $this->emitNode($aa->index);
+                $out .= $this->coerceToPtr();
+                $keyReg = $this->lastValue;
+                $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot_str(ptr '
+                      . $slotPtr . ', ptr ' . $keyReg . ")\n";
+            } else {
+                $out .= $this->emitNode($aa->index);
+                $out .= $this->coerceToI64();
+                $keyReg = $this->lastValue;
+                $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot(ptr '
+                      . $slotPtr . ', i64 ' . $keyReg . ")\n";
+            }
             $addr = $this->allocSsa();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
             $this->lastValue = $addr;

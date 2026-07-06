@@ -64,6 +64,7 @@ final class UnifiedArrayRuntime
         $this->emitAppend();
         $this->emitCow();
         $this->emitRefSlot();
+        $this->emitRefSlotStr();
         $this->emitValueAt();
         $this->emitKeyAt();
         $this->emitKeyCellAt();
@@ -1379,6 +1380,68 @@ final class UnifiedArrayRuntime
         $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $next, $kok);
         $kk = $kok->load(Type::i64(), $this->entryAddr($kok, $b, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $kok->brIf($kok->icmp('eq', $kk, $key), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($this->entryAddr($hit, $b,
+            $hit->load(Type::i64(), $iSlot), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+
+        $miss->ret($scratch);
+    }
+
+    /**
+     * `__mir_array_ref_slot_str(slotAddr, key) -> ptr` — the string-keyed analogue
+     * of {@see emitRefSlot}. COW-detach the array at *slotAddr, auto-vivify the
+     * string key to 0 if absent, then linear-scan the (always-HASHED) entries for
+     * the KIND_STRING entry whose key `__mir_str_eq`s `key` and return its i64
+     * value-cell address. NULL array / miss → a throwaway scratch cell.
+     */
+    private function emitRefSlotStr(): void
+    {
+        // Reference (not redefine) the scratch cell emitted by {@see emitRefSlot}.
+        $scratch = Value::global(Type::ptr(), '__mir_ref_scratch');
+        $fn = $this->module->func('__mir_array_ref_slot_str', Type::ptr());
+        $slotAddr = $fn->param(Type::ptr(), 'slotAddr');
+        $key = $fn->param(Type::ptr(), 'key');
+        $e = $fn->block('entry');
+        $live = $fn->block('live');
+        $vivify = $fn->block('vivify');
+        $locate = $fn->block('locate');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $cmp = $fn->block('cmp');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $miss = $fn->block('miss');
+
+        $b0i = $e->load(Type::i64(), $slotAddr);
+        $b0 = $e->inttoptr($b0i, Type::ptr());
+        $e->brIf($e->icmp('eq', $b0, Value::null()), $miss, $live);
+
+        $cow = $live->call('__mir_array_cow', Type::ptr(), [$b0]);
+        $live->store($live->ptrtoint($cow, Type::i64()), $slotAddr);
+        $present = $live->call('__mir_array_isset_str', Type::i64(),
+            [$cow, $key, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $live->brIf($live->icmp('eq', $present, Value::int(Type::i64(), 0)), $vivify, $locate);
+
+        $sv = $vivify->call('__mir_array_set_str', Type::ptr(),
+            [$cow, $key, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $vivify->store($vivify->ptrtoint($sv, Type::i64()), $slotAddr);
+        $vivify->br($locate);
+
+        $bi = $locate->load(Type::i64(), $slotAddr);
+        $b = $locate->inttoptr($bi, Type::ptr());
+        $len = $locate->load(Type::i64(), $b);
+        $iSlot = $locate->alloca(Type::i64(), 'i');
+        $locate->store(Value::int(Type::i64(), 0), $iSlot);
+        $locate->br($head);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $b, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
+        $ek = $kok->load(Type::ptr(), $this->entryAddr($kok, $b, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->icmp('eq', $ek, Value::null()), $next, $cmp);
+        $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$ek, $key]), $hit, $next);
         $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $next->br($head);
         $hit->ret($this->entryAddr($hit, $b,
