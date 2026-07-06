@@ -11,6 +11,7 @@ use Compile\Mir\StoreDynProp_;
 use Compile\Mir\ClassName_;
 use Compile\Mir\RefAlias_;
 use Compile\Mir\RefBind_;
+use Compile\Mir\RefAddr_;
 use Compile\Mir\Isset_;
 use Compile\Mir\Unset_;
 use Compile\Mir\Throw_;
@@ -772,6 +773,40 @@ trait EmitLlvmObjects
     }
 
     private function castRefBind(Node $n): RefBind_ { return $n; }
+
+    /** `$r = &$obj->prop` / `$r = &$a[$k]` — store the container slot's ADDRESS
+     *  into $r's slot and mark $r a ref local, so later reads/writes of $r deref
+     *  the address (aliasing the property / element). Falls back to a value copy
+     *  when the lvalue is not addressable (unknown class / non-vec element). */
+    private function emitRefAddr(Node $n): string
+    {
+        $ra = $this->castRefAddr($n);
+        if (!isset($this->slots[$ra->target])) {
+            $slot = $this->allocSsa();
+            $this->slots[$ra->target] = $slot;
+            $out = '  ' . $slot . " = alloca i64\n";
+        } else {
+            $out = '';
+        }
+        $addrIr = $this->byRefAddrOf($ra->lvalue);
+        if ($addrIr === null) {
+            // Not addressable — degrade to a value copy (non-crashing).
+            $out .= $this->emitNode($ra->lvalue);
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$ra->target] . "\n";
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $addrIr;
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$ra->target] . "\n";
+        $this->refLocals[$ra->target] = true;
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private function castRefAddr(Node $n): RefAddr_ { return $n; }
 
     /** Bag byte offset for an object node's class (stdClass default). */
     private function bagOffsetOf(Node $obj): int

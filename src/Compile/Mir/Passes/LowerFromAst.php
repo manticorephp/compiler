@@ -40,6 +40,7 @@ use Compile\Mir\Unset_;
 use Compile\Mir\ClassName_;
 use Compile\Mir\RefAlias_;
 use Compile\Mir\RefBind_;
+use Compile\Mir\RefAddr_;
 use Compile\Mir\Throw_;
 use Compile\Mir\Yield_;
 use Compile\Mir\TryCatch_;
@@ -2942,6 +2943,14 @@ final class LowerFromAst implements Pass
         // `$r = &fn(...)` — bind $r as a reference to the by-ref return.
         if ($expr->target->kind === 'Variable' && $expr->source->kind === 'Call') {
             return new RefBind_($expr->target->name, $this->lowerExpr($expr->source), Type::void());
+        }
+        // `$r = &$obj->prop` / `$r = &$a[$k]` — bind $r to the container slot's
+        // ADDRESS so reads/writes of $r alias the property / element.
+        if ($expr->target->kind === 'Variable'
+            && ($expr->source->kind === 'PropertyAccess'
+                || $expr->source->kind === 'ArrayAccess')) {
+            $lv = $this->lowerExpr($expr->source);
+            return new RefAddr_($expr->target->name, $lv, $lv->type);
         }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
     }

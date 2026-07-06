@@ -97,6 +97,12 @@ final class Verify implements Pass
             $this->walk($rb->call);
             return;
         }
+        if ($k === Node::KIND_REF_ADDR) {
+            $ra = $this->asRefAddr($n);
+            $this->defined[$ra->target] = true;
+            $this->walk($ra->lvalue);
+            return;
+        }
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
             $sld = $this->asStaticLocalDecl($n);
             $this->defined[$sld->name] = true;
@@ -150,6 +156,7 @@ final class Verify implements Pass
     private function asIncDec(Node $n): \Compile\Mir\IncDec { return $n; }
     private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
     private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
+    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
     private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
     private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
     private function asTryCatch(Node $n): \Compile\Mir\TryCatch_ { return $n; }

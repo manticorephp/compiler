@@ -141,6 +141,23 @@ final class InferAllocKind implements Pass
             $this->escaping[$ra->source] = true;
         } elseif ($k === Node::KIND_REF_BIND) {
             $this->escaping[$this->asRefBind($n)->target] = true;
+        } elseif ($k === Node::KIND_REF_ADDR) {
+            // The target holds a raw interior address into the aliased
+            // container; both the alias and (for `&$obj->prop`) the base object
+            // must not be arena-allocated / freed while the alias is live.
+            $ra = $this->asRefAddr($n);
+            $this->escaping[$ra->target] = true;
+            if ($ra->lvalue->kind === Node::KIND_PROPERTY_ACCESS) {
+                $base = $this->asPropertyAccess($ra->lvalue)->object;
+                if ($base->kind === Node::KIND_LOAD_LOCAL) {
+                    $this->escaping[$this->asLoadLocal($base)->name] = true;
+                }
+            } elseif ($ra->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
+                $base = $this->asArrayAccess($ra->lvalue)->array;
+                if ($base->kind === Node::KIND_LOAD_LOCAL) {
+                    $this->escaping[$this->asLoadLocal($base)->name] = true;
+                }
+            }
         } elseif ($k === Node::KIND_FOREACH) {
             $fe = $this->asForeach($n);
             if ($fe->byRef) { $this->escaping[$fe->valueVar] = true; }
@@ -487,6 +504,9 @@ final class InferAllocKind implements Pass
     private function asMatch(Node $n): \Compile\Mir\Match_ { return $n; }
     private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
     private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
+    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
+    private function asPropertyAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
+    private function asArrayAccess(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
     private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
     private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 }

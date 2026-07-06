@@ -39,6 +39,7 @@ use Compile\Mir\Unset_;
 use Compile\Mir\ClassName_;
 use Compile\Mir\RefAlias_;
 use Compile\Mir\RefBind_;
+use Compile\Mir\RefAddr_;
 use Compile\Mir\Throw_;
 use Compile\Mir\TryCatch_;
 use Compile\Mir\MirCatch;
@@ -3258,6 +3259,7 @@ final class EmitLlvm
         if ($k === Node::KIND_CLASS_NAME)   { return $this->emitClassName($n); }
         if ($k === Node::KIND_REF_ALIAS)    { return $this->emitRefAlias($n); }
         if ($k === Node::KIND_REF_BIND)     { return $this->emitRefBind($n); }
+        if ($k === Node::KIND_REF_ADDR)     { return $this->emitRefAddr($n); }
         if ($k === Node::KIND_THROW)        { return $this->emitThrow($n); }
         if ($k === Node::KIND_TRY_CATCH)    { return $this->emitTryCatch($n); }
         if ($k === Node::KIND_TERNARY)      { return $this->emitTernary($n); }
@@ -6288,19 +6290,14 @@ final class EmitLlvm
         if ($v === null) {
             return $this->finishReturn('', '0', $leave);
         }
-        // By-ref return: yield the *address* of the returned lvalue as
-        // i64. `return $n` where $n is a by-ref param forwards the held
-        // address; a plain local returns its slot address.
-        if ($this->currentReturnsByRef && $v->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->castLoadLocal($v)->name;
-            if (isset($this->slots[$name])) {
-                $reg = $this->allocSsa();
-                if (isset($this->refLocals[$name])) {
-                    $out = '  ' . $reg . ' = load i64, ptr ' . $this->slots[$name] . "\n";
-                } else {
-                    $out = '  ' . $reg . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
-                }
-                return $this->finishReturn($out, $reg, $leave);
+        // By-ref return: yield the *address* of the returned lvalue as i64.
+        // `return $n` (a by-ref param forwards its held address, a plain local
+        // returns its slot address) or `return $this->prop` (GEP to the field
+        // slot). An unaddressable value falls through to the normal value path.
+        if ($this->currentReturnsByRef) {
+            $addrIr = $this->byRefAddrOf($v);
+            if ($addrIr !== null) {
+                return $this->finishReturn($addrIr, $this->lastValue, $leave);
             }
         }
         $out = $this->emitNode($v);
@@ -6439,9 +6436,7 @@ final class EmitLlvm
      */
     private function argIsByRef(array $mask, int $pi, Node $a): bool
     {
-        return ($mask[$pi] ?? false)
-            && $a->kind === Node::KIND_LOAD_LOCAL
-            && isset($this->slots[$this->castLoadLocal($a)->name]);
+        return ($mask[$pi] ?? false) && $this->isByRefAddressable($a);
     }
 
     /**
@@ -6552,16 +6547,68 @@ final class EmitLlvm
 
     private function emitByRefArg(Node $a): string
     {
-        $name = $this->castLoadLocal($a)->name;
-        $addr = $this->allocSsa();
-        if (isset($this->refLocals[$name])) {
-            $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$name] . "\n";
-        } else {
-            $out = '  ' . $addr . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
+        return $this->byRefAddrOf($a) ?? '';
+    }
+
+    /**
+     * Whether `$a` is an addressable lvalue that can be passed by reference:
+     * a plain local with a stack slot, or an object property `$obj->prop`
+     * whose class (hence field offset) is statically known. Decided WITHOUT
+     * emitting (used by {@see argIsByRef}); {@see byRefAddrOf} does the emit.
+     */
+    private function isByRefAddressable(Node $a): bool
+    {
+        if ($a->kind === Node::KIND_LOAD_LOCAL) {
+            return isset($this->slots[$this->castLoadLocal($a)->name]);
         }
-        $this->lastValue = $addr;
-        $this->lastValueType = 'i64';
-        return $out;
+        if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $this->castPropertyAccess($a);
+            $cls = $pa->object->type->class ?? '';
+            return $cls !== '' && isset($this->classes[$cls]);
+        }
+        return false;
+    }
+
+    /**
+     * IR computing the by-ref ADDRESS of lvalue `$a` as i64 in
+     * `$this->lastValue`; null when `$a` is not addressable. A plain local
+     * yields its slot address (a by-ref local already HOLDS an address — it is
+     * forwarded); an object property `$obj->prop` yields a GEP to the field
+     * slot, so the callee's writes to its `&$p` param mutate the property.
+     */
+    private function byRefAddrOf(Node $a): ?string
+    {
+        if ($a->kind === Node::KIND_LOAD_LOCAL) {
+            $name = $this->castLoadLocal($a)->name;
+            if (!isset($this->slots[$name])) { return null; }
+            $addr = $this->allocSsa();
+            if (isset($this->refLocals[$name])) {
+                $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$name] . "\n";
+            } else {
+                $out = '  ' . $addr . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
+            }
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $this->castPropertyAccess($a);
+            $cls = $pa->object->type->class ?? '';
+            if ($cls === '' || !isset($this->classes[$cls])) { return null; }
+            $out = $this->emitNode($pa->object);
+            $out .= $this->coerceToPtr();
+            $objp = $this->lastValue;
+            $off = $this->propertyOffset($pa->object, $pa->property);
+            $g = $this->allocSsa();
+            $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
+                  . ', i64 ' . (string)$off . "\n";
+            $addr = $this->allocSsa();
+            $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return null;
     }
 
     /**
@@ -6690,18 +6737,12 @@ final class EmitLlvm
             }
             if (!$first) { $argList .= ', '; }
             $first = false;
-            $byRef = ($mask[$ai] ?? false) && $a->kind === Node::KIND_LOAD_LOCAL;
-            $name = $byRef ? $this->castLoadLocal($a)->name : '';
-            if ($byRef && isset($this->slots[$name])) {
-                // By-ref param: pass the address of the argument's slot.
-                // A by-ref arg already holds an address — forward it.
-                $addr = $this->allocSsa();
-                if (isset($this->refLocals[$name])) {
-                    $out .= '  ' . $addr . ' = load i64, ptr ' . $this->slots[$name] . "\n";
-                } else {
-                    $out .= '  ' . $addr . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
-                }
-                $argList .= 'i64 ' . $addr;
+            if (($mask[$ai] ?? false) && $this->isByRefAddressable($a)) {
+                // By-ref param fed an addressable lvalue (plain local or
+                // `$obj->prop`): pass the address so the callee's writes land
+                // in the caller's slot / the object's field.
+                $out .= $this->byRefAddrOf($a);
+                $argList .= 'i64 ' . $this->lastValue;
             } elseif (($mask[$ai] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
                 // By-ref param with a non-lvalue arg — an OMITTED default
                 // (`&$r = null` called without the arg) reaches here as the

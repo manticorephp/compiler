@@ -433,6 +433,17 @@ final class RefBind_ extends Node
     }
 }
 
+/** `$x = &<lvalue>` where lvalue is a container slot (`$obj->prop`, `$a[$k]`).
+ *  $x's slot is bound to the ADDRESS of the slot so reads/writes of $x deref
+ *  it (the refLocals mechanism), aliasing the property / element. */
+final class RefAddr_ extends Node
+{
+    public function __construct(public string $target, public Node $lvalue, Type $type)
+    {
+        parent::__construct(Node::KIND_REF_ADDR, $type);
+    }
+}
+
 /** `$obj::class` — the runtime class name of `operand` as a string. */
 final class ClassName_ extends Node
 {

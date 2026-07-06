@@ -1597,6 +1597,7 @@ final class InferTypes implements Pass
         if ($kind === Node::KIND_CLASS_NAME) { return $this->inferClassName($node); }
         if ($kind === Node::KIND_REF_ALIAS) { return $this->inferRefAlias($node); }
         if ($kind === Node::KIND_REF_BIND) { return $this->inferRefBind($node); }
+        if ($kind === Node::KIND_REF_ADDR) { return $this->inferRefAddr($node); }
         if ($kind === Node::KIND_THROW) { return $this->inferThrow($node); }
         if ($kind === Node::KIND_TRY_CATCH) { return $this->inferTryCatch($node); }
         if ($kind === Node::KIND_TERNARY)     { return $this->inferTernary($node); }
@@ -1761,6 +1762,16 @@ final class InferTypes implements Pass
     }
 
     private function asRefBind(Node $n): RefBind_ { return $n; }
+
+    private function inferRefAddr(Node $node): Type
+    {
+        $n = $this->asRefAddr($node);
+        $t = $this->inferNode($n->lvalue);
+        $this->localTypes[$n->target] = $t;
+        return Type::void();
+    }
+
+    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
 
     private function inferRefAlias(RefAlias_ $n): Type
     {

@@ -159,6 +159,15 @@ final class DeadStore implements Pass
             $this->usedLocals[$ra->source] = true;
             return;
         }
+        if ($k === Node::KIND_REF_ADDR) {
+            // The target aliases a container slot — a store to it writes THROUGH
+            // to the property/element (an observable side effect), so it must
+            // never be dead-store eliminated. Mark it used unconditionally.
+            $ra = $this->asRefAddr($n);
+            $this->usedLocals[$ra->target] = true;
+            $this->collectUses($ra->lvalue);
+            return;
+        }
         if ($k === Node::KIND_THROW) { $this->collectUses($this->asThrow($n)->value); return; }
         if ($k === Node::KIND_TRY_CATCH) {
             $tc = $this->asTryCatch($n);
@@ -431,6 +440,7 @@ final class DeadStore implements Pass
     private function asUnset(Unset_ $n): Unset_ { return $n; }
     private function asClassName(ClassName_ $n): ClassName_ { return $n; }
     private function asRefAlias(RefAlias_ $n): RefAlias_ { return $n; }
+    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
     private function asThrow(Throw_ $n): Throw_ { return $n; }
     private function asTryCatch(TryCatch_ $n): TryCatch_ { return $n; }
     private function asTernary(Ternary $n): Ternary { return $n; }

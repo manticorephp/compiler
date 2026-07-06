@@ -69,6 +69,7 @@ final class Walk
         if ($k === Node::KIND_CALL) { return self::asCall($n)->args; }
         if ($k === Node::KIND_STORE_LOCAL) { return [self::asStoreLocal($n)->value]; }
         if ($k === Node::KIND_REF_BIND) { return [self::asRefBind($n)->call]; }
+        if ($k === Node::KIND_REF_ADDR) { return [self::asRefAddr($n)->lvalue]; }
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
             $sld = self::asStaticLocalDecl($n);
             return $sld->init === null ? [] : [$sld->init];
@@ -206,6 +207,7 @@ final class Walk
     private static function asCall(Node $n): Call { return $n; }
     private static function asStoreLocal(Node $n): StoreLocal { return $n; }
     private static function asRefBind(Node $n): RefBind_ { return $n; }
+    private static function asRefAddr(Node $n): RefAddr_ { return $n; }
     private static function asStaticLocalDecl(Node $n): StaticLocalDecl_ { return $n; }
     private static function asIf(Node $n): If_ { return $n; }
     private static function asWhile(Node $n): While_ { return $n; }

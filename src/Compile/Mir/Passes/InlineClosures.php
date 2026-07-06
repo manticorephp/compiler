@@ -137,6 +137,7 @@ final class InlineClosures implements Pass
             || $k === Node::KIND_STATIC_PROP || $k === Node::KIND_BREAK
             || $k === Node::KIND_CONTINUE || $k === Node::KIND_INCDEC
             || $k === Node::KIND_REF_ALIAS || $k === Node::KIND_REF_BIND
+            || $k === Node::KIND_REF_ADDR
             || $k === Node::KIND_CLASS_NAME || $k === Node::KIND_CLOSURE
             || $k === Node::KIND_YIELD || $k === Node::KIND_SPREAD) {
             return $n;
