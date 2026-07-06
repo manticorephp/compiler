@@ -179,6 +179,12 @@ trait EmitLlvmExceptions
         $out .= '  ' . $cnd . ' = icmp eq i32 ' . $sj . ", 0\n";
         $out .= '  br i1 ' . $cnd . ', label %' . $tryLbl . ', label %' . $catchLbl . "\n";
 
+        // A `return` inside the try / catch bodies must run this finally before
+        // exiting the function — make the finally body visible to emitReturn.
+        // Popped before the finally's own emission (the finally is not
+        // self-protected).
+        if ($hasFinally) { $this->finallyStack[] = $tc->finallyBody; }
+
         // Try body — pop inner depth on normal exit.
         $out .= $tryLbl . ":\n";
         foreach ($tc->tryBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
@@ -238,8 +244,10 @@ trait EmitLlvmExceptions
             $out .= $this->emitRethrowAt();
         }
 
-        // Finally.
+        // Finally. Pop first — the finally body is not protected by itself, and
+        // a `return` inside it must not re-inline this same finally.
         if ($hasFinally) {
+            \array_pop($this->finallyStack);
             $out .= $outerCatchLbl . ":\n";
             // Record the in-flight exception for rethrow after finally.
             $oce = $this->allocSsa();

@@ -162,6 +162,10 @@ final class EmitLlvm
     /** @var array<string, true> by-ref param names in the current fn */
     private array $refLocals = [];
 
+    /** @var array<Node[]> enclosing finally bodies (outer-first) active at the
+     *  current emit point — a `return` inside a try runs them before exiting. */
+    private array $finallyStack = [];
+
     /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
     private array $byRefCaptured = [];
 
@@ -1744,6 +1748,7 @@ final class EmitLlvm
         $this->currentReturnsByRef = $fn->returnsByRef;
         $this->currentReturnType = $fn->returnType;
         $this->currentFnIsClosure = false;
+        $this->finallyStack = [];
 
         $isMain = $fn->name === '__main';
         if ($isMain) {
@@ -4479,6 +4484,36 @@ final class EmitLlvm
     private function emitIncDec(Node $n): string
     {
         $d = $this->castIncDec($n);
+        $instr = $d->op === '+' ? 'add' : 'sub';
+        // Static locals (backed by a global cell) and by-ref params / captures
+        // (the slot holds a POINTER to the real storage) don't live in a plain
+        // i64 slot. `++`/`--` must load/store through the same indirection as
+        // Load/StoreLocal, else the write-back hits a stale local and no-ops.
+        if (isset($this->globalBackedLocals[$d->name])) {
+            $cell = $this->globalBackedLocals[$d->name];
+            $old = $this->allocSsa();
+            $out = '  ' . $old . ' = load i64, ptr ' . $cell . "\n";
+            $new = $this->allocSsa();
+            $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
+            $out .= '  store i64 ' . $new . ', ptr ' . $cell . "\n";
+            $this->lastValue = $d->prefix ? $new : $old;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if (isset($this->refLocals[$d->name]) && isset($this->slots[$d->name])) {
+            $addr = $this->allocSsa();
+            $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$d->name] . "\n";
+            $p = $this->allocSsa();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $old = $this->allocSsa();
+            $out .= '  ' . $old . ' = load i64, ptr ' . $p . "\n";
+            $new = $this->allocSsa();
+            $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
+            $out .= '  store i64 ' . $new . ', ptr ' . $p . "\n";
+            $this->lastValue = $d->prefix ? $new : $old;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $slot = $this->slots[$d->name] ?? null;
         if ($slot === null) {
             // No prior assignment seen — treat as starting from 0.
@@ -4492,7 +4527,6 @@ final class EmitLlvm
         $old = $this->allocSsa();
         $out .= '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
         $new = $this->allocSsa();
-        $instr = $d->op === '+' ? 'add' : 'sub';
         $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
         $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
         $this->lastValue = $d->prefix ? $new : $old;
@@ -6252,7 +6286,7 @@ final class EmitLlvm
             ? $this->castLoadLocal($v)->name : null;
         $leave .= $this->emitRcReturnCleanup($returnedLocal);
         if ($v === null) {
-            return $leave . "  ret i64 0\n" . $this->emitDeadLabel();
+            return $this->finishReturn('', '0', $leave);
         }
         // By-ref return: yield the *address* of the returned lvalue as
         // i64. `return $n` where $n is a by-ref param forwards the held
@@ -6266,7 +6300,7 @@ final class EmitLlvm
                 } else {
                     $out = '  ' . $reg . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
                 }
-                return $out . $leave . '  ret i64 ' . $reg . "\n" . $this->emitDeadLabel();
+                return $this->finishReturn($out, $reg, $leave);
             }
         }
         $out = $this->emitNode($v);
@@ -6278,7 +6312,7 @@ final class EmitLlvm
         // returns first).
         if ($this->currentFnIsClosure && $this->isCellBoxableArg($v->type)) {
             $out .= $this->boxToCell($v->type);
-            return $out . $leave . '  ret i64 ' . $this->lastValue . "\n" . $this->emitDeadLabel();
+            return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
         // integer-arithmetic-on-cells path (`$x * 2` where $x is a plain cell
@@ -6290,7 +6324,7 @@ final class EmitLlvm
         if ($this->currentFnIsClosure && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->needsTagged = true;
             $out .= $this->boxLastByRepr();
-            return $out . $leave . '  ret i64 ' . $this->lastValue . "\n" . $this->emitDeadLabel();
+            return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // A `mixed` / union (cell) return boxes the value to a tagged
         // cell unless it already is one.
@@ -6317,7 +6351,28 @@ final class EmitLlvm
                 $out .= $this->rcRetainByType($v, $this->lastValue);
             }
         }
-        return $out . $leave . '  ret i64 ' . $this->lastValue . "\n" . $this->emitDeadLabel();
+        return $this->finishReturn($out, $this->lastValue, $leave);
+    }
+
+    /**
+     * Emit a function return, first running any enclosing `finally` bodies
+     * (innermost first) — PHP runs `finally` on the return path. The return
+     * value is already computed into `$valReg` (evaluated BEFORE finally, per
+     * PHP order); `$leave` (arena_leave + rc cleanup) trails so locals stay
+     * live during finally. finallyStack is cleared while inlining so a `return`
+     * inside a finally exits directly (a finally-return overrides).
+     */
+    private function finishReturn(string $out, string $valReg, string $leave): string
+    {
+        if ($this->finallyStack !== []) {
+            $saved = $this->finallyStack;
+            $this->finallyStack = [];
+            foreach (\array_reverse($saved) as $body) {
+                foreach ($body as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
+            }
+            $this->finallyStack = $saved;
+        }
+        return $out . $leave . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 
     /** Whether an obj/vec return value is a borrowed reference (needs +1). */

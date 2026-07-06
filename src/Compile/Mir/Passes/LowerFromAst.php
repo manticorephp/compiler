@@ -337,6 +337,12 @@ final class LowerFromAst implements Pass
                             $this->shortClassFqn[$ishort] = $iname;
                         }
                     }
+                } elseif (($cdecl->kind ?? 'class') === 'enum') {
+                    // Register the enum decl so `self::CONST` / `Enum::CONST`
+                    // resolve its constants (findClassConst walks `->consts`).
+                    $ename = $this->classDeclName($cdecl);
+                    $this->classDecls[$ename] = $cdecl;
+                    $this->knownClassNames[$ename] = true;
                 }
             }
         }
@@ -348,6 +354,30 @@ final class LowerFromAst implements Pass
                     $ed = $this->buildEnumDef($decl);
                     $this->enumTable[$ed->name] = $ed;
                     $module->addEnum($ed);
+                    // Register a minimal ClassDef so enum instance methods lower
+                    // and emit (a case is an ordinal; the method takes $this =
+                    // ordinal, and `->name`/`->value` resolve via the enum
+                    // globals). NOT added to module->classes: enum cases are
+                    // value ordinals, not heap objects — the call site dispatches
+                    // directly to `Enum__method`.
+                    $mnames = [];
+                    foreach ($decl->methods as $m) { $mnames[$m->name] = true; }
+                    if ($mnames !== []) {
+                        $ecd = new ClassDef(
+                            name: $ed->name,
+                            classId: $this->stableClassId(\ltrim($ed->name, '\\')),
+                            propertyNames: [],
+                            propertyTypes: [],
+                            methodNames: $mnames,
+                            interfaces: $decl->implements,
+                        );
+                        $this->classTable[$ed->name] = $ecd;
+                        // Registered so InferTypes resolves `$case->method()`
+                        // return types + dispatch. Enum cases stay ordinals — the
+                        // isEnumClass() guards keep rc/new/property on the enum
+                        // path; only method signatures are consulted here.
+                        $module->addClass($ecd);
+                    }
                     continue;
                 }
                 if ($dkind === 'trait') {
@@ -472,7 +502,8 @@ final class LowerFromAst implements Pass
                 continue;
             }
             if ($stmt->kind === 'Class') {
-                if (($stmt->decl->kind ?? 'class') === 'class') {
+                $dk = $stmt->decl->kind ?? 'class';
+                if ($dk === 'class' || $dk === 'enum') {
                     $before = \count($module->functions);
                     $this->lowerClassMethods($stmt->decl, $module);
                     if ($isPrelude) {
@@ -2640,11 +2671,13 @@ final class LowerFromAst implements Pass
             if (\strtolower($saName) === 'class') {
                 return new StringConst($this->resolveStaticClass($saClass), Type::string_());
             }
-            // EnumName::Case → ordinal int carrying the enum type.
+            // EnumName::Case → ordinal int carrying the enum type. A non-case
+            // name (ordinal -1) is an enum CONSTANT — fall through to the
+            // const lookup below.
             $ecls = \ltrim($saClass, '\\');
             if (isset($this->enumTable[$ecls])) {
                 $ord = $this->enumTable[$ecls]->ordinalOf($saName);
-                return new IntConst($ord, Type::obj($ecls));
+                if ($ord >= 0) { return new IntConst($ord, Type::obj($ecls)); }
             }
             // Class::$prop → load the static-property global.
             $sp = $this->staticPropRef($saClass, $saName);
