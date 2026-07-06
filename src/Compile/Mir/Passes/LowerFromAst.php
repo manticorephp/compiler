@@ -3854,6 +3854,29 @@ final class LowerFromAst implements Pass
         return null;
     }
 
+    /** Value element type of a fully STRING-keyed homogeneous array literal
+     *  (`["x"=>10, "y"=>20]` → int); null if any key is non-literal-string or
+     *  the values are heterogeneous / non-scalar. Recovers an assoc bare-array
+     *  property's value type from a wholesale store. */
+    private function inferBareArrayPropAssocElem(\Parser\Ast\Expr $default): ?Type
+    {
+        if ($default->kind !== 'ArrayLit') { return null; }
+        $elems = $default->elements;
+        if ($elems === []) { return null; }
+        $kind = '';
+        foreach ($elems as $el) {
+            if ($el->key === null || $el->key->kind !== 'StringLiteral') { return null; }
+            $vk = $el->value->kind;
+            if ($kind === '') { $kind = $vk; }
+            elseif ($kind !== $vk) { return null; }
+        }
+        if ($kind === 'IntLiteral')    { return Type::int_(); }
+        if ($kind === 'StringLiteral') { return Type::string_(); }
+        if ($kind === 'FloatLiteral')  { return Type::float_(); }
+        if ($kind === 'BoolLiteral')   { return Type::bool_(); }
+        return null;
+    }
+
     /**
      * Recover a bare-`array` property's element type from how the class's own
      * methods STORE into it — the usage-inference fallback when neither a `@var`
@@ -3972,7 +3995,19 @@ final class LowerFromAst implements Pass
             // `$this->prop = []` re-init is fine (no element info); any other
             // wholesale assignment could seed a foreign element type → bail.
             $rhs = $as->value;
-            if ($rhs->kind === 'ArrayLit' && $this->asArrayLit($rhs)->elements === []) { return null; }
+            if ($rhs->kind === 'ArrayLit') {
+                if ($this->asArrayLit($rhs)->elements === []) { return null; }
+                // A homogeneous list literal reveals the element type
+                // (`$this->items = [5,6,7]` in the ctor → vec[int]), same as an
+                // inline default — so a read / by-ref of `$this->items[$i]` stays
+                // typed instead of erased to raw pointers.
+                $elem = $this->inferBareArrayPropElem($rhs);
+                if ($elem !== null) { return $elem; }
+                // A string-keyed homogeneous literal (`$this->map = ["x"=>10]`) →
+                // assoc[string, V]; flag it so buildClassDef builds an assoc type.
+                $ve = $this->inferBareArrayPropAssocElem($rhs);
+                if ($ve !== null) { $this->propStoreStrKey = true; return $ve; }
+            }
             return Type::unknown();
         }
         return null;
