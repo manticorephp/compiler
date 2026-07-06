@@ -2777,6 +2777,30 @@ final class LowerFromAst implements Pass
             if ($fn === 'empty' && \count($expr->args) === 1) {
                 return new Not_($this->lowerExpr($expr->args[0]));
             }
+            // `compact('a', 'b', ...)` with STRING-LITERAL names → an assoc array
+            // built from the named locals (`['a' => $a, 'b' => $b]`). PHP resolves
+            // the names from the runtime symbol table; AOT has no runtime name→slot
+            // map, so only the literal-name form is supported (dynamic / nested-
+            // array names fall through to the stdlib). An undefined var is not
+            // skipped (yields its null slot) — the common "compact vars you just
+            // set" usage matches PHP.
+            if ($fn === 'compact' && \count($expr->args) >= 1) {
+                $names = [];
+                $litOnly = true;
+                foreach ($expr->args as $a) {
+                    if ($a->kind !== 'StringLiteral') { $litOnly = false; break; }
+                    $names[] = $this->stringLitValue($a);
+                }
+                if ($litOnly) {
+                    $elems = [];
+                    foreach ($names as $nm) {
+                        $key = new StringConst($nm, Type::string_());
+                        $val = $this->lowerExpr(\Parser\Ast\Expr::variable($nm, $expr->span));
+                        $elems[] = new ArrayElement_($key, $val);
+                    }
+                    return new ArrayLit($elems, Type::unknown());
+                }
+            }
             // `define("NAME", v)` — registered in the run() pre-pass; the call
             // itself is a no-op yielding true (define's bool return).
             if ($fn === 'define') {
