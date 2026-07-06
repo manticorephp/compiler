@@ -3824,20 +3824,46 @@ final class EmitLlvm
     private function emitNeg(Node $n): string
     {
         $neg = $this->castNeg($n);
+        // A numeric (int|float) cell is dynamic — negate as tagged `0 - $x` so a
+        // float value keeps its float tag and the result stays a numeric cell.
+        // The operand is ALREADY a boxed cell, so it is passed to tagged_sub
+        // as-is (not re-boxed, which would double-tag).
+        if ($neg->operand->type->isNumericCell()) {
+            $this->needsTaggedArith = true;
+            $this->needsTagged = true;
+            $this->needsTaggedToInt = true;
+            $this->needsStrtol = true;
+            $this->needsTaggedToFloat = true;
+            $this->needsStrtod = true;
+            $out = $this->emitNode($neg->operand);
+            $out .= $this->coerceToI64();
+            $xc = $this->lastValue;
+            $z = $this->allocSsa();
+            $out .= '  ' . $z . " = call i64 @__manticore_box_int(i64 0)\n";
+            $reg = $this->allocSsa();
+            $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_sub(i64 ' . $z
+                  . ', i64 ' . $xc . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $out = $this->emitNode($neg->operand);
-        $val = $this->lastValue;
-        $reg = $this->allocSsa();
         // Float negation needs fneg, not integer `sub i64 0, x` (the
         // operand carries a double — e.g. `-PHP_FLOAT_MAX`).
         if ($this->lastValueType === 'double' || $neg->operand->type->kind === Type::KIND_FLOAT) {
             $out .= $this->coerceTo('double');
-            $val = $this->lastValue;
-            $out .= '  ' . $reg . ' = fneg double ' . $val . "\n";
+            $reg = $this->allocSsa();
+            $out .= '  ' . $reg . ' = fneg double ' . $this->lastValue . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'double';
             return $out;
         }
-        $out .= '  ' . $reg . ' = sub i64 0, ' . $val . "\n";
+        // Unbox a cell operand (and numeric-coerce a string) BEFORE the integer
+        // negate — negating the raw NaN-boxed bits of `-$x` on a mixed/untyped
+        // param produced garbage. Mirrors {@see coerceArithOperand}.
+        $out .= $this->coerceArithOperand($neg->operand, false);
+        $reg = $this->allocSsa();
+        $out .= '  ' . $reg . ' = sub i64 0, ' . $this->lastValue . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;

@@ -1886,6 +1886,14 @@ final class InferTypes implements Pass
             $node->type = Type::float_();
         } else if ($t->kind === Type::KIND_INT) {
             $node->type = Type::int_();
+        } else if ($t->isNumericCell()) {
+            // `-$x` on an int|float cell stays a dynamic numeric cell (EmitLlvm
+            // negates via tagged_sub, preserving the runtime tag).
+            $node->type = Type::numericCell();
+        } else if ($t->kind === Type::KIND_CELL) {
+            // A mixed/untyped operand is unboxed to int and negated as a raw
+            // integer (EmitLlvm coerceArithOperand) → the result is an int.
+            $node->type = Type::int_();
         }
         return $node->type;
     }
