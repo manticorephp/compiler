@@ -7642,17 +7642,16 @@ final class EmitLlvm
         $out = '';
         $n = \strlen($s);
         for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = \substr($s, $i, 1);
-            if ($c === '\\' || $c === '"') {
-                $out .= '\\' . $this->hexByte(\ord($c));
-                continue;
-            }
-            $code = \ord($c);
-            if ($code < 0x20 || $code >= 0x7F) {
+            // Index (`$s[$i]`), NOT substr: string indexing is binary-safe but
+            // the runtime substr is C-strlen bounded, so `substr($s,$i,1)` on a
+            // string with an embedded NUL truncates → bytes after the NUL emit
+            // as \00 (the trim mask `\0\x0B`, any `\xNN`/binary literal).
+            $code = \ord($s[$i]);
+            if ($code === 92 || $code === 34 || $code < 0x20 || $code >= 0x7F) {
                 $out .= '\\' . $this->hexByte($code);
                 continue;
             }
-            $out .= $c;
+            $out .= $s[$i];
         }
         return $out;
     }

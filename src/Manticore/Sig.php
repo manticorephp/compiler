@@ -250,7 +250,7 @@ final class Sig
             elseif ($b === 9)   { $out = $out . "\\t"; }
             elseif ($b === 13)  { $out = $out . "\\r"; }
             elseif ($b < 32)    { $out = $out . "\\u00" . self::hex2($b); }
-            else { $out = $out . \substr($s, $i, 1); }
+            else { $out = $out . $s[$i]; } // index: binary-safe (substr is C-strlen bounded)
         }
         return $out . '"';
     }

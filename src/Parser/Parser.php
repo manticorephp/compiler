@@ -2499,18 +2499,34 @@ final class Parser
             $body = str_replace("\\\\", "\\", $body);
             return $body;
         }
-        // Double-quoted: process the common escape subset via
-        // str_replace passes. PHP's full set (\xHH, \uXXXX, octal,
-        // \v, \f, \e) can land here as the bootstrap source grows.
-        $body = str_replace("\\\\", chr(1) . chr(2), $body); // sentinel
-        $body = str_replace("\\n", "\n", $body);
-        $body = str_replace("\\r", "\r", $body);
-        $body = str_replace("\\t", "\t", $body);
-        $body = str_replace("\\\"", "\"", $body);
-        $body = str_replace("\\\$", "\$", $body);
-        $body = str_replace("\\0", chr(0), $body);
-        $body = str_replace(chr(1) . chr(2), "\\", $body); // restore
-        return $body;
+        // Double-quoted: scan and decode the full escape set (simple + \xHH +
+        // octal \NNN + \v \f \e). A char scanner (not str_replace passes) so
+        // variable-length escapes decode correctly and `\\` can't shadow a
+        // following escape. \u{...} is still passed through literally (rare).
+        $out = '';
+        $n = \strlen($body);
+        $i = 0;
+        while ($i < $n) {
+            $c = \substr($body, $i, 1);
+            if ($c === '\\' && $i + 1 < $n) {
+                $out .= $this->decodeEscapeSeq($body, $n, $i + 1);
+                $i = $i + 1 + $this->escapeLen;
+                continue;
+            }
+            $out .= $c;
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /** Hex-digit value of `$c`, or -1. */
+    private function hexDigitVal(string $c): int
+    {
+        $o = \ord($c);
+        if ($o >= 48 && $o <= 57) { return $o - 48; }        // 0-9
+        if ($o >= 97 && $o <= 102) { return $o - 97 + 10; }  // a-f
+        if ($o >= 65 && $o <= 70) { return $o - 65 + 10; }   // A-F
+        return -1;
     }
 
     private function isIdentStart(string $c): bool
@@ -2526,16 +2542,53 @@ final class Parser
             || ($o >= 48 && $o <= 57) || $o === 95;
     }
 
-    /** Decode one double-quote escape char to its byte(s). */
-    private function decodeEscape(string $c): string
+    /** chars consumed AFTER the backslash by the last {@see decodeEscapeSeq}. */
+    private int $escapeLen = 0;
+
+    /**
+     * Decode the double-quote escape whose backslash sits at `$i-1` (so `$i`
+     * indexes the char right after it) and set {@see $escapeLen} to how many
+     * chars past the backslash it spanned. Handles the simple set plus `\xHH`
+     * (1-2 hex), octal `\NNN` (1-3 digits, incl. `\0`), and `\v \f \e`. An
+     * unknown escape keeps both bytes (PHP behaviour). `$n` is `strlen($body)`.
+     */
+    private function decodeEscapeSeq(string $body, int $n, int $i): string
     {
+        $this->escapeLen = 1;
+        $c = \substr($body, $i, 1);
         if ($c === 'n') { return "\n"; }
         if ($c === 'r') { return "\r"; }
         if ($c === 't') { return "\t"; }
+        if ($c === 'v') { return \chr(11); }
+        if ($c === 'f') { return \chr(12); }
+        if ($c === 'e') { return \chr(27); }
         if ($c === '"') { return '"'; }
         if ($c === '\\') { return '\\'; }
         if ($c === '$') { return '$'; }
-        if ($c === '0') { return \chr(0); }
+        if ($c === 'x') {
+            // 1-2 hex digits; `\x` with none is a literal backslash-x (PHP).
+            $val = 0; $got = 0; $j = $i + 1;
+            while ($j < $n && $got < 2) {
+                $hv = $this->hexDigitVal(\substr($body, $j, 1));
+                if ($hv < 0) { break; }
+                $val = $val * 16 + $hv; $got = $got + 1; $j = $j + 1;
+            }
+            if ($got === 0) { return '\\x'; }
+            $this->escapeLen = 1 + $got;
+            return \chr($val & 255);
+        }
+        $o0 = \ord($c);
+        if ($o0 >= 48 && $o0 <= 55) {
+            // Octal \NNN — up to 3 octal digits (\0 is the 1-digit case).
+            $val = 0; $got = 0; $j = $i;
+            while ($j < $n && $got < 3) {
+                $od = \ord(\substr($body, $j, 1));
+                if ($od < 48 || $od > 55) { break; }
+                $val = $val * 8 + ($od - 48); $got = $got + 1; $j = $j + 1;
+            }
+            $this->escapeLen = $got;
+            return \chr($val & 255);
+        }
         return '\\' . $c; // unknown escape: keep both, PHP-style
     }
 
@@ -2573,8 +2626,8 @@ final class Parser
         while ($i < $n) {
             $c = \substr($body, $i, 1);
             if ($c === '\\' && $i + 1 < $n) {
-                $lit .= $this->decodeEscape(\substr($body, $i + 1, 1));
-                $i = $i + 2;
+                $lit .= $this->decodeEscapeSeq($body, $n, $i + 1);
+                $i = $i + 1 + $this->escapeLen;
                 continue;
             }
             // Complex: {$expr}

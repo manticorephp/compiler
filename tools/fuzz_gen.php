@@ -81,10 +81,7 @@ function gString(int $d): string {
     if ($r === 1) return 'strtoupper(' . gString($d-1) . ')';
     if ($r === 2) return 'strtolower(' . gString($d-1) . ')';
     if ($r === 3) return 'str_repeat(' . gString($d-1) . ', ' . mt_rand(0, 4) . ')';
-    // Explicit mask: trim() with the DEFAULT mask is a known divergence (stdlib
-    // param-default escapes don't round-trip through the .sig — the mask carries
-    // a literal `\x0B` whose bytes spuriously strip chars). Pin an explicit mask.
-    if ($r === 4) return 'trim(' . gString($d-1) . ', " ")';
+    if ($r === 4) return 'trim(' . gString($d-1) . ')';
     if ($r === 5) return '((string)' . gInt($d-1) . ')';
     return 'substr(' . gString($d-1) . ', ' . mt_rand(0, 3) . ', ' . mt_rand(1, 4) . ')';
 }

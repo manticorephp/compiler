@@ -140,7 +140,23 @@ final class Parser
                 if ($e === 'n') { $out = $out . "\n"; }
                 elseif ($e === 't') { $out = $out . "\t"; }
                 elseif ($e === 'r') { $out = $out . "\r"; }
-                else { $out = $out . $e; }
+                elseif ($e === 'b') { $out = $out . \chr(8); }
+                elseif ($e === 'f') { $out = $out . \chr(12); }
+                elseif ($e === 'u') {
+                    // \uXXXX — 4 hex digits → the codepoint's UTF-8 bytes.
+                    $cp = 0; $k = 0;
+                    $this->pos = $this->pos + 1;
+                    while ($k < 4 && $this->pos < $this->len) {
+                        $hv = $this->hexDigit($this->src[$this->pos]);
+                        if ($hv < 0) { break; }
+                        $cp = $cp * 16 + $hv;
+                        $this->pos = $this->pos + 1;
+                        $k = $k + 1;
+                    }
+                    $out = $out . $this->utf8Encode($cp);
+                    continue; // pos already past the digits
+                }
+                else { $out = $out . $e; } // \\ \" \/ and any other
                 $this->pos = $this->pos + 1;
                 continue;
             }
@@ -148,6 +164,28 @@ final class Parser
             $this->pos = $this->pos + 1;
         }
         return $out;
+    }
+
+    /** Hex-digit value of `$c`, or -1. */
+    private function hexDigit(string $c): int
+    {
+        $o = \ord($c);
+        if ($o >= 48 && $o <= 57) { return $o - 48; }
+        if ($o >= 97 && $o <= 102) { return $o - 97 + 10; }
+        if ($o >= 65 && $o <= 70) { return $o - 65 + 10; }
+        return -1;
+    }
+
+    /** UTF-8 bytes for a BMP codepoint (1-3 bytes; matches PHP json_decode). */
+    private function utf8Encode(int $cp): string
+    {
+        if ($cp < 128) { return \chr($cp); }
+        if ($cp < 2048) {
+            return \chr(192 + (($cp >> 6) & 31)) . \chr(128 + ($cp & 63));
+        }
+        return \chr(224 + (($cp >> 12) & 15))
+            . \chr(128 + (($cp >> 6) & 63))
+            . \chr(128 + ($cp & 63));
     }
 
     private function parseNumber(): mixed
