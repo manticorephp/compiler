@@ -301,6 +301,8 @@ final class EmitLlvm
     private bool $needsStrcmp = false;
     private bool $needsIntStr = false;
     private bool $needsExceptions = false;
+    /** This module defines `@main` (the user program, not the stdlib library). */
+    private bool $moduleHasMain = false;
     /** Module uses `$gen->throw($e)` → emit the per-yield injection check. */
     private bool $genThrowUsed = false;
     private bool $needsTagged = false;
@@ -399,6 +401,7 @@ final class EmitLlvm
             $this->fnParamDefaults[$fn->name] = $pdefs;
             $this->fnReturnsByRef[$fn->name] = $fn->returnsByRef;
             $this->definedFns[$this->mangle($fn->name)] = true;
+            if ($fn->name === '__main') { $this->moduleHasMain = true; }
         }
         // Pre-scan for `$gen->throw($e)`: a yield resume point must check for
         // an injected exception. Must be known BEFORE emitting any generator
@@ -409,6 +412,14 @@ final class EmitLlvm
             if ($this->scanGenThrow($fn->body)) { $this->genThrowUsed = true; break; }
         }
         if ($this->genThrowUsed) { $this->needsExceptions = true; }
+        // Pre-scan for throw / try-catch so `needsExceptions` is settled BEFORE
+        // any function body emits — @main's base landing pad (emitMain) is gated
+        // on it and @main may be emitted before a throwing function is reached.
+        if (!$this->needsExceptions) {
+            foreach ($module->functions as $fn) {
+                if ($this->scanUsesExceptions($fn->body)) { $this->needsExceptions = true; break; }
+            }
+        }
         // Classify cell/`mixed` properties: a name that is EVER stored a
         // non-scalar (array / string / object / unknown / general cell) value
         // stays RAW (the SPL cell-array backing `$__s` etc. — rc-managed +
@@ -557,6 +568,18 @@ final class EmitLlvm
             // next yield resume point (the suspended `yield` expression raises).
             if ($this->genThrowUsed) {
                 $out .= "@__mir_gen_throw = linkonce_odr global ptr null\n";
+            }
+            // Top-level fatal for an UNCAUGHT throw. @main installs a base
+            // setjmp at slot 0 (depth starts at 1 → user tries take slots 1+);
+            // a throw that unwinds past every try longjmps here. Without it a
+            // depth-0 throw computes slot -1 → OOB jmp_buf → UB longjmp. Emitted
+            // ONLY in the module that owns @main (the user program): its class
+            // switch is module-specific, so a linkonce_odr copy in stdlib.o
+            // (different class table) would be an ODR mismatch.
+            if ($this->moduleHasMain) {
+                $out .= "@.fmt.uncaught = private unnamed_addr constant [35 x i8] "
+                      . "c\"PHP Fatal error:  Uncaught %s: %s\\0A\\00\", align 1\n";
+                $out .= $this->emitUncaughtHandler();
             }
         }
         // Dedup libc declares by symbol — flag-driven needs + the
@@ -2803,10 +2826,96 @@ final class EmitLlvm
         return $out;
     }
 
+    /**
+     * `@__mir_uncaught()` — the top-level fatal handler an uncaught throw
+     * longjmps to (base setjmp installed in @main). Renders PHP's
+     * `PHP Fatal error:  Uncaught <Class>: <message>` to stderr and exits 255.
+     * Class name comes from a runtime class_id switch; the message is the
+     * Throwable's first property (`message`, same offset for every Throwable).
+     */
+    /** True if `$n` (or a descendant) throws or has a try-catch. */
+    private function scanUsesExceptions(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_THROW || $n->kind === Node::KIND_TRY_CATCH) {
+            return true;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->scanUsesExceptions($c)) { return true; }
+        }
+        return false;
+    }
+
+    private function emitUncaughtHandler(): string
+    {
+        $this->libcExtra['exit'] = 'declare void @exit(i32)';
+        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        // message offset: the Exception layout is shared by every Throwable.
+        $exc = $this->classes['Exception'] ?? null;
+        $msgOff = $exc !== null ? $exc->propertyOffset('message') : 16;
+        $strs = '';
+        $cases = '';
+        $bodies = '';
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $id = (string)$cls->classId;
+            $sym = '@__mir_ucn_' . $id;
+            $strs .= $this->strGlobalDef($sym, $cls->name);
+            $cases .= '    i64 ' . $id . ', label %uc_' . $id . "\n";
+            $bodies .= 'uc_' . $id . ":\n"
+                . '  store ptr ' . $this->strSymBytes($sym) . ", ptr %cn\n"
+                . "  br label %named\n";
+        }
+        $strs .= $this->strGlobalDef('@__mir_ucn_def', 'Exception');
+        $empty = $this->strSymBytes('@.cstr.empty');
+        $out = $strs;
+        $out .= "define void @__mir_uncaught() {\nentry:\n";
+        $out .= "  %cn = alloca ptr\n";
+        $out .= '  store ptr ' . $this->strSymBytes('@__mir_ucn_def') . ", ptr %cn\n";
+        $out .= "  %e = load ptr, ptr @__mir_thrown\n";
+        $out .= "  %z = icmp eq ptr %e, null\n";
+        $out .= "  br i1 %z, label %named, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %descI = load i64, ptr %e\n";
+        $out .= "  %descp = inttoptr i64 %descI to ptr\n";
+        $out .= "  %cid = load i64, ptr %descp\n";
+        $out .= "  switch i64 %cid, label %named [\n" . $cases . "  ]\n";
+        $out .= $bodies;
+        $out .= "named:\n";
+        $out .= "  %cname = load ptr, ptr %cn\n";
+        $out .= "  %haveE = icmp ne ptr %e, null\n";
+        $out .= "  br i1 %haveE, label %msg, label %print\n";
+        $out .= "msg:\n";
+        $out .= '  %mp = getelementptr i8, ptr %e, i64 ' . (string)$msgOff . "\n";
+        $out .= "  %msgv = load ptr, ptr %mp\n";
+        $out .= "  %mnz = icmp ne ptr %msgv, null\n";
+        $out .= '  %msgf = select i1 %mnz, ptr %msgv, ptr ' . $empty . "\n";
+        $out .= "  br label %print\n";
+        $out .= "print:\n";
+        $out .= '  %m = phi ptr [ ' . $empty . ', %named ], [ %msgf, %msg ]' . "\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.uncaught, ptr %cname, ptr %m)\n";
+        $out .= "  call void @exit(i32 255)\n";
+        $out .= "  unreachable\n}\n";
+        return $out;
+    }
+
     private function emitMain(FunctionDef $fn): string
     {
         $this->needsCliArgv = true;
         $header = "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n";
+        if ($this->needsExceptions) {
+            // Install the base landing pad: depth 1 reserves slot 0 for this
+            // catch-all, so user tries take slots 1+ and a throw that escapes
+            // them all unwinds here instead of computing an OOB slot -1.
+            $header .= "  store i64 1, ptr @__mir_jmp_depth\n";
+            $header .= "  %__basebuf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
+            $header .= "  %__basesj = call i32 @setjmp(ptr %__basebuf)\n";
+            $header .= "  %__caught = icmp ne i32 %__basesj, 0\n";
+            $header .= "  br i1 %__caught, label %__uncaught, label %__run\n";
+            $header .= "__uncaught:\n";
+            $header .= "  call void @__mir_uncaught()\n";
+            $header .= "  unreachable\n";
+            $header .= "__run:\n";
+        }
         if (\Compile\Debug::$profile) {
             $header .= "  call i32 @atexit(ptr @__manticore_profile_dump)\n";
         }
