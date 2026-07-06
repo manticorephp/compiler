@@ -166,6 +166,19 @@ final class InferTypes implements Pass
     /** Set when scanCtorPropContainers retypes a property (triggers re-infer). */
     private bool $ctorPropChanged = false;
 
+    /** @var array<string, Type> global var name → unified type across every
+     *  scope (`__main` + all functions that `global $g`). A global-backed
+     *  StaticLocalDecl_ is hard-lowered `int`; a function that only READS the
+     *  global (no local store) would keep that int and mis-render/leak a
+     *  string/obj. {@see scanGlobalTypes} joins all stores; the decl seeds
+     *  from here so cross-scope reads carry the real type. */
+    private array $globalVarTypes = [];
+
+    /** @var array<string,bool> functions whose return type was UNDECLARED (unknown
+     *  before inference) — their return is re-narrowed from scratch, so the global
+     *  re-infer may reset it to unknown to re-adopt a now-string global return. */
+    private array $undeclaredReturnFns = [];
+
     /** @var array<string, Type> */
     private array $sigs = [];
 
@@ -205,9 +218,13 @@ final class InferTypes implements Pass
         $this->fnByName = [];
         $this->closureNodeByName = [];
         $this->sawClosures = false;
+        $this->undeclaredReturnFns = [];
         foreach ($module->functions as $fn) {
             $this->sigs[$fn->name] = $fn->returnType;
             $this->fnByName[$fn->name] = $fn;
+            if ($fn->returnType->kind === Type::KIND_UNKNOWN) {
+                $this->undeclaredReturnFns[$fn->name] = true;
+            }
         }
         // Module pre-scan: a class property string-keyed anywhere
         // (`$this->prop[$k] = v`) is an assoc, not a vec. Retype it in the
@@ -249,6 +266,26 @@ final class InferTypes implements Pass
         // makes string/array ops misread it as a NaN-boxed value. Refine it to
         // the concrete type every call site passes (a TYPED `&$p` already works).
         if ($this->scanCallSiteRefParams($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
+        // Global var type unification: a `global $g` read in a scope that never
+        // stores to it keeps the hard-lowered `int` type and mis-renders/leaks a
+        // string/obj global. Join all stores and re-infer so pure-read scopes
+        // pick up the real type.
+        if ($this->scanGlobalTypes($module)) {
+            // A pure-read return (`global $g; return $g;`) was locked to `int`
+            // in pass 1 (the return narrowing only ADOPTS a scalar when the type
+            // is still unknown). Reset every UNDECLARED return to unknown so the
+            // re-infer re-adopts the now-string global return; declared returns
+            // keep their hint.
+            foreach ($module->functions as $fn) {
+                if (isset($this->undeclaredReturnFns[$fn->name])) {
+                    $fn->returnType = Type::unknown();
+                    $this->sigs[$fn->name] = Type::unknown();
+                }
+            }
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
             }
@@ -1189,6 +1226,75 @@ final class InferTypes implements Pass
     }
 
     /**
+     * Unify each `global $g` variable's type across ALL scopes. A global-backed
+     * StaticLocalDecl_ is hard-lowered `int` ({@see LowerFromAst::lowerGlobal}),
+     * so a function that only reads the global — `global $g; return $g;` with no
+     * local store — keeps the int type and renders a string global as a raw
+     * pointer int (and skips rc). Join the value type of every store into the
+     * global (across every function + `__main`) and seed the map; the decl reads
+     * it so pure-read scopes carry the real type. Returns true if any global
+     * gained a non-int type (→ re-infer).
+     */
+    private function scanGlobalTypes(Module $module): bool
+    {
+        if (\count($module->globalVarNames) === 0) { return false; }
+        $observed = [];                  // var name → joined Type
+        foreach ($module->functions as $fn) {
+            $active = [];                // names that are global-backed HERE
+            $this->collectGlobalBacked($fn->body, $active);
+            if (\count($active) === 0) { continue; }
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed);
+        }
+        $changed = false;
+        foreach ($observed as $name => $t) {
+            $k = $t->kind;
+            if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_INT) { continue; }
+            $prev = $this->globalVarTypes[$name] ?? null;
+            if ($prev === null || $prev->kind !== $k) {
+                $this->globalVarTypes[$name] = $t;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Record the names bound by a global-backed StaticLocalDecl_ (cell `@g_*`)
+     *  in this function body.
+     *  @param array<string,bool> $active */
+    private function collectGlobalBacked(Node $n, array &$active): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $d = $this->asStaticLocalDecl($n);
+            if (\str_starts_with($d->cell, '@g_')) { $active[$d->name] = true; }
+        }
+        foreach (Walk::children($n) as $ch) {
+            $this->collectGlobalBacked($ch, $active);
+        }
+    }
+
+    /** Join the value type of every `StoreLocal` into an active global name.
+     *  @param array<string,bool> $active
+     *  @param array<string,Type> $observed */
+    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $s = $this->asStoreLocal($n);
+            if (isset($active[$s->name])) {
+                $t = $s->value->type;
+                $tk = $t->kind;
+                if ($tk !== Type::KIND_UNKNOWN) {
+                    $observed[$s->name] = isset($observed[$s->name])
+                        ? $this->unionTypes($observed[$s->name], $t)
+                        : $t;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $ch) {
+            $this->collectGlobalStoreTypes($ch, $active, $observed);
+        }
+    }
+
+    /**
      * Observe the type each call site passes to a candidate by-ref param.
      * Only a plain lvalue (LoadLocal) is a valid by-ref arg; a cell/unknown
      * arg carries no info (skip, don't conflict). Differing concrete types
@@ -1237,6 +1343,7 @@ final class InferTypes implements Pass
     }
 
     private function asStoreLocal(Node $n): StoreLocal { return $n; }
+    private function asStaticLocalDecl(Node $n): StaticLocalDecl_ { return $n; }
     private function asReturn(Node $n): Return_ { return $n; }
     private function asYield(Node $n): \Compile\Mir\Yield_ { return $n; }
     private function asForeach(Node $n): Foreach_ { return $n; }
@@ -1687,6 +1794,13 @@ final class InferTypes implements Pass
     {
         $t = $n->type;
         if ($n->init !== null) { $t = $this->inferNode($n->init); }
+        // A global-backed decl (`global $g`) is hard-lowered `int`; seed its
+        // unified cross-scope type ({@see scanGlobalTypes}) so a pure-read scope
+        // (`global $g; return $g;`) carries the real string/obj/array type.
+        elseif (\str_starts_with($n->cell, '@g_')
+                && isset($this->globalVarTypes[$n->name])) {
+            $t = $this->globalVarTypes[$n->name];
+        }
         $this->localTypes[$n->name] = $t;
         $n->type = $t;
         return $t;

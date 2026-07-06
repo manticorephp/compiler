@@ -2898,6 +2898,18 @@ trait EmitLlvmBuiltins
     {
         if ($arrNode->kind === Node::KIND_LOAD_LOCAL) {
             $name = $this->castLoadLocal($arrNode)->name;
+            // Global-backed (`global $arr`): the (possibly realloced) buffer must
+            // be stored back into the module cell so `$arr[] = …` inside one
+            // function is visible to `__main` and every other `global $arr` scope.
+            // Without this the append result is discarded and the global keeps the
+            // stale base.
+            if (isset($this->globalBackedLocals[$name])) {
+                $asI = $this->allocSsa();
+                $out = $this->packArrayBack($arr2, $asI, $asCell);
+                $out .= '  store i64 ' . $asI . ', ptr '
+                      . $this->globalBackedLocals[$name] . "\n";
+                return $out;
+            }
             if (!isset($this->slots[$name])) { return ''; }
             $asI = $this->allocSsa();
             $out = $this->packArrayBack($arr2, $asI, $asCell);
