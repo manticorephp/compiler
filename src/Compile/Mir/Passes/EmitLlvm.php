@@ -2977,8 +2977,36 @@ final class EmitLlvm
                 $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
             }
         }
+        // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
+        // or passed as a call argument that may be by-ref) can mutate the vec —
+        // mark it so a prior `$b = $a` copy-on-assigns instead of sharing the
+        // buffer the reference will write through. Over-approximate (any call
+        // arg): a needless copy is safe, a shared write is not.
+        if ($n->kind === Node::KIND_REF_ADDR) {
+            $this->markVecElemBase($this->castRefAddr($n)->lvalue);
+        }
+        if ($n->kind === Node::KIND_CALL) {
+            foreach ($this->castCall($n)->args as $a) { $this->markVecElemBase($a); }
+        }
+        if ($n->kind === Node::KIND_METHOD_CALL) {
+            foreach ($this->castMethodCall($n)->args as $a) { $this->markVecElemBase($a); }
+        }
+        if ($n->kind === Node::KIND_STATIC_CALL) {
+            foreach ($this->castStaticCall($n)->args as $a) { $this->markVecElemBase($a); }
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectMutatedVecs($c);
+        }
+    }
+
+    /** Mark the vec local under an `$a[$k]` element as mutated (its element may
+     *  be written through a reference). No-op for non-element / non-vec-local. */
+    private function markVecElemBase(Node $a): void
+    {
+        if ($a->kind !== Node::KIND_ARRAY_ACCESS) { return; }
+        $arr = $this->castArrayAccess($a)->array;
+        if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isVec()) {
+            $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
         }
     }
 
@@ -6566,7 +6594,96 @@ final class EmitLlvm
             $cls = $pa->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
+        if ($a->kind === Node::KIND_ARRAY_ACCESS) {
+            return $this->arrayElemAddressable($this->castArrayAccess($a));
+        }
         return false;
+    }
+
+    /**
+     * `$a[$k]` is by-ref addressable when it names an INT-keyed element of an
+     * array container (a local, a global, or an object property). The runtime
+     * ref-slot helper is int-only; string / cell keys and string-char indexing
+     * (`$s[0]`) fall back to a value copy.
+     */
+    private function arrayElemAddressable(ArrayAccess_ $aa): bool
+    {
+        $ik = $aa->index->type->kind;
+        if ($ik !== Type::KIND_INT && $aa->index->kind !== Node::KIND_INT_CONST) {
+            return false;
+        }
+        if (!$this->containerAddressable($aa->array)) { return false; }
+        // Base must be a genuine (raw-pointer) array container. A bare-array
+        // property read can infer UNKNOWN, so consult the declared prop type.
+        if ($aa->array->type->isArray()) { return true; }
+        if ($aa->array->kind === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $this->castPropertyAccess($aa->array);
+            $cls = $pa->object->type->class ?? '';
+            if ($cls !== '' && isset($this->classes[$cls])) {
+                $pt = $this->classes[$cls]->propertyTypes[$pa->property] ?? null;
+                if ($pt !== null && $pt->isArray()) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /** Pure predicate: `$base` has a stable i64 cell holding its array pointer
+     *  ({@see containerCellPtr} without emitting). */
+    private function containerAddressable(Node $base): bool
+    {
+        if ($base->kind === Node::KIND_LOAD_LOCAL) {
+            $name = $this->castLoadLocal($base)->name;
+            return isset($this->globalBackedLocals[$name]) || isset($this->slots[$name]);
+        }
+        if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
+            $cls = $this->castPropertyAccess($base)->object->type->class ?? '';
+            return $cls !== '' && isset($this->classes[$cls]);
+        }
+        return false;
+    }
+
+    /**
+     * IR leaving a `ptr` to the i64 cell that holds `$base`'s array pointer in
+     * `$this->lastValue` (a local's alloca, a by-ref param's forwarded slot, a
+     * global cell, or an object field); null when `$base` has no such stable
+     * cell. Used to feed `__mir_array_ref_slot` so a COW / relocation is stored
+     * back where the array lives.
+     */
+    private function containerCellPtr(Node $base): ?string
+    {
+        if ($base->kind === Node::KIND_LOAD_LOCAL) {
+            $name = $this->castLoadLocal($base)->name;
+            if (isset($this->globalBackedLocals[$name])) {
+                $this->lastValue = $this->globalBackedLocals[$name];
+                $this->lastValueType = 'ptr';
+                return '';
+            }
+            if (!isset($this->slots[$name])) { return null; }
+            if (isset($this->refLocals[$name])) {
+                // The slot holds the address of the caller's cell — deref once.
+                $ai = $this->allocSsa();
+                $out = '  ' . $ai . ' = load i64, ptr ' . $this->slots[$name] . "\n";
+                $p = $this->allocSsa();
+                $out .= '  ' . $p . ' = inttoptr i64 ' . $ai . " to ptr\n";
+                $this->lastValue = $p;
+                $this->lastValueType = 'ptr';
+                return $out;
+            }
+            $this->lastValue = $this->slots[$name];
+            $this->lastValueType = 'ptr';
+            return '';
+        }
+        if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
+            // The property field IS the cell holding the array pointer.
+            $addr = $this->byRefAddrOf($base);
+            if ($addr === null) { return null; }
+            $p = $this->allocSsa();
+            $addr .= '  ' . $p . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+            $this->lastValue = $p;
+            $this->lastValueType = 'ptr';
+            return $addr;
+        }
+        return null;
     }
 
     /**
@@ -6604,6 +6721,26 @@ final class EmitLlvm
                   . ', i64 ' . (string)$off . "\n";
             $addr = $this->allocSsa();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($a->kind === Node::KIND_ARRAY_ACCESS) {
+            $aa = $this->castArrayAccess($a);
+            if (!$this->arrayElemAddressable($aa)) { return null; }
+            // ptr to the cell holding the array (for COW write-back).
+            $out = $this->containerCellPtr($aa->array);
+            if ($out === null) { return null; }
+            $slotPtr = $this->lastValue;
+            // the int key.
+            $out .= $this->emitNode($aa->index);
+            $out .= $this->coerceToI64();
+            $keyReg = $this->lastValue;
+            $ep = $this->allocSsa();
+            $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot(ptr ' . $slotPtr
+                  . ', i64 ' . $keyReg . ")\n";
+            $addr = $this->allocSsa();
+            $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
             $this->lastValue = $addr;
             $this->lastValueType = 'i64';
             return $out;

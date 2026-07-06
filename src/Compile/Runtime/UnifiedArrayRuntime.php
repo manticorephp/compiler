@@ -63,6 +63,7 @@ final class UnifiedArrayRuntime
         $this->emitSetStr();
         $this->emitAppend();
         $this->emitCow();
+        $this->emitRefSlot();
         $this->emitValueAt();
         $this->emitKeyAt();
         $this->emitKeyCellAt();
@@ -1310,6 +1311,80 @@ final class UnifiedArrayRuntime
         $clone->store($clone->sub($rc, Value::int(Type::i64(), 1)), $rcAddr);
         $clone->ret($copy);
         $keep->ret($arr);
+    }
+
+    /**
+     * `__mir_array_ref_slot(slotAddr, key) -> ptr` — the ADDRESS of an int-keyed
+     * element's i64 value cell, for by-reference element access (`f($a[$k])`,
+     * `$r = &$a[$k]`). `slotAddr` is the address of the i64 cell holding the
+     * array pointer (a local's alloca or an object field): the array is
+     * COW-detached and the private buffer stored back there, so writes through
+     * the returned address are visible in the caller's array and don't clobber a
+     * shared copy. A missing key is auto-vivified to 0 (PHP by-ref semantics);
+     * set_int may relocate/promote the buffer, so the base is reloaded from
+     * slotAddr before addressing. A NULL array / unreachable miss returns a
+     * throwaway scratch cell (write discarded, non-crashing).
+     */
+    private function emitRefSlot(): void
+    {
+        $scratch = $this->module->globalInt('__mir_ref_scratch', Type::i64(), 0, 'linkonce_odr');
+        $fn = $this->module->func('__mir_array_ref_slot', Type::ptr());
+        $slotAddr = $fn->param(Type::ptr(), 'slotAddr');
+        $key = $fn->param(Type::i64(), 'key');
+        $e = $fn->block('entry');
+        $live = $fn->block('live');
+        $vivify = $fn->block('vivify');
+        $locate = $fn->block('locate');
+        $packed = $fn->block('packed');
+        $hashed = $fn->block('hashed');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $miss = $fn->block('miss');
+
+        // Load & COW the base; a null array degrades to the scratch cell.
+        $b0i = $e->load(Type::i64(), $slotAddr);
+        $b0 = $e->inttoptr($b0i, Type::ptr());
+        $e->brIf($e->icmp('eq', $b0, Value::null()), $miss, $live);
+
+        $cow = $live->call('__mir_array_cow', Type::ptr(), [$b0]);
+        $live->store($live->ptrtoint($cow, Type::i64()), $slotAddr);
+        $present = $live->call('__mir_array_isset_int', Type::i64(), [$cow, $key]);
+        $live->brIf($live->icmp('eq', $present, Value::int(Type::i64(), 0)), $vivify, $locate);
+
+        // Auto-vivify the absent key to 0 (may relocate / promote to hashed).
+        $sv = $vivify->call('__mir_array_set_int', Type::ptr(),
+            [$cow, $key, Value::int(Type::i64(), 0)]);
+        $vivify->store($vivify->ptrtoint($sv, Type::i64()), $slotAddr);
+        $vivify->br($locate);
+
+        // Reload the (possibly relocated) base, then address by mode.
+        $bi = $locate->load(Type::i64(), $slotAddr);
+        $b = $locate->inttoptr($bi, Type::ptr());
+        $flags = $locate->load(Type::i64(), $this->hdr($locate, $b, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $locate->brIf($locate->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+
+        $packed->ret($this->packedSlot($packed, $b, $key));
+
+        // HASHED: linear scan for the KIND_INT entry with key == key.
+        $len = $hashed->load(Type::i64(), $b);
+        $iSlot = $hashed->alloca(Type::i64(), 'i');
+        $hashed->store(Value::int(Type::i64(), 0), $iSlot);
+        $hashed->br($head);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $b, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $next, $kok);
+        $kk = $kok->load(Type::i64(), $this->entryAddr($kok, $b, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->icmp('eq', $kk, $key), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($this->entryAddr($hit, $b,
+            $hit->load(Type::i64(), $iSlot), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+
+        $miss->ret($scratch);
     }
 
     /**
