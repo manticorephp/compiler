@@ -25,6 +25,7 @@ final class EnumDef
         public string $backing,
         public array $intValues = [],
         public array $strValues = [],
+        public int $classId = 0,
     ) {}
 
     /** Ordinal of `$case`, or -1 if unknown. */

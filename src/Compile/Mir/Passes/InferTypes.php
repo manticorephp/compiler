@@ -1116,9 +1116,15 @@ final class InferTypes implements Pass
                 if (!isset($cand[$key])) { continue; }
                 if (isset($conflict[$key]) || !isset($observed[$key])) { continue; }
                 // An already-refined param is only overridden by a NESTED-array
-                // observation — never fight a legitimate vec[string] whose call
-                // sites pass scalar-element arrays.
-                if (isset($refined[$key]) && !$observed[$key]->isArray()) { continue; }
+                // or a CELL observation — never fight a legitimate vec[string]
+                // whose call sites pass scalar-element arrays. A call site that
+                // concretely passes a heterogeneous vec[cell] is ground truth:
+                // the runtime slots hold NaN-boxed cells, so a body-usage guess
+                // of vec[string] (raw ptr slots) reads the boxed cell as a raw
+                // string ptr → SIGSEGV (`f(array $a){ strlen($a[0]); }` fed a
+                // `["x",1,2.5]`). Retype to vec[cell] so the read unboxes.
+                if (isset($refined[$key]) && !$observed[$key]->isArray()
+                    && $observed[$key]->kind !== Type::KIND_CELL) { continue; }
                 $param = $fn->params[$idx - 1];
                 $param->type = Type::vec($observed[$key]);
                 $changed = true;
@@ -2024,6 +2030,7 @@ final class InferTypes implements Pass
         }
         if ($n === '__mir_argc') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        if ($n === '__mir_enum_name') { return Type::string_(); }
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'

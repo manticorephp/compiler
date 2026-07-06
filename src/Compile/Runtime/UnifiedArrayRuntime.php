@@ -680,15 +680,73 @@ final class UnifiedArrayRuntime
      */
     private function emitRelease(): void
     {
+        $this->emitCellDrop();
         $this->emitReleaseVariant('__mir_array_release', '');
         $this->emitReleaseVariant('__mir_array_release_obj', 'obj');
         $this->emitReleaseVariant('__mir_array_release_str', 'str');
+        $this->emitReleaseVariant('__mir_array_release_cell', 'cell');
     }
 
-    /** Drop one rc value `v` (i64) as obj / str. No-op for ''. */
+    /**
+     * `__mir_cell_drop(v)` — release the rc payload NaN-boxed into a cell
+     * (heterogeneous / `mixed` array element). Dispatches on the 4-bit tag:
+     *   tag 4 (string ptr)  → __mir_rc_release_str (self-guards null / immortal)
+     *   tag 8 (object ptr)  → __mir_rc_release, but ONLY when the payload is a
+     *                         real heap object: guarded on (a) payload > 0xFFFF
+     *                         so a boxed enum ORDINAL (a tiny int, no header) is
+     *                         never dereferenced, and (b) RC_TAG_MAGIC at ptr-8
+     *                         so a #[Struct]/closure ptr (no rc header) is left
+     *                         alone. Both are consistent with the retain side
+     *                         ({@see EmitLlvm::retainCellPayload} co-owns exactly
+     *                         string / obj / union), so drop is symmetric.
+     * Arrays (tag 7) are intentionally NOT dropped: an already-cell array boxed
+     * into a cell is a borrowed alias (boxToCell does NOT rebuild it) that was
+     * never co-owned, so a release would double-free. Scalars are no-ops.
+     */
+    private function emitCellDrop(): void
+    {
+        $fn = $this->module->func('__mir_cell_drop', Type::void());
+        $v = $fn->param(Type::i64(), 'v');
+        $entry = $fn->block('entry');
+        $tagged = $fn->block('tagged');
+        $chkobj = $fn->block('chkobj');
+        $dostr = $fn->block('dostr');
+        $doobj = $fn->block('doobj');
+        $chkmagic = $fn->block('chkmagic');
+        $dorel = $fn->block('dorel');
+        $done = $fn->block('done');
+
+        // istag: a tagged cell has header bits > 0xFFF0000000000000; a raw
+        // double (finite / ±Inf / NaN) falls through as a scalar → skip.
+        $istag = $entry->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $entry->brIf($istag, $tagged, $done);
+
+        $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $tagged->brIf($tagged->icmp('eq', $nib, Value::int(Type::i64(), 4)), $dostr, $chkobj);
+
+        // tag 4: string payload.
+        $sp = $dostr->inttoptr($dostr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
+        $dostr->call('__mir_rc_release_str', Type::void(), [$sp]);
+        $dostr->br($done);
+
+        // tag 8: object payload (guarded).
+        $chkobj->brIf($chkobj->icmp('eq', $nib, Value::int(Type::i64(), 8)), $doobj, $done);
+        $op = $doobj->and_($v, Value::int(Type::i64(), 281474976710655));
+        $doobj->brIf($doobj->icmp('ugt', $op, Value::int(Type::i64(), 65535)), $chkmagic, $done);
+        $opp = $chkmagic->inttoptr($op, Type::ptr());
+        $hdr = $chkmagic->load(Type::i64(), $chkmagic->gep(Type::i8(), $opp, [Value::int(Type::i64(), -8)]));
+        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $done);
+        $dorel->call('__mir_rc_release', Type::void(), [$opp]);
+        $dorel->br($done);
+
+        $done->retVoid();
+    }
+
+    /** Drop one rc value `v` (i64) as obj / str / cell. No-op for ''. */
     private function emitDropValue(Block $b, Value $v, string $flavor): void
     {
         if ($flavor === '') { return; }
+        if ($flavor === 'cell') { $b->call('__mir_cell_drop', Type::void(), [$v]); return; }
         $p = $b->inttoptr($v, Type::ptr());
         $fn = $flavor === 'str' ? '__mir_rc_release_str' : '__mir_rc_release';
         $b->call($fn, Type::void(), [$p]);

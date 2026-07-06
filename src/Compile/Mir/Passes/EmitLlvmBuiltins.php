@@ -108,6 +108,7 @@ trait EmitLlvmBuiltins
         if ($name === 'gc_collect_cycles')            { return $this->biGcCollect(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
+        if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
         if ($name === 'array_keys')                   { return $this->biArrayKeys($args); }
         if ($name === 'debug_backtrace')              { return $this->biDebugBacktrace(); }
@@ -156,6 +157,69 @@ trait EmitLlvmBuiltins
      * NaN-box `$this->lastValue` (current type $t) into a tagged cell;
      * result i64 left in lastValue. Returns the IR.
      */
+    /**
+     * `__mir_enum_name($v)` — internal, called from the var_dump object prelude.
+     * If the cell `$v` is an enum-case singleton, return its "<Enum>::<Case>"
+     * string (so var_dump renders `enum(Enum::Case)`); else the empty string.
+     * Reads the object's class descriptor (data+0 → class_id) and matches it
+     * against each enum's stable class_id, then indexes `<Enum>__fqns[ordinal]`.
+     * @param Node[] $args
+     */
+    private function biEnumName(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $cell = $this->lastValue;
+        $res = $this->allocSsa();
+        $out .= '  ' . $res . " = alloca ptr\n";
+        $out .= '  store ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $res . "\n";
+        $out .= $this->cellTagIr($cell);
+        $tag = $this->cellTagReg;
+        $isObj = $this->allocSsa();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
+        $objL = $this->allocLabel('en.obj');
+        $doneL = $this->allocLabel('en.done');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
+        $out .= $objL . ":\n";
+        $m = $this->allocSsa();
+        $out .= '  ' . $m . ' = and i64 ' . $cell . ", 281474976710655\n";
+        $dp = $this->allocSsa();
+        $out .= '  ' . $dp . ' = inttoptr i64 ' . $m . " to ptr\n";
+        $descI = $this->allocSsa();
+        $out .= '  ' . $descI . ' = load i64, ptr ' . $dp . "\n";
+        $descP = $this->allocSsa();
+        $out .= '  ' . $descP . ' = inttoptr i64 ' . $descI . " to ptr\n";
+        $cid = $this->allocSsa();
+        $out .= '  ' . $cid . ' = load i64, ptr ' . $descP . "\n";
+        foreach ($this->enums as $ename => $ed) {
+            $ct = (string)\count($ed->caseNames);
+            $eq = $this->allocSsa();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $cid . ', ' . (string)$ed->classId . "\n";
+            $hitL = $this->allocLabel('en.hit');
+            $nextL = $this->allocLabel('en.next');
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $og = $this->allocSsa();
+            $out .= '  ' . $og . ' = getelementptr i8, ptr ' . $dp . ", i64 16\n";
+            $ord = $this->allocSsa();
+            $out .= '  ' . $ord . ' = load i64, ptr ' . $og . "\n";
+            $fg = $this->allocSsa();
+            $out .= '  ' . $fg . ' = getelementptr [' . $ct . ' x ptr], ptr @' . $ename . '__fqns, i64 0, i64 ' . $ord . "\n";
+            $fp = $this->allocSsa();
+            $out .= '  ' . $fp . ' = load ptr, ptr ' . $fg . "\n";
+            $out .= '  store ptr ' . $fp . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $doneL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = load ptr, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function boxToCell(Type $t): string
     {
         $this->needsTagged = true;
@@ -208,6 +272,24 @@ trait EmitLlvmBuiltins
             $out = $this->coerceToPtr();
             $r = $this->allocSsa();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+            return $this->finishI64($out, $r);
+        }
+        if ($k === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class])) {
+            // An enum case is an ORDINAL — box the per-case SINGLETON (carrying
+            // class identity), NOT the raw ordinal (box_object of a tiny int
+            // faults every generic object consumer). See emitEnumCellSingletons.
+            $out = $this->coerceToI64();
+            $ord = $this->lastValue;
+            $tbl = '@' . $t->class . '__cases';
+            $ct = (string)\count($this->enums[$t->class]->caseNames);
+            $g = $this->allocSsa();
+            $out .= '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
+            $dp = $this->allocSsa();
+            $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
+            $pp = $this->allocSsa();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+            $r = $this->allocSsa();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
             return $this->finishI64($out, $r);
         }
         if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION) {

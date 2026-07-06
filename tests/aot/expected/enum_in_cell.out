@@ -1,0 +1,9 @@
+enum(Suit::S)
+bool(true)
+bool(false)
+enum(Suit::S)
+hit
+miss
+1
+assoc-hit
+enum(Suit::C)

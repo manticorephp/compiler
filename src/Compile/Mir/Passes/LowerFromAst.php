@@ -776,7 +776,10 @@ final class LowerFromAst implements Pass
             $i = $i + 1;
         }
         $body = "function __mir_dump_object(mixed \$v, int \$indent): void {\n"
-            . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n";
+            . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
+            // An enum-case singleton renders `enum(Enum::Case)` — detected via its
+            // class descriptor before the instanceof walk (enums aren't classes here).
+            . "  \$en = __mir_enum_name(\$v); if (\$en !== '') { echo 'enum(', \$en, \")\\n\"; return; }\n";
         $ci = 0;
         while ($ci < $n) {
             $cname = $names[$ci];
@@ -838,7 +841,8 @@ final class LowerFromAst implements Pass
                 elseif ($backing === 'string') { $strs[] = $case->value->value; }
             }
         }
-        return new EnumDef($decl->name, $names, $backing, $ints, $strs);
+        return new EnumDef($decl->name, $names, $backing, $ints, $strs,
+            $this->stableClassId(\ltrim($decl->name, '\\')));
     }
 
     /** Namespace portion of an FQN (`Compile\Mir` for `Compile\Mir\Module`); '' if unqualified. */

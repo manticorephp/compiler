@@ -762,7 +762,56 @@ final class EmitLlvm
                 $out .= '@' . $name . '__values = private unnamed_addr constant ['
                       . (string)$n . ' x ptr] [' . \implode(', ', $vptrs) . "]\n";
             }
+            $out .= $this->emitEnumCellSingletons($name, $ed);
         }
+        return $out;
+    }
+
+    /**
+     * Per-enum-case SINGLETON objects, so an enum case boxed into a `mixed`/cell
+     * (a heterogeneous array, a `mixed` var_dump arg) round-trips with its class
+     * identity intact — box_object of the raw ORDINAL would tag a tiny int as a
+     * pointer, and every generic object consumer (var_dump / ===) then derefs it
+     * → SIGSEGV / wrong compare. Each singleton mimics the object layout so the
+     * normal object machinery works uniformly:
+     *   data-8 : header sentinel 0 (NOT RC_TAG_MAGIC → cell_drop / rc ops SKIP it;
+     *            the case is a `constant`, immortal, never rc-touched)
+     *   data+0 : class descriptor ptr ({class_id, drop=null}) — instanceof /
+     *            __mir_enum_name read class_id THROUGH it
+     *   data+8 : rc (unused)
+     *   data+16: ordinal
+     * `<Enum>__cases[ordinal]` is the boxed-object payload ptr (data ptr), and
+     * `<Enum>__fqns[ordinal]` the "<Enum>::<Case>" string for var_dump.
+     */
+    private function emitEnumCellSingletons(string $name, \Compile\Mir\EnumDef $ed): string
+    {
+        $cid = (string)$ed->classId;
+        $out = '';
+        // Descriptor — reuse the class descriptor if a method-enum already
+        // registered one (dropRuntime emits `@__mir_cd_<id>` for it); else emit.
+        if (!isset($this->classes[$name])) {
+            $out .= '@__mir_cd_' . $cid . ' = linkonce_odr global { i64, ptr } { i64 '
+                  . $cid . ", ptr null }\n";
+        }
+        $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
+        $n = \count($ed->caseNames);
+        $dataPtrs = [];
+        $fqnPtrs = [];
+        $i = 0;
+        foreach ($ed->caseNames as $cn) {
+            $sym = '@' . $name . '__case_' . (string)$i;
+            $out .= $sym . ' = linkonce_odr constant { i64, i64, i64, i64 } { i64 0, i64 '
+                  . $descI . ', i64 0, i64 ' . (string)$i . " }\n";
+            $dataPtrs[] = 'i64 ptrtoint (ptr getelementptr (i8, ptr ' . $sym . ', i64 8) to i64)';
+            $fq = '@' . $name . '__fqn_' . (string)$i;
+            $out .= $this->strGlobalDef($fq, $name . '::' . $cn);
+            $fqnPtrs[] = 'ptr ' . $this->strSymBytes($fq);
+            $i = $i + 1;
+        }
+        $out .= '@' . $name . '__cases = linkonce_odr constant [' . (string)$n
+              . ' x i64] [' . \implode(', ', $dataPtrs) . "]\n";
+        $out .= '@' . $name . '__fqns = linkonce_odr constant [' . (string)$n
+              . ' x ptr] [' . \implode(', ', $fqnPtrs) . "]\n";
         return $out;
     }
 
@@ -5425,6 +5474,7 @@ final class EmitLlvm
         if ($mo->flavor === 'vec') {
             if ($t === null || $shared) { return 'vec'; }
             $el = $t->type->element;
+            if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             return 'vec';
@@ -5432,6 +5482,7 @@ final class EmitLlvm
         if ($mo->flavor === 'assoc') {
             if ($t === null || $shared) { return 'assoc'; }
             $el = $t->type->element;
+            if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             return 'assoc';
@@ -5478,6 +5529,7 @@ final class EmitLlvm
         elseif ($flavor === 'obj') { $this->needsRc = true; $fn = '@__mir_rc_release'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->needsRc = true; $this->needsStrRc = true; $fn = '@__mir_array_release_cell'; }
         $pv = $this->allocSsa();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
@@ -5506,12 +5558,14 @@ final class EmitLlvm
         }
         if ($t->isVec()) {
             $el = $t->element;
+            if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             return 'vec';
         }
         if ($t->isAssoc()) {
             $el = $t->element;
+            if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             return 'assoc';
@@ -5549,6 +5603,7 @@ final class EmitLlvm
         if ($flavor === 'obj') { return '@__mir_rc_release'; }
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return '@__mir_array_release_str'; }
+        if ($flavor === 'veccell' || $flavor === 'assoccell') { return '@__mir_array_release_cell'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         return '';
     }
@@ -5937,6 +5992,35 @@ final class EmitLlvm
         $r = $this->lastValue;
         $rt = $this->lastValueType;
         $rk = $c->right->type->kind;
+
+        // `cell === enum` / `enum === cell` — an enum case in a cell is
+        // box_object(per-case singleton). Box the raw-ordinal enum operand to
+        // its singleton cell too and compare carriers: same case → same global
+        // → equal (identity); a non-enum cell or a different case differs.
+        if ($isEq || $isNe) {
+            $lEnum = $lk === Type::KIND_OBJ && isset($this->enums[$c->left->type->class ?? '']);
+            $rEnum = $rk === Type::KIND_OBJ && isset($this->enums[$c->right->type->class ?? '']);
+            if (($lk === Type::KIND_CELL && $rEnum) || ($lEnum && $rk === Type::KIND_CELL)) {
+                if ($lEnum) {
+                    $this->lastValue = $l; $this->lastValueType = $lt;
+                    $out .= $this->boxToCell($c->left->type);
+                    $l = $this->lastValue; $lt = $this->lastValueType;
+                } else {
+                    $this->lastValue = $r; $this->lastValueType = $rt;
+                    $out .= $this->boxToCell($c->right->type);
+                    $r = $this->lastValue; $rt = $this->lastValueType;
+                }
+                if ($lt === 'ptr') { $tmp = $this->allocSsa(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; }
+                if ($rt === 'ptr') { $tmp = $this->allocSsa(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; }
+                $cmpReg = $this->allocSsa();
+                $out .= '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $l . ', ' . $r . "\n";
+                $z = $this->allocSsa();
+                $out .= '  ' . $z . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $this->lastValue = $z;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
 
         // `string === cell` / `cell === string` (strict): equal iff the cell is
         // a string (NaN tag PTR=4) whose bytes match the known string. A
@@ -6852,6 +6936,22 @@ final class EmitLlvm
             $out = '  ' . $r . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'double';
+            return $out;
+        }
+        if ($pk === Type::KIND_OBJ && $pt->class !== null && isset($this->enums[$pt->class])) {
+            // Enum cell → the ORDINAL a typed-enum consumer expects. The cell is
+            // box_object(singleton); mask to the data ptr, load ordinal @+16
+            // (mirrors emitEnumCellSingletons' layout), NOT the raw payload.
+            $m = $this->allocSsa();
+            $out = '  ' . $m . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+            $p = $this->allocSsa();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
+            $g = $this->allocSsa();
+            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
+            $r = $this->allocSsa();
+            $out .= '  ' . $r . ' = load i64, ptr ' . $g . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
             return $out;
         }
         if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_STRING
