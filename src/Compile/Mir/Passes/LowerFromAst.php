@@ -528,6 +528,7 @@ final class LowerFromAst implements Pass
         // materialise the late-static-binding specialisations.
         $this->emitLsbSpecializations($module);
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
+        $mainStmts = $this->injectGlobalDecls($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
         $module->addFunction(new FunctionDef(
             name: '__main',
@@ -1965,6 +1966,36 @@ final class LowerFromAst implements Pass
      * @param Node[] $mainStmts
      * @return Node[]
      */
+    /**
+     * A top-level variable IS the global of the same name. For every name a
+     * function `global`-imports and that `__main` also touches, prepend a
+     * `StaticLocalDecl_` binding it to the shared `@g_<name>` cell — so a
+     * top-level `$g = 5` writes that cell (visible inside the function) instead
+     * of a frame local that DeadStore would drop as write-only.
+     *
+     * @param \Compile\Mir\Node[] $mainStmts
+     * @return \Compile\Mir\Node[]
+     */
+    private function injectGlobalDecls(array $mainStmts): array
+    {
+        $pre = [];
+        foreach ($this->module->globalVarNames as $gname) {
+            $used = false;
+            foreach ($mainStmts as $s) {
+                if ($this->nodeReadsLocal($s, $gname) || $this->nodeWritesLocal($s, $gname)) {
+                    $used = true;
+                    break;
+                }
+            }
+            if ($used) {
+                $pre[] = new StaticLocalDecl_($gname, '@g_' . $gname, '', null, Type::int_());
+            }
+        }
+        if ($pre === []) { return $mainStmts; }
+        foreach ($mainStmts as $s) { $pre[] = $s; }
+        return $pre;
+    }
+
     private function injectCliSuperglobals(array $mainStmts): array
     {
         $readArgv = false; $readArgc = false;

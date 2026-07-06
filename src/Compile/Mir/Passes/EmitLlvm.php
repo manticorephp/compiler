@@ -6651,6 +6651,43 @@ final class EmitLlvm
         $rcArgRegs = [];
         $rcArgFlavs = [];
         foreach ($c->args as $a) {
+            // Argument unpacking `f(...$arr)`: expand the array into the callee's
+            // remaining positional params (arr[0], arr[1], …). Fixed-arity; the
+            // element values pass raw (matches int/string/cell params).
+            if ($a->kind === Node::KIND_SPREAD) {
+                $operand = $this->castSpread($a)->operand;
+                $out .= $this->emitNode($operand);
+                $out .= $this->coerceToPtr();
+                $arr = $this->lastValue;
+                $elemType = $operand->type->element ?? null;
+                $nparams = \count($ptypes);
+                $k = $ai;
+                while ($k < $nparams) {
+                    if (!$first) { $argList .= ', '; }
+                    $first = false;
+                    $ev = $this->allocSsa();
+                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
+                          . ', i64 ' . (string)($k - $ai) . ")\n";
+                    // A cell/tagged param needs the raw element boxed by its
+                    // source type (a homogeneous int/string vec stores values
+                    // raw); a cell-valued source is already boxed → no rebox.
+                    $pt = $ptypes[$k] ?? null;
+                    $needBox = ($tmask[$k] ?? false)
+                        || ($pt !== null && $pt->kind === Type::KIND_CELL);
+                    if ($needBox && $elemType !== null
+                        && $elemType->kind !== Type::KIND_CELL
+                        && $elemType->kind !== Type::KIND_UNKNOWN) {
+                        $this->lastValue = $ev;
+                        $this->lastValueType = 'i64';
+                        $out .= $this->boxToCell($elemType);
+                        $ev = $this->lastValue;
+                    }
+                    $argList .= 'i64 ' . $ev;
+                    $k = $k + 1;
+                }
+                $ai = $nparams;
+                continue;
+            }
             if (!$first) { $argList .= ', '; }
             $first = false;
             $byRef = ($mask[$ai] ?? false) && $a->kind === Node::KIND_LOAD_LOCAL;

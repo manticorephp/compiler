@@ -244,6 +244,15 @@ final class InferTypes implements Pass
                 $this->inferFunction($fn);
             }
         }
+        // By-ref param type inference: an UNTYPED (`cell`) `&$p` holds the
+        // caller's RAW slot value (a string/array pointer), but a cell type
+        // makes string/array ops misread it as a NaN-boxed value. Refine it to
+        // the concrete type every call site passes (a TYPED `&$p` already works).
+        if ($this->scanCallSiteRefParams($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
         // Element-as-key erasure: `$o=[]; foreach($a as $v){ $o[$v]=1; }` with a
         // now-typed string foreach value `$v` must make `$o` an ASSOC, not a vec.
         // scanAssocLocals runs at the START of inferFunction (before `$v` is
@@ -1128,6 +1137,87 @@ final class InferTypes implements Pass
         }
         foreach (Walk::children($n) as $ch) {
             $this->collectCallArgElems($ch, $cand, $observed, $conflict);
+        }
+    }
+
+    /**
+     * Refine an UNTYPED by-ref param (`&$p` with no type hint → cell) to the
+     * concrete type every call site passes. Only pointer-carrying types
+     * (string / array / object) are refined — those misread as a NaN-boxed
+     * cell; int/float/bool by-ref already work through the raw i64 slot. A
+     * conflicting or unobserved site leaves the param a cell.
+     */
+    private function scanCallSiteRefParams(Module $module): bool
+    {
+        $cand = [];                      // "fn#idx" → true
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $idx = 0;
+            foreach ($fn->params as $p) {
+                if ($p->byRef && !$p->variadic
+                    && ($p->type->kind === Type::KIND_CELL
+                        || $p->type->kind === Type::KIND_UNKNOWN)) {
+                    $cand[$fn->name . '#' . (string)$idx] = true;
+                }
+                $idx = $idx + 1;
+            }
+        }
+        if (\count($cand) === 0) { return false; }
+        $observed = [];                  // "fn#idx" → Type
+        $conflict = [];                  // "fn#idx" → true
+        foreach ($module->functions as $fn) {
+            $this->collectRefArgTypes($fn->body, $cand, $observed, $conflict);
+        }
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $idx = 0;
+            foreach ($fn->params as $p) {
+                $key = $fn->name . '#' . (string)$idx;
+                $idx = $idx + 1;
+                if (!isset($cand[$key])) { continue; }
+                if (isset($conflict[$key]) || !isset($observed[$key])) { continue; }
+                $t = $observed[$key];
+                if ($t->kind === Type::KIND_STRING || $t->isArray()
+                    || $t->kind === Type::KIND_OBJ) {
+                    $fn->params[$idx - 1]->type = $t;
+                    $changed = true;
+                }
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * Observe the type each call site passes to a candidate by-ref param.
+     * Only a plain lvalue (LoadLocal) is a valid by-ref arg; a cell/unknown
+     * arg carries no info (skip, don't conflict). Differing concrete types
+     * conflict → the param stays a cell.
+     *
+     * @param array<string,bool> $cand
+     * @param array<string,Type> $observed
+     * @param array<string,bool> $conflict
+     */
+    private function collectRefArgTypes(Node $n, array $cand, array &$observed, array &$conflict): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $c = $this->asCall($n);
+            $i = 0;
+            foreach ($c->args as $a) {
+                $key = $c->function . '#' . (string)$i;
+                $i = $i + 1;
+                if (!isset($cand[$key]) || isset($conflict[$key])) { continue; }
+                $tk = $a->type->kind;
+                if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN) { continue; }
+                if (!isset($observed[$key])) { $observed[$key] = $a->type; }
+                elseif (!$this->sameElemShape($observed[$key], $a->type)) {
+                    unset($observed[$key]);
+                    $conflict[$key] = true;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $ch) {
+            $this->collectRefArgTypes($ch, $cand, $observed, $conflict);
         }
     }
 
