@@ -38,6 +38,8 @@ final class NodeClone
         if ($k === Node::KIND_STATIC_PROP)  { $x = self::asStaticProp($n); return new StaticProp_($x->global, $n->type); }
         if ($k === Node::KIND_BREAK)        { $x = self::asBreak($n);    return new Break_($x->level); }
         if ($k === Node::KIND_CONTINUE)     { $x = self::asContinue($n); return new Continue_($x->level); }
+        if ($k === Node::KIND_GOTO)         { return new \Compile\Mir\Goto_(self::asGoto($n)->label, $n->type); }
+        if ($k === Node::KIND_LABEL)        { return new \Compile\Mir\Label_(self::asLabel($n)->name, $n->type); }
         if ($k === Node::KIND_INCDEC)       { $x = self::asIncDec($n);   return new IncDec($x->name, $x->op, $x->prefix, $n->type); }
         if ($k === Node::KIND_REF_ALIAS)    { $x = self::asRefAlias($n); return new RefAlias_($x->target, $x->source, $n->type); }
 
@@ -183,6 +185,8 @@ final class NodeClone
     private static function asStaticProp(Node $n): StaticProp_ { return $n; }
     private static function asBreak(Node $n): Break_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }
+    private static function asGoto(Node $n): \Compile\Mir\Goto_ { return $n; }
+    private static function asLabel(Node $n): \Compile\Mir\Label_ { return $n; }
     private static function asIncDec(Node $n): IncDec { return $n; }
     private static function asRefAlias(Node $n): RefAlias_ { return $n; }
     private static function asAdd(Node $n): Add { return $n; }

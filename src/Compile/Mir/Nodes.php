@@ -444,6 +444,24 @@ final class RefAddr_ extends Node
     }
 }
 
+/** `goto L;` — an unconditional branch to the block emitted for label `L`. */
+final class Goto_ extends Node
+{
+    public function __construct(public string $label, Type $type)
+    {
+        parent::__construct(Node::KIND_GOTO, $type);
+    }
+}
+
+/** `L:` — a statement label; EmitLlvm materializes a block a `goto L` targets. */
+final class Label_ extends Node
+{
+    public function __construct(public string $name, Type $type)
+    {
+        parent::__construct(Node::KIND_LABEL, $type);
+    }
+}
+
 /** `$obj::class` — the runtime class name of `operand` as a string. */
 final class ClassName_ extends Node
 {

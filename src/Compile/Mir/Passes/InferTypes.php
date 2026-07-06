@@ -1614,7 +1614,9 @@ final class InferTypes implements Pass
         if ($kind === Node::KIND_SWITCH)      { return $this->inferSwitch($node); }
         if ($kind === Node::KIND_MATCH)       { return $this->inferMatch($node); }
         if ($kind === Node::KIND_BREAK
-            || $kind === Node::KIND_CONTINUE) { return Type::void(); }
+            || $kind === Node::KIND_CONTINUE
+            || $kind === Node::KIND_GOTO
+            || $kind === Node::KIND_LABEL) { return Type::void(); }
         if ($kind === Node::KIND_YIELD) {
             $y = $this->asYield($node);
             if ($y->key !== null) {

@@ -53,6 +53,8 @@ abstract class Node
     public const KIND_REF_ALIAS = 'ref_alias';
     public const KIND_REF_BIND = 'ref_bind';
     public const KIND_REF_ADDR = 'ref_addr';
+    public const KIND_GOTO = 'goto';
+    public const KIND_LABEL = 'label';
     public const KIND_THROW = 'throw';
     public const KIND_TRY_CATCH = 'try_catch';
     public const KIND_YIELD = 'yield';

@@ -24,6 +24,8 @@ use Compile\Mir\Cast;
 use Compile\Mir\Cmp;
 use Compile\Mir\Concat;
 use Compile\Mir\Continue_;
+use Compile\Mir\Goto_;
+use Compile\Mir\Label_;
 use Compile\Mir\Div;
 use Compile\Mir\Echo_;
 use Compile\Mir\FloatConst;
@@ -1721,6 +1723,8 @@ final class LowerFromAst implements Pass
         if ($stmt->kind === 'Foreach')  { return $this->lowerForeach($stmt); }
         if ($stmt->kind === 'Break')    { return new Break_((int)($stmt->level ?? 1)); }
         if ($stmt->kind === 'Continue') { return new Continue_((int)($stmt->level ?? 1)); }
+        if ($stmt->kind === 'Goto')     { return new Goto_($stmt->label, Type::void()); }
+        if ($stmt->kind === 'Label')    { return new Label_($stmt->name, Type::void()); }
         if ($stmt->kind === 'StaticLocal') { return $this->lowerStaticLocal($stmt); }
         if ($stmt->kind === 'Global') { return $this->lowerGlobal($stmt); }
         if ($stmt->kind === 'Throw') { return new Throw_($this->lowerExpr($stmt->expr), Type::void()); }

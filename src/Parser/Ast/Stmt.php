@@ -390,3 +390,23 @@ final class GlobalStmt extends Stmt
         parent::__construct('Global', $span);
     }
 }
+
+final class GotoStmt extends Stmt
+{
+    public function __construct(
+        public readonly string $label,
+        Span $span,
+    ) {
+        parent::__construct('Goto', $span);
+    }
+}
+
+final class LabelStmt extends Stmt
+{
+    public function __construct(
+        public readonly string $name,
+        Span $span,
+    ) {
+        parent::__construct('Label', $span);
+    }
+}

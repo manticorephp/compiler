@@ -187,7 +187,22 @@ final class Parser
                 return $this->parseStaticLocal();
             }
             if ($kw === 'global')    return $this->parseGlobal();
+            if ($kw === 'goto')      return $this->parseGoto();
             if ($kw === 'declare')   return $this->parseDeclare();
+        }
+
+        // Statement label `name:` — an identifier immediately followed by a
+        // single colon at statement position (a `goto` target). Distinct from
+        // `::`, ternary `:`, and switch case labels (those never start a bare
+        // statement with `IDENT :`).
+        if ($tok->kind === TokenKind::Identifier) {
+            $next = $this->tokens[$this->pos + 1] ?? null;
+            if ($next !== null && $next->kind === TokenKind::Colon) {
+                $span = $this->span();
+                $name = $this->advance()->lexeme;   // the label name
+                $this->advance();                    // ':'
+                return new \Parser\Ast\LabelStmt($name, $span);
+            }
         }
 
         // Bare block.
@@ -1290,6 +1305,15 @@ final class Parser
     /**
      * Parse `global $a, $b, ...;` inside a function body.
      */
+    private function parseGoto(): Stmt
+    {
+        $span = $this->span();
+        $this->advance(); // 'goto'
+        $tok = $this->expect(TokenKind::Identifier, "expected label after 'goto'");
+        $this->expect(TokenKind::Semicolon, "expected ';' after goto label");
+        return new \Parser\Ast\GotoStmt($tok->lexeme, $span);
+    }
+
     private function parseGlobal(): Stmt
     {
         $span = $this->span();

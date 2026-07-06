@@ -110,6 +110,9 @@ final class EmitLlvm
 
     private int $nextId = 0;
     private int $nextLabel = 0;
+    /** @var array<string,string> user goto-label name → stable LLVM block label
+     *  (allocated on first goto/label reference; reset per function). */
+    private array $userLabels = [];
     private int $switchCounter = 0;
 
     /** @var array<string, string> local name → alloca SSA id */
@@ -1719,6 +1722,7 @@ final class EmitLlvm
         }
         $this->nextId = 0;
         $this->nextLabel = 0;
+        $this->userLabels = [];
         $this->currentFnName = $fn->name;
         $this->currentFnBody = $fn->body;
         $this->currentFnHasArena = false;
@@ -3305,6 +3309,8 @@ final class EmitLlvm
         if ($k === Node::KIND_FOREACH)      { return $this->emitForeach($n); }
         if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->breakTargetFor($this->castBreak($n)->level) . "\n" . $this->emitDeadLabel(); }
         if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->continueTargetFor($this->castContinue($n)->level) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->userLabel($this->castGoto($n)->label) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_LABEL)        { $l = $this->userLabel($this->castLabel($n)->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
         if ($k === Node::KIND_ARRAY_LIT)    { return $this->emitArrayLit($n); }
         if ($k === Node::KIND_ARRAY_ACCESS) { return $this->emitArrayAccess($n); }
         if ($k === Node::KIND_STORE_ELEMENT){ return $this->emitStoreElement($n); }
@@ -7831,6 +7837,19 @@ final class EmitLlvm
         $this->nextLabel = $this->nextLabel + 1;
         return $hint . '.' . (string)$id;
     }
+
+    /** Stable LLVM block label for a user `goto` label name — allocated once per
+     *  function so a `goto L` and the `L:` label resolve to the SAME block. */
+    private function userLabel(string $name): string
+    {
+        if (!isset($this->userLabels[$name])) {
+            $this->userLabels[$name] = $this->allocLabel('user.' . $name);
+        }
+        return $this->userLabels[$name];
+    }
+
+    private function castGoto(Node $n): \Compile\Mir\Goto_ { return $n; }
+    private function castLabel(Node $n): \Compile\Mir\Label_ { return $n; }
 
     // ── Typed-cast helpers ─────────────────────────────────────
 
