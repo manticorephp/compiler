@@ -1,5 +1,7 @@
 bool(true)
 bool(false)
+bool(true)
+bool(false)
 string(1) "z"
 string(1) "x"
 q

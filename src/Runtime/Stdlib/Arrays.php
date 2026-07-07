@@ -13,10 +13,13 @@
 /**
  * `in_array` — today only the string-needle / string-haystack shape
  * is fully supported (the only one the bootstrap compiler exercises).
- * Both sides go through libc strcmp so they actually compare bytes
- * rather than pointer identity.
  *
- * @param string[] $haystack
+ * `@param mixed[]` (NOT string[]) so the foreach value `$v` is a CELL, not a
+ * string — otherwise `$v === $needle` compiles as a string-vs-cell compare and
+ * a non-string cell value (null/int) mis-matches. A concrete haystack still
+ * routes through the InlineClosures synthesis (this fallback is cell-only).
+ *
+ * @param mixed[] $haystack
  */
 function in_array(mixed $needle, array $haystack, bool $strict = false): bool
 {
@@ -46,6 +49,7 @@ function in_array(mixed $needle, array $haystack, bool $strict = false): bool
  * both work now; a concrete haystack still routes through the InlineClosures
  * synthesis. Returns the matching key (int or string) or false.
  *
+ * @param mixed[] $haystack  (cell values → tag-dispatched compare; see in_array)
  * @return int|string|false
  */
 function array_search(mixed $needle, array $haystack, bool $strict = false): int|string|false
