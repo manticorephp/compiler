@@ -1417,13 +1417,18 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'i64';
             return $out;
         }
+        // Integer compare. A CELL operand (e.g. a `?int`/numericCell arg like
+        // `$offset + $length` in array_slice) carries its int NaN-boxed — its raw
+        // i64 is meaningless in an icmp, so unbox it first (else min/max returns a
+        // boxed cell read back as a garbage negative). `finishI64` keeps the
+        // result a plain int (all-int path — no float operand).
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToI64();
+        $out .= $this->minMaxOperandI64($args[0]);
         $acc = $this->lastValue;
         $count = \count($args);
         for ($i = 1; $i < $count; $i = $i + 1) {
             $out .= $this->emitNode($args[$i]);
-            $out .= $this->coerceToI64();
+            $out .= $this->minMaxOperandI64($args[$i]);
             $v = $this->lastValue;
             $cmp = $this->allocSsa();
             $out .= '  ' . $cmp . ' = icmp ' . $pred . ' i64 ' . $v . ', ' . $acc . "\n";
@@ -1432,6 +1437,19 @@ trait EmitLlvmBuiltins
             $acc = $sel;
         }
         return $this->finishI64($out, $acc);
+    }
+
+    /** Coerce a min/max integer-path operand to a raw i64, unboxing a cell. */
+    private function minMaxOperandI64(Node $a): string
+    {
+        $out = $this->coerceToI64();
+        if ($a->type->kind !== Type::KIND_CELL) { return $out; }
+        $this->needsTagged = true;
+        $u = $this->allocSsa();
+        $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
+        $this->lastValue = $u;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** @param Node[] $args */
