@@ -1534,9 +1534,17 @@ final class LowerFromAst implements Pass
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
+            // EXTERN sig (from the stdlib .sig): an EMPTY type ("") means the
+            // stdlib ERASED it to unknown (a genuine `mixed` serializes as
+            // "mixed" → cell). Lower it to UNKNOWN via lowerTypeHint, NOT
+            // lowerParamType (whose null→cell default makes the CALLER box an
+            // array arg to a cell while the raw-walking stdlib callee reads it
+            // as a plain array pointer → tag deref SIGSEGV: array_key_exists /
+            // array_slice on a concrete assoc). A user function's own untyped
+            // param still routes through lowerParamType (mixed) elsewhere.
             $pt = $isVariadic
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
-                : $this->lowerParamType($this->effectiveHint(
+                : $this->lowerTypeHint($this->effectiveHint(
                     $p->typeHint,
                     $this->docTagType($decl->docComment, '@param', $p->name),
                 ));
