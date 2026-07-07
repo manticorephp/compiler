@@ -312,6 +312,7 @@ final class EmitLlvm
     private bool $needsTaggedToInt = false;
     private bool $needsTaggedToFloat = false;
     private bool $needsTaggedCompare = false;
+    private bool $needsTaggedEq = false;
     private bool $needsTaggedArith = false;
     private bool $needsTaggedTruthy = false;
     /** Module indexes an array with a `mixed`/cell key → emit the
@@ -714,6 +715,9 @@ final class EmitLlvm
         }
         if ($this->needsTaggedCompare) {
             $out .= $this->taggedCompareRuntime();
+        }
+        if ($this->needsTaggedEq) {
+            $out .= $this->taggedEqRuntime();
         }
         if ($this->needsTaggedArith) {
             $out .= $this->taggedArithRuntime();
@@ -1399,6 +1403,103 @@ final class EmitLlvm
         $out .= "  %fres = select i1 %flt, i64 -1, i64 %fsel\n";
         $out .= "  ret i64 %fres\n";
         $out .= "}\n";
+        return $out;
+    }
+
+    /**
+     * `==` / `===` for two NaN-boxed cells with PHP juggling. `__manticore_tagged_
+     * loose_eq`: numbers, bools, null and NUMERIC strings compare numerically
+     * (`5 == "5"`, `"10" == "1e1"`, `null == 0`); two strings where at least one is
+     * non-numeric compare byte-wise; anything else falls back to raw-bit identity.
+     * `__manticore_tagged_strict_eq`: different tag ⇒ not equal; strings compare
+     * byte-wise (non-interned), everything else by raw bits. `__mir_is_numeric_str`
+     * is the PHP-numeric-string test (strtod consumed the whole string modulo
+     * trailing ASCII whitespace). Used by the cell==cell / cell===cell path.
+     */
+    private function taggedEqRuntime(): string
+    {
+        $this->needsStrcmp = true;
+        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+        // __mir_is_numeric_str(s) -> i1
+        $out  = "\ndefine i1 @__mir_is_numeric_str(ptr %s) {\nentry:\n";
+        $out .= "  %c0 = load i8, ptr %s\n";
+        $out .= "  %empty = icmp eq i8 %c0, 0\n";
+        $out .= "  br i1 %empty, label %no, label %parse\n";
+        $out .= "parse:\n";
+        $out .= "  %end = alloca ptr\n";
+        $out .= "  %d = call double @strtod(ptr %s, ptr %end)\n";
+        $out .= "  %ep = load ptr, ptr %end\n";
+        $out .= "  %noparse = icmp eq ptr %ep, %s\n";
+        $out .= "  br i1 %noparse, label %no, label %tail\n";
+        $out .= "tail:\n";
+        $out .= "  %cur = phi ptr [ %ep, %parse ], [ %nxt, %skip ]\n";
+        $out .= "  %tc = load i8, ptr %cur\n";
+        $out .= "  %isnul = icmp eq i8 %tc, 0\n";
+        $out .= "  br i1 %isnul, label %yes, label %chkws\n";
+        $out .= "chkws:\n";
+        // ASCII whitespace: space(32) tab(9) nl(10) cr(13) vt(11) ff(12)
+        $out .= "  %w1 = icmp eq i8 %tc, 32\n  %w2 = icmp eq i8 %tc, 9\n";
+        $out .= "  %w3 = icmp eq i8 %tc, 10\n  %w4 = icmp eq i8 %tc, 13\n";
+        $out .= "  %w5 = icmp eq i8 %tc, 11\n  %w6 = icmp eq i8 %tc, 12\n";
+        $out .= "  %o1 = or i1 %w1, %w2\n  %o2 = or i1 %w3, %w4\n  %o3 = or i1 %w5, %w6\n";
+        $out .= "  %o4 = or i1 %o1, %o2\n  %isws = or i1 %o4, %o3\n";
+        $out .= "  br i1 %isws, label %skip, label %no\n";
+        $out .= "skip:\n  %nxt = getelementptr inbounds i8, ptr %cur, i64 1\n  br label %tail\n";
+        $out .= "yes:\n  ret i1 true\n";
+        $out .= "no:\n  ret i1 false\n}\n";
+
+        // isNumericCell(v) -> i1 : tag int/bool/null/float, OR a numeric string.
+        $out .= "define i1 @__mir_cell_numeric(i64 %v) {\nentry:\n";
+        $out .= "  %t = call i64 @__manticore_tag(i64 %v)\n";
+        $out .= "  %t1 = icmp eq i64 %t, 1\n  %t2 = icmp eq i64 %t, 2\n";
+        $out .= "  %t3 = icmp eq i64 %t, 3\n  %t6 = icmp eq i64 %t, 6\n";
+        $out .= "  %n1 = or i1 %t1, %t2\n  %n2 = or i1 %t3, %t6\n  %numty = or i1 %n1, %n2\n";
+        $out .= "  br i1 %numty, label %y, label %chkstr\n";
+        $out .= "chkstr:\n";
+        $out .= "  %isstr = icmp eq i64 %t, 4\n";
+        $out .= "  br i1 %isstr, label %s, label %n\n";
+        $out .= "s:\n  %p = and i64 %v, 281474976710655\n  %pp = inttoptr i64 %p to ptr\n";
+        $out .= "  %sn = call i1 @__mir_is_numeric_str(ptr %pp)\n  ret i1 %sn\n";
+        $out .= "y:\n  ret i1 true\n  n:\n  ret i1 false\n}\n";
+
+        // __manticore_tagged_loose_eq(a,b) -> i64 (0/1)
+        $out .= "define i64 @__manticore_tagged_loose_eq(i64 %a, i64 %b) {\nentry:\n";
+        $out .= "  %an = call i1 @__mir_cell_numeric(i64 %a)\n";
+        $out .= "  %bn = call i1 @__mir_cell_numeric(i64 %b)\n";
+        $out .= "  %bothnum = and i1 %an, %bn\n";
+        $out .= "  br i1 %bothnum, label %num, label %chkstr\n";
+        $out .= "num:\n";
+        $out .= "  %da = call double @__manticore_tagged_to_double(i64 %a)\n";
+        $out .= "  %db = call double @__manticore_tagged_to_double(i64 %b)\n";
+        $out .= "  %feq = fcmp oeq double %da, %db\n";
+        $out .= "  %fz = zext i1 %feq to i64\n  ret i64 %fz\n";
+        $out .= "chkstr:\n";
+        $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n  %tb = call i64 @__manticore_tag(i64 %b)\n";
+        $out .= "  %sa = icmp eq i64 %ta, 4\n  %sb = icmp eq i64 %tb, 4\n";
+        $out .= "  %bothstr = and i1 %sa, %sb\n";
+        $out .= "  br i1 %bothstr, label %scmp, label %raw\n";
+        $out .= "scmp:\n";
+        $out .= "  %pa = and i64 %a, 281474976710655\n  %ppa = inttoptr i64 %pa to ptr\n";
+        $out .= "  %pb = and i64 %b, 281474976710655\n  %ppb = inttoptr i64 %pb to ptr\n";
+        $out .= "  %se = call i1 @__mir_str_eq(ptr %ppa, ptr %ppb)\n  %sz = zext i1 %se to i64\n  ret i64 %sz\n";
+        $out .= "raw:\n";
+        $out .= "  %req = icmp eq i64 %a, %b\n  %rz = zext i1 %req to i64\n  ret i64 %rz\n}\n";
+
+        // __manticore_tagged_strict_eq(a,b) -> i64 (0/1)
+        $out .= "define i64 @__manticore_tagged_strict_eq(i64 %a, i64 %b) {\nentry:\n";
+        $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n  %tb = call i64 @__manticore_tag(i64 %b)\n";
+        $out .= "  %same = icmp eq i64 %ta, %tb\n";
+        $out .= "  br i1 %same, label %chk, label %ne\n";
+        $out .= "chk:\n";
+        $out .= "  %isstr = icmp eq i64 %ta, 4\n";
+        $out .= "  br i1 %isstr, label %scmp, label %raw\n";
+        $out .= "scmp:\n";
+        $out .= "  %pa = and i64 %a, 281474976710655\n  %ppa = inttoptr i64 %pa to ptr\n";
+        $out .= "  %pb = and i64 %b, 281474976710655\n  %ppb = inttoptr i64 %pb to ptr\n";
+        $out .= "  %se = call i1 @__mir_str_eq(ptr %ppa, ptr %ppb)\n  %sz = zext i1 %se to i64\n  ret i64 %sz\n";
+        $out .= "raw:\n";
+        $out .= "  %req = icmp eq i64 %a, %b\n  %rz = zext i1 %req to i64\n  ret i64 %rz\n";
+        $out .= "ne:\n  ret i64 0\n}\n";
         return $out;
     }
 
@@ -6270,6 +6371,31 @@ final class EmitLlvm
             return $out;
         }
 
+        // Both operands are statically CELL, EQ/NE — dispatch by tag with PHP
+        // juggling at runtime (`5 == "5"`, non-interned `"x" === "x"`). A raw i64
+        // compare only accidentally works for canonical-repr ints / interned
+        // strings; it misses int-vs-numeric-string and non-interned strings.
+        if (($isEq || $isNe)
+            && $lk === Type::KIND_CELL && $rk === Type::KIND_CELL) {
+            $this->needsTaggedEq = true;
+            $this->needsTagged = true;
+            $this->needsTaggedToFloat = true;
+            $li = $l;
+            if ($lt === 'ptr') { $li = $this->allocSsa(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            $ri = $r;
+            if ($rt === 'ptr') { $ri = $this->allocSsa(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            $fn = $strictEq ? '@__manticore_tagged_strict_eq' : '@__manticore_tagged_loose_eq';
+            $eq = $this->allocSsa();
+            $out .= '  ' . $eq . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
+            $res = $eq;
+            if ($isNe) {
+                $res = $this->allocSsa();
+                $out .= '  ' . $res . ' = xor i64 ' . $eq . ", 1\n";
+            }
+            $this->lastValue = $res;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // Both operands are statically CELL (guaranteed NaN-boxed) in an ORDERING
         // compare — their runtime types (string / int / float) are only known at
         // runtime, so dispatch by tag: string→strcmp, else numeric. Without this a
