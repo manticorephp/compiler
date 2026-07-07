@@ -1415,7 +1415,7 @@ trait EmitLlvmRuntime
             //   rlen = end - start  (always >= 0)
             $out .= "\ndefine ptr @__mir_substr(ptr %s, i64 %start, i64 %len, i64 %haveLen) {\n";
             $out .= "entry:\n";
-            $out .= "  %n = call i64 @strlen(ptr %s)\n";
+            $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
             $out .= "  %sneg = icmp slt i64 %start, 0\n";
             $out .= "  %splusn = add i64 %start, %n\n";
             $out .= "  %s0 = select i1 %sneg, i64 %splusn, i64 %start\n";
@@ -1446,7 +1446,7 @@ trait EmitLlvmRuntime
         if ($this->needsStrRepeat) {
             $out .= "\ndefine ptr @__mir_str_repeat(ptr %s, i64 %n) {\n";
             $out .= "entry:\n";
-            $out .= "  %slen = call i64 @strlen(ptr %s)\n";
+            $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
             $out .= "  %total = mul i64 %slen, %n\n";
             $out .= "  %sz = add i64 %total, 1\n";
             $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
@@ -1611,7 +1611,7 @@ trait EmitLlvmRuntime
     {
         $out  = "\ndefine ptr @" . $fn . "(ptr %s) {\n";
         $out .= "entry:\n";
-        $out .= "  %slen = call i64 @strlen(ptr %s)\n";
+        $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %sz = add i64 %slen, 1\n";
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
         $out .= "  br label %loop\n";

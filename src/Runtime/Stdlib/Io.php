@@ -38,7 +38,11 @@ function file_get_contents(string $path): string|false
     }
     \Runtime\Libc\fread($buf, 1, $size, $fp);
     \Runtime\Libc\fclose($fp);
-    return \substr($buf, 0, $size);
+    // str_from_buffer, NOT substr: $buf is a raw \Ffi\Ptr (calloc), NOT a
+    // headered string — substr would read a bogus header (and truncate a file
+    // with an embedded NUL). str_from_buffer copies exactly $size bytes into a
+    // proper headered string (binary-safe). Mirrors Manticore\read_file.
+    return \str_from_buffer($buf, $size);
 }
 
 /**
@@ -121,7 +125,8 @@ function fread(\Ffi\Ptr $stream, int $length): string
     if ($n < 0) {
         $n = 0;
     }
-    return \substr($buf, 0, $n);
+    // str_from_buffer, NOT substr: raw \Ffi\Ptr, exactly $n bytes (binary-safe).
+    return \str_from_buffer($buf, $n);
 }
 
 /**
@@ -141,9 +146,10 @@ function fgets(\Ffi\Ptr $stream, ?int $length = null)
     if ($r === null) {
         return false;
     }
-    // raw calloc buffer (no header): 2-arg substr copies to the NUL via libc
-    // strlen — `strlen($buf)` would read the absent len field post-flip.
-    return \substr($buf, 0);
+    // cstr_to_str, NOT substr: $buf is a raw \Ffi\Ptr (no header) holding a
+    // NUL-terminated line — substr would read a bogus header once substr goes
+    // binary-safe. cstr_to_str is the libc-strlen boundary for FFI char*.
+    return \cstr_to_str($buf);
 }
 
 /**
@@ -234,6 +240,6 @@ function getcwd(): string|false
     if ($r === null) {
         return false;
     }
-    // raw calloc buffer (no header): 2-arg substr copies to the NUL via libc.
-    return \substr($buf, 0);
+    // cstr_to_str, NOT substr: raw \Ffi\Ptr, NUL-terminated cwd (see fgets).
+    return \cstr_to_str($buf);
 }
