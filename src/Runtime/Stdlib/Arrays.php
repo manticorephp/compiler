@@ -18,14 +18,18 @@
  *
  * @param string[] $haystack
  */
-function in_array(string $needle, array $haystack, bool $strict = false): bool
+function in_array(mixed $needle, array $haystack, bool $strict = false): bool
 {
+    // Non-concrete fallback (a CONCRETE haystack routes through the precise
+    // InlineClosures synthesis). `mixed` needle + bare-`array` haystack keep the
+    // values as cells, so `==`/`===` dispatch by tag — correct for a
+    // heterogeneous (null/int/string/…) haystack, not just strings (the old
+    // `strcmp((string)$v, …)` faulted on a non-string cell value).
     foreach ($haystack as $v) {
-        // The compiler infers each foreach value as ptr from the
-        // `string[]` element-class hint, so strcmp is the right op
-        // for both === and == in this signature.
-        if (\Runtime\Libc\strcmp((string)$v, $needle) === 0) {
-            return true;
+        if ($strict) {
+            if ($v === $needle) { return true; }
+        } else {
+            if ($v == $needle) { return true; }
         }
     }
     return false;
@@ -37,19 +41,20 @@ function in_array(string $needle, array $haystack, bool $strict = false): bool
  * through libc strcmp so bytes are compared, not pointers. Returns the matching
  * key or false. Mirrors {@see in_array}.
  *
- * LIMITATION: handles a vec (int-keyed) haystack only. A non-concrete ASSOC
- * (string-key result) and STRICT (===) search need a tagged cell-equality
- * compare the backend doesn't emit yet, so those are not supported here — a
- * concrete haystack still routes through the precise InlineClosures synthesis.
+ * `mixed` needle + bare-`array` haystack keep values as cells so `==`/`===`
+ * dispatch by tag — a non-concrete ASSOC (string-key result) and STRICT search
+ * both work now; a concrete haystack still routes through the InlineClosures
+ * synthesis. Returns the matching key (int or string) or false.
  *
- * @param string[] $haystack
- * @return int|false
+ * @return int|string|false
  */
-function array_search(string $needle, array $haystack, bool $strict = false): int|false
+function array_search(mixed $needle, array $haystack, bool $strict = false): int|string|false
 {
     foreach ($haystack as $k => $v) {
-        if (\Runtime\Libc\strcmp((string)$v, $needle) === 0) {
-            return $k;
+        if ($strict) {
+            if ($v === $needle) { return $k; }
+        } else {
+            if ($v == $needle) { return $k; }
         }
     }
     return false;
