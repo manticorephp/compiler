@@ -5936,7 +5936,16 @@ final class EmitLlvm
     private function retainCellPayload(Node $value): string
     {
         $k = $value->type->kind;
-        if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION) {
+        // A borrowed CELL-array (element cell/unknown) is boxed by ptr — NOT
+        // rebuilt — so the cell co-owns it and needs a retain to balance the
+        // tag7 release in __mir_cell_drop (rcRetainByType skips a fresh literal /
+        // spread). A concrete-element array IS rebuilt fresh by boxToCell, so it
+        // must NOT be retained (that new +1 is the cell's outright).
+        $el = $value->type->element ?? null;
+        $borrowedCellArray = $k === Type::KIND_ARRAY
+            && ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN);
+        if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
+            && !$borrowedCellArray) {
             return '';
         }
         $saveV = $this->lastValue;

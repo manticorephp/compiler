@@ -699,9 +699,14 @@ final class UnifiedArrayRuntime
      *                         alone. Both are consistent with the retain side
      *                         ({@see EmitLlvm::retainCellPayload} co-owns exactly
      *                         string / obj / union), so drop is symmetric.
-     * Arrays (tag 7) are intentionally NOT dropped: an already-cell array boxed
-     * into a cell is a borrowed alias (boxToCell does NOT rebuild it) that was
-     * never co-owned, so a release would double-free. Scalars are no-ops.
+     * Arrays (tag 7) → __mir_array_release_cell: a nested array boxed into a cell
+     * is always a cell-array (boxToCell rebuilds a concrete one to vec[cell] /
+     * boxes an already-cell one by ptr), so release_cell recursively drops its
+     * cell elements (via __mir_cell_drop) and frees the buffer at rc 0. It
+     * self-guards on ARRAY_TAG_MAGIC. The retain side ({@see
+     * EmitLlvm::retainCellPayload}) co-owns a BORROWED cell-array so this release
+     * balances (a rebuilt concrete array is a fresh +1 the cell owns outright).
+     * Scalars are no-ops.
      */
     private function emitCellDrop(): void
     {
@@ -710,6 +715,8 @@ final class UnifiedArrayRuntime
         $entry = $fn->block('entry');
         $tagged = $fn->block('tagged');
         $chkobj = $fn->block('chkobj');
+        $chkarr = $fn->block('chkarr');
+        $doarr = $fn->block('doarr');
         $dostr = $fn->block('dostr');
         $doobj = $fn->block('doobj');
         $chkmagic = $fn->block('chkmagic');
@@ -730,7 +737,7 @@ final class UnifiedArrayRuntime
         $dostr->br($done);
 
         // tag 8: object payload (guarded).
-        $chkobj->brIf($chkobj->icmp('eq', $nib, Value::int(Type::i64(), 8)), $doobj, $done);
+        $chkobj->brIf($chkobj->icmp('eq', $nib, Value::int(Type::i64(), 8)), $doobj, $chkarr);
         $op = $doobj->and_($v, Value::int(Type::i64(), 281474976710655));
         $doobj->brIf($doobj->icmp('ugt', $op, Value::int(Type::i64(), 65535)), $chkmagic, $done);
         $opp = $chkmagic->inttoptr($op, Type::ptr());
@@ -738,6 +745,12 @@ final class UnifiedArrayRuntime
         $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $done);
         $dorel->call('__mir_rc_release', Type::void(), [$opp]);
         $dorel->br($done);
+
+        // tag 7: nested array → recursive cell release (self-guards ARRAY_MAGIC).
+        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $done);
+        $ap = $doarr->inttoptr($doarr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
+        $doarr->call('__mir_array_release_cell', Type::void(), [$ap]);
+        $doarr->br($done);
 
         $done->retVoid();
     }
