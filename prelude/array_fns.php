@@ -328,6 +328,38 @@ function array_reverse(array $a): array
 }
 
 /**
+ * `array_slice($arr, $offset, $length, $preserve_keys)`. PRELUDE (see
+ * array_reverse): bare-`array` param so call-site element inference types the
+ * element and the copied values ride it (a stdlib extern would erase → NaN-box
+ * misreads a raw int as a double). PHP semantics: STRING keys always kept, INT
+ * keys reindexed from 0 unless `$preserve_keys`.
+ */
+function array_slice(array $arr, int $offset, ?int $length = null, bool $preserve_keys = false): array
+{
+    $count = count($arr);
+    if ($offset < 0) { $offset = max(0, $count + $offset); }
+    if ($length === null) {
+        $end = $count;
+    } elseif ($length < 0) {
+        $end = max($offset, $count + $length);
+    } else {
+        $end = min($count, $offset + $length);
+    }
+    $out = [];
+    $i = 0;
+    foreach ($arr as $k => $v) {
+        if ($i >= $end) { break; }
+        if ($i >= $offset) {
+            if (is_string($k)) { $out[$k] = $v; }
+            elseif ($preserve_keys) { $out[$k] = $v; }
+            else { $out[] = $v; }
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+/**
  * `array_pad(arr, size, value)` — pad to abs(size) with `value` (right when
  * size > 0, left when size < 0); a shorter `size` returns the input values.
  * PRELUDE (see array_reverse) so call-site element inference types `$arr`

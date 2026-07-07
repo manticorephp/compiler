@@ -105,31 +105,12 @@ function array_merge(array ...$arrays): array
     return $out;
 }
 
-function array_slice(array $arr, int $offset, ?int $length = null): array
-{
-    $count = \count($arr);
-    if ($offset < 0) { $offset = \max(0, $count + $offset); }
-    if ($length === null) {
-        $end = $count;
-    } elseif ($length < 0) {
-        $end = \max($offset, $count + $length);
-    } else {
-        $end = \min($count, $offset + $length);
-    }
-    $out = [];
-    $i = 0;
-    foreach ($arr as $v) {
-        if ($i >= $end) { break; }
-        if ($i >= $offset) { $out[] = $v; }
-        $i = $i + 1;
-    }
-    return $out;
-}
-
-// array_map / array_filter live in prelude/array_fns.php (PRELUDE-injected),
-// NOT here: a callback invoked across the separately-linked stdlib.o boundary
-// crashes (the closure ABI + bare-array element erasure). Same reason as
-// array_reduce / sort / usort. Gated in Main on `array_map(` / `array_filter(`.
+// array_slice / array_map / array_filter live in prelude/array_fns.php
+// (PRELUDE-injected), NOT here: as a stdlib extern the `array` param's element
+// erases to unknown, so re-stored values read back as garbage (a raw int → a
+// denormal float under NaN-boxing) and a callback crosses the closure ABI. In
+// the prelude, call-site element inference types the param + result. Same reason
+// as array_reverse / array_reduce / sort / usort. Gated in Main.
 
 function reset(array &$arr): mixed
 {

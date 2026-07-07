@@ -1264,6 +1264,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
             || \strpos($source, 'str_split(') !== false
             || \strpos($source, 'array_filter(') !== false
             || \strpos($source, 'array_reverse(') !== false
+            || \strpos($source, 'array_slice(') !== false
             || \strpos($source, 'array_pad(') !== false
             || \strpos($source, 'explode(') !== false) { $useArrayFns = true; }
         // CLI prelude (__mc_argv / getopt): gate on a $argv / $argc reference
