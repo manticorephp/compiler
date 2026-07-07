@@ -405,7 +405,12 @@ final class InferTypes implements Pass
         // single forward pass would leave the early stores typed by the
         // unrefined scalar element → stored raw → read back as garbage).
         foreach ($this->assocValClasses as $name => $classes) {
-            if (\count($classes) < 2) { continue; }
+            // A `null` element is special: its raw repr (0) differs from its cell
+            // repr (box_null), so even a HOMOGENEOUS-null local ($d[]=null only)
+            // must ride a cell element — else the store writes raw 0 and a later
+            // isset/`??`/read misdecodes it as float(0) (every other single kind
+            // has raw==boxed and reconciles). So a lone `null` also forces a cell.
+            if (\count($classes) < 2 && !isset($classes['null'])) { continue; }
             if (isset($this->recordLocals[$name])) { continue; } // record keeps its shape
             $this->cellElemLocals[$name] = true;
             if (isset($this->assocLocals[$name])) {
@@ -2505,6 +2510,19 @@ final class InferTypes implements Pass
         return $t;
     }
 
+    /** A plain-ternary null arm whose SIBLING is a scalar (int/float/string/
+     *  bool) must lift to a nullable cell so null renders as NULL (not the
+     *  scalar's zero: `$c ? 5 : null` else read as int(0), `$c ? true : null`
+     *  as bool(false), gettype mistold). Restricted to scalars: object/array
+     *  siblings are left as the branch type because a broad flip perturbs
+     *  self-host clone lowering (see inferTernary). */
+    private function scalarNullArm(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL;
+    }
+
     private function inferTernary(Ternary $node): Type
     {
         $this->inferNode($node->cond);
@@ -2521,9 +2539,9 @@ final class InferTypes implements Pass
         // keeps the historical "null arm takes the other branch's type" (a
         // broad flip perturbs the self-host — clone lowering regressed).
         if ($t->kind === Type::KIND_NULL) {
-            $node->type = $node->nullable ? $this->nullableOf($e) : $e;
+            $node->type = ($node->nullable || $this->scalarNullArm($e)) ? $this->nullableOf($e) : $e;
         } elseif ($e->kind === Type::KIND_NULL) {
-            $node->type = $node->nullable ? $this->nullableOf($t) : $t;
+            $node->type = ($node->nullable || $this->scalarNullArm($t)) ? $this->nullableOf($t) : $t;
         }
         elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
             && ($e->kind === Type::KIND_OBJ || $e->kind === Type::KIND_UNION)) {
@@ -2821,6 +2839,7 @@ final class InferTypes implements Pass
             // cells so each entry carries its own runtime type tag.
             $vt = $valType ?? Type::unknown();
             if ($vt->kind === Type::KIND_UNKNOWN) { $vt = Type::cell(); }
+            elseif ($vt->kind === Type::KIND_NULL) { $vt = Type::cell(); }
             elseif ($hetSubArrays && $vt->isArray()) { $vt = Type::cell(); }
             // All keys are string literals and the element shape is regular
             // (no het-sub-array cell coercion) → a RECORD: same assoc repr
@@ -2839,6 +2858,8 @@ final class InferTypes implements Pass
         // reading the raw i64. Homogeneous-unknown stays unknown (no boxing).
         $vt = $valType ?? Type::unknown();
         if ($vt->kind === Type::KIND_UNKNOWN && count($concreteKinds) >= 2) {
+            $vt = Type::cell();
+        } elseif ($vt->kind === Type::KIND_NULL) {
             $vt = Type::cell();
         } elseif ($hetSubArrays && $vt->isArray()) {
             $vt = Type::cell();
@@ -2923,10 +2944,15 @@ final class InferTypes implements Pass
      */
     private function arrayElemMerge(?Type $cur, Type $vt): Type
     {
-        if ($cur === null || $cur->kind === Type::KIND_UNKNOWN) { return $vt; }
+        // A homogeneous-null element cannot represent "present but null"
+        // distinctly from "absent" in a raw slot (isset/`??` misread it) —
+        // box it as a cell so the store emits box_null (mirrors inferArrayLit).
+        if ($cur === null || $cur->kind === Type::KIND_UNKNOWN) {
+            return $vt->kind === Type::KIND_NULL ? Type::cell() : $vt;
+        }
         if ($vt->kind === Type::KIND_UNKNOWN) { return $cur; }
         $u = $this->unionTypes($cur, $vt);
-        if ($u->kind === Type::KIND_UNKNOWN) { return Type::cell(); }
+        if ($u->kind === Type::KIND_UNKNOWN || $u->kind === Type::KIND_NULL) { return Type::cell(); }
         return $u;
     }
 

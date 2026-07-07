@@ -1,0 +1,25 @@
+string(3) "def"
+bool(false)
+bool(true)
+string(1) "a"
+bool(false)
+array(2) {
+  [0]=>
+  NULL
+  [1]=>
+  NULL
+}
+string(1) "g"
+bool(false)
+int(2)
+string(1) "e"
+bool(false)
+array(2) {
+  ["i"]=>
+  int(1)
+  ["n"]=>
+  NULL
+}
+bool(false)
+string(1) "z"
+{"a":null,"b":null}
