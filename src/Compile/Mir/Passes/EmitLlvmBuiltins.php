@@ -1315,6 +1315,22 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $z . ' = zext i1 ' . $eq . " to i64\n";
             return $this->finishI64($out, $z);
         }
+        // An object/closure value can be a null (0) pointer at runtime — a plain
+        // ternary null arm keeps the obj type (`$c ? new P() : null`), so both
+        // is_null and is_object must runtime-check the pointer instead of
+        // short-circuiting on the static obj type (which would answer null=never,
+        // object=always). is_null → ptr==0; is_object → ptr!=0.
+        if (($a->type->kind === Type::KIND_OBJ || $a->type->kind === Type::KIND_CLOSURE)
+            && ($kind === Type::KIND_NULL || $kind === Type::KIND_OBJ)) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
+            $cmp = $this->allocSsa();
+            $out .= '  ' . $cmp . ' = icmp ' . $pred . ' i64 ' . $this->lastValue . ", 0\n";
+            $z = $this->allocSsa();
+            $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
+            return $this->finishI64($out, $z);
+        }
         $this->lastValue = ($a->type->kind === $kind) ? '1' : '0';
         $this->lastValueType = 'i64';
         return '';
@@ -1368,8 +1384,20 @@ trait EmitLlvmBuiltins
         elseif ($k === Type::KIND_BOOL) { $name = $nBool; }
         elseif ($k === Type::KIND_NULL) { $name = $nNull; }
         elseif ($k === Type::KIND_ARRAY) { $name = $nArr; }
-        // get_debug_type names an object by its class; gettype → "object".
-        elseif ($k === Type::KIND_OBJ) { $name = $debug && ($a->type->class ?? '') !== '' ? $a->type->class : $nObj; }
+        // An obj value may be a null (0) pointer at runtime (a plain-ternary null
+        // arm keeps the obj type) — runtime-select "NULL" over the object name.
+        elseif ($k === Type::KIND_OBJ) {
+            $objName = $debug && ($a->type->class ?? '') !== '' ? $a->type->class : $nObj;
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $isN = $this->allocSsa();
+            $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            $sel = $this->allocSsa();
+            $out .= '  ' . $sel . ' = select i1 ' . $isN . ', ptr ' . $this->strRef($nNull) . ', ptr ' . $this->strRef($objName) . "\n";
+            $this->lastValue = $sel;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         elseif ($k === Type::KIND_CLOSURE) { $name = $debug ? 'Closure' : $nObj; }
         $this->lastValue = $this->strRef($name);
         $this->lastValueType = 'ptr';

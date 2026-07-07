@@ -2511,16 +2511,23 @@ final class InferTypes implements Pass
     }
 
     /** A plain-ternary null arm whose SIBLING is a scalar (int/float/string/
-     *  bool) must lift to a nullable cell so null renders as NULL (not the
-     *  scalar's zero: `$c ? 5 : null` else read as int(0), `$c ? true : null`
-     *  as bool(false), gettype mistold). Restricted to scalars: object/array
-     *  siblings are left as the branch type because a broad flip perturbs
-     *  self-host clone lowering (see inferTernary). */
+     *  bool) or an ARRAY must lift to a nullable cell so null renders as NULL
+     *  (not the sibling's zero: `$c ? 5 : null` else int(0); `$c ? [1] : null`
+     *  else array(0); is_null/gettype mistold). A cell dispatches on the runtime
+     *  tag, so those consumers read null correctly for free.
+     *
+     *  OBJECT siblings are deliberately NOT lifted: a null object is already a
+     *  0 pointer (var_dump/`===`/instanceof read it right), and boxing to a cell
+     *  loses the static class the inline `clone` lowering needs (the descriptor
+     *  header carries no size/prop layout for a generic runtime clone). The
+     *  remaining obj-null gaps (is_null/gettype short-circuiting on the static
+     *  obj type) are fixed at those builtins instead. */
     private function scalarNullArm(Type $t): bool
     {
         $k = $t->kind;
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL;
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL
+            || $k === Type::KIND_ARRAY;
     }
 
     private function inferTernary(Ternary $node): Type

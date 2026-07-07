@@ -4618,12 +4618,31 @@ final class EmitLlvm
             $this->lastValueType = 'i64';
             return $out;
         }
+        // A non-cell obj operand can be a null (0) pointer at runtime — an
+        // obj-typed value from a plain-ternary null arm (`$c ? new P() : null`).
+        // Reading the class id from a null ptr is a wild load (heap roulette
+        // SIGSEGV); guard it — null is an instance of nothing. A result slot
+        // avoids a phi (mirrors the cell path above).
+        $slot = $this->allocSsa();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $slot . "\n";
+        $isNull = $this->allocSsa();
+        $out .= '  ' . $isNull . ' = icmp eq i64 ' . $obj . ", 0\n";
+        $objL = $this->allocLabel('io.obj');
+        $doneL = $this->allocLabel('io.done');
+        $out .= '  br i1 ' . $isNull . ', label %' . $doneL . ', label %' . $objL . "\n";
+        $out .= $objL . ":\n";
         $objp = $this->allocSsa();
         $out .= '  ' . $objp . ' = inttoptr i64 ' . $obj . " to ptr\n";
         $out .= $this->emitLoadClassId($objp);
         $out .= $this->emitClassIdMatch($this->classIdReg, $ids);
+        $mx = $this->allocSsa();
+        $out .= '  ' . $mx . ' = zext i1 ' . $this->classIdMatchReg . " to i64\n";
+        $out .= '  store i64 ' . $mx . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
         $reg = $this->allocSsa();
-        $out .= '  ' . $reg . ' = zext i1 ' . $this->classIdMatchReg . " to i64\n";
+        $out .= '  ' . $reg . ' = load i64, ptr ' . $slot . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
