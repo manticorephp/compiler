@@ -1359,8 +1359,12 @@ final class LowerFromAst implements Pass
         $pi = 0;
         foreach ($m->params as $p) {
             $isVar = (bool)($p->variadic ?? false);
+            // `T ...$xs` collects trailing args into a vec[T] the callee sees as
+            // one vec param (caller packs at the call site) — same as the plain
+            // function path. Without the Type::vec wrapper the callee reads the
+            // param as a single T, so `$xs` is garbage (a raw arg, not the vec).
             $pt = $isVar
-                ? $this->lowerTypeHint($p->typeHint)
+                ? Type::vec($this->lowerTypeHint($p->typeHint))
                 : $this->lowerParamType($this->effectiveHint(
                     $p->typeHint,
                     $this->docTagType($m->docComment, '@param', $p->name),
@@ -3442,6 +3446,32 @@ final class LowerFromAst implements Pass
      * call args so the callee never reads uninitialized param slots.
      * @return \Parser\Ast\Param[]|null
      */
+    /**
+     * Resolve a variadic method signature by NAME across all classes, for
+     * packing a variable-receiver call whose class isn't known until InferTypes.
+     * Returns the params of a class declaring `$method` with a trailing variadic
+     * — but only when EVERY class declaring `$method` agrees (all variadic, same
+     * fixed arity). A single non-variadic same-name method → null (ambiguous
+     * packing, defer): never mis-pack a non-variadic call. Common consistent
+     * variadic method names pack correctly; rare collisions safely defer.
+     * @return \Parser\Ast\Param[]|null
+     */
+    private function variadicMethodParams(string $method): ?array
+    {
+        $found = null;
+        foreach ($this->classDecls as $cd) {
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) !== $method) { continue; }
+                $mp = $this->methodDeclParams($m);
+                $np = \count($mp);
+                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) { return null; }
+                if ($found !== null && \count($found) !== $np) { return null; }
+                $found = $mp;
+            }
+        }
+        return $found;
+    }
+
     private function resolveMethodParams(string $class, string $method): ?array
     {
         $c = $class;
@@ -3523,6 +3553,14 @@ final class LowerFromAst implements Pass
             && $expr->object->name === 'this'
             && $this->currentLowerClass !== '') {
             $params = $this->resolveMethodParams($this->currentLowerClass, $expr->method);
+        }
+        // A variable-receiver variadic call (`$x->m(a,b,c)`) must STILL pack its
+        // trailing args into a vec — but the receiver class isn't resolved until
+        // InferTypes. Variadic-ness is a property of the method NAME, so resolve
+        // a consistent variadic signature across all classes and pack against it
+        // (default-arg padding for non-variadic methods still defers to emit).
+        if ($params === null) {
+            $params = $this->variadicMethodParams($expr->method);
         }
         if ($params !== null) {
             $args = $this->defaultFillArgs($params, $expr->args);
