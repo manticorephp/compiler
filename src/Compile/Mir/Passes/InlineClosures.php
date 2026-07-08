@@ -384,6 +384,10 @@ final class InlineClosures implements Pass
         if ($ret->kind !== Node::KIND_RETURN) { return null; }
         $retX = $this->asReturn($ret);
         if ($retX->value === null) { return null; }
+        // A curried arrow (`fn($x) => fn($y) => ...`) returns a closure node,
+        // which NodeClone can't copy (its captured scope would be duplicated).
+        // Keep the real invoke — inlining is only ever an optimisation.
+        if ($this->containsClosure($retX->value)) { return null; }
         // Arity match (captureless → params are exactly the user params).
         if (\count($fn->params) !== \count($iv->args)) { return null; }
         // Map param name → arg node; reject non-substitutable params/args.
@@ -465,6 +469,16 @@ final class InlineClosures implements Pass
         $counts = [];
         $this->countLoads($body, $names, $counts);
         return $counts;
+    }
+
+    /** Whether `$n` is or contains a closure node (which NodeClone can't copy). */
+    private function containsClosure(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_CLOSURE) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if ($this->containsClosure($c)) { return true; }
+        }
+        return false;
     }
 
     /**
