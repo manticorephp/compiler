@@ -4880,8 +4880,21 @@ final class EmitLlvm
         $t = $this->castTernary($n);
         $res = $this->allocSsa();
         $out = '  ' . $res . " = alloca i64\n";
-        $out .= $this->emitCondVal($t->cond);
-        $cond = $this->lastValue;
+        // Short ternary (`?:`) reuses the operand as its then-value, so keep its
+        // RAW value and compute truthiness separately — else a string/cell operand
+        // whose truthiness is a computed 0/1 (not the raw carrier) would return
+        // that 0/1 as the value (a `1` used as a string ptr → SIGSEGV).
+        $rawCond = '0';
+        if ($t->then === null) {
+            $out .= $this->emitNode($t->cond);
+            $out .= $this->coerceToI64();
+            $rawCond = $this->lastValue;
+            $out .= $this->truthinessOf($t->cond->type);
+            $cond = $this->lastValue;
+        } else {
+            $out .= $this->emitCondVal($t->cond);
+            $cond = $this->lastValue;
+        }
         $thenLabel = $this->allocLabel('tern.then');
         $elseLabel = $this->allocLabel('tern.else');
         $endLabel  = $this->allocLabel('tern.end');
@@ -4901,12 +4914,12 @@ final class EmitLlvm
             $out .= $wantCell ? $this->boxToCell($t->then->type) : $this->coerceToI64();
             $thenVal = $this->lastValue;
         } elseif ($wantCell) {
-            $this->lastValue = $cond;
+            $this->lastValue = $rawCond;
             $this->lastValueType = 'i64';
             $out .= $this->boxToCell($t->cond->type);
             $thenVal = $this->lastValue;
         } else {
-            $thenVal = $cond;
+            $thenVal = $rawCond;
         }
         $out .= '  store i64 ' . $thenVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
@@ -7440,16 +7453,55 @@ final class EmitLlvm
     private function emitCondVal(Node $cond): string
     {
         $out = $this->emitNode($cond);
-        if ($cond->type->kind === Type::KIND_CELL) {
+        return $out . $this->truthinessOf($cond->type);
+    }
+
+    /**
+     * Transform the current lastValue into an i64 that is 0/non-0 for its PHP
+     * truthiness. A CELL unboxes by tag; a STRING is falsy for "" and "0" (a raw
+     * ptr coerce would read any non-null string, incl. "", as truthy) — box it
+     * (box_ptr is bit-ops, no alloc) and reuse the tagged-truthy byte check; any
+     * other type coerces to i64 unchanged (the caller's `icmp ne 0` is correct).
+     * Split from emitCondVal so the short-ternary (`?:`) can compute truthiness
+     * WITHOUT clobbering the raw operand it reuses as its then-value.
+     */
+    private function truthinessOf(Type $t): string
+    {
+        if ($t->kind === Type::KIND_CELL) {
             $this->needsTaggedTruthy = true;
-            $out .= $this->coerceToI64();
+            $out = $this->coerceToI64();
             $r = $this->allocSsa();
             $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;
         }
-        return $out . $this->coerceToI64();
+        if ($t->kind === Type::KIND_STRING) {
+            $out = $this->boxToCell(Type::string_());
+            $this->needsTaggedTruthy = true;
+            $r = $this->allocSsa();
+            $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // An array is falsy iff empty (len 0); a raw ptr coerce reads any
+        // non-null array (incl. `[]`) as truthy. Tag the raw ptr (box_array is
+        // bit-ops + a null guard, no element rebuild) and reuse tagged-truthy's
+        // length check.
+        if ($t->isArray()) {
+            $out = $this->coerceToPtr();
+            $this->needsTagged = true;
+            $ba = $this->allocSsa();
+            $out .= '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+            $this->needsTaggedTruthy = true;
+            $r = $this->allocSsa();
+            $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $ba . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $this->coerceToI64();
     }
 
     private function coerceToI64(): string
