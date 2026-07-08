@@ -88,6 +88,7 @@ trait EmitLlvmBuiltins
         if ($name === 'is_bool')                      { return $this->biIsType($args, 2, Type::KIND_BOOL); }
         if ($name === 'is_array')                     { return $this->biIsType($args, 7, Type::KIND_ARRAY); }
         if ($name === 'is_object')                    { return $this->biIsType($args, 8, Type::KIND_OBJ); }
+        if ($name === 'is_callable')                  { return $this->biIsCallable($args); }
         if ($name === 'gettype')                      { return $this->biGettype($args, false); }
         if ($name === 'get_debug_type')               { return $this->biGettype($args, true); }
         if ($name === 'min')                          { return $this->biMinMax($args, 'slt'); }
@@ -2167,6 +2168,97 @@ trait EmitLlvmBuiltins
             else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]); }
         }
         return $this->biConstBool($out, $exists);
+    }
+
+    /** is_callable($x) — see {@see emitIsCallable} for the resolved forms. */
+    private function biIsCallable(array $args): string
+    {
+        // Route through a `Node`-typed helper: reading `$args[0]->type->…` off
+        // the untyped array element directly reads a wrong (unpinned) offset
+        // under self-host; a typed param pins the node (same discipline as
+        // reflClassName). Every concrete arm lives in {@see emitIsCallable}.
+        return $this->emitIsCallable($args[0]);
+    }
+
+    /**
+     * is_callable($x). Compile-time-resolvable forms:
+     *  - a "fn" / "C::m" string literal → user-function / method existence fold
+     *  - a [recv, "m"] two-element array literal → method_exists fold
+     *  - a Closure value, or an object with __invoke → runtime ptr!=0 (a null-arm
+     *    closure / null object is NOT callable)
+     *  - a tagged cell carrying an object/closure (tag 8) → runtime tag check
+     *  Any other static type folds to false. A NON-literal string that names a
+     *  function only at runtime needs a runtime function registry we don't keep
+     *  → folded false (documented gap; callable literals bound to a `callable`
+     *  param are already lowered to closures upstream, so they hit the ptr path).
+     *  The `'C::m'` / `['C', 'm']` class-name forms fold on method EXISTENCE
+     *  only — a non-static method referenced without an instance is reported
+     *  callable though PHP 8 requires one (method static-ness isn't tracked in
+     *  ClassDef). The `[$obj, 'm']` object form has an instance, so it is exact.
+     */
+    private function emitIsCallable(Node $a): string
+    {
+        // "fn" / "C::m" string literal. A bare name matches a USER function only
+        // (builtins/stdlib externs aren't in fnParamTypes — a name like 'strlen'
+        // folds false; documented gap, matches the runtime-registry limitation).
+        if ($a->kind === Node::KIND_STRING_CONST) {
+            $s = $this->castStringConst($a)->value;
+            $sep = \strpos($s, '::');
+            if ($sep !== false) {
+                $c = \ltrim(\substr($s, 0, $sep), '\\');
+                $m = \substr($s, $sep + 2);
+                $ok = $this->resolveMethodClass($c, $m) !== '';
+            } else {
+                $ok = isset($this->fnParamTypes[$s]) || isset($this->fnParamTypes[\ltrim($s, '\\')]);
+            }
+            return $this->biConstBool($this->emitNode($a), $ok);
+        }
+        // [recv, "method"] two-element array literal.
+        if ($a->kind === Node::KIND_ARRAY_LIT) {
+            $al = $this->castArrayLit($a);
+            if (\count($al->elements) === 2) {
+                $cls = $this->reflClassName($al->elements[0]->value);
+                $m   = $this->reflLitStr($al->elements[1]->value);
+                $ok  = $cls !== '' && $m !== '' && $this->resolveMethodClass($cls, $m) !== '';
+                return $this->biConstBool($this->emitNode($a), $ok);
+            }
+        }
+        $k = $a->type->kind;
+        // A Closure — or an object whose class declares __invoke — is callable
+        // iff its pointer is non-null. A closure value carries the object type
+        // `obj<__closure_N>` (not KIND_CLOSURE), so match that class prefix too.
+        $ptrCallable = ($k === Type::KIND_CLOSURE);
+        if ($k === Type::KIND_OBJ) {
+            $ocls = $a->type->class ?? '';
+            if ($ocls !== ''
+                && (\str_starts_with($ocls, '__closure_')
+                    || $this->resolveMethodClass($ocls, '__invoke') !== '')) {
+                $ptrCallable = true;
+            }
+        }
+        if ($ptrCallable) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $ne = $this->allocSsa();
+            $out .= '  ' . $ne . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+            $z = $this->allocSsa();
+            $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
+            return $this->finishI64($out, $z);
+        }
+        // A tagged cell that carries an object/closure (tag 8) is callable.
+        if ($k === Type::KIND_CELL) {
+            $this->needsTagged = true;
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $out .= $this->cellTagIr($this->lastValue);
+            $eq = $this->allocSsa();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $z = $this->allocSsa();
+            $out .= '  ' . $z . ' = zext i1 ' . $eq . " to i64\n";
+            return $this->finishI64($out, $z);
+        }
+        // int/float/bool/null/plain object/non-literal string/array → not callable.
+        return $this->biConstBool($this->emitNode($a), false);
     }
 
     /** method_exists($obj|'C', 'm') — walk the parent chain for the method. */

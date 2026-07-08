@@ -2064,7 +2064,7 @@ final class InferTypes implements Pass
         if ($n === 'is_null' || $n === 'is_int' || $n === 'is_integer'
             || $n === 'is_long' || $n === 'is_string' || $n === 'is_float'
             || $n === 'is_double' || $n === 'is_bool' || $n === 'is_array'
-            || $n === 'is_object') {
+            || $n === 'is_object' || $n === 'is_callable') {
             return Type::bool_();
         }
         if ($n === 'get_class') { return Type::string_(); }
