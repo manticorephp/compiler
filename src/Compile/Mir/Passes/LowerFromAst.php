@@ -1078,6 +1078,18 @@ final class LowerFromAst implements Pass
         return !$tp->isStatic && $tp->default !== null;
     }
 
+    /** Default-init store for one inherited (parent-declared) property (typed-param T5). */
+    private function inheritedPropDefaultStore(\Parser\Ast\PropertyDecl $prop, string $className, Type $pt): StoreProperty
+    {
+        return new StoreProperty(
+            new LoadLocal('this', Type::obj($className)),
+            $prop->name,
+            $this->lowerExpr($prop->default),
+            $pt,
+            $prop->hooks !== [],
+        );
+    }
+
     /** Default-init store for one mixed-in trait property (typed-param T5). */
     private function traitPropDefaultStore(\Parser\Ast\PropertyDecl $tp, string $className, Type $pt): StoreProperty
     {
@@ -1155,6 +1167,29 @@ final class LowerFromAst implements Pass
                 $ptype,
                 $prop->hooks !== [],
             );
+        }
+        // Inherited property defaults: PHP applies EVERY declared default at
+        // instantiation, not just the leaf class's. A subclass ctor (synthesized
+        // or explicit) must therefore also initialise the parent chain's
+        // defaulted properties — else an inherited `public string $k = 'x'` reads
+        // back as 0/null on a subclass instance. Nearer class wins on name
+        // conflict (a redeclaration, even without a default, shadows the parent).
+        $seen = [];
+        foreach ($decl->properties as $prop) { $seen[$prop->name] = true; }
+        $pname = $decl->extends !== [] ? \ltrim($decl->extends[0], '\\') : '';
+        $guard = 0;
+        while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
+            $pdecl = $this->classDecls[$pname];
+            foreach ($pdecl->properties as $pprop) {
+                if (isset($seen[$pprop->name])) { continue; }
+                $seen[$pprop->name] = true;
+                if ($pprop->isStatic) { continue; }
+                if ($pprop->default === null) { continue; }
+                $pptype = $cd->propertyTypes[$pprop->name] ?? Type::unknown();
+                $defaultStores[] = $this->inheritedPropDefaultStore($pprop, $decl->name, $pptype);
+            }
+            $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
+            $guard = $guard + 1;
         }
         // Mixed-in trait property defaults too — the layout merge in
         // buildClassDef gives them a slot, but without these stores a
