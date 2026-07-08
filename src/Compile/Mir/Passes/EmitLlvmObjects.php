@@ -223,8 +223,23 @@ trait EmitLlvmObjects
             $out .= '  ' . $v . ' = load i64, ptr ' . $sg . "\n";
             $dg = $this->allocSsa();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
-            $out .= '  store i64 ' . $v . ', ptr ' . $dg . "\n";
-            $out .= $this->rcRetainRawByType($v, $cd->propertyTypes[$pname] ?? null);
+            $pt = $cd->propertyTypes[$pname] ?? null;
+            if ($pt !== null && $pt->isArray()) {
+                // PHP arrays are VALUES: `clone` must copy each array-typed
+                // property, not co-own the handle — else a mutation on the clone
+                // (`$b->items[] = x`) aliases the original's buffer. The copy is a
+                // fresh owned array (rc=1), so no extra retain.
+                $vp = $this->allocSsa();
+                $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
+                $cp = $this->allocSsa();
+                $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $vp . ")\n";
+                $cpi = $this->allocSsa();
+                $out .= '  ' . $cpi . ' = ptrtoint ptr ' . $cp . " to i64\n";
+                $out .= '  store i64 ' . $cpi . ', ptr ' . $dg . "\n";
+            } else {
+                $out .= '  store i64 ' . $v . ', ptr ' . $dg . "\n";
+                $out .= $this->rcRetainRawByType($v, $pt);
+            }
         }
         // Dynamic-property bag: shallow-share the same assoc pointer.
         if ($cd->usesBag()) {
