@@ -5207,21 +5207,38 @@ final class EmitLlvm
             if ($arm->value !== null) {
                 $out .= $base . '_t' . (string)$vi . ":\n";
                 $out .= $this->emitNode($arm->value);
-                $out .= $this->coerceToI64();
-                $v = $this->lastValue;
                 $vk = $arm->value->type->kind;
-                $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
-                    && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
                 $eq = $this->allocSsa();
-                if ($useStr) {
-                    $this->needsStrcmp = true;
-                    $sp = $this->allocSsa();
-                    $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
-                    $vp = $this->allocSsa();
-                    $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
-                    $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $vp . ")\n";
+                if ($subjK === Type::KIND_CELL) {
+                    // A cell (untyped/`mixed`) subject is NaN-boxed, so a raw
+                    // `icmp eq` of its boxed bits against a raw arm value never
+                    // matches (a boxed int 1 != raw 1) and misses `5 == "5"`.
+                    // PHP `switch` matches with `==`, so box the arm and run the
+                    // loose-juggling tagged compare (mirrors emitCmp's cell path).
+                    $out .= $this->boxToCell($arm->value->type);
+                    $armCell = $this->lastValue;
+                    $this->needsTaggedEq = true;
+                    $this->needsTagged = true;
+                    $this->needsTaggedToFloat = true;
+                    $le = $this->allocSsa();
+                    $out .= '  ' . $le . ' = call i64 @__manticore_tagged_loose_eq(i64 '
+                          . $subj . ', i64 ' . $armCell . ")\n";
+                    $out .= '  ' . $eq . ' = icmp ne i64 ' . $le . ", 0\n";
                 } else {
-                    $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $v . "\n";
+                    $out .= $this->coerceToI64();
+                    $v = $this->lastValue;
+                    $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
+                        && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
+                    if ($useStr) {
+                        $this->needsStrcmp = true;
+                        $sp = $this->allocSsa();
+                        $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
+                        $vp = $this->allocSsa();
+                        $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
+                        $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $vp . ")\n";
+                    } else {
+                        $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $v . "\n";
+                    }
                 }
                 $miss = ($vi + 1 < $nv) ? ($base . '_t' . (string)($vi + 1)) : $defaultTarget;
                 $out .= '  br i1 ' . $eq . ', label %' . $base . '_b' . (string)$ai
