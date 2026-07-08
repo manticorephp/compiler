@@ -1219,9 +1219,41 @@ trait EmitLlvmObjects
         return $base;
     }
 
+    /**
+     * `Enum::cases()` → a fresh vec of every case's ordinal (0..N-1) in
+     * declaration order, element type obj<Enum>. N is a compile-time constant,
+     * so the appends are unrolled (matches the __mir_array_alloc + append idiom
+     * used by array_keys). lastValue ← the vec ptr.
+     */
+    private function emitEnumCases(string $enum): string
+    {
+        $ed = $this->enums[$enum];
+        $n = \count($ed->caseNames);
+        $cur = $this->allocSsa();
+        $out = '  ' . $cur . ' = call ptr @__mir_array_alloc(i64 ' . (string)$n . ")\n";
+        $i = 0;
+        while ($i < $n) {
+            $nx = $this->allocSsa();
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur
+                  . ', i64 ' . (string)$i . ")\n";
+            $cur = $nx;
+            $i = $i + 1;
+        }
+        $this->lastValue = $cur;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitStaticCall(Node $n): string
     {
         $sc = $this->castStaticCall($n);
+        // Enum built-in `cases()` — a list of every case in declaration order.
+        // An enum value is carried as its ordinal, so the list is [0..N-1] with
+        // element type obj<Enum> (typed in InferTypes::inferStaticCall).
+        if (isset($this->enums[$sc->class]) && $sc->method === 'cases'
+            && \count($sc->args) === 0) {
+            return $this->emitEnumCases($sc->class);
+        }
         // Method overloading: an unresolved static method on a class that
         // defines __callStatic reroutes to `Class::__callStatic('name', [args])`.
         if ($this->resolveMethodClass($sc->class, $sc->method) === ''

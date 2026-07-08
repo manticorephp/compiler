@@ -3426,6 +3426,13 @@ final class InferTypes implements Pass
         foreach ($node->args as $a) {
             $this->inferNode($a);
         }
+        // Enum built-in `cases()` → list<Enum> (an enum value is carried as its
+        // ordinal, so obj<Enum> is the right element type). from()/tryFrom() are
+        // not yet implemented (throw / null-sentinel semantics).
+        if (isset($this->enums[$node->class]) && $node->method === 'cases') {
+            $node->type = Type::vec(Type::obj($node->class));
+            return $node->type;
+        }
         // Method overloading: an unresolved static method on a class with
         // __callStatic → __callStatic's return type (reroute is in EmitLlvm).
         if ($this->resolveMethodClass($node->class, $node->method) === ''
