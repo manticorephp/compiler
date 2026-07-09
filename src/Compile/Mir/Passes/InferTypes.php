@@ -261,6 +261,18 @@ final class InferTypes implements Pass
                 $this->inferFunction($fn);
             }
         }
+        // Property-element inference from stores: a bare-`array` property that
+        // only ever receives element stores of ONE concrete scalar/object type
+        // (`$this->lines[] = $m` where `$m` settled to string via the call-site
+        // pass above) is that vec[T]. Runs AFTER the call-site pass so a value
+        // sourced from a now-typed param is seen concrete, not unknown. Without
+        // it the property element stays erased and a read-back bitcasts each raw
+        // i64 to a garbage double.
+        if ($this->scanPropElemFromStores($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
         // By-ref param type inference: an UNTYPED (`cell`) `&$p` holds the
         // caller's RAW slot value (a string/array pointer), but a cell type
         // makes string/array ops misread it as a NaN-boxed value. Refine it to
@@ -786,6 +798,78 @@ final class InferTypes implements Pass
         foreach (Walk::children($n) as $c) { $this->findCellElemStores($c, $cls); }
     }
 
+    /**
+     * Refine a still-erased array property to vec[T] / assoc[K,T] when every
+     * `$this->prop[...] = v` stores the SAME concrete scalar/object element.
+     * Runs post-inference (values settled), so an element sourced from a
+     * now-typed param/foreach is seen concrete. A conflicting shape, or any
+     * unknown/cell store, leaves it erased for the other scanners to handle.
+     */
+    private function scanPropElemFromStores(Module $module): bool
+    {
+        /** @var array<string, Type> */
+        $observed = [];   // "Class::prop" → Type
+        $conflict = [];   // "Class::prop" → true
+        foreach ($module->functions as $fn) {
+            $cls = '';
+            if (\count($fn->params) > 0 && $fn->params[0]->name === 'this'
+                && $fn->params[0]->type->kind === Type::KIND_OBJ
+                && $fn->params[0]->type->class !== null) {
+                $cls = $fn->params[0]->type->class;
+            }
+            if ($cls === '') { continue; }
+            $this->collectPropElemStores($fn->body, $cls, $observed, $conflict);
+        }
+        $changed = false;
+        foreach ($observed as $key => $elem) {
+            if (isset($conflict[$key]) || $elem === null) { continue; }
+            $ek = $elem->kind;
+            $ok = $ek === Type::KIND_STRING || $ek === Type::KIND_INT
+                || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
+                || ($ek === Type::KIND_OBJ && $elem->class !== null);
+            if (!$ok) { continue; }
+            $cut = \strpos($key, '::');
+            if ($cut === false || $cut < 0) { continue; }
+            $cls = \substr($key, 0, $cut);
+            $prop = \substr($key, $cut + 2, \strlen($key) - $cut - 2);
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd === null) { continue; }
+            $cur = $cd->propertyTypes[$prop] ?? null;
+            // Only fill an ERASED slot — never override a concrete or cell element.
+            $isErased = $cur === null
+                || $cur->kind === Type::KIND_UNKNOWN
+                || ($cur->isArray()
+                    && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
+            if (!$isErased) { continue; }
+            $keyT = ($cur !== null && $cur->isArray()) ? $cur->key : null;
+            $cd->propertyTypes[$prop] = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
+            $changed = true;
+        }
+        return $changed;
+    }
+
+    /**
+     * @param array<string, Type> $observed
+     * @param array<string, bool> $conflict
+     */
+    private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$conflict): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $this->asStoreElement($n);
+            if ($se->array->kind === Node::KIND_PROPERTY_ACCESS) {
+                $pa = $this->asPropertyAccess($se->array);
+                if ($pa->object->kind === Node::KIND_LOAD_LOCAL
+                    && $this->asLoadLocal($pa->object)->name === 'this') {
+                    $key = $cls . '::' . $pa->property;
+                    $vt = $se->value->type;
+                    if (!isset($observed[$key])) { $observed[$key] = $vt; }
+                    elseif (!$this->sameElemShape($observed[$key], $vt)) { $conflict[$key] = true; }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectPropElemStores($c, $cls, $observed, $conflict); }
+    }
+
     private function findPropReturns(Node $n, string $cls, Type $rt): void
     {
         if ($n->kind === Node::KIND_RETURN) {
@@ -1075,6 +1159,8 @@ final class InferTypes implements Pass
     private function asCmp(Node $n): Cmp { return $n; }
     private function asArrayAccess(Node $n): ArrayAccess_ { return $n; }
     private function asCall(Node $n): Call { return $n; }
+    private function asMethodCall(Node $n): MethodCall_ { return $n; }
+    private function asStaticCall(Node $n): StaticCall_ { return $n; }
 
     /**
      * Refine each non-extern function's bare-`array` param to vec[T] when every
@@ -1146,11 +1232,32 @@ final class InferTypes implements Pass
      */
     private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict): void
     {
+        // Resolve the target function name + a param-index base for each call
+        // flavor. A free/static call's arg `i` maps to param `i`; an INSTANCE
+        // method's args are offset by 1 (param 0 is `this`). A method whose
+        // receiver class is erased, or an inherited method (name resolves to the
+        // parent fn, not `$cls__$method`), simply won't match a candidate — a
+        // conservative no-op.
+        $fnName = '';
+        $args = null;
+        $base = 0;
         if ($n->kind === Node::KIND_CALL) {
-            $c = $this->asCall($n);
+            $fnName = $this->asCall($n)->function;
+            $args = $this->asCall($n)->args;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $mc = $this->asMethodCall($n);
+            $cls = $mc->object->type->class ?? '';
+            if ($cls !== '') { $fnName = $cls . '__' . $mc->method; $args = $mc->args; $base = 1; }
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $sc = $this->asStaticCall($n);
+            if ($sc->class !== '') { $fnName = $sc->class . '__' . $sc->method; $args = $sc->args; }
+        }
+        if ($args !== null) {
+            /** @var \Compile\Mir\Node[] $argl */
+            $argl = $args;
             $i = 0;
-            foreach ($c->args as $a) {
-                $key = $c->function . '#' . (string)$i;
+            foreach ($argl as $a) {
+                $key = $fnName . '#' . (string)($base + $i);
                 $i = $i + 1;
                 if (!isset($cand[$key]) || isset($conflict[$key])) { continue; }
                 // A self-recursive / forwarded arg whose OWN element type is
