@@ -169,14 +169,43 @@ codegen correctness on user code independently of self-compilation.
 - before any BROAD normalization, the array-append and arithmetic CONSUMERS must
   become cell-aware (unbox array-in-cell; keep cell-arith).
 
-## 9. First concrete step (revised by the diagnostic)
+## 9. STAGE 1 EXECUTED (2026-07-08) — codegen fix DONE + correct; self-host blocker isolated
 
-The offset-16 slice is now the clear first real target and is proven to work:
-**box OBJECT values at their erasure boundaries (obj → unknown element/property/return/
-arg → `box_object` → cell) and route an unknown-typed `->prop` receiver to the existing
-cell path (`emitCellPropertyRead`).** Excludes arrays entirely, so no array/stdlib
-breakage. Consistent producer+consumer (objects) → the self-host should re-converge.
-Validate each step on USER programs via the harness above BEFORE `bin/build`.
+Implemented `emitRawPropByClassId` (EmitLlvmObjects): unknown `->prop` receiver →
+`cellToPtr` (48-bit mask normalises BOTH a raw obj ptr AND a boxed-obj cell) →
+class_id switch → per-holder REAL offset, loaded RAW (node stays unknown, no cell
+ripple). Routed `KIND_UNKNOWN` receivers to it in `emitPropertyAccess`.
+
+**Correct on USER programs (Zend-host harness, no self-build):** offset-16 repro
+`int(7)`/`string "hello"` (no SIGSEGV); q1/q2/q3/s3/s4/kt all pass; **does NOT break
+s3 or arrays** (surgical `->prop`-only, unlike the blanket experiment). This fix is
+READY — re-apply it the moment the source blocker below is cleared.
+
+**Self-host blocker — precisely isolated.** `bin/compile` self-build smoke SIGSEGVs
+`KERN_INVALID_ADDRESS at 0x38` (a null→field@offset-56), NONDETERMINISTIC ~5% (the
+documented heisenbug). Made the switch **strictly additive** (default + non-holder
+class_id → keep offset-16; override ONLY confirmed holders) → **still crashes.** So the
+crash is a HOLDER-receiver read whose value CHANGED — i.e. **the compiler's own source
+relies on the offset-16 wrong-read for holder receivers**: it compiled itself with the
+quirk, so its logic expects the quirk. Pure fixpoint self-consistency-with-the-bug.
+
+## 10. The real remaining work: eliminate the compiler's unknown-receiver `->prop` reads
+
+The codegen fix affects ONLY `KIND_UNKNOWN` receivers. A TYPED receiver read already
+uses the correct `propertyOffset(knownClass)` TODAY. So the plan:
+
+**Pin every genuinely-unknown-receiver `->prop` read in `src/` to a concrete type**
+(the T5 `castX()` pattern the codebase already uses widely). A pinned read is correct
+under TODAY's codegen (offset-16 only fires on unknown) → validate via the NORMAL
+`bin/build` + gate, incrementally, one site at a time. Once NO compiler read hits the
+unknown path, `emitRawPropByClassId` lands with nothing left to perturb.
+
+**Finding the sites:** crash-atos on the heisenbug reports
+(`~/Library/Logs/DiagnosticReports/manticore*.ips` → `atos -o bin/manticore -l <base>
+<addr>`; all crashes = null@0x38). The prior bisect found `LowerFromAst.php:515`
+(`$module->functions[$k]->isPrelude=true` — chained prop-array-element on a null elem)
+and `ConstFold::foldBlock` (null `$n`→`->stmts@56`); the crash HOPS as each is pinned,
+so expect several. This is bounded, incremental, and each pin is independently gateable.
 
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
