@@ -1881,9 +1881,22 @@ final class LowerFromAst implements Pass
     private function lowerForeach(\Parser\Ast\ForeachStmt $stmt): Foreach_
     {
         $array = $this->lowerExpr($stmt->expr);
-        $valueVar = $stmt->value->name;
         $keyVar = null;
         if ($stmt->key !== null) { $keyVar = $stmt->key->name; }
+        // List-destructuring value pattern — `foreach ($x as [$a, $b])` /
+        // `foreach ($x as ['k' => $v])`: the value binding can't name the
+        // pattern's several targets, so bind each element to a synthetic local
+        // and destructure it into the pattern at the top of the body.
+        if ($stmt->value->kind === 'ArrayLit') {
+            $tmp = '__fe_val_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $destr = $this->lowerDestructure($stmt->value, new LoadLocal($tmp, Type::unknown()));
+            $body = $this->lowerBlockNode($stmt->body);
+            $stmts = [$destr];
+            foreach ($body->stmts as $s) { $stmts[] = $s; }
+            return new Foreach_($array, $keyVar, $tmp, $stmt->valueByRef, new Block($stmts, Type::void()));
+        }
+        $valueVar = $stmt->value->name;
         $body = $this->lowerBlockNode($stmt->body);
         return new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body);
     }

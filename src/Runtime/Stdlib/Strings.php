@@ -339,3 +339,50 @@ function number_format(float $num, int $decimals = 0, string $dec_point = ".", s
     if ($neg && $scaled !== 0) { $result = "-" . $result; }
     return $result;
 }
+
+/** Insert `<br />` (or `<br>` when not xhtml) before each newline sequence,
+ *  keeping the newline itself (PHP `nl2br`). Handles \r\n, \n\r, \n, \r. */
+function nl2br(string $s, bool $is_xhtml = true): string
+{
+    $br = $is_xhtml ? "<br />" : "<br>";
+    $n = \strlen($s);
+    $out = "";
+    $i = 0;
+    while ($i < $n) {
+        $c = \substr($s, $i, 1);
+        if ($c === "\r" || $c === "\n") {
+            $nx = ($i + 1 < $n) ? \substr($s, $i + 1, 1) : "";
+            // A two-char sequence (\r\n or \n\r) stays together after the tag.
+            if (($c === "\r" && $nx === "\n") || ($c === "\n" && $nx === "\r")) {
+                $out = $out . $br . $c . $nx;
+                $i = $i + 2;
+                continue;
+            }
+            $out = $out . $br . $c;
+            $i = $i + 1;
+            continue;
+        }
+        $out = $out . $c;
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+/** Number of words in `$s` (PHP `str_word_count` format 0). A word is a maximal
+ *  run of alphabetic characters, optionally containing `'` and `-` (PHP's
+ *  default locale word set). Only format 0 (the count) is supported. */
+function str_word_count(string $s, int $format = 0): int
+{
+    $n = \strlen($s);
+    $count = 0;
+    $inWord = false;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = \substr($s, $i, 1);
+        $isAlpha = ($c >= "a" && $c <= "z") || ($c >= "A" && $c <= "Z");
+        $isInner = $isAlpha || $c === "'" || $c === "-";
+        // A run STARTS on an alphabetic char; `'`/`-` only continue an open run.
+        if ($isAlpha && !$inWord) { $count = $count + 1; $inWord = true; }
+        elseif (!$isInner) { $inWord = false; }
+    }
+    return $count;
+}

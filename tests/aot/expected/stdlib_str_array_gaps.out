@@ -1,0 +1,33 @@
+a<br />
+b<br />
+c
+x<br>
+y
+4
+3
+0
+Array
+(
+    [0] => A
+    [1] => B
+)
+Array
+(
+    [1] => A
+    [2] => B
+)
+Array
+(
+    [1] => Array
+        (
+            [id] => 1
+            [name] => A
+        )
+
+    [2] => Array
+        (
+            [id] => 2
+            [name] => B
+        )
+
+)

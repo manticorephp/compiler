@@ -206,3 +206,29 @@ function array_fill(int $start, int $count, mixed $value): array
 // a small int's tag is 0). The fix is to PRELUDE-INJECT these (compile them with
 // the user program like the SPL classes), where call-site element inference
 // types the param and the in-module closure ABI matches. Follow-up.
+
+/**
+ * Return the values of a single column `$column_key` from a list of array rows,
+ * optionally re-keyed by each row's `$index_key` (PHP `array_column`). A null
+ * `$column_key` yields whole rows (re-keyed). Rows lacking the column are
+ * skipped. Array rows only (the object-property form is not modelled here).
+ * @param array<int|string, array<int|string, mixed>> $array
+ */
+function array_column(array $array, int|string|null $column_key, int|string|null $index_key = null): array
+{
+    $out = [];
+    foreach ($array as $row) {
+        if ($column_key === null) {
+            $val = $row;
+        } else {
+            if (!isset($row[$column_key])) { continue; }
+            $val = $row[$column_key];
+        }
+        if ($index_key !== null && isset($row[$index_key])) {
+            $out[$row[$index_key]] = $val;
+        } else {
+            $out[] = $val;
+        }
+    }
+    return $out;
+}
