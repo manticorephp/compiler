@@ -139,10 +139,44 @@ Stop overloading. Introduce the distinction the lattice is missing:
    via the Zend seed compiling USER programs, never `bin/build` — then flip codegen
    and let the fixpoint re-converge.
 
-## 8. First concrete step
+## 8. DIAGNOSTIC RESULTS (2026-07-08) — the invariant is EMPIRICALLY CONFIRMED
 
-Stage 1 (disentangle stdlib ABI) is the prerequisite that unblocks everything and
-is the least entangled with the self-host node-traversal. Start there.
+A throwaway blanket `residual unknown → cell` normalization at the InferTypes tail
+was compiled onto USER programs by the **Zend-hosted** compiler and linked WITHOUT
+any self-build (`php tools/compile_files_mir.php user.php > u.ll; clang -c u.ll;
+cc u.o lib/manticore_stdlib.o -o u`). This is the fixpoint-break harness — it proves
+codegen correctness on user code independently of self-compilation.
+
+**FIXED** (the object/scalar-erasure family — including the offset-16 research bug):
+- `repro_unknown.php` (`$items[0]->s`, unknown receiver): `int(7)\nstring(5) "hello"`
+  = php, **no SIGSEGV**. offset-16 is fixed by the invariant.
+- `e1` (bare-array property scalar append → float): `3 a,b,c` = php.
+- object programs q1/q2/q3/q5/s4/s6/kt (obj arrays, obj-in-assoc, return-new,
+  closure-capture-obj, LSB, readonly, inherited-defaults) all pass.
+
+**BROKE** (the carve-outs the blanket over-reached into):
+- `cow2` (read a bare-`array` PROPERTY then append): an ARRAY value flowed through an
+  unknown node → got retyped `cell` → append-on-cell is not handled → crash. **Arrays
+  must stay raw, NOT be boxed to cell.**
+- `s3` (Iterator `current(): mixed` summed in a loop): mixed-in-arithmetic rendered a
+  garbage float. **Cell arithmetic consumers must be preserved / made unbox-aware.**
+- concrete-literal arrays (cow1, std2 assoc build) were UNAFFECTED — only ERASED
+  arrays break.
+
+**Conclusion:** the disentanglement is **scalar/obj-vs-array**, not (only) stdlib ABI.
+- erased SCALAR/OBJ ⟹ cell — CORRECT, fixes offset-16 + e1 + the object cluster.
+- erased ARRAY ⟹ stays a raw array (its value-semantics is the separate array cluster).
+- before any BROAD normalization, the array-append and arithmetic CONSUMERS must
+  become cell-aware (unbox array-in-cell; keep cell-arith).
+
+## 9. First concrete step (revised by the diagnostic)
+
+The offset-16 slice is now the clear first real target and is proven to work:
+**box OBJECT values at their erasure boundaries (obj → unknown element/property/return/
+arg → `box_object` → cell) and route an unknown-typed `->prop` receiver to the existing
+cell path (`emitCellPropertyRead`).** Excludes arrays entirely, so no array/stdlib
+breakage. Consistent producer+consumer (objects) → the self-host should re-converge.
+Validate each step on USER programs via the harness above BEFORE `bin/build`.
 
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
