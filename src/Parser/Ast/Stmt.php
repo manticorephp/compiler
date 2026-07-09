@@ -23,9 +23,9 @@ abstract class Stmt
     // The parser still calls these short-name factories; each one
     // forwards to the matching concrete subclass below.
 
-    public static function expression(Expr $expr, Span $span): ExpressionStmt
+    public static function expression(Expr $expr, Span $span, ?string $docComment = null): ExpressionStmt
     {
-        return new ExpressionStmt($expr, $span);
+        return new ExpressionStmt($expr, $span, $docComment);
     }
 
     /** @param Expr[] $exprs */
@@ -135,6 +135,8 @@ final class ExpressionStmt extends Stmt
     public function __construct(
         public readonly Expr $expr,
         Span $span,
+        /** Leading doc comment (inline `/** @var T $x *\/`), or null. */
+        public readonly ?string $docComment = null,
     ) {
         parent::__construct('Expression', $span);
     }

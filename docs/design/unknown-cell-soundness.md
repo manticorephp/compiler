@@ -207,6 +207,139 @@ unknown path, `emitRawPropByClassId` lands with nothing left to perturb.
 and `ConstFold::foldBlock` (null `$n`→`->stmts@56`); the crash HOPS as each is pinned,
 so expect several. This is bounded, incremental, and each pin is independently gateable.
 
+## 11. BREAKTHROUGH (2026-07-09) — deterministic enumeration + inference root-fixes (NO pins)
+
+The §10 pin/crash-atos plan is SUPERSEDED. Two better ideas replaced the whack-a-mole:
+
+**(a) Deterministic enumeration instead of crash-atos.** A gated diagnostic in
+`emitPropertyAccess` (`EmitLlvmObjects.php`) — when the receiver's static class is
+empty (the offset-16 path), `error_log("UNKPROP\tfn=…\t->prop\trkind=…")`. Gate on
+`MANTICORE_UNKNOWN_PROP_TRACE`; use `error_log` (a real builtin — `fwrite(STDERR,…)`
+is fine under Zend but calling it with `$e->getFile()` broke self-compile emit; and
+`dprint`'s `write(2,…)` is a no-op stub under Zend so its output is lost). Run the
+Zend front-end over all of `src/`:
+`MANTICORE_UNKNOWN_PROP_TRACE=1 find src -name '*.php' | sort | xargs php tools/compile_files_mir.php >/dev/null`.
+This lists EVERY genuinely-unknown-receiver `->prop` the compiler emits over its own
+source — complete, deterministic, ~seconds. **36 sites at HEAD.** No heisenbug, no gate
+per discovery. (Re-run anytime to measure remaining count.)
+
+**(b) The user's steer: eliminate the unknown-ness by INFERENCE, not by pinning each
+read.** A pinned read is a manual annotation; teaching inference to derive the type is
+the principled version AND crosses the fixpoint smoothly — a receiver that infers to a
+known class uses the correct `propertyOffset` TODAY, so codegen is unchanged and self-
+compilation does not diverge. The 36 sites clustered into a few roots:
+
+1. **`null ∪ obj<C>` erased to `unknown`** (`Type::unionWith`, the kind-mismatch arm
+   `return unknown()`). A local `$x = null; … $x = <obj>;` merged to unknown → every
+   guarded `$x !== null && $x->p` read hit offset-16. FIX: null arm joined with obj/
+   union keeps the obj type (PHP `?C`). Pure inference, no annotation. (Matches the
+   ternary path's existing "obj|null STAYS obj<P>" — unionWith was the inconsistent one.)
+
+2. **Doc-type short-name resolution (THE big lever).** The compiler's own core
+   collections carry `@var array<string, Type>` / `array<…, ClassDef>` etc. `array<K,V>`
+   IS parsed → `assoc[K,V]`, and the inner `V` goes through `lowerTypeHint`. But a short
+   name like `Type` is GLOBALLY AMBIGUOUS (`Compile\Mir\Type` AND `Codegen\Llvm\Type`),
+   so `shortClassFqn` rejects it; regular hints survive only via the file's
+   `use Compile\Mir\Type;`, which doc-comment strings never consult (and the merged
+   module drops per-file aliases). FIX: `lowerTypeHint` walks `currentDeclNamespace` AND
+   ITS ANCESTORS — a pass in `Compile\Mir\Passes` naming `Type` resolves to the nearest
+   enclosing `Compile\Mir\Type`, the PHP-correct pick, no per-file alias tracking needed.
+   This single fix revives ALL ~30 existing `array<K,V>` annotations → **cleared 15
+   sites with zero new source.** Exactly the "compiler infers itself" ideal.
+
+3. **Bare-`array` param/prop holding node objects, NO annotation** (e.g.
+   `fccParamsAndArgs(?array $declParams)` → `foreach as $p` → `$p->typeHint`). The
+   element type is unrecoverable from PHP syntax; `@param \Parser\Ast\Param[]` (already
+   the codebase convention, honored by `docTagType`→`lowerTypeHint`) types all reads in
+   the function at once — a per-DECLARATION annotation, not a per-read cast. Proven on
+   `fccParamsAndArgs` (−5). Alternative (deeper): call-site/store back-inference
+   (`scanCallSiteArrayElems` machinery) to avoid annotations entirely — riskier.
+
+**Result: 36 → 11**, via fixes 1+2 (pure inference) plus one `@param` (fcc). IR emits
+clean under the Zend host (exit 0). **NOT YET GATED** — fixes 1 & 2 touch shared, load-
+bearing hint/merge resolution used by 500+ self-compile sites; the fixpoint is the real
+test (§5). Gate before trusting any of it.
+
+Remaining 11 (the tail): `synthStaticClosure` (AST-Param array, annotation-fixable like
+fcc); `scanCallSiteRefParams`/`scanCallSiteArrayElems`/`scanGlobalTypes`/
+`mergeAdjacentStrConsts` (unannotated node-array params); `unionPropType`/
+`unionMethodReturn`/`cellMethodReturn` (rkind=`null` — a smaller residual null-merge gap
+distinct from root 1). Each independently diagnosable; re-run the enumeration to track.
+
+## 12. MILESTONE (2026-07-09) — compiler unknown-receiver `->prop` reads: 36 → 0
+
+Every genuinely-unknown-receiver `->prop` read in the compiler's self-compilation is
+ELIMINATED (re-run the §11 enumeration: `UNKPROP=0`, IR emits clean, exit 0). Per §10
+the offset-16 codegen fix (`emitRawPropByClassId`) now lands "with nothing left to
+perturb" — the compiler no longer exercises the offset-16 / KIND_NULL-receiver path.
+
+Mechanisms used (in the spirit "teach the compiler to infer; annotations where PHP's
+syntax cannot carry the type" — the annotations double as a generics precursor):
+
+- **Pure inference #1 — `Type::unionWith`:** a NULL arm joined with obj/union keeps the
+  obj type (`?C`) instead of erasing to unknown. (`Type.php`.)
+- **Pure inference #2 — ancestor-namespace doc-type resolution:** `lowerTypeHint` walks
+  `currentDeclNamespace` and its ancestors, so a short name in a doc-type (`Type`,
+  `Node`, globally ambiguous) resolves to the nearest enclosing package. Revived ALL
+  existing `@var array<K,V>` annotations → cleared the whole collection cluster (−15),
+  zero new source. (`LowerFromAst.php`.)
+- **Annotation channel — `@param T[]` / `@return T[]`:** already honored by
+  `docTagType`→`lowerTypeHint`; used on `fccParamsAndArgs`, `resolveMethodParams`,
+  `isFccArgs`. (`|null` in a doc-type BREAKS parsing — the `?type` return already carries
+  nullability; write `@return T[]` not `@return T[]|null`.)
+- **NEW FEATURE — inline local `/** @var T $x */`:** parser captures a statement-leading
+  doc comment (`docCommentByPos`) onto `ExpressionStmt`; `LowerFromAst` reads `@var` for
+  the bound local and stamps `StoreLocal::declaredType`; `InferTypes::inferStoreLocal`
+  treats it as authoritative (seeds `localTypes`, retypes an array-literal init to the
+  declared shape). Types bare-`array` LOCALS that hold objects (`$observed`/`$merged`),
+  which no prior channel could. This is the local-scope analogue of `@var`/`@param`.
+
+Files: `Type.php`, `LowerFromAst.php` (ancestor-NS + `@var`-local hook + `resolveMethod
+Params` @return), `InferTypes.php` (declaredType + `@var` seeds + 3 `@var Type $found`),
+`Nodes.php` (`StoreLocal::declaredType`), `Parser.php` + `Ast/Stmt.php` (ExpressionStmt
+docComment), `EmitLlvm.php`/`Parser.php` (annotations), `EmitLlvmObjects.php` (the
+`MANTICORE_UNKNOWN_PROP_TRACE` enumeration diagnostic — keep as tooling).
+
+**Residual pure-inference opportunity (not required, deeper):** the 3 `@var Type $found`
+sites paper over a real gap — a local `$x = null;` reassigned INSIDE a loop and read in
+that loop types as KIND_NULL only (the loop back-edge doesn't merge the reassignment into
+the loop-entry type). Fixing the loop-carried local-type fixpoint would drop those
+annotations. High blast radius; deferred.
+
+**STATUS: NOT GATED.** All above is validated only by the Zend-host enumeration (emits
+clean IR). The changes touch shared inference (unionWith / hint resolution / StoreLocal)
+used by 500+ self-compile sites — the fixpoint (§5) is the real test. GATE the inference
+changes FIRST (fixpoint + suite); only then apply `emitRawPropByClassId` and gate again.
+
+## 13. GATED GREEN (2026-07-09) — offset-16 SOLVED end-to-end
+
+The codegen fix + the 36→0 source-robustness landed and passed the FULL gate:
+- **FIXPOINT OK** — Stage-2 IR == Stage-3 IR, byte-identical (the inference changes
+  re-converge; the fragile fixpoint held).
+- **SELF-HOST OK** — AOT suite 415/415 (incl. the new `unknown_receiver_prop` case).
+- **STABILITY OK** — 5×2 rebuilds, every binary smoke-clean (the ~5% heisenbug is GONE —
+  it was the offset-16 wrong-read on a holder receiver all along).
+- **DIFFTEST** — 406 MATCH, 0 DIFF vs PHP 8.5.
+
+Codegen: `emitRawPropByClassId` (EmitLlvmObjects) routes a KIND_UNKNOWN receiver `->prop`
+to a class_id switch reading `$prop`'s REAL per-holder offset, BOXED by the slot's declared
+type. `inferPropertyAccess` types the RESULT as a `cell` so echo/var_dump/=== dispatch on
+the tag (a raw load rendered a string slot as its pointer-as-int). Self-host-neutral: the
+compiler has 0 unknown-receiver reads, so it never exercises the new path on itself.
+
+**Regression caught + fixed by the gate:** the first gate passed fixpoint but failed
+`callable_forms` (method FCC `$o->dbl(...)` → 0). Root: a `@param T[]` / `@return T[]` on a
+NULLABLE `?array` coerces a null to `[]` UNDER THE NATIVE self-build (not under Zend) —
+dropping `fccParamsAndArgs`'s `__fa0` fallback → a param-less closure. **Rule: never
+annotate a nullable `?array` param/return with `T[]`; rebind to a non-null local inside the
+null guard and put the inline `@var` there.** (`|null` in a doc-type also breaks parsing.)
+
+Recommended follow-ups (separate): the deeper pure-inference wins that would drop the
+remaining annotations — the loop-back-edge local-type merge (the 3 `@var Type $found`), and
+call-site/store back-inference for object array elements. And the broader stage-3/4 of §7
+(normalize residual unknown → cell; delete raw-unknown fallbacks) now that the invariant is
+proven and the enumeration tool exists.
+
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
   memory `unknown-receiver-propread-offset16-2026-07-08`.

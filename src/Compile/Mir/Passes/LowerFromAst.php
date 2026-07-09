@@ -1755,7 +1755,16 @@ final class LowerFromAst implements Pass
     private function lowerStmtInner(\Parser\Ast\Stmt $stmt): Node
     {
         if ($stmt->kind === 'Expression') {
-            return $this->lowerExpr($stmt->expr);
+            $lowered = $this->lowerExpr($stmt->expr);
+            // Inline `/** @var T $x */` on a local binding seeds the slot type
+            // (a per-declaration annotation InferTypes honors — element types a
+            // bare `array` local can't carry, e.g. `@var array<string, Type>`).
+            if ($stmt->docComment !== null && $lowered instanceof StoreLocal) {
+                $vt = $this->docTagType($stmt->docComment, '@var', $lowered->name);
+                if ($vt === null) { $vt = $this->docTagType($stmt->docComment, '@var', ''); }
+                if ($vt !== null) { $lowered->declaredType = $this->lowerTypeHint($vt); }
+            }
+            return $lowered;
         }
         if ($stmt->kind === 'Echo') {
             $items = [];
@@ -2177,7 +2186,13 @@ final class LowerFromAst implements Pass
         $mir = [];
         $loads = [];
         if ($declParams !== null) {
-            foreach ($declParams as $p) {
+            // Rebind to a NON-nullable local before typing it: a `@param T[]` on
+            // the nullable `?array` parameter itself coerces a null argument to
+            // `[]` under the native self-build (dropping the __fa0 fallback →
+            // a param-less closure). Type the local inside the null guard instead.
+            /** @var \Parser\Ast\Param[] $dp */
+            $dp = $declParams;
+            foreach ($dp as $p) {
                 $t = $this->lowerParamType($p->typeHint);
                 $mir[] = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false));
                 $loads[] = new LoadLocal($p->name, $t);
@@ -2228,6 +2243,7 @@ final class LowerFromAst implements Pass
      *  `$scope`). Shared by `C::m(...)` and `["C","m"]` callable coercion. */
     private function synthStaticClosure(string $class, string $method, string $scope): Node
     {
+        /** @var \Parser\Ast\Param[] $declParams */
         $declParams = $this->resolveMethodParams($class, $method) ?? [];
         $loads = [];
         foreach ($declParams as $p) {
@@ -3890,9 +3906,23 @@ final class LowerFromAst implements Pass
         // `Codegen\Llvm` and `Compile\Mir`) that the global heuristic
         // below would otherwise mark ambiguous and erase.
         if (\strpos($cls, '\\') === false && $this->currentDeclNamespace !== '') {
-            $qualified = $this->currentDeclNamespace . '\\' . $cls;
-            if (isset($this->classTable[$qualified]) || isset($this->knownClassNames[$qualified])) {
-                return Type::obj($qualified);
+            // Walk the declaring namespace and its ANCESTORS: a pass in
+            // `Compile\Mir\Passes` naming `Type` means `Compile\Mir\Type` (a
+            // sibling of its own package), resolved by a file `use`. Doc-comment
+            // generic inners (`@var array<string, Type>`) carry the raw short
+            // name with no `use` context, and the global short→FQN map marks
+            // `Type` ambiguous (also `Codegen\Llvm\Type`). The nearest enclosing
+            // namespace that declares it is the PHP-correct pick and disambiguates
+            // without per-file alias tracking (which the merged module drops).
+            $ns = $this->currentDeclNamespace;
+            while ($ns !== '') {
+                $qualified = $ns . '\\' . $cls;
+                if (isset($this->classTable[$qualified]) || isset($this->knownClassNames[$qualified])) {
+                    return Type::obj($qualified);
+                }
+                $p = \strrpos($ns, '\\');
+                if ($p === false || $p < 0) { break; }
+                $ns = \substr($ns, 0, $p);
             }
         }
         // Unqualified short name of a namespaced class (`Stmt` →

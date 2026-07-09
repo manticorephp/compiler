@@ -1106,6 +1106,7 @@ final class InferTypes implements Pass
             }
         }
         if (\count($cand) === 0) { return false; }
+        /** @var array<string, Type> */
         $observed = [];                  // "fn#idx" → Type (scalar element)
         $conflict = [];                  // "fn#idx" → true
         foreach ($module->functions as $fn) {
@@ -1211,6 +1212,7 @@ final class InferTypes implements Pass
             }
         }
         if (\count($cand) === 0) { return false; }
+        /** @var array<string, Type> */
         $observed = [];                  // "fn#idx" → Type
         $conflict = [];                  // "fn#idx" → true
         foreach ($module->functions as $fn) {
@@ -1249,6 +1251,7 @@ final class InferTypes implements Pass
     private function scanGlobalTypes(Module $module): bool
     {
         if (\count($module->globalVarNames) === 0) { return false; }
+        /** @var array<string, Type> */
         $observed = [];                  // var name → joined Type
         foreach ($module->functions as $fn) {
             $active = [];                // names that are global-backed HERE
@@ -1676,6 +1679,18 @@ final class InferTypes implements Pass
     private function inferStoreLocal(StoreLocal $node): Type
     {
         $valueType = $this->inferNode($node->value);
+        // An inline `/** @var T $x */` on the binding is authoritative: seed the
+        // slot with the declared type (retyping an array-literal init to match
+        // its shape) so later element reads resolve. Wins over the heuristics.
+        if ($node->declaredType !== null) {
+            $dt = $node->declaredType;
+            if ($node->value->kind === Node::KIND_ARRAY_LIT && $dt->isArray()) {
+                $node->value->type = $dt;
+            }
+            $this->localTypes[$node->name] = $dt;
+            $node->type = $dt;
+            return $dt;
+        }
         // A record local (all-string-key literal, never mutated) keeps its
         // {@see Type::record} shape — the literal already carries the field
         // types; hold them on the slot so json_encode($local) can specialize.
@@ -3020,6 +3035,16 @@ final class InferTypes implements Pass
             if ($pt !== null) { $node->type = $pt; }
             return $node->type;
         }
+        // Erased receiver (`$x->p` where `$x` lost its class): recover the value
+        // as a tagged CELL — emitPropertyAccess routes such a read to
+        // emitRawPropByClassId, which reads `$p` at its REAL per-holder offset
+        // and boxes it by the slot's declared type. Typing the RESULT cell keeps
+        // the codegen (boxed) and the consumer (echo/var_dump/=== dispatch on the
+        // tag) in agreement, instead of the raw-i64 misread of a string/float slot.
+        if ($objType->kind === Type::KIND_UNKNOWN) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // Enum ->name (string) / ->value (backing type).
         if ($objType->kind === Type::KIND_OBJ
             && $objType->class !== null
@@ -3112,6 +3137,7 @@ final class InferTypes implements Pass
 
     private function unionPropType(Type $u, string $prop): ?Type
     {
+        /** @var Type $found */
         $found = null;
         foreach ($u->atoms as $atom) {
             $cd = $this->classes[$atom->class ?? ''] ?? null;
@@ -3344,6 +3370,7 @@ final class InferTypes implements Pass
      *  every atom resolves it to the same kind, else null (unresolved). */
     private function unionMethodReturn(Type $u, string $method): ?Type
     {
+        /** @var Type $found */
         $found = null;
         foreach ($u->atoms as $atom) {
             $cls = $this->resolveMethodClass($atom->class ?? '', $method);
@@ -3364,6 +3391,7 @@ final class InferTypes implements Pass
      *  when the method is absent or implementers disagree. */
     private function cellMethodReturn(string $method): ?Type
     {
+        /** @var Type $found */
         $found = null;
         foreach ($this->classes as $cd) {
             if (!isset($cd->methodNames[$method])) { continue; }

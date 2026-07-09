@@ -347,6 +347,18 @@ trait EmitLlvmObjects
                 return $out . $this->emitMagicCall($getCls, '__get', $this->lastValue, $pa->property, null);
             }
         }
+        if (($pa->object->type->class ?? '') === '' && \getenv('MANTICORE_UNKNOWN_PROP_TRACE')) {
+            \error_log("UNKPROP\tfn=" . $this->currentFnName
+                . "\t->" . $pa->property . "\trkind=" . $pa->object->type->kind
+                . "\tL" . ($pa->object->line ?: $n->line));
+        }
+        // A KIND_UNKNOWN receiver (inference lost the class) can't use a static
+        // property offset — blind-reading slot 16 mis-slots / SIGSEGVs whenever
+        // the real holder lays $prop elsewhere. Recover the class at runtime from
+        // the object's class_id and read $prop's REAL per-holder offset.
+        if ($pa->object->type->kind === Type::KIND_UNKNOWN) {
+            return $this->emitRawPropByClassId($pa);
+        }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
@@ -480,6 +492,74 @@ trait EmitLlvmObjects
         $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
               . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
         $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `$x->prop` where `$x` is KIND_UNKNOWN. Recover the runtime class from the
+     * object's class_id and read `$prop` at its REAL per-holder offset, BOXED by
+     * that slot's declared type so the result is a self-describing tagged cell
+     * (var_dump / echo dispatch on the tag; a raw load would render a string
+     * slot as its pointer-as-int). `cellToPtr` normalises both a raw obj ptr and
+     * a boxed-obj cell. Replaces the old blind offset-16 read (correct only for a
+     * single-property class). A class_id with no fixed holder falls back to slot
+     * 16 raw, and a no-holder property to a null cell.
+     */
+    private function emitRawPropByClassId(PropertyAccess_ $pa): string
+    {
+        $prop = $pa->property;
+        $fixed = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+        }
+        $out = $this->emitNode($pa->object);
+        $out .= $this->cellToPtr();
+        $objPtr = $this->lastValue;
+        // No known holder → nothing better than the historical raw slot-16 read.
+        if (\count($fixed) === 0) {
+            $gep = $this->allocSsa();
+            $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
+            $ld = $this->allocSsa();
+            $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
+            $this->lastValue = $ld;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // A single holder → its real offset, boxed by its declared type.
+        if (\count($fixed) === 1) {
+            return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
+        }
+        // Dispatch on class_id: each holder reads (and boxes) its OWN slot.
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $res = $this->allocSsa();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->allocLabel('rp.end');
+        $def = $this->allocLabel('rp.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($fixed as $cd) {
+            $lbl = $this->allocLabel('rp.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $out .= $def . ":\n";
+        $gep = $this->allocSsa();
+        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
+        $ld = $this->allocSsa();
+        $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
+        $out .= '  store i64 ' . $ld . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }

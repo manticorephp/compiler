@@ -151,6 +151,12 @@ final class Parser
 
     private function parseStatement(): Stmt
     {
+        // A doc comment at the head of a statement (inline `/** @var T $x */`
+        // before an assignment) — captured before anything advances so an
+        // expression statement can carry it for local-type seeding.
+        $stmtDoc = isset($this->docCommentByPos[(string)$this->pos])
+            ? $this->docCommentByPos[(string)$this->pos]
+            : null;
         // Collect leading attributes; they apply to whatever declaration
         // follows (function, class, or property at the head of a class
         // body — but here only function and class apply).
@@ -216,7 +222,7 @@ final class Parser
             throw $this->error('attributes must precede a declaration');
         }
 
-        return $this->parseExpressionStatement();
+        return $this->parseExpressionStatement($stmtDoc);
     }
 
     /** True iff the head token is a class-modifier keyword whose next
@@ -1167,12 +1173,12 @@ final class Parser
         return Stmt::while_($cond, $body, $span);
     }
 
-    private function parseExpressionStatement(): Stmt
+    private function parseExpressionStatement(?string $docComment = null): Stmt
     {
         $span = $this->span();
         $expr = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after expression");
-        return Stmt::expression($expr, $span);
+        return Stmt::expression($expr, $span, $docComment);
     }
 
     private function parseDoWhile(): Stmt
@@ -1577,6 +1583,7 @@ final class Parser
     private function pipeStrVal(\Parser\Ast\StringLiteral $s): string { return $s->value; }
 
     /** Whether an argument list is the first-class-callable marker `(...)`. */
+    /** @param \Parser\Ast\Expr[] $args */
     private function isFccArgs(array $args): bool
     {
         return \count($args) === 1 && $args[0]->kind === 'Ellipsis';

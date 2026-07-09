@@ -68,6 +68,10 @@ final class LoadLocal extends Node
 
 final class StoreLocal extends Node
 {
+    /** Declared local type from an inline `/** @var T $x *\/` on the binding
+     *  statement; seeds the slot type in InferTypes (else null → inferred). */
+    public ?Type $declaredType = null;
+
     public function __construct(
         public readonly string $name,
         public Node $value,

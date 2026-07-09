@@ -229,7 +229,22 @@ final class Type
             }
             return self::union([$this, $other]);
         }
-        if ($this->kind !== $other->kind) { return self::unknown(); }
+        if ($this->kind !== $other->kind) {
+            // A NULL arm joined with an object keeps the object type (PHP `?C`):
+            // the class stays statically resolvable so a guarded
+            // `$x !== null && $x->p` read hits the declared slot instead of the
+            // offset-16 unknown-receiver fallback. A runtime null would
+            // null-deref exactly as PHP does (and such reads are null-guarded).
+            if ($this->kind === self::KIND_NULL
+                && ($other->kind === self::KIND_OBJ || $other->kind === self::KIND_UNION)) {
+                return $other;
+            }
+            if ($other->kind === self::KIND_NULL
+                && ($this->kind === self::KIND_OBJ || $this->kind === self::KIND_UNION)) {
+                return $this;
+            }
+            return self::unknown();
+        }
         if ($this->kind === self::KIND_OBJ) {
             if ($this->class !== $other->class) { return self::unknown(); }
             return $this;

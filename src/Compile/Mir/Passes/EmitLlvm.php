@@ -5475,6 +5475,7 @@ final class EmitLlvm
      */
     private function mergeAdjacentStrConsts(array $ops): array
     {
+        /** @var Node[] */
         $merged = [];
         foreach ($ops as $op) {
             $n = count($merged);
