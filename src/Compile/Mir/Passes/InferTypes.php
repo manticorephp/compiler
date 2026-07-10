@@ -3064,7 +3064,10 @@ final class InferTypes implements Pass
             if ($el->key !== null) {
                 $hasKey = true;
                 $kt = $this->inferNode($el->key);
-                $keyType = $first ? $kt : $keyType->unionWith($kt);
+                // keyType tracks the first KEYED element, not the first element
+                // overall — a leading keyless spread (`[...$a, "x"=>1]`) leaves
+                // keyType null when the first real key arrives.
+                $keyType = $keyType === null ? $kt : $keyType->unionWith($kt);
                 if ($el->key->kind !== Node::KIND_STRING_CONST) { $allStrConstKeys = false; }
             } else {
                 $allStrConstKeys = false;

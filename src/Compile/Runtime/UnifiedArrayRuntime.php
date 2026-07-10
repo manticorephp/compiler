@@ -68,6 +68,7 @@ final class UnifiedArrayRuntime
         $this->emitValueAt();
         $this->emitKeyAt();
         $this->emitKeyCellAt();
+        $this->emitSpreadInto();
         $this->emitPop();
         $this->emitShift();
         $this->emitUnshift();
@@ -1707,6 +1708,57 @@ final class UnifiedArrayRuntime
         $hstr->ret($hstr->or_($hstr->and_($sk, $mask), $ptrTag));
         $ik = $hint->load(Type::i64(), $this->entryAddr($hint, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $hint->ret($hint->or_($hint->and_($ik, $mask), $intTag));
+    }
+
+    /**
+     * `__mir_array_spread_into(dst, src) -> ptr` — merge every entry of `src`
+     * into `dst` with PHP array-spread key semantics (8.1+): STRING keys are
+     * preserved (a later duplicate overwrites), INTEGER keys are renumbered
+     * (appended). PACKED src is all-int → append; HASHED src dispatches per
+     * entry KIND. Returns the (possibly relocated) dst buffer.
+     */
+    private function emitSpreadInto(): void
+    {
+        $fn = $this->module->func('__mir_array_spread_into', Type::ptr());
+        $dst = $fn->param(Type::ptr(), 'dst');
+        $src = $fn->param(Type::ptr(), 'src');
+        $e = $fn->block('entry');
+        $cond = $fn->block('sp_cond');
+        $body = $fn->block('sp_body');
+        $isStr = $fn->block('sp_isstr');
+        $doStr = $fn->block('sp_str');
+        $doInt = $fn->block('sp_int');
+        $nextb = $fn->block('sp_next');
+        $end = $fn->block('sp_end');
+        $dSlot = $e->alloca(Type::ptr(), 'd');
+        $iSlot = $e->alloca(Type::i64(), 'i');
+        $e->store($dst, $dSlot);
+        $e->store(Value::int(Type::i64(), 0), $iSlot);
+        $e->brIf($e->icmp('eq', $src, Value::null()), $end, $cond);
+        // count = header len (both packed & hashed store entry count at offset 0)
+        $len = $cond->load(Type::i64(), $src);
+        $i = $cond->load(Type::i64(), $iSlot);
+        $cond->brIf($cond->icmp('sge', $i, $len), $end, $body);
+        $iv = $body->load(Type::i64(), $iSlot);
+        $val = $body->call('__mir_array_value_at', Type::i64(), [$src, $iv]);
+        $flags = $body->load(Type::i64(), $this->hdr($body, $src, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        // packed (flags==0) → implicit int key → renumber; hashed → check KIND
+        $body->brIf($body->icmp('eq', $flags, Value::int(Type::i64(), 0)), $doInt, $isStr);
+        $kind = $isStr->load(Type::i64(), $this->entryAddr($isStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $isStr->brIf($isStr->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $doStr, $doInt);
+        $key = $doStr->load(Type::ptr(), $this->entryAddr($doStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $d1 = $doStr->load(Type::ptr(), $dSlot);
+        $ns = $doStr->call('__mir_array_set_str', Type::ptr(),
+            [$d1, $key, $val, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $doStr->store($ns, $dSlot);
+        $doStr->br($nextb);
+        $d2 = $doInt->load(Type::ptr(), $dSlot);
+        $na = $doInt->call('__mir_array_append', Type::ptr(), [$d2, $val]);
+        $doInt->store($na, $dSlot);
+        $doInt->br($nextb);
+        $nextb->store($nextb->add($nextb->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $nextb->br($cond);
+        $end->ret($end->load(Type::ptr(), $dSlot));
     }
 
     /**

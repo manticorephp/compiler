@@ -8233,39 +8233,19 @@ final class EmitLlvm
         return $out;
     }
 
-    /** Append every element of a spread source (positional) into `$slot`. */
+    /** Merge a spread source into `$slot` with PHP key semantics: string keys
+     *  preserved (later duplicate overwrites), int keys renumbered. */
     private function emitArraySpreadUnified(string $slot, Node $spreadNode): string
     {
         $sp = $this->castSpread($spreadNode);
         $out = $this->emitNode($sp->operand);
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
-        $slen = $this->allocSsa();
-        $out .= '  ' . $slen . ' = load i64, ptr ' . $src . "\n";
-        $iSlot = $this->allocSsa();
-        $out .= '  ' . $iSlot . " = alloca i64\n";
-        $out .= '  store i64 0, ptr ' . $iSlot . "\n";
-        $cond = $this->allocLabel('uspr.cond');
-        $body = $this->allocLabel('uspr.body');
-        $end  = $this->allocLabel('uspr.end');
-        $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
-        $i = $this->allocSsa();
-        $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
-        $c = $this->allocSsa();
-        $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $slen . "\n";
-        $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
-        $out .= $body . ":\n";
-        $ev = $this->allocSsa();
-        $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $cur = $this->allocSsa();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->allocSsa();
-        $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $ev . ")\n";
+        $out .= '  ' . $nx . ' = call ptr @__mir_array_spread_into(ptr ' . $cur . ', ptr ' . $src . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
-        $i2 = $this->allocSsa();
-        $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
-        $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
-        $out .= '  br label %' . $cond . "\n" . $end . ":\n";
         return $out;
     }
 
