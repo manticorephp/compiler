@@ -892,8 +892,8 @@ final class InferTypes implements Pass
     private function scanPropElemFromStores(Module $module): bool
     {
         /** @var array<string, Type> */
-        $observed = [];   // "Class::prop" → Type
-        $conflict = [];   // "Class::prop" → true
+        $observed = [];   // "Class::prop" → element Type (cell when mixed-but-boxable)
+        $unusable = [];   // "Class::prop" → true
         foreach ($module->functions as $fn) {
             $cls = '';
             if (\count($fn->params) > 0 && $fn->params[0]->name === 'this'
@@ -902,14 +902,15 @@ final class InferTypes implements Pass
                 $cls = $fn->params[0]->type->class;
             }
             if ($cls === '') { continue; }
-            $this->collectPropElemStores($fn->body, $cls, $observed, $conflict);
+            $this->collectPropElemStores($fn->body, $cls, $observed, $unusable);
         }
         $changed = false;
         foreach ($observed as $key => $elem) {
-            if (isset($conflict[$key]) || $elem === null) { continue; }
+            if (isset($unusable[$key]) || $elem === null) { continue; }
             $ek = $elem->kind;
             $ok = $ek === Type::KIND_STRING || $ek === Type::KIND_INT
                 || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
+                || $ek === Type::KIND_CELL
                 || ($ek === Type::KIND_OBJ && $elem->class !== null);
             if (!$ok) { continue; }
             $cut = \strpos($key, '::');
@@ -932,11 +933,20 @@ final class InferTypes implements Pass
         return $changed;
     }
 
+    /** Whether `$t` is a concrete element a store can box into a cell slot. */
+    private function isBoxablePropElem(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_STRING || $k === Type::KIND_INT
+            || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
+            || ($k === Type::KIND_OBJ && $t->class !== null);
+    }
+
     /**
      * @param array<string, Type> $observed
-     * @param array<string, bool> $conflict
+     * @param array<string, bool> $unusable
      */
-    private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$conflict): void
+    private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $this->asStoreElement($n);
@@ -946,12 +956,18 @@ final class InferTypes implements Pass
                     && $this->asLoadLocal($pa->object)->name === 'this') {
                     $key = $cls . '::' . $pa->property;
                     $vt = $se->value->type;
-                    if (!isset($observed[$key])) { $observed[$key] = $vt; }
-                    elseif (!$this->sameElemShape($observed[$key], $vt)) { $conflict[$key] = true; }
+                    if (!$this->isBoxablePropElem($vt)) {
+                        $unusable[$key] = true;
+                    } elseif (!isset($observed[$key])) {
+                        $observed[$key] = $vt;
+                    } elseif ($observed[$key]->kind !== Type::KIND_CELL
+                        && !$this->sameElemShape($observed[$key], $vt)) {
+                        $observed[$key] = Type::cell();
+                    }
                 }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->collectPropElemStores($c, $cls, $observed, $conflict); }
+        foreach (Walk::children($n) as $c) { $this->collectPropElemStores($c, $cls, $observed, $unusable); }
     }
 
     private function findPropReturns(Node $n, string $cls, Type $rt): void
@@ -3459,7 +3475,9 @@ final class InferTypes implements Pass
             && $ot->kind === Type::KIND_OBJ && $ot->class !== null
             && isset($this->classes[$ot->class])) {
             $pt = $this->classes[$ot->class]->propertyTypes[$node->property] ?? null;
-            if ($pt !== null && $pt->isAssoc()) {
+            $ptCell = $pt !== null && $pt->element !== null
+                && $pt->element->kind === Type::KIND_CELL;
+            if ($pt !== null && ($pt->isAssoc() || $ptCell)) {
                 $node->value->type = $pt;
                 $vt = $pt;
             }

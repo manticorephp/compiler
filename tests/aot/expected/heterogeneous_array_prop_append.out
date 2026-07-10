@@ -1,0 +1,5 @@
+int(7)
+float(3.5)
+string(2) "hi"
+a=int(1)
+b=string(1) "x"

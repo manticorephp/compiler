@@ -4019,7 +4019,13 @@ final class LowerFromAst implements Pass
      */
     private function inferPropElemFromStores(\Parser\Ast\ClassDecl $decl, string $prop): ?Type
     {
-        $found = null;
+        // `$found` is seeded ONLY inside the guard below; a `?Type $found = null`
+        // that is later read via `$found === null` / `$found->kind` is a nullable
+        // object local whose null representation is unreliable under the native
+        // self-build (a null-init obj slot compared `=== null` gave BOTH arms) —
+        // gate on an explicit bool instead of the null sentinel.
+        $found = Type::unknown();
+        $have = false;
         foreach ($decl->methods as $m) {
             if ($m->body === null) { continue; }
             $paramTypes = [];
@@ -4032,11 +4038,11 @@ final class LowerFromAst implements Pass
             foreach ($types as $t) {
                 // An unknown entry marks an unresolvable / keyed / wholesale store.
                 if ($t->kind === Type::KIND_UNKNOWN) { return null; }
-                if ($found === null) { $found = $t; }
+                if (!$have) { $found = $t; $have = true; }
                 elseif (!$this->sameElemType($found, $t)) { return null; }
             }
         }
-        return $found;
+        return $have ? $found : null;
     }
 
     /**
