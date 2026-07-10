@@ -1293,10 +1293,13 @@ final class InferTypes implements Pass
         }
         if (\count($cand) === 0) { return false; }
         /** @var array<string, Type> */
-        $observed = [];                  // "fn#idx" → Type (scalar element)
+        $observed = [];                  // "fn#idx" → value/element Type
         $conflict = [];                  // "fn#idx" → true
+        /** @var array<string, Type> */
+        $assocKey = [];                  // "fn#idx" → key Type (assoc-shaped arg)
+        $shape = [];                     // "fn#idx" → 'v' (vec) | 'a' (assoc)
         foreach ($module->functions as $fn) {
-            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict);
+            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape);
         }
         $changed = false;
         foreach ($module->functions as $fn) {
@@ -1318,7 +1321,9 @@ final class InferTypes implements Pass
                 if (isset($refined[$key]) && !$observed[$key]->isArray()
                     && $observed[$key]->kind !== Type::KIND_CELL) { continue; }
                 $param = $fn->params[$idx - 1];
-                $param->type = Type::vec($observed[$key]);
+                $param->type = isset($assocKey[$key])
+                    ? Type::assoc($assocKey[$key], $observed[$key])
+                    : Type::vec($observed[$key]);
                 $changed = true;
             }
         }
@@ -1329,8 +1334,10 @@ final class InferTypes implements Pass
      * @param array<string,bool> $cand
      * @param array<string,Type> $observed
      * @param array<string,bool> $conflict
+     * @param array<string,Type> $assocKey
+     * @param array<string,string> $shape
      */
-    private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict): void
+    private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape): void
     {
         // Resolve the target function name + a param-index base for each call
         // flavor. A free/static call's arg `i` maps to param `i`; an INSTANCE
@@ -1369,7 +1376,34 @@ final class InferTypes implements Pass
                 // quicksort's `&$a` erased to int → `<` compiled as an integer
                 // compare on string pointers; see preserve_known_type_principle.)
                 if ($this->isUnknownArrayElem($a->type)) { continue; }
-                if (!$a->type->isVec()) { $conflict[$key] = true; continue; }
+                $isAssoc = $a->type->isAssoc();
+                // An ASSOC arg refines the param to assoc[K,V] — but ONLY for a
+                // NUMERIC value (int/float/bool). A string/cell value stays out:
+                // a bare-`array` param that also holds a callable name / mixed is
+                // widely used in the compiler's own call machinery, and retyping
+                // it assoc there mis-reads the name (a self-host FCC regression).
+                if ($isAssoc) {
+                    $ve = $a->type->element;
+                    $vk = $ve === null ? '' : $ve->kind;
+                    if ($vk !== Type::KIND_INT && $vk !== Type::KIND_FLOAT
+                        && $vk !== Type::KIND_BOOL) { $conflict[$key] = true; continue; }
+                } elseif (!$a->type->isVec()) {
+                    $conflict[$key] = true; continue;
+                }
+                // All call sites must agree on the shape (all vec, or all assoc
+                // with the same key type).
+                $sh = $isAssoc ? 'a' : 'v';
+                if (isset($shape[$key]) && $shape[$key] !== $sh) {
+                    unset($observed[$key]); $conflict[$key] = true; continue;
+                }
+                if ($isAssoc) {
+                    $kt = $a->type->key ?? Type::string_();
+                    if (isset($assocKey[$key]) && $assocKey[$key]->kind !== $kt->kind) {
+                        unset($observed[$key]); $conflict[$key] = true; continue;
+                    }
+                    $assocKey[$key] = $kt;
+                }
+                $shape[$key] = $sh;
                 $elem = $a->type->element;
                 $ek = $elem === null ? '' : $elem->kind;
                 // Scalar elements refine to vec[T]; a CELL element (a
@@ -1392,7 +1426,7 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectCallArgElems($ch, $cand, $observed, $conflict);
+            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape);
         }
     }
 

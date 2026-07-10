@@ -38,3 +38,14 @@ function nest2(array $x): void { $x[0][0][] = 5; }
 $h = [[[1]], [[2]]];
 nest2($h);
 echo count($h[0][0]), "\n";                     // 1
+
+// Assoc by-value param with a NUMERIC value: a keyed store stays private
+// (call-site inference types the param assoc[K,int] → copy-on-entry fires).
+function kset(array $x): int { $x["k"] = 9; return $x["k"]; }
+$m = ["k" => 1];
+$r = kset($m);
+echo $m["k"], " ", $r, "\n";              // 1 9
+
+function sumv(array $x): int { $t = 0; foreach ($x as $v) { $t = $t + $v; } return $t; }
+$p = ["a" => 10, "b" => 20, "c" => 30];
+echo sumv($p), " ", count($p), "\n";      // 60 3

@@ -3310,9 +3310,12 @@ final class EmitLlvm
         $k = $e->kind;
         if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT
             || $k === Type::KIND_STRING || $k === Type::KIND_BOOL) {
-            return 0;
+            return 0;   // flat copy sound for a vec OR an assoc of scalars
         }
-        if ($k === Type::KIND_ARRAY && $e->isVec()) {
+        // A nested VEC element needs each level cloned — but the deep copier
+        // index-walks the OUTER, so the outer must be a vec (a hashed assoc can't
+        // be index-walked). An assoc-of-arrays is left borrowed.
+        if ($k === Type::KIND_ARRAY && $e->isVec() && $t->isVec()) {
             $inner = $this->arrayCopyDepth($e);
             return $inner < 0 ? -1 : $inner + 1;
         }
