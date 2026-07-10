@@ -54,6 +54,11 @@ final class ClassDef
      *  @var array<string, bool> */
     public array $propertyArrayHinted = [];
 
+    /** Names of `readonly` properties — a write from outside the declaring class
+     *  scope is a fatal `Error` (Cannot modify readonly property).
+     *  @var array<string, bool> */
+    public array $propertyReadonly = [];
+
     /** Whether this class carries a dynamic-property bag. */
     public function usesBag(): bool
     {

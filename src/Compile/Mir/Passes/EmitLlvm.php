@@ -421,6 +421,14 @@ final class EmitLlvm
                 if ($this->scanUsesExceptions($fn->body)) { $this->needsExceptions = true; break; }
             }
         }
+        // A readonly property write emits a synthesized `throw Error` at emit time
+        // (see emitStoreProperty) that the scan above can't see, so the base
+        // landing pad must be set up if any class has a readonly property.
+        if (!$this->needsExceptions) {
+            foreach ($this->classes as $cd) {
+                if ($cd->propertyReadonly !== []) { $this->needsExceptions = true; break; }
+            }
+        }
         // Classify cell/`mixed` properties: a name that is EVER stored a
         // non-scalar (array / string / object / unknown / general cell) value
         // stays RAW (the SPL cell-array backing `$__s` etc. — rc-managed +

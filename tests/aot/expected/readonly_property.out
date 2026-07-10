@@ -1,0 +1,6 @@
+3,4
+caught: Cannot modify readonly property Point::$x
+3
+alice
+caught: Cannot modify readonly property Named::$name
+alice

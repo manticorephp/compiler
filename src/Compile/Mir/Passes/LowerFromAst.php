@@ -914,6 +914,7 @@ final class LowerFromAst implements Pass
         $names = [];
         $types = [];
         $arrHinted = [];
+        $roProps = [];
         // Single inheritance: prepend the parent's properties so the
         // subclass instance shares the parent's field offsets, then
         // append the subclass's own. Parent is assumed already built
@@ -928,6 +929,9 @@ final class LowerFromAst implements Pass
                 $names[] = $pn;
                 $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
                 $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
+                // readonly is NOT propagated: `readonlyDeclClass` walks the parent
+                // chain so the ORIGINAL declaring class drives the scope check
+                // (only it may write the slot).
             }
         }
         foreach ($decl->methods as $m) {
@@ -939,6 +943,7 @@ final class LowerFromAst implements Pass
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
                         $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
+                        if (($p->promotedReadonly ?? false) || $decl->isReadonly) { $roProps[$p->name] = true; }
                     }
                 }
             }
@@ -973,6 +978,7 @@ final class LowerFromAst implements Pass
             $names[] = $prop->name;
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
+            if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
         }
         // Mixed-in trait properties extend the class's layout (PHP appends
         // them after the class's own fields). Without this they get no slot,
@@ -1070,6 +1076,7 @@ final class LowerFromAst implements Pass
         $this->currentLowerClass = $savedLowerClass;
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
+        $cd->propertyReadonly = $roProps;
         return $cd;
     }
 

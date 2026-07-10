@@ -670,9 +670,48 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** The class in `$cls`'s ancestry that DECLARES `$prop` as `readonly`, or ''
+     *  — only that class's scope may write the slot. */
+    private function readonlyDeclClass(string $cls, string $prop): string
+    {
+        $c = $cls;
+        while ($c !== '' && isset($this->classes[$c])) {
+            if ($this->classes[$c]->propertyReadonly[$prop] ?? false) { return $c; }
+            $c = $this->classes[$c]->parent;
+        }
+        return '';
+    }
+
     private function emitStoreProperty(Node $n): string
     {
         $sp = $this->castStoreProperty($n);
+        // A write to a `readonly` property from OUTSIDE its declaring class scope
+        // is a fatal Error (PHP throws a catchable `Error`). Types are resolved
+        // by now, so if the receiver's class chain declares this property
+        // `readonly` in a class the CURRENT function (`Class__method`) is not part
+        // of, evaluate the RHS (side effects) then throw in place of the store.
+        // A write inside the class (constructor init) proceeds; single-init is not
+        // enforced (that needs flow analysis).
+        $roCls = $sp->object->type->class ?? '';
+        if ($roCls !== '') {
+            $roDecl = $this->readonlyDeclClass($roCls, $sp->property);
+            if ($roDecl !== '' && !\str_starts_with($this->currentFnName, $roDecl . '__')) {
+                $out = $this->emitNode($sp->value);
+                $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $sp->property;
+                // Supply every ctor arg — emitNewObj does NOT pad defaults (that
+                // happens at AST→MIR); a short arg list leaves `code`/`previous`
+                // as garbage registers and the ctor retains a bogus `previous`.
+                $throw = new \Compile\Mir\Throw_(
+                    new \Compile\Mir\NewObj('Error', [
+                        new \Compile\Mir\StringConst($msg, Type::string_()),
+                        new \Compile\Mir\IntConst(0, Type::int_()),
+                        new \Compile\Mir\NullConst(Type::obj('Throwable')),
+                    ], Type::obj('Error')),
+                    Type::void(),
+                );
+                return $out . $this->emitNode($throw);
+            }
+        }
         // PHP 8.4 property hook: a set hook replaces the write (unless bypassed —
         // default init — or we are inside this property's own hook).
         $hcls = $sp->object->type->class ?? '';
