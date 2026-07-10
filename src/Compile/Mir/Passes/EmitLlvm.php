@@ -6454,6 +6454,59 @@ final class EmitLlvm
             $this->lastValue = $z; $this->lastValueType = 'i64';
             return $out;
         }
+        // Loose ==/!= between a STRING and a NUMBER (int/float): PHP numeric-string
+        // juggling. A numeric string ("10", "1e2") compares BY VALUE; a
+        // non-numeric string ("abc") is never == a number (PHP 8 casts the number
+        // to string, which a non-numeric string can't match). A null `?string`
+        // carrier coerces to numeric 0.
+        // LOOSE only — `"10" === 10` stays false (distinct types).
+        $looseEqNum = $op === '==' || $op === '!=';
+        if ($looseEqNum
+            && (($lk === Type::KIND_STRING && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT))
+                || ($rk === Type::KIND_STRING && ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT)))) {
+            $this->needsTaggedEq = true;   // emits __mir_is_numeric_str
+            $this->needsStrtod = true;
+            $lStr = $lk === Type::KIND_STRING;
+            $strV = $lStr ? $l : $r; $strT = $lStr ? $lt : $rt;
+            $numV = $lStr ? $r : $l; $numT = $lStr ? $rt : $lt;
+            $numK = $lStr ? $rk : $lk;
+            $si = $strV;
+            if ($strT === 'ptr') { $si = $this->allocSsa(); $out .= '  ' . $si . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
+            $sp = $this->allocSsa(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $si . " to ptr\n";
+            if ($numK === Type::KIND_FLOAT && $numT === 'double') {
+                $nd = $numV;
+            } elseif ($numK === Type::KIND_FLOAT) {
+                $nd = $this->allocSsa(); $out .= '  ' . $nd . ' = bitcast i64 ' . $numV . " to double\n";
+            } else {
+                $nd = $this->allocSsa(); $out .= '  ' . $nd . ' = sitofp i64 ' . $numV . " to double\n";
+            }
+            $snz = $this->allocSsa(); $out .= '  ' . $snz . ' = icmp ne i64 ' . $si . ", 0\n";
+            $chkL = $this->allocLabel('nseq.chk');
+            $nullL = $this->allocLabel('nseq.null');
+            $numL = $this->allocLabel('nseq.num');
+            $nnumL = $this->allocLabel('nseq.nnum');
+            $joinL = $this->allocLabel('nseq.join');
+            $out .= '  br i1 ' . $snz . ', label %' . $chkL . ', label %' . $nullL . "\n";
+            $out .= $chkL . ":\n";
+            $isn = $this->allocSsa(); $out .= '  ' . $isn . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
+            $out .= '  br i1 ' . $isn . ', label %' . $numL . ', label %' . $nnumL . "\n";
+            $out .= $numL . ":\n";
+            $sd = $this->allocSsa(); $out .= '  ' . $sd . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
+            $eqn = $this->allocSsa(); $out .= '  ' . $eqn . ' = fcmp oeq double ' . $sd . ', ' . $nd . "\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $nnumL . ":\n  br label %" . $joinL . "\n";
+            $out .= $nullL . ":\n";
+            $eqz = $this->allocSsa(); $out .= '  ' . $eqz . ' = fcmp oeq double 0.0, ' . $nd . "\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $joinL . ":\n";
+            $phi = $this->allocSsa();
+            $out .= '  ' . $phi . ' = phi i1 [ ' . $eqn . ', %' . $numL . ' ], [ false, %' . $nnumL . ' ], [ ' . $eqz . ', %' . $nullL . " ]\n";
+            $res = $phi;
+            if ($isNe) { $res = $this->allocSsa(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
+            $z = $this->allocSsa(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            $this->lastValue = $z; $this->lastValueType = 'i64';
+            return $out;
+        }
         // String ordering / equality → strcmp(l, r) <pred> 0. Fires when
         // one side is a known string and the other is a string OR unknown
         // (e.g. an `array $args` element whose element type was erased to
