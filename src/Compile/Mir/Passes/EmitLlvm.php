@@ -225,6 +225,8 @@ final class EmitLlvm
 
     /** @var array<string, int> closure fn name → capture count */
     private array $closureCaptures = [];
+    /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
+    private array $closureHasThis = [];
 
     /** Whether any `.` concat was emitted (gates the string runtime). */
     private bool $needsConcat = false;
@@ -375,6 +377,7 @@ final class EmitLlvm
         $this->interfaceNames = $module->interfaceNames;
         $this->traitNames = $module->traitNames;
         $this->closureCaptures = $module->closureCaptures;
+        $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
         $this->globalVarNames = $module->globalVarNames;

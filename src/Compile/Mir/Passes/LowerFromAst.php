@@ -525,6 +525,11 @@ final class LowerFromAst implements Pass
                 || $stmt->kind === 'Namespace') {
                 continue;
             }
+            // A top-level statement has no class scope — reset it (a preceding
+            // class lowering left `currentLowerClass` set, which would make a
+            // top-level closure reading `$this` capture a non-existent local
+            // instead of a late-bound placeholder).
+            $this->currentLowerClass = '';
             $mainStmts[] = $this->lowerStmt($stmt);
         }
         // The class table is now complete, so descendant sets are known —
@@ -2030,9 +2035,22 @@ final class LowerFromAst implements Pass
         $clFn->isGenerator = $isGenerator;
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
+        // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
+        // ->call inject the bound object there (see emit). Prepended first, so
+        // it is always struct slot 1.
+        $this->module->closureHasThis[$fnName] = ($capNames[0] ?? '') === 'this';
         $captures = [];
         $captureByRef = [];
         foreach ($capNames as $cn) {
+            if ($cn === 'this' && $this->currentLowerClass === '') {
+                // A top-level closure that reads `$this` has no enclosing object
+                // to capture — the slot is a LATE-BOUND placeholder filled by
+                // Closure::bind / ->bindTo / ->call. Capture NULL (0) so no
+                // dangling `$this` read is emitted at the definition site.
+                $captures[] = new NullConst(Type::unknown());
+                $captureByRef[] = false;
+                continue;
+            }
             $ctype = $cn === 'this' ? $thisType : Type::unknown();
             $captures[] = new LoadLocal($cn, $ctype);
             $captureByRef[] = $capByRef[$cn] ?? false;
@@ -2442,6 +2460,26 @@ final class LowerFromAst implements Pass
         if ($k === 'Invoke') {
             $out = $this->collectVars($e->callee);
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
+        // A NESTED arrow fn contributes its OWN free vars (body vars minus its
+        // params) to the enclosing scope — an inner `fn($c)=>$a+$b+$c` makes
+        // `$a`/`$b` free in the middle `fn($b)=>…`, so 3+-level currying
+        // captures the outer vars transitively instead of dangling.
+        if ($k === 'ArrowFn') {
+            $inner = [];
+            foreach ($e->params as $p) { $inner[$p->name] = true; }
+            $out = [];
+            foreach ($this->collectVars($e->body) as $v) {
+                if (!isset($inner[$v])) { $out[] = $v; }
+            }
+            return $out;
+        }
+        // A nested `function () use ($x) {}` makes each explicitly-captured var
+        // free in the enclosing scope (its body runs in an isolated scope).
+        if ($k === 'Closure') {
+            $out = [];
+            foreach ($e->uses as $u) { $out[] = $u->name; }
             return $out;
         }
         return [];
@@ -3637,6 +3675,15 @@ final class LowerFromAst implements Pass
             $class = $cd !== null ? $cd->parent : $this->currentLowerClass;
         } else {
             $scope = \ltrim($class, '\\');
+        }
+        // `Closure::fromCallable($c)` → the same closure a first-class callable
+        // builds. A string / `C::m` / `[$o,"m"]` literal reuses coerceCallableArg;
+        // a value already a closure passes through.
+        if (\strtolower(\ltrim($class, '\\')) === 'closure' && $expr->method === 'fromCallable'
+            && \count($expr->args) === 1) {
+            $conv = $this->coerceCallableArg(Type::closure(), $expr->args[0]);
+            if ($conv !== null) { return $conv; }
+            return $this->lowerExpr($expr->args[0]);
         }
         // First-class callable `C::m(...)` → a 0-capture closure forwarding to
         // the static method (scope preserved for late static binding).

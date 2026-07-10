@@ -32,6 +32,10 @@ final class Module
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 
+    /** @var array<string, bool> closure fn name → capture slot 0 is `$this`
+     *  (struct slot 1) — where Closure::bind/->bindTo/->call inject the object. */
+    public array $closureHasThis = [];
+
     /**
      * Module-level i64 global cells (static props, static locals,
      * `global` vars). Parallel arrays (name + literal default node) —

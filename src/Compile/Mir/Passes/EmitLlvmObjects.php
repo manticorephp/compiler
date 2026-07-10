@@ -1373,9 +1373,55 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** Copy a closure's env struct, rebinding the `$this` slot (struct slot 1)
+     *  to `$objNode`. Shared by Closure::bind / ->bindTo / ->call. The bound
+     *  value carries the same fn ptr (slot 0), so an invoke dispatches through
+     *  it; class_id dispatch resolves `$this->prop` against the new object. */
+    private function emitClosureRebind(Node $fnNode, Node $objNode): string
+    {
+        $out = $this->emitNode($fnNode);
+        $out .= $this->coerceToPtr();
+        $src = $this->lastValue;
+        // Env size from the static closure type; a dynamic (unknown) closure
+        // falls back to a `$this`-only env (fn ptr + one slot) — the common
+        // bind target `function () { … $this … }`.
+        $fnName = $fnNode->type->class ?? '';
+        $cnt = $this->closureCaptures[$fnName] ?? 1;
+        $slots = 1 + $cnt;
+        $buf = $this->allocSsa();
+        $out .= '  ' . $buf . ' = call ptr @__mir_alloc(i64 ' . (string)(8 * $slots) . ")\n";
+        for ($i = 0; $i < $slots; $i = $i + 1) {
+            $sg = $this->allocSsa();
+            $out .= '  ' . $sg . ' = getelementptr inbounds i64, ptr ' . $src . ', i64 ' . (string)$i . "\n";
+            $sv = $this->allocSsa();
+            $out .= '  ' . $sv . ' = load i64, ptr ' . $sg . "\n";
+            $dg = $this->allocSsa();
+            $out .= '  ' . $dg . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$i . "\n";
+            $out .= '  store i64 ' . $sv . ', ptr ' . $dg . "\n";
+        }
+        $hasThis = $this->closureHasThis[$fnName] ?? true;
+        if ($hasThis && $cnt >= 1) {
+            $out .= $this->emitNode($objNode);
+            $out .= $this->coerceToI64();
+            $objV = $this->lastValue;
+            $tg = $this->allocSsa();
+            $out .= '  ' . $tg . ' = getelementptr inbounds i64, ptr ' . $buf . ", i64 1\n";
+            $out .= '  store i64 ' . $objV . ', ptr ' . $tg . "\n";
+        }
+        $this->lastValue = $buf;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitStaticCall(Node $n): string
     {
         $sc = $this->castStaticCall($n);
+        // Closure::bind($fn, $obj, $scope?) → a copy of $fn's env with the
+        // `$this` slot rebound to $obj (scope resolved by class_id dispatch).
+        if (\strtolower(\ltrim($sc->class, '\\')) === 'closure' && $sc->method === 'bind'
+            && \count($sc->args) >= 2) {
+            return $this->emitClosureRebind($sc->args[0], $sc->args[1]);
+        }
         // Enum built-in `cases()` — a list of every case in declaration order.
         // An enum value is carried as its ordinal, so the list is [0..N-1] with
         // element type obj<Enum> (typed in InferTypes::inferStaticCall).
@@ -1656,6 +1702,40 @@ trait EmitLlvmObjects
         $mc = $this->castMethodCall($n);
         if ($this->isGeneratorType($mc->object->type)) {
             return $this->emitGeneratorMethod($mc);
+        }
+        // Closure methods. `$fn->bindTo($obj, $scope?)` rebinds `$this`;
+        // `$fn->call($obj, ...args)` rebinds then invokes in one step. Gated on
+        // a closure receiver so a user class's own `call`/`bindTo` is untouched.
+        $recvCls = $mc->object->type->class ?? '';
+        $isClosureRecv = $mc->object->type->kind === Type::KIND_CLOSURE
+            || \str_starts_with($recvCls, '__closure_');
+        if ($isClosureRecv && $mc->method === 'bindTo' && \count($mc->args) >= 1) {
+            return $this->emitClosureRebind($mc->object, $mc->args[0]);
+        }
+        if ($isClosureRecv && $mc->method === 'call' && \count($mc->args) >= 1) {
+            $out = $this->emitClosureRebind($mc->object, $mc->args[0]);
+            $bound = $this->lastValue;
+            $argList = 'ptr ' . $bound;
+            $argTypes = 'ptr';
+            $k = \count($mc->args);
+            for ($ai = 1; $ai < $k; $ai = $ai + 1) {
+                $a = $mc->args[$ai];
+                $out .= $this->emitNode($a);
+                if ($this->isCellBoxableArg($a->type)) { $out .= $this->boxToCell($a->type); }
+                else { $out .= $this->coerceToI64(); }
+                $argList .= ', i64 ' . $this->lastValue;
+                $argTypes .= ', i64';
+            }
+            $fpi = $this->allocSsa();
+            $out .= '  ' . $fpi . ' = load i64, ptr ' . $bound . "\n";
+            $fp = $this->allocSsa();
+            $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
+            $reg = $this->allocSsa();
+            $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            if ($this->isCellScalarParam($n->type)) { $out .= $this->unboxCellToType($n->type); }
+            return $out;
         }
         // Method overloading: an unresolved instance method on a class that
         // defines __call reroutes to `$obj->__call('name', [args])` — rebuilt as

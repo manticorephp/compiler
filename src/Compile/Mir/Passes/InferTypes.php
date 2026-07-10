@@ -350,10 +350,31 @@ final class InferTypes implements Pass
         }
         // Second pass once capture sites are typed: closure bodies re-infer
         // with their capture locals seeded (see inferFunction) — a captured
-        // array/string/obj is now typed, not read as a raw int.
+        // array/string/obj is now typed, not read as a raw int. Nested closures
+        // (curried arrow fns) propagate one capture level per pass — the inner
+        // capture is typed only after the enclosing closure's param is seeded —
+        // so iterate until the closure return sigs converge (N-level currying
+        // needs N passes). Early-break keeps the common shallow case at ~2 passes;
+        // the cap bounds a pathological chain (and self-build compile time).
         if ($this->sawClosures) {
-            foreach ($module->functions as $fn) {
-                $this->inferFunction($fn);
+            for ($iter = 0; $iter < 8; $iter = $iter + 1) {
+                // Convergence is driven by CAPTURE-node types, not return kinds:
+                // an inner curried capture flips unknown→cell one level per pass
+                // while the enclosing closure's return kind can already look
+                // stable — breaking on the return kind stops a pass too early and
+                // leaves the deepest capture read raw (boxed value, raw read).
+                $before = '';
+                foreach ($this->closureNodeByName as $cn) {
+                    foreach ($cn->captures as $c) { $before .= $c->type->kind . ','; }
+                }
+                foreach ($module->functions as $fn) {
+                    $this->inferFunction($fn);
+                }
+                $after = '';
+                foreach ($this->closureNodeByName as $cn) {
+                    foreach ($cn->captures as $c) { $after .= $c->type->kind . ','; }
+                }
+                if ($before === $after) { break; }
             }
         }
         $module->markPassApplied(self::NAME);
@@ -3544,6 +3565,13 @@ final class InferTypes implements Pass
         foreach ($node->args as $a) {
             $this->inferNode($a);
         }
+        // Closure methods on a closure receiver: `->bindTo()` yields a (rebound)
+        // closure; `->call()` invokes it and returns a tagged cell (uniform ABI).
+        $recvCls = $objType->class ?? '';
+        if ($objType->kind === Type::KIND_CLOSURE || \str_starts_with($recvCls, '__closure_')) {
+            if ($node->method === 'bindTo') { $node->type = Type::closure(); return $node->type; }
+            if ($node->method === 'call')   { $node->type = Type::cell();    return $node->type; }
+        }
         // Generator iterator protocol: current()/send() yield the value type
         // (the Generator's element); key() an int; valid() a bool. next()/
         // rewind()/getReturn() are left as-is (void / unknown).
@@ -3699,6 +3727,11 @@ final class InferTypes implements Pass
     {
         foreach ($node->args as $a) {
             $this->inferNode($a);
+        }
+        // Closure::bind($fn, $obj, $scope?) → a (rebound) closure value.
+        if (\strtolower(\ltrim($node->class, '\\')) === 'closure' && $node->method === 'bind') {
+            $node->type = Type::closure();
+            return $node->type;
         }
         // Enum built-in `cases()` → list<Enum> (an enum value is carried as its
         // ordinal, so obj<Enum> is the right element type). from()/tryFrom() are
