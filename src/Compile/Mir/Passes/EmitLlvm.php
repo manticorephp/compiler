@@ -2013,6 +2013,26 @@ final class EmitLlvm
                 $this->slots[$p->name] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
+                // PHP arrays are values: a by-VALUE array param the body mutates
+                // in place (`$x[] = …` / `$x[$k] = …`) must not alias the caller's
+                // buffer. Copy it on entry so the mutation is private. Restricted
+                // to a SCALAR/STRING element (a nested array/obj element would be
+                // shared by the flat copy → still leak/corrupt; that needs a
+                // deep/rc-aware copy — left borrowed for now). By-ref params must
+                // keep aliasing the caller, so they are excluded.
+                if (!$p->byRef && $p->type->isArray()
+                    && $this->isScalarElemArray($p->type)
+                    && isset($this->mutatedVecLocals[$p->name])) {
+                    $ld = $this->allocSsa();
+                    $body .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
+                    $lp = $this->allocSsa();
+                    $body .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
+                    $cp = $this->allocSsa();
+                    $body .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $lp . ")\n";
+                    $ci = $this->allocSsa();
+                    $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
+                    $body .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
+                }
             }
         }
         $paramNames = [];
@@ -3260,6 +3280,18 @@ final class EmitLlvm
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectMutatedVecs($c);
         }
+    }
+
+    /** Whether `$t` is an array whose element is a SCALAR / string (a flat
+     *  `__mir_array_copy` fully separates it). A nested-array / object / cell
+     *  element is shared by the flat copy, so it is NOT safe to copy-on-entry. */
+    private function isScalarElemArray(Type $t): bool
+    {
+        $e = $t->element;
+        if ($e === null) { return false; }
+        $k = $e->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL;
     }
 
     /** Mark the array local under an `$a[$k]` element as mutated (its element may
