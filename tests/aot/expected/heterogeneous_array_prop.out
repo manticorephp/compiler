@@ -1,0 +1,7 @@
+int(1)
+string(1) "x"
+float(3.5)
+int(9)
+a=int(1)
+b=string(1) "y"
+c=int(3)

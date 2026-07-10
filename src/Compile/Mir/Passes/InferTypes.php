@@ -261,6 +261,16 @@ final class InferTypes implements Pass
                 $this->inferFunction($fn);
             }
         }
+        // Property-type inference from a whole-array assignment: `$this->p =
+        // [1,"x"]` (a heterogeneous literal → vec[cell]) lifts that shape onto
+        // the DECLARED property type so a later `$this->p[$i]` / foreach reads a
+        // tagged cell instead of a raw i64 (the property analogue of a typed
+        // local literal). Runs before the element scan so the shape is set first.
+        if ($this->scanPropTypeFromArrayAssign($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
         // Property-element inference from stores: a bare-`array` property that
         // only ever receives element stores of ONE concrete scalar/object type
         // (`$this->lines[] = $m` where `$m` settled to string via the call-site
@@ -796,6 +806,80 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $c) { $this->findCellElemStores($c, $cls); }
+    }
+
+    /**
+     * Type a still-erased array property from a WHOLE-array assignment
+     * (`$this->prop = [1, "x"]` / `$this->prop = $typedArray`). A heterogeneous
+     * literal types vec[cell]; without lifting that onto the DECLARED property
+     * type, a later read (`$this->prop[$i]` / foreach) sees a bare `array` →
+     * unknown and returns the raw i64 instead of dispatching on the cell tag (a
+     * LOCAL `$a = [1,"x"]` already works — this is the property analogue). A
+     * non-array assignment, or two assignments of different array shapes, leaves
+     * the property erased.
+     */
+    private function scanPropTypeFromArrayAssign(Module $module): bool
+    {
+        /** @var array<string, Type> */
+        $observed = [];   // "Class::prop" → array Type
+        $unusable = [];   // "Class::prop" → true
+        foreach ($module->functions as $fn) {
+            $cls = '';
+            if (\count($fn->params) > 0 && $fn->params[0]->name === 'this'
+                && $fn->params[0]->type->kind === Type::KIND_OBJ
+                && $fn->params[0]->type->class !== null) {
+                $cls = $fn->params[0]->type->class;
+            }
+            if ($cls === '') { continue; }
+            $this->collectPropArrayAssigns($fn->body, $cls, $observed, $unusable);
+        }
+        $changed = false;
+        foreach ($observed as $key => $at) {
+            if (isset($unusable[$key]) || $at === null) { continue; }
+            $cut = \strpos($key, '::');
+            if ($cut === false || $cut < 0) { continue; }
+            $cls = \substr($key, 0, $cut);
+            $prop = \substr($key, $cut + 2, \strlen($key) - $cut - 2);
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd === null) { continue; }
+            $cur = $cd->propertyTypes[$prop] ?? null;
+            $isErased = $cur === null
+                || $cur->kind === Type::KIND_UNKNOWN
+                || ($cur->isArray()
+                    && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
+            if (!$isErased) { continue; }
+            $cd->propertyTypes[$prop] = $at;
+            $changed = true;
+        }
+        return $changed;
+    }
+
+    /**
+     * @param array<string, Type> $observed
+     * @param array<string, bool> $unusable
+     */
+    private function collectPropArrayAssigns(Node $n, string $cls, array &$observed, array &$unusable): void
+    {
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $sp = $this->asStoreProperty($n);
+            if ($sp->object->kind === Node::KIND_LOAD_LOCAL
+                && $this->asLoadLocal($sp->object)->name === 'this') {
+                $key = $cls . '::' . $sp->property;
+                $vt = $sp->value->type;
+                // Only a CONCRETE array shape carries type info; a bare/unknown-
+                // element array or a non-array assignment can't seed the slot.
+                $ok = $vt->isArray() && $vt->element !== null
+                    && $vt->element->kind !== Type::KIND_UNKNOWN;
+                if (!$ok) {
+                    $unusable[$key] = true;
+                } elseif (!isset($observed[$key])) {
+                    $observed[$key] = $vt;
+                } elseif (!$this->sameElemShape($observed[$key], $vt)) {
+                    $unusable[$key] = true;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectPropArrayAssigns($c, $cls, $observed, $unusable); }
     }
 
     /**
