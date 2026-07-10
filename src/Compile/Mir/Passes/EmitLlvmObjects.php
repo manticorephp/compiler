@@ -224,15 +224,23 @@ trait EmitLlvmObjects
             $dg = $this->allocSsa();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
             $pt = $cd->propertyTypes[$pname] ?? null;
-            if ($pt !== null && $pt->isArray()) {
-                // PHP arrays are VALUES: `clone` must copy each array-typed
-                // property, not co-own the handle — else a mutation on the clone
-                // (`$b->items[] = x`) aliases the original's buffer. The copy is a
-                // fresh owned array (rc=1), so no extra retain.
+            // PHP arrays are VALUES: `clone` must copy each array property (a
+            // fresh rc=1 owned buffer, no extra retain), not co-own the handle —
+            // else a mutation on the clone (`$b->items[] = x`) aliases the
+            // original. Fires for a typed array AND a bare `array` hint whose
+            // element erased to unknown (still an array at runtime). A cell
+            // (heterogeneous) element takes the tag-aware copy so a boxed inner
+            // array separates too; a null slot passes through (copy is NULL-safe).
+            $arrHint = ($cd->propertyArrayHinted[$pname] ?? false)
+                || ($pt !== null && $pt->isArray());
+            if ($arrHint) {
                 $vp = $this->allocSsa();
                 $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
+                $isCellElem = $pt !== null && $pt->element !== null
+                    && $pt->element->kind === Type::KIND_CELL;
                 $cp = $this->allocSsa();
-                $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $vp . ")\n";
+                $fn = $isCellElem ? '__mir_array_copy_cells' : '__mir_array_copy';
+                $out .= '  ' . $cp . ' = call ptr @' . $fn . '(ptr ' . $vp . ")\n";
                 $cpi = $this->allocSsa();
                 $out .= '  ' . $cpi . ' = ptrtoint ptr ' . $cp . " to i64\n";
                 $out .= '  store i64 ' . $cpi . ', ptr ' . $dg . "\n";

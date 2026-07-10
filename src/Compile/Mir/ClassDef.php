@@ -48,6 +48,12 @@ final class ClassDef
         public array $propHooks = [],
     ) {}
 
+    /** Names of properties declared `array` (or a typed array). `clone` must
+     *  value-copy their array slot even when a bare `array` hint erased the
+     *  element type to unknown (else the clone aliases the original's buffer).
+     *  @var array<string, bool> */
+    public array $propertyArrayHinted = [];
+
     /** Whether this class carries a dynamic-property bag. */
     public function usesBag(): bool
     {

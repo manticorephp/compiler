@@ -913,6 +913,7 @@ final class LowerFromAst implements Pass
         $this->currentLowerClass = $decl->name;
         $names = [];
         $types = [];
+        $arrHinted = [];
         // Single inheritance: prepend the parent's properties so the
         // subclass instance shares the parent's field offsets, then
         // append the subclass's own. Parent is assumed already built
@@ -926,6 +927,7 @@ final class LowerFromAst implements Pass
             foreach ($pcd->propertyNames as $pn) {
                 $names[] = $pn;
                 $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
+                $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
             }
         }
         foreach ($decl->methods as $m) {
@@ -936,6 +938,7 @@ final class LowerFromAst implements Pass
                         $pdoc = $this->docTagType($m->docComment, '@param', $p->name);
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
+                        $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
                     }
                 }
             }
@@ -969,6 +972,7 @@ final class LowerFromAst implements Pass
             }
             $names[] = $prop->name;
             $types[$prop->name] = $pt;
+            $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
         }
         // Mixed-in trait properties extend the class's layout (PHP appends
         // them after the class's own fields). Without this they get no slot,
@@ -1064,7 +1068,9 @@ final class LowerFromAst implements Pass
         $isStruct = $this->hasStructAttr($decl->attributes);
         $hasBag = $this->hasDynamicPropsAttr($decl->attributes);
         $this->currentLowerClass = $savedLowerClass;
-        return new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
+        $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
+        $cd->propertyArrayHinted = $arrHinted;
+        return $cd;
     }
 
     /**
