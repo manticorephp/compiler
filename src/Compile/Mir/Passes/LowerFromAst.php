@@ -1371,13 +1371,15 @@ final class LowerFromAst implements Pass
                 ));
             if ($magicName && $pi === 0) { $pt = Type::string_(); }
             if ($magicArgs && $pi === 1) { $pt = Type::vec(Type::cell()); }
-            $params[] = new Param(
+            $mp = new Param(
                 name: $p->name,
                 type: $pt,
                 byRef: (bool)($p->byRef ?? false),
                 variadic: $isVar,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
+            $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $params[] = $mp;
             $pi = $pi + 1;
         }
         $stmts = [];
@@ -1501,13 +1503,15 @@ final class LowerFromAst implements Pass
                     $p->typeHint,
                     $this->docTagType($decl->docComment, '@param', $p->name),
                 ));
-            $params[] = new Param(
+            $fp = new Param(
                 name: $p->name,
                 type: $pt,
                 byRef: (bool)($p->byRef ?? false),
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
+            $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $params[] = $fp;
         }
         $this->currentLowerClass = '';
         $this->currentLowerFn = $decl->name;

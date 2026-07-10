@@ -2014,15 +2014,20 @@ final class EmitLlvm
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
                 // PHP arrays are values: a by-VALUE array param the body mutates
-                // in place (`$x[] = …` / `$x[$k] = …`) must not alias the caller's
-                // buffer. Copy it on entry so the mutation is private, deep-cloning
-                // `depth` levels of nested vecs (a scalar/string leaf is separated
-                // by the flat copy; a nested `vec[vec[…]]` needs each level cloned
-                // or `$x[0][] = …` still leaks). A cell/obj/unknown element yields
-                // depth -1 (unsound to copy) → left borrowed. By-ref excluded.
-                $depth = $this->arrayCopyDepth($p->type);
-                if (!$p->byRef && $p->type->isArray() && $depth >= 0
-                    && isset($this->mutatedVecLocals[$p->name])) {
+                // in place (`$x[] = …` / `$x[$k] = …` / nested `$x[0][] = …`) must
+                // not alias the caller's buffer. Copy it on entry so the mutation
+                // is private. A KNOWN nested `vec[vec[…]]` deep-clones each level
+                // (`arrayCopyDepth`); anything else — incl. a bare `array` hint
+                // that erased to unknown, or a cell/obj/string element — takes a
+                // FLAT copy (depth 0), sound for a scalar/string/obj/cell element
+                // (a nested array under an unknown type would still leak, but that
+                // needs the concrete type). Gated on the DECLARED array hint so a
+                // string param's `$s[0]=…` char-write is never mis-copied. By-ref
+                // keeps aliasing the caller.
+                if (!$p->byRef && $p->arrayHinted
+                    && $this->localMutatedAsArray($fn->body, $p->name)) {
+                    $depth = $this->arrayCopyDepth($p->type);
+                    if ($depth < 0) { $depth = 0; }
                     $ld = $this->allocSsa();
                     $body .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
                     $lp = $this->allocSsa();
@@ -3320,6 +3325,27 @@ final class EmitLlvm
             return $inner < 0 ? -1 : $inner + 1;
         }
         return -1;
+    }
+
+    /** Whether the local `$name` is the base of an in-place element store
+     *  (`$name[$k] = …` / append, or a nested `$name[0][] = …`) anywhere in `$n`
+     *  — i.e. mutated as an array, independent of its (possibly erased) type. */
+    private function localMutatedAsArray(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $base = $this->castStoreElement($n)->array;
+            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
+                $base = $this->castArrayAccess($base)->array;
+            }
+            if ($base->kind === Node::KIND_LOAD_LOCAL
+                && $this->castLoadLocal($base)->name === $name) {
+                return true;
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->localMutatedAsArray($c, $name)) { return true; }
+        }
+        return false;
     }
 
     /** Mark the array local under an `$a[$k]` element as mutated (its element may
