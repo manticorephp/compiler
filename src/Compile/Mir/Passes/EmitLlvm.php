@@ -2026,15 +2026,24 @@ final class EmitLlvm
                 // keeps aliasing the caller.
                 if (!$p->byRef && $p->arrayHinted
                     && $this->localMutatedAsArray($fn->body, $p->name)) {
-                    $depth = $this->arrayCopyDepth($p->type);
-                    if ($depth < 0) { $depth = 0; }
                     $ld = $this->allocSsa();
                     $body .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
                     $lp = $this->allocSsa();
                     $body .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
                     $cp = $this->allocSsa();
-                    $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
-                          . ', i64 ' . (string)$depth . ")\n";
+                    if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
+                        // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so
+                        // a tag-aware copy separates each boxed-array element (a
+                        // nested `$x[0][] = …` on a het `[[1,2], "s"]` would else
+                        // share the inner array). Safe only here — raw vecs can't
+                        // be tag-inspected (a large/neg int could look boxed).
+                        $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
+                    } else {
+                        $depth = $this->arrayCopyDepth($p->type);
+                        if ($depth < 0) { $depth = 0; }
+                        $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+                              . ', i64 ' . (string)$depth . ")\n";
+                    }
                     $ci = $this->allocSsa();
                     $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
                     $body .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";

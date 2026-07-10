@@ -17,3 +17,10 @@ function push(array $x): int { $x[] = new stdClass(); return count($x); }
 $o = [new stdClass(), new stdClass()];
 $rp = push($o);
 echo count($o), " ", $rp, "\n";     // 2 3
+
+// Heterogeneous outer (array + string → vec[cell]) with a nested-array element:
+// a tag-aware copy separates the boxed inner array so `$x[0][] = …` stays private.
+function nestcell(array $x): void { $x[0][] = 9; }
+$d = [[1, 2], "tag"];
+nestcell($d);
+echo count($d[0]), "\n";            // 2

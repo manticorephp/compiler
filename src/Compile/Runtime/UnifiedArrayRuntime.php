@@ -78,6 +78,7 @@ final class UnifiedArrayRuntime
         $this->emitUnsetInt();
         $this->emitCopy();
         $this->emitCopyDeep();
+        $this->emitCopyCells();
         $this->emitHashStr();
         $this->emitIndexDrop();
         $this->emitIndexBuild();
@@ -582,6 +583,73 @@ final class UnifiedArrayRuntime
         $body->store($nc, $copySlot);
         $body->store($body->add($bi, Value::int(Type::i64(), 1)), $iSlot);
         $body->br($head);
+
+        $ret->ret($ret->load(Type::ptr(), $copySlot));
+    }
+
+    /**
+     * `__mir_array_copy_cells(arr) -> ptr` — a value copy of a vec[cell] /
+     * assoc[*,cell] whose elements are all NaN-boxed: flat-copies the outer, then
+     * separates every boxed-ARRAY element (tag nibble 7) with a flat inner copy
+     * so a nested `$x[$k][] = …` on a heterogeneous `[[1,2], "s"]` can't reach the
+     * caller's inner buffer. Only valid for a cell-element array — a raw vec can't
+     * be tag-inspected (a large/negative int could masquerade as a boxed ptr).
+     * One inner level (a doubly-nested cell array still shares below it). NULL→NULL.
+     */
+    private function emitCopyCells(): void
+    {
+        $fn = $this->module->func('__mir_array_copy_cells', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $z = $fn->block('z');
+        $go = $fn->block('go');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $isarr = $fn->block('isarr');
+        $doarr = $fn->block('doarr');
+        $cont = $fn->block('cont');
+        $ret = $fn->block('ret');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $go);
+        $z->ret(Value::null());
+
+        $copy0 = $go->call('__mir_array_copy', Type::ptr(), [$arr]);
+        $copySlot = $go->alloca(Type::ptr(), 'copy');
+        $go->store($copy0, $copySlot);
+        $iSlot = $go->alloca(Type::i64(), 'i');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $go->br($head);
+
+        $hc = $head->load(Type::ptr(), $copySlot);
+        $len = $head->load(Type::i64(), $hc);
+        $hi = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $hi, $len), $ret, $body);
+
+        $bc = $body->load(Type::ptr(), $copySlot);
+        $bi = $body->load(Type::i64(), $iSlot);
+        $v = $body->call('__mir_array_value_at', Type::i64(), [$bc, $bi]);
+        // A tagged cell has header bits above the double range; a raw scalar
+        // falls through unchanged (shared — correct for int/string/obj cells).
+        $body->brIf($body->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496)), $isarr, $cont);
+        // nibble [48:52] == 7 → array payload.
+        $nib = $isarr->and_($isarr->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isarr->brIf($isarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $cont);
+        $ip = $doarr->inttoptr($doarr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
+        $icp = $doarr->call('__mir_array_copy', Type::ptr(), [$ip]);
+        // Re-box the fresh (non-null) copy as an ARRAY cell inline — the same
+        // encoding as `__manticore_box_array`: (ptr & PAYLOAD_MASK) | ARRAY tag.
+        // Inlined so `copy_cells` doesn't depend on that helper being emitted.
+        $iv = $doarr->or_(
+            $doarr->and_($doarr->ptrtoint($icp, Type::i64()), Value::int(Type::i64(), 281474976710655)),
+            Value::int(Type::i64(), -2533274790395904),
+        );
+        $bc2 = $doarr->load(Type::ptr(), $copySlot);
+        $nc = $doarr->call('__mir_array_set_int', Type::ptr(), [$bc2, $bi, $iv]);
+        $doarr->store($nc, $copySlot);
+        $doarr->br($cont);
+
+        $cont->store($cont->add($cont->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $cont->br($head);
 
         $ret->ret($ret->load(Type::ptr(), $copySlot));
     }
