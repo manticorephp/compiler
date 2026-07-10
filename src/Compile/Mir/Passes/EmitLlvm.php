@@ -2015,20 +2015,21 @@ final class EmitLlvm
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
                 // PHP arrays are values: a by-VALUE array param the body mutates
                 // in place (`$x[] = …` / `$x[$k] = …`) must not alias the caller's
-                // buffer. Copy it on entry so the mutation is private. Restricted
-                // to a SCALAR/STRING element (a nested array/obj element would be
-                // shared by the flat copy → still leak/corrupt; that needs a
-                // deep/rc-aware copy — left borrowed for now). By-ref params must
-                // keep aliasing the caller, so they are excluded.
-                if (!$p->byRef && $p->type->isArray()
-                    && $this->isScalarElemArray($p->type)
+                // buffer. Copy it on entry so the mutation is private, deep-cloning
+                // `depth` levels of nested vecs (a scalar/string leaf is separated
+                // by the flat copy; a nested `vec[vec[…]]` needs each level cloned
+                // or `$x[0][] = …` still leaks). A cell/obj/unknown element yields
+                // depth -1 (unsound to copy) → left borrowed. By-ref excluded.
+                $depth = $this->arrayCopyDepth($p->type);
+                if (!$p->byRef && $p->type->isArray() && $depth >= 0
                     && isset($this->mutatedVecLocals[$p->name])) {
                     $ld = $this->allocSsa();
                     $body .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
                     $lp = $this->allocSsa();
                     $body .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
                     $cp = $this->allocSsa();
-                    $body .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $lp . ")\n";
+                    $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+                          . ', i64 ' . (string)$depth . ")\n";
                     $ci = $this->allocSsa();
                     $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
                     $body .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
@@ -3259,6 +3260,18 @@ final class EmitLlvm
                 && $arr->type->isArray()) {
                 $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
             }
+            // A NESTED element store (`$x[0][] = …` / `$x[0][0][] = …`) mutates
+            // the root local `$x` too — its base is an `$x[0]…` element, not `$x`
+            // directly. Walk down the element chain to the root local and mark it
+            // so a by-value copy-on-entry separates the outer buffer (the deep
+            // copy owns the inner levels).
+            $base = $arr;
+            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
+                $base = $this->castArrayAccess($base)->array;
+            }
+            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
+                $this->mutatedVecLocals[$this->castLoadLocal($base)->name] = true;
+            }
         }
         // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
         // or passed as a call argument that may be by-ref) can mutate the vec —
@@ -3282,16 +3295,28 @@ final class EmitLlvm
         }
     }
 
-    /** Whether `$t` is an array whose element is a SCALAR / string (a flat
-     *  `__mir_array_copy` fully separates it). A nested-array / object / cell
-     *  element is shared by the flat copy, so it is NOT safe to copy-on-entry. */
-    private function isScalarElemArray(Type $t): bool
+    /**
+     * Number of array-nesting levels to deep-copy for a sound by-value copy of
+     * an array of type `$t`, or -1 when a copy is unsound (a cell/obj/unknown
+     * element, whose sharing/rc a flat memcpy can't model). 0 = a leaf element
+     * (scalar / string — a flat `__mir_array_copy` fully separates it). N = the
+     * element is itself an N-deep VEC of copyable arrays (`vec[vec[int]]` → 1),
+     * so each level must be cloned. Restricted to VEC element arrays — an assoc
+     * (hashed) element can't be index-walked by the deep copier. */
+    private function arrayCopyDepth(Type $t): int
     {
         $e = $t->element;
-        if ($e === null) { return false; }
+        if ($e === null) { return -1; }
         $k = $e->kind;
-        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL) {
+            return 0;
+        }
+        if ($k === Type::KIND_ARRAY && $e->isVec()) {
+            $inner = $this->arrayCopyDepth($e);
+            return $inner < 0 ? -1 : $inner + 1;
+        }
+        return -1;
     }
 
     /** Mark the array local under an `$a[$k]` element as mutated (its element may

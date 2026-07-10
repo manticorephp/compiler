@@ -77,6 +77,7 @@ final class UnifiedArrayRuntime
         $this->emitUnsetStr();
         $this->emitUnsetInt();
         $this->emitCopy();
+        $this->emitCopyDeep();
         $this->emitHashStr();
         $this->emitIndexDrop();
         $this->emitIndexBuild();
@@ -533,6 +534,56 @@ final class UnifiedArrayRuntime
         $go->store(Value::int(Type::i64(), 0), $this->hdr($go, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $go->store(Value::null(), $this->hdr($go, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
         $go->ret($copy);
+    }
+
+    /**
+     * `__mir_array_copy_deep(arr, depth) -> ptr` — a value copy that clones
+     * `depth` nested VEC levels. depth 0 is the flat `__mir_array_copy` (a
+     * scalar/string/obj leaf element is correctly shared). depth>0 recurses into
+     * each element (an inner vec) so `$x[0][] = …` on the copy can't reach the
+     * caller's inner buffer. Element order is the packed slot order (0..len);
+     * used only for VEC arrays (the copy-on-entry restricts to them). NULL→NULL.
+     */
+    private function emitCopyDeep(): void
+    {
+        $fn = $this->module->func('__mir_array_copy_deep', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $depth = $fn->param(Type::i64(), 'depth');
+        $e = $fn->block('entry');
+        $z = $fn->block('z');
+        $go = $fn->block('go');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $ret = $fn->block('ret');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $go);
+        $z->ret(Value::null());
+
+        $copy0 = $go->call('__mir_array_copy', Type::ptr(), [$arr]);
+        $copySlot = $go->alloca(Type::ptr(), 'copy');
+        $go->store($copy0, $copySlot);
+        $iSlot = $go->alloca(Type::i64(), 'i');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $go->brIf($go->icmp('sle', $depth, Value::int(Type::i64(), 0)), $ret, $head);
+
+        $hc = $head->load(Type::ptr(), $copySlot);
+        $len = $head->load(Type::i64(), $hc);   // logical length at offset 0
+        $hi = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $hi, $len), $ret, $body);
+
+        $bc = $body->load(Type::ptr(), $copySlot);
+        $bi = $body->load(Type::i64(), $iSlot);
+        $v = $body->call('__mir_array_value_at', Type::i64(), [$bc, $bi]);
+        $vp = $body->inttoptr($v, Type::ptr());
+        $v2 = $body->call('__mir_array_copy_deep', Type::ptr(),
+            [$vp, $body->sub($depth, Value::int(Type::i64(), 1))]);
+        $v2i = $body->ptrtoint($v2, Type::i64());
+        $nc = $body->call('__mir_array_set_int', Type::ptr(), [$bc, $bi, $v2i]);
+        $body->store($nc, $copySlot);
+        $body->store($body->add($bi, Value::int(Type::i64(), 1)), $iSlot);
+        $body->br($head);
+
+        $ret->ret($ret->load(Type::ptr(), $copySlot));
     }
 
     /** PACKED → 8, HASHED → 24 (element/entry stride). */
