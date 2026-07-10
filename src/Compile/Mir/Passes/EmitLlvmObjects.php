@@ -1126,33 +1126,20 @@ trait EmitLlvmObjects
                 $this->lastValueType = 'i64';
                 return $out;
             }
-            // String receiver: 0 <= idx < length word (legacy probe).
+            // String receiver: isset($s[$i]) — the binary-safe length lives in
+            // the header (at ptr-16), NOT at ptr (that's the first data byte),
+            // and a negative offset counts from the end — the helper does both.
             $out = $this->emitNode($aa->array);
             $out .= $this->coerceToPtr();
             $arr = $this->lastValue;
-            // An empty `[]` lowers to a null ptr (and a string-key probe on a
-            // vec-typed empty literal lands here); reading the length word
-            // from null faults. Redirect null to the shared zero word → len 0
-            // → out of bounds → isset false.
-            $nz = $this->allocSsa();
-            $out .= '  ' . $nz . ' = icmp eq ptr ' . $arr . ", null\n";
-            $arrSafe = $this->allocSsa();
-            $out .= '  ' . $arrSafe . ' = select i1 ' . $nz
-                  . ', ptr @__mir_zero_word, ptr ' . $arr . "\n";
-            $arr = $arrSafe;
-            $len = $this->allocSsa();
-            $out .= '  ' . $len . ' = load i64, ptr ' . $arr . "\n";
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
-            $ge0 = $this->allocSsa();
-            $out .= '  ' . $ge0 . ' = icmp sge i64 ' . $idx . ", 0\n";
-            $ltl = $this->allocSsa();
-            $out .= '  ' . $ltl . ' = icmp slt i64 ' . $idx . ', ' . $len . "\n";
-            $both = $this->allocSsa();
-            $out .= '  ' . $both . ' = and i1 ' . $ge0 . ', ' . $ltl . "\n";
+            $ok = $this->allocSsa();
+            $out .= '  ' . $ok . ' = call i1 @__mir_str_offset_isset(ptr ' . $arr
+                  . ', i64 ' . $idx . ")\n";
             $z = $this->allocSsa();
-            $out .= '  ' . $z . ' = zext i1 ' . $both . " to i64\n";
+            $out .= '  ' . $z . ' = zext i1 ' . $ok . " to i64\n";
             $this->lastValue = $z;
             $this->lastValueType = 'i64';
             return $out;

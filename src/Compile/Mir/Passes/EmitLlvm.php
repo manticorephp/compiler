@@ -8116,7 +8116,8 @@ final class EmitLlvm
     private function emitArrayAccess(Node $n): string
     {
         $aa = $this->castArrayAccess($n);
-        // `$s[$i]` on a string → fresh 1-char NUL-terminated string.
+        // `$s[$i]` on a string → fresh 1-char string. Negative index counts
+        // from the end; out-of-range yields "" (both handled by the helper).
         if ($aa->array->type->kind === Type::KIND_STRING) {
             $out = $this->emitNode($aa->array);
             $out .= $this->coerceToPtr();
@@ -8124,17 +8125,9 @@ final class EmitLlvm
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
-            $bytePtr = $this->allocSsa();
-            $out .= '  ' . $bytePtr . ' = getelementptr inbounds i8, ptr '
-                  . $base . ', i64 ' . $idx . "\n";
-            $ch = $this->allocSsa();
-            $out .= '  ' . $ch . ' = load i8, ptr ' . $bytePtr . "\n";
             $buf = $this->allocSsa();
-            $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 2)\n";
-            $out .= '  store i8 ' . $ch . ', ptr ' . $buf . "\n";
-            $nul = $this->allocSsa();
-            $out .= '  ' . $nul . ' = getelementptr inbounds i8, ptr ' . $buf . ", i64 1\n";
-            $out .= '  store i8 0, ptr ' . $nul . "\n";
+            $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
+                  . $base . ', i64 ' . $idx . ")\n";
             $this->lastValue = $buf;
             $this->lastValueType = 'ptr';
             return $out;
@@ -8151,6 +8144,30 @@ final class EmitLlvm
     private function emitStoreElement(Node $n): string
     {
         $se = $this->castStoreElement($n);
+        // `$s[$i] = $c` on a string → set byte $i to $c's first byte and write
+        // the new string back into the base. Growing past the end pads with
+        // spaces; negative $i counts from the end (all in the helper). The `[]`
+        // append form is a PHP error on strings, so it stays out of this path.
+        if ($se->array->type->kind === Type::KIND_STRING
+            && $se->index->kind !== Node::KIND_NULL_CONST
+            && $se->value->type->kind === Type::KIND_STRING) {
+            $out = $this->emitNode($se->array);
+            $out .= $this->coerceToPtr();
+            $base = $this->lastValue;
+            $out .= $this->emitNode($se->index);
+            $out .= $this->coerceToI64();
+            $idx = $this->lastValue;
+            $out .= $this->emitNode($se->value);
+            $out .= $this->coerceToPtr();
+            $chs = $this->lastValue;
+            $nw = $this->allocSsa();
+            $out .= '  ' . $nw . ' = call ptr @__mir_str_set_char(ptr ' . $base
+                  . ', i64 ' . $idx . ', ptr ' . $chs . ")\n";
+            $out .= $this->vecWriteBack($se->array, $nw, false);
+            $this->lastValue = $nw;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         // `$obj[$k] = $v` / `$obj[] = $v` on an ArrayAccess object →
         // `$obj->offsetSet($k, $v)`. The append form `$obj[]=` already lowered
         // its index to a NullConst, so `$se->index` is the right key as-is.

@@ -1295,6 +1295,68 @@ trait EmitLlvmRuntime
         $out .= "  %c = call i32 @memcmp(ptr %a, ptr %b, i64 %la)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  ret i1 %eq\n}\n";
+
+        // `$s[$i]` read — negative index counts from the end; out-of-range → "".
+        // Returns a fresh 1-char headered string (binary-safe).
+        $out .= "\ndefine ptr @__mir_str_char_at(ptr %s, i64 %i) {\nentry:\n";
+        $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %neg = icmp slt i64 %i, 0\n";
+        $out .= "  %iadj = add i64 %i, %len\n";
+        $out .= "  %ix = select i1 %neg, i64 %iadj, i64 %i\n";
+        $out .= "  %lo = icmp slt i64 %ix, 0\n";
+        $out .= "  %hi = icmp sge i64 %ix, %len\n";
+        $out .= "  %oob = or i1 %lo, %hi\n";
+        $out .= "  br i1 %oob, label %empty, label %one\n";
+        $out .= "empty:\n";
+        $out .= "  %e = call ptr @__mir_str_new(ptr null, i64 0)\n";
+        $out .= "  ret ptr %e\n";
+        $out .= "one:\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %ix\n";
+        $out .= "  %r = call ptr @__mir_str_new(ptr %cp, i64 1)\n";
+        $out .= "  ret ptr %r\n}\n";
+
+        // isset(\$s[\$i]) — true iff the (end-relative) offset is in range.
+        $out .= "\ndefine i1 @__mir_str_offset_isset(ptr %s, i64 %i) {\nentry:\n";
+        $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %neg = icmp slt i64 %i, 0\n";
+        $out .= "  %iadj = add i64 %i, %len\n";
+        $out .= "  %ix = select i1 %neg, i64 %iadj, i64 %i\n";
+        $out .= "  %lo = icmp slt i64 %ix, 0\n";
+        $out .= "  %hi = icmp sge i64 %ix, %len\n";
+        $out .= "  %oob = or i1 %lo, %hi\n";
+        $out .= "  %ok = xor i1 %oob, true\n";
+        $out .= "  ret i1 %ok\n}\n";
+
+        // `$s[$i] = $c` — returns a NEW headered string with byte %ix set to the
+        // first byte of %chs. Growing past the end pads the gap with spaces
+        // (PHP). Negative offset counts from the end; still-negative → no-op copy.
+        $out .= "\ndefine ptr @__mir_str_set_char(ptr %s, i64 %i, ptr %chs) {\nentry:\n";
+        $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %neg = icmp slt i64 %i, 0\n";
+        $out .= "  %iadj = add i64 %i, %len\n";
+        $out .= "  %ix = select i1 %neg, i64 %iadj, i64 %i\n";
+        $out .= "  %bad = icmp slt i64 %ix, 0\n";
+        $out .= "  br i1 %bad, label %nop, label %go\n";
+        $out .= "nop:\n";
+        $out .= "  %cpy = call ptr @__mir_str_new(ptr %s, i64 %len)\n";
+        $out .= "  ret ptr %cpy\n";
+        $out .= "go:\n";
+        $out .= "  %ix1 = add i64 %ix, 1\n";
+        $out .= "  %grow = icmp sgt i64 %ix1, %len\n";
+        $out .= "  %newlen = select i1 %grow, i64 %ix1, i64 %len\n";
+        $out .= "  %buf = call ptr @__mir_str_new(ptr null, i64 %newlen)\n";
+        $out .= "  call ptr @memcpy(ptr %buf, ptr %s, i64 %len)\n";
+        $out .= "  br i1 %grow, label %pad, label %setc\n";
+        $out .= "pad:\n";
+        $out .= "  %padp = getelementptr inbounds i8, ptr %buf, i64 %len\n";
+        $out .= "  %padn = sub i64 %ix, %len\n";
+        $out .= "  call ptr @memset(ptr %padp, i32 32, i64 %padn)\n";
+        $out .= "  br label %setc\n";
+        $out .= "setc:\n";
+        $out .= "  %chb = load i8, ptr %chs\n";
+        $out .= "  %dst = getelementptr inbounds i8, ptr %buf, i64 %ix\n";
+        $out .= "  store i8 %chb, ptr %dst\n";
+        $out .= "  ret ptr %buf\n}\n";
         return $out;
     }
 
