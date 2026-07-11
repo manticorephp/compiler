@@ -76,10 +76,13 @@ final class InsertMemoryOps implements Pass
 
     /** @var array<string, \Compile\Mir\ClassDef> class name → layout */
     private array $classes = [];
+    /** @var array<string, mixed> enum name → def (enum values are non-rc). */
+    private array $enums = [];
 
     public function run(Module $module): Module
     {
         $this->classes = $module->classes;
+        $this->enums = $module->enums;
         // FFI functions return FOREIGN values (raw libc buffers/pointers
         // from calloc/malloc/fopen/...) that do NOT follow the +1 owned
         // return convention and carry no rc header — never rc-track them.
@@ -178,6 +181,12 @@ final class InsertMemoryOps implements Pass
             if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) {
                 return false;
             }
+            // Enum values are ORDINALS (an immortal per-case singleton when
+            // boxed) — never rc-managed, whatever produced them. A `from()` /
+            // a method returning the enum yields an obj<Enum> STATIC/METHOD call
+            // that would otherwise be tracked as a +1 owned heap object and
+            // rc_release the ordinal-as-pointer (SIGSEGV).
+            if ($cls !== '' && isset($this->enums[$cls])) { return false; }
             // Closures have no rc header (struct is [fn_ptr, captures...]).
             // Both the synthesized `__closure_N` and a `\Closure`-typed slot
             // (class "Closure") hold such a header-less struct.

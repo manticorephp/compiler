@@ -627,6 +627,20 @@ trait EmitLlvmObjects
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToI64();
         $ord = $this->lastValue;
+        // A nullable-enum CELL receiver (`Enum::tryFrom(...)->name`) carries
+        // box_object(singleton), not a raw ordinal — mask to the data ptr and
+        // load the ordinal at +16 (mirrors emitEnumCellSingletons' layout).
+        if ($pa->object->type->kind === Type::KIND_CELL) {
+            $m = $this->allocSsa();
+            $out .= '  ' . $m . ' = and i64 ' . $ord . ", 281474976710655\n";
+            $p = $this->allocSsa();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
+            $g0 = $this->allocSsa();
+            $out .= '  ' . $g0 . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
+            $ordR = $this->allocSsa();
+            $out .= '  ' . $ordR . ' = load i64, ptr ' . $g0 . "\n";
+            $ord = $ordR;
+        }
         if ($pa->property === 'value' && $this->edBacking($ed) === 'int') {
             $gep = $this->allocSsa();
             $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x i64], ptr @'
@@ -1373,6 +1387,99 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * Backed-enum `from($v)` / `tryFrom($v)`. Unrolled scan of the constant
+     * `@<Enum>__values` table: a hit yields the case (from → raw ordinal;
+     * tryFrom → box_object(singleton), a nullable-enum cell); a miss throws a
+     * catchable `ValueError` (from) or yields box_null (tryFrom).
+     */
+    private function emitEnumFrom(string $enum, Node $arg, bool $try): string
+    {
+        $ed = $this->enums[$enum];
+        $n = \count($ed->caseNames);
+        $isStr = $this->edBacking($ed) === 'string';
+        $out = $this->emitNode($arg);
+        $out .= $isStr ? $this->coerceToPtr() : $this->coerceToI64();
+        $needle = $this->lastValue;
+        $res = $this->allocSsa();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $done = $this->allocLabel('efrom.done');
+        $vt = $isStr ? 'ptr' : 'i64';
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $hit = $this->allocLabel('efrom.hit');
+            $nextL = $this->allocLabel('efrom.next');
+            $g = $this->allocSsa();
+            $out .= '  ' . $g . ' = getelementptr [' . (string)$n . ' x ' . $vt . '], ptr @'
+                  . $enum . '__values, i64 0, i64 ' . (string)$i . "\n";
+            $v = $this->allocSsa();
+            $out .= '  ' . $v . ' = load ' . $vt . ', ptr ' . $g . "\n";
+            $eq = $this->allocSsa();
+            if ($isStr) {
+                $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $needle . ', ptr ' . $v . ")\n";
+            } else {
+                $out .= '  ' . $eq . ' = icmp eq i64 ' . $needle . ', ' . $v . "\n";
+            }
+            $out .= '  br i1 ' . $eq . ', label %' . $hit . ', label %' . $nextL . "\n";
+            $out .= $hit . ":\n";
+            if ($try) {
+                $cg = $this->allocSsa();
+                $out .= '  ' . $cg . ' = getelementptr [' . (string)$n . ' x i64], ptr @'
+                      . $enum . '__cases, i64 0, i64 ' . (string)$i . "\n";
+                $dp = $this->allocSsa();
+                $out .= '  ' . $dp . ' = load i64, ptr ' . $cg . "\n";
+                $pp = $this->allocSsa();
+                $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+                $bx = $this->allocSsa();
+                $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+                $out .= '  store i64 ' . $bx . ', ptr ' . $res . "\n";
+            } else {
+                $out .= '  store i64 ' . (string)$i . ', ptr ' . $res . "\n";
+            }
+            $out .= '  br label %' . $done . "\n";
+            $out .= $nextL . ":\n";
+        }
+        // Fell through every case → miss.
+        if ($try) {
+            $out .= '  store i64 -3659174697238528, ptr ' . $res . "\n"; // box_null
+            $out .= '  br label %' . $done . "\n";
+        } else {
+            // PHP's exact message: `"<v>" is not a valid backing value for enum
+            // <Name>` (string values quoted; int values bare) — built at runtime
+            // so getMessage() matches. Re-emits $arg (miss path only).
+            $tail = new \Compile\Mir\StringConst(
+                ' is not a valid backing value for enum ' . $enum, Type::string_());
+            if ($isStr) {
+                $msgNode = new \Compile\Mir\Concat(
+                    new \Compile\Mir\Concat(
+                        new \Compile\Mir\StringConst('"', Type::string_()), $arg),
+                    new \Compile\Mir\Concat(
+                        new \Compile\Mir\StringConst('"', Type::string_()), $tail));
+            } else {
+                $msgNode = new \Compile\Mir\Concat($arg, $tail);
+            }
+            $throw = new \Compile\Mir\Throw_(
+                new \Compile\Mir\NewObj('ValueError', [
+                    $msgNode,
+                    new \Compile\Mir\IntConst(0, Type::int_()),
+                    new \Compile\Mir\NullConst(Type::obj('Throwable')),
+                ], Type::obj('ValueError')),
+                Type::void(),
+            );
+            // emitNode(Throw_) longjmps + `unreachable`, then leaves a trailing
+            // empty `dead.N:` block — terminate it into `done` so the label that
+            // follows is well-formed (the branch is itself dead: the throw never
+            // returns). `res` is unset on this path but never loaded live.
+            $out .= $this->emitNode($throw);
+            $out .= '  br label %' . $done . "\n";
+        }
+        $out .= $done . ":\n";
+        $r = $this->allocSsa();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** Copy a closure's env struct, rebinding the `$this` slot (struct slot 1)
      *  to `$objNode`. Shared by Closure::bind / ->bindTo / ->call. The bound
      *  value carries the same fn ptr (slot 0), so an invoke dispatches through
@@ -1428,6 +1535,11 @@ trait EmitLlvmObjects
         if (isset($this->enums[$sc->class]) && $sc->method === 'cases'
             && \count($sc->args) === 0) {
             return $this->emitEnumCases($sc->class);
+        }
+        // Backed-enum `from($v)` / `tryFrom($v)` — value→case lookup.
+        if (isset($this->enums[$sc->class]) && \count($sc->args) === 1
+            && ($sc->method === 'from' || $sc->method === 'tryFrom')) {
+            return $this->emitEnumFrom($sc->class, $sc->args[0], $sc->method === 'tryFrom');
         }
         // Method overloading: an unresolved static method on a class that
         // defines __callStatic reroutes to `Class::__callStatic('name', [args])`.

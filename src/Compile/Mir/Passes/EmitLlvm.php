@@ -2986,6 +2986,13 @@ final class EmitLlvm
         if ($n->kind === Node::KIND_THROW || $n->kind === Node::KIND_TRY_CATCH) {
             return true;
         }
+        // `Enum::from($v)` synthesizes a `throw ValueError` on a miss — the base
+        // landing pad must be set up so an uncaught miss exits 255, not longjmp
+        // to garbage. (tryFrom never throws.)
+        if ($n->kind === Node::KIND_STATIC_CALL) {
+            $sc = $this->castStaticCall($n);
+            if ($sc->method === 'from' && isset($this->enums[$sc->class])) { return true; }
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             if ($this->scanUsesExceptions($c)) { return true; }
         }

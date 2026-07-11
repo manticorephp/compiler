@@ -1,0 +1,12 @@
+Diamonds D
+High 10
+"Z" is not a valid backing value for enum Suit
+99 is not a valid backing value for enum Level
+Clubs
+NULL
+enum(Suit::Spades)
+Low 0
+enum(Level::Low)
+NULL
+have Hearts (H)
+absent

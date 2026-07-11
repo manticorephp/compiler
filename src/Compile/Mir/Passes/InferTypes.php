@@ -3290,6 +3290,16 @@ final class InferTypes implements Pass
             $node->type = $this->localTypes[$pk];
             return $node->type;
         }
+        // A nullable-enum CELL (`Enum::tryFrom(...)->name`) carries the enum
+        // class — resolve `->name`/`->value` to its real type (emitEnumProp
+        // unboxes the singleton), BEFORE the generic tagged-cell fallthrough.
+        if ($objType->kind === Type::KIND_CELL && $objType->class !== null
+            && isset($this->enums[$objType->class])) {
+            $ed = $this->enums[$objType->class];
+            $node->type = ($node->property === 'value' && $this->edBacking($ed) === 'int')
+                ? Type::int_() : Type::string_();
+            return $node->type;
+        }
         // `$cell->prop` (tagged object, e.g. json_decode result) → cell.
         if ($objType->kind === Type::KIND_CELL) {
             $node->type = Type::cell();
@@ -3738,6 +3748,16 @@ final class InferTypes implements Pass
         // not yet implemented (throw / null-sentinel semantics).
         if (isset($this->enums[$node->class]) && $node->method === 'cases') {
             $node->type = Type::vec(Type::obj($node->class));
+            return $node->type;
+        }
+        // `Enum::from($v)` → the enum (raw ordinal); `Enum::tryFrom($v)` → a
+        // NULLABLE enum carried as a cell (box_null on miss, box_object(singleton)
+        // on hit) — null can't be a raw ordinal (0 is a valid case).
+        if (isset($this->enums[$node->class])
+            && ($node->method === 'from' || $node->method === 'tryFrom')) {
+            $node->type = $node->method === 'from'
+                ? Type::obj($node->class)
+                : new Type(Type::KIND_CELL, class: $node->class);
             return $node->type;
         }
         // Method overloading: an unresolved static method on a class with
