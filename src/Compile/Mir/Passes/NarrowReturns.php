@@ -176,12 +176,9 @@ final class NarrowReturns implements Pass
     private function collectReturns(Node $n): void
     {
         if ($n->kind === Node::KIND_RETURN) {
-            $r = $this->asReturn($n);
-            if ($r->value !== null) { $this->collected[] = $r; }
+            if ($n->value !== null) { $this->collected[] = $n; }
             return;
         }
         foreach (Walk::children($n) as $c) { $this->collectReturns($c); }
     }
-
-    private function asReturn(Node $n): Return_ { return $n; }
 }

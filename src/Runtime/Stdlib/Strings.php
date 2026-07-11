@@ -386,3 +386,39 @@ function str_word_count(string $s, int $format = 0): int
     }
     return $count;
 }
+
+/** Perl-style string increment backing the `++` operator on a string. A numeric
+ *  string increments NUMERICALLY (int, or float when it has a `.`/`e`); an empty
+ *  string becomes "1"; otherwise the rightmost alphanumeric advances with carry
+ *  ('z'->'a', '9'->'0', 'Z'->'A'), and a carry off the front prepends '1'/'a'/'A'.
+ *  A non-alphanumeric char stops the carry. `$v` arrives as the slot's cell so a
+ *  chained `$s++` (already promoted to int/float) keeps incrementing numerically. */
+function __mir_str_increment(mixed $v): mixed
+{
+    if (\is_int($v)) { return $v + 1; }
+    if (\is_float($v)) { return $v + 1; }
+    $s = (string)$v;
+    if (\is_numeric($s)) {
+        if (\strpos($s, ".") !== false || \strpos($s, "e") !== false || \strpos($s, "E") !== false) {
+            return ((float)$s) + 1.0;
+        }
+        return ((int)$s) + 1;
+    }
+    if ($s === "") { return "1"; }
+    $i = \strlen($s) - 1;
+    while ($i >= 0) {
+        $c = $s[$i];
+        if ($c >= "0" && $c <= "8") { $s[$i] = \chr(\ord($c) + 1); return $s; }
+        if ($c === "9") { $s[$i] = "0"; $i = $i - 1; continue; }
+        if ($c >= "a" && $c <= "y") { $s[$i] = \chr(\ord($c) + 1); return $s; }
+        if ($c === "z") { $s[$i] = "a"; $i = $i - 1; continue; }
+        if ($c >= "A" && $c <= "Y") { $s[$i] = \chr(\ord($c) + 1); return $s; }
+        if ($c === "Z") { $s[$i] = "A"; $i = $i - 1; continue; }
+        return $s;
+    }
+    $first = $s[0];
+    if ($first === "0") { return "1" . $s; }
+    if ($first === "a") { return "a" . $s; }
+    if ($first === "A") { return "A" . $s; }
+    return $s;
+}

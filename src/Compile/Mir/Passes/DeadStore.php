@@ -113,146 +113,132 @@ final class DeadStore implements Pass
 
     private function collectUses(Node $n): void
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_LOAD_LOCAL) {
-            $this->usedLocals[$this->asLoadLocal($n)->name] = true;
+        if ($n->kind === Node::KIND_LOAD_LOCAL) {
+            $this->usedLocals[$n->name] = true;
             return;
         }
-        if ($k === Node::KIND_STORE_LOCAL) { $this->collectUses($this->asStoreLocal($n)->value); return; }
-        if ($k === Node::KIND_ADD) { $a = $this->asAdd($n); $this->collectUses($a->left); $this->collectUses($a->right); return; }
-        if ($k === Node::KIND_SUB) { $a = $this->asSub($n); $this->collectUses($a->left); $this->collectUses($a->right); return; }
-        if ($k === Node::KIND_MUL) { $a = $this->asMul($n); $this->collectUses($a->left); $this->collectUses($a->right); return; }
-        if ($k === Node::KIND_DIV) { $a = $this->asDiv($n); $this->collectUses($a->left); $this->collectUses($a->right); return; }
-        if ($k === Node::KIND_MOD) { $a = $this->asMod($n); $this->collectUses($a->left); $this->collectUses($a->right); return; }
-        if ($k === Node::KIND_NEG) { $this->collectUses($this->asNeg($n)->operand); return; }
-        if ($k === Node::KIND_NOT) { $this->collectUses($this->asNot($n)->operand); return; }
-        if ($k === Node::KIND_BITOP) { $b = $this->asBitOp($n); $this->collectUses($b->left); $this->collectUses($b->right); return; }
-        if ($k === Node::KIND_BITNOT) { $this->collectUses($this->asBitNot($n)->operand); return; }
-        if ($k === Node::KIND_CONCAT) { $c = $this->asConcat($n); $this->collectUses($c->left); $this->collectUses($c->right); return; }
-        if ($k === Node::KIND_CMP) { $c = $this->asCmp($n); $this->collectUses($c->left); $this->collectUses($c->right); return; }
-        if ($k === Node::KIND_CAST) { $this->collectUses($this->asCast($n)->operand); return; }
-        if ($k === Node::KIND_INSTANCEOF) { $this->collectUses($this->asInstanceof($n)->operand); return; }
-        if ($k === Node::KIND_NULLCOALESCE) { $nc = $this->asNullCoalesce($n); $this->collectUses($nc->left); $this->collectUses($nc->right); return; }
-        if ($k === Node::KIND_CLOSURE) { foreach ($this->asClosure($n)->captures as $c) { $this->collectUses($c); } return; }
-        if ($k === Node::KIND_INVOKE) { $iv = $this->asInvoke($n); $this->collectUses($iv->callee); foreach ($iv->args as $a) { $this->collectUses($a); } return; }
-        if ($k === Node::KIND_INCDEC) { $this->usedLocals[$this->asIncDec($n)->name] = true; return; }
-        if ($k === Node::KIND_STATIC_PROP) { return; }
-        if ($k === Node::KIND_STORE_STATIC_PROP) { $this->collectUses($this->asStoreStaticProp($n)->value); return; }
-        if ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            $sld = $this->asStaticLocalDecl($n);
-            $this->usedLocals[$sld->name] = true;
-            if ($sld->init !== null) { $this->collectUses($sld->init); }
+        if ($n->kind === Node::KIND_STORE_LOCAL) { $this->collectUses($n->value); return; }
+        if ($n->kind === Node::KIND_ADD) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_SUB) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_MUL) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_DIV) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_MOD) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_NEG) { $this->collectUses($n->operand); return; }
+        if ($n->kind === Node::KIND_NOT) { $this->collectUses($n->operand); return; }
+        if ($n->kind === Node::KIND_BITOP) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_BITNOT) { $this->collectUses($n->operand); return; }
+        if ($n->kind === Node::KIND_CONCAT) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_CMP) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_CAST) { $this->collectUses($n->operand); return; }
+        if ($n->kind === Node::KIND_INSTANCEOF) { $this->collectUses($n->operand); return; }
+        if ($n->kind === Node::KIND_NULLCOALESCE) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_CLOSURE) { foreach ($n->captures as $c) { $this->collectUses($c); } return; }
+        if ($n->kind === Node::KIND_INVOKE) { $this->collectUses($n->callee); foreach ($n->args as $a) { $this->collectUses($a); } return; }
+        if ($n->kind === Node::KIND_INCDEC) { $this->usedLocals[$n->name] = true; return; }
+        if ($n->kind === Node::KIND_STATIC_PROP) { return; }
+        if ($n->kind === Node::KIND_STORE_STATIC_PROP) { $this->collectUses($n->value); return; }
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $this->usedLocals[$n->name] = true;
+            if ($n->init !== null) { $this->collectUses($n->init); }
             return;
         }
-        if ($k === Node::KIND_ISSET) {
-            foreach ($this->asIsset($n)->targets as $t) { $this->collectUses($t); }
+        if ($n->kind === Node::KIND_ISSET) {
+            foreach ($n->targets as $t) { $this->collectUses($t); }
             return;
         }
-        if ($k === Node::KIND_UNSET) {
-            foreach ($this->asUnset($n)->targets as $t) { $this->collectUses($t); }
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach ($n->targets as $t) { $this->collectUses($t); }
             return;
         }
-        if ($k === Node::KIND_CLASS_NAME) { $this->collectUses($this->asClassName($n)->operand); return; }
-        if ($k === Node::KIND_REF_ALIAS) {
-            $ra = $this->asRefAlias($n);
-            $this->usedLocals[$ra->target] = true;
-            $this->usedLocals[$ra->source] = true;
+        if ($n->kind === Node::KIND_CLASS_NAME) { $this->collectUses($n->operand); return; }
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $this->usedLocals[$n->target] = true;
+            $this->usedLocals[$n->source] = true;
             return;
         }
-        if ($k === Node::KIND_REF_ADDR) {
+        if ($n->kind === Node::KIND_REF_ADDR) {
             // The target aliases a container slot — a store to it writes THROUGH
             // to the property/element (an observable side effect), so it must
             // never be dead-store eliminated. Mark it used unconditionally.
-            $ra = $this->asRefAddr($n);
-            $this->usedLocals[$ra->target] = true;
-            $this->collectUses($ra->lvalue);
+            $this->usedLocals[$n->target] = true;
+            $this->collectUses($n->lvalue);
             return;
         }
-        if ($k === Node::KIND_REF_BIND) {
+        if ($n->kind === Node::KIND_REF_BIND) {
             // The target holds a by-ref return address; a store to it writes
             // THROUGH to the aliased slot (observable), so keep it used.
-            $rb = $this->asRefBind($n);
-            $this->usedLocals[$rb->target] = true;
-            $this->collectUses($rb->call);
+            $this->usedLocals[$n->target] = true;
+            $this->collectUses($n->call);
             return;
         }
-        if ($k === Node::KIND_THROW) { $this->collectUses($this->asThrow($n)->value); return; }
-        if ($k === Node::KIND_TRY_CATCH) {
-            $tc = $this->asTryCatch($n);
-            foreach ($tc->tryBody as $s) { $this->collectUses($s); }
-            foreach ($tc->catches as $c) {
+        if ($n->kind === Node::KIND_THROW) { $this->collectUses($n->value); return; }
+        if ($n->kind === Node::KIND_TRY_CATCH) {
+            foreach ($n->tryBody as $s) { $this->collectUses($s); }
+            foreach ($n->catches as $c) {
                 if ($c->var !== null) { $this->usedLocals[$c->var] = true; }
                 foreach ($c->body as $s) { $this->collectUses($s); }
             }
-            foreach ($tc->finallyBody as $s) { $this->collectUses($s); }
+            foreach ($n->finallyBody as $s) { $this->collectUses($s); }
             return;
         }
-        if ($k === Node::KIND_TERNARY) {
-            $t = $this->asTernary($n);
-            $this->collectUses($t->cond);
-            if ($t->then !== null) { $this->collectUses($t->then); }
-            $this->collectUses($t->else_);
+        if ($n->kind === Node::KIND_TERNARY) {
+            $this->collectUses($n->cond);
+            if ($n->then !== null) { $this->collectUses($n->then); }
+            $this->collectUses($n->else_);
             return;
         }
-        if ($k === Node::KIND_ECHO) {
-            foreach ($this->asEcho($n)->exprs as $e) { $this->collectUses($e); }
+        if ($n->kind === Node::KIND_ECHO) {
+            foreach ($n->exprs as $e) { $this->collectUses($e); }
             return;
         }
-        if ($k === Node::KIND_RETURN) {
-            $v = $this->asReturn($n)->value;
+        if ($n->kind === Node::KIND_RETURN) {
+            $v = $n->value;
             if ($v !== null) { $this->collectUses($v); }
             return;
         }
-        if ($k === Node::KIND_CALL) {
-            foreach ($this->asCall($n)->args as $a) { $this->collectUses($a); }
+        if ($n->kind === Node::KIND_CALL) {
+            foreach ($n->args as $a) { $this->collectUses($a); }
             return;
         }
-        if ($k === Node::KIND_IF) {
-            $i = $this->asIf($n);
-            $this->collectUses($i->cond);
-            $this->collectUses($i->then);
-            if ($i->else !== null) { $this->collectUses($i->else); }
+        if ($n->kind === Node::KIND_IF) {
+            $this->collectUses($n->cond);
+            $this->collectUses($n->then);
+            if ($n->else !== null) { $this->collectUses($n->else); }
             return;
         }
-        if ($k === Node::KIND_WHILE) {
-            $w = $this->asWhile($n);
-            $this->collectUses($w->cond);
-            $this->collectUses($w->body);
+        if ($n->kind === Node::KIND_WHILE) {
+            $this->collectUses($n->cond);
+            $this->collectUses($n->body);
             return;
         }
-        if ($k === Node::KIND_FOR) {
-            $f = $this->asFor($n);
-            if ($f->init !== null) { $this->collectUses($f->init); }
-            if ($f->cond !== null) { $this->collectUses($f->cond); }
-            if ($f->step !== null) { $this->collectUses($f->step); }
-            $this->collectUses($f->body);
+        if ($n->kind === Node::KIND_FOR) {
+            if ($n->init !== null) { $this->collectUses($n->init); }
+            if ($n->cond !== null) { $this->collectUses($n->cond); }
+            if ($n->step !== null) { $this->collectUses($n->step); }
+            $this->collectUses($n->body);
             return;
         }
-        if ($k === Node::KIND_DOWHILE) {
-            $d = $this->asDoWhile($n);
-            $this->collectUses($d->body);
-            $this->collectUses($d->cond);
+        if ($n->kind === Node::KIND_DOWHILE) {
+            $this->collectUses($n->body);
+            $this->collectUses($n->cond);
             return;
         }
-        if ($k === Node::KIND_FOREACH) {
-            $fe = $this->asForeach($n);
-            $this->collectUses($fe->array);
-            $this->collectUses($fe->body);
+        if ($n->kind === Node::KIND_FOREACH) {
+            $this->collectUses($n->array);
+            $this->collectUses($n->body);
             return;
         }
-        if ($k === Node::KIND_SWITCH) {
-            $sw = $this->asSwitch($n);
-            $this->collectUses($sw->subject);
-            foreach ($sw->arms as $arm) {
+        if ($n->kind === Node::KIND_SWITCH) {
+            $this->collectUses($n->subject);
+            foreach ($n->arms as $arm) {
                 if ($arm->value !== null) { $this->collectUses($arm->value); }
                 foreach ($arm->body as $s) { $this->collectUses($s); }
             }
             return;
         }
-        if ($k === Node::KIND_MATCH) {
-            $m = $this->asMatch($n);
-            $this->collectUses($m->subject);
-            foreach ($m->arms as $arm) {
+        if ($n->kind === Node::KIND_MATCH) {
+            $this->collectUses($n->subject);
+            foreach ($n->arms as $arm) {
                 $conds = $arm->conds;
                 if ($conds !== null) {
                     foreach ($conds as $c) { $this->collectUses($c); }
@@ -261,65 +247,59 @@ final class DeadStore implements Pass
             }
             return;
         }
-        if ($k === Node::KIND_BLOCK) {
-            foreach ($this->asBlock($n)->stmts as $s) { $this->collectUses($s); }
+        if ($n->kind === Node::KIND_BLOCK) {
+            foreach ($n->stmts as $s) { $this->collectUses($s); }
             return;
         }
-        if ($k === Node::KIND_ARRAY_LIT) {
-            foreach ($this->asArrayLit($n)->elements as $el) {
+        if ($n->kind === Node::KIND_ARRAY_LIT) {
+            foreach ($n->elements as $el) {
                 if ($el->key !== null) { $this->collectUses($el->key); }
                 $this->collectUses($el->value);
             }
             return;
         }
-        if ($k === Node::KIND_ARRAY_ACCESS) {
-            $a = $this->asArrayAccess($n);
-            $this->collectUses($a->array);
-            $this->collectUses($a->index);
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $this->collectUses($n->array);
+            $this->collectUses($n->index);
             return;
         }
-        if ($k === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
-            $this->collectUses($se->array);
-            $this->collectUses($se->index);
-            $this->collectUses($se->value);
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $this->collectUses($n->array);
+            $this->collectUses($n->index);
+            $this->collectUses($n->value);
             return;
         }
-        if ($k === Node::KIND_NEW_OBJ) {
-            foreach ($this->asNewObj($n)->args as $a) { $this->collectUses($a); }
+        if ($n->kind === Node::KIND_NEW_OBJ) {
+            foreach ($n->args as $a) { $this->collectUses($a); }
             return;
         }
-        if ($k === Node::KIND_PROPERTY_ACCESS) {
-            $this->collectUses($this->asPropertyAccess($n)->object);
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) {
+            $this->collectUses($n->object);
             return;
         }
-        if ($k === Node::KIND_STORE_PROPERTY) {
-            $sp = $this->asStoreProperty($n);
-            $this->collectUses($sp->object);
-            $this->collectUses($sp->value);
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $this->collectUses($n->object);
+            $this->collectUses($n->value);
             return;
         }
-        if ($k === Node::KIND_DYN_PROP) {
-            $dp = $this->asDynProp($n);
-            $this->collectUses($dp->object);
-            $this->collectUses($dp->name);
+        if ($n->kind === Node::KIND_DYN_PROP) {
+            $this->collectUses($n->object);
+            $this->collectUses($n->name);
             return;
         }
-        if ($k === Node::KIND_STORE_DYN_PROP) {
-            $sd = $this->asStoreDynProp($n);
-            $this->collectUses($sd->object);
-            $this->collectUses($sd->name);
-            $this->collectUses($sd->value);
+        if ($n->kind === Node::KIND_STORE_DYN_PROP) {
+            $this->collectUses($n->object);
+            $this->collectUses($n->name);
+            $this->collectUses($n->value);
             return;
         }
-        if ($k === Node::KIND_METHOD_CALL) {
-            $mc = $this->asMethodCall($n);
-            $this->collectUses($mc->object);
-            foreach ($mc->args as $a) { $this->collectUses($a); }
+        if ($n->kind === Node::KIND_METHOD_CALL) {
+            $this->collectUses($n->object);
+            foreach ($n->args as $a) { $this->collectUses($a); }
             return;
         }
-        if ($k === Node::KIND_STATIC_CALL) {
-            foreach ($this->asStaticCall($n)->args as $a) { $this->collectUses($a); }
+        if ($n->kind === Node::KIND_STATIC_CALL) {
+            foreach ($n->args as $a) { $this->collectUses($a); }
             return;
         }
     }
@@ -339,39 +319,33 @@ final class DeadStore implements Pass
 
     private function rewriteStmt(Node $n): ?Node
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
-            if (!isset($this->usedLocals[$sl->name]) && $this->isPure($sl->value)) {
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            if (!isset($this->usedLocals[$n->name]) && $this->isPure($n->value)) {
                 return null;
             }
-            return $sl;
+            return $n;
         }
-        if ($k === Node::KIND_IF) {
-            $i = $this->asIf($n);
-            $i->then = $this->rewriteBlock($i->then);
-            if ($i->else !== null) {
-                $i->else = $this->rewriteBlock($i->else);
+        if ($n->kind === Node::KIND_IF) {
+            $n->then = $this->rewriteBlock($n->then);
+            if ($n->else !== null) {
+                $n->else = $this->rewriteBlock($n->else);
             }
-            return $i;
+            return $n;
         }
-        if ($k === Node::KIND_WHILE) {
-            $w = $this->asWhile($n);
-            $w->body = $this->rewriteBlock($w->body);
-            return $w;
+        if ($n->kind === Node::KIND_WHILE) {
+            $n->body = $this->rewriteBlock($n->body);
+            return $n;
         }
-        if ($k === Node::KIND_FOR) {
-            $f = $this->asFor($n);
-            $f->body = $this->rewriteBlock($f->body);
-            return $f;
+        if ($n->kind === Node::KIND_FOR) {
+            $n->body = $this->rewriteBlock($n->body);
+            return $n;
         }
-        if ($k === Node::KIND_DOWHILE) {
-            $d = $this->asDoWhile($n);
-            $d->body = $this->rewriteBlock($d->body);
-            return $d;
+        if ($n->kind === Node::KIND_DOWHILE) {
+            $n->body = $this->rewriteBlock($n->body);
+            return $n;
         }
-        if ($k === Node::KIND_BLOCK) {
-            return $this->rewriteBlock($this->asBlock($n));
+        if ($n->kind === Node::KIND_BLOCK) {
+            return $this->rewriteBlock($n);
         }
         return $n;
     }
@@ -383,80 +357,25 @@ final class DeadStore implements Pass
      */
     private function isPure(Node $n): bool
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_INT_CONST
-            || $k === Node::KIND_FLOAT_CONST
-            || $k === Node::KIND_STRING_CONST
-            || $k === Node::KIND_BOOL_CONST
-            || $k === Node::KIND_NULL_CONST
-            || $k === Node::KIND_LOAD_LOCAL) {
+        if ($n->kind === Node::KIND_INT_CONST
+            || $n->kind === Node::KIND_FLOAT_CONST
+            || $n->kind === Node::KIND_STRING_CONST
+            || $n->kind === Node::KIND_BOOL_CONST
+            || $n->kind === Node::KIND_NULL_CONST
+            || $n->kind === Node::KIND_LOAD_LOCAL) {
             return true;
         }
-        if ($k === Node::KIND_ADD) { $a = $this->asAdd($n); return $this->isPure($a->left) && $this->isPure($a->right); }
-        if ($k === Node::KIND_SUB) { $a = $this->asSub($n); return $this->isPure($a->left) && $this->isPure($a->right); }
-        if ($k === Node::KIND_MUL) { $a = $this->asMul($n); return $this->isPure($a->left) && $this->isPure($a->right); }
-        if ($k === Node::KIND_DIV) { $a = $this->asDiv($n); return $this->isPure($a->left) && $this->isPure($a->right); }
-        if ($k === Node::KIND_MOD) { $a = $this->asMod($n); return $this->isPure($a->left) && $this->isPure($a->right); }
-        if ($k === Node::KIND_NEG) { return $this->isPure($this->asNeg($n)->operand); }
-        if ($k === Node::KIND_NOT) { return $this->isPure($this->asNot($n)->operand); }
-        if ($k === Node::KIND_BITOP) { $b = $this->asBitOp($n); return $this->isPure($b->left) && $this->isPure($b->right); }
-        if ($k === Node::KIND_BITNOT) { return $this->isPure($this->asBitNot($n)->operand); }
-        if ($k === Node::KIND_CONCAT) { $c = $this->asConcat($n); return $this->isPure($c->left) && $this->isPure($c->right); }
-        if ($k === Node::KIND_CMP) { $c = $this->asCmp($n); return $this->isPure($c->left) && $this->isPure($c->right); }
+        if ($n->kind === Node::KIND_ADD) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_SUB) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_MUL) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_DIV) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_MOD) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_NEG) { return $this->isPure($n->operand); }
+        if ($n->kind === Node::KIND_NOT) { return $this->isPure($n->operand); }
+        if ($n->kind === Node::KIND_BITOP) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_BITNOT) { return $this->isPure($n->operand); }
+        if ($n->kind === Node::KIND_CONCAT) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_CMP) { return $this->isPure($n->left) && $this->isPure($n->right); }
         return false;
     }
-
-    // ── Typed-cast helpers (see ConstFold for the rationale) ───
-
-    private function asArrayLit(ArrayLit $n): ArrayLit { return $n; }
-    private function asArrayAccess(ArrayAccess_ $n): ArrayAccess_ { return $n; }
-    private function asStoreElement(StoreElement $n): StoreElement { return $n; }
-    private function asNewObj(NewObj $n): NewObj { return $n; }
-    private function asPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }
-    private function asStoreProperty(StoreProperty $n): StoreProperty { return $n; }
-    private function asDynProp(DynProp_ $n): DynProp_ { return $n; }
-    private function asStoreDynProp(StoreDynProp_ $n): StoreDynProp_ { return $n; }
-    private function asMethodCall(MethodCall_ $n): MethodCall_ { return $n; }
-    private function asStaticCall(StaticCall_ $n): StaticCall_ { return $n; }
-    private function asLoadLocal(LoadLocal $n): LoadLocal { return $n; }
-    private function asStoreLocal(StoreLocal $n): StoreLocal { return $n; }
-    private function asAdd(Add $n): Add { return $n; }
-    private function asSub(Sub $n): Sub { return $n; }
-    private function asMul(Mul $n): Mul { return $n; }
-    private function asDiv(Div $n): Div { return $n; }
-    private function asMod(Mod $n): Mod { return $n; }
-    private function asNeg(Neg $n): Neg { return $n; }
-    private function asNot(Not_ $n): Not_ { return $n; }
-    private function asBitOp(Node $n): \Compile\Mir\BitOp { return $n; }
-    private function asBitNot(Node $n): \Compile\Mir\BitNot_ { return $n; }
-    private function asConcat(Concat $n): Concat { return $n; }
-    private function asCmp(Cmp $n): Cmp { return $n; }
-    private function asEcho(Echo_ $n): Echo_ { return $n; }
-    private function asReturn(Return_ $n): Return_ { return $n; }
-    private function asCall(Call $n): Call { return $n; }
-    private function asIf(If_ $n): If_ { return $n; }
-    private function asWhile(While_ $n): While_ { return $n; }
-    private function asCast(Cast $n): Cast { return $n; }
-    private function asInstanceof(Instanceof_ $n): Instanceof_ { return $n; }
-    private function asNullCoalesce(NullCoalesce_ $n): NullCoalesce_ { return $n; }
-    private function asClosure(Closure_ $n): Closure_ { return $n; }
-    private function asInvoke(Invoke_ $n): Invoke_ { return $n; }
-    private function asIncDec(IncDec $n): IncDec { return $n; }
-    private function asStoreStaticProp(StoreStaticProp_ $n): StoreStaticProp_ { return $n; }
-    private function asStaticLocalDecl(StaticLocalDecl_ $n): StaticLocalDecl_ { return $n; }
-    private function asIsset(Isset_ $n): Isset_ { return $n; }
-    private function asUnset(Unset_ $n): Unset_ { return $n; }
-    private function asClassName(ClassName_ $n): ClassName_ { return $n; }
-    private function asRefAlias(RefAlias_ $n): RefAlias_ { return $n; }
-    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
-    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
-    private function asThrow(Throw_ $n): Throw_ { return $n; }
-    private function asTryCatch(TryCatch_ $n): TryCatch_ { return $n; }
-    private function asTernary(Ternary $n): Ternary { return $n; }
-    private function asForeach(Foreach_ $n): Foreach_ { return $n; }
-    private function asSwitch(Switch_ $n): Switch_ { return $n; }
-    private function asMatch(Match_ $n): Match_ { return $n; }
-    private function asFor(For_ $n): For_ { return $n; }
-    private function asDoWhile(DoWhile_ $n): DoWhile_ { return $n; }
-    private function asBlock(Block $n): Block { return $n; }
 }

@@ -2180,18 +2180,17 @@ final class EmitLlvm
     private function scanCellPropStores(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
-            $sp = $this->castStoreProperty($n);
-            $vk = $sp->value->type->kind;
+            $vk = $n->value->type->kind;
             if ($vk === Type::KIND_ARRAY) {
                 // A concrete array can box (boxToCell rebuilds it as a cell-array),
                 // but it only does so when the slot is already self-describing —
                 // see cellPropBoxed. Tracked separately so an array-only prop keeps
                 // its current raw behaviour (no regression for typed-array backing).
-                $this->cellPropHasArrayStore[$sp->property] = true;
-            } elseif (!$this->cellBoxableKind($sp->value->type)) {
-                $this->cellPropNotBoxable[$sp->property] = true;
+                $this->cellPropHasArrayStore[$n->property] = true;
+            } elseif (!$this->cellBoxableKind($n->value->type)) {
+                $this->cellPropNotBoxable[$n->property] = true;
             } else {
-                $this->cellPropHasInPlaceBox[$sp->property] = true;
+                $this->cellPropHasInPlaceBox[$n->property] = true;
             }
         }
         $base = $this->cellPropArrayBaseName($n);
@@ -2207,14 +2206,14 @@ final class EmitLlvm
     {
         $base = null;
         if ($n->kind === Node::KIND_ARRAY_ACCESS) {
-            $base = $this->castArrayAccess($n)->array;
+            $base = $n->array;
         } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $base = $this->castStoreElement($n)->array;
+            $base = $n->array;
         } elseif ($n->kind === Node::KIND_FOREACH) {
-            $base = $this->castForeach($n)->array;
+            $base = $n->array;
         }
         if ($base !== null && $base->kind === Node::KIND_PROPERTY_ACCESS) {
-            return $this->castPropertyAccess($base)->property;
+            return $base->property;
         }
         return null;
     }
@@ -2242,7 +2241,7 @@ final class EmitLlvm
     private function collectByRefCaptured(Node $n): void
     {
         if ($n->kind === Node::KIND_CLOSURE) {
-            $cl = $this->castClosure($n);
+            $cl = $n;
             $i = 0;
             foreach ($cl->captures as $c) {
                 if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
@@ -2453,10 +2452,10 @@ final class EmitLlvm
     private function collectGenLocals(Node $n, array &$locals): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $name = $this->castStoreLocal($n)->name;
+            $name = $n->name;
             if (!isset($locals[$name])) { $locals[$name] = \count($locals); }
         } elseif ($n->kind === Node::KIND_TRY_CATCH) {
-            $tc = $this->castTryCatch($n);
+            $tc = $n;
             // A catch variable (`catch (E $e)`) is bound by emitTryCatch via a
             // direct slot store, not a StoreLocal — collect it so it gets a
             // frame slot (else `$e` has no slot and `$e->m()` reads garbage).
@@ -2478,20 +2477,19 @@ final class EmitLlvm
                 $locals["@try.pv." . (string)$tc->genPendSlot] = \count($locals);
             }
         } elseif ($n->kind === Node::KIND_FOREACH) {
-            $fe = $this->castForeach($n);
-            if (!isset($locals[$fe->valueVar])) { $locals[$fe->valueVar] = \count($locals); }
-            if ($fe->keyVar !== null && !isset($locals[$fe->keyVar])) {
-                $locals[$fe->keyVar] = \count($locals);
+            if (!isset($locals[$n->valueVar])) { $locals[$n->valueVar] = \count($locals); }
+            if ($n->keyVar !== null && !isset($locals[$n->keyVar])) {
+                $locals[$n->keyVar] = \count($locals);
             }
             // Iterator state that crosses a yield in the body must live in the
             // frame (the resume entry-switch re-enters mid-loop, killing SSA /
             // stack allocas). An ARRAY foreach needs two slots (cursor + array
             // ptr); a GENERATOR foreach needs one (the sub-generator ptr).
-            if ($this->foreachBodyYields($fe->body)) {
-                $fe->genSlotBase = \count($locals);
-                $locals["@fe.0." . (string)$fe->genSlotBase] = \count($locals);
-                if (!$this->isGeneratorType($fe->array->type)) {
-                    $locals["@fe.1." . (string)$fe->genSlotBase] = \count($locals);
+            if ($this->foreachBodyYields($n->body)) {
+                $n->genSlotBase = \count($locals);
+                $locals["@fe.0." . (string)$n->genSlotBase] = \count($locals);
+                if (!$this->isGeneratorType($n->array->type)) {
+                    $locals["@fe.1." . (string)$n->genSlotBase] = \count($locals);
                 }
             }
         }
@@ -2525,12 +2523,12 @@ final class EmitLlvm
      * passed in via `send()` (the frame's `sent` slot, 0/null otherwise).
      * The key is an explicit `$k` or the auto-increment `nextkey` counter.
      */
-    private function emitYield(Node $n): string
+    private function emitYield(\Compile\Mir\Yield_ $n): string
     {
         if (!$this->inGenerator) {
             throw new \RuntimeException('EmitLlvm: yield outside a generator');
         }
-        $y = $this->castYield($n);
+        $y = $n;
         if ($y->from) {
             throw new \RuntimeException('EmitLlvm: `yield from` not yet implemented');
         }
@@ -2592,8 +2590,6 @@ final class EmitLlvm
         $this->lastValueType = 'i64';
         return $out;
     }
-
-    private function castYield(Node $n): \Compile\Mir\Yield_ { return $n; }
 
     /** A generator value (`@manticore_<gen>` creator result). */
     private function isGeneratorType(Type $t): bool
@@ -2990,8 +2986,7 @@ final class EmitLlvm
         // landing pad must be set up so an uncaught miss exits 255, not longjmp
         // to garbage. (tryFrom never throws.)
         if ($n->kind === Node::KIND_STATIC_CALL) {
-            $sc = $this->castStaticCall($n);
-            if ($sc->method === 'from' && isset($this->enums[$sc->class])) { return true; }
+            if ($n->method === 'from' && isset($this->enums[$n->class])) { return true; }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             if ($this->scanUsesExceptions($c)) { return true; }
@@ -3127,14 +3122,14 @@ final class EmitLlvm
     private function collectRcObjLocals(Node $n): void
     {
         if ($n->kind === Node::KIND_MEMORY_OP) {
-            $mo = $this->castMemoryOp($n);
+            $mo = $n;
             if ($mo->op === 'rc_release' && $mo->target !== null
                 && $mo->target->kind === Node::KIND_LOAD_LOCAL) {
                 // Store the MemoryOp node, not its flavor string — the
                 // self-host backend corrupts a short string round-tripped
                 // through an assoc value (a `'str'` read back mis-compares),
                 // but a node handle survives. Flavor is re-derived per use.
-                $this->currentRcObjLocals[$this->castLoadLocal($mo->target)->name] = $mo;
+                $this->currentRcObjLocals[$mo->target->name] = $mo;
             }
             return;
         }
@@ -3155,22 +3150,19 @@ final class EmitLlvm
     {
         $k = $n->kind;
         if ($k === Node::KIND_STORE_ELEMENT) {
-            $se = $this->castStoreElement($n);
             // assoc store retains by its element type; vec offers no fallback.
-            $fallback = $se->array->type->isAssoc()
-                ? ($se->array->type->element ?? null) : null;
-            $this->maybeTransfer($se->value, $fallback);
+            $fallback = $n->array->type->isAssoc()
+                ? ($n->array->type->element ?? null) : null;
+            $this->maybeTransfer($n->value, $fallback);
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
-            $sp = $this->castStoreProperty($n);
-            $pcls = $sp->object->type->class ?? '';
+            $pcls = $n->object->type->class ?? '';
             $propType = ($pcls !== '' && isset($this->classes[$pcls]))
-                ? ($this->classes[$pcls]->propertyTypes[$sp->property] ?? null)
+                ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
                 : null;
-            $this->maybeTransfer($sp->value, $propType);
+            $this->maybeTransfer($n->value, $propType);
         } elseif ($k === Node::KIND_ARRAY_LIT) {
-            $al = $this->castArrayLit($n);
-            $fallback = $al->type->element ?? null;
-            foreach ($al->elements as $el) { $this->maybeTransfer($el->value, $fallback); }
+            $fallback = $n->type->element ?? null;
+            foreach ($n->elements as $el) { $this->maybeTransfer($el->value, $fallback); }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectTransferredLocals($c); }
     }
@@ -3185,7 +3177,7 @@ final class EmitLlvm
     private function maybeTransfer(Node $valueNode, ?Type $fallback): void
     {
         if ($valueNode->kind !== Node::KIND_LOAD_LOCAL) { return; }
-        $name = $this->castLoadLocal($valueNode)->name;
+        $name = $valueNode->name;
         if (!isset($this->currentRcObjLocals[$name])) { return; }
         if (isset($this->currentParamNames[$name])) { return; }
         if ($this->containerStoreRetains($valueNode, $fallback)) { return; }
@@ -3211,16 +3203,16 @@ final class EmitLlvm
     {
         $k = $n->kind;
         if ($k === Node::KIND_NEW_OBJ) {
-            $this->shareCallArgs($this->castNewObj($n)->args);
+            $this->shareCallArgs($n->args);
         } elseif ($n->type->kind === Type::KIND_OBJ) {
             if ($k === Node::KIND_CALL) {
-                $this->shareCallArgs($this->castCall($n)->args);
+                $this->shareCallArgs($n->args);
             } elseif ($k === Node::KIND_METHOD_CALL) {
-                $this->shareCallArgs($this->castMethodCall($n)->args);
+                $this->shareCallArgs($n->args);
             } elseif ($k === Node::KIND_STATIC_CALL) {
-                $this->shareCallArgs($this->castStaticCall($n)->args);
+                $this->shareCallArgs($n->args);
             } elseif ($k === Node::KIND_INVOKE) {
-                $this->shareCallArgs($this->castInvoke($n)->args);
+                $this->shareCallArgs($n->args);
             }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectElementSharedLocals($c); }
@@ -3287,10 +3279,10 @@ final class EmitLlvm
     private function collectMutatedVecs(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $arr = $this->castStoreElement($n)->array;
+            $arr = $n->array;
             if ($arr->kind === Node::KIND_LOAD_LOCAL
                 && $arr->type->isArray()) {
-                $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
+                $this->mutatedVecLocals[$arr->name] = true;
             }
             // A NESTED element store (`$x[0][] = …` / `$x[0][0][] = …`) mutates
             // the root local `$x` too — its base is an `$x[0]…` element, not `$x`
@@ -3299,10 +3291,10 @@ final class EmitLlvm
             // copy owns the inner levels).
             $base = $arr;
             while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $this->castArrayAccess($base)->array;
+                $base = $base->array;
             }
             if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
-                $this->mutatedVecLocals[$this->castLoadLocal($base)->name] = true;
+                $this->mutatedVecLocals[$base->name] = true;
             }
         }
         // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
@@ -3311,16 +3303,16 @@ final class EmitLlvm
         // buffer the reference will write through. Over-approximate (any call
         // arg): a needless copy is safe, a shared write is not.
         if ($n->kind === Node::KIND_REF_ADDR) {
-            $this->markVecElemBase($this->castRefAddr($n)->lvalue);
+            $this->markVecElemBase($n->lvalue);
         }
         if ($n->kind === Node::KIND_CALL) {
-            foreach ($this->castCall($n)->args as $a) { $this->markVecElemBase($a); }
+            foreach ($n->args as $a) { $this->markVecElemBase($a); }
         }
         if ($n->kind === Node::KIND_METHOD_CALL) {
-            foreach ($this->castMethodCall($n)->args as $a) { $this->markVecElemBase($a); }
+            foreach ($n->args as $a) { $this->markVecElemBase($a); }
         }
         if ($n->kind === Node::KIND_STATIC_CALL) {
-            foreach ($this->castStaticCall($n)->args as $a) { $this->markVecElemBase($a); }
+            foreach ($n->args as $a) { $this->markVecElemBase($a); }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectMutatedVecs($c);
@@ -3360,9 +3352,9 @@ final class EmitLlvm
     private function localMutatedAsArray(Node $n, string $name): bool
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $base = $this->castStoreElement($n)->array;
+            $base = $n->array;
             while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $this->castArrayAccess($base)->array;
+                $base = $base->array;
             }
             if ($base->kind === Node::KIND_LOAD_LOCAL
                 && $this->castLoadLocal($base)->name === $name) {
@@ -3380,9 +3372,9 @@ final class EmitLlvm
     private function markVecElemBase(Node $a): void
     {
         if ($a->kind !== Node::KIND_ARRAY_ACCESS) { return; }
-        $arr = $this->castArrayAccess($a)->array;
+        $arr = $a->array;
         if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
-            $this->mutatedVecLocals[$this->castLoadLocal($arr)->name] = true;
+            $this->mutatedVecLocals[$arr->name] = true;
         }
     }
 
@@ -3395,38 +3387,36 @@ final class EmitLlvm
     {
         $k = $n->kind;
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            $sld = $this->castStaticLocalDecl($n);
-            $this->globalBackedLocals[$sld->name] = $sld->cell;
+            $this->globalBackedLocals[$n->name] = $n->cell;
             return;
         }
         if ($k === Node::KIND_BLOCK) {
-            foreach ($this->castBlock($n)->stmts as $s) { $this->collectStaticLocals($s); }
+            foreach ($n->stmts as $s) { $this->collectStaticLocals($s); }
             return;
         }
         if ($k === Node::KIND_IF) {
-            $i = $this->castIf($n);
-            $this->collectStaticLocals($i->then);
-            if ($i->else !== null) { $this->collectStaticLocals($i->else); }
+            $this->collectStaticLocals($n->then);
+            if ($n->else !== null) { $this->collectStaticLocals($n->else); }
             return;
         }
         if ($k === Node::KIND_WHILE) {
-            $this->collectStaticLocals($this->castWhile($n)->body);
+            $this->collectStaticLocals($n->body);
             return;
         }
         if ($k === Node::KIND_FOR) {
-            $this->collectStaticLocals($this->castFor($n)->body);
+            $this->collectStaticLocals($n->body);
             return;
         }
         if ($k === Node::KIND_DOWHILE) {
-            $this->collectStaticLocals($this->castDoWhile($n)->body);
+            $this->collectStaticLocals($n->body);
             return;
         }
         if ($k === Node::KIND_FOREACH) {
-            $this->collectStaticLocals($this->castForeach($n)->body);
+            $this->collectStaticLocals($n->body);
             return;
         }
         if ($k === Node::KIND_SWITCH) {
-            foreach ($this->castSwitch($n)->arms as $arm) {
+            foreach ($n->arms as $arm) {
                 foreach ($arm->body as $s) { $this->collectStaticLocals($s); }
             }
             return;
@@ -3437,18 +3427,17 @@ final class EmitLlvm
     {
         $k = $n->kind;
         if ($k === Node::KIND_STORE_LOCAL) {
-            $sl = $this->castStoreLocal($n);
             $out = '';
-            if (!isset($this->globalBackedLocals[$sl->name]) && !isset($this->slots[$sl->name])) {
+            if (!isset($this->globalBackedLocals[$n->name]) && !isset($this->slots[$n->name])) {
                 $slot = $this->allocSsa();
-                $this->slots[$sl->name] = $slot;
+                $this->slots[$n->name] = $slot;
                 $out .= '  ' . $slot . " = alloca i64\n";
             }
-            return $out . $this->preallocateLocals($sl->value);
+            return $out . $this->preallocateLocals($n->value);
         }
         if ($k === Node::KIND_BLOCK) {
             $out = '';
-            foreach ($this->castBlock($n)->stmts as $s) { $out .= $this->preallocateLocals($s); }
+            foreach ($n->stmts as $s) { $out .= $this->preallocateLocals($s); }
             return $out;
         }
         if ($k === Node::KIND_THROW) {
@@ -3471,94 +3460,82 @@ final class EmitLlvm
             return $out;
         }
         if ($k === Node::KIND_IF) {
-            $i = $this->castIf($n);
-            $out = $this->preallocateLocals($i->cond);
-            $out .= $this->preallocateLocals($i->then);
-            if ($i->else !== null) { $out .= $this->preallocateLocals($i->else); }
+            $out = $this->preallocateLocals($n->cond);
+            $out .= $this->preallocateLocals($n->then);
+            if ($n->else !== null) { $out .= $this->preallocateLocals($n->else); }
             return $out;
         }
         if ($k === Node::KIND_WHILE) {
-            $w = $this->castWhile($n);
-            return $this->preallocateLocals($w->cond) . $this->preallocateLocals($w->body);
+            return $this->preallocateLocals($n->cond) . $this->preallocateLocals($n->body);
         }
         if ($k === Node::KIND_FOR) {
-            $f = $this->castFor($n);
             $out = '';
-            if ($f->init !== null) { $out .= $this->preallocateLocals($f->init); }
-            if ($f->cond !== null) { $out .= $this->preallocateLocals($f->cond); }
-            if ($f->step !== null) { $out .= $this->preallocateLocals($f->step); }
-            return $out . $this->preallocateLocals($f->body);
+            if ($n->init !== null) { $out .= $this->preallocateLocals($n->init); }
+            if ($n->cond !== null) { $out .= $this->preallocateLocals($n->cond); }
+            if ($n->step !== null) { $out .= $this->preallocateLocals($n->step); }
+            return $out . $this->preallocateLocals($n->body);
         }
         if ($k === Node::KIND_DOWHILE) {
-            $d = $this->castDoWhile($n);
-            return $this->preallocateLocals($d->body) . $this->preallocateLocals($d->cond);
+            return $this->preallocateLocals($n->body) . $this->preallocateLocals($n->cond);
         }
         if ($k === Node::KIND_FOREACH) {
-            $fe = $this->castForeach($n);
-            $out = $this->preallocateLocals($fe->array);
+            $out = $this->preallocateLocals($n->array);
             // Hoist the value/key slots to entry so a foreach nested in a
             // branch doesn't leave its slot alloca dominating only that
             // branch (two sibling foreaches reusing `$val` then break LLVM).
-            if (!isset($this->slots[$fe->valueVar])) {
+            if (!isset($this->slots[$n->valueVar])) {
                 $vs = $this->allocSsa();
-                $this->slots[$fe->valueVar] = $vs;
+                $this->slots[$n->valueVar] = $vs;
                 $out .= '  ' . $vs . " = alloca i64\n";
             }
-            if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
+            if ($n->keyVar !== null && !isset($this->slots[$n->keyVar])) {
                 $ks = $this->allocSsa();
-                $this->slots[$fe->keyVar] = $ks;
+                $this->slots[$n->keyVar] = $ks;
                 $out .= '  ' . $ks . " = alloca i64\n";
             }
-            return $out . $this->preallocateLocals($fe->body);
+            return $out . $this->preallocateLocals($n->body);
         }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
             || $k === Node::KIND_MOD || $k === Node::KIND_CMP) {
             return $this->preallocateLocals($this->binLeft($n))
                  . $this->preallocateLocals($this->binRight($n));
         }
-        if ($k === Node::KIND_NEG) { return $this->preallocateLocals($this->castNeg($n)->operand); }
-        if ($k === Node::KIND_NOT) { return $this->preallocateLocals($this->castNot($n)->operand); }
+        if ($k === Node::KIND_NEG) { return $this->preallocateLocals($n->operand); }
+        if ($k === Node::KIND_NOT) { return $this->preallocateLocals($n->operand); }
         if ($k === Node::KIND_BITOP) {
-            $b = $this->castBitOp($n);
-            return $this->preallocateLocals($b->left) . $this->preallocateLocals($b->right);
+            return $this->preallocateLocals($n->left) . $this->preallocateLocals($n->right);
         }
-        if ($k === Node::KIND_BITNOT) { return $this->preallocateLocals($this->castBitNot($n)->operand); }
+        if ($k === Node::KIND_BITNOT) { return $this->preallocateLocals($n->operand); }
         if ($k === Node::KIND_CONCAT) {
-            $c = $this->castConcat($n);
-            return $this->preallocateLocals($c->left) . $this->preallocateLocals($c->right);
+            return $this->preallocateLocals($n->left) . $this->preallocateLocals($n->right);
         }
         if ($k === Node::KIND_CAST) {
-            return $this->preallocateLocals($this->castCast($n)->operand);
+            return $this->preallocateLocals($n->operand);
         }
         if ($k === Node::KIND_NULLCOALESCE) {
-            $nc = $this->castNullCoalesce($n);
-            return $this->preallocateLocals($nc->left) . $this->preallocateLocals($nc->right);
+            return $this->preallocateLocals($n->left) . $this->preallocateLocals($n->right);
         }
         if ($k === Node::KIND_INVOKE) {
-            $iv = $this->castInvoke($n);
-            $out = $this->preallocateLocals($iv->callee);
-            foreach ($iv->args as $a) { $out .= $this->preallocateLocals($a); }
+            $out = $this->preallocateLocals($n->callee);
+            foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
         if ($k === Node::KIND_TERNARY) {
-            $t = $this->castTernary($n);
-            $out = $this->preallocateLocals($t->cond);
-            if ($t->then !== null) { $out .= $this->preallocateLocals($t->then); }
-            return $out . $this->preallocateLocals($t->else_);
+            $out = $this->preallocateLocals($n->cond);
+            if ($n->then !== null) { $out .= $this->preallocateLocals($n->then); }
+            return $out . $this->preallocateLocals($n->else_);
         }
         if ($k === Node::KIND_SWITCH) {
-            $sw = $this->castSwitch($n);
-            $out = $this->preallocateLocals($sw->subject);
-            foreach ($sw->arms as $arm) {
+            $out = $this->preallocateLocals($n->subject);
+            foreach ($n->arms as $arm) {
                 if ($arm->value !== null) { $out .= $this->preallocateLocals($arm->value); }
                 foreach ($arm->body as $s) { $out .= $this->preallocateLocals($s); }
             }
             return $out;
         }
         if ($k === Node::KIND_MATCH) {
-            $m = $this->castMatch($n);
-            $out = $this->preallocateLocals($m->subject);
-            foreach ($m->arms as $arm) {
+            $out = $this->preallocateLocals($n->subject);
+            foreach ($n->arms as $arm) {
                 $conds = $arm->conds;
                 if ($conds !== null) {
                     foreach ($conds as $c) { $out .= $this->preallocateLocals($c); }
@@ -3569,58 +3546,53 @@ final class EmitLlvm
         }
         if ($k === Node::KIND_ECHO) {
             $out = '';
-            foreach ($this->castEcho($n)->exprs as $e) { $out .= $this->preallocateLocals($e); }
+            foreach ($n->exprs as $e) { $out .= $this->preallocateLocals($e); }
             return $out;
         }
         if ($k === Node::KIND_RETURN) {
-            $v = $this->castReturn($n)->value;
+            $v = $n->value;
             return $v === null ? '' : $this->preallocateLocals($v);
         }
         if ($k === Node::KIND_CALL) {
             $out = '';
-            foreach ($this->castCall($n)->args as $a) { $out .= $this->preallocateLocals($a); }
+            foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
         if ($k === Node::KIND_ARRAY_LIT) {
             $out = '';
-            foreach ($this->castArrayLit($n)->elements as $el) {
+            foreach ($n->elements as $el) {
                 if ($el->key !== null) { $out .= $this->preallocateLocals($el->key); }
                 $out .= $this->preallocateLocals($el->value);
             }
             return $out;
         }
         if ($k === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->castArrayAccess($n);
-            return $this->preallocateLocals($aa->array) . $this->preallocateLocals($aa->index);
+            return $this->preallocateLocals($n->array) . $this->preallocateLocals($n->index);
         }
         if ($k === Node::KIND_STORE_ELEMENT) {
-            $se = $this->castStoreElement($n);
-            return $this->preallocateLocals($se->array)
-                 . $this->preallocateLocals($se->index)
-                 . $this->preallocateLocals($se->value);
+            return $this->preallocateLocals($n->array)
+                 . $this->preallocateLocals($n->index)
+                 . $this->preallocateLocals($n->value);
         }
         if ($k === Node::KIND_NEW_OBJ) {
             $out = '';
-            foreach ($this->castNewObj($n)->args as $a) { $out .= $this->preallocateLocals($a); }
+            foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
         if ($k === Node::KIND_CLONE) {
-            $cl = $this->castClone($n);
-            $out = $this->preallocateLocals($cl->object);
-            foreach ($cl->withProps as $pair) { $out .= $this->preallocateLocals($pair->value); }
+            $out = $this->preallocateLocals($n->object);
+            foreach ($n->withProps as $pair) { $out .= $this->preallocateLocals($pair->value); }
             return $out;
         }
         if ($k === Node::KIND_PROPERTY_ACCESS) {
-            return $this->preallocateLocals($this->castPropertyAccess($n)->object);
+            return $this->preallocateLocals($n->object);
         }
         if ($k === Node::KIND_STORE_PROPERTY) {
-            $sp = $this->castStoreProperty($n);
-            return $this->preallocateLocals($sp->object) . $this->preallocateLocals($sp->value);
+            return $this->preallocateLocals($n->object) . $this->preallocateLocals($n->value);
         }
         if ($k === Node::KIND_METHOD_CALL) {
-            $mc = $this->castMethodCall($n);
-            $out = $this->preallocateLocals($mc->object);
-            foreach ($mc->args as $a) { $out .= $this->preallocateLocals($a); }
+            $out = $this->preallocateLocals($n->object);
+            foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
         return '';
@@ -3632,9 +3604,9 @@ final class EmitLlvm
     private function emitNode(Node $n): string
     {
         $k = $n->kind;
-        if ($k === Node::KIND_INT_CONST)    { $this->lastValue = (string)$this->castIntConst($n)->value; $this->lastValueType = 'i64'; return ''; }
-        if ($k === Node::KIND_FLOAT_CONST)  { $this->lastValue = $this->formatFloat($this->castFloatConst($n)->value); $this->lastValueType = 'double'; return ''; }
-        if ($k === Node::KIND_BOOL_CONST)   { $this->lastValue = $this->castBoolConst($n)->value ? '1' : '0'; $this->lastValueType = 'i64'; return ''; }
+        if ($k === Node::KIND_INT_CONST)    { $this->lastValue = (string)$n->value; $this->lastValueType = 'i64'; return ''; }
+        if ($k === Node::KIND_FLOAT_CONST)  { $this->lastValue = $this->formatFloat($n->value); $this->lastValueType = 'double'; return ''; }
+        if ($k === Node::KIND_BOOL_CONST)   { $this->lastValue = $n->value ? '1' : '0'; $this->lastValueType = 'i64'; return ''; }
         if ($k === Node::KIND_NULL_CONST)   { $this->lastValue = '0'; $this->lastValueType = 'i64'; return ''; }
         if ($k === Node::KIND_STRING_CONST) { return $this->emitStringConst($n); }
         if ($k === Node::KIND_LOAD_LOCAL)   { return $this->emitLoadLocal($n); }
@@ -3679,10 +3651,10 @@ final class EmitLlvm
         if ($k === Node::KIND_SWITCH)       { return $this->emitSwitch($n); }
         if ($k === Node::KIND_MATCH)        { return $this->emitMatch($n); }
         if ($k === Node::KIND_FOREACH)      { return $this->emitForeach($n); }
-        if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->breakTargetFor($this->castBreak($n)->level) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->continueTargetFor($this->castContinue($n)->level) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->userLabel($this->castGoto($n)->label) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_LABEL)        { $l = $this->userLabel($this->castLabel($n)->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
+        if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->breakTargetFor($n->level) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->continueTargetFor($n->level) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->userLabel($n->label) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_LABEL)        { $l = $this->userLabel($n->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
         if ($k === Node::KIND_ARRAY_LIT)    { return $this->emitArrayLit($n); }
         if ($k === Node::KIND_ARRAY_ACCESS) { return $this->emitArrayAccess($n); }
         if ($k === Node::KIND_STORE_ELEMENT){ return $this->emitStoreElement($n); }
@@ -3696,7 +3668,7 @@ final class EmitLlvm
         if ($k === Node::KIND_STATIC_CALL)     { return $this->emitStaticCall($n); }
         if ($k === Node::KIND_BLOCK) {
             $out = '';
-            foreach ($this->castBlock($n)->stmts as $s) {
+            foreach ($n->stmts as $s) {
                 $out .= $this->emitNode($s);
                 $out .= $this->emitDiscardedCallRelease($s);
             }
@@ -3722,18 +3694,18 @@ final class EmitLlvm
         return $label . ":\n";
     }
 
-    private function emitStringConst(Node $n): string
+    private function emitStringConst(StringConst $n): string
     {
-        $sc = $this->castStringConst($n);
+        $sc = $n;
         $id = $this->internString($sc->value);
         $this->lastValue = $this->strLitId($id);
         $this->lastValueType = 'ptr';
         return '';
     }
 
-    private function emitLoadLocal(Node $n): string
+    private function emitLoadLocal(LoadLocal $n): string
     {
-        $ll = $this->castLoadLocal($n);
+        $ll = $n;
         if (isset($this->globalBackedLocals[$ll->name])) {
             $reg = $this->allocSsa();
             $out = '  ' . $reg . ' = load i64, ptr ' . $this->globalBackedLocals[$ll->name] . "\n";
@@ -3789,9 +3761,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitStoreLocal(Node $n): string
+    private function emitStoreLocal(StoreLocal $n): string
     {
-        $sl = $this->castStoreLocal($n);
+        $sl = $n;
         // Amortized `.=`: `$s = $s . rhs` on a plain (non-ref, non-global,
         // non-arena) heap string local → in-place append instead of a fresh
         // O(n²) concat. The helper owns the old value's lifetime, so this
@@ -4178,9 +4150,9 @@ final class EmitLlvm
      * double, fdiv. Integer floor division goes through `intdiv`
      * separately — not surfaced as a MIR node yet.
      */
-    private function emitDiv(Node $n): string
+    private function emitDiv(Div $n): string
     {
-        $d = $this->castDiv($n);
+        $d = $n;
         $out = $this->emitNode($d->left);
         $out .= $this->coerceDoubleOperand($d->left);
         $l = $this->lastValue;
@@ -4194,9 +4166,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitNeg(Node $n): string
+    private function emitNeg(Neg $n): string
     {
-        $neg = $this->castNeg($n);
+        $neg = $n;
         // A numeric (int|float) cell is dynamic — negate as tagged `0 - $x` so a
         // float value keeps its float tag and the result stays a numeric cell.
         // The operand is ALREADY a boxed cell, so it is passed to tagged_sub
@@ -4242,9 +4214,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitNot(Node $n): string
+    private function emitNot(Not_ $n): string
     {
-        $out = $this->emitCondVal($this->castNot($n)->operand);
+        $out = $this->emitCondVal($n->operand);
         $val = $this->lastValue;
         $cmpReg = $this->allocSsa();
         $out .= '  ' . $cmpReg . ' = icmp eq i64 ' . $val . ", 0\n";
@@ -4254,9 +4226,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitBitOp(Node $n): string
+    private function emitBitOp(\Compile\Mir\BitOp $n): string
     {
-        $b = $this->castBitOp($n);
+        $b = $n;
         $out = $this->emitNode($b->left);
         $out .= $this->coerceToI64();
         $l = $this->lastValue;
@@ -4277,9 +4249,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitBitNot(Node $n): string
+    private function emitBitNot(\Compile\Mir\BitNot_ $n): string
     {
-        $out = $this->emitNode($this->castBitNot($n)->operand);
+        $out = $this->emitNode($n->operand);
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $reg = $this->allocSsa();
@@ -4288,9 +4260,6 @@ final class EmitLlvm
         $this->lastValueType = 'i64';
         return $out;
     }
-
-    private function castBitOp(Node $n): \Compile\Mir\BitOp { return $n; }
-    private function castBitNot(Node $n): \Compile\Mir\BitNot_ { return $n; }
 
     /**
      * `$x instanceof T` → 1/0. The set of matching class_ids is fixed
@@ -4308,9 +4277,9 @@ final class EmitLlvm
      * The closure value is the struct ptr; the fn itself is the
      * top-level `__closure_N` synthesised at lowering.
      */
-    private function emitClosure(Node $n): string
+    private function emitClosure(Closure_ $n): string
     {
-        $cl = $this->castClosure($n);
+        $cl = $n;
         $cnt = \count($cl->captures);
         // Layout: [fn_ptr, cap0, cap1, ...]. The fn ptr at slot 0 lets a
         // closure invoked through a `Closure`-typed value (returned /
@@ -4405,9 +4374,9 @@ final class EmitLlvm
     }
 
     /** `$closure(args)` → load captures from the struct, call __closure_N. */
-    private function emitInvoke(Node $n): string
+    private function emitInvoke(Invoke_ $n): string
     {
-        $iv = $this->castInvoke($n);
+        $iv = $n;
         $fn = $iv->callee->type->class ?? '';
         // An invokable object: `$obj(...)` on a real class with __invoke
         // reroutes to `$obj->__invoke(...)` (closures keep the struct path).
@@ -4464,11 +4433,11 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitNullCoalesce(Node $n): string
+    private function emitNullCoalesce(NullCoalesce_ $n): string
     {
-        $nc = $this->castNullCoalesce($n);
+        $nc = $n;
         if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS) {
-            $lpa = $this->castPropertyAccess($nc->left);
+            $lpa = $nc->left;
             if ($lpa->object->kind === Node::KIND_PROPERTY_ACCESS
                 && $lpa->object->type->kind === Type::KIND_OBJ) {
                 return $this->emitCoalesceChain($nc, $n->type);
@@ -4571,7 +4540,7 @@ final class EmitLlvm
         $chain = [];
         $node = $nc->left;
         while ($node->kind === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->castPropertyAccess($node);
+            $pa = $node;
             $rc = $pa->object->type->class ?? '';
             if ($pa->object->type->kind === Type::KIND_OBJ && $rc !== ''
                 && isset($this->classes[$rc]) && !isset($this->enums[$rc])
@@ -4684,9 +4653,9 @@ final class EmitLlvm
         return $ir;
     }
 
-    private function emitInstanceof(Node $n): string
+    private function emitInstanceof(Instanceof_ $n): string
     {
-        $io = $this->castInstanceof($n);
+        $io = $n;
         $out = $this->emitNode($io->operand);
         $out .= $this->coerceToI64();
         $obj = $this->lastValue;
@@ -4794,9 +4763,9 @@ final class EmitLlvm
         return false;
     }
 
-    private function emitCast(Node $n): string
+    private function emitCast(Cast $n): string
     {
-        $c = $this->castCast($n);
+        $c = $n;
         $ok = $c->operand->type->kind;
         $out = $this->emitNode($c->operand);
         if ($c->target === 'string') {
@@ -4935,9 +4904,24 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitIncDec(Node $n): string
+    private function emitIncDec(IncDec $n): string
     {
-        $d = $this->castIncDec($n);
+        $d = $n;
+        // `$s++` on a string local (typed CELL by inferIncDec): the value rides a
+        // cell — delegate to the stdlib Perl/numeric increment, which returns the
+        // next value (int/float/string) as a cell. Post returns the old cell.
+        if ($d->type->kind === Type::KIND_CELL && $d->op === '+'
+            && isset($this->slots[$d->name])) {
+            $slot = $this->slots[$d->name];
+            $old = $this->allocSsa();
+            $out = '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
+            $new = $this->allocSsa();
+            $out .= '  ' . $new . ' = call i64 @manticore___mir_str_increment(i64 ' . $old . ")\n";
+            $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
+            $this->lastValue = $d->prefix ? $new : $old;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $instr = $d->op === '+' ? 'add' : 'sub';
         // Static locals (backed by a global cell) and by-ref params / captures
         // (the slot holds a POINTER to the real storage) don't live in a plain
@@ -4988,9 +4972,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitTernary(Node $n): string
+    private function emitTernary(Ternary $n): string
     {
-        $t = $this->castTernary($n);
+        $t = $n;
         $res = $this->allocSsa();
         $out = '  ' . $res . " = alloca i64\n";
         // Short ternary (`?:`) reuses the operand as its then-value, so keep its
@@ -5085,9 +5069,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitForeach(Node $n): string
+    private function emitForeach(Foreach_ $n): string
     {
-        $fe = $this->castForeach($n);
+        $fe = $n;
         if ($this->isGeneratorType($fe->array->type)) {
             return $this->emitForeachGenerator($fe);
         }
@@ -5284,9 +5268,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitSwitch(Node $n): string
+    private function emitSwitch(Switch_ $n): string
     {
-        $sw = $this->castSwitch($n);
+        $sw = $n;
         $out = $this->emitNode($sw->subject);
         $out .= $this->coerceToI64();
         $subj = $this->lastValue;
@@ -5390,9 +5374,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitMatch(Node $n): string
+    private function emitMatch(Match_ $n): string
     {
-        $m = $this->castMatch($n);
+        $m = $n;
         $res = $this->allocSsa();
         $out = '  ' . $res . " = alloca i64\n";
         $out .= $this->emitNode($m->subject);
@@ -5517,10 +5501,10 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitConcat(Node $n): string
+    private function emitConcat(Concat $n): string
     {
         $this->needsConcat = true;
-        $c = $this->castConcat($n);
+        $c = $n;
         // Route confined (Arena) concats through the arena allocator so
         // they are bulk-freed at the frame's mem_arena_leave; escaping
         // ones stay on the heap. The kind comes from InferAllocKind via
@@ -5614,9 +5598,8 @@ final class EmitLlvm
     private function flattenConcat(Node $n, array &$ops): void
     {
         if ($n->kind === Node::KIND_CONCAT) {
-            $c = $this->castConcat($n);
-            $this->flattenConcat($c->left, $ops);
-            $this->flattenConcat($c->right, $ops);
+            $this->flattenConcat($n->left, $ops);
+            $this->flattenConcat($n->right, $ops);
             return;
         }
         $ops[] = $n;
@@ -5778,9 +5761,9 @@ final class EmitLlvm
      * to real runtime calls; rc release/retain stay no-ops until the rc
      * runtime lands.
      */
-    private function emitMemoryOp(Node $n): string
+    private function emitMemoryOp(\Compile\Mir\MemoryOp_ $n): string
     {
-        $mo = $this->castMemoryOp($n);
+        $mo = $n;
         if ($mo->op === 'arena_enter') {
             $this->needsArena = true;
             $this->currentFnHasArena = true;
@@ -5798,7 +5781,7 @@ final class EmitLlvm
             // Scope-exit drop of an owned RcHeap vec / obj local.
             $t = $mo->target;
             if ($t !== null && $t->kind === Node::KIND_LOAD_LOCAL) {
-                $name = $this->castLoadLocal($t)->name;
+                $name = $t->name;
                 // Transferred (escaped into a borrowing container): ownership
                 // moved to the container, so skip the scope-exit release.
                 if (isset($this->transferredLocals[$name])) { return ''; }
@@ -6040,8 +6023,6 @@ final class EmitLlvm
     }
 
 
-    private function castMemoryOp(Node $n): \Compile\Mir\MemoryOp_ { return $n; }
-
     /**
      * Retain (rc++) a just-emitted vec / obj value that is being given a
      * second owner (heap store, container element, obj alias, capture).
@@ -6249,9 +6230,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitCmp(Node $n): string
+    private function emitCmp(Cmp $n): string
     {
-        $c = $this->castCmp($n);
+        $c = $n;
         // `X === null` / `!== null` (and == / !=) — null-ness is a
         // compile-time property of the operand's type (the i64 carrier
         // can't tell null from int 0 at runtime). Evaluate the non-null
@@ -6774,10 +6755,10 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitEcho(Node $n): string
+    private function emitEcho(Echo_ $n): string
     {
         $out = '';
-        foreach ($this->castEcho($n)->exprs as $e) {
+        foreach ($n->exprs as $e) {
             $out .= $this->emitNode($e);
             $kind = $e->type->kind;
             // Stringable object → __toString, then print as a string.
@@ -6864,9 +6845,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitReturn(Node $n): string
+    private function emitReturn(Return_ $n): string
     {
-        $r = $this->castReturn($n);
+        $r = $n;
         $v = $r->value;
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
         // The return value (if any) is stashed in `retval` for getReturn().
@@ -7164,15 +7145,15 @@ final class EmitLlvm
     private function isByRefAddressable(Node $a): bool
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
-            return isset($this->slots[$this->castLoadLocal($a)->name]);
+            return isset($this->slots[$a->name]);
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->castPropertyAccess($a);
+            $pa = $a;
             $cls = $pa->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
-            return $this->arrayElemAddressable($this->castArrayAccess($a));
+            return $this->arrayElemAddressable($a);
         }
         return false;
     }
@@ -7191,7 +7172,7 @@ final class EmitLlvm
         // property read can infer UNKNOWN, so consult the declared prop type.
         if ($aa->array->type->isArray()) { return true; }
         if ($aa->array->kind === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->castPropertyAccess($aa->array);
+            $pa = $aa->array;
             $cls = $pa->object->type->class ?? '';
             if ($cls !== '' && isset($this->classes[$cls])) {
                 $pt = $this->classes[$cls]->propertyTypes[$pa->property] ?? null;
@@ -7221,11 +7202,11 @@ final class EmitLlvm
     private function containerAddressable(Node $base): bool
     {
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->castLoadLocal($base)->name;
+            $name = $base->name;
             return isset($this->globalBackedLocals[$name]) || isset($this->slots[$name]);
         }
         if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
-            $cls = $this->castPropertyAccess($base)->object->type->class ?? '';
+            $cls = $base->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
         return false;
@@ -7241,7 +7222,7 @@ final class EmitLlvm
     private function containerCellPtr(Node $base): ?string
     {
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->castLoadLocal($base)->name;
+            $name = $base->name;
             if (isset($this->globalBackedLocals[$name])) {
                 $this->lastValue = $this->globalBackedLocals[$name];
                 $this->lastValueType = 'ptr';
@@ -7285,7 +7266,7 @@ final class EmitLlvm
     private function byRefAddrOf(Node $a): ?string
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->castLoadLocal($a)->name;
+            $name = $a->name;
             if (!isset($this->slots[$name])) { return null; }
             $addr = $this->allocSsa();
             if (isset($this->refLocals[$name])) {
@@ -7298,7 +7279,7 @@ final class EmitLlvm
             return $out;
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->castPropertyAccess($a);
+            $pa = $a;
             $cls = $pa->object->type->class ?? '';
             if ($cls === '' || !isset($this->classes[$cls])) { return null; }
             $out = $this->emitNode($pa->object);
@@ -7315,7 +7296,7 @@ final class EmitLlvm
             return $out;
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->castArrayAccess($a);
+            $aa = $a;
             $keyKind = $this->arrayElemKeyKind($aa->index);
             if ($keyKind === null || !$this->arrayElemAddressable($aa)) { return null; }
             // ptr to the cell holding the array (for COW write-back).
@@ -7425,9 +7406,9 @@ final class EmitLlvm
         return '';
     }
 
-    private function emitCall(Node $n): string
+    private function emitCall(Call $n): string
     {
-        $c = $this->castCall($n);
+        $c = $n;
         $b = $this->emitBuiltin($c);
         if ($b !== null) { return $b; }
         $out = '';
@@ -7691,9 +7672,9 @@ final class EmitLlvm
         return '';
     }
 
-    private function emitIf(Node $n): string
+    private function emitIf(If_ $n): string
     {
-        $i = $this->castIf($n);
+        $i = $n;
         $out = $this->emitCondVal($i->cond);
         $cond = $this->lastValue;
         $thenLabel = $this->allocLabel('then');
@@ -7773,9 +7754,8 @@ final class EmitLlvm
             $this->arenaHasAlloc = true;
         }
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = $this->castStoreLocal($n);
-            if ($this->bindsArenaValue($sl->value)) {
-                $this->arenaBoundLocals[$sl->name] = true;
+            if ($this->bindsArenaValue($n->value)) {
+                $this->arenaBoundLocals[$n->name] = true;
             }
         } else {
             $sv = $this->storeBoundValue($n);
@@ -7828,7 +7808,7 @@ final class EmitLlvm
     private function stmtList(Node $body): array
     {
         if ($body->kind === Node::KIND_BLOCK) {
-            return $this->castBlock($body)->stmts;
+            return $body->stmts;
         }
         return [$body];
     }
@@ -7849,10 +7829,10 @@ final class EmitLlvm
     private function storeBoundValue(Node $n): ?Node
     {
         $k = $n->kind;
-        if ($k === Node::KIND_STORE_LOCAL) { return $this->castStoreLocal($n)->value; }
-        if ($k === Node::KIND_STORE_PROPERTY) { return $this->castStoreProperty($n)->value; }
-        if ($k === Node::KIND_STORE_ELEMENT) { return $this->castStoreElement($n)->value; }
-        if ($k === Node::KIND_STORE_STATIC_PROP) { return $this->castStoreStaticProp($n)->value; }
+        if ($k === Node::KIND_STORE_LOCAL) { return $n->value; }
+        if ($k === Node::KIND_STORE_PROPERTY) { return $n->value; }
+        if ($k === Node::KIND_STORE_ELEMENT) { return $n->value; }
+        if ($k === Node::KIND_STORE_STATIC_PROP) { return $n->value; }
         if ($k === Node::KIND_STORE_DYN_PROP) { return $this->castStoreDynProp($n)->value; }
         return null;
     }
@@ -7862,12 +7842,12 @@ final class EmitLlvm
     {
         if ($v->allocKind === \Compile\Mir\AllocationKind::ARENA) { return true; }
         if ($v->kind === Node::KIND_TERNARY) {
-            $t = $this->castTernary($v);
+            $t = $v;
             if ($t->then !== null && $this->bindsArenaValue($t->then)) { return true; }
             return $this->bindsArenaValue($t->else_);
         }
         if ($v->kind === Node::KIND_NULLCOALESCE) {
-            $nc = $this->castNullCoalesce($v);
+            $nc = $v;
             return $this->bindsArenaValue($nc->left) || $this->bindsArenaValue($nc->right);
         }
         return false;
@@ -7899,9 +7879,9 @@ final class EmitLlvm
             . ', i64 ' . $this->arenaSaveUsedReg . ")\n";
     }
 
-    private function emitWhile(Node $n): string
+    private function emitWhile(While_ $n): string
     {
-        $w = $this->castWhile($n);
+        $w = $n;
         $condLabel = $this->allocLabel('loop.cond');
         $bodyLabel = $this->allocLabel('loop.body');
         $endLabel  = $this->allocLabel('loop.end');
@@ -7935,9 +7915,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitFor(Node $n): string
+    private function emitFor(For_ $n): string
     {
-        $f = $this->castFor($n);
+        $f = $n;
         $condLabel = $this->allocLabel('for.cond');
         $bodyLabel = $this->allocLabel('for.body');
         $stepLabel = $this->allocLabel('for.step');
@@ -7981,9 +7961,9 @@ final class EmitLlvm
         return $out;
     }
 
-    private function emitDoWhile(Node $n): string
+    private function emitDoWhile(DoWhile_ $n): string
     {
-        $d = $this->castDoWhile($n);
+        $d = $n;
         $bodyLabel = $this->allocLabel('do.body');
         $condLabel = $this->allocLabel('do.cond');
         $endLabel  = $this->allocLabel('do.end');
@@ -8072,7 +8052,7 @@ final class EmitLlvm
     private function litKeyHashArgs(Node $key): string
     {
         if ($key->kind === Node::KIND_STRING_CONST) {
-            $h = $this->fnvHash64($this->castStringConst($key)->value);
+            $h = $this->fnvHash64($key->value);
             return ', i64 ' . (string)$h . ', i64 1';
         }
         return ', i64 0, i64 0';
@@ -8117,15 +8097,15 @@ final class EmitLlvm
 
     // ── Arrays (unified PhpArray, docs/16) ─────────────────────
 
-    private function emitArrayLit(Node $n): string
+    private function emitArrayLit(ArrayLit $n): string
     {
         $this->vecAllocArena = false;
-        return $this->emitArrayLitUnified($this->castArrayLit($n));
+        return $this->emitArrayLitUnified($n);
     }
 
-    private function emitArrayAccess(Node $n): string
+    private function emitArrayAccess(ArrayAccess_ $n): string
     {
-        $aa = $this->castArrayAccess($n);
+        $aa = $n;
         // `$s[$i]` on a string → fresh 1-char string. Negative index counts
         // from the end; out-of-range yields "" (both handled by the helper).
         if ($aa->array->type->kind === Type::KIND_STRING) {
@@ -8151,9 +8131,9 @@ final class EmitLlvm
         return $this->emitArrayAccessUnified($n, $aa);
     }
 
-    private function emitStoreElement(Node $n): string
+    private function emitStoreElement(StoreElement $n): string
     {
-        $se = $this->castStoreElement($n);
+        $se = $n;
         // `$s[$i] = $c` on a string → set byte $i to $c's first byte and write
         // the new string back into the base. Growing past the end pads with
         // spaces; negative $i counts from the end (all in the helper). The `[]`
@@ -8490,36 +8470,24 @@ final class EmitLlvm
         return $this->userLabels[$name];
     }
 
-    private function castGoto(Node $n): \Compile\Mir\Goto_ { return $n; }
-    private function castLabel(Node $n): \Compile\Mir\Label_ { return $n; }
-
     // ── Typed-cast helpers ─────────────────────────────────────
 
-    private function castIntConst(IntConst $n): IntConst { return $n; }
-    private function castFloatConst(FloatConst $n): FloatConst { return $n; }
-    private function castDiv(Div $n): Div { return $n; }
-    private function castBoolConst(BoolConst $n): BoolConst { return $n; }
     private function castStringConst(StringConst $n): StringConst { return $n; }
     private function castLoadLocal(LoadLocal $n): LoadLocal { return $n; }
     private function castStoreLocal(StoreLocal $n): StoreLocal { return $n; }
-    private function castNeg(Neg $n): Neg { return $n; }
-    private function castNot(Not_ $n): Not_ { return $n; }
-    private function castConcat(Concat $n): Concat { return $n; }
     private function castCmp(Cmp $n): Cmp { return $n; }
+    // Still called from sibling trait EmitLlvmObjects on a SUB-node (`$def`), where
+    // narrowing can't fire — the host pin stays.
+    private function castBoolConst(\Compile\Mir\BoolConst $n): \Compile\Mir\BoolConst { return $n; }
+    private function castIntConst(\Compile\Mir\IntConst $n): \Compile\Mir\IntConst { return $n; }
+    private function castFloatConst(\Compile\Mir\FloatConst $n): \Compile\Mir\FloatConst { return $n; }
     private function asBoolConst(Node $n): BoolConst { return $n; }
-    private function castEcho(Echo_ $n): Echo_ { return $n; }
-    private function castReturn(Return_ $n): Return_ { return $n; }
     private function castCall(Call $n): Call { return $n; }
     private function castArrayLit(ArrayLit $n): ArrayLit { return $n; }
     private function castSpread(Node $n): Spread_ { return $n; }
     private function castArrayAccess(ArrayAccess_ $n): ArrayAccess_ { return $n; }
-    private function castStoreElement(StoreElement $n): StoreElement { return $n; }
-    private function castNewObj(NewObj $n): NewObj { return $n; }
-    private function castClone(Clone_ $n): Clone_ { return $n; }
     private function castPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }
-    private function castStoreProperty(StoreProperty $n): StoreProperty { return $n; }
     private function castMethodCall(MethodCall_ $n): MethodCall_ { return $n; }
-    private function castStaticCall(StaticCall_ $n): StaticCall_ { return $n; }
     /** `break N` target — read the break stack directly (no array param;
      *  self-host mishandles indexing an array passed by value). */
     private function breakTargetFor(int $level): string
@@ -8540,57 +8508,32 @@ final class EmitLlvm
         return $this->continueStack[$idx];
     }
 
-    private function castBreak(Break_ $n): Break_ { return $n; }
-    private function castContinue(Continue_ $n): Continue_ { return $n; }
-    private function castIf(If_ $n): If_ { return $n; }
-    private function castWhile(While_ $n): While_ { return $n; }
-    private function castForeach(Foreach_ $n): Foreach_ { return $n; }
-    private function castFor(For_ $n): For_ { return $n; }
-    private function castDoWhile(DoWhile_ $n): DoWhile_ { return $n; }
-    private function castCast(Cast $n): Cast { return $n; }
-    private function castInstanceof(Instanceof_ $n): Instanceof_ { return $n; }
-    private function castNullCoalesce(NullCoalesce_ $n): NullCoalesce_ { return $n; }
-    private function castClosure(Closure_ $n): Closure_ { return $n; }
-    private function castInvoke(Invoke_ $n): Invoke_ { return $n; }
-    private function castIncDec(IncDec $n): IncDec { return $n; }
-    private function castStaticProp(StaticProp_ $n): StaticProp_ { return $n; }
-    private function castStoreStaticProp(StoreStaticProp_ $n): StoreStaticProp_ { return $n; }
-    private function castStaticLocalDecl(StaticLocalDecl_ $n): StaticLocalDecl_ { return $n; }
-    private function castTernary(Ternary $n): Ternary { return $n; }
-    private function castSwitch(Switch_ $n): Switch_ { return $n; }
-    private function castMatch(Match_ $n): Match_ { return $n; }
     /** Read a node's type kind through a typed param: a match cond comes
      *  from `foreach ($arm->conds as $c)` where `conds` is `?array` — the
      *  loop var is untyped, so an inline `$c->type->kind` resolves the wrong
      *  field offset (self-host) and reads garbage. Routing through `Node $c`
      *  fixes the offset. */
     private function nodeTypeKind(Node $c): string { return $c->type->kind; }
-    private function castBlock(Block $n): Block { return $n; }
 
     private function binLeft(Node $n): Node
     {
         $k = $n->kind;
-        if ($k === Node::KIND_ADD) { return $this->castAdd($n)->left; }
-        if ($k === Node::KIND_SUB) { return $this->castSub($n)->left; }
-        if ($k === Node::KIND_MUL) { return $this->castMul($n)->left; }
-        if ($k === Node::KIND_DIV) { return $this->castDiv($n)->left; }
-        if ($k === Node::KIND_MOD) { return $this->castMod($n)->left; }
+        if ($k === Node::KIND_ADD) { return $n->left; }
+        if ($k === Node::KIND_SUB) { return $n->left; }
+        if ($k === Node::KIND_MUL) { return $n->left; }
+        if ($k === Node::KIND_DIV) { return $n->left; }
+        if ($k === Node::KIND_MOD) { return $n->left; }
         return $this->castCmp($n)->left;
     }
 
     private function binRight(Node $n): Node
     {
         $k = $n->kind;
-        if ($k === Node::KIND_ADD) { return $this->castAdd($n)->right; }
-        if ($k === Node::KIND_SUB) { return $this->castSub($n)->right; }
-        if ($k === Node::KIND_MUL) { return $this->castMul($n)->right; }
-        if ($k === Node::KIND_DIV) { return $this->castDiv($n)->right; }
-        if ($k === Node::KIND_MOD) { return $this->castMod($n)->right; }
+        if ($k === Node::KIND_ADD) { return $n->right; }
+        if ($k === Node::KIND_SUB) { return $n->right; }
+        if ($k === Node::KIND_MUL) { return $n->right; }
+        if ($k === Node::KIND_DIV) { return $n->right; }
+        if ($k === Node::KIND_MOD) { return $n->right; }
         return $this->castCmp($n)->right;
     }
-
-    private function castAdd(Add $n): Add { return $n; }
-    private function castSub(Sub $n): Sub { return $n; }
-    private function castMul(Mul $n): Mul { return $n; }
-    private function castMod(Mod $n): Mod { return $n; }
 }

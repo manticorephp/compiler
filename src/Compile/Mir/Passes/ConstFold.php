@@ -160,35 +160,31 @@ final class ConstFold implements Pass
     {
         // Targets are addressing nodes (load/array-access/prop); fold
         // their sub-expressions (indices) but keep the node shape.
+        // $n narrows to Isset_/Unset_ from each guard (InferTypes kind-narrowing);
+        // both carry `targets` — no cast pin needed.
         if ($n->kind === Node::KIND_ISSET) {
-            $i = $this->castIsset($n);
             $out = [];
-            foreach ($i->targets as $t) { $out[] = $this->foldNode($t); }
-            $i->targets = $out;
-            return $i;
+            foreach ($n->targets as $t) { $out[] = $this->foldNode($t); }
+            $n->targets = $out;
+            return $n;
         }
-        $u = $this->castUnset($n);
-        $out = [];
-        foreach ($u->targets as $t) { $out[] = $this->foldNode($t); }
-        $u->targets = $out;
-        return $u;
+        if ($n->kind === Node::KIND_UNSET) {
+            $out = [];
+            foreach ($n->targets as $t) { $out[] = $this->foldNode($t); }
+            $n->targets = $out;
+            return $n;
+        }
+        return $n;
     }
 
-    private function castIsset(Isset_ $n): Isset_ { return $n; }
-    private function castUnset(Unset_ $n): Unset_ { return $n; }
-    private function castThrow(Throw_ $n): Throw_ { return $n; }
-    private function castTryCatch(TryCatch_ $n): TryCatch_ { return $n; }
-
-    private function foldThrow(Node $n): Node
+    private function foldThrow(Throw_ $t): Node
     {
-        $t = $this->castThrow($n);
         $t->value = $this->foldNode($t->value);
         return $t;
     }
 
-    private function foldTryCatch(Node $n): Node
+    private function foldTryCatch(TryCatch_ $tc): Node
     {
-        $tc = $this->castTryCatch($n);
         $tb = [];
         foreach ($tc->tryBody as $s) { $tb[] = $this->foldNode($s); }
         $tc->tryBody = $tb;
@@ -427,7 +423,7 @@ final class ConstFold implements Pass
             $n->else = $this->foldBlock($n->else);
         }
         if ($n->cond->kind === Node::KIND_BOOL_CONST) {
-            $val = $this->asBoolConst($n->cond)->value;
+            $val = $n->cond->value;
             if ($val) {
                 return $n->then;
             }
@@ -525,7 +521,7 @@ final class ConstFold implements Pass
     {
         $n->operand = $this->foldNode($n->operand);
         if ($n->operand->kind === Node::KIND_BOOL_CONST) {
-            $v = $this->asBoolConst($n->operand)->value;
+            $v = $n->operand->value;
             return new BoolConst(!$v, Type::bool_());
         }
         return $n;
@@ -539,8 +535,8 @@ final class ConstFold implements Pass
         // for the emitter to coerce at runtime.
         if ($n->left->kind === Node::KIND_STRING_CONST
             && $n->right->kind === Node::KIND_STRING_CONST) {
-            $l = $this->asStringConst($n->left)->value;
-            $r = $this->asStringConst($n->right)->value;
+            $l = $n->left->value;
+            $r = $n->right->value;
             return new StringConst($l . $r, Type::string_());
         }
         return $n;
@@ -584,6 +580,4 @@ final class ConstFold implements Pass
     }
 
     private function asIntConst(IntConst $n): IntConst { return $n; }
-    private function asBoolConst(BoolConst $n): BoolConst { return $n; }
-    private function asStringConst(StringConst $n): StringConst { return $n; }
 }

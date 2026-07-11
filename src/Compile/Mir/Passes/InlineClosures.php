@@ -119,213 +119,187 @@ final class InlineClosures implements Pass
     /** Recurse every node, rebuilding children; splice at an eligible invoke. */
     private function rewrite(Node $n): Node
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_INVOKE) {
-            $iv = $this->asInvoke($n);
-            $iv->callee = $this->rewrite($iv->callee);
+        if ($n->kind === Node::KIND_INVOKE) {
+            $n->callee = $this->rewrite($n->callee);
             $args = [];
-            foreach ($iv->args as $a) { $args[] = $this->rewrite($a); }
-            $iv->args = $args;
-            $spliced = $this->tryInline($iv);
-            return $spliced ?? $iv;
+            foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
+            $n->args = $args;
+            $spliced = $this->tryInline($n);
+            return $spliced ?? $n;
         }
 
         // ── Leaves (no sub-nodes that can hold an invoke) ──
-        if ($k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST
-            || $k === Node::KIND_STRING_CONST || $k === Node::KIND_BOOL_CONST
-            || $k === Node::KIND_NULL_CONST || $k === Node::KIND_LOAD_LOCAL
-            || $k === Node::KIND_STATIC_PROP || $k === Node::KIND_BREAK
-            || $k === Node::KIND_CONTINUE || $k === Node::KIND_INCDEC
-            || $k === Node::KIND_REF_ALIAS || $k === Node::KIND_REF_BIND
-            || $k === Node::KIND_REF_ADDR
-            || $k === Node::KIND_CLASS_NAME || $k === Node::KIND_CLOSURE
-            || $k === Node::KIND_YIELD || $k === Node::KIND_SPREAD) {
+        if ($n->kind === Node::KIND_INT_CONST || $n->kind === Node::KIND_FLOAT_CONST
+            || $n->kind === Node::KIND_STRING_CONST || $n->kind === Node::KIND_BOOL_CONST
+            || $n->kind === Node::KIND_NULL_CONST || $n->kind === Node::KIND_LOAD_LOCAL
+            || $n->kind === Node::KIND_STATIC_PROP || $n->kind === Node::KIND_BREAK
+            || $n->kind === Node::KIND_CONTINUE || $n->kind === Node::KIND_INCDEC
+            || $n->kind === Node::KIND_REF_ALIAS || $n->kind === Node::KIND_REF_BIND
+            || $n->kind === Node::KIND_REF_ADDR
+            || $n->kind === Node::KIND_CLASS_NAME || $n->kind === Node::KIND_CLOSURE
+            || $n->kind === Node::KIND_YIELD || $n->kind === Node::KIND_SPREAD) {
             return $n;
         }
 
         // ── Binary (left,right) ──
-        if ($k === Node::KIND_ADD) { $x = $this->asAdd($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_SUB) { $x = $this->asSub($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_MUL) { $x = $this->asMul($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_DIV) { $x = $this->asDiv($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_MOD) { $x = $this->asMod($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_CMP) { $x = $this->asCmp($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_CONCAT) { $x = $this->asConcat($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
-        if ($k === Node::KIND_BITOP) { $x = $this->asBitOp($n); $x->left = $this->rewrite($x->left); $x->right = $this->rewrite($x->right); return $n; }
+        if ($n->kind === Node::KIND_ADD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_SUB) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_MUL) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_DIV) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_MOD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_CMP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_CONCAT) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_BITOP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         // ── Unary (operand) ──
-        if ($k === Node::KIND_NEG)    { $x = $this->asNeg($n);    $x->operand = $this->rewrite($x->operand); return $n; }
-        if ($k === Node::KIND_NOT)    { $x = $this->asNot($n);    $x->operand = $this->rewrite($x->operand); return $n; }
-        if ($k === Node::KIND_BITNOT) { $x = $this->asBitNot($n); $x->operand = $this->rewrite($x->operand); return $n; }
-        if ($k === Node::KIND_CAST) {
-            $c = $this->asCast($n);
-            $c->operand = $this->rewrite($c->operand);
+        if ($n->kind === Node::KIND_NEG)    { $n->operand = $this->rewrite($n->operand); return $n; }
+        if ($n->kind === Node::KIND_NOT)    { $n->operand = $this->rewrite($n->operand); return $n; }
+        if ($n->kind === Node::KIND_BITNOT) { $n->operand = $this->rewrite($n->operand); return $n; }
+        if ($n->kind === Node::KIND_CAST) {
+            $n->operand = $this->rewrite($n->operand);
             return $n;
         }
-        if ($k === Node::KIND_INSTANCEOF) {
-            $io = $this->asInstanceof($n);
-            $io->operand = $this->rewrite($io->operand);
+        if ($n->kind === Node::KIND_INSTANCEOF) {
+            $n->operand = $this->rewrite($n->operand);
             return $n;
         }
 
         // ── Statements / expressions with children ──
-        if ($k === Node::KIND_RETURN) {
-            $r = $this->asReturn($n);
-            if ($r->value !== null) { $r->value = $this->rewrite($r->value); }
+        if ($n->kind === Node::KIND_RETURN) {
+            if ($n->value !== null) { $n->value = $this->rewrite($n->value); }
             return $n;
         }
-        if ($k === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
-            $sl->value = $this->rewrite($sl->value);
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $n->value = $this->rewrite($n->value);
             return $n;
         }
-        if ($k === Node::KIND_ECHO) {
-            $e = $this->asEcho($n);
+        if ($n->kind === Node::KIND_ECHO) {
             $out = [];
-            foreach ($e->exprs as $x) { $out[] = $this->rewrite($x); }
-            $e->exprs = $out;
+            foreach ($n->exprs as $x) { $out[] = $this->rewrite($x); }
+            $n->exprs = $out;
             return $n;
         }
-        if ($k === Node::KIND_CALL) {
-            $call = $this->asCall($n);
+        if ($n->kind === Node::KIND_CALL) {
             $args = [];
-            foreach ($call->args as $a) { $args[] = $this->rewrite($a); }
-            $call->args = $args;
-            $fused = $this->tryFuseArrayFn($call);
+            foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
+            $n->args = $args;
+            $fused = $this->tryFuseArrayFn($n);
             return $fused ?? $n;
         }
-        if ($k === Node::KIND_NULLCOALESCE) {
-            $nc = $this->asNullCoalesce($n);
-            $nc->left = $this->rewrite($nc->left);
-            $nc->right = $this->rewrite($nc->right);
+        if ($n->kind === Node::KIND_NULLCOALESCE) {
+            $n->left = $this->rewrite($n->left);
+            $n->right = $this->rewrite($n->right);
             return $n;
         }
-        if ($k === Node::KIND_TERNARY) {
-            $t = $this->asTernary($n);
-            $t->cond = $this->rewrite($t->cond);
-            if ($t->then !== null) { $t->then = $this->rewrite($t->then); }
-            $t->else_ = $this->rewrite($t->else_);
+        if ($n->kind === Node::KIND_TERNARY) {
+            $n->cond = $this->rewrite($n->cond);
+            if ($n->then !== null) { $n->then = $this->rewrite($n->then); }
+            $n->else_ = $this->rewrite($n->else_);
             return $n;
         }
-        if ($k === Node::KIND_THROW) {
-            $th = $this->asThrow($n);
-            $th->value = $this->rewrite($th->value);
+        if ($n->kind === Node::KIND_THROW) {
+            $n->value = $this->rewrite($n->value);
             return $n;
         }
-        if ($k === Node::KIND_ISSET) {
-            $is = $this->asIsset($n);
+        if ($n->kind === Node::KIND_ISSET) {
             $out = [];
-            foreach ($is->targets as $t) { $out[] = $this->rewrite($t); }
-            $is->targets = $out;
+            foreach ($n->targets as $t) { $out[] = $this->rewrite($t); }
+            $n->targets = $out;
             return $n;
         }
-        if ($k === Node::KIND_UNSET) {
-            $u = $this->asUnset($n);
+        if ($n->kind === Node::KIND_UNSET) {
             $out = [];
-            foreach ($u->targets as $t) { $out[] = $this->rewrite($t); }
-            $u->targets = $out;
+            foreach ($n->targets as $t) { $out[] = $this->rewrite($t); }
+            $n->targets = $out;
             return $n;
         }
-        if ($k === Node::KIND_STORE_STATIC_PROP) {
-            $sp = $this->asStoreStaticProp($n);
-            $sp->value = $this->rewrite($sp->value);
+        if ($n->kind === Node::KIND_STORE_STATIC_PROP) {
+            $n->value = $this->rewrite($n->value);
             return $n;
         }
 
         // ── Containers / arrays ──
-        if ($k === Node::KIND_ARRAY_LIT) {
-            foreach ($this->asArrayLit($n)->elements as $el) {
+        if ($n->kind === Node::KIND_ARRAY_LIT) {
+            foreach ($n->elements as $el) {
                 if ($el->key !== null) { $el->key = $this->rewrite($el->key); }
                 $el->value = $this->rewrite($el->value);
             }
             return $n;
         }
-        if ($k === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->asArrayAccess($n);
-            $aa->array = $this->rewrite($aa->array);
-            $aa->index = $this->rewrite($aa->index);
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $n->array = $this->rewrite($n->array);
+            $n->index = $this->rewrite($n->index);
             return $n;
         }
-        if ($k === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
-            $se->array = $this->rewrite($se->array);
-            $se->index = $this->rewrite($se->index);
-            $se->value = $this->rewrite($se->value);
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $n->array = $this->rewrite($n->array);
+            $n->index = $this->rewrite($n->index);
+            $n->value = $this->rewrite($n->value);
             return $n;
         }
 
         // ── Objects ──
-        if ($k === Node::KIND_NEW_OBJ) {
+        if ($n->kind === Node::KIND_NEW_OBJ) {
             $args = [];
-            foreach ($this->asNewObj($n)->args as $a) { $args[] = $this->rewrite($a); }
-            $this->asNewObj($n)->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
+            $n->args = $args;
             return $n;
         }
-        if ($k === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->asPropertyAccess($n);
-            $pa->object = $this->rewrite($pa->object);
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) {
+            $n->object = $this->rewrite($n->object);
             return $n;
         }
-        if ($k === Node::KIND_STORE_PROPERTY) {
-            $sp = $this->asStoreProperty($n);
-            $sp->object = $this->rewrite($sp->object);
-            $sp->value = $this->rewrite($sp->value);
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $n->object = $this->rewrite($n->object);
+            $n->value = $this->rewrite($n->value);
             return $n;
         }
-        if ($k === Node::KIND_METHOD_CALL) {
-            $mc = $this->asMethodCall($n);
-            $mc->object = $this->rewrite($mc->object);
+        if ($n->kind === Node::KIND_METHOD_CALL) {
+            $n->object = $this->rewrite($n->object);
             $args = [];
-            foreach ($mc->args as $a) { $args[] = $this->rewrite($a); }
-            $mc->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
+            $n->args = $args;
             return $n;
         }
-        if ($k === Node::KIND_STATIC_CALL) {
-            $sc = $this->asStaticCall($n);
+        if ($n->kind === Node::KIND_STATIC_CALL) {
             $args = [];
-            foreach ($sc->args as $a) { $args[] = $this->rewrite($a); }
-            $sc->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
+            $n->args = $args;
             return $n;
         }
 
         // ── Control flow ──
-        if ($k === Node::KIND_BLOCK) { return $this->rewriteBlock($this->asBlock($n)); }
-        if ($k === Node::KIND_IF) {
-            $if = $this->asIf($n);
-            $if->cond = $this->rewrite($if->cond);
-            $this->rewriteBlock($if->then);
-            if ($if->else !== null) { $this->rewriteBlock($if->else); }
+        if ($n->kind === Node::KIND_BLOCK) { return $this->rewriteBlock($n); }
+        if ($n->kind === Node::KIND_IF) {
+            $n->cond = $this->rewrite($n->cond);
+            $this->rewriteBlock($n->then);
+            if ($n->else !== null) { $this->rewriteBlock($n->else); }
             return $n;
         }
-        if ($k === Node::KIND_WHILE) {
-            $w = $this->asWhile($n);
-            $w->cond = $this->rewrite($w->cond);
-            $this->rewriteBlock($w->body);
+        if ($n->kind === Node::KIND_WHILE) {
+            $n->cond = $this->rewrite($n->cond);
+            $this->rewriteBlock($n->body);
             return $n;
         }
-        if ($k === Node::KIND_DOWHILE) {
-            $dw = $this->asDoWhile($n);
-            $this->rewriteBlock($dw->body);
-            $dw->cond = $this->rewrite($dw->cond);
+        if ($n->kind === Node::KIND_DOWHILE) {
+            $this->rewriteBlock($n->body);
+            $n->cond = $this->rewrite($n->cond);
             return $n;
         }
-        if ($k === Node::KIND_FOR) {
-            $f = $this->asFor($n);
-            if ($f->init !== null) { $f->init = $this->rewrite($f->init); }
-            if ($f->cond !== null) { $f->cond = $this->rewrite($f->cond); }
-            if ($f->step !== null) { $f->step = $this->rewrite($f->step); }
-            $this->rewriteBlock($f->body);
+        if ($n->kind === Node::KIND_FOR) {
+            if ($n->init !== null) { $n->init = $this->rewrite($n->init); }
+            if ($n->cond !== null) { $n->cond = $this->rewrite($n->cond); }
+            if ($n->step !== null) { $n->step = $this->rewrite($n->step); }
+            $this->rewriteBlock($n->body);
             return $n;
         }
-        if ($k === Node::KIND_FOREACH) {
-            $fe = $this->asForeach($n);
-            $fe->array = $this->rewrite($fe->array);
-            $this->rewriteBlock($fe->body);
+        if ($n->kind === Node::KIND_FOREACH) {
+            $n->array = $this->rewrite($n->array);
+            $this->rewriteBlock($n->body);
             return $n;
         }
-        if ($k === Node::KIND_SWITCH) {
-            $sw = $this->asSwitch($n);
-            $sw->subject = $this->rewrite($sw->subject);
-            foreach ($sw->arms as $arm) {
+        if ($n->kind === Node::KIND_SWITCH) {
+            $n->subject = $this->rewrite($n->subject);
+            foreach ($n->arms as $arm) {
                 if ($arm->value !== null) { $arm->value = $this->rewrite($arm->value); }
                 $body = [];
                 foreach ($arm->body as $s) { $body[] = $this->rewrite($s); }
@@ -333,10 +307,9 @@ final class InlineClosures implements Pass
             }
             return $n;
         }
-        if ($k === Node::KIND_MATCH) {
-            $m = $this->asMatch($n);
-            $m->subject = $this->rewrite($m->subject);
-            foreach ($m->arms as $arm) {
+        if ($n->kind === Node::KIND_MATCH) {
+            $n->subject = $this->rewrite($n->subject);
+            foreach ($n->arms as $arm) {
                 if ($arm->conds !== null) {
                     $cs = [];
                     foreach ($arm->conds as $c) { $cs[] = $this->rewrite($c); }
@@ -346,19 +319,18 @@ final class InlineClosures implements Pass
             }
             return $n;
         }
-        if ($k === Node::KIND_TRY_CATCH) {
-            $tc = $this->asTryCatch($n);
+        if ($n->kind === Node::KIND_TRY_CATCH) {
             $tb = [];
-            foreach ($tc->tryBody as $s) { $tb[] = $this->rewrite($s); }
-            $tc->tryBody = $tb;
-            foreach ($tc->catches as $c) {
+            foreach ($n->tryBody as $s) { $tb[] = $this->rewrite($s); }
+            $n->tryBody = $tb;
+            foreach ($n->catches as $c) {
                 $cb = [];
                 foreach ($c->body as $s) { $cb[] = $this->rewrite($s); }
                 $c->body = $cb;
             }
             $fb = [];
-            foreach ($tc->finallyBody as $s) { $fb[] = $this->rewrite($s); }
-            $tc->finallyBody = $fb;
+            foreach ($n->finallyBody as $s) { $fb[] = $this->rewrite($s); }
+            $n->finallyBody = $fb;
             return $n;
         }
 
@@ -488,7 +460,7 @@ final class InlineClosures implements Pass
     private function countLoads(Node $n, array $names, array &$counts): void
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->asLoadLocal($n)->name;
+            $name = $n->name;
             if (isset($names[$name])) { $counts[$name] = ($counts[$name] ?? 0) + 1; }
             return;
         }
@@ -504,7 +476,7 @@ final class InlineClosures implements Pass
     private function substitute(Node $n, array $subst): Node
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->asLoadLocal($n)->name;
+            $name = $n->name;
             if (isset($subst[$name])) { return NodeClone::node($subst[$name]); }
             return $n;
         }
@@ -515,78 +487,70 @@ final class InlineClosures implements Pass
     /** Rewrite each child field of $n in place via {@see substitute}. */
     private function substituteChildren(Node $n, array $subst): void
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_ADD) { $x = $this->asAdd($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_SUB) { $x = $this->asSub($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_MUL) { $x = $this->asMul($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_DIV) { $x = $this->asDiv($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_MOD) { $x = $this->asMod($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_CMP) { $x = $this->asCmp($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_CONCAT) { $x = $this->asConcat($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_BITOP) { $x = $this->asBitOp($n); $x->left = $this->substitute($x->left, $subst); $x->right = $this->substitute($x->right, $subst); return; }
-        if ($k === Node::KIND_NEG)    { $x = $this->asNeg($n);    $x->operand = $this->substitute($x->operand, $subst); return; }
-        if ($k === Node::KIND_NOT)    { $x = $this->asNot($n);    $x->operand = $this->substitute($x->operand, $subst); return; }
-        if ($k === Node::KIND_BITNOT) { $x = $this->asBitNot($n); $x->operand = $this->substitute($x->operand, $subst); return; }
-        if ($k === Node::KIND_CAST) { $c = $this->asCast($n); $c->operand = $this->substitute($c->operand, $subst); return; }
-        if ($k === Node::KIND_INSTANCEOF) { $io = $this->asInstanceof($n); $io->operand = $this->substitute($io->operand, $subst); return; }
-        if ($k === Node::KIND_NULLCOALESCE) {
-            $nc = $this->asNullCoalesce($n);
-            $nc->left = $this->substitute($nc->left, $subst);
-            $nc->right = $this->substitute($nc->right, $subst);
+        if ($n->kind === Node::KIND_ADD) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_SUB) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_MUL) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_DIV) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_MOD) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_CMP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_CONCAT) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_BITOP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_NEG)    { $n->operand = $this->substitute($n->operand, $subst); return; }
+        if ($n->kind === Node::KIND_NOT)    { $n->operand = $this->substitute($n->operand, $subst); return; }
+        if ($n->kind === Node::KIND_BITNOT) { $n->operand = $this->substitute($n->operand, $subst); return; }
+        if ($n->kind === Node::KIND_CAST) { $n->operand = $this->substitute($n->operand, $subst); return; }
+        if ($n->kind === Node::KIND_INSTANCEOF) { $n->operand = $this->substitute($n->operand, $subst); return; }
+        if ($n->kind === Node::KIND_NULLCOALESCE) {
+            $n->left = $this->substitute($n->left, $subst);
+            $n->right = $this->substitute($n->right, $subst);
             return;
         }
-        if ($k === Node::KIND_TERNARY) {
-            $t = $this->asTernary($n);
-            $t->cond = $this->substitute($t->cond, $subst);
-            if ($t->then !== null) { $t->then = $this->substitute($t->then, $subst); }
-            $t->else_ = $this->substitute($t->else_, $subst);
+        if ($n->kind === Node::KIND_TERNARY) {
+            $n->cond = $this->substitute($n->cond, $subst);
+            if ($n->then !== null) { $n->then = $this->substitute($n->then, $subst); }
+            $n->else_ = $this->substitute($n->else_, $subst);
             return;
         }
-        if ($k === Node::KIND_CALL) {
+        if ($n->kind === Node::KIND_CALL) {
             $args = [];
-            foreach ($this->asCall($n)->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $this->asCall($n)->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
+            $n->args = $args;
             return;
         }
-        if ($k === Node::KIND_INVOKE) {
-            $iv = $this->asInvoke($n);
-            $iv->callee = $this->substitute($iv->callee, $subst);
+        if ($n->kind === Node::KIND_INVOKE) {
+            $n->callee = $this->substitute($n->callee, $subst);
             $args = [];
-            foreach ($iv->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $iv->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
+            $n->args = $args;
             return;
         }
-        if ($k === Node::KIND_ARRAY_LIT) {
-            foreach ($this->asArrayLit($n)->elements as $el) {
+        if ($n->kind === Node::KIND_ARRAY_LIT) {
+            foreach ($n->elements as $el) {
                 if ($el->key !== null) { $el->key = $this->substitute($el->key, $subst); }
                 $el->value = $this->substitute($el->value, $subst);
             }
             return;
         }
-        if ($k === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->asArrayAccess($n);
-            $aa->array = $this->substitute($aa->array, $subst);
-            $aa->index = $this->substitute($aa->index, $subst);
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $n->array = $this->substitute($n->array, $subst);
+            $n->index = $this->substitute($n->index, $subst);
             return;
         }
-        if ($k === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->asPropertyAccess($n);
-            $pa->object = $this->substitute($pa->object, $subst);
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) {
+            $n->object = $this->substitute($n->object, $subst);
             return;
         }
-        if ($k === Node::KIND_METHOD_CALL) {
-            $mc = $this->asMethodCall($n);
-            $mc->object = $this->substitute($mc->object, $subst);
+        if ($n->kind === Node::KIND_METHOD_CALL) {
+            $n->object = $this->substitute($n->object, $subst);
             $args = [];
-            foreach ($mc->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $mc->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
+            $n->args = $args;
             return;
         }
-        if ($k === Node::KIND_STATIC_CALL) {
-            $sc = $this->asStaticCall($n);
+        if ($n->kind === Node::KIND_STATIC_CALL) {
             $args = [];
-            foreach ($sc->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $sc->args = $args;
+            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
+            $n->args = $args;
             return;
         }
         // Leaves and any unexpected shape: nothing to substitute. (The
@@ -819,46 +783,6 @@ final class InlineClosures implements Pass
     private function fnDef(FunctionDef $f): FunctionDef { return $f; }
     private function param(\Compile\Mir\Param $p): \Compile\Mir\Param { return $p; }
     private function node(Node $n): Node { return $n; }
-    private function asInvoke(Node $n): Invoke_ { return $n; }
     private function asReturn(Node $n): Return_ { return $n; }
-    private function asLoadLocal(Node $n): LoadLocal { return $n; }
-    private function asStoreLocal(Node $n): StoreLocal { return $n; }
-    private function asEcho(Node $n): Echo_ { return $n; }
-    private function asCall(Node $n): \Compile\Mir\Call { return $n; }
-    private function asNullCoalesce(Node $n): NullCoalesce_ { return $n; }
-    private function asTernary(Node $n): Ternary { return $n; }
-    private function asThrow(Node $n): Throw_ { return $n; }
-    private function asIsset(Node $n): Isset_ { return $n; }
-    private function asUnset(Node $n): Unset_ { return $n; }
-    private function asStoreStaticProp(Node $n): StoreStaticProp_ { return $n; }
-    private function asArrayLit(Node $n): ArrayLit { return $n; }
-    private function asArrayAccess(Node $n): ArrayAccess_ { return $n; }
-    private function asStoreElement(Node $n): StoreElement { return $n; }
-    private function asNewObj(Node $n): NewObj { return $n; }
     private function asPropertyAccess(Node $n): PropertyAccess_ { return $n; }
-    private function asStoreProperty(Node $n): StoreProperty { return $n; }
-    private function asMethodCall(Node $n): MethodCall_ { return $n; }
-    private function asStaticCall(Node $n): StaticCall_ { return $n; }
-    private function asBlock(Node $n): Block { return $n; }
-    private function asIf(Node $n): If_ { return $n; }
-    private function asWhile(Node $n): While_ { return $n; }
-    private function asDoWhile(Node $n): DoWhile_ { return $n; }
-    private function asFor(Node $n): For_ { return $n; }
-    private function asForeach(Node $n): Foreach_ { return $n; }
-    private function asSwitch(Node $n): Switch_ { return $n; }
-    private function asMatch(Node $n): Match_ { return $n; }
-    private function asTryCatch(Node $n): TryCatch_ { return $n; }
-    private function asCast(Node $n): Cast { return $n; }
-    private function asInstanceof(Node $n): Instanceof_ { return $n; }
-    private function asAdd(Node $n): \Compile\Mir\Add { return $n; }
-    private function asSub(Node $n): \Compile\Mir\Sub { return $n; }
-    private function asMul(Node $n): \Compile\Mir\Mul { return $n; }
-    private function asDiv(Node $n): \Compile\Mir\Div { return $n; }
-    private function asMod(Node $n): \Compile\Mir\Mod { return $n; }
-    private function asCmp(Node $n): \Compile\Mir\Cmp { return $n; }
-    private function asConcat(Node $n): \Compile\Mir\Concat { return $n; }
-    private function asBitOp(Node $n): \Compile\Mir\BitOp { return $n; }
-    private function asNeg(Node $n): \Compile\Mir\Neg { return $n; }
-    private function asNot(Node $n): \Compile\Mir\Not_ { return $n; }
-    private function asBitNot(Node $n): \Compile\Mir\BitNot_ { return $n; }
 }

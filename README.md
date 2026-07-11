@@ -18,13 +18,13 @@ potential for creating a fully self-contained PHP runtime environment.
 
 - ✅ **Self-host fixpoint holds.** `manticore build manticore.json` rebuilds the
   compiler from PHP source; gen2 and gen3 emit byte-identical IR.
-- ✅ **AOT suite 343/343** green (`tests/aot/`).
-- ✅ **Differential parity 334/0** vs the Zend `php` interpreter (PHP 8.5.3) —
+- ✅ **AOT suite 384/384** green (`tests/aot/`).
+- ✅ **Differential parity 375/0** vs the Zend `php` interpreter (PHP 8.5.3) —
   manticore output matches the reference on every plain-runnable case.
 - ✅ **Rebuild-stable** — 5×2 cold/self rebuilds, every binary smoke-clean (no
   build-to-build heap-layout roulette).
-- ✅ **Faster than Zend on every benchmark** — up to **45×** on compute/algorithms,
-  1.5–3.5× on the stdlib-bound tail, ~24× faster cold start — see
+- ✅ **Faster than Zend on every benchmark** — up to **44×** on compute/algorithms,
+  1.5–8× on the stdlib-bound tail, ~24× faster cold start — see
   [Benchmarks](#benchmarks).
 - ✅ Refcount + copy-on-write (assoc + objects) and a Bacon–Rajan cycle
   collector v1 (opt-in, zero-overhead unless `gc_collect_cycles()` is reached).
@@ -33,14 +33,19 @@ potential for creating a fully self-contained PHP runtime environment.
 - ✅ Extension system (MVP): manifest-declared native-library bindings —
   glue compiled into the app + `-l<lib>` linked (proof: `zlib`/`crc32`). Real
   extensions (curl / xml / pdo) build on the same mechanism.
-- ✅ **Broad PHP 8.5 surface.** Classes / interfaces / traits / enums,
-  abstract + anonymous classes, late static binding (`new static`,
-  `static::method()`, `parent::`/`self::` forwarding), magic methods
+- ✅ **Broad PHP 8.5 surface.** Classes / interfaces / traits / enums (incl.
+  enum methods + constants and interface-implementing enums), abstract +
+  anonymous classes, late static binding (`new static`, `static::method()`,
+  `parent::`/`self::` forwarding), magic methods
   (`__get`/`__set`/`__call`/`__invoke`/`__clone`/`__destruct`), `clone`-with,
-  closures + first-class callable syntax (`f(...)`), dynamic callables
-  (`call_user_func`, string/array callables), the pipe operator `|>`,
-  heredoc / nowdoc, encapsed-string interpolation, `define`/constants, generators,
-  exceptions, and file I/O over libc.
+  8.4 **property hooks** + asymmetric visibility, closures + first-class callable
+  syntax (`f(...)`), by-ref / variadic params + **argument unpacking** (`f(...$a)`),
+  dynamic callables (`call_user_func`, string/array callables), the pipe operator
+  `|>`, `match`, DNF types, null-coalescing / nullsafe (`??`, `?->`), `global` /
+  `static` locals, heredoc / nowdoc, encapsed-string interpolation,
+  `define`/constants, generators (`yield` / `yield from`), exceptions with
+  `try`/`catch`/`finally` and stack traces (`getTrace` / `debug_backtrace`), and
+  file I/O over libc.
 
 ## Benchmarks
 
@@ -55,13 +60,13 @@ is the tax we skip):
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |-----------|----------|------:|----------:|--------:|
-| `oop`     | 20 M polymorphic virtual `area()` (LCG-indexed) | 1.10 s | 0.04 s | **28×** |
-| `fib`     | recursive fib, data-dependent depth [30,33] | 1.85 s | 0.10 s | **19×** |
-| `closures`| 2 M closure build + call          | 0.18 s | 0.01 s | **18×** |
-| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.15 s | 0.01 s | **15×** |
-| `loop`    | 50 M-iter data-dependent accumulate | 0.67 s | 0.06 s | **11×** |
-| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.19 s | 0.02 s | **9.5×** |
-| `array`   | 30× build + sum a 500 K-element vec | 0.34 s | 0.07 s |  **4.9×** |
+| `oop`     | 20 M polymorphic virtual `area()` (LCG-indexed) | 1.13 s | 0.04 s | **28×** |
+| `fib`     | recursive fib, data-dependent depth [30,33] | 1.86 s | 0.10 s | **19×** |
+| `closures`| 2 M closure build + call          | 0.19 s | 0.01 s | **19×** |
+| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.16 s | 0.01 s | **16×** |
+| `loop`    | 50 M-iter data-dependent accumulate | 0.68 s | 0.06 s | **11×** |
+| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.20 s | 0.02 s | **10×** |
+| `array`   | 30× build + sum a 500 K-element vec | 0.35 s | 0.07 s |  **5.0×** |
 | `strcat`  | 30 M-iter string append           | 0.37 s | 0.11 s | **3.4×** |
 
 **Algorithms** (Computer Language Benchmarks Game style — float math, tight
@@ -69,11 +74,11 @@ loops, 2-D arrays):
 
 | Benchmark | `php` | manticore | Speedup |
 |-----------|------:|----------:|--------:|
-| `spectralnorm` | 0.45 s | 0.01 s | **45×** |
-| `mandelbrot`   | 0.27 s | 0.03 s |  **9×** |
+| `spectralnorm` | 0.44 s | 0.01 s | **44×** |
+| `mandelbrot`   | 0.26 s | 0.03 s | **8.7×** |
 | `matmul`       | 0.08 s | 0.01 s |  **8×** |
-| `dijkstra`     | 0.14 s | 0.02 s |  **7×** |
-| `nbody`        | 0.16 s | 0.04 s |  **4×** |
+| `dijkstra`     | 0.14 s | 0.03 s | **4.7×** |
+| `nbody`        | 0.17 s | 0.04 s | **4.2×** |
 
 **Library-bound** — time is spent in the PHP-level stdlib/prelude (arrays,
 strings, JSON), so the win is smaller and tracks how optimized that helper is,
@@ -81,14 +86,14 @@ and how much it competes with PHP's hand-tuned C:
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |-----------|----------|------:|----------:|--------:|
-| `funcarr` | `array_map`/`filter`/`reduce`     | 0.15 s | 0.02 s | **7.5×** |
-| `wordcount`| assoc map build + iterate        | 0.07 s | 0.01 s | **7×** |
+| `funcarr` | `array_map`/`filter`/`reduce`     | 0.16 s | 0.02 s | **8.0×** |
 | `strops`  | `strtoupper`/`str_replace` loop   | 0.07 s | 0.02 s | **3.5×** |
-| `sort`    | `sort()` 3 K ints × 200           | 0.11 s | 0.05 s | **2.2×** |
+| `wordcount`| assoc map build + iterate        | 0.07 s | 0.02 s | **3.5×** |
+| `sort`    | `sort()` 3 K ints × 200           | 0.12 s | 0.05 s | **2.4×** |
 | `sprintf` | `sprintf` formatting loop         | 0.09 s | 0.04 s | **2.2×** |
 | `in_array`| `in_array` linear scan over a vec | 0.15 s | 0.07 s | **2.1×** |
 | `explode` | `explode`/`implode` loop (fused)  | 0.14 s | 0.07 s | **2.0×** |
-| `assoc`   | string-keyed map build + lookup   | 0.13 s | 0.07 s | **1.9×** |
+| `assoc`   | string-keyed map build + lookup   | 0.15 s | 0.08 s | **1.9×** |
 | `json`    | `json_encode` loop                | 0.12 s | 0.08 s | **1.5×** |
 
 - **Cold start** (`echo "hello"`): `php` 62 ms vs manticore **2.6 ms** (~24×) —
@@ -96,7 +101,7 @@ and how much it competes with PHP's hand-tuned C:
 - **Compile time**: `fib.php` → native binary in **~0.1 s** (parse → MIR →
   LLVM → clang → link).
 - **Output size**: a trivial program links to a **~50 KB** fully-static binary
-  (libc only); the self-hosted compiler is ~2.9 MB.
+  (libc only); the self-hosted compiler is ~4.3 MB.
 
 The library-bound tail is the tightest race — these lean on stdlib/prelude
 helpers competing with PHP's hand-tuned C, yet native still wins every one.
@@ -117,7 +122,7 @@ string builders (`$s = $s . …`) append in place, not the former O(n²) copy.
 
 ```bash
 # Cold bootstrap: Zend seeds the first native compiler (no binary needed yet)
-bash bin/compile                      # → bin/manticore  (~2.9 MB static binary)
+bash bin/compile                      # → bin/manticore  (~4.3 MB static binary)
 
 # Thereafter, the compiler rebuilds itself (Zend seed is only the cold start)
 bash bin/build                      # self-host: bin/manticore compiles src/
@@ -237,7 +242,7 @@ Pure PHP, one class/interface/trait/enum per file, path mirrors FQN.
 bin/            build & run scripts + the output binary
   compile         cold seed: Zend builds a throwaway seed, which then runs
                   `build manticore.json` → native bin/manticore + stdlib
-  rebuild         self-host rebuild via the manifest (+ --seed, --verify)
+  build           self-host rebuild via the manifest (+ --seed, --verify)
 lib/              prebuilt stdlib object + .sig (gitignored build artifacts)
 src/Lexer/        tokenizer
 src/Parser/       recursive-descent + Pratt parser; AST node types
@@ -266,7 +271,7 @@ binary's `main` lowers to.
 ## Self-hosting & gates
 
 ```bash
-bash tests/aot/run.sh                 # AOT suite (328 cases)
+bash tests/aot/run.sh                 # AOT suite (384 cases)
 bash tests/aot/run.sh -k hello        # filter by substring
 bash tools/difftest.sh                # parity vs `php` (PHP 8.5.3)
 bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + stability
@@ -286,6 +291,11 @@ catch layout roulette.
   one object doesn't know still drops correctly. The compiler still self-builds self-contained
   (stdlib embedded) for simplicity; user programs link the cached `stdlib.o`.
 - Cycle collector is manual-trigger only; static/global roots not scanned.
+- A few PHP corners are not yet covered: by-ref to an **array element / object
+  property** (`f($a[0])`, `f($o->v)` — plain and typed by-ref params work),
+  string-valued `global`s, `goto`, reference returns (`function &f()`), the
+  `preg_*` family, and `compact`/`extract`. Integer overflow wraps instead of
+  promoting to float.
 
 ## Roadmap / next steps
 

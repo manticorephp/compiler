@@ -51,29 +51,24 @@ final class TypeCheck
 
     private function checkNode(Node $n, string $inFn): void
     {
-        $k = $n->kind;
         // $recv = 1 when the receiver (`this`) is IMPLICIT (not in args) so arg
         // index i maps to param i+1. A free function has no receiver; a static
         // call (incl. `parent::__construct`) already passes `this` explicitly in
         // args, so both align at offset 0.
-        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
-            || $k === Node::KIND_DIV || $k === Node::KIND_MOD) {
+        if ($n->kind === Node::KIND_ADD || $n->kind === Node::KIND_SUB || $n->kind === Node::KIND_MUL
+            || $n->kind === Node::KIND_DIV || $n->kind === Node::KIND_MOD) {
             $this->checkArith($n, $inFn);
         }
-        if ($k === Node::KIND_CALL) {
-            $c = $this->asCall($n);
-            $this->checkArgs($c->function, $c->function, $c->args, $inFn, 0);
-        } elseif ($k === Node::KIND_NEW_OBJ) {
-            $no = $this->asNew($n);
-            $this->checkArgs($no->class . '____construct', 'new ' . $no->class, $no->args, $inFn, 1);
-        } elseif ($k === Node::KIND_STATIC_CALL) {
-            $sc = $this->asStaticCall($n);
-            $this->checkArgs($sc->class . '__' . $sc->method, $sc->class . '::' . $sc->method, $sc->args, $inFn, 0);
-        } elseif ($k === Node::KIND_METHOD_CALL) {
-            $mc = $this->asMethodCall($n);
-            $cls = $mc->object->type->class ?? '';
+        if ($n->kind === Node::KIND_CALL) {
+            $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0);
+        } elseif ($n->kind === Node::KIND_NEW_OBJ) {
+            $this->checkArgs($n->class . '____construct', 'new ' . $n->class, $n->args, $inFn, 1);
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $this->checkArgs($n->class . '__' . $n->method, $n->class . '::' . $n->method, $n->args, $inFn, 0);
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $cls = $n->object->type->class ?? '';
             if ($cls !== '') {
-                $this->checkArgs($cls . '__' . $mc->method, $cls . '->' . $mc->method, $mc->args, $inFn, 1);
+                $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1);
             }
         }
         foreach (Walk::children($n) as $c) { $this->checkNode($c, $inFn); }
@@ -161,9 +156,8 @@ final class TypeCheck
     private function checkReturnNodes(Node $n, Type $rt, string $fnName): void
     {
         if ($n->kind === Node::KIND_RETURN) {
-            $r = $this->asReturn($n);
-            if ($r->value !== null && $this->incompatible($r->value->type, $rt)) {
-                $this->errors[] = $this->at($r) . $fnName . '(): return ' . $r->value->type->toString()
+            if ($n->value !== null && $this->incompatible($n->value->type, $rt)) {
+                $this->errors[] = $this->at($n) . $fnName . '(): return ' . $n->value->type->toString()
                     . ' incompatible with declared ' . $rt->toString();
             }
         }
@@ -195,10 +189,4 @@ final class TypeCheck
             || $k === Type::KIND_STRING || $k === Type::KIND_BOOL
             || $k === Type::KIND_ARRAY || $k === Type::KIND_OBJ;
     }
-
-    private function asCall(Call $n): Call { return $n; }
-    private function asNew(NewObj $n): NewObj { return $n; }
-    private function asStaticCall(StaticCall_ $n): StaticCall_ { return $n; }
-    private function asMethodCall(MethodCall_ $n): MethodCall_ { return $n; }
-    private function asReturn(Return_ $n): Return_ { return $n; }
 }

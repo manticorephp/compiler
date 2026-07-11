@@ -37,10 +37,9 @@ trait EmitLlvmObjects
     // across separately-linked objects. `new Foo(args)` → malloc(size) +
     // write header + zero props + call `Foo____construct(i64 thisptr, args…)`.
 
-    private function emitNewObj(Node $n): string
+    private function emitNewObj(\Compile\Mir\NewObj $n): string
     {
-        $no = $this->castNewObj($n);
-        $cd = $this->classes[$no->class] ?? null;
+        $cd = $this->classes[$n->class] ?? null;
         $size = $cd === null ? 16 : $cd->instanceSize();
         $isStruct = $cd !== null && $cd->isStruct;
         // Header slot count before properties: 2 (class_id + rc) for a
@@ -86,7 +85,7 @@ trait EmitLlvmObjects
         }
         // ctor call — resolve through the parent chain (a subclass
         // with no ctor inherits its parent's).
-        $ctorClass = $this->resolveMethodClass($no->class, '__construct');
+        $ctorClass = $this->resolveMethodClass($n->class, '__construct');
         if ($ctorClass !== '') {
             $objInt = $this->allocSsa();
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
@@ -97,7 +96,7 @@ trait EmitLlvmObjects
             $ptypes = $this->fnParamTypes[$ctorClass . '____construct'] ?? [];
             $tmask = $this->fnTaggedParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
-            foreach ($no->args as $a) {
+            foreach ($n->args as $a) {
                 if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
                     // static type so the ctor reads the runtime tag.
@@ -127,12 +126,12 @@ trait EmitLlvmObjects
             }
             // Late static binding: `new C()` constructs with `static == C` even
             // when the ctor body is inherited — route to the C specialisation.
-            $ctorTarget = $this->lsbTarget($ctorClass, '__construct', $no->class);
+            $ctorTarget = $this->lsbTarget($ctorClass, '__construct', $n->class);
             // Push a frame for the ctor call so __construct's entry btNameFix
             // stamps its OWN (soon-popped) slot, not the caller's top frame.
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
-            $out .= $this->btPush('__construct', $no->line);
+            $out .= $this->btPush('__construct', $n->line);
             $cr = $this->allocSsa();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
@@ -144,8 +143,8 @@ trait EmitLlvmObjects
         // Capture the thrown location + call stack into a Throwable at `new`
         // (PHP records these at construction), when the program queries a trace.
         if ($this->needsBacktrace && $cd !== null
-            && $this->classImplements($no->class, 'Throwable')) {
-            $out .= $this->emitThrowableCapture($obj, $no);
+            && $this->classImplements($n->class, 'Throwable')) {
+            $out .= $this->emitThrowableCapture($obj, $n);
         }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
@@ -194,12 +193,11 @@ trait EmitLlvmObjects
      * object/string/array handle), then call `__clone()` if defined. PHP 8.5
      * clone-with overrides land on the copy after `__clone`.
      */
-    private function emitClone(Node $n): string
+    private function emitClone(\Compile\Mir\Clone_ $n): string
     {
-        $cl = $this->castClone($n);
-        $cls = $cl->object->type->class ?? '';
+        $cls = $n->object->type->class ?? '';
         $cd = ($cls !== '' && isset($this->classes[$cls])) ? $this->classes[$cls] : null;
-        $out = $this->emitNode($cl->object);
+        $out = $this->emitNode($n->object);
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
         if ($cd === null || $cd->isStruct) {
@@ -270,7 +268,7 @@ trait EmitLlvmObjects
                   . '____clone(i64 ' . $ni . ")\n";
         }
         // PHP 8.5 clone-with overrides applied last.
-        foreach ($cl->withProps as $pair) {
+        foreach ($n->withProps as $pair) {
             $off = $cd->propertyOffset($pair->name);
             if ($off < 0) { continue; }
             $pt = $cd->propertyTypes[$pair->name] ?? null;
@@ -696,9 +694,8 @@ trait EmitLlvmObjects
         return '';
     }
 
-    private function emitStoreProperty(Node $n): string
+    private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
-        $sp = $this->castStoreProperty($n);
         // A write to a `readonly` property from OUTSIDE its declaring class scope
         // is a fatal Error (PHP throws a catchable `Error`). Types are resolved
         // by now, so if the receiver's class chain declares this property
@@ -706,12 +703,12 @@ trait EmitLlvmObjects
         // of, evaluate the RHS (side effects) then throw in place of the store.
         // A write inside the class (constructor init) proceeds; single-init is not
         // enforced (that needs flow analysis).
-        $roCls = $sp->object->type->class ?? '';
+        $roCls = $n->object->type->class ?? '';
         if ($roCls !== '') {
-            $roDecl = $this->readonlyDeclClass($roCls, $sp->property);
+            $roDecl = $this->readonlyDeclClass($roCls, $n->property);
             if ($roDecl !== '' && !\str_starts_with($this->currentFnName, $roDecl . '__')) {
-                $out = $this->emitNode($sp->value);
-                $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $sp->property;
+                $out = $this->emitNode($n->value);
+                $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
                 // Supply every ctor arg — emitNewObj does NOT pad defaults (that
                 // happens at AST→MIR); a short arg list leaves `code`/`previous`
                 // as garbage registers and the ctor retains a bogus `previous`.
@@ -728,22 +725,22 @@ trait EmitLlvmObjects
         }
         // PHP 8.4 property hook: a set hook replaces the write (unless bypassed —
         // default init — or we are inside this property's own hook).
-        $hcls = $sp->object->type->class ?? '';
-        if (!$sp->bypassHook && $hcls !== '' && isset($this->classes[$hcls])
-            && isset($this->classes[$hcls]->propHooks[$sp->property])) {
-            $hk = $this->classes[$hcls]->propHooks[$sp->property];
+        $hcls = $n->object->type->class ?? '';
+        if (!$n->bypassHook && $hcls !== '' && isset($this->classes[$hcls])
+            && isset($this->classes[$hcls]->propHooks[$n->property])) {
+            $hk = $this->classes[$hcls]->propHooks[$n->property];
             if ($hk['set'] !== '' && !$this->insideOwnHook($hk)) {
-                return $this->emitHookSet($sp->object, $hk['set'], $sp->value);
+                return $this->emitHookSet($n->object, $hk['set'], $n->value);
             }
         }
         // Dynamic property on a bag class → set the boxed value in the
         // property-bag assoc, threading any realloc back to the slot.
-        $bcls = $sp->object->type->class ?? '';
+        $bcls = $n->object->type->class ?? '';
         if ($bcls !== '' && isset($this->classes[$bcls])
             && $this->classes[$bcls]->usesBag()
-            && $this->classes[$bcls]->propertyOffset($sp->property) === -1) {
+            && $this->classes[$bcls]->propertyOffset($n->property) === -1) {
             $bcd = $this->classes[$bcls];
-            $out = $this->emitNode($sp->object);
+            $out = $this->emitNode($n->object);
             $out .= $this->coerceToPtr();
             $objPtr = $this->lastValue;
             $bg = $this->allocSsa();
@@ -753,10 +750,10 @@ trait EmitLlvmObjects
             $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
             $bagP = $this->allocSsa();
             $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-            $out .= $this->emitNode($sp->value);
-            $out .= $this->boxToCell($sp->value->type);
+            $out .= $this->emitNode($n->value);
+            $out .= $this->boxToCell($n->value->type);
             $val = $this->lastValue;
-            $kid = $this->internString($sp->property);
+            $kid = $this->internString($n->property);
             $nb = $this->allocSsa();
                         $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
                   . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $val . ", i64 0, i64 0)\n";
@@ -769,24 +766,24 @@ trait EmitLlvmObjects
         }
         // Property overloading: writing an undeclared property on a class that
         // defines __set routes through `$obj->__set('name', $value)`.
-        $scls = $sp->object->type->class ?? '';
+        $scls = $n->object->type->class ?? '';
         if ($scls !== '' && isset($this->classes[$scls])
-            && $this->classes[$scls]->propertyOffset($sp->property) === -1) {
+            && $this->classes[$scls]->propertyOffset($n->property) === -1) {
             $setCls = $this->resolveMethodClass($scls, '__set');
             if ($setCls !== '') {
-                $out = $this->emitNode($sp->object);
+                $out = $this->emitNode($n->object);
                 $out .= $this->coerceToPtr();
                 $objPtr = $this->lastValue;
-                $out .= $this->emitNode($sp->value);
-                $out .= $this->boxToCell($sp->value->type);
+                $out .= $this->emitNode($n->value);
+                $out .= $this->boxToCell($n->value->type);
                 $val = $this->lastValue;
-                $out .= $this->emitMagicCall($setCls, '__set', $objPtr, $sp->property, $val);
+                $out .= $this->emitMagicCall($setCls, '__set', $objPtr, $n->property, $val);
                 $this->lastValue = $val;
                 $this->lastValueType = 'i64';
                 return $out;
             }
         }
-        $out = $this->emitNode($sp->object);
+        $out = $this->emitNode($n->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
         // The object now owns a second reference to a vec / obj value.
@@ -794,19 +791,19 @@ trait EmitLlvmObjects
         // param lowers to unknown), fall back to the property's declared
         // type so a vec/assoc/obj property still co-owns the buffer —
         // otherwise the source local's scope-exit release frees it.
-        $pcls = $sp->object->type->class ?? '';
+        $pcls = $n->object->type->class ?? '';
         $propType = ($pcls !== '' && isset($this->classes[$pcls]))
-            ? ($this->classes[$pcls]->propertyTypes[$sp->property] ?? null)
+            ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
             : null;
-        $out .= $this->emitNode($sp->value);
+        $out .= $this->emitNode($n->value);
         // A self-describing cell property (scalar-nullable OR a `mixed` prop
         // whose every store boxes in place) NaN-boxes the value so the slot is
         // tag-dispatchable (var_dump / `=== null`, null distinct from 0). An
         // rc-managed payload (string/object) is retained on the RAW pointer
         // BEFORE boxing — a tagged cell would mis-locate the rc header. A cell
         // -array backing slot keeps the raw store + rc co-own.
-        if ($this->cellPropBoxed($propType, $sp->property)) {
-            $vk = $sp->value->type->kind;
+        if ($this->cellPropBoxed($propType, $n->property)) {
+            $vk = $n->value->type->kind;
             if ($vk === Type::KIND_CELL) {
                 // Already a boxed cell — store as-is.
                 $out .= $this->coerceToI64();
@@ -816,22 +813,22 @@ trait EmitLlvmObjects
                 // boxing (a tagged cell would mis-locate the rc header).
                 $out .= $this->coerceToI64();
                 $raw = $this->lastValue;
-                $out .= $this->rcRetainByType($sp->value, $raw, $propType, 4);
+                $out .= $this->rcRetainByType($n->value, $raw, $propType, 4);
                 $this->lastValue = $raw;
                 $this->lastValueType = 'i64';
-                $out .= $this->boxToCell($sp->value->type);
+                $out .= $this->boxToCell($n->value->type);
                 $val = $this->lastValue;
             } else {
                 // Non-rc scalar (int/float/bool/null) — box, no retain.
-                $out .= $this->boxToCell($sp->value->type);
+                $out .= $this->boxToCell($n->value->type);
                 $val = $this->lastValue;
             }
         } else {
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
-            $out .= $this->rcRetainByType($sp->value, $val, $propType, 4);
+            $out .= $this->rcRetainByType($n->value, $val, $propType, 4);
         }
-        $offset = $this->propertyOffset($sp->object, $sp->property);
+        $offset = $this->propertyOffset($n->object, $n->property);
         $gep = $this->allocSsa();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
               . $objPtr . ', i64 ' . (string)$offset . "\n";
@@ -861,10 +858,9 @@ trait EmitLlvmObjects
         return '0';
     }
 
-    private function emitStaticLocalDecl(Node $n): string
+    private function emitStaticLocalDecl(\Compile\Mir\StaticLocalDecl_ $n): string
     {
-        $sld = $this->castStaticLocalDecl($n);
-        if ($sld->guard === '' || $sld->init === null) {
+        if ($n->guard === '' || $n->init === null) {
             return '';
         }
         // Once-init guard: `if (guard == 0) { cell = init; guard = 1; }`.
@@ -872,33 +868,27 @@ trait EmitLlvmObjects
         $cond = $this->allocSsa();
         $doLbl = $this->allocLabel('slinit');
         $skipLbl = $this->allocLabel('slskip');
-        $out = '  ' . $g . ' = load i64, ptr ' . $sld->guard . "\n";
+        $out = '  ' . $g . ' = load i64, ptr ' . $n->guard . "\n";
         $out .= '  ' . $cond . ' = icmp eq i64 ' . $g . ", 0\n";
         $out .= '  br i1 ' . $cond . ', label %' . $doLbl . ', label %' . $skipLbl . "\n";
         $out .= $doLbl . ":\n";
-        $out .= $this->emitNode($sld->init);
+        $out .= $this->emitNode($n->init);
         $out .= $this->coerceToI64();
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sld->cell . "\n";
-        $out .= '  store i64 1, ptr ' . $sld->guard . "\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $n->cell . "\n";
+        $out .= '  store i64 1, ptr ' . $n->guard . "\n";
         $out .= '  br label %' . $skipLbl . "\n";
         $out .= $skipLbl . ":\n";
         return $out;
     }
 
-    private function castIsset(Isset_ $n): Isset_ { return $n; }
-    private function castUnset(Unset_ $n): Unset_ { return $n; }
-    private function castClassName(ClassName_ $n): ClassName_ { return $n; }
-    private function castRefAlias(RefAlias_ $n): RefAlias_ { return $n; }
-
     private function castThrow(Throw_ $n): Throw_ { return $n; }
     private function castTryCatch(TryCatch_ $n): TryCatch_ { return $n; }
 
     /** `$y = &$x` — point the target's slot at the source's slot. */
-    private function emitRefAlias(Node $n): string
+    private function emitRefAlias(RefAlias_ $n): string
     {
-        $ra = $this->castRefAlias($n);
-        if (isset($this->slots[$ra->source])) {
-            $this->slots[$ra->target] = $this->slots[$ra->source];
+        if (isset($this->slots[$n->source])) {
+            $this->slots[$n->target] = $this->slots[$n->source];
         }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
@@ -906,63 +896,57 @@ trait EmitLlvmObjects
     }
 
     /** `$r = &fn(...)` — store the by-ref return address into $r's slot. */
-    private function emitRefBind(Node $n): string
+    private function emitRefBind(RefBind_ $n): string
     {
-        $rb = $this->castRefBind($n);
-        if (!isset($this->slots[$rb->target])) {
+        if (!isset($this->slots[$n->target])) {
             $slot = $this->allocSsa();
-            $this->slots[$rb->target] = $slot;
+            $this->slots[$n->target] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
             $out = '';
         }
         $this->rawRefCall = true;
-        $out .= $this->emitNode($rb->call);
+        $out .= $this->emitNode($n->call);
         $this->rawRefCall = false;
         $out .= $this->coerceToI64();
         $addr = $this->lastValue;
-        $out .= '  store i64 ' . $addr . ', ptr ' . $this->slots[$rb->target] . "\n";
-        $this->refLocals[$rb->target] = true;
+        $out .= '  store i64 ' . $addr . ', ptr ' . $this->slots[$n->target] . "\n";
+        $this->refLocals[$n->target] = true;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
     }
-
-    private function castRefBind(Node $n): RefBind_ { return $n; }
 
     /** `$r = &$obj->prop` / `$r = &$a[$k]` — store the container slot's ADDRESS
      *  into $r's slot and mark $r a ref local, so later reads/writes of $r deref
      *  the address (aliasing the property / element). Falls back to a value copy
      *  when the lvalue is not addressable (unknown class / non-vec element). */
-    private function emitRefAddr(Node $n): string
+    private function emitRefAddr(RefAddr_ $n): string
     {
-        $ra = $this->castRefAddr($n);
-        if (!isset($this->slots[$ra->target])) {
+        if (!isset($this->slots[$n->target])) {
             $slot = $this->allocSsa();
-            $this->slots[$ra->target] = $slot;
+            $this->slots[$n->target] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
             $out = '';
         }
-        $addrIr = $this->byRefAddrOf($ra->lvalue);
+        $addrIr = $this->byRefAddrOf($n->lvalue);
         if ($addrIr === null) {
             // Not addressable — degrade to a value copy (non-crashing).
-            $out .= $this->emitNode($ra->lvalue);
+            $out .= $this->emitNode($n->lvalue);
             $out .= $this->coerceToI64();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$ra->target] . "\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$n->target] . "\n";
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
             return $out;
         }
         $out .= $addrIr;
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$ra->target] . "\n";
-        $this->refLocals[$ra->target] = true;
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$n->target] . "\n";
+        $this->refLocals[$n->target] = true;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
     }
-
-    private function castRefAddr(Node $n): RefAddr_ { return $n; }
 
     /** Bag byte offset for an object node's class (stdClass default). */
     private function bagOffsetOf(Node $obj): int
@@ -991,16 +975,15 @@ trait EmitLlvmObjects
     }
 
     /** `$o->$name` — read the boxed value from the bag by runtime key. */
-    private function emitDynProp(Node $n): string
+    private function emitDynProp(DynProp_ $n): string
     {
-        $dp = $this->castDynProp($n);
-        $out = $this->emitNode($dp->object);
-        if ($dp->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
+        $out = $this->emitNode($n->object);
+        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
         else { $out .= $this->coerceToPtr(); }
         $objPtr = $this->lastValue;
-        $out .= $this->emitBagPtr($dp->object, $objPtr, $this->bagOffsetOf($dp->object));
+        $out .= $this->emitBagPtr($n->object, $objPtr, $this->bagOffsetOf($n->object));
         $bagP = $this->bagPtrReg;
-        $out .= $this->emitNode($dp->name);
+        $out .= $this->emitNode($n->name);
         $out .= $this->coerceToPtr();
         $keyP = $this->lastValue;
         $reg = $this->allocSsa();
@@ -1012,21 +995,20 @@ trait EmitLlvmObjects
     }
 
     /** `$o->$name = v` — set the boxed value in the bag by runtime key. */
-    private function emitStoreDynProp(Node $n): string
+    private function emitStoreDynProp(StoreDynProp_ $n): string
     {
-        $sp = $this->castStoreDynProp($n);
-        $out = $this->emitNode($sp->object);
-        if ($sp->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
+        $out = $this->emitNode($n->object);
+        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
         else { $out .= $this->coerceToPtr(); }
         $objPtr = $this->lastValue;
-        $out .= $this->emitBagPtr($sp->object, $objPtr, $this->bagOffsetOf($sp->object));
+        $out .= $this->emitBagPtr($n->object, $objPtr, $this->bagOffsetOf($n->object));
         $bagP = $this->bagPtrReg;
         $bg = $this->bagSlotReg;
-        $out .= $this->emitNode($sp->name);
+        $out .= $this->emitNode($n->name);
         $out .= $this->coerceToPtr();
         $keyP = $this->lastValue;
-        $out .= $this->emitNode($sp->value);
-        $out .= $this->boxToCell($sp->value->type);
+        $out .= $this->emitNode($n->value);
+        $out .= $this->boxToCell($n->value->type);
         $val = $this->lastValue;
         $nb = $this->allocSsa();
                 $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
@@ -1042,23 +1024,21 @@ trait EmitLlvmObjects
     private function castDynProp(Node $n): DynProp_ { return $n; }
     private function castStoreDynProp(Node $n): StoreDynProp_ { return $n; }
 
-    private function emitClassName(Node $n): string
+    private function emitClassName(ClassName_ $n): string
     {
-        $cn = $this->castClassName($n);
-        $cls = $cn->operand->type->class ?? '';
+        $cls = $n->operand->type->class ?? '';
         $id = $this->internString($cls);
         $this->lastValue = $this->strLitId($id);
         $this->lastValueType = 'ptr';
         return '';
     }
 
-    private function emitIsset(Node $n): string
+    private function emitIsset(Isset_ $n): string
     {
-        $iss = $this->castIsset($n);
         $out = '';
         $acc = '1';
         $first = true;
-        foreach ($iss->targets as $t) {
+        foreach ($n->targets as $t) {
             $out .= $this->emitIssetTarget($t);
             $cur = $this->lastValue;
             if ($first) { $acc = $cur; $first = false; continue; }
@@ -1245,11 +1225,10 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitUnset(Node $n): string
+    private function emitUnset(Unset_ $n): string
     {
-        $u = $this->castUnset($n);
         $out = '';
-        foreach ($u->targets as $t) {
+        foreach ($n->targets as $t) {
             if ($t->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $this->castLoadLocal($t)->name;
                 // Release the held rc value first (drops to rc 0 → __destruct),
@@ -1314,11 +1293,10 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitStaticProp(Node $n): string
+    private function emitStaticProp(\Compile\Mir\StaticProp_ $n): string
     {
-        $sp = $this->castStaticProp($n);
         $reg = $this->allocSsa();
-        $out = '  ' . $reg . ' = load i64, ptr ' . $sp->global . "\n";
+        $out = '  ' . $reg . ' = load i64, ptr ' . $n->global . "\n";
         if ($n->type->kind === Type::KIND_FLOAT) {
             $regF = $this->allocSsa();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -1331,15 +1309,14 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitStoreStaticProp(Node $n): string
+    private function emitStoreStaticProp(\Compile\Mir\StoreStaticProp_ $n): string
     {
-        $ss = $this->castStoreStaticProp($n);
-        $out = $this->emitNode($ss->value);
+        $out = $this->emitNode($n->value);
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         // A static prop is a program-lifetime owner of an obj value.
-        $out .= $this->rcRetainByType($ss->value, $val, null, 5);
-        $out .= '  store i64 ' . $val . ', ptr ' . $ss->global . "\n";
+        $out .= $this->rcRetainByType($n->value, $val, null, 5);
+        $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
         $this->lastValue = $val;
         $this->lastValueType = 'i64';
         return $out;
@@ -1520,57 +1497,56 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitStaticCall(Node $n): string
+    private function emitStaticCall(\Compile\Mir\StaticCall_ $n): string
     {
-        $sc = $this->castStaticCall($n);
         // Closure::bind($fn, $obj, $scope?) → a copy of $fn's env with the
         // `$this` slot rebound to $obj (scope resolved by class_id dispatch).
-        if (\strtolower(\ltrim($sc->class, '\\')) === 'closure' && $sc->method === 'bind'
-            && \count($sc->args) >= 2) {
-            return $this->emitClosureRebind($sc->args[0], $sc->args[1]);
+        if (\strtolower(\ltrim($n->class, '\\')) === 'closure' && $n->method === 'bind'
+            && \count($n->args) >= 2) {
+            return $this->emitClosureRebind($n->args[0], $n->args[1]);
         }
         // Enum built-in `cases()` — a list of every case in declaration order.
         // An enum value is carried as its ordinal, so the list is [0..N-1] with
         // element type obj<Enum> (typed in InferTypes::inferStaticCall).
-        if (isset($this->enums[$sc->class]) && $sc->method === 'cases'
-            && \count($sc->args) === 0) {
-            return $this->emitEnumCases($sc->class);
+        if (isset($this->enums[$n->class]) && $n->method === 'cases'
+            && \count($n->args) === 0) {
+            return $this->emitEnumCases($n->class);
         }
         // Backed-enum `from($v)` / `tryFrom($v)` — value→case lookup.
-        if (isset($this->enums[$sc->class]) && \count($sc->args) === 1
-            && ($sc->method === 'from' || $sc->method === 'tryFrom')) {
-            return $this->emitEnumFrom($sc->class, $sc->args[0], $sc->method === 'tryFrom');
+        if (isset($this->enums[$n->class]) && \count($n->args) === 1
+            && ($n->method === 'from' || $n->method === 'tryFrom')) {
+            return $this->emitEnumFrom($n->class, $n->args[0], $n->method === 'tryFrom');
         }
         // Method overloading: an unresolved static method on a class that
         // defines __callStatic reroutes to `Class::__callStatic('name', [args])`.
-        if ($this->resolveMethodClass($sc->class, $sc->method) === ''
-            && $this->resolveMethodClass($sc->class, '__callStatic') !== '') {
+        if ($this->resolveMethodClass($n->class, $n->method) === ''
+            && $this->resolveMethodClass($n->class, '__callStatic') !== '') {
             $elems = [];
-            foreach ($sc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            foreach ($n->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
             $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
-            $nameNode = new \Compile\Mir\StringConst($sc->method, Type::string_());
-            $call = new \Compile\Mir\StaticCall_($sc->class, '__callStatic', [$nameNode, $argsArr], $sc->type);
+            $nameNode = new \Compile\Mir\StringConst($n->method, Type::string_());
+            $call = new \Compile\Mir\StaticCall_($n->class, '__callStatic', [$nameNode, $argsArr], $n->type);
             return $this->emitStaticCall($call);
         }
         $out = '';
         $argList = '';
         $first = true;
         $argTemps = [];
-        $cls = $this->resolveMethodClass($sc->class, $sc->method);
-        if ($cls === '') { $cls = $sc->class; }
+        $cls = $this->resolveMethodClass($n->class, $n->method);
+        if ($cls === '') { $cls = $n->class; }
         // Late static binding: route to the per-descendant specialisation
-        // matching the called class (`$sc->staticClass`) when one exists.
-        $lsbScope = $sc->staticClass !== '' ? $sc->staticClass : $sc->class;
-        $target = $this->lsbTarget($cls, $sc->method, $lsbScope);
+        // matching the called class (`$n->staticClass`) when one exists.
+        $lsbScope = $n->staticClass !== '' ? $n->staticClass : $n->class;
+        $target = $this->lsbTarget($cls, $n->method, $lsbScope);
         // By-ref mask of the resolved callee. Static-call args already align
         // with params (a selfish instance call prepends `$this` at lowering),
         // so arg index `ai` maps to param `ai` — forward the slot address for
         // a by-ref param instead of the dereferenced value.
-        $mask = $this->fnRefParams[$cls . '__' . $sc->method] ?? [];
-        $ptypes = $this->fnParamTypes[$cls . '__' . $sc->method] ?? [];
-        $tmask = $this->fnTaggedParams[$cls . '__' . $sc->method] ?? [];
+        $mask = $this->fnRefParams[$cls . '__' . $n->method] ?? [];
+        $ptypes = $this->fnParamTypes[$cls . '__' . $n->method] ?? [];
+        $tmask = $this->fnTaggedParams[$cls . '__' . $n->method] ?? [];
         $ai = 0;
-        foreach ($sc->args as $a) {
+        foreach ($n->args as $a) {
             if (!$first) { $argList .= ', '; }
             $first = false;
             if ($this->argIsByRef($mask, $ai, $a)) {
@@ -1593,11 +1569,11 @@ trait EmitLlvmObjects
         // Catch-all default pad (mirrors emitMethodCall); a static call is
         // usually lower-filled, but an unresolved-at-lowering callee may
         // arrive short — never leave a trailing optional unset.
-        $out .= $this->emitDefaultArgPad($cls . '__' . $sc->method, $ai, !$first);
+        $out .= $this->emitDefaultArgPad($cls . '__' . $n->method, $ai, !$first);
         $argList .= $this->lastPadArgs;
         $btName = '';
         if ($this->needsBacktrace) {
-            $btName = $sc->class . '::' . $sc->method;
+            $btName = $n->class . '::' . $n->method;
             $out .= $this->btPush($btName, $n->line);
         }
         $reg = $this->allocSsa();

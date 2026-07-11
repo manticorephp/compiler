@@ -373,14 +373,11 @@ final class Monomorphize implements Pass
     private function collectCalls(Node $n): void
     {
         if ($n->kind === Node::KIND_CALL) {
-            $c = $this->asCall($n);
-            if (!isset($this->callsByName[$c->function])) {
-                $this->callsByName[$c->function] = [];
+            if (!isset($this->callsByName[$n->function])) {
+                $this->callsByName[$n->function] = [];
             }
-            $this->callsByName[$c->function][] = $c;
+            $this->callsByName[$n->function][] = $n;
         }
         foreach (Walk::children($n) as $c) { $this->collectCalls($c); }
     }
-
-    private function asCall(Node $n): Call { return $n; }
 }

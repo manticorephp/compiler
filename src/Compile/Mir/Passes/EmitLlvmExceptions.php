@@ -60,11 +60,10 @@ trait EmitLlvmExceptions
              . (string)$off . "\n  " . $v . ' = load i64, ptr ' . $p . "\n";
     }
 
-    private function emitThrow(Node $n): string
+    private function emitThrow(\Compile\Mir\Throw_ $n): string
     {
         $this->needsExceptions = true;
-        $t = $this->castThrow($n);
-        $out = $this->emitNode($t->value);
+        $out = $this->emitNode($n->value);
         $out .= $this->coerceToPtr();
         $out .= '  store ptr ' . $this->lastValue . ", ptr @__mir_thrown\n";
         $depth = $this->allocSsa();
@@ -90,11 +89,10 @@ trait EmitLlvmExceptions
              . '  store i64 ' . $b . ", ptr @__mir_bt_depth\n";
     }
 
-    private function emitTryCatch(Node $n): string
+    private function emitTryCatch(\Compile\Mir\TryCatch_ $n): string
     {
         $this->needsExceptions = true;
-        $tc = $this->castTryCatch($n);
-        $hasFinally = $tc->hasFinally;
+        $hasFinally = $n->hasFinally;
         $endLbl = $this->allocLabel('try_end');
         $finLbl = $hasFinally ? $this->allocLabel('try_fin') : '';
         $joinLbl = $hasFinally ? $finLbl : $endLbl;
@@ -116,13 +114,13 @@ trait EmitLlvmExceptions
         if ($hasFinally) {
             $pendFlag = $this->allocSsa();
             $pendVal = $this->allocSsa();
-            if ($this->inGenerator && $tc->genPendSlot >= 0) {
+            if ($this->inGenerator && $n->genPendSlot >= 0) {
                 // Frame cells (a yield in the try bypasses an alloca via the
                 // resume switch). Use the entry-block GEPs precomputed in
                 // {@see $this->slots} so the pointer dominates every use across
                 // the resume re-entry; an inline GEP in gen.start would not.
-                $pendFlag = $this->slots["@try.pf." . (string)$tc->genPendSlot];
-                $pendVal = $this->slots["@try.pv." . (string)$tc->genPendSlot];
+                $pendFlag = $this->slots["@try.pf." . (string)$n->genPendSlot];
+                $pendVal = $this->slots["@try.pv." . (string)$n->genPendSlot];
             } else {
                 $out .= '  ' . $pendFlag . " = alloca i64\n";
                 $out .= '  ' . $pendVal . " = alloca ptr\n";
@@ -138,7 +136,7 @@ trait EmitLlvmExceptions
             $bodyLbl = $this->allocLabel('try_outerbody');
             $od = $this->allocSsa();
             $out .= '  ' . $od . " = load i64, ptr @__mir_jmp_depth\n";
-            $out .= $this->tryStoreDepth($tc->genOuterSlot, $od);
+            $out .= $this->tryStoreDepth($n->genOuterSlot, $od);
             $out .= $this->jmpBufExpr($od);
             $outerBuf = $this->jmpScratch;
             $nd = $this->allocSsa();
@@ -155,7 +153,7 @@ trait EmitLlvmExceptions
         // Inner buf — try body / catch dispatch.
         $idb = $this->allocSsa();
         $out .= '  ' . $idb . " = load i64, ptr @__mir_jmp_depth\n";
-        $out .= $this->tryStoreDepth($tc->genDepthSlot, $idb);
+        $out .= $this->tryStoreDepth($n->genDepthSlot, $idb);
         $out .= $this->jmpBufExpr($idb);
         $innerBuf = $this->jmpScratch;
         $ind = $this->allocSsa();
@@ -164,7 +162,7 @@ trait EmitLlvmExceptions
         $sj = $this->allocSsa();
         $out .= '  ' . $sj . ' = call i32 @setjmp(ptr ' . $innerBuf . ")\n";
         $tryLbl = $this->allocLabel('try_body');
-        $hasCatch = \count($tc->catches) > 0;
+        $hasCatch = \count($n->catches) > 0;
         // No catch but finally present: an inner throw must still record
         // the pending exception so finally re-throws it afterwards.
         $catchlessFin = (!$hasCatch && $hasFinally);
@@ -183,12 +181,12 @@ trait EmitLlvmExceptions
         // exiting the function — make the finally body visible to emitReturn.
         // Popped before the finally's own emission (the finally is not
         // self-protected).
-        if ($hasFinally) { $this->finallyStack[] = $tc->finallyBody; }
+        if ($hasFinally) { $this->finallyStack[] = $n->finallyBody; }
 
         // Try body — pop inner depth on normal exit.
         $out .= $tryLbl . ":\n";
-        foreach ($tc->tryBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
-        $out .= $this->tryReloadDepth($tc->genDepthSlot, $idb);
+        foreach ($n->tryBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
+        $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
         $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
         if ($hasFinally) {
             // Success path: clear pending so finally doesn't rethrow.
@@ -198,7 +196,7 @@ trait EmitLlvmExceptions
 
         if ($catchlessFin) {
             $out .= $catchLbl . ":\n";
-            $out .= $this->tryReloadDepth($tc->genDepthSlot, $idb);
+            $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             $out .= $this->btRestore($btSlot);
             $clt = $this->allocSsa();
@@ -211,14 +209,14 @@ trait EmitLlvmExceptions
         // Catch dispatch.
         if ($hasCatch) {
             $out .= $catchLbl . ":\n";
-            $out .= $this->tryReloadDepth($tc->genDepthSlot, $idb);
+            $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             $out .= $this->btRestore($btSlot);
             $thrown = $this->allocSsa();
             $out .= '  ' . $thrown . " = load ptr, ptr @__mir_thrown\n";
             $out .= $this->emitLoadClassId($thrown);
             $cid = $this->classIdReg;
-            foreach ($tc->catches as $c) {
+            foreach ($n->catches as $c) {
                 $matchLbl = $this->allocLabel('catch_match');
                 $nextLbl = $this->allocLabel('catch_next');
                 $cVar = $this->catchVar($c);
@@ -260,9 +258,9 @@ trait EmitLlvmExceptions
             // Done with the outer buf either way: depth back to the entry depth
             // ($od). In a generator the snapshot is reloaded from the frame (a
             // yield in the try bypasses the entry SSA via the resume switch).
-            $out .= $this->tryReloadDepth($tc->genOuterSlot, $od);
+            $out .= $this->tryReloadDepth($n->genOuterSlot, $od);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
-            foreach ($tc->finallyBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
+            foreach ($n->finallyBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
             $rethrowLbl = $this->allocLabel('try_rethrow');
             $pf = $this->allocSsa();
             $out .= '  ' . $pf . ' = load i64, ptr ' . $pendFlag . "\n";

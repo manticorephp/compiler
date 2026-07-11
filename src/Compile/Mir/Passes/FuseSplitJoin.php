@@ -58,7 +58,7 @@ final class FuseSplitJoin implements Pass
     private function visit(Node $n): void
     {
         if ($n->kind === Node::KIND_BLOCK) {
-            $this->fuseBlockTemps($this->asBlock($n));
+            $this->fuseBlockTemps($n);
         }
         // Direct-nested: implode($sep, explode($lit, $subj)).
         if ($this->isImplode2($n)) {
@@ -117,9 +117,8 @@ final class FuseSplitJoin implements Pass
     private function isImplode2(Node $n): bool
     {
         if ($n->kind !== Node::KIND_CALL) { return false; }
-        $c = $this->asCall($n);
-        return ($c->function === 'implode' || $c->function === 'join')
-            && \count($c->args) === 2;
+        return ($n->function === 'implode' || $n->function === 'join')
+            && \count($n->args) === 2;
     }
 
     /**
@@ -131,11 +130,10 @@ final class FuseSplitJoin implements Pass
     private function isFusableExplode(Node $n): bool
     {
         if ($n->kind !== Node::KIND_CALL) { return false; }
-        $c = $this->asCall($n);
-        if ($c->function !== 'explode') { return false; }
-        $argc = \count($c->args);
+        if ($n->function !== 'explode') { return false; }
+        $argc = \count($n->args);
         if ($argc === 3) {
-            $lim = $c->args[2];
+            $lim = $n->args[2];
             if ($lim->kind !== Node::KIND_INT_CONST
                 || $this->asIntConst($lim)->value !== \PHP_INT_MAX) {
                 return false;
@@ -143,7 +141,7 @@ final class FuseSplitJoin implements Pass
         } elseif ($argc !== 2) {
             return false;
         }
-        $d = $c->args[0];
+        $d = $n->args[0];
         return $d->kind === Node::KIND_STRING_CONST && $this->asStringConst($d)->value !== '';
     }
 
@@ -167,24 +165,21 @@ final class FuseSplitJoin implements Pass
     private function countNameOccurrences(string $name, Node $n): int
     {
         $c = 0;
-        $k = $n->kind;
-        if ($k === Node::KIND_LOAD_LOCAL) {
-            if ($this->asLoadLocal($n)->name === $name) { $c = $c + 1; }
-        } elseif ($k === Node::KIND_STORE_LOCAL) {
-            if ($this->asStoreLocal($n)->name === $name) { $c = $c + 1; }
-        } elseif ($k === Node::KIND_INCDEC) {
-            if ($this->asIncDec($n)->name === $name) { $c = $c + 1; }
-        } elseif ($k === Node::KIND_REF_ALIAS) {
-            $ra = $this->asRefAlias($n);
-            if ($ra->target === $name || $ra->source === $name) { $c = $c + 1; }
-        } elseif ($k === Node::KIND_REF_BIND) {
-            if ($this->asRefBind($n)->target === $name) { $c = $c + 1; }
-        } elseif ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            if ($this->asStaticLocalDecl($n)->name === $name) { $c = $c + 1; }
-        } elseif ($k === Node::KIND_FOREACH) {
-            $fe = $this->asForeach($n);
-            if ($fe->valueVar === $name) { $c = $c + 1; }
-            if ($fe->keyVar === $name) { $c = $c + 1; }
+        if ($n->kind === Node::KIND_LOAD_LOCAL) {
+            if ($n->name === $name) { $c = $c + 1; }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
+            if ($n->name === $name) { $c = $c + 1; }
+        } elseif ($n->kind === Node::KIND_INCDEC) {
+            if ($n->name === $name) { $c = $c + 1; }
+        } elseif ($n->kind === Node::KIND_REF_ALIAS) {
+            if ($n->target === $name || $n->source === $name) { $c = $c + 1; }
+        } elseif ($n->kind === Node::KIND_REF_BIND) {
+            if ($n->target === $name) { $c = $c + 1; }
+        } elseif ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            if ($n->name === $name) { $c = $c + 1; }
+        } elseif ($n->kind === Node::KIND_FOREACH) {
+            if ($n->valueVar === $name) { $c = $c + 1; }
+            if ($n->keyVar === $name) { $c = $c + 1; }
         }
         foreach (Walk::children($n) as $ch) {
             $c = $c + $this->countNameOccurrences($name, $ch);
@@ -211,15 +206,9 @@ final class FuseSplitJoin implements Pass
         return true;
     }
 
-    private function asBlock(Node $n): Block { return $n; }
     private function asCall(Node $n): Call { return $n; }
     private function asStoreLocal(Node $n): StoreLocal { return $n; }
     private function asLoadLocal(Node $n): LoadLocal { return $n; }
     private function asStringConst(Node $n): \Compile\Mir\StringConst { return $n; }
     private function asIntConst(Node $n): \Compile\Mir\IntConst { return $n; }
-    private function asIncDec(Node $n): \Compile\Mir\IncDec { return $n; }
-    private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
-    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
-    private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
-    private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 }

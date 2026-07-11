@@ -85,6 +85,7 @@ trait EmitLlvmBuiltins
         if ($name === 'is_int' || $name === 'is_integer' || $name === 'is_long') { return $this->biIsType($args, 1, Type::KIND_INT); }
         if ($name === 'is_string')                    { return $this->biIsType($args, 4, Type::KIND_STRING); }
         if ($name === 'is_float' || $name === 'is_double') { return $this->biIsType($args, 6, Type::KIND_FLOAT); }
+        if ($name === 'is_numeric')                    { return $this->biIsNumeric($args); }
         if ($name === 'is_bool')                      { return $this->biIsType($args, 2, Type::KIND_BOOL); }
         if ($name === 'is_array')                     { return $this->biIsType($args, 7, Type::KIND_ARRAY); }
         if ($name === 'is_object')                    { return $this->biIsType($args, 8, Type::KIND_OBJ); }
@@ -1301,6 +1302,59 @@ trait EmitLlvmBuiltins
      * arg, else a compile-time constant from the static type.
      * @param Node[] $args
      */
+    /** `is_numeric($v)` — int/float → true; a string → numeric-format check
+     *  (`__mir_is_numeric_str`); a cell dispatches on its tag; else false.
+     *  @param Node[] $args */
+    private function biIsNumeric(array $args): string
+    {
+        $a = $args[0];
+        $k = $a->type->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT) {
+            $this->lastValue = '1'; $this->lastValueType = 'i64'; return '';
+        }
+        if ($k === Type::KIND_STRING) {
+            $this->needsTaggedEq = true; // emits __mir_is_numeric_str
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToPtr();
+            $r = $this->allocSsa();
+            $out .= '  ' . $r . ' = call i1 @__mir_is_numeric_str(ptr ' . $this->lastValue . ")\n";
+            $z = $this->allocSsa();
+            $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+            return $this->finishI64($out, $z);
+        }
+        if ($k === Type::KIND_CELL) {
+            $this->needsTagged = true;
+            $this->needsTaggedEq = true;
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $v = $this->lastValue;
+            $tg = $this->allocSsa();
+            $out .= '  ' . $tg . ' = call i64 @__manticore_tag(i64 ' . $v . ")\n";
+            $isI = $this->allocSsa();
+            $out .= '  ' . $isI . ' = icmp eq i64 ' . $tg . ", 1\n";
+            $isF = $this->allocSsa();
+            $out .= '  ' . $isF . ' = icmp eq i64 ' . $tg . ", 6\n";
+            $isNum = $this->allocSsa();
+            $out .= '  ' . $isNum . ' = or i1 ' . $isI . ', ' . $isF . "\n";
+            $isS = $this->allocSsa();
+            $out .= '  ' . $isS . ' = icmp eq i64 ' . $tg . ", 4\n";
+            $sp = $this->allocSsa();
+            $out .= '  ' . $sp . ' = and i64 ' . $v . ", 281474976710655\n";
+            $spp = $this->allocSsa();
+            $out .= '  ' . $spp . ' = inttoptr i64 ' . $sp . " to ptr\n";
+            $sn = $this->allocSsa();
+            $out .= '  ' . $sn . ' = call i1 @__mir_is_numeric_str(ptr ' . $spp . ")\n";
+            $strNum = $this->allocSsa();
+            $out .= '  ' . $strNum . ' = and i1 ' . $isS . ', ' . $sn . "\n";
+            $r = $this->allocSsa();
+            $out .= '  ' . $r . ' = or i1 ' . $isNum . ', ' . $strNum . "\n";
+            $z = $this->allocSsa();
+            $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+            return $this->finishI64($out, $z);
+        }
+        $this->lastValue = '0'; $this->lastValueType = 'i64'; return '';
+    }
+
     private function biIsType(array $args, int $wantTag, string $kind): string
     {
         $a = $args[0];
@@ -2126,7 +2180,7 @@ trait EmitLlvmBuiltins
     private function reflClassName(Node $arg): string
     {
         if ($arg->kind === Node::KIND_STRING_CONST) {
-            return \ltrim($this->castStringConst($arg)->value, '\\');
+            return \ltrim($arg->value, '\\');
         }
         return \ltrim($arg->type->class ?? '', '\\');
     }
@@ -2202,7 +2256,7 @@ trait EmitLlvmBuiltins
         // (builtins/stdlib externs aren't in fnParamTypes — a name like 'strlen'
         // folds false; documented gap, matches the runtime-registry limitation).
         if ($a->kind === Node::KIND_STRING_CONST) {
-            $s = $this->castStringConst($a)->value;
+            $s = $a->value;
             $sep = \strpos($s, '::');
             if ($sep !== false) {
                 $c = \ltrim(\substr($s, 0, $sep), '\\');
@@ -2215,10 +2269,9 @@ trait EmitLlvmBuiltins
         }
         // [recv, "method"] two-element array literal.
         if ($a->kind === Node::KIND_ARRAY_LIT) {
-            $al = $this->castArrayLit($a);
-            if (\count($al->elements) === 2) {
-                $cls = $this->reflClassName($al->elements[0]->value);
-                $m   = $this->reflLitStr($al->elements[1]->value);
+            if (\count($a->elements) === 2) {
+                $cls = $this->reflClassName($a->elements[0]->value);
+                $m   = $this->reflLitStr($a->elements[1]->value);
                 $ok  = $cls !== '' && $m !== '' && $this->resolveMethodClass($cls, $m) !== '';
                 return $this->biConstBool($this->emitNode($a), $ok);
             }
@@ -3117,7 +3170,7 @@ trait EmitLlvmBuiltins
     private function vecWriteBack(Node $arrNode, string $arr2, bool $asCell = false): string
     {
         if ($arrNode->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $this->castLoadLocal($arrNode)->name;
+            $name = $arrNode->name;
             // Global-backed (`global $arr`): the (possibly realloced) buffer must
             // be stored back into the module cell so `$arr[] = …` inside one
             // function is visible to `__main` and every other `global $arr` scope.
@@ -3149,11 +3202,10 @@ trait EmitLlvmBuiltins
             return $out;
         }
         if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS) {
-            $pa = $this->castPropertyAccess($arrNode);
-            $out = $this->emitNode($pa->object);
+            $out = $this->emitNode($arrNode->object);
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
-            $off = $this->propertyOffset($pa->object, $pa->property);
+            $off = $this->propertyOffset($arrNode->object, $arrNode->property);
             $g = $this->allocSsa();
             $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
                   . ', i64 ' . (string)$off . "\n";
@@ -3167,44 +3219,43 @@ trait EmitLlvmBuiltins
         // realloced) parent threaded further up the chain. Without this the
         // inner mutation lands on a copy the parent never sees.
         if ($arrNode->kind === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->castArrayAccess($arrNode);
-            $parentCell = $aa->array->type->kind === Type::KIND_CELL;
-            $out = $this->emitNode($aa->array);
+            $parentCell = $arrNode->array->type->kind === Type::KIND_CELL;
+            $out = $this->emitNode($arrNode->array);
             $out .= $parentCell ? $this->cellToPtr() : $this->coerceToPtr();
             $parentPtr = $this->lastValue;
             // The inner array is stored back as the parent's element; box it
             // when the parent holds cells (mixed/cell element type).
-            $innerCell = $aa->array->type->element !== null
-                && $aa->array->type->element->kind === Type::KIND_CELL;
+            $innerCell = $arrNode->array->type->element !== null
+                && $arrNode->array->type->element->kind === Type::KIND_CELL;
             $valI = $this->allocSsa();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
-            $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+            $keyIsCell = $arrNode->index->type->kind === Type::KIND_CELL;
             $keyIsString = !$keyIsCell
-                && ($aa->index->type->kind === Type::KIND_STRING
-                    || $aa->index->kind === Node::KIND_STRING_CONST);
+                && ($arrNode->index->type->kind === Type::KIND_STRING
+                    || $arrNode->index->kind === Node::KIND_STRING_CONST);
             $parent2 = $this->allocSsa();
             if ($keyIsCell) {
                 $this->needsCellKey = true;
-                $out .= $this->emitNode($aa->index);
+                $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToI64();
                 $key = $this->lastValue;
                 $out .= '  ' . $parent2 . ' = call ptr @__mir_array_set_cell(ptr '
                       . $parentPtr . ', i64 ' . $key . ', i64 ' . $valI . ")\n";
             } elseif ($keyIsString) {
-                $out .= $this->emitNode($aa->index);
+                $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToPtr();
                 $key = $this->lastValue;
                 $out .= '  ' . $parent2 . ' = call ptr @__mir_array_set_str(ptr '
                       . $parentPtr . ', ptr ' . $key . ', i64 ' . $valI
-                      . $this->litKeyHashArgs($aa->index) . ")\n";
+                      . $this->litKeyHashArgs($arrNode->index) . ")\n";
             } else {
-                $out .= $this->emitNode($aa->index);
+                $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToI64();
                 $idx = $this->lastValue;
                 $out .= '  ' . $parent2 . ' = call ptr @__mir_array_set_int(ptr '
                       . $parentPtr . ', i64 ' . $idx . ', i64 ' . $valI . ")\n";
             }
-            $out .= $this->vecWriteBack($aa->array, $parent2, $parentCell);
+            $out .= $this->vecWriteBack($arrNode->array, $parent2, $parentCell);
             return $out;
         }
         // `Class::$arr[k] = v` — thread the (possibly realloced) buffer back
@@ -3212,10 +3263,9 @@ trait EmitLlvmBuiltins
         // stale pre-grow pointer (a first string-keyed store reallocs from the
         // empty `[]` default → the write is silently lost).
         if ($arrNode->kind === Node::KIND_STATIC_PROP) {
-            $sp = $this->castStaticProp($arrNode);
             $asI = $this->allocSsa();
             $out = $this->packArrayBack($arr2, $asI, $asCell);
-            $out .= '  store i64 ' . $asI . ', ptr ' . $sp->global . "\n";
+            $out .= '  store i64 ' . $asI . ', ptr ' . $arrNode->global . "\n";
             return $out;
         }
         return '';
