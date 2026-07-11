@@ -899,7 +899,7 @@ final class InferTypes implements Pass
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             if ($n->object->kind === Node::KIND_LOAD_LOCAL
-                && $this->asLoadLocal($n->object)->name === 'this') {
+                && $n->object->name === 'this') {
                 $key = $cls . '::' . $n->property;
                 $vt = $n->value->type;
                 // Only a CONCRETE array shape carries type info; a bare/unknown-
@@ -1126,7 +1126,7 @@ final class InferTypes implements Pass
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             if ($n->object->kind === Node::KIND_LOAD_LOCAL
-                && $this->asLoadLocal($n->object)->name === 'this'
+                && $n->object->name === 'this'
                 && $n->value->kind === Node::KIND_LOAD_LOCAL
                 && isset($this->cellPropNames[$n->property])) {
                 $vn = $n->value->name;
@@ -1673,7 +1673,7 @@ final class InferTypes implements Pass
 
     private function valueReadsLocal(Node $v, string $name): bool
     {
-        if ($v->kind === Node::KIND_LOAD_LOCAL && $this->asLoadLocal($v)->name === $name) {
+        if ($v->kind === Node::KIND_LOAD_LOCAL && $v->name === $name) {
             return true;
         }
         foreach (Walk::children($v) as $c) {
@@ -3074,10 +3074,20 @@ final class InferTypes implements Pass
     {
         $this->inferNode($node->cond);
         $saved = $this->localTypes;
-        if ($node->then !== null) { $t = $this->inferNode($node->then); }
-        else { $t = $node->cond->type; }
+        // Flow-typing across the arms (short-circuit): the then-arm evaluates only
+        // when `cond` holds, the else-arm only when it doesn't. This also narrows
+        // the second conjunct of `A && B` (lowered to `Ternary(A, !!B, false)`),
+        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The merge below
+        // unions the arms, so no narrowing leaks past the ternary.
+        if ($node->then !== null) {
+            $this->narrowFromCond($node->cond);
+            $t = $this->inferNode($node->then);
+        } else {
+            $t = $node->cond->type;
+        }
         $thenLocals = $this->localTypes;
         $this->localTypes = $saved;
+        $this->narrowFromNegatedCond($node->cond);
         $e = $this->inferNode($node->else_);
         $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
         // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value

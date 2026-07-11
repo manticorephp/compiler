@@ -2189,7 +2189,7 @@ trait EmitLlvmBuiltins
     private function reflLitStr(Node $arg): string
     {
         return $arg->kind === Node::KIND_STRING_CONST
-            ? $this->castStringConst($arg)->value : '';
+            ? $arg->value : '';
     }
 
     /** Emit each arg for its side effects, discard the values. @param Node[] $args */

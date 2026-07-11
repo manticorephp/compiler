@@ -2135,7 +2135,7 @@ final class EmitLlvm
      *  exception injection — gates the per-yield resume-point check). */
     private function scanGenThrow(Node $n): bool
     {
-        if ($n->kind === Node::KIND_METHOD_CALL && $this->castMethodCall($n)->method === 'throw') {
+        if ($n->kind === Node::KIND_METHOD_CALL && $n->method === 'throw') {
             return true;
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
@@ -3357,7 +3357,7 @@ final class EmitLlvm
                 $base = $base->array;
             }
             if ($base->kind === Node::KIND_LOAD_LOCAL
-                && $this->castLoadLocal($base)->name === $name) {
+                && $base->name === $name) {
                 return true;
             }
         }
@@ -3860,7 +3860,7 @@ final class EmitLlvm
         $v = $sl->value;
         if ($v->kind === Node::KIND_LOAD_LOCAL
             && $v->type->isArray()
-            && (isset($this->mutatedVecLocals[$this->castLoadLocal($v)->name])
+            && (isset($this->mutatedVecLocals[$v->name])
                 || isset($this->mutatedVecLocals[$sl->name]))) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
@@ -5826,7 +5826,7 @@ final class EmitLlvm
         // never the elements (element-drop would double-free the shared refs:
         // the parser `$args` UAF). See {@see $elementSharedLocals}.
         $shared = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
-            && isset($this->elementSharedLocals[$this->castLoadLocal($t)->name]);
+            && isset($this->elementSharedLocals[$t->name]);
         if ($mo->flavor === 'vec') {
             if ($t === null || $shared) { return 'vec'; }
             $el = $t->type->element;
@@ -6298,8 +6298,8 @@ final class EmitLlvm
         // boxed int never equals false. Compare the tag, skip payload.
         $lCell = $c->left->type->kind === Type::KIND_CELL;
         $rCell = $c->right->type->kind === Type::KIND_CELL;
-        $lFalse = $c->left->kind === Node::KIND_BOOL_CONST && !$this->asBoolConst($c->left)->value;
-        $rFalse = $c->right->kind === Node::KIND_BOOL_CONST && !$this->asBoolConst($c->right)->value;
+        $lFalse = $c->left->kind === Node::KIND_BOOL_CONST && !$c->left->value;
+        $rFalse = $c->right->kind === Node::KIND_BOOL_CONST && !$c->right->value;
         if (($isEq || $isNe) && (($lCell && $rFalse) || ($rCell && $lFalse))) {
             $cellNode = $lCell ? $c->left : $c->right;
             $out = $this->emitNode($cellNode);
@@ -6700,7 +6700,7 @@ final class EmitLlvm
     private function isEmptyArrayLit(Node $n): bool
     {
         return $n->kind === Node::KIND_ARRAY_LIT
-            && \count($this->castArrayLit($n)->elements) === 0;
+            && \count($n->elements) === 0;
     }
 
     private function cmpPredicateF(string $op): string
@@ -6871,7 +6871,7 @@ final class EmitLlvm
         // the one being returned (ownership transfers to the caller). The
         // trailing fall-through release covers paths with no `return`.
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
-            ? $this->castLoadLocal($v)->name : null;
+            ? $v->name : null;
         $leave .= $this->emitRcReturnCleanup($returnedLocal);
         if ($v === null) {
             return $this->finishReturn('', '0', $leave);
@@ -7770,7 +7770,7 @@ final class EmitLlvm
     private function countLocalReads(string $name, Node $n): int
     {
         $c = 0;
-        if ($n->kind === Node::KIND_LOAD_LOCAL && $this->castLoadLocal($n)->name === $name) {
+        if ($n->kind === Node::KIND_LOAD_LOCAL && $n->name === $name) {
             $c = 1;
         }
         foreach (\Compile\Mir\Walk::children($n) as $ch) {
@@ -7790,7 +7790,7 @@ final class EmitLlvm
     {
         foreach ($this->stmtList($body) as $stmt) {
             if ($stmt->kind === Node::KIND_STORE_LOCAL
-                && $this->castStoreLocal($stmt)->name === $name) {
+                && $stmt->name === $name) {
                 // Fresh re-init iff the value doesn't read $name itself.
                 return $this->countLocalReads($name, $this->castStoreLocal($stmt)->value) === 0;
             }
@@ -7816,7 +7816,7 @@ final class EmitLlvm
     /** Whether the subtree contains a StoreLocal targeting `$name` (any depth). */
     private function mentionsLocalStore(string $name, Node $n): bool
     {
-        if ($n->kind === Node::KIND_STORE_LOCAL && $this->castStoreLocal($n)->name === $name) {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
             return true;
         }
         foreach (\Compile\Mir\Walk::children($n) as $ch) {
@@ -8481,9 +8481,7 @@ final class EmitLlvm
     private function castBoolConst(\Compile\Mir\BoolConst $n): \Compile\Mir\BoolConst { return $n; }
     private function castIntConst(\Compile\Mir\IntConst $n): \Compile\Mir\IntConst { return $n; }
     private function castFloatConst(\Compile\Mir\FloatConst $n): \Compile\Mir\FloatConst { return $n; }
-    private function asBoolConst(Node $n): BoolConst { return $n; }
     private function castCall(Call $n): Call { return $n; }
-    private function castArrayLit(ArrayLit $n): ArrayLit { return $n; }
     private function castSpread(Node $n): Spread_ { return $n; }
     private function castArrayAccess(ArrayAccess_ $n): ArrayAccess_ { return $n; }
     private function castPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }

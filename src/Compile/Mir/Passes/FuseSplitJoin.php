@@ -142,7 +142,7 @@ final class FuseSplitJoin implements Pass
             return false;
         }
         $d = $n->args[0];
-        return $d->kind === Node::KIND_STRING_CONST && $this->asStringConst($d)->value !== '';
+        return $d->kind === Node::KIND_STRING_CONST && $d->value !== '';
     }
 
     /** Find an `implode($sep, LoadLocal($x))` node within `$n`, else null. */
@@ -150,7 +150,7 @@ final class FuseSplitJoin implements Pass
     {
         if ($this->isImplode2($n)) {
             $a1 = $this->asCall($n)->args[1];
-            if ($a1->kind === Node::KIND_LOAD_LOCAL && $this->asLoadLocal($a1)->name === $x) {
+            if ($a1->kind === Node::KIND_LOAD_LOCAL && $a1->name === $x) {
                 return $n;
             }
         }
@@ -208,7 +208,5 @@ final class FuseSplitJoin implements Pass
 
     private function asCall(Node $n): Call { return $n; }
     private function asStoreLocal(Node $n): StoreLocal { return $n; }
-    private function asLoadLocal(Node $n): LoadLocal { return $n; }
-    private function asStringConst(Node $n): \Compile\Mir\StringConst { return $n; }
     private function asIntConst(Node $n): \Compile\Mir\IntConst { return $n; }
 }

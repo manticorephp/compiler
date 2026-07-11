@@ -1168,7 +1168,7 @@ trait EmitLlvmObjects
         // mismatch if the field read appends its own blocks.
         if (($t->kind === Node::KIND_PROPERTY_ACCESS || $t->kind === Node::KIND_DYN_PROP)) {
             $objNode = $t->kind === Node::KIND_PROPERTY_ACCESS
-                ? $this->castPropertyAccess($t)->object
+                ? $t->object
                 : $this->castDynProp($t)->object;
             if ($objNode->kind === Node::KIND_LOAD_LOCAL) {
                 $rSlot = $this->allocSsa();
