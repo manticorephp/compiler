@@ -441,9 +441,9 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($this->isIntConst($n->left) && $this->isIntConst($n->right)) {
-            $l = $this->asIntConst($n->left)->value;
-            $r = $this->asIntConst($n->right)->value;
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $l = $n->left->value;
+            $r = $n->right->value;
             return new IntConst($l + $r, Type::int_());
         }
         return $n;
@@ -453,9 +453,9 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($this->isIntConst($n->left) && $this->isIntConst($n->right)) {
-            $l = $this->asIntConst($n->left)->value;
-            $r = $this->asIntConst($n->right)->value;
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $l = $n->left->value;
+            $r = $n->right->value;
             return new IntConst($l - $r, Type::int_());
         }
         return $n;
@@ -465,9 +465,9 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($this->isIntConst($n->left) && $this->isIntConst($n->right)) {
-            $l = $this->asIntConst($n->left)->value;
-            $r = $this->asIntConst($n->right)->value;
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $l = $n->left->value;
+            $r = $n->right->value;
             return new IntConst($l * $r, Type::int_());
         }
         return $n;
@@ -482,9 +482,9 @@ final class ConstFold implements Pass
         // non-exact `7 / 2` already evaluates to the right float at runtime, and
         // folding it to a FloatConst would hit the self-host's mistyped
         // FloatConst pre-scan. A zero divisor is left to the runtime.
-        if ($this->isIntConst($n->left) && $this->isIntConst($n->right)) {
-            $l = $this->asIntConst($n->left)->value;
-            $r = $this->asIntConst($n->right)->value;
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $l = $n->left->value;
+            $r = $n->right->value;
             if ($r !== 0 && $l % $r === 0) {
                 return new IntConst((int)($l / $r), Type::int_());
             }
@@ -496,10 +496,10 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($this->isIntConst($n->left) && $this->isIntConst($n->right)) {
-            $r = $this->asIntConst($n->right)->value;
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $r = $n->right->value;
             if ($r === 0) { return $n; }
-            $l = $this->asIntConst($n->left)->value;
+            $l = $n->left->value;
             return new IntConst($l % $r, Type::int_());
         }
         return $n;
@@ -510,8 +510,8 @@ final class ConstFold implements Pass
     private function foldNeg(Neg $n): Node
     {
         $n->operand = $this->foldNode($n->operand);
-        if ($this->isIntConst($n->operand)) {
-            $v = $this->asIntConst($n->operand)->value;
+        if ($n->operand->kind === Node::KIND_INT_CONST) {
+            $v = $n->operand->value;
             return new IntConst(-$v, Type::int_());
         }
         return $n;
@@ -548,9 +548,9 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($this->isIntConst($n->left) && $this->isIntConst($n->right)) {
-            $l = $this->asIntConst($n->left)->value;
-            $r = $this->asIntConst($n->right)->value;
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $l = $n->left->value;
+            $r = $n->right->value;
             return new BoolConst($this->cmpInt($n->op, $l, $r), Type::bool_());
         }
         return $n;
@@ -567,17 +567,4 @@ final class ConstFold implements Pass
         return false;
     }
 
-    // ── Typed-cast helpers ─────────────────────────────────────
-    //
-    // Self-host pre-scan can't read `$node->value` on a base-Node
-    // typed local. Routing through a typed-parameter helper
-    // (`asIntConst(IntConst $n): IntConst`) gives the resolved
-    // type and lets the property read land.
-
-    private function isIntConst(Node $n): bool
-    {
-        return $n->kind === Node::KIND_INT_CONST;
-    }
-
-    private function asIntConst(IntConst $n): IntConst { return $n; }
 }
