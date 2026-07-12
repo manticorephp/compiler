@@ -74,43 +74,43 @@ final class Verify implements Pass
 
         // ── definition sites ──
         if ($k === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             $this->defined[$sl->name] = true;
             $this->walk($sl->value);
             return;
         }
         if ($k === Node::KIND_INCDEC) {
-            $name = $this->asIncDec($n)->name;
+            $name = $n->name;
             $this->defined[$name] = true;
             $this->used[$name] = true;
             return;
         }
         if ($k === Node::KIND_REF_ALIAS) {
-            $ra = $this->asRefAlias($n);
+            $ra = $n;
             $this->defined[$ra->target] = true;
             $this->used[$ra->source] = true;
             return;
         }
         if ($k === Node::KIND_REF_BIND) {
-            $rb = $this->asRefBind($n);
+            $rb = $n;
             $this->defined[$rb->target] = true;
             $this->walk($rb->call);
             return;
         }
         if ($k === Node::KIND_REF_ADDR) {
-            $ra = $this->asRefAddr($n);
+            $ra = $n;
             $this->defined[$ra->target] = true;
             $this->walk($ra->lvalue);
             return;
         }
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            $sld = $this->asStaticLocalDecl($n);
+            $sld = $n;
             $this->defined[$sld->name] = true;
             if ($sld->init !== null) { $this->walk($sld->init); }
             return;
         }
         if ($k === Node::KIND_FOREACH) {
-            $fe = $this->asForeach($n);
+            $fe = $n;
             $this->defined[$fe->valueVar] = true;
             if ($fe->keyVar !== null) { $this->defined[$fe->keyVar] = true; }
             $this->walk($fe->array);
@@ -118,7 +118,7 @@ final class Verify implements Pass
             return;
         }
         if ($k === Node::KIND_TRY_CATCH) {
-            $tc = $this->asTryCatch($n);
+            $tc = $n;
             foreach ($tc->tryBody as $s) { $this->walk($s); }
             foreach ($tc->catches as $c) {
                 if ($c->var !== null) { $this->defined[$c->var] = true; }
@@ -130,7 +130,7 @@ final class Verify implements Pass
 
         // ── use site ──
         if ($k === Node::KIND_LOAD_LOCAL) {
-            $this->used[$this->asLoadLocal($n)->name] = true;
+            $this->used[$n->name] = true;
             return;
         }
 
@@ -150,14 +150,4 @@ final class Verify implements Pass
     {
         return \Compile\Mir\Walk::children($n);
     }
-
-    private function asStoreLocal(Node $n): \Compile\Mir\StoreLocal { return $n; }
-    private function asLoadLocal(Node $n): \Compile\Mir\LoadLocal { return $n; }
-    private function asIncDec(Node $n): \Compile\Mir\IncDec { return $n; }
-    private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
-    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
-    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
-    private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
-    private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
-    private function asTryCatch(Node $n): \Compile\Mir\TryCatch_ { return $n; }
 }

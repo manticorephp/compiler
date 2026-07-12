@@ -110,9 +110,6 @@ final class InferEffects implements Pass
         return new Effects();
     }
 
-    private function castTarget(Node $n): string { return $this->asCast($n)->target; }
-    private function returnValue(Node $n): ?Node { return $this->asReturn($n)->value; }
-
-    private function asCast(Node $n): \Compile\Mir\Cast { return $n; }
-    private function asReturn(Node $n): \Compile\Mir\Return_ { return $n; }
+    private function castTarget(\Compile\Mir\Cast $n): string { return $n->target; }
+    private function returnValue(\Compile\Mir\Return_ $n): ?Node { return $n->value; }
 }

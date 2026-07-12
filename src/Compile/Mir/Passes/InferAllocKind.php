@@ -111,7 +111,7 @@ final class InferAllocKind implements Pass
         if ($n->kind === Node::KIND_LOAD_LOCAL) {
             $t = $n->type;
             if ($t !== null && $t->isArray()) {
-                $name = $this->asLoadLocal($n)->name;
+                $name = $n->name;
                 $latchedFalse = isset($this->localArrayEligible[$name])
                     && $this->localArrayEligible[$name] === false;
                 if (!$latchedFalse) {
@@ -134,32 +134,32 @@ final class InferAllocKind implements Pass
     {
         $k = $n->kind;
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            $this->escaping[$this->asStaticLocalDecl($n)->name] = true;
+            $this->escaping[$n->name] = true;
         } elseif ($k === Node::KIND_REF_ALIAS) {
-            $ra = $this->asRefAlias($n);
+            $ra = $n;
             $this->escaping[$ra->target] = true;
             $this->escaping[$ra->source] = true;
         } elseif ($k === Node::KIND_REF_BIND) {
-            $this->escaping[$this->asRefBind($n)->target] = true;
+            $this->escaping[$n->target] = true;
         } elseif ($k === Node::KIND_REF_ADDR) {
             // The target holds a raw interior address into the aliased
             // container; both the alias and (for `&$obj->prop`) the base object
             // must not be arena-allocated / freed while the alias is live.
-            $ra = $this->asRefAddr($n);
+            $ra = $n;
             $this->escaping[$ra->target] = true;
             if ($ra->lvalue->kind === Node::KIND_PROPERTY_ACCESS) {
-                $base = $this->asPropertyAccess($ra->lvalue)->object;
+                $base = $ra->lvalue->object;
                 if ($base->kind === Node::KIND_LOAD_LOCAL) {
-                    $this->escaping[$this->asLoadLocal($base)->name] = true;
+                    $this->escaping[$base->name] = true;
                 }
             } elseif ($ra->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $this->asArrayAccess($ra->lvalue)->array;
+                $base = $ra->lvalue->array;
                 if ($base->kind === Node::KIND_LOAD_LOCAL) {
-                    $this->escaping[$this->asLoadLocal($base)->name] = true;
+                    $this->escaping[$base->name] = true;
                 }
             }
         } elseif ($k === Node::KIND_FOREACH) {
-            $fe = $this->asForeach($n);
+            $fe = $n;
             if ($fe->byRef) { $this->escaping[$fe->valueVar] = true; }
         }
         foreach (Walk::children($n) as $c) { $this->seedBindings($c); }
@@ -175,7 +175,7 @@ final class InferAllocKind implements Pass
 
         if ($collecting) {
             if ($k === Node::KIND_LOAD_LOCAL && $escCtx) {
-                $this->escaping[$this->asLoadLocal($n)->name] = true;
+                $this->escaping[$n->name] = true;
             }
         } else {
             $e = $n->effects;
@@ -211,16 +211,16 @@ final class InferAllocKind implements Pass
 
         // ── escape sinks: value child(ren) escape ──
         if ($k === Node::KIND_RETURN) {
-            $v = $this->asReturn($n)->value;
+            $v = $n->value;
             if ($v !== null) { $this->traverse($v, true, $collecting); }
             return;
         }
         if ($k === Node::KIND_THROW) {
-            $this->traverse($this->asThrow($n)->value, true, $collecting);
+            $this->traverse($n->value, true, $collecting);
             return;
         }
         if ($k === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             $val = $sl->value;
             // Aliasing a mutable container (`$b = $a` where $a is a
             // vec/assoc/obj) is unsafe to arena: the two locals share one
@@ -265,13 +265,13 @@ final class InferAllocKind implements Pass
             return;
         }
         if ($k === Node::KIND_STORE_PROPERTY) {
-            $sp = $this->asStoreProperty($n);
+            $sp = $n;
             $this->traverse($sp->object, false, $collecting);
             $this->traverse($sp->value, true, $collecting);
             return;
         }
         if ($k === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
+            $se = $n;
             $this->traverse($se->array, false, $collecting);
             // The key may be retained by the container (assoc strdup-free
             // keys), so an allocated key escapes — conservatively RcHeap.
@@ -280,11 +280,11 @@ final class InferAllocKind implements Pass
             return;
         }
         if ($k === Node::KIND_STORE_STATIC_PROP) {
-            $this->traverse($this->asStoreStaticProp($n)->value, true, $collecting);
+            $this->traverse($n->value, true, $collecting);
             return;
         }
         if ($k === Node::KIND_STORE_DYN_PROP) {
-            $sd = $this->asStoreDynProp($n);
+            $sd = $n;
             $this->traverse($sd->object, false, $collecting);
             $this->traverse($sd->name, false, $collecting);
             $this->traverse($sd->value, true, $collecting);
@@ -297,33 +297,33 @@ final class InferAllocKind implements Pass
         // confined producer (a concat / substr temp passed to strlen / strpos)
         // on the arena instead of forcing it to the rc heap. */
         if ($k === Node::KIND_CALL) {
-            $call = $this->asCall($n);
+            $call = $n;
             $argEsc = !$this->isBorrowingBuiltin($call->function);
             foreach ($call->args as $a) { $this->traverse($a, $argEsc, $collecting); }
             return;
         }
         if ($k === Node::KIND_STATIC_CALL) {
-            foreach ($this->asStaticCall($n)->args as $a) { $this->traverse($a, true, $collecting); }
+            foreach ($n->args as $a) { $this->traverse($a, true, $collecting); }
             return;
         }
         if ($k === Node::KIND_NEW_OBJ) {
-            foreach ($this->asNewObj($n)->args as $a) { $this->traverse($a, true, $collecting); }
+            foreach ($n->args as $a) { $this->traverse($a, true, $collecting); }
             return;
         }
         if ($k === Node::KIND_CLONE) {
-            $cl = $this->asClone($n);
+            $cl = $n;
             $this->traverse($cl->object, true, $collecting);
             foreach ($cl->withProps as $pair) { $this->traverse($pair->value, true, $collecting); }
             return;
         }
         if ($k === Node::KIND_METHOD_CALL) {
-            $mc = $this->asMethodCall($n);
+            $mc = $n;
             $this->traverse($mc->object, true, $collecting);
             foreach ($mc->args as $a) { $this->traverse($a, true, $collecting); }
             return;
         }
         if ($k === Node::KIND_INVOKE) {
-            $iv = $this->asInvoke($n);
+            $iv = $n;
             $this->traverse($iv->callee, true, $collecting);
             foreach ($iv->args as $a) { $this->traverse($a, true, $collecting); }
             return;
@@ -331,37 +331,37 @@ final class InferAllocKind implements Pass
 
         // ── aggregate / capture: element values escape into the container ──
         if ($k === Node::KIND_ARRAY_LIT) {
-            foreach ($this->asArrayLit($n)->elements as $el) {
+            foreach ($n->elements as $el) {
                 if ($el->key !== null) { $this->traverse($el->key, false, $collecting); }
                 $this->traverse($el->value, true, $collecting);
             }
             return;
         }
         if ($k === Node::KIND_CLOSURE) {
-            foreach ($this->asClosure($n)->captures as $c) { $this->traverse($c, true, $collecting); }
+            foreach ($n->captures as $c) { $this->traverse($c, true, $collecting); }
             return;
         }
         if ($k === Node::KIND_SPREAD) {
-            $this->traverse($this->asSpread($n)->operand, true, $collecting);
+            $this->traverse($n->operand, true, $collecting);
             return;
         }
 
         // ── transparent: branches inherit the parent context ──
         if ($k === Node::KIND_TERNARY) {
-            $t = $this->asTernary($n);
+            $t = $n;
             $this->traverse($t->cond, false, $collecting);
             if ($t->then !== null) { $this->traverse($t->then, $escCtx, $collecting); }
             $this->traverse($t->else_, $escCtx, $collecting);
             return;
         }
         if ($k === Node::KIND_NULLCOALESCE) {
-            $nc = $this->asNullCoalesce($n);
+            $nc = $n;
             $this->traverse($nc->left, $escCtx, $collecting);
             $this->traverse($nc->right, $escCtx, $collecting);
             return;
         }
         if ($k === Node::KIND_MATCH) {
-            $m = $this->asMatch($n);
+            $m = $n;
             $this->traverse($m->subject, false, $collecting);
             foreach ($m->arms as $arm) {
                 $conds = $arm->conds;
@@ -410,7 +410,7 @@ final class InferAllocKind implements Pass
         $left = $this->asConcat($v)->left;
         return $left->kind === Node::KIND_LOAD_LOCAL
             && $left->type->kind === \Compile\Mir\Type::KIND_STRING
-            && $this->asLoadLocal($left)->name === $sl->name;
+            && $left->name === $sl->name;
     }
 
     private function asConcat(Node $n): \Compile\Mir\Concat { return $n; }
@@ -481,32 +481,4 @@ final class InferAllocKind implements Pass
         return $k === \Compile\Mir\Type::KIND_ARRAY
             || $k === \Compile\Mir\Type::KIND_OBJ;
     }
-
-    private function asLoadLocal(Node $n): \Compile\Mir\LoadLocal { return $n; }
-    private function asStoreLocal(Node $n): \Compile\Mir\StoreLocal { return $n; }
-    private function asReturn(Node $n): \Compile\Mir\Return_ { return $n; }
-    private function asThrow(Node $n): \Compile\Mir\Throw_ { return $n; }
-    private function asStoreProperty(Node $n): \Compile\Mir\StoreProperty { return $n; }
-    private function asStoreElement(Node $n): \Compile\Mir\StoreElement { return $n; }
-    private function asStoreStaticProp(Node $n): \Compile\Mir\StoreStaticProp_ { return $n; }
-    private function asStoreDynProp(Node $n): \Compile\Mir\StoreDynProp_ { return $n; }
-    private function asCall(Node $n): \Compile\Mir\Call { return $n; }
-    private function asStaticCall(Node $n): \Compile\Mir\StaticCall_ { return $n; }
-    private function asNewObj(Node $n): \Compile\Mir\NewObj { return $n; }
-    private function asClone(Node $n): \Compile\Mir\Clone_ { return $n; }
-    private function asMethodCall(Node $n): \Compile\Mir\MethodCall_ { return $n; }
-    private function asInvoke(Node $n): \Compile\Mir\Invoke_ { return $n; }
-    private function asArrayLit(Node $n): \Compile\Mir\ArrayLit { return $n; }
-    private function asClosure(Node $n): \Compile\Mir\Closure_ { return $n; }
-    private function asSpread(Node $n): \Compile\Mir\Spread_ { return $n; }
-    private function asTernary(Node $n): \Compile\Mir\Ternary { return $n; }
-    private function asNullCoalesce(Node $n): \Compile\Mir\NullCoalesce_ { return $n; }
-    private function asMatch(Node $n): \Compile\Mir\Match_ { return $n; }
-    private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
-    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
-    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
-    private function asPropertyAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
-    private function asArrayAccess(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
-    private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
-    private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 }

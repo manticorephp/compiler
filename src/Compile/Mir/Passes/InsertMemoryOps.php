@@ -205,7 +205,7 @@ final class InsertMemoryOps implements Pass
         // EXCEPT an FFI call: it returns a foreign libc buffer/pointer
         // with no rc header — rc-releasing it frees raw memory → abort.
         if ($k === Node::KIND_CALL) {
-            return !isset($this->ffiFns[$this->asCall($value)->function]);
+            return !isset($this->ffiFns[$value->function]);
         }
         if ($k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
@@ -242,7 +242,7 @@ final class InsertMemoryOps implements Pass
         // (the `fact` arg-node UAF: a vec[Node] child dropped while the
         // parent still owns it). Disqualify foreach loop vars from release.
         if ($n->kind === Node::KIND_FOREACH) {
-            $fe = $this->asForeach($n);
+            $fe = $n;
             $this->rcObjBlocked[$fe->valueVar] = true;
             $this->blocked[$fe->valueVar] = true;
             if ($fe->keyVar !== null) {
@@ -252,7 +252,7 @@ final class InsertMemoryOps implements Pass
         }
 
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             $name = $sl->name;
             $value = $sl->value;
             // Track RcHeap obj ownership. Any store of a non-owned-obj
@@ -272,7 +272,7 @@ final class InsertMemoryOps implements Pass
             // shared vec twice.
             if ($value->kind === Node::KIND_LOAD_LOCAL
                 && $value->type->kind === Type::KIND_ARRAY) {
-                $this->rcObjBlocked[$this->asLoadLocal($value)->name] = true;
+                $this->rcObjBlocked[$value->name] = true;
             }
             $flavor = $this->allocFlavor($value);
             if ($flavor === null) {
@@ -316,9 +316,4 @@ final class InsertMemoryOps implements Pass
         if ($k === Type::KIND_CELL)    { return 'cell'; }
         return null;
     }
-
-    private function asStoreLocal(Node $n): \Compile\Mir\StoreLocal { return $n; }
-    private function asLoadLocal(Node $n): \Compile\Mir\LoadLocal { return $n; }
-    private function asCall(Node $n): \Compile\Mir\Call { return $n; }
-    private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 }
