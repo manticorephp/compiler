@@ -9,7 +9,6 @@ use Compile\Mir\LoadLocal;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
 use Compile\Mir\Pass;
-use Compile\Mir\StoreLocal;
 use Compile\Mir\Walk;
 
 /**
@@ -61,12 +60,10 @@ final class FuseSplitJoin implements Pass
             $this->fuseBlockTemps($n);
         }
         // Direct-nested: implode($sep, explode($lit, $subj)).
-        if ($this->isImplode2($n)) {
-            $call = $this->asCall($n);
-            $arg1 = $call->args[1];
-            if ($this->isFusableExplode($arg1)) {
-                $ex = $this->asCall($arg1);
-                $this->rewriteToReplace($call, $ex->args[0], $call->args[0], $ex->args[1]);
+        if ($n->kind === Node::KIND_CALL && $this->isImplode2($n)) {
+            $arg1 = $n->args[1];
+            if ($arg1->kind === Node::KIND_CALL && $this->isFusableExplode($arg1)) {
+                $this->rewriteToReplace($n, $arg1->args[0], $n->args[0], $arg1->args[1]);
             }
         }
         foreach (Walk::children($n) as $c) { $this->visit($c); }
@@ -80,21 +77,23 @@ final class FuseSplitJoin implements Pass
         $n = \count($stmts);
         for ($i = 0; $i < $n - 1; $i = $i + 1) {
             $s = $stmts[$i];
-            if ($s->kind !== Node::KIND_STORE_LOCAL) { continue; }
-            $sl = $this->asStoreLocal($s);
-            if (!$this->isFusableExplode($sl->value)) { continue; }
-            $x = $sl->name;
-            $ex = $this->asCall($sl->value);
-            $subj = $ex->args[1];
-            if (!$this->sideEffectFree($subj)) { continue; }
-            // The next statement must use implode($sep, $x); `$x` occurs exactly
-            // twice in the whole function (this def + that read) → no other use.
-            $imp = $this->findImplodeOfLocal($stmts[$i + 1], $x);
-            if ($imp === null) { continue; }
-            if ($this->fnBody === null) { continue; }
-            if ($this->countNameOccurrences($x, $this->fnBody) !== 2) { continue; }
-            $this->rewriteToReplace($imp, $ex->args[0], $this->asCall($imp)->args[0], $subj);
-            $drop[$i] = true;
+            if ($s->kind === Node::KIND_STORE_LOCAL) {
+                $val = $s->value;
+                if ($val->kind === Node::KIND_CALL && $this->isFusableExplode($val)) {
+                    $x = $s->name;
+                    $subj = $val->args[1];
+                    // The next statement must use implode($sep, $x); `$x` occurs
+                    // exactly twice in the whole function (this def + that read).
+                    $imp = $this->findImplodeOfLocal($stmts[$i + 1], $x);
+                    if ($this->sideEffectFree($subj)
+                        && $imp !== null && $imp->kind === Node::KIND_CALL
+                        && $this->fnBody !== null
+                        && $this->countNameOccurrences($x, $this->fnBody) === 2) {
+                        $this->rewriteToReplace($imp, $val->args[0], $imp->args[0], $subj);
+                        $drop[$i] = true;
+                    }
+                }
+            }
         }
         if (\count($drop) === 0) { return; }
         $kept = [];
@@ -106,11 +105,10 @@ final class FuseSplitJoin implements Pass
     }
 
     /** Turn `$call` (an implode) into `__mir_str_replace_one($delim,$sep,$subj)` in place. */
-    private function rewriteToReplace(Node $call, Node $delim, Node $sep, Node $subj): void
+    private function rewriteToReplace(Call $call, Node $delim, Node $sep, Node $subj): void
     {
-        $c = $this->asCall($call);
-        $c->function = '__mir_str_replace_one';
-        $c->args = [$delim, $sep, $subj];
+        $call->function = '__mir_str_replace_one';
+        $call->args = [$delim, $sep, $subj];
     }
 
     /** implode/join with exactly 2 args (sep, array). */
@@ -135,7 +133,7 @@ final class FuseSplitJoin implements Pass
         if ($argc === 3) {
             $lim = $n->args[2];
             if ($lim->kind !== Node::KIND_INT_CONST
-                || $this->asIntConst($lim)->value !== \PHP_INT_MAX) {
+                || $lim->value !== \PHP_INT_MAX) {
                 return false;
             }
         } elseif ($argc !== 2) {
@@ -148,8 +146,8 @@ final class FuseSplitJoin implements Pass
     /** Find an `implode($sep, LoadLocal($x))` node within `$n`, else null. */
     private function findImplodeOfLocal(Node $n, string $x): ?Node
     {
-        if ($this->isImplode2($n)) {
-            $a1 = $this->asCall($n)->args[1];
+        if ($n->kind === Node::KIND_CALL && $this->isImplode2($n)) {
+            $a1 = $n->args[1];
             if ($a1->kind === Node::KIND_LOAD_LOCAL && $a1->name === $x) {
                 return $n;
             }
@@ -205,8 +203,4 @@ final class FuseSplitJoin implements Pass
         }
         return true;
     }
-
-    private function asCall(Node $n): Call { return $n; }
-    private function asStoreLocal(Node $n): StoreLocal { return $n; }
-    private function asIntConst(Node $n): \Compile\Mir\IntConst { return $n; }
 }

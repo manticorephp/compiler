@@ -3222,13 +3222,16 @@ final class EmitLlvm
     private function shareCallArgs(array $args): void
     {
         foreach ($args as $a) {
-            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-            $t = $a->type;
-            if (!$t->isVec() && !$t->isAssoc()) { continue; }
-            $el = $t->element;
-            if ($el === null) { continue; }
-            if ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING) { continue; }
-            $this->elementSharedLocals[$this->castLoadLocal($a)->name] = true;
+            if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                $t = $a->type;
+                if ($t->isVec() || $t->isAssoc()) {
+                    $el = $t->element;
+                    if ($el !== null
+                        && ($el->kind === Type::KIND_OBJ || $el->kind === Type::KIND_STRING)) {
+                        $this->elementSharedLocals[$a->name] = true;
+                    }
+                }
+            }
         }
     }
 
@@ -3791,16 +3794,18 @@ final class EmitLlvm
             $ops = [];
             $this->flattenConcat($sv, $ops);
             $ops = $this->mergeAdjacentStrConsts($ops);
-            if (\count($ops) >= 2
-                && $ops[0]->kind === Node::KIND_LOAD_LOCAL
-                && $ops[0]->type->kind === Type::KIND_STRING
-                && $this->castLoadLocal($ops[0])->name === $sl->name) {
-                $rest = $ops[1];
-                $k = \count($ops);
-                for ($j = 2; $j < $k; $j = $j + 1) {
-                    $rest = new \Compile\Mir\Concat($rest, $ops[$j]);
+            if (\count($ops) >= 2) {
+                $op0 = $ops[0];
+                if ($op0->kind === Node::KIND_LOAD_LOCAL
+                    && $op0->type->kind === Type::KIND_STRING
+                    && $op0->name === $sl->name) {
+                    $rest = $ops[1];
+                    $k = \count($ops);
+                    for ($j = 2; $j < $k; $j = $j + 1) {
+                        $rest = new \Compile\Mir\Concat($rest, $ops[$j]);
+                    }
+                    return $this->emitSelfAppend($sl, new \Compile\Mir\Concat($op0, $rest));
                 }
-                return $this->emitSelfAppend($sl, new \Compile\Mir\Concat($ops[0], $rest));
             }
         }
         // Flow-sensitive cell-merge box-back (`$x = box($x)` planted by
@@ -4293,13 +4298,12 @@ final class EmitLlvm
         $out .= '  store i64 ' . $fp . ', ptr ' . $buf . "\n";
         $i = 0;
         foreach ($cl->captures as $c) {
-            $byRef = ($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL;
-            if ($byRef) {
+            if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
                 // `use (&$x)`: pack the ADDRESS of $x's slot so the closure
                 // body (a byRef param → refLocal) reads/writes the original.
                 // Already-ref enclosing locals hold the address; plain locals
                 // take the slot address. No rc retain on a raw address.
-                $name = $this->castLoadLocal($c)->name;
+                $name = $c->name;
                 $capV = $this->allocSsa();
                 if (isset($this->refLocals[$name])) {
                     $out .= '  ' . $capV . ' = load i64, ptr ' . $this->slots[$name] . "\n";
@@ -4554,7 +4558,10 @@ final class EmitLlvm
             }
         }
         $hops = \count($chain);
-        $leafPa = $this->castPropertyAccess($chain[0]);
+        $leafPa = $chain[0];
+        if ($leafPa->kind !== Node::KIND_PROPERTY_ACCESS) {
+            throw new \RuntimeException('emitCoalesceChain: non-property leaf');
+        }
         $leafCls = $leafPa->object->type->class ?? '';
         $leafType = ($leafCls !== '' && isset($this->classes[$leafCls]))
             ? ($this->classes[$leafCls]->propertyTypes[$leafPa->property] ?? Type::unknown())
@@ -4569,7 +4576,10 @@ final class EmitLlvm
         $out .= $this->coerceToI64();
         $cur = $this->lastValue;
         for ($i = $hops - 1; $i >= 0; $i = $i - 1) {
-            $hop = $this->castPropertyAccess($chain[$i]);
+            $hop = $chain[$i];
+            if ($hop->kind !== Node::KIND_PROPERTY_ACCESS) {
+                throw new \RuntimeException('emitCoalesceChain: non-property hop');
+            }
             $hoff = $this->propertyOffset($hop->object, $hop->property);
             $z0 = $this->allocSsa();
             $out .= '  ' . $z0 . ' = icmp eq i64 ' . $cur . ", 0\n";
@@ -5576,12 +5586,13 @@ final class EmitLlvm
         $merged = [];
         foreach ($ops as $op) {
             $n = count($merged);
-            if ($op->kind === Node::KIND_STRING_CONST && $n > 0
-                && $merged[$n - 1]->kind === Node::KIND_STRING_CONST) {
-                $prev = $this->castStringConst($merged[$n - 1]);
-                $cur = $op;
-                $merged[$n - 1] = new StringConst($prev->value . $cur->value, Type::string_());
-                continue;
+            if ($op->kind === Node::KIND_STRING_CONST && $n > 0) {
+                $prev = $merged[$n - 1];
+                if ($prev->kind === Node::KIND_STRING_CONST) {
+                    $cur = $op;
+                    $merged[$n - 1] = new StringConst($prev->value . $cur->value, Type::string_());
+                    continue;
+                }
             }
             $merged[] = $op;
         }
@@ -8242,9 +8253,9 @@ final class EmitLlvm
 
     /** Merge a spread source into `$slot` with PHP key semantics: string keys
      *  preserved (later duplicate overwrites), int keys renumbered. */
-    private function emitArraySpreadUnified(string $slot, Node $spreadNode): string
+    private function emitArraySpreadUnified(string $slot, Spread_ $spreadNode): string
     {
-        $sp = $this->castSpread($spreadNode);
+        $sp = $spreadNode;
         $out = $this->emitNode($sp->operand);
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
@@ -8470,14 +8481,6 @@ final class EmitLlvm
         return $this->userLabels[$name];
     }
 
-    // ── Typed-cast helpers ─────────────────────────────────────
-
-    private function castStringConst(StringConst $n): StringConst { return $n; }
-    private function castLoadLocal(LoadLocal $n): LoadLocal { return $n; }
-    private function castCmp(Cmp $n): Cmp { return $n; }
-    private function castSpread(Node $n): Spread_ { return $n; }
-    private function castPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }
-    private function castMethodCall(MethodCall_ $n): MethodCall_ { return $n; }
     /** `break N` target — read the break stack directly (no array param;
      *  self-host mishandles indexing an array passed by value). */
     private function breakTargetFor(int $level): string
@@ -8513,7 +8516,8 @@ final class EmitLlvm
         if ($k === Node::KIND_MUL) { return $n->left; }
         if ($k === Node::KIND_DIV) { return $n->left; }
         if ($k === Node::KIND_MOD) { return $n->left; }
-        return $this->castCmp($n)->left;
+        if ($k === Node::KIND_CMP) { return $n->left; }
+        throw new \RuntimeException('binLeft: unexpected node kind');
     }
 
     private function binRight(Node $n): Node
@@ -8524,6 +8528,7 @@ final class EmitLlvm
         if ($k === Node::KIND_MUL) { return $n->right; }
         if ($k === Node::KIND_DIV) { return $n->right; }
         if ($k === Node::KIND_MOD) { return $n->right; }
-        return $this->castCmp($n)->right;
+        if ($k === Node::KIND_CMP) { return $n->right; }
+        throw new \RuntimeException('binRight: unexpected node kind');
     }
 }

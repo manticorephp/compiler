@@ -289,9 +289,9 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitPropertyAccess(Node $n): string
+    private function emitPropertyAccess(PropertyAccess_ $n): string
     {
-        $pa = $this->castPropertyAccess($n);
+        $pa = $n;
         // Enum case `->name` / `->value` → index the per-enum global
         // table by the case ordinal.
         $ecls = $pa->object->type->class ?? '';
@@ -1019,8 +1019,6 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function castDynProp(Node $n): DynProp_ { return $n; }
-
     private function emitClassName(ClassName_ $n): string
     {
         $cls = $n->operand->type->class ?? '';
@@ -1164,9 +1162,13 @@ trait EmitLlvmObjects
         // branch). Result threads through a slot to avoid a phi predecessor
         // mismatch if the field read appends its own blocks.
         if (($t->kind === Node::KIND_PROPERTY_ACCESS || $t->kind === Node::KIND_DYN_PROP)) {
-            $objNode = $t->kind === Node::KIND_PROPERTY_ACCESS
-                ? $t->object
-                : $this->castDynProp($t)->object;
+            if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
+                $objNode = $t->object;
+            } elseif ($t->kind === Node::KIND_DYN_PROP) {
+                $objNode = $t->object;
+            } else {
+                $objNode = $t;
+            }
             if ($objNode->kind === Node::KIND_LOAD_LOCAL) {
                 $rSlot = $this->allocSsa();
                 $out = '  ' . $rSlot . " = alloca i64\n";
@@ -1782,9 +1784,9 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitMethodCall(Node $n): string
+    private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
     {
-        $mc = $this->castMethodCall($n);
+        $mc = $n;
         if ($this->isGeneratorType($mc->object->type)) {
             return $this->emitGeneratorMethod($mc);
         }

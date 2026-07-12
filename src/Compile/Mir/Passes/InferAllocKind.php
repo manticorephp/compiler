@@ -407,13 +407,11 @@ final class InferAllocKind implements Pass
             || $v->type->kind !== \Compile\Mir\Type::KIND_STRING) {
             return false;
         }
-        $left = $this->asConcat($v)->left;
+        $left = $v->left;
         return $left->kind === Node::KIND_LOAD_LOCAL
             && $left->type->kind === \Compile\Mir\Type::KIND_STRING
             && $left->name === $sl->name;
     }
-
-    private function asConcat(Node $n): \Compile\Mir\Concat { return $n; }
 
     /**
      * Arena-eligible iff the array needs NO per-element AND no per-key drop:

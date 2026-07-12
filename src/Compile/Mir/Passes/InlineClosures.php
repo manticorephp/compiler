@@ -607,9 +607,11 @@ final class InlineClosures implements Pass
         $haystack = $this->node($args[1]);
         if (!$this->isConcreteArray($haystack->type)) { return null; }
         // strict (===) when the 3rd arg is a literal `true`; else loose (==).
-        $strict = \count($args) >= 3
-            && $args[2]->kind === Node::KIND_BOOL_CONST
-            && $this->asBool($this->node($args[2]))->value;
+        $strict = false;
+        if (\count($args) >= 3 && $args[2]->kind === Node::KIND_BOOL_CONST) {
+            $a2 = $this->node($args[2]);
+            if ($a2->kind === Node::KIND_BOOL_CONST) { $strict = $a2->value; }
+        }
         $op = $strict ? '===' : '==';
         $u = Type::unknown();
         // `if ($v <op> $needle) return <hit>;` inside `foreach ($h as $k => $v)`.
@@ -635,8 +637,6 @@ final class InlineClosures implements Pass
             [$needle, $haystack],
         );
     }
-
-    private function asBool(Node $n): \Compile\Mir\BoolConst { return $n; }
 
     /** `array_map(fn($v)=>E, $a)` → `[$o=[]; foreach($a as $k=>$v){ $o[$k]=E; } return $o]`. */
     private function fuseMap(Node $cbArg, Node $arrArg): ?Node
@@ -739,7 +739,10 @@ final class InlineClosures implements Pass
     /** Cloned single-return body expression of an eligible closure fn. */
     private function closureBodyExpr(FunctionDef $fn): Node
     {
-        $ret = $this->asReturn($this->node($fn->body->stmts[0]));
+        $ret = $this->node($fn->body->stmts[0]);
+        if ($ret->kind !== Node::KIND_RETURN) {
+            throw new \RuntimeException('closureBodyExpr: non-return body');
+        }
         return NodeClone::node($this->node($ret->value));
     }
 
@@ -783,5 +786,4 @@ final class InlineClosures implements Pass
     private function fnDef(FunctionDef $f): FunctionDef { return $f; }
     private function param(\Compile\Mir\Param $p): \Compile\Mir\Param { return $p; }
     private function node(Node $n): Node { return $n; }
-    private function asReturn(Node $n): Return_ { return $n; }
 }

@@ -1801,8 +1801,9 @@ trait EmitLlvmBuiltins
      */
     private function biSprintf(array $args, bool $toStdout): ?string
     {
-        if ($args[0]->kind !== Node::KIND_STRING_CONST) { return null; }
-        $fmt = $this->castStringConst($args[0])->value;
+        $a0 = $args[0];
+        if ($a0->kind !== Node::KIND_STRING_CONST) { return null; }
+        $fmt = $a0->value;
         // Translate specifiers + record per-arg conversion kind.
         $trans = '';
         $convs = [];

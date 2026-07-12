@@ -111,13 +111,13 @@ final class TypeCheck
      * alone, so the self-host corpus (which never does string arithmetic) is
      * unaffected. The `.` concat operator is the string path and is not checked.
      */
-    private function checkArith(Node $n, string $inFn): void
+    // Add/Sub/Mul/Div/Mod share the (left, right) layout — typing the param as
+    // Add (the load-bearing-subclass idiom; identical offsets) lets the field
+    // reads resolve. The dispatch only ever calls this for the five arith kinds.
+    private function checkArith(\Compile\Mir\Add $n, string $inFn): void
     {
-        // Add/Sub/Mul/Div/Mod share the (left, right) layout — pin to Add so the
-        // field read resolves (the load-bearing-subclass idiom; same offsets).
-        $a = $this->asArith($n);
-        $bad = $a->left->type->kind === Type::KIND_STRING
-            || $a->right->type->kind === Type::KIND_STRING;
+        $bad = $n->left->type->kind === Type::KIND_STRING
+            || $n->right->type->kind === Type::KIND_STRING;
         if ($bad) {
             $op = $this->arithOp($n->kind);
             $this->errors[] = $this->at($n) . 'arithmetic (`' . $op
@@ -125,8 +125,6 @@ final class TypeCheck
                 . '() — cast explicitly ((int)/(float)) to compute on it';
         }
     }
-
-    private function asArith(Node $n): \Compile\Mir\Add { return $n; }
 
     private function arithOp(string $kind): string
     {

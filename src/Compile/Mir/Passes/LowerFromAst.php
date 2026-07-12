@@ -2061,7 +2061,7 @@ final class LowerFromAst implements Pass
     /** Whether the lowered node tree reads the local `$this`. */
     private function nodeReadsThis(Node $n): bool
     {
-        if ($n->kind === Node::KIND_LOAD_LOCAL && $this->asLoadLocal($n)->name === 'this') {
+        if ($n->kind === Node::KIND_LOAD_LOCAL && $n->name === 'this') {
             return true;
         }
         foreach (Walk::children($n) as $c) {
@@ -2144,7 +2144,7 @@ final class LowerFromAst implements Pass
     /** Whether the node tree reads the named local (LoadLocal). */
     private function nodeReadsLocal(Node $n, string $name): bool
     {
-        if ($n->kind === Node::KIND_LOAD_LOCAL && $this->asLoadLocal($n)->name === $name) {
+        if ($n->kind === Node::KIND_LOAD_LOCAL && $n->name === $name) {
             return true;
         }
         foreach (Walk::children($n) as $c) {
@@ -2156,7 +2156,7 @@ final class LowerFromAst implements Pass
     /** Whether the node tree assigns the named local (StoreLocal). */
     private function nodeWritesLocal(Node $n, string $name): bool
     {
-        if ($n->kind === Node::KIND_STORE_LOCAL && $this->asStoreLocal($n)->name === $name) {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
             return true;
         }
         foreach (Walk::children($n) as $c) {
@@ -2165,37 +2165,9 @@ final class LowerFromAst implements Pass
         return false;
     }
 
-    private function asStoreLocal(Node $n): StoreLocal { return $n; }
-
-    private function asLoadLocal(Node $n): LoadLocal { return $n; }
-    private function asFloatLiteral(\Parser\Ast\Expr $e): \Parser\Ast\FloatLiteral { return $e; }
-    /** Pin to IntLiteral so `->value` is INT-typed: a base-`Expr` read borrows a
-     * subclass type and (under a union perturbation) can resolve to CELL — a
-     * large int then truncates through the 48-bit inline box round-trip. */
-    private function asIntLiteral(\Parser\Ast\Expr $e): \Parser\Ast\IntLiteral { return $e; }
-    private function asPropAccess(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess { return $e; }
-
-    // Pin AST nodes to their concrete type before reading subclass fields — a
-    // base-`Stmt`/`Expr` read off a bare array element resolves the wrong offset
-    // under self-host (the poly-prop trap). Used by the usage-inference scan.
-    private function asExprStmt(\Parser\Ast\Stmt $s): \Parser\Ast\ExpressionStmt { return $s; }
-    private function asIfStmt(\Parser\Ast\Stmt $s): \Parser\Ast\IfStmt { return $s; }
-    private function asWhileStmt(\Parser\Ast\Stmt $s): \Parser\Ast\WhileStmt { return $s; }
-    private function asDoWhileStmt(\Parser\Ast\Stmt $s): \Parser\Ast\DoWhileStmt { return $s; }
-    private function asForStmt(\Parser\Ast\Stmt $s): \Parser\Ast\ForStmt { return $s; }
-    private function asForeachStmt(\Parser\Ast\Stmt $s): \Parser\Ast\ForeachStmt { return $s; }
-    private function asTryCatchStmt(\Parser\Ast\Stmt $s): \Parser\Ast\TryCatchStmt { return $s; }
-    private function asSwitchStmt(\Parser\Ast\Stmt $s): \Parser\Ast\SwitchStmt { return $s; }
-    private function asElseIfArm(\Parser\Ast\ElseIfArm $a): \Parser\Ast\ElseIfArm { return $a; }
-    private function asCatchClause(\Parser\Ast\CatchClause $c): \Parser\Ast\CatchClause { return $c; }
-    private function asSwitchArm(\Parser\Ast\SwitchArm $a): \Parser\Ast\SwitchArm { return $a; }
-    private function asAssign(\Parser\Ast\Expr $e): \Parser\Ast\Assign { return $e; }
-    private function asArrayAccessExpr(\Parser\Ast\Expr $e): \Parser\Ast\ArrayAccess { return $e; }
-    private function asNewExpr(\Parser\Ast\Expr $e): \Parser\Ast\NewExpr { return $e; }
-    private function asVariableExpr(\Parser\Ast\Expr $e): \Parser\Ast\Variable { return $e; }
-    private function asArrayLit(\Parser\Ast\Expr $e): \Parser\Ast\ArrayLit { return $e; }
-    private function asBinaryOp(\Parser\Ast\Expr $e): \Parser\Ast\BinaryOp { return $e; }
-    private function asCastExpr(\Parser\Ast\Expr $e): \Parser\Ast\Cast { return $e; }
+    // Pin foreach-var helper structs (not Expr/Stmt subclasses) to their concrete
+    // type before reading fields — a bare array element read resolves the wrong
+    // offset under self-host (the poly-prop trap). Used by the usage-inference scan.
 
     /**
      * `foo(...)` first-class callable → a 0-capture closure whose body
@@ -2779,7 +2751,7 @@ final class LowerFromAst implements Pass
     private function lowerExprInner(\Parser\Ast\Expr $expr): Node
     {
         if ($expr->kind === 'IntLiteral') {
-            return new IntConst($this->asIntLiteral($expr)->value, Type::int_());
+            return new IntConst($expr->value, Type::int_());
         }
         if ($expr->kind === 'FloatLiteral') {
             // Pin to the FloatLiteral subclass so `->value` is FLOAT-typed: a
@@ -2788,7 +2760,7 @@ final class LowerFromAst implements Pass
             // carrier TYPED int — harmless on its own (a bitcast round-trips it),
             // but a float-param ctor coercion (`new FloatConst(float)`) would
             // sitofp those bits to garbage. Type-pinned read keeps it float.
-            return new FloatConst($this->asFloatLiteral($expr)->value, Type::float_());
+            return new FloatConst($expr->value, Type::float_());
         }
         if ($expr->kind === 'StringLiteral') {
             return new StringConst($expr->value, Type::string_());
@@ -3019,7 +2991,7 @@ final class LowerFromAst implements Pass
             // PropertyAccess holds `nullsafe` at a different slot than MethodCall,
             // so a base read returns garbage and routes EVERY `->prop` through the
             // nullsafe desugar.
-            $pa = $this->asPropAccess($expr);
+            $pa = $expr;
             return $pa->nullsafe ? $this->lowerNullsafeProp($pa) : $this->lowerPropertyAccess($pa);
         }
         if ($expr->kind === 'DynProp') {
@@ -4124,39 +4096,39 @@ final class LowerFromAst implements Pass
         foreach ($stmts as $s) {
             $k = $s->kind;
             if ($k === 'Expression') {
-                $t = $this->storeElemTypeOf($this->asExprStmt($s)->expr, $prop, $paramTypes);
+                $t = $this->storeElemTypeOf($s->expr, $prop, $paramTypes);
                 if ($t !== null) { $out[] = $t; }
             } elseif ($k === 'If') {
-                $if = $this->asIfStmt($s);
+                $if = $s;
                 $out = \array_merge($out, $this->scanStorePropTypes($if->then->statements, $prop, $paramTypes));
                 foreach ($if->elseifs as $ei) {
-                    $out = \array_merge($out, $this->scanStorePropTypes($this->asElseIfArm($ei)->body->statements, $prop, $paramTypes));
+                    $out = \array_merge($out, $this->scanStorePropTypes($ei->body->statements, $prop, $paramTypes));
                 }
                 $else = $if->else;
                 if ($else !== null) {
                     $out = \array_merge($out, $this->scanStorePropTypes($else->statements, $prop, $paramTypes));
                 }
             } elseif ($k === 'While') {
-                $out = \array_merge($out, $this->scanStorePropTypes($this->asWhileStmt($s)->body->statements, $prop, $paramTypes));
+                $out = \array_merge($out, $this->scanStorePropTypes($s->body->statements, $prop, $paramTypes));
             } elseif ($k === 'DoWhile') {
-                $out = \array_merge($out, $this->scanStorePropTypes($this->asDoWhileStmt($s)->body->statements, $prop, $paramTypes));
+                $out = \array_merge($out, $this->scanStorePropTypes($s->body->statements, $prop, $paramTypes));
             } elseif ($k === 'For') {
-                $out = \array_merge($out, $this->scanStorePropTypes($this->asForStmt($s)->body->statements, $prop, $paramTypes));
+                $out = \array_merge($out, $this->scanStorePropTypes($s->body->statements, $prop, $paramTypes));
             } elseif ($k === 'Foreach') {
-                $out = \array_merge($out, $this->scanStorePropTypes($this->asForeachStmt($s)->body->statements, $prop, $paramTypes));
+                $out = \array_merge($out, $this->scanStorePropTypes($s->body->statements, $prop, $paramTypes));
             } elseif ($k === 'TryCatch') {
-                $tc = $this->asTryCatchStmt($s);
+                $tc = $s;
                 $out = \array_merge($out, $this->scanStorePropTypes($tc->try->statements, $prop, $paramTypes));
                 foreach ($tc->catches as $c) {
-                    $out = \array_merge($out, $this->scanStorePropTypes($this->asCatchClause($c)->body->statements, $prop, $paramTypes));
+                    $out = \array_merge($out, $this->scanStorePropTypes($c->body->statements, $prop, $paramTypes));
                 }
                 $fin = $tc->finally;
                 if ($fin !== null) {
                     $out = \array_merge($out, $this->scanStorePropTypes($fin->statements, $prop, $paramTypes));
                 }
             } elseif ($k === 'Switch') {
-                foreach ($this->asSwitchStmt($s)->cases as $case) {
-                    $out = \array_merge($out, $this->scanStorePropTypes($this->asSwitchArm($case)->body, $prop, $paramTypes));
+                foreach ($s->cases as $case) {
+                    $out = \array_merge($out, $this->scanStorePropTypes($case->body, $prop, $paramTypes));
                 }
             }
         }
@@ -4174,10 +4146,10 @@ final class LowerFromAst implements Pass
     private function storeElemTypeOf(\Parser\Ast\Expr $e, string $prop, array $paramTypes): ?Type
     {
         if ($e->kind !== 'Assign') { return null; }
-        $as = $this->asAssign($e);
+        $as = $e;
         $target = $as->target;
         if ($target->kind === 'ArrayAccess') {
-            $aa = $this->asArrayAccessExpr($target);
+            $aa = $target;
             if (!$this->isThisProp($aa->array, $prop)) { return null; }
             if ($aa->index !== null) {
                 // A string-keyed store implies an ASSOC; keep a resolvable value
@@ -4195,7 +4167,7 @@ final class LowerFromAst implements Pass
             // wholesale assignment could seed a foreign element type → bail.
             $rhs = $as->value;
             if ($rhs->kind === 'ArrayLit') {
-                if ($this->asArrayLit($rhs)->elements === []) { return null; }
+                if ($rhs->elements === []) { return null; }
                 // A homogeneous list literal reveals the element type
                 // (`$this->items = [5,6,7]` in the ctor → vec[int]), same as an
                 // inline default — so a read / by-ref of `$this->items[$i]` stays
@@ -4216,10 +4188,10 @@ final class LowerFromAst implements Pass
     private function isThisProp(\Parser\Ast\Expr $e, string $prop): bool
     {
         if ($e->kind !== 'PropertyAccess') { return false; }
-        $pa = $this->asPropAccess($e);
+        $pa = $e;
         if ($pa->property !== $prop) { return false; }
         $obj = $pa->object;
-        return $obj->kind === 'Variable' && $this->asVariableExpr($obj)->name === 'this';
+        return $obj->kind === 'Variable' && $obj->name === 'this';
     }
 
     /**
@@ -4233,12 +4205,12 @@ final class LowerFromAst implements Pass
     {
         $k = $v->kind;
         if ($k === 'New') {
-            $cls = \ltrim($this->asNewExpr($v)->class, '\\');
+            $cls = \ltrim($v->class, '\\');
             if ($cls === 'self' || $cls === 'static') { $cls = $this->currentLowerClass; }
             return $cls !== '' ? Type::obj($cls) : Type::unknown();
         }
         if ($k === 'Variable') {
-            $name = $this->asVariableExpr($v)->name;
+            $name = $v->name;
             return $paramTypes[$name] ?? Type::unknown();
         }
         if ($k === 'IntLiteral')    { return Type::int_(); }
@@ -4247,8 +4219,8 @@ final class LowerFromAst implements Pass
         if ($k === 'BoolLiteral')   { return Type::bool_(); }
         // A concat / interpolation (BinaryOp `.`) and a `(string)` cast are
         // always string — the common assoc-value shape (`$this->d[$k] = "$a->$b"`).
-        if ($k === 'BinaryOp' && $this->asBinaryOp($v)->op === '.') { return Type::string_(); }
-        if ($k === 'Cast' && $this->asCastExpr($v)->cast === 'string') { return Type::string_(); }
+        if ($k === 'BinaryOp' && $v->op === '.') { return Type::string_(); }
+        if ($k === 'Cast' && $v->cast === 'string') { return Type::string_(); }
         return Type::unknown();
     }
 
@@ -4264,10 +4236,10 @@ final class LowerFromAst implements Pass
     {
         $kk = $k->kind;
         if ($kk === 'StringLiteral') { return true; }
-        if ($kk === 'BinaryOp' && $this->asBinaryOp($k)->op === '.') { return true; }
-        if ($kk === 'Cast' && $this->asCastExpr($k)->cast === 'string') { return true; }
+        if ($kk === 'BinaryOp' && $k->op === '.') { return true; }
+        if ($kk === 'Cast' && $k->cast === 'string') { return true; }
         if ($kk === 'Variable') {
-            $t = $paramTypes[$this->asVariableExpr($k)->name] ?? null;
+            $t = $paramTypes[$k->name] ?? null;
             return $t !== null && $t->kind === Type::KIND_STRING;
         }
         return false;
