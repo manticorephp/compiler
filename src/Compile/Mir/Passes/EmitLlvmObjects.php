@@ -846,14 +846,14 @@ trait EmitLlvmObjects
     private function globalInit(Node $def): string
     {
         $k = $def->kind;
-        if ($k === Node::KIND_INT_CONST)  { return (string)$this->castIntConst($def)->value; }
-        if ($k === Node::KIND_BOOL_CONST) { return $this->castBoolConst($def)->value ? '1' : '0'; }
+        if ($k === Node::KIND_INT_CONST)  { return (string)$def->value; }
+        if ($k === Node::KIND_BOOL_CONST) { return $def->value ? '1' : '0'; }
         if ($k === Node::KIND_STRING_CONST) {
-            $id = $this->internString($this->castStringConst($def)->value);
+            $id = $this->internString($def->value);
             return 'ptrtoint (ptr ' . $this->strLitId($id) . ' to i64)';
         }
         if ($k === Node::KIND_FLOAT_CONST) {
-            return 'bitcast (double ' . $this->formatFloat($this->castFloatConst($def)->value) . ' to i64)';
+            return 'bitcast (double ' . $this->formatFloat($def->value) . ' to i64)';
         }
         return '0';
     }
@@ -881,8 +881,6 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function castThrow(Throw_ $n): Throw_ { return $n; }
-    private function castTryCatch(TryCatch_ $n): TryCatch_ { return $n; }
 
     /** `$y = &$x` — point the target's slot at the source's slot. */
     private function emitRefAlias(RefAlias_ $n): string
@@ -1022,7 +1020,6 @@ trait EmitLlvmObjects
     }
 
     private function castDynProp(Node $n): DynProp_ { return $n; }
-    private function castStoreDynProp(Node $n): StoreDynProp_ { return $n; }
 
     private function emitClassName(ClassName_ $n): string
     {
@@ -1055,7 +1052,7 @@ trait EmitLlvmObjects
     private function emitIssetTarget(Node $t): string
     {
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->castArrayAccess($t);
+            $aa = $t;
             // `isset($obj[$k])` on an ArrayAccess object → `offsetExists()`.
             if ($aa->array->type->kind === Type::KIND_OBJ
                 && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
@@ -1141,7 +1138,7 @@ trait EmitLlvmObjects
         // Property overloading: `isset($obj->undeclaredProp)` on a class that
         // defines __isset routes through `$obj->__isset('name')`.
         if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
-            $ipa = $this->castPropertyAccess($t);
+            $ipa = $t;
             $icls = $ipa->object->type->class ?? '';
             if ($icls !== '' && isset($this->classes[$icls])
                 && $this->classes[$icls]->propertyOffset($ipa->property) === -1) {
@@ -1230,7 +1227,7 @@ trait EmitLlvmObjects
         $out = '';
         foreach ($n->targets as $t) {
             if ($t->kind === Node::KIND_LOAD_LOCAL) {
-                $name = $this->castLoadLocal($t)->name;
+                $name = $t->name;
                 // Release the held rc value first (drops to rc 0 → __destruct),
                 // THEN zero the slot — a later scope-exit release re-loads 0 and
                 // no-ops, so no double free.
@@ -1244,7 +1241,7 @@ trait EmitLlvmObjects
                 }
             }
             if ($t->kind === Node::KIND_ARRAY_ACCESS) {
-                $aa = $this->castArrayAccess($t);
+                $aa = $t;
                 // `unset($obj[$k])` on an ArrayAccess object → `offsetUnset()`.
                 if ($aa->array->type->kind === Type::KIND_OBJ
                     && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
@@ -1274,7 +1271,7 @@ trait EmitLlvmObjects
             // Property overloading: `unset($obj->undeclaredProp)` on a class
             // that defines __unset routes through `$obj->__unset('name')`.
             if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
-                $upa = $this->castPropertyAccess($t);
+                $upa = $t;
                 $ucls = $upa->object->type->class ?? '';
                 if ($ucls !== '' && isset($this->classes[$ucls])
                     && $this->classes[$ucls]->propertyOffset($upa->property) === -1) {

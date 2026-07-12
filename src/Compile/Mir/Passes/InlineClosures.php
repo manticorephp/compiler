@@ -354,7 +354,7 @@ final class InlineClosures implements Pass
         if (\count($stmts) !== 1) { return null; }
         $ret = $this->node($stmts[0]);
         if ($ret->kind !== Node::KIND_RETURN) { return null; }
-        $retX = $this->asReturn($ret);
+        $retX = $ret;
         if ($retX->value === null) { return null; }
         // A curried arrow (`fn($x) => fn($y) => ...`) returns a closure node,
         // which NodeClone can't copy (its captured scope would be duplicated).
@@ -406,7 +406,7 @@ final class InlineClosures implements Pass
             || $k === Node::KIND_STRING_CONST || $k === Node::KIND_BOOL_CONST
             || $k === Node::KIND_NULL_CONST
             || ($k === Node::KIND_PROPERTY_ACCESS
-                && $this->isCheap($this->asPropertyAccess($a)->object));
+                && $this->isCheap($a->object));
     }
 
     /** Side-effect-free expression (no call/invoke/incdec/store/new/yield). */
@@ -732,7 +732,7 @@ final class InlineClosures implements Pass
         if (\count($stmts) !== 1) { return null; }
         $ret = $this->node($stmts[0]);
         if ($ret->kind !== Node::KIND_RETURN) { return null; }
-        if ($this->asReturn($ret)->value === null) { return null; }
+        if ($ret->value === null) { return null; }
         return $fn;
     }
 
@@ -784,5 +784,4 @@ final class InlineClosures implements Pass
     private function param(\Compile\Mir\Param $p): \Compile\Mir\Param { return $p; }
     private function node(Node $n): Node { return $n; }
     private function asReturn(Node $n): Return_ { return $n; }
-    private function asPropertyAccess(Node $n): PropertyAccess_ { return $n; }
 }

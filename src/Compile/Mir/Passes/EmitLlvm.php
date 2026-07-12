@@ -2245,7 +2245,7 @@ final class EmitLlvm
             $i = 0;
             foreach ($cl->captures as $c) {
                 if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
-                    $this->byRefCaptured[$this->castLoadLocal($c)->name] = true;
+                    $this->byRefCaptured[$c->name] = true;
                 }
                 $i = $i + 1;
             }
@@ -3441,10 +3441,10 @@ final class EmitLlvm
             return $out;
         }
         if ($k === Node::KIND_THROW) {
-            return $this->preallocateLocals($this->castThrow($n)->value);
+            return $this->preallocateLocals($n->value);
         }
         if ($k === Node::KIND_TRY_CATCH) {
-            $tc = $this->castTryCatch($n);
+            $tc = $n;
             $out = '';
             foreach ($tc->tryBody as $s) { $out .= $this->preallocateLocals($s); }
             foreach ($tc->catches as $c) {
@@ -5579,7 +5579,7 @@ final class EmitLlvm
             if ($op->kind === Node::KIND_STRING_CONST && $n > 0
                 && $merged[$n - 1]->kind === Node::KIND_STRING_CONST) {
                 $prev = $this->castStringConst($merged[$n - 1]);
-                $cur = $this->castStringConst($op);
+                $cur = $op;
                 $merged[$n - 1] = new StringConst($prev->value . $cur->value, Type::string_());
                 continue;
             }
@@ -5645,7 +5645,7 @@ final class EmitLlvm
             // length here, where libc strlen would truncate it.
             if ($op->kind === Node::KIND_STRING_CONST) {
                 $gptrs[] = $raw;
-                $lens[] = (string) \strlen($this->castStringConst($op)->value);
+                $lens[] = (string) \strlen($op->value);
                 continue;
             }
             // A null `?string` operand concatenates as "" (PHP), not a memcpy
@@ -5986,7 +5986,7 @@ final class EmitLlvm
         $owned = $k === Node::KIND_NEW_OBJ
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
         if ($k === Node::KIND_CALL) {
-            $fn = $this->castCall($a)->function;
+            $fn = $a->function;
             $owned = isset($this->fnParamTypes[$fn]) && !($this->fnReturnsByRef[$fn] ?? false);
         }
         if (!$owned) { return ''; }
@@ -6010,7 +6010,7 @@ final class EmitLlvm
             // result. Builtins vary (some return borrowed elements) — and a
             // user fn can never shadow a builtin name (PHP forbids it), so a
             // hit in fnParamTypes proves it is user-defined, not a builtin.
-            $fname = $this->castCall($s)->function;
+            $fname = $s->function;
             if (!isset($this->fnParamTypes[$fname])) { return ''; }
             // A by-ref-returning fn yields an address, not an owned value.
             if ($this->fnReturnsByRef[$fname] ?? false) { return ''; }
@@ -7433,7 +7433,7 @@ final class EmitLlvm
             // remaining positional params (arr[0], arr[1], …). Fixed-arity; the
             // element values pass raw (matches int/string/cell params).
             if ($a->kind === Node::KIND_SPREAD) {
-                $operand = $this->castSpread($a)->operand;
+                $operand = $a->operand;
                 $out .= $this->emitNode($operand);
                 $out .= $this->coerceToPtr();
                 $arr = $this->lastValue;
@@ -7792,7 +7792,7 @@ final class EmitLlvm
             if ($stmt->kind === Node::KIND_STORE_LOCAL
                 && $stmt->name === $name) {
                 // Fresh re-init iff the value doesn't read $name itself.
-                return $this->countLocalReads($name, $this->castStoreLocal($stmt)->value) === 0;
+                return $this->countLocalReads($name, $stmt->value) === 0;
             }
             // Any other statement that mentions $name (read, or a nested/
             // conditional/element write) reaches a use before a clean write.
@@ -7833,7 +7833,7 @@ final class EmitLlvm
         if ($k === Node::KIND_STORE_PROPERTY) { return $n->value; }
         if ($k === Node::KIND_STORE_ELEMENT) { return $n->value; }
         if ($k === Node::KIND_STORE_STATIC_PROP) { return $n->value; }
-        if ($k === Node::KIND_STORE_DYN_PROP) { return $this->castStoreDynProp($n)->value; }
+        if ($k === Node::KIND_STORE_DYN_PROP) { return $n->value; }
         return null;
     }
 
@@ -8474,16 +8474,8 @@ final class EmitLlvm
 
     private function castStringConst(StringConst $n): StringConst { return $n; }
     private function castLoadLocal(LoadLocal $n): LoadLocal { return $n; }
-    private function castStoreLocal(StoreLocal $n): StoreLocal { return $n; }
     private function castCmp(Cmp $n): Cmp { return $n; }
-    // Still called from sibling trait EmitLlvmObjects on a SUB-node (`$def`), where
-    // narrowing can't fire — the host pin stays.
-    private function castBoolConst(\Compile\Mir\BoolConst $n): \Compile\Mir\BoolConst { return $n; }
-    private function castIntConst(\Compile\Mir\IntConst $n): \Compile\Mir\IntConst { return $n; }
-    private function castFloatConst(\Compile\Mir\FloatConst $n): \Compile\Mir\FloatConst { return $n; }
-    private function castCall(Call $n): Call { return $n; }
     private function castSpread(Node $n): Spread_ { return $n; }
-    private function castArrayAccess(ArrayAccess_ $n): ArrayAccess_ { return $n; }
     private function castPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }
     private function castMethodCall(MethodCall_ $n): MethodCall_ { return $n; }
     /** `break N` target — read the break stack directly (no array param;

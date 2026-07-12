@@ -828,11 +828,11 @@ final class InferTypes implements Pass
     private function findCellElemStores(Node $n, string $cls): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
+            $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS
                 && $se->index->kind !== Node::KIND_NULL_CONST) {
                 if ($se->array->object->kind === Node::KIND_LOAD_LOCAL
-                    && $this->asLoadLocal($se->array->object)->name === 'this') {
+                    && $se->array->object->name === 'this') {
                     // A definitely-mixed stored value (a `mixed` param / cell):
                     // the slot holds NaN-boxed cells.
                     $vk = $se->value->type->kind;
@@ -985,10 +985,10 @@ final class InferTypes implements Pass
     private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
+            $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS) {
                 if ($se->array->object->kind === Node::KIND_LOAD_LOCAL
-                    && $this->asLoadLocal($se->array->object)->name === 'this') {
+                    && $se->array->object->name === 'this') {
                     $key = $cls . '::' . $se->array->property;
                     $vt = $se->value->type;
                     if (!$this->isBoxablePropElem($vt)) {
@@ -1014,7 +1014,7 @@ final class InferTypes implements Pass
                 if ($aa->array->kind === Node::KIND_PROPERTY_ACCESS
                     && $aa->index->kind !== Node::KIND_NULL_CONST) {
                     if ($aa->array->object->kind === Node::KIND_LOAD_LOCAL
-                        && $this->asLoadLocal($aa->array->object)->name === 'this') {
+                        && $aa->array->object->name === 'this') {
                         $this->propReturnsFound[$cls . '::' . $aa->array->property] = $rt;
                     }
                 }
@@ -1029,7 +1029,7 @@ final class InferTypes implements Pass
     private function scanAssocPropsNode(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
+            $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS
                 && $se->index->kind !== Node::KIND_NULL_CONST
                 && $this->isStringKey($se->index)) {
@@ -1177,10 +1177,10 @@ final class InferTypes implements Pass
     private function collectElemLocals(Node $n, array $cand): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             $v = $sl->value;
             if ($v->kind === Node::KIND_ARRAY_ACCESS) {
-                $aa = $this->asArrayAccess($v);
+                $aa = $v;
                 if ($aa->array->kind === Node::KIND_LOAD_LOCAL
                     && $aa->index->kind !== Node::KIND_NULL_CONST) {
                     $arrName = $aa->array->name;
@@ -1191,7 +1191,7 @@ final class InferTypes implements Pass
             }
         } elseif ($n->kind === Node::KIND_FOREACH) {
             // `foreach ($param as $v)` — the value var carries an element.
-            $fe = $this->asForeach($n);
+            $fe = $n;
             if ($fe->array->kind === Node::KIND_LOAD_LOCAL) {
                 $arrName = $fe->array->name;
                 if (isset($cand[$arrName])) {
@@ -1251,7 +1251,7 @@ final class InferTypes implements Pass
             return $this->elemLocalOf[$nm] ?? '';
         }
         if ($node->kind === Node::KIND_ARRAY_ACCESS) {
-            $aa = $this->asArrayAccess($node);
+            $aa = $node;
             if ($aa->array->kind === Node::KIND_LOAD_LOCAL
                 && $aa->index->kind !== Node::KIND_NULL_CONST) {
                 $nm = $aa->array->name;
@@ -1282,9 +1282,6 @@ final class InferTypes implements Pass
 
     private function asCmp(Node $n): Cmp { return $n; }
     private function asArrayAccess(Node $n): ArrayAccess_ { return $n; }
-    private function asCall(Node $n): Call { return $n; }
-    private function asMethodCall(Node $n): MethodCall_ { return $n; }
-    private function asStaticCall(Node $n): StaticCall_ { return $n; }
 
     /**
      * Refine each non-extern function's bare-`array` param to vec[T] when every
@@ -1373,14 +1370,14 @@ final class InferTypes implements Pass
         $args = null;
         $base = 0;
         if ($n->kind === Node::KIND_CALL) {
-            $fnName = $this->asCall($n)->function;
-            $args = $this->asCall($n)->args;
+            $fnName = $n->function;
+            $args = $n->args;
         } elseif ($n->kind === Node::KIND_METHOD_CALL) {
-            $mc = $this->asMethodCall($n);
+            $mc = $n;
             $cls = $mc->object->type->class ?? '';
             if ($cls !== '') { $fnName = $cls . '__' . $mc->method; $args = $mc->args; $base = 1; }
         } elseif ($n->kind === Node::KIND_STATIC_CALL) {
-            $sc = $this->asStaticCall($n);
+            $sc = $n;
             if ($sc->class !== '') { $fnName = $sc->class . '__' . $sc->method; $args = $sc->args; }
         }
         if ($args !== null) {
@@ -1556,7 +1553,7 @@ final class InferTypes implements Pass
     private function collectGlobalStoreTypes(Node $n, array $active, array &$observed): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $s = $this->asStoreLocal($n);
+            $s = $n;
             if (isset($active[$s->name])) {
                 $t = $s->value->type;
                 $tk = $t->kind;
@@ -1585,7 +1582,7 @@ final class InferTypes implements Pass
     private function collectRefArgTypes(Node $n, array $cand, array &$observed, array &$conflict): void
     {
         if ($n->kind === Node::KIND_CALL) {
-            $c = $this->asCall($n);
+            $c = $n;
             $i = 0;
             foreach ($c->args as $a) {
                 $key = $c->function . '#' . (string)$i;
@@ -1620,11 +1617,6 @@ final class InferTypes implements Pass
         return true;
     }
 
-    private function asStoreLocal(Node $n): StoreLocal { return $n; }
-    private function asYield(Node $n): \Compile\Mir\Yield_ { return $n; }
-    private function asForeach(Node $n): Foreach_ { return $n; }
-    private function asClone(Node $n): \Compile\Mir\Clone_ { return $n; }
-
     /** True when any fn stores into a vec-typed local base under a STRING-typed
      *  key — an assoc that erased to a vec because the key (a foreach value)
      *  was typed only after scanAssocLocals already ran. A re-infer flips it. */
@@ -1639,7 +1631,7 @@ final class InferTypes implements Pass
     private function bodyHasUntypedAssocKeyStore(Node $n): bool
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
+            $se = $n;
             if ($se->array->kind === Node::KIND_LOAD_LOCAL
                 && $se->array->type->isVec()
                 && $se->index->kind !== Node::KIND_NULL_CONST
@@ -1657,7 +1649,7 @@ final class InferTypes implements Pass
     private function scanFloatLocals(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             // Only a SELF-REFERENTIAL float store (`$s = $s + 1.5`, i.e. a `+=`
             // compound) makes a float slot — the loop-accumulator shape. A plain
             // `$x = 2.5` in one if/else branch must stay an int|float numeric
@@ -1726,7 +1718,7 @@ final class InferTypes implements Pass
         if ($n->kind === Node::KIND_INCDEC) {
             if ($n->op === '+') { $incTargets[$n->name] = true; }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             $vk = $sl->value->kind;
             if ($vk === Node::KIND_STRING_CONST || $vk === Node::KIND_CONCAT) {
                 $strAssigned[$sl->name] = true;
@@ -1740,7 +1732,7 @@ final class InferTypes implements Pass
     private function scanAssocLocals(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $se = $this->asStoreElement($n);
+            $se = $n;
             if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $se->array->name;
                 $this->recordDisqualified[$name] = true; // element-mutated → not a record
@@ -1772,7 +1764,7 @@ final class InferTypes implements Pass
                 }
                 // `$a[k] = []` — an empty inner array value (infers vec[unknown]).
                 if ($se->value->kind === Node::KIND_ARRAY_LIT
-                    && \count($this->asArrayLit($se->value)->elements) === 0) {
+                    && \count($se->value->elements) === 0) {
                     $this->emptyArrValLocals[$name] = true;
                 }
             } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
@@ -1794,7 +1786,7 @@ final class InferTypes implements Pass
             // then `$r[0] = "a"` (string) is a genuinely mixed array — without the
             // literal's `num` the store's lone `string` looks homogeneous and the
             // string is written raw into a vec[int] (read back as garbage bits).
-            $sl = $this->asStoreLocal($n);
+            $sl = $n;
             if ($sl->value->kind === Node::KIND_ARRAY_LIT) {
                 $elems = $sl->value->elements;
                 $allStr = \count($elems) > 0;
@@ -1915,7 +1907,7 @@ final class InferTypes implements Pass
             || $kind === Node::KIND_GOTO
             || $kind === Node::KIND_LABEL) { return Type::void(); }
         if ($kind === Node::KIND_YIELD) {
-            $y = $this->asYield($node);
+            $y = $node;
             if ($y->key !== null) {
                 $kt = $this->inferNode($y->key);
                 $this->genKeyType = $this->genKeyType === null
@@ -1934,7 +1926,7 @@ final class InferTypes implements Pass
         if ($kind === Node::KIND_STORE_ELEMENT)   { return $this->inferStoreElement($node); }
         if ($kind === Node::KIND_NEW_OBJ)         { return $this->inferNewObj($node); }
         if ($kind === Node::KIND_CLONE) {
-            $cl = $this->asClone($node);
+            $cl = $node;
             $ot = $this->inferNode($cl->object);
             foreach ($cl->withProps as $pair) { $this->inferNode($pair->value); }
             $node->type = $ot;
@@ -2008,7 +2000,7 @@ final class InferTypes implements Pass
         if (isset($this->assocLocals[$node->name])
             && $node->value->kind === Node::KIND_ARRAY_LIT
             && $valueType->isVec()
-            && \count($this->asArrayLit($node->value)->elements) === 0) {
+            && \count($node->value->elements) === 0) {
             // A cell-keyed local (`$o[$dynKey]=…`) carries dynamic int-or-string
             // keys → assoc[cell,*]; a plain string-keyed local → assoc[string,*].
             $keyType = isset($this->cellKeyLocals[$node->name]) ? Type::cell() : Type::string_();            $valueType = Type::assoc($keyType, Type::unknown());
@@ -2847,19 +2839,28 @@ final class InferTypes implements Pass
         };
     }
 
-    /** Narrowing key for `$local->prop` (NUL-joined; '' never in a name), or null. */
+    /** Narrowing key for a `$local->p1->…->pN` property path (`->`-joined, rooted
+     *  at a LoadLocal), or null. Handles ANY depth by recursing on the object. */
     private function propPathKey(Node $node): ?string
     {
         if ($node->kind !== Node::KIND_PROPERTY_ACCESS) { return null; }
         $pa = $this->asPropertyAccess($node);
-        if ($pa->object->kind !== Node::KIND_LOAD_LOCAL) { return null; }
+        $obj = $pa->object;
         // Separator MUST be NUL-free: this key indexes the `localTypes` assoc,
         // whose string-key compare is not reliably binary-safe across every
-        // self-host layout (a `\0` made `"c\0value"` collide with `"c"`, so the
-        // path-narrowing branch handed `$c->value` the type of `$c` itself —
-        // e.g. `$case->value->typed()` mis-dispatched to the OUTER class). `->`
+        // self-host layout (a `\0` made `"c\0value"` collide with `"c"`). `->`
         // cannot appear in a PHP identifier, so base/property can't collide.
-        return $this->asLoadLocal($pa->object)->name . "->" . $pa->property;
+        if ($obj->kind === Node::KIND_LOAD_LOCAL) {
+            return $this->asLoadLocal($obj)->name . "->" . $pa->property;
+        }
+        // `$a->b->c` → recurse: "a->b" + "->c". A non-LoadLocal/non-path base
+        // (e.g. a call result) has no stable key.
+        if ($obj->kind === Node::KIND_PROPERTY_ACCESS) {
+            $base = $this->propPathKey($obj);
+            if ($base === null) { return null; }
+            return $base . "->" . $pa->property;
+        }
+        return null;
     }
 
     /**
@@ -2986,9 +2987,7 @@ final class InferTypes implements Pass
 
     private function asInstanceof(Instanceof_ $n): Instanceof_ { return $n; }
     private function asLoadLocal(LoadLocal $n): LoadLocal { return $n; }
-    private function asStoreElement(StoreElement $n): StoreElement { return $n; }
     private function asPropertyAccess(PropertyAccess_ $n): PropertyAccess_ { return $n; }
-    private function asArrayLit(ArrayLit $n): ArrayLit { return $n; }
     private function asStringConst(StringConst $n): StringConst { return $n; }
 
     private function inferIncDec(IncDec $node): Type
