@@ -181,7 +181,7 @@ trait EmitLlvmExceptions
         // exiting the function — make the finally body visible to emitReturn.
         // Popped before the finally's own emission (the finally is not
         // self-protected).
-        if ($hasFinally) { $this->finallyStack[] = $n->finallyBody; }
+        if ($hasFinally) { $this->cf->pushFinally($n->finallyBody); }
 
         // Try body — pop inner depth on normal exit.
         $out .= $tryLbl . ":\n";
@@ -245,7 +245,7 @@ trait EmitLlvmExceptions
         // Finally. Pop first — the finally body is not protected by itself, and
         // a `return` inside it must not re-inline this same finally.
         if ($hasFinally) {
-            \array_pop($this->finallyStack);
+            $this->cf->popFinally();
             $out .= $outerCatchLbl . ":\n";
             // Record the in-flight exception for rethrow after finally.
             $oce = $this->ssa->allocReg();

@@ -2264,7 +2264,7 @@ trait EmitLlvmBuiltins
                 $m = \substr($s, $sep + 2);
                 $ok = $this->resolveMethodClass($c, $m) !== '';
             } else {
-                $ok = isset($this->fnParamTypes[$s]) || isset($this->fnParamTypes[\ltrim($s, '\\')]);
+                $ok = isset($this->sigs->paramTypes[$s]) || isset($this->sigs->paramTypes[\ltrim($s, '\\')]);
             }
             return $this->biConstBool($this->emitNode($a), $ok);
         }

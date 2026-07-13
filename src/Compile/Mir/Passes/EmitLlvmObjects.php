@@ -93,8 +93,8 @@ trait EmitLlvmObjects
             $argTemps = [];
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
-            $ptypes = $this->fnParamTypes[$ctorClass . '____construct'] ?? [];
-            $tmask = $this->fnTaggedParams[$ctorClass . '____construct'] ?? [];
+            $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
+            $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
             foreach ($n->args as $a) {
                 if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -354,7 +354,7 @@ trait EmitLlvmObjects
             }
         }
         if (($pa->object->type->class ?? '') === '' && \getenv('MANTICORE_UNKNOWN_PROP_TRACE')) {
-            \error_log("UNKPROP\tfn=" . $this->currentFnName
+            \error_log("UNKPROP\tfn=" . $this->frame->name
                 . "\t->" . $pa->property . "\trkind=" . $pa->object->type->kind
                 . "\tL" . ($pa->object->line ?: $n->line));
         }
@@ -574,8 +574,8 @@ trait EmitLlvmObjects
      *  accesses read/write the backing slot directly (no hook re-entry). */
     private function insideOwnHook(array $hk): bool
     {
-        return ($hk['get'] !== '' && $this->currentFnName === $hk['get'])
-            || ($hk['set'] !== '' && $this->currentFnName === $hk['set']);
+        return ($hk['get'] !== '' && $this->frame->name === $hk['get'])
+            || ($hk['set'] !== '' && $this->frame->name === $hk['set']);
     }
 
     /** Emit a property get-hook call: `<hookSym>($this)` → the hooked value,
@@ -706,7 +706,7 @@ trait EmitLlvmObjects
         $roCls = $n->object->type->class ?? '';
         if ($roCls !== '') {
             $roDecl = $this->readonlyDeclClass($roCls, $n->property);
-            if ($roDecl !== '' && !\str_starts_with($this->currentFnName, $roDecl . '__')) {
+            if ($roDecl !== '' && !\str_starts_with($this->frame->name, $roDecl . '__')) {
                 $out = $this->emitNode($n->value);
                 $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
                 // Supply every ctor arg — emitNewObj does NOT pad defaults (that
@@ -1333,7 +1333,7 @@ trait EmitLlvmObjects
         $base = $owner . '__' . $method;
         if ($scope !== '' && $scope !== $owner) {
             $spec = $base . '__lsb' . $scope;
-            if (isset($this->fnParamTypes[$spec])) { return $spec; }
+            if (isset($this->sigs->paramTypes[$spec])) { return $spec; }
         }
         return $base;
     }
@@ -1541,9 +1541,9 @@ trait EmitLlvmObjects
         // with params (a selfish instance call prepends `$this` at lowering),
         // so arg index `ai` maps to param `ai` — forward the slot address for
         // a by-ref param instead of the dereferenced value.
-        $mask = $this->fnRefParams[$cls . '__' . $n->method] ?? [];
-        $ptypes = $this->fnParamTypes[$cls . '__' . $n->method] ?? [];
-        $tmask = $this->fnTaggedParams[$cls . '__' . $n->method] ?? [];
+        $mask = $this->sigs->refParams[$cls . '__' . $n->method] ?? [];
+        $ptypes = $this->sigs->paramTypes[$cls . '__' . $n->method] ?? [];
+        $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
         $ai = 0;
         foreach ($n->args as $a) {
             if (!$first) { $argList .= ', '; }
@@ -1582,7 +1582,7 @@ trait EmitLlvmObjects
         $out .= $this->freeStrArgTemps($argTemps);
         // By-ref return (`static function &m()`): the callee yields the slot
         // ADDRESS; deref in value context, keep raw under rawRefCall (RefBind).
-        if (($this->fnReturnsByRef[$target] ?? false) && !$this->rawRefCall) {
+        if (($this->sigs->returnsByRef[$target] ?? false) && !$this->rawRefCall) {
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
@@ -1858,9 +1858,9 @@ trait EmitLlvmObjects
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —
         // forward the slot address rather than the dereferenced value, or a
         // recursive `array &$param` call corrupts (the callee re-derefs it).
-        $mask = $this->fnRefParams[$fallback . '__' . $mc->method] ?? [];
-        $ptypes = $this->fnParamTypes[$fallback . '__' . $mc->method] ?? [];
-        $tmask = $this->fnTaggedParams[$fallback . '__' . $mc->method] ?? [];
+        $mask = $this->sigs->refParams[$fallback . '__' . $mc->method] ?? [];
+        $ptypes = $this->sigs->paramTypes[$fallback . '__' . $mc->method] ?? [];
+        $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
         $ai = 0;
         foreach ($mc->args as $a) {
             if ($this->argIsByRef($mask, $ai + 1, $a)) {
@@ -1949,7 +1949,7 @@ trait EmitLlvmObjects
             // An ABSTRACT method (declared, no emitted body) has no function —
             // an abstract class is never instantiated, so its switch case is
             // dead and would reference an undefined symbol. Drop the candidate.
-            if (!isset($this->fnParamTypes[$full])) { continue; }
+            if (!isset($this->sigs->paramTypes[$full])) { continue; }
             $liveCands[] = $c;
             $targets[$c] = $full;
             if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
@@ -1957,7 +1957,7 @@ trait EmitLlvmObjects
         $fallbackFull = $this->lsbTarget($fallback, $mc->method, $static);
         // The static receiver's own method may be abstract (`$this->m()` inside
         // an abstract base) — fall back to a concrete implementation.
-        if (!isset($this->fnParamTypes[$fallbackFull])) {
+        if (!isset($this->sigs->paramTypes[$fallbackFull])) {
             $fallbackFull = $distinct[0] ?? $fallbackFull;
         }
         $btName = '';
@@ -1981,7 +1981,7 @@ trait EmitLlvmObjects
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
         // (rawRefCall) keeps the raw address so RefBind can alias through it.
-        if (($this->fnReturnsByRef[$fallbackFull] ?? false) && !$this->rawRefCall) {
+        if (($this->sigs->returnsByRef[$fallbackFull] ?? false) && !$this->rawRefCall) {
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();

@@ -42,6 +42,9 @@ use Compile\Mir\RuntimeFeatures;
 use Compile\Mir\StringPool;
 use Compile\Mir\SsaBuilder;
 use Compile\Mir\GeneratorContext;
+use Compile\Mir\ControlFlow;
+use Compile\Mir\FunctionEmitFrame;
+use Compile\Mir\FunctionSignatures;
 use Compile\Mir\RefBind_;
 use Compile\Mir\RefAddr_;
 use Compile\Mir\Throw_;
@@ -126,14 +129,17 @@ final class EmitLlvm
     private array $globalBackedLocals = [];
 
 
-    private string $breakLabel = '';
-    private string $continueLabel = '';
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
     private string $cellTagReg = '';
-    /** @var string[] enclosing loops' break targets (innermost last) */
-    private array $breakStack = [];
-    /** @var string[] enclosing loops' continue targets (innermost last) */
-    private array $continueStack = [];
+
+    /** break/continue/finally targets of the current function (fresh each {@see emit}). */
+    private ?ControlFlow $cf = null;
+
+    /** Identity + ABI of the function being emitted (fresh each {@see emit}). */
+    private ?FunctionEmitFrame $frame = null;
+
+    /** Call-site signature registry for the module (fresh each {@see emit}). */
+    private ?FunctionSignatures $sigs = null;
 
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
@@ -156,23 +162,11 @@ final class EmitLlvm
     /** @var array<string, true> trait names (trait_exists fold) */
     private array $traitNames = [];
 
-    /** @var array<string, bool[]> fn name → per-param by-ref mask */
-    private array $fnRefParams = [];
-    /** @var array<string, bool[]> fn → which params are tagged (cell) */
-    private array $fnTaggedParams = [];
-    /** @var array<string, Type[]> fn name → per-param declared type */
-    private array $fnParamTypes = [];
-    /** @var array<string, array<int, ?Node>> fn name → per-param default node */
-    private array $fnParamDefaults = [];
     /** Arg-list suffix produced by the most recent {@see emitDefaultArgPad}. */
     private string $lastPadArgs = '';
 
     /** @var array<string, true> by-ref param names in the current fn */
     private array $refLocals = [];
-
-    /** @var array<Node[]> enclosing finally bodies (outer-first) active at the
-     *  current emit point — a `return` inside a try runs them before exiting. */
-    private array $finallyStack = [];
 
     /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
     private array $byRefCaptured = [];
@@ -180,32 +174,19 @@ final class EmitLlvm
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
     private ?GeneratorContext $gen = null;
-    /** Name of the function currently being emitted (property-hook self-ref guard). */
-    private string $currentFnName = '';
 
 
     /** Program source path (exception file() / trace frames). */
     private string $sourceFile = '';
 
-    /** Display name of the function currently being emitted, for a trace frame. */
-    private string $currentFnDisplay = '';
 
 
-    /** @var array<string, bool> fn name → returns by reference */
-    private array $fnReturnsByRef = [];
 
-    /** True while the current fn returns by-ref (emitReturn yields an address). */
-    private bool $currentReturnsByRef = false;
 
     /** True while emitting a `$r = &fn()` bind (suppress call-result deref). */
     private bool $rawRefCall = false;
 
-    /** Return type of the function currently being emitted (cell → box). */
-    private ?Type $currentReturnType = null;
 
-    /** Whether the function currently being emitted is a closure (uniform ABI:
-     *  scalar params/returns travel as tagged cells). */
-    private bool $currentFnIsClosure = false;
 
     /** Scratch regs threaded out of {@see emitBagPtr}. */
     private string $bagSlotReg = '';
@@ -222,18 +203,6 @@ final class EmitLlvm
     /** @var array<string, bool> vec locals mutated in the current fn
      *  (append / element store) — drive copy-on-assign value semantics. */
     private array $mutatedVecLocals = [];
-    /** True while emitting a function that opened an arena scope — its
-     *  every `ret` must run `@__mir_arena_leave` first. */
-    private bool $currentFnHasArena = false;
-    /** Body of the function currently being emitted — used by the loop
-     *  arena-reset liveness check to see uses OUTSIDE the loop. */
-    private ?Node $currentFnBody = null;
-    /** @var array<string, \Compile\Mir\MemoryOp_> owned RcHeap obj/vec/str
-     *  locals of the current fn → their rc_release MemoryOp node (flavor is
-     *  re-derived per use via rcReleaseFlavor; storing the flavor string
-     *  here corrupts under the self-host backend). Released before every
-     *  `ret` except the returned one (transfer); slots null-inited. */
-    private array $currentRcObjLocals = [];
     /** @var array<string, bool> owned rcObj locals of the current fn whose
      *  value flows into a BORROWING container store (a vec/assoc/property/
      *  array-lit store that does NOT retain it — erased element type, no
@@ -256,10 +225,6 @@ final class EmitLlvm
      *  elements the node still references. Element-drop stays valid only for a
      *  SOLE-owner confined vec (built and discarded, never shared). */
     private array $elementSharedLocals = [];
-    /** @var array<string, bool> param names of the current fn (transfer
-     *  skips params — they are retained-on-entry by initRcObjSlots, so
-     *  suppressing their release would unbalance that entry retain). */
-    private array $currentParamNames = [];
     /** Set by emitArrayLit when it bump-allocated a vec, read by the
      *  enclosing emitStoreLocal to mark the target as an arena vec. */
     private bool $vecAllocArena = false;
@@ -310,6 +275,9 @@ final class EmitLlvm
         $this->pool = new StringPool();
         $this->ssa = new SsaBuilder();
         $this->gen = new GeneratorContext();
+        $this->cf = new ControlFlow();
+        $this->frame = new FunctionEmitFrame();
+        $this->sigs = new FunctionSignatures();
         $this->classes = $module->classes;
         $this->enums = $module->enums;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
@@ -323,10 +291,6 @@ final class EmitLlvm
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
-        $this->fnRefParams = [];
-        $this->fnTaggedParams = [];
-        $this->fnParamTypes = [];
-        $this->fnReturnsByRef = [];
         foreach ($module->functions as $fn) {
             $mask = [];
             $tmask = [];
@@ -338,11 +302,11 @@ final class EmitLlvm
                 $ptypes[] = $p->type;
                 $pdefs[] = $p->default;
             }
-            $this->fnRefParams[$fn->name] = $mask;
-            $this->fnTaggedParams[$fn->name] = $tmask;
-            $this->fnParamTypes[$fn->name] = $ptypes;
-            $this->fnParamDefaults[$fn->name] = $pdefs;
-            $this->fnReturnsByRef[$fn->name] = $fn->returnsByRef;
+            $this->sigs->refParams[$fn->name] = $mask;
+            $this->sigs->taggedParams[$fn->name] = $tmask;
+            $this->sigs->paramTypes[$fn->name] = $ptypes;
+            $this->sigs->paramDefaults[$fn->name] = $pdefs;
+            $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->definedFns[$this->mangle($fn->name)] = true;
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
         }
@@ -1845,9 +1809,9 @@ final class EmitLlvm
         }
         $this->ssa->reset();
         $this->userLabels = [];
-        $this->currentFnName = $fn->name;
-        $this->currentFnBody = $fn->body;
-        $this->currentFnHasArena = false;
+        $this->frame->name = $fn->name;
+        $this->frame->body = $fn->body;
+        $this->frame->hasArena = false;
         $this->vecAllocArena = false;
         $this->arenaVecLocals = [];
         $this->slots = [];
@@ -1862,20 +1826,16 @@ final class EmitLlvm
                 $this->globalBackedLocals[$gname] = '@g_' . $gname;
             }
         }
-        $this->breakLabel = '';
-        $this->continueLabel = '';
-        $this->breakStack = [];
-        $this->continueStack = [];
+        $this->cf->reset();
         // By-ref params: the slot holds the caller's variable address;
         // loads/stores deref it.
         $this->refLocals = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) { $this->refLocals[$p->name] = true; }
         }
-        $this->currentReturnsByRef = $fn->returnsByRef;
-        $this->currentReturnType = $fn->returnType;
-        $this->currentFnIsClosure = false;
-        $this->finallyStack = [];
+        $this->frame->returnsByRef = $fn->returnsByRef;
+        $this->frame->returnType = $fn->returnType;
+        $this->frame->isClosure = false;
 
         $isMain = $fn->name === '__main';
         if ($isMain) {
@@ -1897,7 +1857,7 @@ final class EmitLlvm
         // unpacked from env slot 1+ rather than passed by the caller.
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
-        $this->currentFnIsClosure = $isClosure;
+        $this->frame->isClosure = $isClosure;
         $body = '';
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
@@ -2323,7 +2283,7 @@ final class EmitLlvm
         // ── resume ──
         $this->slots = [];
         $this->refLocals = [];
-        $this->currentReturnType = $fn->returnType;
+        $this->frame->returnType = $fn->returnType;
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
         foreach ($locals as $name => $idx) {
@@ -2638,17 +2598,9 @@ final class EmitLlvm
             $out .= $this->genFieldLoad($g, 24);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$fe->keyVar] . "\n";
         }
-        $savedBreak = $this->breakLabel;
-        $savedCont  = $this->continueLabel;
-        $this->breakLabel = $endLabel;
-        $this->continueLabel = $stepLabel;
-        $this->breakStack[] = $endLabel;
-        $this->continueStack[] = $stepLabel;
+        $this->cf->enterLoop($endLabel, $stepLabel);
         $out .= $this->emitNode($fe->body);
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
-        $this->continueLabel = $savedCont;
+        $this->cf->leave();
         $out .= '  br label %' . $stepLabel . "\n";
 
         $out .= $stepLabel . ":\n";
@@ -2741,17 +2693,9 @@ final class EmitLlvm
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$fe->keyVar] . "\n";
         }
-        $savedBreak = $this->breakLabel;
-        $savedCont  = $this->continueLabel;
-        $this->breakLabel = $endL;
-        $this->continueLabel = $stepL;
-        $this->breakStack[] = $endL;
-        $this->continueStack[] = $stepL;
+        $this->cf->enterLoop($endL, $stepL);
         $out .= $this->emitNode($fe->body);
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
-        $this->continueLabel = $savedCont;
+        $this->cf->leave();
         $out .= '  br label %' . $stepL . "\n";
 
         $out .= $stepL . ":\n";
@@ -3027,15 +2971,15 @@ final class EmitLlvm
      */
     private function initRcObjSlots(Node $body, array $paramNames = []): string
     {
-        $this->currentRcObjLocals = [];
+        $this->frame->rcObjLocals = [];
         $this->collectRcObjLocals($body);
-        $this->currentParamNames = $paramNames;
+        $this->frame->paramNames = $paramNames;
         $this->transferredLocals = [];
         $this->collectTransferredLocals($body);
         $this->elementSharedLocals = [];
         $this->collectElementSharedLocals($body);
         $out = '';
-        foreach ($this->currentRcObjLocals as $name => $mo) {
+        foreach ($this->frame->rcObjLocals as $name => $mo) {
             // A reassigned obj/str/vec/assoc PARAM holds the caller's
             // incoming (borrowed) value. The first `$p = ...` reassignment
             // emits a release-before-overwrite of that old value, and a
@@ -3067,7 +3011,7 @@ final class EmitLlvm
                 // self-host backend corrupts a short string round-tripped
                 // through an assoc value (a `'str'` read back mis-compares),
                 // but a node handle survives. Flavor is re-derived per use.
-                $this->currentRcObjLocals[$mo->target->name] = $mo;
+                $this->frame->rcObjLocals[$mo->target->name] = $mo;
             }
             return;
         }
@@ -3116,8 +3060,8 @@ final class EmitLlvm
     {
         if ($valueNode->kind !== Node::KIND_LOAD_LOCAL) { return; }
         $name = $valueNode->name;
-        if (!isset($this->currentRcObjLocals[$name])) { return; }
-        if (isset($this->currentParamNames[$name])) { return; }
+        if (!isset($this->frame->rcObjLocals[$name])) { return; }
+        if (isset($this->frame->paramNames[$name])) { return; }
         if ($this->containerStoreRetains($valueNode, $fallback)) { return; }
         $this->transferredLocals[$name] = true;
     }
@@ -3592,8 +3536,8 @@ final class EmitLlvm
         if ($k === Node::KIND_SWITCH)       { return $this->emitSwitch($n); }
         if ($k === Node::KIND_MATCH)        { return $this->emitMatch($n); }
         if ($k === Node::KIND_FOREACH)      { return $this->emitForeach($n); }
-        if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->breakTargetFor($n->level) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->continueTargetFor($n->level) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel(); }
         if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->userLabel($n->label) . "\n" . $this->emitDeadLabel(); }
         if ($k === Node::KIND_LABEL)        { $l = $this->userLabel($n->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
         if ($k === Node::KIND_ARRAY_LIT)    { return $this->emitArrayLit($n); }
@@ -3881,10 +3825,10 @@ final class EmitLlvm
             // local drops its previous value (the slot is null-inited, so
             // the first store releases null = no-op). Frees the per-
             // iteration value in `for (...) { $x = new Foo(); }`.
-            if (isset($this->currentRcObjLocals[$sl->name])
+            if (isset($this->frame->rcObjLocals[$sl->name])
                 && !isset($this->transferredLocals[$sl->name])) {
                 $out .= $this->rcReleaseSlot($this->slots[$sl->name],
-                    $this->rcReleaseFlavor($this->currentRcObjLocals[$sl->name]));
+                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
             }
             $out .= '  store i64 ' . $val . ', ptr ' . $this->slots[$sl->name] . "\n";
         }
@@ -5084,12 +5028,7 @@ final class EmitLlvm
         $bodyLabel = $this->ssa->allocLabel('fe.body');
         $stepLabel = $this->ssa->allocLabel('fe.step');
         $endLabel  = $this->ssa->allocLabel('fe.end');
-        $savedBreak = $this->breakLabel;
-        $savedCont  = $this->continueLabel;
-        $this->breakLabel = $endLabel;
-        $this->continueLabel = $stepLabel;
-        $this->breakStack[] = $endLabel;
-        $this->continueStack[] = $stepLabel;
+        $this->cf->enterLoop($endLabel, $stepLabel);
 
         // Per-iteration arena reset. Safe because the save point is taken
         // *after* the iterable + iterator state (`$arr`, `$iSlot`, `$len`)
@@ -5169,10 +5108,7 @@ final class EmitLlvm
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
 
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
-        $this->continueLabel = $savedCont;
+        $this->cf->leave();
         return $out;
     }
 
@@ -5223,12 +5159,9 @@ final class EmitLlvm
         $out .= $this->coerceToI64();
         $subj = $this->lastValue;
         $endLabel = $this->ssa->allocLabel('sw.end');
-        $savedBreak = $this->breakLabel;
-        $this->breakLabel = $endLabel;
         // A switch counts as a break/continue level; continue inside a
         // switch behaves as break (target = end).
-        $this->breakStack[] = $endLabel;
-        $this->continueStack[] = $endLabel;
+        $this->cf->enterSwitch($endLabel);
 
         // String subjects must compare by value (strcmp), not pointer.
         // Mirrors emitCmp's strish gate: subject string-or-unknown and the
@@ -5316,9 +5249,7 @@ final class EmitLlvm
             $ai = $ai + 1;
         }
         $out .= $endLabel . ":\n";
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
+        $this->cf->leave();
         return $out;
     }
 
@@ -5715,7 +5646,7 @@ final class EmitLlvm
         $mo = $n;
         if ($mo->op === 'arena_enter') {
             $this->rt->needsArena = true;
-            $this->currentFnHasArena = true;
+            $this->frame->hasArena = true;
             return "  call void @__mir_arena_enter()\n";
         }
         if ($mo->op === 'arena_leave') {
@@ -5936,7 +5867,7 @@ final class EmitLlvm
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
-            $owned = isset($this->fnParamTypes[$fn]) && !($this->fnReturnsByRef[$fn] ?? false);
+            $owned = isset($this->sigs->paramTypes[$fn]) && !($this->sigs->returnsByRef[$fn] ?? false);
         }
         if (!$owned) { return ''; }
         return $this->discardReleaseFlavor($a->type);
@@ -5960,9 +5891,9 @@ final class EmitLlvm
             // user fn can never shadow a builtin name (PHP forbids it), so a
             // hit in fnParamTypes proves it is user-defined, not a builtin.
             $fname = $s->function;
-            if (!isset($this->fnParamTypes[$fname])) { return ''; }
+            if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
             // A by-ref-returning fn yields an address, not an owned value.
-            if ($this->fnReturnsByRef[$fname] ?? false) { return ''; }
+            if ($this->sigs->returnsByRef[$fname] ?? false) { return ''; }
         } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
             return '';
         }
@@ -6785,7 +6716,7 @@ final class EmitLlvm
     private function emitRcReturnCleanup(?string $returnedLocal): string
     {
         $out = '';
-        foreach ($this->currentRcObjLocals as $name => $mo) {
+        foreach ($this->frame->rcObjLocals as $name => $mo) {
             if ($name === $returnedLocal) { continue; }
             if (isset($this->transferredLocals[$name])) { continue; }
             if (!isset($this->slots[$name])) { continue; }
@@ -6815,7 +6746,7 @@ final class EmitLlvm
         // arena_leave only covers fall-through). The return value is
         // escaping (RcHeap, heap-allocated), never arena, so freeing
         // the arena here can't touch it.
-        $leave = $this->currentFnHasArena ? "  call void @__mir_arena_leave()\n" : '';
+        $leave = $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         // Drop every owned RcHeap obj local on this return path, except
         // the one being returned (ownership transfers to the caller). The
         // trailing fall-through release covers paths with no `return`.
@@ -6829,7 +6760,7 @@ final class EmitLlvm
         // `return $n` (a by-ref param forwards its held address, a plain local
         // returns its slot address) or `return $this->prop` (GEP to the field
         // slot). An unaddressable value falls through to the normal value path.
-        if ($this->currentReturnsByRef) {
+        if ($this->frame->returnsByRef) {
             $addrIr = $this->byRefAddrOf($v);
             if ($addrIr !== null) {
                 return $this->finishReturn($addrIr, $this->lastValue, $leave);
@@ -6842,7 +6773,7 @@ final class EmitLlvm
         // (boxToCell would rebuild an array) — they fall through to the normal
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
-        if ($this->currentFnIsClosure && $this->isCellBoxableArg($v->type)) {
+        if ($this->frame->isClosure && $this->isCellBoxableArg($v->type)) {
             $out .= $this->boxToCell($v->type);
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
@@ -6853,15 +6784,15 @@ final class EmitLlvm
         // a 0 header is misread as a double — so box it by its runtime repr.
         // A passthrough `return $x` of a cell param is typed CELL (handled
         // above), never reaches here; arrays/objects travel raw (below).
-        if ($this->currentFnIsClosure && $v->type->kind === Type::KIND_UNKNOWN) {
+        if ($this->frame->isClosure && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
             $out .= $this->boxLastByRepr();
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // A `mixed` / union (cell) return boxes the value to a tagged
         // cell unless it already is one.
-        if ($this->currentReturnType !== null
-            && $this->currentReturnType->kind === Type::KIND_CELL
+        if ($this->frame->returnType !== null
+            && $this->frame->returnType->kind === Type::KIND_CELL
             && $v->type->kind !== Type::KIND_CELL) {
             $out .= $this->boxToCell($v->type);
         } else {
@@ -6869,8 +6800,8 @@ final class EmitLlvm
             // (`return $mixed[$i]` from a `: int` fn) must be unboxed — else the
             // tagged bits flow back as the result (a boxed int read as a raw
             // i64). Mirrors the cell→param unboxing.
-            if ($v->type->kind === Type::KIND_CELL && $this->currentReturnType !== null) {
-                $out .= $this->unboxCellToType($this->currentReturnType);
+            if ($v->type->kind === Type::KIND_CELL && $this->frame->returnType !== null) {
+                $out .= $this->unboxCellToType($this->frame->returnType);
             }
             // ABI: every fn returns i64. Coerce float / ptr through
             // the i64 carrier.
@@ -6896,13 +6827,12 @@ final class EmitLlvm
      */
     private function finishReturn(string $out, string $valReg, string $leave): string
     {
-        if ($this->finallyStack !== []) {
-            $saved = $this->finallyStack;
-            $this->finallyStack = [];
+        if ($this->cf->hasFinally()) {
+            $saved = $this->cf->takeFinally();
             foreach (\array_reverse($saved) as $body) {
                 foreach ($body as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
             }
-            $this->finallyStack = $saved;
+            $this->cf->restoreFinally($saved);
         }
         return $out . $leave . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
@@ -6929,7 +6859,7 @@ final class EmitLlvm
         if ($tk === Type::KIND_STRING
             && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return false; }
         if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->currentRcObjLocals[$returnedLocal])) {
+            && isset($this->frame->rcObjLocals[$returnedLocal])) {
             return false; // transfer of an owned local
         }
         return true; // param / alias / property / array read — borrow
@@ -6992,10 +6922,10 @@ final class EmitLlvm
     private function emitDefaultArgPad(string $fnKey, int $firstMissingIdx, bool $haveArgs): string
     {
         $this->lastPadArgs = '';
-        $ptypes = $this->fnParamTypes[$fnKey] ?? [];
+        $ptypes = $this->sigs->paramTypes[$fnKey] ?? [];
         $pcount = \count($ptypes);
         if ($firstMissingIdx >= $pcount) { return ''; }
-        $pdefs = $this->fnParamDefaults[$fnKey] ?? [];
+        $pdefs = $this->sigs->paramDefaults[$fnKey] ?? [];
         $out = '';
         $pi = $firstMissingIdx;
         while ($pi < $pcount) {
@@ -7363,9 +7293,9 @@ final class EmitLlvm
         $out = '';
         $argList = '';
         $first = true;
-        $mask = $this->fnRefParams[$c->function] ?? [];
-        $tmask = $this->fnTaggedParams[$c->function] ?? [];
-        $ptypes = $this->fnParamTypes[$c->function] ?? [];
+        $mask = $this->sigs->refParams[$c->function] ?? [];
+        $tmask = $this->sigs->taggedParams[$c->function] ?? [];
+        $ptypes = $this->sigs->paramTypes[$c->function] ?? [];
         $ai = 0;
         // Fresh string-temp arg carriers freed after the call: a borrow the
         // callee retains if it keeps it (the +1 convention), so the caller's
@@ -7504,7 +7434,7 @@ final class EmitLlvm
         if ($btName !== '') { $out .= $this->btPop(); }
         // Free fresh string-temp args now the callee has read (and retained
         // if kept) them. Skipped when the call returns one of them by ref.
-        if (!($this->fnReturnsByRef[$c->function] ?? false)) {
+        if (!($this->sigs->returnsByRef[$c->function] ?? false)) {
             $out .= $this->freeStrArgTemps($argTemps);
             $ri = 0;
             foreach ($rcArgRegs as $rg) {
@@ -7516,7 +7446,7 @@ final class EmitLlvm
         $this->lastValueType = 'i64';
         // By-ref-returning callee yields an address. In value context
         // (everything but a `$r = &fn()` bind) deref it to the value.
-        if (($this->fnReturnsByRef[$c->function] ?? false) && !$this->rawRefCall) {
+        if (($this->sigs->returnsByRef[$c->function] ?? false) && !$this->rawRefCall) {
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
@@ -7688,8 +7618,8 @@ final class EmitLlvm
             $inLoop = $this->countLocalReads($name, $body)
                 + ($cond !== null ? $this->countLocalReads($name, $cond) : 0)
                 + ($step !== null ? $this->countLocalReads($name, $step) : 0);
-            $total = $this->currentFnBody !== null
-                ? $this->countLocalReads($name, $this->currentFnBody) : $inLoop;
+            $total = $this->frame->body !== null
+                ? $this->countLocalReads($name, $this->frame->body) : $inLoop;
             if ($total > $inLoop) { return false; }
             // (A) written before read on each iteration.
             if (!$this->writtenBeforeRead($name, $body)) { return false; }
@@ -7834,12 +7764,7 @@ final class EmitLlvm
         $condLabel = $this->ssa->allocLabel('loop.cond');
         $bodyLabel = $this->ssa->allocLabel('loop.body');
         $endLabel  = $this->ssa->allocLabel('loop.end');
-        $savedBreak = $this->breakLabel;
-        $savedCont  = $this->continueLabel;
-        $this->breakLabel = $endLabel;
-        $this->continueLabel = $condLabel;
-        $this->breakStack[] = $endLabel;
-        $this->continueStack[] = $condLabel;
+        $this->cf->enterLoop($endLabel, $condLabel);
 
         $reset = $this->loopArenaResettable($w->cond, $w->body, null);
         $out = '';
@@ -7857,10 +7782,7 @@ final class EmitLlvm
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
 
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
-        $this->continueLabel = $savedCont;
+        $this->cf->leave();
         return $out;
     }
 
@@ -7871,13 +7793,8 @@ final class EmitLlvm
         $bodyLabel = $this->ssa->allocLabel('for.body');
         $stepLabel = $this->ssa->allocLabel('for.step');
         $endLabel  = $this->ssa->allocLabel('for.end');
-        $savedBreak = $this->breakLabel;
-        $savedCont  = $this->continueLabel;
         // `continue` runs the step before re-testing the condition.
-        $this->breakLabel = $endLabel;
-        $this->continueLabel = $stepLabel;
-        $this->breakStack[] = $endLabel;
-        $this->continueStack[] = $stepLabel;
+        $this->cf->enterLoop($endLabel, $stepLabel);
 
         $reset = $this->loopArenaResettable($f->cond, $f->body, $f->step);
         $out = '';
@@ -7903,10 +7820,7 @@ final class EmitLlvm
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
 
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
-        $this->continueLabel = $savedCont;
+        $this->cf->leave();
         return $out;
     }
 
@@ -7916,12 +7830,7 @@ final class EmitLlvm
         $bodyLabel = $this->ssa->allocLabel('do.body');
         $condLabel = $this->ssa->allocLabel('do.cond');
         $endLabel  = $this->ssa->allocLabel('do.end');
-        $savedBreak = $this->breakLabel;
-        $savedCont  = $this->continueLabel;
-        $this->breakLabel = $endLabel;
-        $this->continueLabel = $condLabel;
-        $this->breakStack[] = $endLabel;
-        $this->continueStack[] = $condLabel;
+        $this->cf->enterLoop($endLabel, $condLabel);
 
         $reset = $this->loopArenaResettable($d->cond, $d->body, null);
         $out = '';
@@ -7939,10 +7848,7 @@ final class EmitLlvm
         $out .= '  br i1 ' . $condBit . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
 
-        \array_pop($this->breakStack);
-        \array_pop($this->continueStack);
-        $this->breakLabel = $savedBreak;
-        $this->continueLabel = $savedCont;
+        $this->cf->leave();
         return $out;
     }
 
@@ -8395,26 +8301,6 @@ final class EmitLlvm
             $this->userLabels[$name] = $this->ssa->allocLabel('user.' . $name);
         }
         return $this->userLabels[$name];
-    }
-
-    /** `break N` target — read the break stack directly (no array param;
-     *  self-host mishandles indexing an array passed by value). */
-    private function breakTargetFor(int $level): string
-    {
-        $n = \count($this->breakStack);
-        if ($n === 0) { return 'unreachable_no_loop'; }
-        $idx = $n - $level;
-        if ($idx < 0) { $idx = 0; }
-        return $this->breakStack[$idx];
-    }
-
-    private function continueTargetFor(int $level): string
-    {
-        $n = \count($this->continueStack);
-        if ($n === 0) { return 'unreachable_no_loop'; }
-        $idx = $n - $level;
-        if ($idx < 0) { $idx = 0; }
-        return $this->continueStack[$idx];
     }
 
     /** Read a node's type kind through a typed param: a match cond comes
