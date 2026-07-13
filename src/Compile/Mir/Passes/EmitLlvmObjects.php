@@ -50,7 +50,7 @@ trait EmitLlvmObjects
         if (!$isStruct) {
             // header[0] = class descriptor ptr ({class_id, drop_fn}); class_id
             // and drop are read THROUGH it so drops compose across objects.
-            $out .= '  store i64 ' . $this->descSlotValue($cd) . ', ptr ' . $obj . "\n";
+            $out .= '  store i64 ' . $this->lib->descSlotValue($cd) . ', ptr ' . $obj . "\n";
             // header[1] = refcount = 1
             $rcGep = $this->ssa->allocReg();
             $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $obj . ", i64 1\n";
@@ -208,7 +208,7 @@ trait EmitLlvmObjects
         $size = $cd->instanceSize();
         $new = $this->ssa->allocReg();
         $out .= '  ' . $new . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
-        $out .= '  store i64 ' . $this->descSlotValue($cd) . ', ptr ' . $new . "\n";
+        $out .= '  store i64 ' . $this->lib->descSlotValue($cd) . ', ptr ' . $new . "\n";
         $rcGep = $this->ssa->allocReg();
         $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $new . ", i64 1\n";
         $out .= '  store i64 1, ptr ' . $rcGep . "\n";
@@ -885,8 +885,8 @@ trait EmitLlvmObjects
     /** `$y = &$x` — point the target's slot at the source's slot. */
     private function emitRefAlias(RefAlias_ $n): string
     {
-        if (isset($this->slots[$n->source])) {
-            $this->slots[$n->target] = $this->slots[$n->source];
+        if (isset($this->locals->slots[$n->source])) {
+            $this->locals->slots[$n->target] = $this->locals->slots[$n->source];
         }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
@@ -896,9 +896,9 @@ trait EmitLlvmObjects
     /** `$r = &fn(...)` — store the by-ref return address into $r's slot. */
     private function emitRefBind(RefBind_ $n): string
     {
-        if (!isset($this->slots[$n->target])) {
+        if (!isset($this->locals->slots[$n->target])) {
             $slot = $this->ssa->allocReg();
-            $this->slots[$n->target] = $slot;
+            $this->locals->slots[$n->target] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
             $out = '';
@@ -908,8 +908,8 @@ trait EmitLlvmObjects
         $this->rawRefCall = false;
         $out .= $this->coerceToI64();
         $addr = $this->lastValue;
-        $out .= '  store i64 ' . $addr . ', ptr ' . $this->slots[$n->target] . "\n";
-        $this->refLocals[$n->target] = true;
+        $out .= '  store i64 ' . $addr . ', ptr ' . $this->locals->slots[$n->target] . "\n";
+        $this->locals->refLocals[$n->target] = true;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
@@ -921,9 +921,9 @@ trait EmitLlvmObjects
      *  when the lvalue is not addressable (unknown class / non-vec element). */
     private function emitRefAddr(RefAddr_ $n): string
     {
-        if (!isset($this->slots[$n->target])) {
+        if (!isset($this->locals->slots[$n->target])) {
             $slot = $this->ssa->allocReg();
-            $this->slots[$n->target] = $slot;
+            $this->locals->slots[$n->target] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
             $out = '';
@@ -933,14 +933,14 @@ trait EmitLlvmObjects
             // Not addressable — degrade to a value copy (non-crashing).
             $out .= $this->emitNode($n->lvalue);
             $out .= $this->coerceToI64();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$n->target] . "\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$n->target] . "\n";
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
             return $out;
         }
         $out .= $addrIr;
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$n->target] . "\n";
-        $this->refLocals[$n->target] = true;
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$n->target] . "\n";
+        $this->locals->refLocals[$n->target] = true;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
@@ -1234,12 +1234,12 @@ trait EmitLlvmObjects
                 // THEN zero the slot — a later scope-exit release re-loads 0 and
                 // no-ops, so no double free.
                 $flavor = $this->discardReleaseFlavor($t->type);
-                if (isset($this->globalBackedLocals[$name])) {
-                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->globalBackedLocals[$name], $flavor); }
-                    $out .= '  store i64 0, ptr ' . $this->globalBackedLocals[$name] . "\n";
-                } elseif (isset($this->slots[$name])) {
-                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->slots[$name], $flavor); }
-                    $out .= '  store i64 0, ptr ' . $this->slots[$name] . "\n";
+                if (isset($this->locals->globalBacked[$name])) {
+                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->globalBacked[$name], $flavor); }
+                    $out .= '  store i64 0, ptr ' . $this->locals->globalBacked[$name] . "\n";
+                } elseif (isset($this->locals->slots[$name])) {
+                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor); }
+                    $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
                 }
             }
             if ($t->kind === Node::KIND_ARRAY_ACCESS) {

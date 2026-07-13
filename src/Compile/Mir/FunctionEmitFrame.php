@@ -34,4 +34,25 @@ final class FunctionEmitFrame
      *  self-host backend). Released before every `ret` except the returned one
      *  (transfer); slots null-inited. */
     public array $rcObjLocals = [];
+    /** @var array<string, bool> vec locals mutated in this fn (append / element
+     *  store) — drive copy-on-assign value semantics. */
+    public array $mutatedVecLocals = [];
+    /** @var array<string, bool> owned rcObj locals whose value flows into a
+     *  BORROWING container store (a vec/assoc/property/array-lit store that does
+     *  NOT retain it — erased element type, no usable fallback). Ownership
+     *  transfers to the container, so the local's scope-exit / pre-return /
+     *  reassign release is SUPPRESSED. This is B2 escape-driven ownership: it
+     *  kills the over-release UAF (the enum/arena heisenbug) by moving instead of
+     *  adding a retain (adding retains pushed the binary toward the corruption
+     *  boundary). Worst case is a leak (the safe direction), never a double-free. */
+    public array $transferredLocals = [];
+    /** @var array<string, bool> owned vec/assoc locals whose BUFFER is shared
+     *  with an outliving owner: passed as a (by-value) call argument, so the
+     *  callee co-owns the buffer AND its retained element refs (the +1 each
+     *  `array_append` adds). Their scope-exit release must drop the BUFFER ONLY
+     *  (plain `array_release`), never element-drop: `array_release_obj/_str`
+     *  walks and -1's every element, which on a co-owned buffer double-frees the
+     *  shared elements. Element-drop stays valid only for a SOLE-owner confined
+     *  vec (built and discarded, never shared). */
+    public array $elementSharedLocals = [];
 }

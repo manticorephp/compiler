@@ -45,6 +45,9 @@ use Compile\Mir\GeneratorContext;
 use Compile\Mir\ControlFlow;
 use Compile\Mir\FunctionEmitFrame;
 use Compile\Mir\FunctionSignatures;
+use Compile\Mir\ArenaContext;
+use Compile\Mir\LocalSlots;
+use Compile\Mir\RuntimeLibrary;
 use Compile\Mir\RefBind_;
 use Compile\Mir\RefAddr_;
 use Compile\Mir\Throw_;
@@ -117,16 +120,9 @@ final class EmitLlvm
 
     /** Per-function SSA register + label allocator (fresh each {@see emit}). */
     private ?SsaBuilder $ssa = null;
-    /** @var array<string,string> user goto-label name → stable LLVM block label
-     *  (allocated on first goto/label reference; reset per function). */
-    private array $userLabels = [];
     private int $switchCounter = 0;
 
-    /** @var array<string, string> local name → alloca SSA id */
-    private array $slots = [];
 
-    /** @var array<string, string> static-local name → global cell (this fn) */
-    private array $globalBackedLocals = [];
 
 
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
@@ -140,6 +136,15 @@ final class EmitLlvm
 
     /** Call-site signature registry for the module (fresh each {@see emit}). */
     private ?FunctionSignatures $sigs = null;
+
+    /** Arena-allocation state of the current function (fresh each {@see emit}). */
+    private ?ArenaContext $arena = null;
+
+    /** Where each local of the current function lives (fresh each {@see emit}). */
+    private ?LocalSlots $locals = null;
+
+    /** The fixed LLVM text of the runtime helpers (stateless). */
+    private ?RuntimeLibrary $lib = null;
 
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
@@ -165,11 +170,7 @@ final class EmitLlvm
     /** Arg-list suffix produced by the most recent {@see emitDefaultArgPad}. */
     private string $lastPadArgs = '';
 
-    /** @var array<string, true> by-ref param names in the current fn */
-    private array $refLocals = [];
 
-    /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
-    private array $byRefCaptured = [];
 
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
@@ -200,37 +201,6 @@ final class EmitLlvm
     /** Out-param for {@see emitLoadClassId} — the class_id SSA reg (avoids a
      *  list-destructure return, which self-host doesn't support). */
     private string $classIdReg = '';
-    /** @var array<string, bool> vec locals mutated in the current fn
-     *  (append / element store) — drive copy-on-assign value semantics. */
-    private array $mutatedVecLocals = [];
-    /** @var array<string, bool> owned rcObj locals of the current fn whose
-     *  value flows into a BORROWING container store (a vec/assoc/property/
-     *  array-lit store that does NOT retain it — erased element type, no
-     *  usable fallback). Ownership transfers to the container, so the
-     *  local's scope-exit / pre-return / reassign release is SUPPRESSED.
-     *  This is B2 escape-driven ownership: it kills the over-release UAF
-     *  (the enum/arena heisenbug) by moving instead of adding a retain
-     *  (adding retains pushed the binary toward the corruption boundary).
-     *  Worst case is a leak (the safe direction), never a double-free. */
-    private array $transferredLocals = [];
-    /** @var array<string, bool> owned vec/assoc locals of the current fn whose
-     *  BUFFER is shared with an outliving owner: passed as a (by-value) call
-     *  argument, so the callee co-owns the buffer AND its retained element
-     *  refs (the +1 each `array_append` adds). Their scope-exit release must
-     *  drop the BUFFER ONLY (plain `array_release`), never element-drop:
-     *  `array_release_obj/_str` walks and -1's every element, which on a
-     *  co-owned buffer double-frees the shared elements. This is the parser
-     *  `$args = parseArgList(); return Expr::call(..., $args, ...)` UAF — the
-     *  Expr node retains the buffer, then the local's `release_obj` kills the
-     *  elements the node still references. Element-drop stays valid only for a
-     *  SOLE-owner confined vec (built and discarded, never shared). */
-    private array $elementSharedLocals = [];
-    /** Set by emitArrayLit when it bump-allocated a vec, read by the
-     *  enclosing emitStoreLocal to mark the target as an arena vec. */
-    private bool $vecAllocArena = false;
-    /** @var array<string, bool> locals holding an arena-allocated vec —
-     *  their `$x[]=` appends must use @__mir_arena_realloc. */
-    private array $arenaVecLocals = [];
     /** This module defines `@main` (the user program, not the stdlib library). */
     private bool $moduleHasMain = false;
     /** @var array<string, string> libc symbol → declare line (builtins) */
@@ -278,6 +248,9 @@ final class EmitLlvm
         $this->cf = new ControlFlow();
         $this->frame = new FunctionEmitFrame();
         $this->sigs = new FunctionSignatures();
+        $this->arena = new ArenaContext();
+        $this->locals = new LocalSlots();
+        $this->lib = new RuntimeLibrary();
         $this->classes = $module->classes;
         $this->enums = $module->enums;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
@@ -1808,30 +1781,29 @@ final class EmitLlvm
                 . '(' . $params . ")\n";
         }
         $this->ssa->reset();
-        $this->userLabels = [];
         $this->frame->name = $fn->name;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;
-        $this->vecAllocArena = false;
-        $this->arenaVecLocals = [];
-        $this->slots = [];
-        $this->globalBackedLocals = [];
-        $this->mutatedVecLocals = [];
+        $this->arena->vecAllocated = false;
+        $this->arena->vecLocals = [];
+        $this->locals->slots = [];
+        $this->locals->globalBacked = [];
+        $this->frame->mutatedVecLocals = [];
         $this->collectMutatedVecs($fn->body);
         $this->collectStaticLocals($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
         // same `@g_x` cell so writes are visible inside functions.
         if ($fn->name === '__main') {
             foreach ($this->globalVarNames as $gname) {
-                $this->globalBackedLocals[$gname] = '@g_' . $gname;
+                $this->locals->globalBacked[$gname] = '@g_' . $gname;
             }
         }
         $this->cf->reset();
         // By-ref params: the slot holds the caller's variable address;
         // loads/stores deref it.
-        $this->refLocals = [];
+        $this->locals->refLocals = [];
         foreach ($fn->params as $p) {
-            if ($p->byRef) { $this->refLocals[$p->name] = true; }
+            if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
         }
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
@@ -1880,7 +1852,7 @@ final class EmitLlvm
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
                 $slot = $this->ssa->allocReg();
-                $this->slots[$cn] = $slot;
+                $this->locals->slots[$cn] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $gep = $this->ssa->allocReg();
                 $body .= '  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 ' . (string)($pi + 1) . "\n";
@@ -1892,7 +1864,7 @@ final class EmitLlvm
                 $pp = $fn->params[$pi];
                 $cn = $pp->name;
                 $slot = $this->ssa->allocReg();
-                $this->slots[$cn] = $slot;
+                $this->locals->slots[$cn] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 // Uniform closure ABI: the caller passes every scalar arg as a
                 // tagged cell. A param declared a concrete scalar unboxes the
@@ -1919,7 +1891,7 @@ final class EmitLlvm
             $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
             foreach ($fn->params as $p) {
                 $slot = $this->ssa->allocReg();
-                $this->slots[$p->name] = $slot;
+                $this->locals->slots[$p->name] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
                 // PHP arrays are values: a by-VALUE array param the body mutates
@@ -1971,19 +1943,19 @@ final class EmitLlvm
         // branch in emitClosure. Params are excluded (a by-ref capture param
         // already holds an inherited box ptr). The box leaks (bounded — one
         // per by-ref-captured local per call), like the generator frame.
-        $this->byRefCaptured = [];
+        $this->locals->byRefCaptured = [];
         $this->collectByRefCaptured($fn->body);
-        foreach ($this->byRefCaptured as $bname => $_) {
+        foreach ($this->locals->byRefCaptured as $bname => $_) {
             if (isset($paramNames[$bname])) { continue; }
-            if (!isset($this->slots[$bname])) { continue; }
-            if (isset($this->refLocals[$bname])) { continue; }
+            if (!isset($this->locals->slots[$bname])) { continue; }
+            if (isset($this->locals->refLocals[$bname])) { continue; }
             $box = $this->ssa->allocReg();
             $body .= '  ' . $box . " = call ptr @__mir_alloc(i64 8)\n";
             $body .= '  store i64 0, ptr ' . $box . "\n";
             $bi = $this->ssa->allocReg();
             $body .= '  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n";
-            $body .= '  store i64 ' . $bi . ', ptr ' . $this->slots[$bname] . "\n";
-            $this->refLocals[$bname] = true;
+            $body .= '  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n";
+            $this->locals->refLocals[$bname] = true;
         }
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
@@ -2143,7 +2115,7 @@ final class EmitLlvm
             $i = 0;
             foreach ($cl->captures as $c) {
                 if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
-                    $this->byRefCaptured[$c->name] = true;
+                    $this->locals->byRefCaptured[$c->name] = true;
                 }
                 $i = $i + 1;
             }
@@ -2281,8 +2253,8 @@ final class EmitLlvm
         $out .= '  ret i64 ' . $ri . "\n}\n\n";
 
         // ── resume ──
-        $this->slots = [];
-        $this->refLocals = [];
+        $this->locals->slots = [];
+        $this->locals->refLocals = [];
         $this->frame->returnType = $fn->returnType;
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
@@ -2291,7 +2263,7 @@ final class EmitLlvm
             $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr %frame, i64 '
                   . (string)$off . "\n";
-            $this->slots[$name] = $slot;
+            $this->locals->slots[$name] = $slot;
         }
         $this->gen->statePtr = $this->ssa->allocReg();
         $out .= '  ' . $this->gen->statePtr . " = getelementptr inbounds i8, ptr %frame, i64 8\n";
@@ -2540,14 +2512,14 @@ final class EmitLlvm
     private function emitForeachGenerator(\Compile\Mir\Foreach_ $fe): string
     {
         $out = '';
-        if (!isset($this->slots[$fe->valueVar])) {
+        if (!isset($this->locals->slots[$fe->valueVar])) {
             $vs = $this->ssa->allocReg();
-            $this->slots[$fe->valueVar] = $vs;
+            $this->locals->slots[$fe->valueVar] = $vs;
             $out .= '  ' . $vs . " = alloca i64\n";
         }
-        if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
+        if ($fe->keyVar !== null && !isset($this->locals->slots[$fe->keyVar])) {
             $ks = $this->ssa->allocReg();
-            $this->slots[$fe->keyVar] = $ks;
+            $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
         $out .= $this->emitNode($fe->array);
@@ -2559,7 +2531,7 @@ final class EmitLlvm
         $framed = $fe->genSlotBase >= 0;
         $gSlot = '';
         if ($framed) {
-            $gSlot = $this->slots["@fe.0." . (string)$fe->genSlotBase];
+            $gSlot = $this->locals->slots["@fe.0." . (string)$fe->genSlotBase];
             $gi = $this->ssa->allocReg();
             $out .= '  ' . $gi . ' = ptrtoint ptr ' . $g . " to i64\n";
             $out .= '  store i64 ' . $gi . ', ptr ' . $gSlot . "\n";
@@ -2593,10 +2565,10 @@ final class EmitLlvm
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
         $out .= $this->genFieldLoad($g, 16);
         $cur = $this->lastValue;
-        $out .= '  store i64 ' . $cur . ', ptr ' . $this->slots[$fe->valueVar] . "\n";
+        $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$fe->keyVar] . "\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
         $this->cf->enterLoop($endLabel, $stepLabel);
         $out .= $this->emitNode($fe->body);
@@ -2639,14 +2611,14 @@ final class EmitLlvm
     private function emitForeachObject(\Compile\Mir\Foreach_ $fe): string
     {
         $out = '';
-        if (!isset($this->slots[$fe->valueVar])) {
+        if (!isset($this->locals->slots[$fe->valueVar])) {
             $vs = $this->ssa->allocReg();
-            $this->slots[$fe->valueVar] = $vs;
+            $this->locals->slots[$fe->valueVar] = $vs;
             $out .= '  ' . $vs . " = alloca i64\n";
         }
-        if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
+        if ($fe->keyVar !== null && !isset($this->locals->slots[$fe->keyVar])) {
             $ks = $this->ssa->allocReg();
-            $this->slots[$fe->keyVar] = $ks;
+            $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
         // Hold the iterator in a synthetic local; protocol calls load it from
@@ -2654,7 +2626,7 @@ final class EmitLlvm
         $iterName = "@it." . (string)$this->iterCounter;
         $this->iterCounter = $this->iterCounter + 1;
         $iterSlot = $this->ssa->allocReg();
-        $this->slots[$iterName] = $iterSlot;
+        $this->locals->slots[$iterName] = $iterSlot;
         $out .= '  ' . $iterSlot . " = alloca i64\n";
         $out .= $this->emitNode($fe->array);
         $out .= $this->coerceToI64();
@@ -2687,11 +2659,11 @@ final class EmitLlvm
         $out .= $bodyL . ":\n";
         $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'current', [], \Compile\Mir\Type::unknown()));
         $out .= $this->coerceToI64();
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$fe->valueVar] . "\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'key', [], \Compile\Mir\Type::unknown()));
             $out .= $this->coerceToI64();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->slots[$fe->keyVar] . "\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
         $this->cf->enterLoop($endL, $stepL);
         $out .= $this->emitNode($fe->body);
@@ -2974,9 +2946,9 @@ final class EmitLlvm
         $this->frame->rcObjLocals = [];
         $this->collectRcObjLocals($body);
         $this->frame->paramNames = $paramNames;
-        $this->transferredLocals = [];
+        $this->frame->transferredLocals = [];
         $this->collectTransferredLocals($body);
-        $this->elementSharedLocals = [];
+        $this->frame->elementSharedLocals = [];
         $this->collectElementSharedLocals($body);
         $out = '';
         foreach ($this->frame->rcObjLocals as $name => $mo) {
@@ -2989,13 +2961,13 @@ final class EmitLlvm
             // entry so the frame co-owns the slot; the matching release
             // then cancels cleanly. (Slot already holds the incoming arg.)
             if (isset($paramNames[$name])) {
-                if (isset($this->slots[$name])) {
-                    $out .= $this->rcRetainSlot($this->slots[$name], $this->rcReleaseFlavor($mo));
+                if (isset($this->locals->slots[$name])) {
+                    $out .= $this->rcRetainSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
                 }
                 continue;
             }
-            if (isset($this->slots[$name])) {
-                $out .= '  store i64 0, ptr ' . $this->slots[$name] . "\n";
+            if (isset($this->locals->slots[$name])) {
+                $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
             }
         }
         return $out;
@@ -3063,7 +3035,7 @@ final class EmitLlvm
         if (!isset($this->frame->rcObjLocals[$name])) { return; }
         if (isset($this->frame->paramNames[$name])) { return; }
         if ($this->containerStoreRetains($valueNode, $fallback)) { return; }
-        $this->transferredLocals[$name] = true;
+        $this->frame->transferredLocals[$name] = true;
     }
 
     /**
@@ -3110,7 +3082,7 @@ final class EmitLlvm
                     $el = $t->element;
                     if ($el !== null
                         && ($el->kind === Type::KIND_OBJ || $el->kind === Type::KIND_STRING)) {
-                        $this->elementSharedLocals[$a->name] = true;
+                        $this->frame->elementSharedLocals[$a->name] = true;
                     }
                 }
             }
@@ -3149,7 +3121,7 @@ final class EmitLlvm
     /**
      * Walks the function body looking for `StoreLocal` nodes and
      * returns the alloca chunk for the entry block. Subsequent
-     * stores / loads address through `$this->slots[$name]`.
+     * stores / loads address through `$this->locals->slots[$name]`.
      *
      * Self-host pre-scan doesn't propagate `string &$body` writes
      * through nested method calls; returning the chunk and concat-
@@ -3167,7 +3139,7 @@ final class EmitLlvm
             $arr = $n->array;
             if ($arr->kind === Node::KIND_LOAD_LOCAL
                 && $arr->type->isArray()) {
-                $this->mutatedVecLocals[$arr->name] = true;
+                $this->frame->mutatedVecLocals[$arr->name] = true;
             }
             // A NESTED element store (`$x[0][] = …` / `$x[0][0][] = …`) mutates
             // the root local `$x` too — its base is an `$x[0]…` element, not `$x`
@@ -3179,7 +3151,7 @@ final class EmitLlvm
                 $base = $base->array;
             }
             if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
-                $this->mutatedVecLocals[$base->name] = true;
+                $this->frame->mutatedVecLocals[$base->name] = true;
             }
         }
         // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
@@ -3259,7 +3231,7 @@ final class EmitLlvm
         if ($a->kind !== Node::KIND_ARRAY_ACCESS) { return; }
         $arr = $a->array;
         if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
-            $this->mutatedVecLocals[$arr->name] = true;
+            $this->frame->mutatedVecLocals[$arr->name] = true;
         }
     }
 
@@ -3272,7 +3244,7 @@ final class EmitLlvm
     {
         $k = $n->kind;
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            $this->globalBackedLocals[$n->name] = $n->cell;
+            $this->locals->globalBacked[$n->name] = $n->cell;
             return;
         }
         if ($k === Node::KIND_BLOCK) {
@@ -3313,9 +3285,9 @@ final class EmitLlvm
         $k = $n->kind;
         if ($k === Node::KIND_STORE_LOCAL) {
             $out = '';
-            if (!isset($this->globalBackedLocals[$n->name]) && !isset($this->slots[$n->name])) {
+            if (!isset($this->locals->globalBacked[$n->name]) && !isset($this->locals->slots[$n->name])) {
                 $slot = $this->ssa->allocReg();
-                $this->slots[$n->name] = $slot;
+                $this->locals->slots[$n->name] = $slot;
                 $out .= '  ' . $slot . " = alloca i64\n";
             }
             return $out . $this->preallocateLocals($n->value);
@@ -3334,9 +3306,9 @@ final class EmitLlvm
             foreach ($tc->tryBody as $s) { $out .= $this->preallocateLocals($s); }
             foreach ($tc->catches as $c) {
                 $cVar = $this->catchVar($c);
-                if ($cVar !== null && !isset($this->slots[$cVar])) {
+                if ($cVar !== null && !isset($this->locals->slots[$cVar])) {
                     $slot = $this->ssa->allocReg();
-                    $this->slots[$cVar] = $slot;
+                    $this->locals->slots[$cVar] = $slot;
                     $out .= '  ' . $slot . " = alloca i64\n";
                 }
                 foreach ($this->catchBody($c) as $s) { $out .= $this->preallocateLocals($s); }
@@ -3368,14 +3340,14 @@ final class EmitLlvm
             // Hoist the value/key slots to entry so a foreach nested in a
             // branch doesn't leave its slot alloca dominating only that
             // branch (two sibling foreaches reusing `$val` then break LLVM).
-            if (!isset($this->slots[$n->valueVar])) {
+            if (!isset($this->locals->slots[$n->valueVar])) {
                 $vs = $this->ssa->allocReg();
-                $this->slots[$n->valueVar] = $vs;
+                $this->locals->slots[$n->valueVar] = $vs;
                 $out .= '  ' . $vs . " = alloca i64\n";
             }
-            if ($n->keyVar !== null && !isset($this->slots[$n->keyVar])) {
+            if ($n->keyVar !== null && !isset($this->locals->slots[$n->keyVar])) {
                 $ks = $this->ssa->allocReg();
-                $this->slots[$n->keyVar] = $ks;
+                $this->locals->slots[$n->keyVar] = $ks;
                 $out .= '  ' . $ks . " = alloca i64\n";
             }
             return $out . $this->preallocateLocals($n->body);
@@ -3538,8 +3510,8 @@ final class EmitLlvm
         if ($k === Node::KIND_FOREACH)      { return $this->emitForeach($n); }
         if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel(); }
         if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->userLabel($n->label) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_LABEL)        { $l = $this->userLabel($n->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
+        if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel(); }
+        if ($k === Node::KIND_LABEL)        { $l = $this->ssa->userLabel($n->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
         if ($k === Node::KIND_ARRAY_LIT)    { return $this->emitArrayLit($n); }
         if ($k === Node::KIND_ARRAY_ACCESS) { return $this->emitArrayAccess($n); }
         if ($k === Node::KIND_STORE_ELEMENT){ return $this->emitStoreElement($n); }
@@ -3591,9 +3563,9 @@ final class EmitLlvm
     private function emitLoadLocal(LoadLocal $n): string
     {
         $ll = $n;
-        if (isset($this->globalBackedLocals[$ll->name])) {
+        if (isset($this->locals->globalBacked[$ll->name])) {
             $reg = $this->ssa->allocReg();
-            $out = '  ' . $reg . ' = load i64, ptr ' . $this->globalBackedLocals[$ll->name] . "\n";
+            $out = '  ' . $reg . ' = load i64, ptr ' . $this->locals->globalBacked[$ll->name] . "\n";
             if ($ll->type->kind === Type::KIND_FLOAT) {
                 $regF = $this->ssa->allocReg();
                 $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -3605,21 +3577,21 @@ final class EmitLlvm
             }
             return $out;
         }
-        if (!isset($this->slots[$ll->name])) {
+        if (!isset($this->locals->slots[$ll->name])) {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
             return '';
         }
         $reg = $this->ssa->allocReg();
-        if (isset($this->refLocals[$ll->name])) {
+        if (isset($this->locals->refLocals[$ll->name])) {
             // By-ref: slot holds the address; deref to the value.
             $addr = $this->ssa->allocReg();
-            $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$ll->name] . "\n";
+            $out = '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$ll->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= '  ' . $reg . ' = load i64, ptr ' . $p . "\n";
         } else {
-            $out = '  ' . $reg . ' = load i64, ptr ' . $this->slots[$ll->name] . "\n";
+            $out = '  ' . $reg . ' = load i64, ptr ' . $this->locals->slots[$ll->name] . "\n";
         }
         // Slots are uniform i64. Bitcast back to double when the
         // inferred type for this local says it carries a float —
@@ -3662,9 +3634,9 @@ final class EmitLlvm
         // so an arena-confined self-concat no longer grows the arena unbounded.
         if ($sv->kind === Node::KIND_CONCAT
             && $sv->type->kind === Type::KIND_STRING
-            && !isset($this->refLocals[$sl->name])
-            && !isset($this->globalBackedLocals[$sl->name])
-            && isset($this->slots[$sl->name])) {
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && isset($this->locals->slots[$sl->name])) {
             // Flatten `$s = $s . a . b . …` (left-nested, so the outer concat's
             // left is a nested concat, NOT `$s`) to its leaves; if the first leaf
             // is `$s`, rebuild the suffix `a.b.…` as ONE right-hand concat and
@@ -3699,13 +3671,13 @@ final class EmitLlvm
         // store (those have a cell value → fall through to the raw path).
         if ($sl->type->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
-            && !isset($this->refLocals[$sl->name])
-            && !isset($this->globalBackedLocals[$sl->name])
-            && isset($this->slots[$sl->name])) {
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
             $out .= $this->boxToCell($sl->value->type);
             $boxed = $this->lastValue;
-            $out .= '  store i64 ' . $boxed . ', ptr ' . $this->slots[$sl->name] . "\n";
+            $out .= '  store i64 ' . $boxed . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             $this->lastValue = $boxed;
             $this->lastValueType = 'i64';
             return $out;
@@ -3718,26 +3690,26 @@ final class EmitLlvm
         // through to the raw path.
         if ($sl->type->kind === Type::KIND_FLOAT
             && ($sl->value->type->kind === Type::KIND_INT || $sl->value->type->kind === Type::KIND_BOOL)
-            && !isset($this->refLocals[$sl->name])
-            && !isset($this->globalBackedLocals[$sl->name])
-            && isset($this->slots[$sl->name])) {
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
             $out .= $this->coerceToI64();
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
             $bits = $this->ssa->allocReg();
             $out .= '  ' . $bits . ' = bitcast double ' . $d . " to i64\n";
-            $out .= '  store i64 ' . $bits . ', ptr ' . $this->slots[$sl->name] . "\n";
+            $out .= '  store i64 ' . $bits . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             $this->lastValue = $bits;
             $this->lastValueType = 'i64';
             return $out;
         }
-        $this->vecAllocArena = false;
+        $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
         // The value just emitted an arena vec → this local owns it, so
         // its `$x[] =` appends must realloc through the arena.
-        if ($this->vecAllocArena) {
-            $this->arenaVecLocals[$sl->name] = true;
+        if ($this->arena->vecAllocated) {
+            $this->arena->vecLocals[$sl->name] = true;
         }
         // PHP arrays are values: `$b = $a` (vec OR assoc) needs an independent
         // copy when either side is later mutated, else a store into one would
@@ -3747,8 +3719,8 @@ final class EmitLlvm
         $v = $sl->value;
         if ($v->kind === Node::KIND_LOAD_LOCAL
             && $v->type->isArray()
-            && (isset($this->mutatedVecLocals[$v->name])
-                || isset($this->mutatedVecLocals[$sl->name]))) {
+            && (isset($this->frame->mutatedVecLocals[$v->name])
+                || isset($this->frame->mutatedVecLocals[$sl->name]))) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
@@ -3757,7 +3729,7 @@ final class EmitLlvm
             $this->lastValueType = 'ptr';
             // The copy is heap-owned + independent, so it is no longer an
             // arena vec alias.
-            unset($this->arenaVecLocals[$sl->name]);
+            unset($this->arena->vecLocals[$sl->name]);
         }
         // `$saved = $this->vecProp` — snapshot of a vec PROPERTY. PHP value
         // semantics: it must be independent, else a later `$this->vecProp[]=…`
@@ -3812,11 +3784,11 @@ final class EmitLlvm
             $out .= '  ' . $reg . ' = ptrtoint ptr ' . $val . " to i64\n";
             $val = $reg;
         }
-        if (isset($this->globalBackedLocals[$sl->name])) {
-            $out .= '  store i64 ' . $val . ', ptr ' . $this->globalBackedLocals[$sl->name] . "\n";
-        } elseif (isset($this->refLocals[$sl->name])) {
+        if (isset($this->locals->globalBacked[$sl->name])) {
+            $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->globalBacked[$sl->name] . "\n";
+        } elseif (isset($this->locals->refLocals[$sl->name])) {
             $addr = $this->ssa->allocReg();
-            $out .= '  ' . $addr . ' = load i64, ptr ' . $this->slots[$sl->name] . "\n";
+            $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
@@ -3826,11 +3798,11 @@ final class EmitLlvm
             // the first store releases null = no-op). Frees the per-
             // iteration value in `for (...) { $x = new Foo(); }`.
             if (isset($this->frame->rcObjLocals[$sl->name])
-                && !isset($this->transferredLocals[$sl->name])) {
-                $out .= $this->rcReleaseSlot($this->slots[$sl->name],
+                && !isset($this->frame->transferredLocals[$sl->name])) {
+                $out .= $this->rcReleaseSlot($this->locals->slots[$sl->name],
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
             }
-            $out .= '  store i64 ' . $val . ', ptr ' . $this->slots[$sl->name] . "\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
         }
         $this->lastValue = $val;
         $this->lastValueType = 'i64';
@@ -3849,7 +3821,7 @@ final class EmitLlvm
         $this->rt->needsStrAppend = true;
         $this->rt->needsStrRc = true;
         $this->rt->needsConcat = true; // pulls strlen + the string runtime decls
-        $slot = $this->slots[$sl->name];
+        $slot = $this->locals->slots[$sl->name];
         $out = $this->emitNode($c->right);
         $out .= $this->coerceToStr($c->right, false);
         $rp = $this->lastValue;
@@ -4187,10 +4159,10 @@ final class EmitLlvm
                 // take the slot address. No rc retain on a raw address.
                 $name = $c->name;
                 $capV = $this->ssa->allocReg();
-                if (isset($this->refLocals[$name])) {
-                    $out .= '  ' . $capV . ' = load i64, ptr ' . $this->slots[$name] . "\n";
+                if (isset($this->locals->refLocals[$name])) {
+                    $out .= '  ' . $capV . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
                 } else {
-                    $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
+                    $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->locals->slots[$name] . " to i64\n";
                 }
             } else {
                 $out .= $this->emitNode($c);
@@ -4735,7 +4707,7 @@ final class EmitLlvm
             $out .= '  ' . $bagI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             $obj = $this->ssa->allocReg();
             $out .= '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
-            $out .= '  store i64 ' . $this->descSlotValue($std) . ', ptr ' . $obj . "\n";
+            $out .= '  store i64 ' . $this->lib->descSlotValue($std) . ', ptr ' . $obj . "\n";
             $rcg = $this->ssa->allocReg();
             $out .= '  ' . $rcg . ' = getelementptr inbounds i64, ptr ' . $obj . ", i64 1\n";
             $out .= '  store i64 1, ptr ' . $rcg . "\n";
@@ -4803,8 +4775,8 @@ final class EmitLlvm
         // cell — delegate to the stdlib Perl/numeric increment, which returns the
         // next value (int/float/string) as a cell. Post returns the old cell.
         if ($d->type->kind === Type::KIND_CELL && $d->op === '+'
-            && isset($this->slots[$d->name])) {
-            $slot = $this->slots[$d->name];
+            && isset($this->locals->slots[$d->name])) {
+            $slot = $this->locals->slots[$d->name];
             $old = $this->ssa->allocReg();
             $out = '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
             $new = $this->ssa->allocReg();
@@ -4819,8 +4791,8 @@ final class EmitLlvm
         // (the slot holds a POINTER to the real storage) don't live in a plain
         // i64 slot. `++`/`--` must load/store through the same indirection as
         // Load/StoreLocal, else the write-back hits a stale local and no-ops.
-        if (isset($this->globalBackedLocals[$d->name])) {
-            $cell = $this->globalBackedLocals[$d->name];
+        if (isset($this->locals->globalBacked[$d->name])) {
+            $cell = $this->locals->globalBacked[$d->name];
             $old = $this->ssa->allocReg();
             $out = '  ' . $old . ' = load i64, ptr ' . $cell . "\n";
             $new = $this->ssa->allocReg();
@@ -4830,9 +4802,9 @@ final class EmitLlvm
             $this->lastValueType = 'i64';
             return $out;
         }
-        if (isset($this->refLocals[$d->name]) && isset($this->slots[$d->name])) {
+        if (isset($this->locals->refLocals[$d->name]) && isset($this->locals->slots[$d->name])) {
             $addr = $this->ssa->allocReg();
-            $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$d->name] . "\n";
+            $out = '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$d->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $old = $this->ssa->allocReg();
@@ -4844,11 +4816,11 @@ final class EmitLlvm
             $this->lastValueType = 'i64';
             return $out;
         }
-        $slot = $this->slots[$d->name] ?? null;
+        $slot = $this->locals->slots[$d->name] ?? null;
         if ($slot === null) {
             // No prior assignment seen — treat as starting from 0.
             $slot = $this->ssa->allocReg();
-            $this->slots[$d->name] = $slot;
+            $this->locals->slots[$d->name] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $slot . "\n";
         } else {
@@ -4971,14 +4943,14 @@ final class EmitLlvm
             return $this->emitForeachObject($fe);
         }
         $out = '';
-        if (!isset($this->slots[$fe->valueVar])) {
+        if (!isset($this->locals->slots[$fe->valueVar])) {
             $vs = $this->ssa->allocReg();
-            $this->slots[$fe->valueVar] = $vs;
+            $this->locals->slots[$fe->valueVar] = $vs;
             $out .= '  ' . $vs . " = alloca i64\n";
         }
-        if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
+        if ($fe->keyVar !== null && !isset($this->locals->slots[$fe->keyVar])) {
             $ks = $this->ssa->allocReg();
-            $this->slots[$fe->keyVar] = $ks;
+            $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
         $out .= $this->emitNode($fe->array);
@@ -5009,8 +4981,8 @@ final class EmitLlvm
             // Slot ptrs were computed in the resume entry block (dominate all
             // blocks, incl. the resume-switch targets) — use those, never a
             // mid-loop GEP that the resume edge would bypass.
-            $iSlot = $this->slots["@fe.0." . (string)$fe->genSlotBase];
-            $arrSlot = $this->slots["@fe.1." . (string)$fe->genSlotBase];
+            $iSlot = $this->locals->slots["@fe.0." . (string)$fe->genSlotBase];
+            $arrSlot = $this->locals->slots["@fe.1." . (string)$fe->genSlotBase];
             $out .= '  store i64 0, ptr ' . $iSlot . "\n";
             $aint = $this->ssa->allocReg();
             $out .= '  ' . $aint . ' = ptrtoint ptr ' . $arr . " to i64\n";
@@ -5058,12 +5030,12 @@ final class EmitLlvm
         // element address + key
         $out .= $this->foreachElemAddrUnified($arr, $i);
         $valAddr = $this->feAddr;
-        $valSlot = $this->slots[$fe->valueVar];
+        $valSlot = $this->locals->slots[$fe->valueVar];
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $valAddr . "\n";
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {
-            $kSlot = $this->slots[$fe->keyVar];
+            $kSlot = $this->locals->slots[$fe->keyVar];
             // key_at handles packed (index) vs hashed (int / str ptr). Over a
             // `mixed`/cell, an erased/unknown, OR a cell-element array (which may
             // hold dynamic int-or-string keys) the key must come back NaN-boxed,
@@ -5099,7 +5071,7 @@ final class EmitLlvm
             $out .= $this->foreachElemAddrUnified($arr, $si);
             $wAddr = $this->feAddr;
             $wv = $this->ssa->allocReg();
-            $out .= '  ' . $wv . ' = load i64, ptr ' . $this->slots[$fe->valueVar] . "\n";
+            $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
             $out .= '  store i64 ' . $wv . ', ptr ' . $wAddr . "\n";
         }
         $si2 = $this->ssa->allocReg();
@@ -5664,9 +5636,9 @@ final class EmitLlvm
                 $name = $t->name;
                 // Transferred (escaped into a borrowing container): ownership
                 // moved to the container, so skip the scope-exit release.
-                if (isset($this->transferredLocals[$name])) { return ''; }
-                if (isset($this->slots[$name])) {
-                    return $this->rcReleaseSlot($this->slots[$name], $this->rcReleaseFlavor($mo));
+                if (isset($this->frame->transferredLocals[$name])) { return ''; }
+                if (isset($this->locals->slots[$name])) {
+                    return $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
                 }
             }
             return '';
@@ -5706,7 +5678,7 @@ final class EmitLlvm
         // never the elements (element-drop would double-free the shared refs:
         // the parser `$args` UAF). See {@see $elementSharedLocals}.
         $shared = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
-            && isset($this->elementSharedLocals[$t->name]);
+            && isset($this->frame->elementSharedLocals[$t->name]);
         if ($mo->flavor === 'vec') {
             if ($t === null || $shared) { return 'vec'; }
             $el = $t->type->element;
@@ -6718,9 +6690,9 @@ final class EmitLlvm
         $out = '';
         foreach ($this->frame->rcObjLocals as $name => $mo) {
             if ($name === $returnedLocal) { continue; }
-            if (isset($this->transferredLocals[$name])) { continue; }
-            if (!isset($this->slots[$name])) { continue; }
-            $out .= $this->rcReleaseSlot($this->slots[$name], $this->rcReleaseFlavor($mo));
+            if (isset($this->frame->transferredLocals[$name])) { continue; }
+            if (!isset($this->locals->slots[$name])) { continue; }
+            $out .= $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
         }
         return $out;
     }
@@ -7046,7 +7018,7 @@ final class EmitLlvm
     private function isByRefAddressable(Node $a): bool
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
-            return isset($this->slots[$a->name]);
+            return isset($this->locals->slots[$a->name]);
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $a;
@@ -7104,7 +7076,7 @@ final class EmitLlvm
     {
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
             $name = $base->name;
-            return isset($this->globalBackedLocals[$name]) || isset($this->slots[$name]);
+            return isset($this->locals->globalBacked[$name]) || isset($this->locals->slots[$name]);
         }
         if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
             $cls = $base->object->type->class ?? '';
@@ -7124,23 +7096,23 @@ final class EmitLlvm
     {
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
             $name = $base->name;
-            if (isset($this->globalBackedLocals[$name])) {
-                $this->lastValue = $this->globalBackedLocals[$name];
+            if (isset($this->locals->globalBacked[$name])) {
+                $this->lastValue = $this->locals->globalBacked[$name];
                 $this->lastValueType = 'ptr';
                 return '';
             }
-            if (!isset($this->slots[$name])) { return null; }
-            if (isset($this->refLocals[$name])) {
+            if (!isset($this->locals->slots[$name])) { return null; }
+            if (isset($this->locals->refLocals[$name])) {
                 // The slot holds the address of the caller's cell — deref once.
                 $ai = $this->ssa->allocReg();
-                $out = '  ' . $ai . ' = load i64, ptr ' . $this->slots[$name] . "\n";
+                $out = '  ' . $ai . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
                 $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $ai . " to ptr\n";
                 $this->lastValue = $p;
                 $this->lastValueType = 'ptr';
                 return $out;
             }
-            $this->lastValue = $this->slots[$name];
+            $this->lastValue = $this->locals->slots[$name];
             $this->lastValueType = 'ptr';
             return '';
         }
@@ -7168,12 +7140,12 @@ final class EmitLlvm
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
-            if (!isset($this->slots[$name])) { return null; }
+            if (!isset($this->locals->slots[$name])) { return null; }
             $addr = $this->ssa->allocReg();
-            if (isset($this->refLocals[$name])) {
-                $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$name] . "\n";
+            if (isset($this->locals->refLocals[$name])) {
+                $out = '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
             } else {
-                $out = '  ' . $addr . ' = ptrtoint ptr ' . $this->slots[$name] . " to i64\n";
+                $out = '  ' . $addr . ' = ptrtoint ptr ' . $this->locals->slots[$name] . " to i64\n";
             }
             $this->lastValue = $addr;
             $this->lastValueType = 'i64';
@@ -7597,18 +7569,6 @@ final class EmitLlvm
         return $out;
     }
 
-    /** Set by arenaScan: the loop subtree contains an Arena allocation. */
-    private bool $arenaHasAlloc = false;
-    /** Set by arenaScan: an Arena value is bound to a NON-local sink
-     *  (property / element / static / dyn prop) — always unsafe to reset,
-     *  the value outlives the frame. */
-    private bool $arenaBindsNonLocal = false;
-    /** @var array<string,bool> locals a store binds an Arena value to in the
-     *  loop — each must pass the reset-liveness check (written-before-read
-     *  each iteration AND not read outside the loop). */
-    private array $arenaBoundLocals = [];
-    private string $arenaSaveCurReg = '';
-    private string $arenaSaveUsedReg = '';
 
     /**
      * A loop may reset the arena each iteration iff its body (+cond/step)
@@ -7627,14 +7587,12 @@ final class EmitLlvm
         // before the loop no longer dominates the in-loop reset. Disable the
         // arena loop optimization inside generators.
         if ($this->gen->inGenerator) { return false; }
-        $this->arenaHasAlloc = false;
-        $this->arenaBindsNonLocal = false;
-        $this->arenaBoundLocals = [];
+        $this->arena->resetScan();
         if ($cond !== null) { $this->arenaScan($cond); }
         $this->arenaScan($body);
         if ($step !== null) { $this->arenaScan($step); }
-        if (!$this->arenaHasAlloc || $this->arenaBindsNonLocal) { return false; }
-        foreach ($this->arenaBoundLocals as $name => $ignored) {
+        if (!$this->arena->hasAlloc || $this->arena->bindsNonLocal) { return false; }
+        foreach ($this->arena->boundLocals as $name => $ignored) {
             // (B) read outside the loop? Reads within the loop are cond+body+step;
             // any surplus in the whole function body is an outside read.
             $inLoop = $this->countLocalReads($name, $body)
@@ -7652,16 +7610,16 @@ final class EmitLlvm
     private function arenaScan(Node $n): void
     {
         if ($n->allocKind === \Compile\Mir\AllocationKind::ARENA) {
-            $this->arenaHasAlloc = true;
+            $this->arena->hasAlloc = true;
         }
         if ($n->kind === Node::KIND_STORE_LOCAL) {
             if ($this->bindsArenaValue($n->value)) {
-                $this->arenaBoundLocals[$n->name] = true;
+                $this->arena->boundLocals[$n->name] = true;
             }
         } else {
             $sv = $this->storeBoundValue($n);
             if ($sv !== null && $this->bindsArenaValue($sv)) {
-                $this->arenaBindsNonLocal = true;
+                $this->arena->bindsNonLocal = true;
             }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->arenaScan($c); }
@@ -7766,8 +7724,8 @@ final class EmitLlvm
         $this->rt->needsArenaReset = true;
         $cr = $this->ssa->allocReg();
         $ur = $this->ssa->allocReg();
-        $this->arenaSaveCurReg = $cr;
-        $this->arenaSaveUsedReg = $ur;
+        $this->arena->saveCurReg = $cr;
+        $this->arena->saveUsedReg = $ur;
         $out  = '  ' . $cr . " = load ptr, ptr @__mir_arena_cur\n";
         $out .= '  ' . $ur . " = call i64 @__mir_arena_used()\n";
         return $out;
@@ -7776,8 +7734,8 @@ final class EmitLlvm
     /** Emit a reset to the saved arena position (read immediately after save). */
     private function emitArenaReset(): string
     {
-        return '  call void @__mir_arena_restore(ptr ' . $this->arenaSaveCurReg
-            . ', i64 ' . $this->arenaSaveUsedReg . ")\n";
+        return '  call void @__mir_arena_restore(ptr ' . $this->arena->saveCurReg
+            . ', i64 ' . $this->arena->saveUsedReg . ")\n";
     }
 
     private function emitWhile(While_ $n): string
@@ -7968,7 +7926,7 @@ final class EmitLlvm
 
     private function emitArrayLit(ArrayLit $n): string
     {
-        $this->vecAllocArena = false;
+        $this->arena->vecAllocated = false;
         return $this->emitArrayLitUnified($n);
     }
 
@@ -8058,7 +8016,7 @@ final class EmitLlvm
         // retain/release bail on that tag, so nothing else in codegen changes.
         $arena = $al->allocKind === \Compile\Mir\AllocationKind::ARENA;
         $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
-        if ($arena) { $this->rt->needsArena = true; $this->vecAllocArena = true; }
+        if ($arena) { $this->rt->needsArena = true; $this->arena->vecAllocated = true; }
         $slot = $this->ssa->allocReg();
         $out  = '  ' . $slot . " = alloca ptr\n";
         $init = $this->ssa->allocReg();
@@ -8314,16 +8272,6 @@ final class EmitLlvm
     }
 
     // ── SSA / label minting ────────────────────────────────────
-
-    /** Stable LLVM block label for a user `goto` label name — allocated once per
-     *  function so a `goto L` and the `L:` label resolve to the SAME block. */
-    private function userLabel(string $name): string
-    {
-        if (!isset($this->userLabels[$name])) {
-            $this->userLabels[$name] = $this->ssa->allocLabel('user.' . $name);
-        }
-        return $this->userLabels[$name];
-    }
 
     /** Read a node's type kind through a typed param: a match cond comes
      *  from `foreach ($arm->conds as $c)` where `conds` is `?array` — the

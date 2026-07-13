@@ -117,10 +117,10 @@ trait EmitLlvmExceptions
             if ($this->gen->inGenerator && $n->genPendSlot >= 0) {
                 // Frame cells (a yield in the try bypasses an alloca via the
                 // resume switch). Use the entry-block GEPs precomputed in
-                // {@see $this->slots} so the pointer dominates every use across
+                // {@see $this->locals->slots} so the pointer dominates every use across
                 // the resume re-entry; an inline GEP in gen.start would not.
-                $pendFlag = $this->slots["@try.pf." . (string)$n->genPendSlot];
-                $pendVal = $this->slots["@try.pv." . (string)$n->genPendSlot];
+                $pendFlag = $this->locals->slots["@try.pf." . (string)$n->genPendSlot];
+                $pendVal = $this->locals->slots["@try.pv." . (string)$n->genPendSlot];
             } else {
                 $out .= '  ' . $pendFlag . " = alloca i64\n";
                 $out .= '  ' . $pendVal . " = alloca ptr\n";
@@ -229,10 +229,10 @@ trait EmitLlvmExceptions
                           . ', label %' . $nextLbl . "\n";
                 }
                 $out .= $matchLbl . ":\n";
-                if ($cVar !== null && isset($this->slots[$cVar])) {
+                if ($cVar !== null && isset($this->locals->slots[$cVar])) {
                     $ti = $this->ssa->allocReg();
                     $out .= '  ' . $ti . ' = ptrtoint ptr ' . $thrown . " to i64\n";
-                    $out .= '  store i64 ' . $ti . ', ptr ' . $this->slots[$cVar] . "\n";
+                    $out .= '  store i64 ' . $ti . ', ptr ' . $this->locals->slots[$cVar] . "\n";
                 }
                 foreach ($this->catchBody($c) as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
                 $out .= '  br label %' . $joinLbl . "\n";
