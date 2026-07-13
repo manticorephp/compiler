@@ -6809,9 +6809,11 @@ final class EmitLlvm
             // +1 return convention: a borrowed obj (param / alias /
             // property / array read) is retained so the caller owns a
             // reference. Owned producers (`new`, call return) and
-            // owned-local transfers are already +1.
+            // owned-local transfers are already +1. The declared return type
+            // is the fallback: it is what the CALLER assumes ({@see
+            // ownershipReturnType}).
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $out .= $this->rcRetainByType($v, $this->lastValue);
+                $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
             }
         }
         return $this->finishReturn($out, $this->lastValue, $leave);
@@ -6837,15 +6839,35 @@ final class EmitLlvm
         return $out . $leave . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 
+    /**
+     * The type the CALLER will assume for the returned value.
+     *
+     * A read out of an element-type-erased array (`return $a[$i]` where `$a` is
+     * a bare-`array` param) types the expression UNKNOWN/CELL, but the caller
+     * takes ownership per the fn's DECLARED return type. Deciding the +1 from
+     * the erased expression type makes the two sides disagree: the callee skips
+     * the retain while the caller still releases, freeing an object the array
+     * still owns (double-free → SIGTRAP). So ownership follows the declared type
+     * whenever the expression's own type carries none.
+     */
+    private function ownershipReturnType(Node $v): Type
+    {
+        $tk = $v->type->kind;
+        if ($tk !== Type::KIND_UNKNOWN && $tk !== Type::KIND_CELL) { return $v->type; }
+        if ($this->frame->returnType === null) { return $v->type; }
+        return $this->frame->returnType;
+    }
+
     /** Whether an obj/vec return value is a borrowed reference (needs +1). */
     private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
     {
-        $tk = $v->type->kind;
-        $isVec = $v->type->isVec();
+        $t = $this->ownershipReturnType($v);
+        $tk = $t->kind;
+        $isVec = $t->isVec();
         if ($tk !== Type::KIND_OBJ && !$isVec
             && $tk !== Type::KIND_STRING) { return false; }
-        if ($tk === Type::KIND_OBJ && ($this->objTypeIsStruct($v->type)
-            || $this->isClosureClass($v->type->class ?? ''))) { return false; }
+        if ($tk === Type::KIND_OBJ && ($this->objTypeIsStruct($t)
+            || $this->isClosureClass($t->class ?? ''))) { return false; }
         $k = $v->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {

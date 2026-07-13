@@ -52,27 +52,29 @@ final class ControlFlow
         \array_pop($this->continueStack);
     }
 
-    /**
-     * `break N` target — indexes outward from the innermost loop. Reads the
-     * stack field directly (no array param: self-host mishandles indexing an
-     * array passed by value).
-     */
+    /** `break N` target — indexes outward from the innermost loop. */
     public function breakTarget(int $level): string
     {
-        $n = \count($this->breakStack);
-        if ($n === 0) { return 'unreachable_no_loop'; }
-        $idx = $n - $level;
-        if ($idx < 0) { $idx = 0; }
-        return $this->breakStack[$idx];
+        return $this->targetAt($this->breakStack, $level);
     }
 
     public function continueTarget(int $level): string
     {
-        $n = \count($this->continueStack);
+        return $this->targetAt($this->continueStack, $level);
+    }
+
+    /**
+     * Nth-outermost entry of a level stack.
+     *
+     * @param string[] $stack
+     */
+    private function targetAt(array $stack, int $level): string
+    {
+        $n = \count($stack);
         if ($n === 0) { return 'unreachable_no_loop'; }
         $idx = $n - $level;
         if ($idx < 0) { $idx = 0; }
-        return $this->continueStack[$idx];
+        return $stack[$idx];
     }
 
     /** @param Node[] $body */
