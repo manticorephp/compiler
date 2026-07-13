@@ -150,6 +150,12 @@ final class Walk
             return [$se->array, $se->index, $se->value];
         }
         if ($k === Node::KIND_NEW_OBJ) { return self::asNewObj($n)->args; }
+        if ($k === Node::KIND_NEW_DYN_OBJ) {
+            $nd = $n;
+            $kids = [$nd->classExpr];
+            foreach ($nd->args as $a) { $kids[] = $a; }
+            return $kids;
+        }
         if ($k === Node::KIND_CLONE) {
             $cl = self::asClone($n);
             $out = [$cl->object];

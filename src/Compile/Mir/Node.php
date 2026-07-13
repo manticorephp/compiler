@@ -78,6 +78,8 @@ abstract class Node
     public const KIND_ARRAY_ACCESS    = 'array_access';
     public const KIND_STORE_ELEMENT   = 'store_element';
     public const KIND_NEW_OBJ         = 'new_obj';
+    /** `new $cls(args)` — the class is named by a runtime string. */
+    public const KIND_NEW_DYN_OBJ     = 'new_dyn_obj';
     public const KIND_CLONE           = 'clone';
     public const KIND_PROPERTY_ACCESS = 'property_access';
     public const KIND_STORE_PROPERTY  = 'store_property';

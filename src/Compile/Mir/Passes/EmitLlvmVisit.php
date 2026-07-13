@@ -10,6 +10,7 @@ use Compile\Mir\Spread_;
 use Compile\Mir\BoolConst;
 use Compile\Mir\MethodCall_;
 use Compile\Mir\NewObj;
+use Compile\Mir\NewDynObj;
 use Compile\Mir\Clone_;
 use Compile\Mir\PropertyAccess_;
 use Compile\Mir\StoreProperty;
@@ -401,6 +402,11 @@ trait EmitLlvmVisit
     public function visitStoreElement(StoreElement $n): string
     {
         return $this->emitStoreElement($n);
+    }
+
+    public function visitNewDynObj(NewDynObj $n): string
+    {
+        return $this->emitNewDynObj($n);
     }
 
     public function visitNewObj(NewObj $n): string

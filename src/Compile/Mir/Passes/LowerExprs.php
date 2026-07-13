@@ -61,6 +61,7 @@ use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
 use Compile\Mir\NewObj;
+use Compile\Mir\NewDynObj;
 use Compile\Mir\Node;
 use Compile\Mir\Not_;
 use Compile\Mir\NullConst;
@@ -335,6 +336,7 @@ trait LowerExprs
         if ($expr->kind === 'ArrayLit')       { return $this->lowerArrayLit($expr); }
         if ($expr->kind === 'ArrayAccess')    { return $this->lowerArrayAccess($expr); }
         if ($expr->kind === 'New')            { return $this->lowerNewExpr($expr); }
+        if ($expr->kind === 'NewDyn')         { return $this->lowerNewDynExpr($expr); }
         if ($expr->kind === 'PropertyAccess') {
             // Pin to PropertyAccess before reading `nullsafe`: on the base `Expr`
             // the field offset is the load-bearing subclass's (poly-prop trap) —

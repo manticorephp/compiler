@@ -37,9 +37,13 @@ trait EmitLlvmObjects
     // across separately-linked objects. `new Foo(args)` → malloc(size) +
     // write header + zero props + call `Foo____construct(i64 thisptr, args…)`.
 
-    private function emitNewObj(\Compile\Mir\NewObj $n): string
+    /**
+     * Allocate an object and initialise its header and property slots. Shared by
+     * `new C(…)` and `new $cls(…)`, which differ only in how the class is chosen.
+     * Leaves the object POINTER in {@see $lastValue}.
+     */
+    private function emitObjAllocInit(?\Compile\Mir\ClassDef $cd): string
     {
-        $cd = $this->classes[$n->class] ?? null;
         $size = $cd === null ? 16 : $cd->instanceSize();
         $isStruct = $cd !== null && $cd->isStruct;
         // Header slot count before properties: 2 (class_id + rc) for a
@@ -83,6 +87,112 @@ trait EmitLlvmObjects
                 $out .= '  store i64 0, ptr ' . $bGep . "\n";
             }
         }
+        $this->lastValue = $obj;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `new $cls(args)` — the class is named by a value, so the choice is made at
+     * runtime: compare the name against every class whose constructor takes this
+     * many arguments, and construct the one that matches.
+     *
+     * The arguments are evaluated ONCE, before the comparison chain. An arm may
+     * box or coerce its own copy of a register, but the argument EXPRESSIONS must
+     * not run once per candidate class — that would repeat their side effects.
+     *
+     * No match yields a null object, which is PHP's "Class not found" — the read
+     * that follows faults rather than silently constructing the wrong thing.
+     */
+    private function emitNewDynObj(\Compile\Mir\NewDynObj $n): string
+    {
+        $out = $this->emitNode($n->classExpr);
+        $out .= $this->coerceToI64();
+        $nameI = $this->lastValue;
+        $namePtr = $this->ssa->allocReg();
+        $out .= '  ' . $namePtr . ' = inttoptr i64 ' . $nameI . " to ptr\n";
+        $this->rt->needsStrcmp = true;
+
+        $argRegs = [];
+        $argKinds = [];
+        foreach ($n->args as $a) {
+            $out .= $this->emitNode($a);
+            $argRegs[] = $this->lastValue;
+            $argKinds[] = $this->lastValueType;
+        }
+        $argc = \count($n->args);
+
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $endL = $this->ssa->allocLabel('newdyn.end');
+
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct) { continue; }
+            $ctorClass = $this->resolveMethodClass($cd->name, '__construct');
+            $ptypes = [];
+            $tmask = [];
+            $need = 0;
+            if ($ctorClass !== '') {
+                $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
+                $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
+                // Param 0 is the implicit `$this`.
+                $need = \count($ptypes) - 1;
+                if ($need < 0) { $need = 0; }
+            }
+            if ($need !== $argc) { continue; }
+
+            $hitL = $this->ssa->allocLabel('newdyn.hit');
+            $nextL = $this->ssa->allocLabel('newdyn.next');
+            $lit = $this->strLitId($this->pool->intern($cd->name));
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $namePtr . ', ptr ' . $lit . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= $this->emitObjAllocInit($cd);
+            $objPtr = $this->lastValue;
+            $objInt = $this->ssa->allocReg();
+            $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+            if ($ctorClass !== '') {
+                $argList = 'i64 ' . $objInt;
+                $ai = 0;
+                foreach ($n->args as $a) {
+                    $this->lastValue = $argRegs[$ai];
+                    $this->lastValueType = $argKinds[$ai];
+                    if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
+                        $out .= $this->boxToCell($a->type);
+                    } else {
+                        $out .= $this->coerceToI64();
+                        $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                    }
+                    $argList .= ', i64 ' . $this->lastValue;
+                    $ai = $ai + 1;
+                }
+                $cr = $this->ssa->allocReg();
+                $out .= '  ' . $cr . ' = call i64 @manticore_'
+                      . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
+                      . '(' . $argList . ")\n";
+            }
+            $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        $out .= '  store i64 0, ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private function emitNewObj(\Compile\Mir\NewObj $n): string
+    {
+        $cd = $this->classes[$n->class] ?? null;
+        $out = $this->emitObjAllocInit($cd);
+        $obj = $this->lastValue;
         // ctor call — resolve through the parent chain (a subclass
         // with no ctor inherits its parent's).
         $ctorClass = $this->resolveMethodClass($n->class, '__construct');

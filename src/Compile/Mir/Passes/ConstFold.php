@@ -47,6 +47,7 @@ use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
 use Compile\Mir\NewObj;
+use Compile\Mir\NewDynObj;
 use Compile\Mir\Node;
 use Compile\Mir\Not_;
 use Compile\Mir\Pass;
@@ -137,6 +138,7 @@ final class ConstFold implements Pass
         if ($kind === Node::KIND_ARRAY_ACCESS)    { return $this->foldArrayAccess($n); }
         if ($kind === Node::KIND_STORE_ELEMENT)   { return $this->foldStoreElement($n); }
         if ($kind === Node::KIND_NEW_OBJ)         { return $this->foldNewObj($n); }
+        if ($kind === Node::KIND_NEW_DYN_OBJ)     { return $this->foldNewDynObj($n); }
         if ($kind === Node::KIND_PROPERTY_ACCESS) { return $this->foldPropertyAccess($n); }
         if ($kind === Node::KIND_STORE_PROPERTY)  { return $this->foldStoreProperty($n); }
         if ($kind === Node::KIND_METHOD_CALL)     { return $this->foldMethodCall($n); }
@@ -220,6 +222,15 @@ final class ConstFold implements Pass
         $n->array = $this->foldNode($n->array);
         $n->index = $this->foldNode($n->index);
         $n->value = $this->foldNode($n->value);
+        return $n;
+    }
+
+    private function foldNewDynObj(NewDynObj $n): Node
+    {
+        $n->classExpr = $this->foldNode($n->classExpr);
+        $out = [];
+        foreach ($n->args as $a) { $out[] = $this->foldNode($a); }
+        $n->args = $out;
         return $n;
     }
 

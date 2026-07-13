@@ -512,6 +512,22 @@ final class StaticAccess extends Expr
     }
 }
 
+/**
+ * `new $cls(args)` — the class is named by a value at runtime, not written in
+ * the source. The expression must evaluate to a class-name string.
+ */
+final class NewDynExpr extends Expr
+{
+    /** @param Expr[] $args */
+    public function __construct(
+        public readonly Expr $classExpr,
+        public readonly array $args,
+        Span $span,
+    ) {
+        parent::__construct('NewDyn', $span);
+    }
+}
+
 final class NewExpr extends Expr
 {
     /** @param Expr[] $args */

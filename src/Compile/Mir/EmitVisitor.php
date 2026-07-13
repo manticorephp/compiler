@@ -71,6 +71,7 @@ interface EmitVisitor
     public function visitSpread(Spread_ $n): string;
     public function visitStoreElement(StoreElement $n): string;
     public function visitNewObj(NewObj $n): string;
+    public function visitNewDynObj(NewDynObj $n): string;
     public function visitPropertyAccess(PropertyAccess_ $n): string;
     public function visitClone(Clone_ $n): string;
     public function visitDynProp(DynProp_ $n): string;

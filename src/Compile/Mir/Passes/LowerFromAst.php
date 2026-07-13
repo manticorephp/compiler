@@ -61,6 +61,7 @@ use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
 use Compile\Mir\NewObj;
+use Compile\Mir\NewDynObj;
 use Compile\Mir\Node;
 use Compile\Mir\Not_;
 use Compile\Mir\NullConst;
@@ -1703,6 +1704,38 @@ final class LowerFromAst implements Pass
             ? new NullConst(Type::null_())
             : $this->lowerExpr($expr->index);
         return new ArrayAccess_($arr, $idx, Type::unknown());
+    }
+
+    /**
+     * `new $cls(args)` — the class is a runtime value, so nothing can be resolved
+     * here: no ctor params to default-fill, no concrete result type. The emitter
+     * matches the name against the module's classes; the RESULT is typed `unknown`,
+     * which routes property reads through the runtime class_id dispatch (the same
+     * path an unknown-receiver `->prop` already takes). A `class-string<T>` call
+     * site refines it back to a concrete type.
+     */
+    private function lowerNewDynExpr(\Parser\Ast\NewDynExpr $expr): NewDynObj
+    {
+        $args = [];
+        foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
+        $argc = \count($args);
+        // The result is one of the classes whose constructor takes this many
+        // arguments — exactly the set the emitter will compare the name against.
+        // Typing it as their UNION (rather than `unknown`) is what makes a method
+        // call on the result resolve: the union dispatches on the runtime class_id
+        // and its return type comes from the atoms. An `unknown` receiver resolves
+        // nothing, so `$obj->speak()` rendered its string result as a raw pointer.
+        $arms = [];
+        foreach ($this->classTable as $name => $cd) {
+            $params = $this->resolveMethodParams($name, '__construct');
+            $need = $params === null ? 0 : \count($params);
+            if ($need !== $argc) { continue; }
+            $arms[] = Type::obj($name);
+        }
+        $t = Type::unknown();
+        if (\count($arms) === 1) { $t = $arms[0]; }
+        elseif (\count($arms) > 1) { $t = Type::union($arms); }
+        return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
     }
 
     private function lowerNewExpr(\Parser\Ast\NewExpr $expr): NewObj

@@ -1033,6 +1033,28 @@ final class StoreElement extends Node
 
 // ── Objects ───────────────────────────────────────────────────────
 
+/**
+ * `new $cls(args)` — the class comes from a value at runtime. The emitter tests
+ * the name against every class whose constructor can take these arguments, and
+ * throws if none matches (PHP's "Class not found").
+ */
+final class NewDynObj extends Node
+{
+    /** @param Node[] $args */
+    public function __construct(
+        public Node $classExpr,
+        public array $args,
+        Type $type,
+    ) {
+        parent::__construct(Node::KIND_NEW_DYN_OBJ, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitNewDynObj($this);
+    }
+}
+
 final class NewObj extends Node
 {
     /** @param Node[] $args */

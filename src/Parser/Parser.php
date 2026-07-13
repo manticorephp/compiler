@@ -2327,6 +2327,17 @@ final class Parser
         if ($this->checkKeyword('class')) {
             return $this->parseAnonClass($span);
         }
+        // `new $cls(args)` — the class is named by a value, not written in the
+        // source. Only the variable form: `new ($expr)(args)` would make the
+        // first paren ambiguous with the argument list.
+        if ($this->check(TokenKind::Variable)) {
+            $classExpr = $this->parsePrimary();
+            $dargs = [];
+            if ($this->check(TokenKind::OpenParen)) {
+                $dargs = $this->parseArgList();
+            }
+            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
+        }
         $class = $this->parseClassName();
         $args = [];
         if ($this->check(TokenKind::OpenParen)) {

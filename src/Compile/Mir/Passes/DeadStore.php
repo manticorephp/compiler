@@ -273,6 +273,11 @@ final class DeadStore implements Pass
             foreach ($n->args as $a) { $this->collectUses($a); }
             return;
         }
+        if ($n->kind === Node::KIND_NEW_DYN_OBJ) {
+            $this->collectUses($n->classExpr);
+            foreach ($n->args as $a) { $this->collectUses($a); }
+            return;
+        }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) {
             $this->collectUses($n->object);
             return;
