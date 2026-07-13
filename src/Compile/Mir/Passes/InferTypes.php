@@ -3972,9 +3972,21 @@ final class InferTypes implements Pass
                 return $node->type;
             }
             $cls = $this->resolveMethodClass($objType->class, $node->method);
-            // Interface-typed receiver (e.g. `\Throwable $e`): the
-            // interface has no ClassDef, so fall back to any class that
-            // declares the method for its return signature.
+            // Interface-typed receiver (e.g. `\Throwable $e`): the interface has
+            // no ClassDef, so borrow a return signature from an IMPLEMENTING
+            // class. Matching on the method NAME alone picks whichever unrelated
+            // class happens to declare one first and adopts ITS return type — a
+            // `get()` colliding with some other class's `get(): float` typed every
+            // result as a float, so a string came out as a double's bit pattern.
+            if ($cls === '') {
+                $recvIface = $objType->class;
+                foreach ($this->classes as $cd) {
+                    if (!isset($cd->methodNames[$node->method])) { continue; }
+                    if ($this->classImplementsT($cd->name, $recvIface)) { $cls = $cd->name; break; }
+                }
+            }
+            // No implementing class in this module (a cross-module interface, or
+            // a built-in like \Throwable) — fall back to the old name-only match.
             if ($cls === '') {
                 foreach ($this->classes as $cd) {
                     if (isset($cd->methodNames[$node->method])) { $cls = $cd->name; break; }

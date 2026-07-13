@@ -63,6 +63,18 @@ final class NarrowReturns implements Pass
 
     public function run(Module $module): Module
     {
+        // A GENERIC method's body is shared by every instantiation, so its
+        // return type is deliberately erased (a cell carrying its tag). Narrowing
+        // it to whatever one call site happened to store would type every OTHER
+        // instantiation wrong — with a `Box<string>` and a `Box<float>` in the
+        // same program, the float store narrowed `get()` to float and the string
+        // came back as a double's bit pattern.
+        $generic = [];
+        foreach ($module->classes as $cd) {
+            foreach ($cd->genericReturns as $m => $ignored) {
+                $generic[$cd->name . '__' . $m] = true;
+            }
+        }
         // Bounded fixpoint: each productive sweep narrows >=1 function,
         // which is monotonic, so the function count caps the iterations.
         $iters = 0;
@@ -71,6 +83,7 @@ final class NarrowReturns implements Pass
             $iters = $iters + 1;
             $changed = false;
             foreach ($module->functions as $fn) {
+                if (isset($generic[$fn->name])) { continue; }
                 if ($this->narrowFunction($fn)) { $changed = true; }
             }
             if (!$changed) { break; }
