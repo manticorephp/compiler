@@ -44,6 +44,24 @@ final class Type
      */
     public const KIND_UNION   = 'union';
 
+    /**
+     * A docblock TYPE VARIABLE — the `T` of a `@template T` class/interface.
+     * {@see $class} holds the variable's name.
+     *
+     * It exists only in the declaration of a generic class: inside the shared
+     * compiled body a `T` value travels in its RAW representation (a double's
+     * bits, a string/object pointer, an int), exactly as an erased value does
+     * today — so one compiled body serves every instantiation. What generics add
+     * is that the CALL SITE recovers the binding ({@see $typeArgs}) and types the
+     * result concretely, instead of falling back to `unknown` and picking the
+     * integer path for `+` / `.` / echo (which silently printed a pointer or a
+     * double's bit pattern).
+     *
+     * A typevar must never be allowed to degrade to `cell` — that would box the
+     * hot path, which is the erasure this feature exists to remove.
+     */
+    public const KIND_TYPEVAR = 'typevar';
+
     public function __construct(
         public readonly string $kind,
         public readonly ?self $element = null,
@@ -67,6 +85,15 @@ final class Type
          * @var array<string,self>|null
          */
         public readonly ?array $fields = null,
+        /**
+         * Bound type arguments of a generic class use — the `Node` of a
+         * `Box<Node>`. Positionally matched against the class's `@template`
+         * parameters ({@see ClassDef::$typeParams}). Empty for a non-generic
+         * type. Purely a compile-time payload: it changes how a call site TYPES
+         * the result, never the runtime representation.
+         * @var self[]
+         */
+        public readonly array $typeArgs = [],
     ) {}
 
     public static function void():    self { return new self(self::KIND_VOID); }
@@ -136,6 +163,98 @@ final class Type
     public static function obj(string $class): self
     {
         return new self(self::KIND_OBJ, class: $class);
+    }
+
+    /** The `T` of a `@template T` — see {@see KIND_TYPEVAR}. */
+    public static function typeVar(string $name): self
+    {
+        return new self(self::KIND_TYPEVAR, class: $name);
+    }
+
+    public function isTypeVar(): bool
+    {
+        return $this->kind === self::KIND_TYPEVAR;
+    }
+
+    /**
+     * A use of a generic class with its arguments bound (`Box<Node>`).
+     *
+     * @param self[] $typeArgs
+     */
+    public static function objOf(string $class, array $typeArgs): self
+    {
+        return new self(self::KIND_OBJ, class: $class, typeArgs: $typeArgs);
+    }
+
+    /**
+     * Replace every type variable in this type by its binding, recursively
+     * (`T` → `Node`, `T[]` → `Node[]`). A variable with no binding is left
+     * alone — an unbound typevar behaves exactly like today's erased `unknown`
+     * at every consumer, so an un-annotated use degrades rather than miscompiles.
+     *
+     * @param array<string, self> $bindings type-parameter name → bound type
+     */
+    public function substitute(array $bindings): self
+    {
+        if ($this->kind === self::KIND_TYPEVAR) {
+            $name = $this->class ?? '';
+            if (isset($bindings[$name])) { return $bindings[$name]; }
+            return $this;
+        }
+        if ($this->kind === self::KIND_ARRAY) {
+            $el = $this->element !== null ? $this->element->substitute($bindings) : null;
+            $ky = $this->key !== null ? $this->key->substitute($bindings) : null;
+            if ($el === $this->element && $ky === $this->key) { return $this; }
+            return new self(
+                self::KIND_ARRAY,
+                element: $el,
+                key: $ky,
+                fields: $this->fields,
+            );
+        }
+        return $this;
+    }
+
+    /** Whether this type mentions a type variable anywhere (worth substituting). */
+    public function hasTypeVar(): bool
+    {
+        if ($this->kind === self::KIND_TYPEVAR) { return true; }
+        if ($this->element !== null && $this->element->hasTypeVar()) { return true; }
+        if ($this->key !== null && $this->key->hasTypeVar()) { return true; }
+        return false;
+    }
+
+    /**
+     * Drop every type variable to `unknown` — the type as the SHARED compiled
+     * body must see it.
+     *
+     * A generic class has one body serving every instantiation, so inside it a
+     * `T` really is erased, and the MIR/codegen must be handed exactly the type
+     * it would have had before generics existed (no consumer downstream knows
+     * KIND_TYPEVAR, and letting one leak in would risk a wrong array/rc path).
+     * The un-erased form is kept beside it, in {@see ClassDef::$genericReturns},
+     * purely so a CALL SITE can substitute its binding.
+     */
+    public function eraseTypeVars(): self
+    {
+        // A typevar erases to CELL, not `unknown`. That is this compiler's
+        // standing invariant — an erased value must carry its runtime tag —
+        // and it is exactly what the shared body needs: `T` boxes on the way in
+        // and the tag survives, so concat / arithmetic / echo dispatch on it
+        // correctly at any instantiation. Erasing to `unknown` instead hands the
+        // consumer a raw i64 and it silently takes the integer path (printing a
+        // pointer, or a double's bit pattern) — the bug this feature exists to
+        // remove.
+        if ($this->kind === self::KIND_TYPEVAR) { return self::cell(); }
+        if ($this->kind === self::KIND_ARRAY && $this->hasTypeVar()) {
+            return new self(
+                self::KIND_ARRAY,
+                element: $this->element !== null ? $this->element->eraseTypeVars() : null,
+                key: $this->key !== null ? $this->key->eraseTypeVars() : null,
+                fields: $this->fields,
+            );
+        }
+        return $this;
     }
 
     /**

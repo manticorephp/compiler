@@ -126,6 +126,10 @@ final class LowerFromAst implements Pass
     /** Enclosing class while lowering a method body (self/static resolution). */
     private string $currentLowerClass = '';
 
+    /** `@template` names declared by the class being lowered, in order.
+     *  @var string[] */
+    private array $currentTypeParams = [];
+
     /**
      * Late-static-binding scope while lowering a method body — the *called*
      * class for `static::`. Equals `$currentLowerClass` for the normal copy;
@@ -530,6 +534,7 @@ final class LowerFromAst implements Pass
             // top-level closure reading `$this` capture a non-existent local
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
+        $this->currentTypeParams = [];
             $mainStmts[] = $this->lowerStmt($stmt);
         }
         // The class table is now complete, so descendant sets are known —
@@ -916,6 +921,10 @@ final class LowerFromAst implements Pass
         // property can't find a return flavor). Restored before return.
         $savedLowerClass = $this->currentLowerClass;
         $this->currentLowerClass = $decl->name;
+        // `@template T` — in scope for every property / param / return hint of
+        // this class, so `T` and `T[]` lower to a typevar rather than erasing.
+        $savedTypeParams = $this->currentTypeParams;
+        $this->currentTypeParams = $this->docTemplates($decl->docComment);
         $names = [];
         $types = [];
         $arrHinted = [];
@@ -958,7 +967,9 @@ final class LowerFromAst implements Pass
         foreach ($decl->properties as $prop) {
             $vdoc = $this->docTagType($prop->docComment, '@var', '');
             $veff = $this->effectiveHint($prop->typeHint, $vdoc);
-            $pt = $this->lowerTypeHint($veff);
+            // `@var T[]` erases in the shared body (as it did before generics);
+            // the binding lives at the use site, not in the class's layout.
+            $pt = $this->lowerTypeHint($veff)->eraseTypeVars();
             // Bare `array` with no docblock: recover the element type from a
             // homogeneous list-literal default, else from how the class's methods
             // push into it (usage inference) — both keep reads typed instead of
@@ -1082,6 +1093,8 @@ final class LowerFromAst implements Pass
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
         $cd->propertyReadonly = $roProps;
+        $cd->typeParams = $this->currentTypeParams;
+        $this->currentTypeParams = $savedTypeParams;
         return $cd;
     }
 
@@ -1166,6 +1179,13 @@ final class LowerFromAst implements Pass
     {
         $cd = $this->classTable[$decl->name];
         $this->currentLowerClass = $decl->name;
+        // An ENUM reaches this path but has no ClassDef in the class table, so
+        // guard on the table itself — reading `$cd->typeParams` unconditionally
+        // dereferences null (a warning under Zend, a SIGSEGV once self-built).
+        $this->currentTypeParams = [];
+        if (isset($this->classTable[$decl->name])) {
+            $this->currentTypeParams = $this->classTable[$decl->name]->typeParams;
+        }
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         // Property-default stores (`public int $c = 7` → `$this->c = 7`),
         // applied at construction before the ctor body. Lowered into a
@@ -1427,6 +1447,13 @@ final class LowerFromAst implements Pass
             $m->returnType,
             $this->docTagType($m->docComment, '@return', ''),
         ));
+        // `@return T` on a generic class: the shared body must see the ERASED
+        // type (exactly what it saw before generics), so keep the un-erased form
+        // aside for call sites to substitute against their receiver's binding.
+        if ($mret->hasTypeVar()) {
+            $cd->genericReturns[$m->name] = $mret;
+            $mret = $mret->eraseTypeVars();
+        }
         if ($isGen) {
             $elem = $mret->isGenerator() ? $mret->element : null;
             $mret = Type::generator($elem);
@@ -1532,6 +1559,7 @@ final class LowerFromAst implements Pass
             $params[] = $fp;
         }
         $this->currentLowerClass = '';
+        $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the
         // body (a stock-PHP fallback like `$GLOBALS['argc']`) is never
@@ -1591,6 +1619,7 @@ final class LowerFromAst implements Pass
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->currentLowerClass = '';
+        $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
         $params = [];
         foreach ($decl->params as $p) {
@@ -3780,7 +3809,9 @@ final class LowerFromAst implements Pass
     private function lowerParamType(?string $eff): Type
     {
         if ($eff === null) { return Type::cell(); }
-        return $this->lowerTypeHint($eff);
+        // A `@param T` is erased for the shared body — same as before generics,
+        // where `T` simply looked like an unknown class name.
+        return $this->lowerTypeHint($eff)->eraseTypeVars();
     }
 
     /** True if `$hint` is a union (`a|b|…`) whose every arm is an ARRAY shape
@@ -3814,6 +3845,11 @@ final class LowerFromAst implements Pass
     private function lowerTypeHint(?string $hint): Type
     {
         if ($hint === null) { return Type::unknown(); }
+        // A `@template T` parameter of the enclosing class. Checked before any
+        // lowercasing — a type-parameter name is case-sensitive. `T[]` and
+        // `array<string, T>` reach this through the recursive element/value
+        // lowering below, so they need no separate case.
+        if ($this->isTypeParam($hint)) { return Type::typeVar($hint); }
         // `mixed` and union types (`int|string`, DNF `(A&B)|C`) become a tagged
         // cell (NaN-boxed i64): the value carries its runtime type tag. A purely
         // NUMERIC union (`int|float`) is a NUMERIC cell — arithmetic promotes by
@@ -3938,6 +3974,21 @@ final class LowerFromAst implements Pass
             $keyStr = \trim(\substr($inner, 0, $comma));
             $valStr = \trim(\substr($inner, $comma + 1, \strlen($inner) - $comma - 1));
             return Type::generator($this->lowerTypeHint($valStr), $this->lowerTypeHint($keyStr));
+        }
+        // A generic class use — `Box<Tag>` → obj<Box> carrying the bound args.
+        // (`array<…>` and `Generator<…>` are handled above, so this is the
+        // user-declared case.) The args are a compile-time payload only: the
+        // class has ONE compiled body, and the binding is what lets a call site
+        // type `@return T` concretely instead of erasing it to unknown.
+        $ltg = \strpos($low, '<');
+        if ($ltg !== false && $ltg > 0) {
+            $gbase = \ltrim($hint, '?\\');
+            $glt = \strpos($gbase, '<');
+            $gname = \substr($gbase, 0, $glt);
+            $ginner = \substr($gbase, $glt + 1, \strlen($gbase) - $glt - 2);
+            if (isset($this->classTable[$gname]) || isset($this->knownClassNames[$gname])) {
+                return Type::objOf($gname, $this->lowerTypeArgs($ginner));
+            }
         }
         $cls = \ltrim($hint, '?\\');
         // A bare class name → obj<Class> (so method returns / params of
@@ -4268,7 +4319,27 @@ final class LowerFromAst implements Pass
             && $this->looksLikeArrayElemType($docType)) {
             return $docType;
         }
+        // `@return T` / `@param T` on a generic class. A type parameter cannot be
+        // written in PHP syntax, so the docblock is the ONLY source — without
+        // this the hint stays null and `T` erases, which is the whole bug.
+        // Deliberately narrow: adopted only when the docblock names a `@template`
+        // parameter of the class being lowered, so every other un-hinted docblock
+        // keeps its current (ignored) meaning and no existing code moves.
+        if ($hint === null && $docType !== null && $docType !== ''
+            && $this->mentionsTypeParam($docType)) {
+            return $docType;
+        }
         return $hint;
+    }
+
+    /** Whether `$t` is a `@template` parameter of the class being lowered (`T`, `T[]`). */
+    private function mentionsTypeParam(string $t): bool
+    {
+        foreach ($this->currentTypeParams as $p) {
+            if ($t === $p) { return true; }
+            if ($t === $p . '[]') { return true; }
+        }
+        return false;
     }
 
     /** Whether `$t` is a container shape (`X[]` or `array<...>`). */
@@ -4285,6 +4356,84 @@ final class LowerFromAst implements Pass
      * `$varName` is non-empty) or `@return X[]` / `@var X[]` (empty
      * `$varName`). Returns the raw token (`PropertyDecl[]`) or null.
      */
+    /** Whether `$hint` names a `@template` parameter of the class being lowered. */
+    private function isTypeParam(string $hint): bool
+    {
+        foreach ($this->currentTypeParams as $p) {
+            if ($p === $hint) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * Split the inside of a `Cls<…>` on top-level commas and lower each arg.
+     * Depth-aware, so a nested `Map<string, Box<T>>` keeps its inner comma.
+     *
+     * @return Type[]
+     */
+    private function lowerTypeArgs(string $inner): array
+    {
+        $out = [];
+        $n = \strlen($inner);
+        $depth = 0;
+        $start = 0;
+        $i = 0;
+        while ($i < $n) {
+            $c = \substr($inner, $i, 1);
+            if ($c === '<') { $depth = $depth + 1; }
+            elseif ($c === '>') { if ($depth > 0) { $depth = $depth - 1; } }
+            elseif ($c === ',' && $depth === 0) {
+                $out[] = $this->lowerTypeHint(\trim(\substr($inner, $start, $i - $start)));
+                $start = $i + 1;
+            }
+            $i = $i + 1;
+        }
+        $last = \trim(\substr($inner, $start, $n - $start));
+        if ($last !== '') { $out[] = $this->lowerTypeHint($last); }
+        return $out;
+    }
+
+    /**
+     * The `@template T` names a class docblock declares, in order.
+     *
+     * Scans forward once with bounded `substr` (never `ltrim`/`rtrim` — the
+     * self-host trim helpers can hand back a buffer whose later `substr` reads
+     * garbage). `@template-covariant` and friends are skipped: the tag must be
+     * followed by whitespace.
+     *
+     * @return string[]
+     */
+    private function docTemplates(?string $doc): array
+    {
+        $out = [];
+        if ($doc === null) { return $out; }
+        $n = \strlen($doc);
+        $tag = '@template';
+        $tlen = \strlen($tag);
+        $i = 0;
+        while ($i + $tlen <= $n) {
+            if (\substr($doc, $i, $tlen) !== $tag) { $i = $i + 1; continue; }
+            $j = $i + $tlen;
+            $b = ($j < $n) ? \substr($doc, $j, 1) : '';
+            if ($b !== ' ' && $b !== "\t") { $i = $i + 1; continue; }
+            while ($j < $n) {
+                $c = \substr($doc, $j, 1);
+                if ($c !== ' ' && $c !== "\t") { break; }
+                $j = $j + 1;
+            }
+            $start = $j;
+            while ($j < $n) {
+                $c = \substr($doc, $j, 1);
+                if ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r") { break; }
+                $j = $j + 1;
+            }
+            $name = \substr($doc, $start, $j - $start);
+            if ($name !== '') { $out[] = $name; }
+            $i = $j;
+        }
+        return $out;
+    }
+
     private function docTagType(?string $doc, string $tag, string $varName): ?string
     {
         if ($doc === null) { return null; }

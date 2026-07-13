@@ -3894,6 +3894,44 @@ final class InferTypes implements Pass
         return null;
     }
 
+    /**
+     * The concrete return type of `$cls::$method` for a receiver that bound the
+     * class's `@template` parameters (`Box<Tag>` → `@return T` becomes `Tag`).
+     *
+     * Null when the class is not generic, the receiver carries no binding, or
+     * the method's return mentions no type variable — every one of which leaves
+     * the existing erased sig in place, so a program that uses no generics is
+     * completely unaffected.
+     */
+    /** Whether a value of this type travels as a boxed (tagged) cell. */
+    private function isCellBoxed(Type $t): bool
+    {
+        return $t->kind === Type::KIND_CELL;
+    }
+
+    private function genericReturnType(string $cls, string $method, Type $recv): ?Type
+    {
+        if ($recv->typeArgs === []) { return null; }
+        // The receiver's DECLARED class carries the binding.
+        $decl = $recv->class ?? '';
+        if (!isset($this->classes[$decl])) { return null; }
+        $cd = $this->classes[$decl];
+        if (!isset($cd->genericReturns[$method])) { return null; }
+        $generic = $cd->genericReturns[$method];
+        $bindings = [];
+        $i = 0;
+        foreach ($cd->typeParams as $p) {
+            if ($i >= \count($recv->typeArgs)) { break; }
+            $bindings[$p] = $recv->typeArgs[$i];
+            $i = $i + 1;
+        }
+        if ($bindings === []) { return null; }
+        $r = $generic->substitute($bindings);
+        // An unbound leftover stays erased rather than leaking a typevar into
+        // codegen, which knows nothing about KIND_TYPEVAR.
+        return $r->eraseTypeVars();
+    }
+
     private function inferMethodCall(MethodCall_ $node): Type
     {
         $objType = $this->inferNode($node->object);
@@ -3952,6 +3990,34 @@ final class InferTypes implements Pass
                     // is typed (e.g. an abstract `: float` rendering raw bits).
                     $rt = $this->concreteOverrideSig($cls, $node->method);
                     if ($rt !== null) { $node->type = $rt; }
+                }
+                // Generic receiver (`Box<Tag>`): the sig above is the ERASED one
+                // the shared body compiles against. Re-type the RESULT from the
+                // method's un-erased `@return T` under this receiver's binding —
+                // without it the call erases to unknown and `+` / `.` / echo take
+                // the integer path, silently printing a pointer or a double's bits.
+                // Generic receiver (`Box<float>`): the sig above is the ERASED
+                // one the shared body compiles against — a boxed `cell`. Re-type
+                // the RESULT from the method's un-erased `@return T` under this
+                // receiver's binding, and mark it so the emitter unboxes.
+                //
+                // The cell alone is already CORRECT for strings/objects/ints (the
+                // tag carries them), but a plain mixed cell keeps the INTEGER
+                // path in arithmetic, so a `Box<float>` sum came back 0. Knowing
+                // T here is what recovers the float.
+                $gen = $this->genericReturnType($cls, $node->method, $objType);
+                if ($gen !== null && $this->isCellBoxed($node->type)) {
+                    // The value IS a cell — the shared body boxed it — and the
+                    // cell already carries its tag, so strings / objects / ints
+                    // come back right. What the binding adds is the cell's
+                    // FLAVOR: a NUMERIC cell promotes by tag in arithmetic, while
+                    // a plain mixed cell keeps the integer path (which read a
+                    // float's tag as an int and produced 0). Retyping the result
+                    // to the raw concrete type instead would be wrong — a string
+                    // in a cell is tagged, not a bare pointer.
+                    if ($gen->kind === Type::KIND_INT || $gen->kind === Type::KIND_FLOAT) {
+                        $node->type = Type::numericCell();
+                    }
                 }
             }
         }

@@ -170,12 +170,12 @@ final class Parser
             if ($kw === 'use')       return $this->parseUseDecl();
             if ($kw === 'class' || $kw === 'final' || $kw === 'abstract' || $kw === 'readonly') {
                 if ($kw === 'class' || $this->isClassModifierFollowedByClass()) {
-                    return $this->parseClass($attrs);
+                    return $this->parseClass($attrs, $stmtDoc);
                 }
             }
-            if ($kw === 'interface') return $this->parseClass($attrs);
-            if ($kw === 'trait')     return $this->parseClass($attrs);
-            if ($kw === 'enum')      return $this->parseClass($attrs);
+            if ($kw === 'interface') return $this->parseClass($attrs, $stmtDoc);
+            if ($kw === 'trait')     return $this->parseClass($attrs, $stmtDoc);
+            if ($kw === 'enum')      return $this->parseClass($attrs, $stmtDoc);
             if ($kw === 'function')  return $this->parseFunctionDecl($attrs);
             if ($kw === 'return')    return $this->parseReturn();
             if ($kw === 'echo')      return $this->parseEcho();
@@ -447,7 +447,7 @@ final class Parser
     /**
      * @param AttributeNode[] $attributes
      */
-    private function parseClass(array $attributes): Stmt
+    private function parseClass(array $attributes, ?string $docComment = null): Stmt
     {
         $span = $this->span();
         $isFinal = false;
@@ -477,7 +477,7 @@ final class Parser
             $name = $this->currentNamespace . '\\' . $name;
         }
 
-        $decl = $this->finishClassDecl($kindKw, $name, $attributes, $isFinal, $isAbstract, $isReadonly, $span);
+        $decl = $this->finishClassDecl($kindKw, $name, $attributes, $isFinal, $isAbstract, $isReadonly, $span, $docComment);
         return Stmt::class_($decl, $span);
     }
 
@@ -488,7 +488,7 @@ final class Parser
      *
      * @param AttributeNode[] $attributes
      */
-    private function finishClassDecl(string $kindKw, string $name, array $attributes, bool $isFinal, bool $isAbstract, bool $isReadonly, Span $span): ClassDecl
+    private function finishClassDecl(string $kindKw, string $name, array $attributes, bool $isFinal, bool $isAbstract, bool $isReadonly, Span $span, ?string $docComment = null): ClassDecl
     {
         $enumBacking = null;
         if ($kindKw === 'enum' && $this->check(TokenKind::Colon)) {
@@ -602,6 +602,7 @@ final class Parser
             $span,
             $uses,
             $traitAdaptations,
+            $docComment,
         );
     }
 

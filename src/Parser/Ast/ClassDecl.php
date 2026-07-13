@@ -47,5 +47,7 @@ final class ClassDecl
          * @var TraitAdaptation[]
          */
         public readonly array $traitAdaptations = [],
+        /** The docblock preceding the declaration — carries `@template T`. */
+        public readonly ?string $docComment = null,
     ) {}
 }

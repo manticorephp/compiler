@@ -59,6 +59,19 @@ final class ClassDef
      *  @var array<string, bool> */
     public array $propertyReadonly = [];
 
+    /** Declared `@template` parameters, in order (`['T']` for `@template T`). A
+     *  use site binds them positionally via {@see Type::$typeArgs}.
+     *  @var string[] */
+    public array $typeParams = [];
+
+    /** Method name → its declared return type STILL CARRYING type variables
+     *  (`T`, `T[]`). The MIR signature holds the erased form, because the class
+     *  has one shared compiled body; this un-erased copy exists only so a call
+     *  site with a bound receiver (`Box<Tag>`) can substitute and type the
+     *  result concretely.
+     *  @var array<string, Type> */
+    public array $genericReturns = [];
+
     /** Whether this class carries a dynamic-property bag. */
     public function usesBag(): bool
     {
