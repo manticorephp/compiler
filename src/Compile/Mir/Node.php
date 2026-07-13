@@ -90,6 +90,13 @@ abstract class Node
 
     public const KIND_MEMORY_OP = 'memory_op';
 
+
+    /**
+     * Double dispatch to the emitter: the node picks the visit method, so the
+     * emitter never re-derives the node type from `kind`.
+     */
+    abstract public function accept(EmitVisitor $v): string;
+
     public function __construct(
         public readonly string $kind,
         public Type $type,

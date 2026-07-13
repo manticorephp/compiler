@@ -48,6 +48,13 @@ use Compile\Mir\FunctionSignatures;
 use Compile\Mir\ArenaContext;
 use Compile\Mir\LocalSlots;
 use Compile\Mir\RuntimeLibrary;
+use Compile\Mir\EmitVisitor;
+use Compile\Mir\BitOp;
+use Compile\Mir\BitNot_;
+use Compile\Mir\MemoryOp_;
+use Compile\Mir\Yield_;
+use Compile\Mir\Goto_;
+use Compile\Mir\Label_;
 use Compile\Mir\RefBind_;
 use Compile\Mir\RefAddr_;
 use Compile\Mir\Throw_;
@@ -106,7 +113,7 @@ use Codegen\Llvm\Module as LlvmModule;
  * The `__main` MIR function lowers to `define i32 @main(i32, ptr)`
  * so the linker has the libc entry point.
  */
-final class EmitLlvm
+final class EmitLlvm implements EmitVisitor
 {
     use EmitLlvmRuntime;
     use EmitLlvmBuiltins;
@@ -3350,86 +3357,356 @@ final class EmitLlvm
     private string $lastValue = '0';
     private string $lastValueType = 'i64';
 
+    /**
+     * Emit one node. The node picks its own visit method (double dispatch) —
+     * this used to be a chain of up to 64 `kind ===` tests walked on every node.
+     */
     private function emitNode(Node $n): string
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_INT_CONST)    { $this->lastValue = (string)$n->value; $this->lastValueType = 'i64'; return ''; }
-        if ($k === Node::KIND_FLOAT_CONST)  { $this->lastValue = $this->formatFloat($n->value); $this->lastValueType = 'double'; return ''; }
-        if ($k === Node::KIND_BOOL_CONST)   { $this->lastValue = $n->value ? '1' : '0'; $this->lastValueType = 'i64'; return ''; }
-        if ($k === Node::KIND_NULL_CONST)   { $this->lastValue = '0'; $this->lastValueType = 'i64'; return ''; }
-        if ($k === Node::KIND_STRING_CONST) { return $this->emitStringConst($n); }
-        if ($k === Node::KIND_LOAD_LOCAL)   { return $this->emitLoadLocal($n); }
-        if ($k === Node::KIND_STORE_LOCAL)  { return $this->emitStoreLocal($n); }
-        if ($k === Node::KIND_ADD)          { return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'add', 'fadd'); }
-        if ($k === Node::KIND_SUB)          { return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'sub', 'fsub'); }
-        if ($k === Node::KIND_MUL)          { return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'mul', 'fmul'); }
-        if ($k === Node::KIND_DIV)          { return $this->emitDiv($n); }
-        if ($k === Node::KIND_MOD)          { return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'srem', 'frem'); }
-        if ($k === Node::KIND_NEG)          { return $this->emitNeg($n); }
-        if ($k === Node::KIND_NOT)          { return $this->emitNot($n); }
-        if ($k === Node::KIND_BITOP)        { return $this->emitBitOp($n); }
-        if ($k === Node::KIND_BITNOT)       { return $this->emitBitNot($n); }
-        if ($k === Node::KIND_CAST)         { return $this->emitCast($n); }
-        if ($k === Node::KIND_INSTANCEOF)   { return $this->emitInstanceof($n); }
-        if ($k === Node::KIND_NULLCOALESCE) { return $this->emitNullCoalesce($n); }
-        if ($k === Node::KIND_CLOSURE)      { return $this->emitClosure($n); }
-        if ($k === Node::KIND_INVOKE)       { return $this->emitInvoke($n); }
-        if ($k === Node::KIND_YIELD)        { return $this->emitYield($n); }
-        if ($k === Node::KIND_INCDEC)       { return $this->emitIncDec($n); }
-        if ($k === Node::KIND_STATIC_PROP)  { return $this->emitStaticProp($n); }
-        if ($k === Node::KIND_STORE_STATIC_PROP) { return $this->emitStoreStaticProp($n); }
-        if ($k === Node::KIND_STATIC_LOCAL_DECL) { return $this->emitStaticLocalDecl($n); }
-        if ($k === Node::KIND_ISSET)        { return $this->emitIsset($n); }
-        if ($k === Node::KIND_UNSET)        { return $this->emitUnset($n); }
-        if ($k === Node::KIND_CLASS_NAME)   { return $this->emitClassName($n); }
-        if ($k === Node::KIND_REF_ALIAS)    { return $this->emitRefAlias($n); }
-        if ($k === Node::KIND_REF_BIND)     { return $this->emitRefBind($n); }
-        if ($k === Node::KIND_REF_ADDR)     { return $this->emitRefAddr($n); }
-        if ($k === Node::KIND_THROW)        { return $this->emitThrow($n); }
-        if ($k === Node::KIND_TRY_CATCH)    { return $this->emitTryCatch($n); }
-        if ($k === Node::KIND_TERNARY)      { return $this->emitTernary($n); }
-        if ($k === Node::KIND_CONCAT)       { return $this->emitConcat($n); }
-        if ($k === Node::KIND_CMP)          { return $this->emitCmp($n); }
-        if ($k === Node::KIND_ECHO)         { return $this->emitEcho($n); }
-        if ($k === Node::KIND_RETURN)       { return $this->emitReturn($n); }
-        if ($k === Node::KIND_CALL)         { return $this->emitCall($n); }
-        if ($k === Node::KIND_IF)           { return $this->emitIf($n); }
-        if ($k === Node::KIND_WHILE)        { return $this->emitWhile($n); }
-        if ($k === Node::KIND_FOR)          { return $this->emitFor($n); }
-        if ($k === Node::KIND_DOWHILE)      { return $this->emitDoWhile($n); }
-        if ($k === Node::KIND_SWITCH)       { return $this->emitSwitch($n); }
-        if ($k === Node::KIND_MATCH)        { return $this->emitMatch($n); }
-        if ($k === Node::KIND_FOREACH)      { return $this->emitForeach($n); }
-        if ($k === Node::KIND_BREAK)        { return '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_CONTINUE)     { return '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_GOTO)         { return '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel(); }
-        if ($k === Node::KIND_LABEL)        { $l = $this->ssa->userLabel($n->name); return '  br label %' . $l . "\n" . $l . ":\n"; }
-        if ($k === Node::KIND_ARRAY_LIT)    { return $this->emitArrayLit($n); }
-        if ($k === Node::KIND_ARRAY_ACCESS) { return $this->emitArrayAccess($n); }
-        if ($k === Node::KIND_STORE_ELEMENT){ return $this->emitStoreElement($n); }
-        if ($k === Node::KIND_NEW_OBJ)         { return $this->emitNewObj($n); }
-        if ($k === Node::KIND_CLONE)           { return $this->emitClone($n); }
-        if ($k === Node::KIND_PROPERTY_ACCESS) { return $this->emitPropertyAccess($n); }
-        if ($k === Node::KIND_STORE_PROPERTY)  { return $this->emitStoreProperty($n); }
-        if ($k === Node::KIND_DYN_PROP)        { return $this->emitDynProp($n); }
-        if ($k === Node::KIND_STORE_DYN_PROP)  { return $this->emitStoreDynProp($n); }
-        if ($k === Node::KIND_METHOD_CALL)     { return $this->emitMethodCall($n); }
-        if ($k === Node::KIND_STATIC_CALL)     { return $this->emitStaticCall($n); }
-        if ($k === Node::KIND_BLOCK) {
+        return $n->accept($this);
+    }
+
+    public function visitIntConst(IntConst $n): string
+    {
+        $this->lastValue = (string)$n->value;
+        $this->lastValueType = 'i64';
+        return '';
+    }
+
+    public function visitFloatConst(FloatConst $n): string
+    {
+        $this->lastValue = $this->formatFloat($n->value);
+        $this->lastValueType = 'double';
+        return '';
+    }
+
+    public function visitStringConst(StringConst $n): string
+    {
+        return $this->emitStringConst($n);
+    }
+
+    public function visitBoolConst(BoolConst $n): string
+    {
+        $this->lastValue = $n->value ? '1' : '0';
+        $this->lastValueType = 'i64';
+        return '';
+    }
+
+    public function visitNullConst(NullConst $n): string
+    {
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return '';
+    }
+
+    public function visitLoadLocal(LoadLocal $n): string
+    {
+        return $this->emitLoadLocal($n);
+    }
+
+    public function visitStoreLocal(StoreLocal $n): string
+    {
+        return $this->emitStoreLocal($n);
+    }
+
+    public function visitAdd(Add $n): string
+    {
+        return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'add', 'fadd');
+    }
+
+    public function visitSub(Sub $n): string
+    {
+        return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'sub', 'fsub');
+    }
+
+    public function visitMul(Mul $n): string
+    {
+        return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'mul', 'fmul');
+    }
+
+    public function visitDiv(Div $n): string
+    {
+        return $this->emitDiv($n);
+    }
+
+    public function visitMod(Mod $n): string
+    {
+        return $this->emitArith($n, $this->binLeft($n), $this->binRight($n), 'srem', 'frem');
+    }
+
+    public function visitNeg(Neg $n): string
+    {
+        return $this->emitNeg($n);
+    }
+
+    public function visitNot(Not_ $n): string
+    {
+        return $this->emitNot($n);
+    }
+
+    public function visitBitOp(BitOp $n): string
+    {
+        return $this->emitBitOp($n);
+    }
+
+    public function visitBitNot(BitNot_ $n): string
+    {
+        return $this->emitBitNot($n);
+    }
+
+    public function visitConcat(Concat $n): string
+    {
+        return $this->emitConcat($n);
+    }
+
+    public function visitEcho(Echo_ $n): string
+    {
+        return $this->emitEcho($n);
+    }
+
+    public function visitReturn(Return_ $n): string
+    {
+        return $this->emitReturn($n);
+    }
+
+    public function visitCall(Call $n): string
+    {
+        return $this->emitCall($n);
+    }
+
+    public function visitBlock(Block $n): string
+    {
             $out = '';
             foreach ($n->stmts as $s) {
                 $out .= $this->emitNode($s);
                 $out .= $this->emitDiscardedCallRelease($s);
             }
             return $out;
-        }
-        // MemoryOps consumer seam (#5). EmitLlvm reads the plan; it
-        // never invents memory ops. Arena scope enter/leave emit real
-        // runtime calls (#5b). RcHeap retain/release + rc-mode release
-        // are still no-ops until the rc runtime lands.
-        if ($k === Node::KIND_MEMORY_OP) { return $this->emitMemoryOp($n); }
+    }
+
+    public function visitMemoryOp(MemoryOp_ $n): string
+    {
+        return $this->emitMemoryOp($n);
+    }
+
+    public function visitCmp(Cmp $n): string
+    {
+        return $this->emitCmp($n);
+    }
+
+    public function visitIf(If_ $n): string
+    {
+        return $this->emitIf($n);
+    }
+
+    public function visitWhile(While_ $n): string
+    {
+        return $this->emitWhile($n);
+    }
+
+    public function visitIncDec(IncDec $n): string
+    {
+        return $this->emitIncDec($n);
+    }
+
+    public function visitStaticProp(StaticProp_ $n): string
+    {
+        return $this->emitStaticProp($n);
+    }
+
+    public function visitStoreStaticProp(StoreStaticProp_ $n): string
+    {
+        return $this->emitStoreStaticProp($n);
+    }
+
+    public function visitStaticLocalDecl(StaticLocalDecl_ $n): string
+    {
+        return $this->emitStaticLocalDecl($n);
+    }
+
+    public function visitThrow(Throw_ $n): string
+    {
+        return $this->emitThrow($n);
+    }
+
+    public function visitYield(Yield_ $n): string
+    {
+        return $this->emitYield($n);
+    }
+
+    public function visitTryCatch(TryCatch_ $n): string
+    {
+        return $this->emitTryCatch($n);
+    }
+
+    public function visitRefAlias(RefAlias_ $n): string
+    {
+        return $this->emitRefAlias($n);
+    }
+
+    public function visitRefBind(RefBind_ $n): string
+    {
+        return $this->emitRefBind($n);
+    }
+
+    public function visitRefAddr(RefAddr_ $n): string
+    {
+        return $this->emitRefAddr($n);
+    }
+
+    public function visitGoto(Goto_ $n): string
+    {
+        return '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel();
+    }
+
+    public function visitLabel(Label_ $n): string
+    {
+        $l = $this->ssa->userLabel($n->name);
+        return '  br label %' . $l . "\n" . $l . ":\n";
+    }
+
+    public function visitClassName(ClassName_ $n): string
+    {
+        return $this->emitClassName($n);
+    }
+
+    public function visitIsset(Isset_ $n): string
+    {
+        return $this->emitIsset($n);
+    }
+
+    public function visitUnset(Unset_ $n): string
+    {
+        return $this->emitUnset($n);
+    }
+
+    public function visitClosure(Closure_ $n): string
+    {
+        return $this->emitClosure($n);
+    }
+
+    public function visitInvoke(Invoke_ $n): string
+    {
+        return $this->emitInvoke($n);
+    }
+
+    public function visitNullCoalesce(NullCoalesce_ $n): string
+    {
+        return $this->emitNullCoalesce($n);
+    }
+
+    public function visitInstanceof(Instanceof_ $n): string
+    {
+        return $this->emitInstanceof($n);
+    }
+
+    public function visitCast(Cast $n): string
+    {
+        return $this->emitCast($n);
+    }
+
+    public function visitTernary(Ternary $n): string
+    {
+        return $this->emitTernary($n);
+    }
+
+    public function visitSwitch(Switch_ $n): string
+    {
+        return $this->emitSwitch($n);
+    }
+
+    public function visitMatch(Match_ $n): string
+    {
+        return $this->emitMatch($n);
+    }
+
+    public function visitForeach(Foreach_ $n): string
+    {
+        return $this->emitForeach($n);
+    }
+
+    public function visitFor(For_ $n): string
+    {
+        return $this->emitFor($n);
+    }
+
+    public function visitDoWhile(DoWhile_ $n): string
+    {
+        return $this->emitDoWhile($n);
+    }
+
+    public function visitBreak(Break_ $n): string
+    {
+        return '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel();
+    }
+
+    public function visitContinue(Continue_ $n): string
+    {
+        return '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel();
+    }
+
+    public function visitArrayLit(ArrayLit $n): string
+    {
+        return $this->emitArrayLit($n);
+    }
+
+    public function visitArrayAccess(ArrayAccess_ $n): string
+    {
+        return $this->emitArrayAccess($n);
+    }
+
+    public function visitSpread(Spread_ $n): string
+    {
+        // No emit arm: a Spread_ is consumed by its parent node, never emitted
+        // on its own (the old chain fell through to an empty string here).
         return '';
     }
+
+    public function visitStoreElement(StoreElement $n): string
+    {
+        return $this->emitStoreElement($n);
+    }
+
+    public function visitNewObj(NewObj $n): string
+    {
+        return $this->emitNewObj($n);
+    }
+
+    public function visitPropertyAccess(PropertyAccess_ $n): string
+    {
+        return $this->emitPropertyAccess($n);
+    }
+
+    public function visitClone(Clone_ $n): string
+    {
+        return $this->emitClone($n);
+    }
+
+    public function visitDynProp(DynProp_ $n): string
+    {
+        return $this->emitDynProp($n);
+    }
+
+    public function visitStoreDynProp(StoreDynProp_ $n): string
+    {
+        return $this->emitStoreDynProp($n);
+    }
+
+    public function visitStoreProperty(StoreProperty $n): string
+    {
+        return $this->emitStoreProperty($n);
+    }
+
+    public function visitMethodCall(MethodCall_ $n): string
+    {
+        return $this->emitMethodCall($n);
+    }
+
+    public function visitStaticCall(StaticCall_ $n): string
+    {
+        return $this->emitStaticCall($n);
+    }
+
 
     /**
      * After an unconditional terminator (`br`, `ret`) the next

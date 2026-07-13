@@ -22,6 +22,11 @@ final class IntConst extends Node
     {
         parent::__construct(Node::KIND_INT_CONST, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitIntConst($this);
+    }
 }
 
 final class FloatConst extends Node
@@ -29,6 +34,11 @@ final class FloatConst extends Node
     public function __construct(public readonly float $value, Type $type)
     {
         parent::__construct(Node::KIND_FLOAT_CONST, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitFloatConst($this);
     }
 }
 
@@ -38,6 +48,11 @@ final class StringConst extends Node
     {
         parent::__construct(Node::KIND_STRING_CONST, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStringConst($this);
+    }
 }
 
 final class BoolConst extends Node
@@ -46,6 +61,11 @@ final class BoolConst extends Node
     {
         parent::__construct(Node::KIND_BOOL_CONST, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitBoolConst($this);
+    }
 }
 
 final class NullConst extends Node
@@ -53,6 +73,11 @@ final class NullConst extends Node
     public function __construct(Type $type)
     {
         parent::__construct(Node::KIND_NULL_CONST, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitNullConst($this);
     }
 }
 
@@ -63,6 +88,11 @@ final class LoadLocal extends Node
     public function __construct(public readonly string $name, Type $type)
     {
         parent::__construct(Node::KIND_LOAD_LOCAL, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitLoadLocal($this);
     }
 }
 
@@ -79,6 +109,11 @@ final class StoreLocal extends Node
     ) {
         parent::__construct(Node::KIND_STORE_LOCAL, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStoreLocal($this);
+    }
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────
@@ -92,6 +127,11 @@ final class Add extends Node
     ) {
         parent::__construct(Node::KIND_ADD, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitAdd($this);
+    }
 }
 
 final class Sub extends Node
@@ -102,6 +142,11 @@ final class Sub extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_SUB, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitSub($this);
     }
 }
 
@@ -114,6 +159,11 @@ final class Mul extends Node
     ) {
         parent::__construct(Node::KIND_MUL, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitMul($this);
+    }
 }
 
 final class Div extends Node
@@ -125,6 +175,11 @@ final class Div extends Node
     ) {
         parent::__construct(Node::KIND_DIV, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitDiv($this);
+    }
 }
 
 final class Mod extends Node
@@ -135,6 +190,11 @@ final class Mod extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_MOD, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitMod($this);
     }
 }
 
@@ -148,6 +208,11 @@ final class Neg extends Node
     ) {
         parent::__construct(Node::KIND_NEG, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitNeg($this);
+    }
 }
 
 final class Not_ extends Node
@@ -155,6 +220,11 @@ final class Not_ extends Node
     public function __construct(public Node $operand)
     {
         parent::__construct(Node::KIND_NOT, Type::bool_());
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitNot($this);
     }
 }
 
@@ -169,6 +239,11 @@ final class BitOp extends Node
     ) {
         parent::__construct(Node::KIND_BITOP, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitBitOp($this);
+    }
 }
 
 /** `~$x` — integer bitwise complement. */
@@ -177,6 +252,11 @@ final class BitNot_ extends Node
     public function __construct(public Node $operand, Type $type)
     {
         parent::__construct(Node::KIND_BITNOT, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitBitNot($this);
     }
 }
 
@@ -193,6 +273,11 @@ final class Concat extends Node
     ) {
         parent::__construct(Node::KIND_CONCAT, Type::string_());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitConcat($this);
+    }
 }
 
 // ── Statements ────────────────────────────────────────────────────
@@ -204,6 +289,11 @@ final class Echo_ extends Node
     {
         parent::__construct(Node::KIND_ECHO, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitEcho($this);
+    }
 }
 
 final class Return_ extends Node
@@ -211,6 +301,11 @@ final class Return_ extends Node
     public function __construct(public ?Node $value, Type $type)
     {
         parent::__construct(Node::KIND_RETURN, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitReturn($this);
     }
 }
 
@@ -227,6 +322,11 @@ final class Call extends Node
     ) {
         parent::__construct(Node::KIND_CALL, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitCall($this);
+    }
 }
 
 final class Block extends Node
@@ -235,6 +335,11 @@ final class Block extends Node
     public function __construct(public array $stmts, Type $type)
     {
         parent::__construct(Node::KIND_BLOCK, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitBlock($this);
     }
 }
 
@@ -260,6 +365,11 @@ final class MemoryOp_ extends Node
     ) {
         parent::__construct(Node::KIND_MEMORY_OP, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitMemoryOp($this);
+    }
 }
 
 // ── Comparison ────────────────────────────────────────────────────
@@ -277,6 +387,11 @@ final class Cmp extends Node
     ) {
         parent::__construct(Node::KIND_CMP, Type::bool_());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitCmp($this);
+    }
 }
 
 // ── Control flow ──────────────────────────────────────────────────
@@ -290,6 +405,11 @@ final class If_ extends Node
     ) {
         parent::__construct(Node::KIND_IF, Type::void());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitIf($this);
+    }
 }
 
 final class While_ extends Node
@@ -299,6 +419,11 @@ final class While_ extends Node
         public Block $body,
     ) {
         parent::__construct(Node::KIND_WHILE, Type::void());
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitWhile($this);
     }
 }
 
@@ -312,6 +437,11 @@ final class IncDec extends Node
     ) {
         parent::__construct(Node::KIND_INCDEC, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitIncDec($this);
+    }
 }
 
 final class StaticProp_ extends Node
@@ -320,6 +450,11 @@ final class StaticProp_ extends Node
     {
         parent::__construct(Node::KIND_STATIC_PROP, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStaticProp($this);
+    }
 }
 
 final class StoreStaticProp_ extends Node
@@ -327,6 +462,11 @@ final class StoreStaticProp_ extends Node
     public function __construct(public string $global, public Node $value, Type $type)
     {
         parent::__construct(Node::KIND_STORE_STATIC_PROP, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStoreStaticProp($this);
     }
 }
 
@@ -347,6 +487,11 @@ final class StaticLocalDecl_ extends Node
     ) {
         parent::__construct(Node::KIND_STATIC_LOCAL_DECL, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStaticLocalDecl($this);
+    }
 }
 
 /** `throw $value` — store + longjmp to the topmost active jmp_buf. */
@@ -355,6 +500,11 @@ final class Throw_ extends Node
     public function __construct(public Node $value, Type $type)
     {
         parent::__construct(Node::KIND_THROW, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitThrow($this);
     }
 }
 
@@ -373,6 +523,11 @@ final class Yield_ extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_YIELD, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitYield($this);
     }
 }
 
@@ -417,6 +572,11 @@ final class TryCatch_ extends Node
     ) {
         parent::__construct(Node::KIND_TRY_CATCH, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitTryCatch($this);
+    }
 }
 
 /** `$y = &$x` — bind local `target` as an alias of local `source`. */
@@ -426,6 +586,11 @@ final class RefAlias_ extends Node
     {
         parent::__construct(Node::KIND_REF_ALIAS, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitRefAlias($this);
+    }
 }
 
 /** `$r = &fn(...)` — bind `$r` as a reference to a by-ref return. */
@@ -434,6 +599,11 @@ final class RefBind_ extends Node
     public function __construct(public string $target, public Node $call, Type $type)
     {
         parent::__construct(Node::KIND_REF_BIND, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitRefBind($this);
     }
 }
 
@@ -446,6 +616,11 @@ final class RefAddr_ extends Node
     {
         parent::__construct(Node::KIND_REF_ADDR, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitRefAddr($this);
+    }
 }
 
 /** `goto L;` — an unconditional branch to the block emitted for label `L`. */
@@ -454,6 +629,11 @@ final class Goto_ extends Node
     public function __construct(public string $label, Type $type)
     {
         parent::__construct(Node::KIND_GOTO, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitGoto($this);
     }
 }
 
@@ -464,6 +644,11 @@ final class Label_ extends Node
     {
         parent::__construct(Node::KIND_LABEL, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitLabel($this);
+    }
 }
 
 /** `$obj::class` — the runtime class name of `operand` as a string. */
@@ -472,6 +657,11 @@ final class ClassName_ extends Node
     public function __construct(public Node $operand, Type $type)
     {
         parent::__construct(Node::KIND_CLASS_NAME, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitClassName($this);
     }
 }
 
@@ -483,6 +673,11 @@ final class Isset_ extends Node
     {
         parent::__construct(Node::KIND_ISSET, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitIsset($this);
+    }
 }
 
 /** `unset($a, $b, ...)` — clear each target. */
@@ -492,6 +687,11 @@ final class Unset_ extends Node
     public function __construct(public array $targets, Type $type)
     {
         parent::__construct(Node::KIND_UNSET, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitUnset($this);
     }
 }
 
@@ -513,6 +713,11 @@ final class Closure_ extends Node
     ) {
         parent::__construct(Node::KIND_CLOSURE, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitClosure($this);
+    }
 }
 
 final class Invoke_ extends Node
@@ -525,6 +730,11 @@ final class Invoke_ extends Node
     ) {
         parent::__construct(Node::KIND_INVOKE, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitInvoke($this);
+    }
 }
 
 final class NullCoalesce_ extends Node
@@ -536,6 +746,11 @@ final class NullCoalesce_ extends Node
     ) {
         parent::__construct(Node::KIND_NULLCOALESCE, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitNullCoalesce($this);
+    }
 }
 
 final class Instanceof_ extends Node
@@ -545,6 +760,11 @@ final class Instanceof_ extends Node
         public string $class,
     ) {
         parent::__construct(Node::KIND_INSTANCEOF, Type::bool_());
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitInstanceof($this);
     }
 }
 
@@ -556,6 +776,11 @@ final class Cast extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_CAST, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitCast($this);
     }
 }
 
@@ -572,6 +797,11 @@ final class Ternary extends Node
         public bool $nullable = false,
     ) {
         parent::__construct(Node::KIND_TERNARY, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitTernary($this);
     }
 }
 
@@ -594,6 +824,11 @@ final class Switch_ extends Node
     ) {
         parent::__construct(Node::KIND_SWITCH, Type::void());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitSwitch($this);
+    }
 }
 
 /** One `conds => body` arm of a {@see Match_}. conds null = default. */
@@ -615,6 +850,11 @@ final class Match_ extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_MATCH, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitMatch($this);
     }
 }
 
@@ -648,6 +888,11 @@ final class Foreach_ extends Node
      */
     public string $iterClass = '';
     public bool $iterAggregate = false;
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitForeach($this);
+    }
 }
 
 final class For_ extends Node
@@ -660,6 +905,11 @@ final class For_ extends Node
     ) {
         parent::__construct(Node::KIND_FOR, Type::void());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitFor($this);
+    }
 }
 
 final class DoWhile_ extends Node
@@ -670,6 +920,11 @@ final class DoWhile_ extends Node
     ) {
         parent::__construct(Node::KIND_DOWHILE, Type::void());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitDoWhile($this);
+    }
 }
 
 final class Break_ extends Node
@@ -678,6 +933,11 @@ final class Break_ extends Node
     {
         parent::__construct(Node::KIND_BREAK, Type::void());
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitBreak($this);
+    }
 }
 
 final class Continue_ extends Node
@@ -685,6 +945,11 @@ final class Continue_ extends Node
     public function __construct(public int $level = 1)
     {
         parent::__construct(Node::KIND_CONTINUE, Type::void());
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitContinue($this);
     }
 }
 
@@ -711,6 +976,11 @@ final class ArrayLit extends Node
     {
         parent::__construct(Node::KIND_ARRAY_LIT, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitArrayLit($this);
+    }
 }
 
 final class ArrayAccess_ extends Node
@@ -722,6 +992,11 @@ final class ArrayAccess_ extends Node
     ) {
         parent::__construct(Node::KIND_ARRAY_ACCESS, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitArrayAccess($this);
+    }
 }
 
 final class Spread_ extends Node
@@ -731,6 +1006,11 @@ final class Spread_ extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_SPREAD, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitSpread($this);
     }
 }
 
@@ -743,6 +1023,11 @@ final class StoreElement extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_STORE_ELEMENT, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStoreElement($this);
     }
 }
 
@@ -758,6 +1043,11 @@ final class NewObj extends Node
     ) {
         parent::__construct(Node::KIND_NEW_OBJ, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitNewObj($this);
+    }
 }
 
 final class PropertyAccess_ extends Node
@@ -768,6 +1058,11 @@ final class PropertyAccess_ extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_PROPERTY_ACCESS, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitPropertyAccess($this);
     }
 }
 
@@ -796,6 +1091,11 @@ final class Clone_ extends Node
     ) {
         parent::__construct(Node::KIND_CLONE, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitClone($this);
+    }
 }
 
 final class DynProp_ extends Node
@@ -804,6 +1104,11 @@ final class DynProp_ extends Node
     {
         parent::__construct(Node::KIND_DYN_PROP, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitDynProp($this);
+    }
 }
 
 final class StoreDynProp_ extends Node
@@ -811,6 +1116,11 @@ final class StoreDynProp_ extends Node
     public function __construct(public Node $object, public Node $name, public Node $value, Type $type)
     {
         parent::__construct(Node::KIND_STORE_DYN_PROP, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStoreDynProp($this);
     }
 }
 
@@ -827,6 +1137,11 @@ final class StoreProperty extends Node
     ) {
         parent::__construct(Node::KIND_STORE_PROPERTY, $type);
     }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStoreProperty($this);
+    }
 }
 
 final class MethodCall_ extends Node
@@ -839,6 +1154,11 @@ final class MethodCall_ extends Node
         Type $type,
     ) {
         parent::__construct(Node::KIND_METHOD_CALL, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitMethodCall($this);
     }
 }
 
@@ -861,5 +1181,10 @@ final class StaticCall_ extends Node
         public readonly string $staticClass = '',
     ) {
         parent::__construct(Node::KIND_STATIC_CALL, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitStaticCall($this);
     }
 }
