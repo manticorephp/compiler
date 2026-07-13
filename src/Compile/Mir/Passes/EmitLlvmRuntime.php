@@ -189,7 +189,7 @@ trait EmitLlvmRuntime
         $out .= "  ret void\n";
         $out .= "}\n";
         $out .= $this->stringCoreRuntime();
-        if ($this->needsArena) {
+        if ($this->rt->needsArena) {
             $out .= "define ptr @__mir_str_alloc_arena(i64 %n) {\n";
             $out .= "entry:\n";
             $out .= "  %t = add i64 %n, " . $H . "\n";
@@ -245,7 +245,7 @@ trait EmitLlvmRuntime
             $out .= "}\n";
             }
         }
-        if ($this->needsRc) {
+        if ($this->rt->needsRc) {
             // Reference counting for escaping (RcHeap) vec / obj. Both
             // layouts carry the refcount at header[1] (offset 8): vec is
             // [len, rc, ...], obj is [class_id, rc, ...]. retain bumps it
@@ -300,7 +300,7 @@ trait EmitLlvmRuntime
             $out .= $this->profBump(4);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %rc = load i64, ptr %rcp\n";
-            if ($this->needsCc) {
+            if ($this->rt->needsCc) {
                 // Cycle-collector mode: the rc word packs rc | color |
                 // buffered, so the live count is the SIGNED low-56-bit field
                 // (shl 8 / ashr 8) — color/buffered bits must not poison the
@@ -356,9 +356,9 @@ trait EmitLlvmRuntime
             $out .= "  ret void\n";
             $out .= "}\n";
             $out .= $this->dropRuntime();
-            if ($this->needsCc) { $out .= $this->ccRuntime(); }
+            if ($this->rt->needsCc) { $out .= $this->ccRuntime(); }
         }
-        if ($this->needsStrRc) {
+        if ($this->rt->needsStrRc) {
             // String rc: the rc word (ptr-8) holds the count; cap@-16
             // precedes it. Immortal strings (literals, arena) carry -1 and
             // are skipped by both ops, so retain never writes read-only
@@ -430,7 +430,7 @@ trait EmitLlvmRuntime
             $out .= "  ret void\n";
             $out .= "}\n";
         }
-        if (!$this->needsArena) {
+        if (!$this->rt->needsArena) {
             return $out;
         }
         // ── Bump-pointer arena (chunk chain + LIFO scope marks) ──
@@ -638,7 +638,7 @@ trait EmitLlvmRuntime
         $out .= "fin:\n";
         $out .= "  ret void\n";
         $out .= "}\n";
-        if ($this->needsArenaReset) {
+        if ($this->rt->needsArenaReset) {
             // Per-loop iteration reset: save the bump position before the
             // loop, restore it at the top of each iteration so confined
             // (Arena) temporaries built in the body are reclaimed instead
@@ -1363,10 +1363,10 @@ trait EmitLlvmRuntime
     private function concatRuntime(): string
     {
         $out = $this->concatImpl('@__mir_concat', '@__mir_str_alloc');
-        if ($this->needsArena) {
+        if ($this->rt->needsArena) {
             $out .= $this->concatImpl('@__mir_concat_arena', '@__mir_str_alloc_arena');
         }
-        if ($this->needsStrAppend) {
+        if ($this->rt->needsStrAppend) {
             $out .= $this->strAppendImpl();
         }
         return $out;
@@ -1468,7 +1468,7 @@ trait EmitLlvmRuntime
     private function stringBuiltinRuntime(): string
     {
         $out = '';
-        if ($this->needsSubstr) {
+        if ($this->rt->needsSubstr) {
             // PHP/Zend substr() normalization, branchless (all `select`):
             //   n = strlen(s)
             //   start = start<0 ? max(0, n+start) : min(start, n)
@@ -1505,7 +1505,7 @@ trait EmitLlvmRuntime
             $out .= "  ret ptr %buf\n";
             $out .= "}\n";
         }
-        if ($this->needsStrRepeat) {
+        if ($this->rt->needsStrRepeat) {
             $out .= "\ndefine ptr @__mir_str_repeat(ptr %s, i64 %n) {\n";
             $out .= "entry:\n";
             $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
@@ -1529,14 +1529,14 @@ trait EmitLlvmRuntime
             $out .= "  ret ptr %buf\n";
             $out .= "}\n";
         }
-        if ($this->needsIpow) { $out .= $this->ipowRuntime(); }
-        if ($this->needsStrtolower) { $out .= $this->caseConvRuntime('__mir_strtolower', 65, 90, 32); }
-        if ($this->needsStrtoupper) { $out .= $this->caseConvRuntime('__mir_strtoupper', 97, 122, -32); }
-        if ($this->needsAddslashes) { $out .= $this->addslashesRuntime(); }
-        if ($this->needsJsonEscape) { $out .= $this->jsonEscapeRuntime(); }
-        if ($this->needsJsonEnc) { $out .= $this->jsonEncRuntime(); }
-        if ($this->needsStrReplaceOne) { $out .= $this->strReplaceOneRuntime(); }
-        if ($this->needsStrpos) {
+        if ($this->rt->needsIpow) { $out .= $this->ipowRuntime(); }
+        if ($this->rt->needsStrtolower) { $out .= $this->caseConvRuntime('__mir_strtolower', 65, 90, 32); }
+        if ($this->rt->needsStrtoupper) { $out .= $this->caseConvRuntime('__mir_strtoupper', 97, 122, -32); }
+        if ($this->rt->needsAddslashes) { $out .= $this->addslashesRuntime(); }
+        if ($this->rt->needsJsonEscape) { $out .= $this->jsonEscapeRuntime(); }
+        if ($this->rt->needsJsonEnc) { $out .= $this->jsonEncRuntime(); }
+        if ($this->rt->needsStrReplaceOne) { $out .= $this->strReplaceOneRuntime(); }
+        if ($this->rt->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),
             // miss → NaN-boxed bool(false). Callers read the tag.
             // strpos($h, $n, $off): search from byte offset $off (PHP-faithful —
@@ -1569,7 +1569,7 @@ trait EmitLlvmRuntime
             $out .= "  ret i64 -3940649673949184\n";
             $out .= "}\n";
         }
-        if ($this->needsStrExplode) {
+        if ($this->rt->needsStrExplode) {
             // `__mir_str_explode(delim, subj, limit) -> ptr` — single-scan split
             // into a fresh vec[string]. Each segment is a POOLED `__mir_str_alloc`
             // (size-class free-list, sets len=n-1 & rc=1) + memcpy — NOT raw-malloc

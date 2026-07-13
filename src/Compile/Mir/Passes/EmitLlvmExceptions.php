@@ -27,8 +27,8 @@ trait EmitLlvmExceptions
     /** `@__mir_jmp_stack + slot*256` as a ptr SSA. Appends IR to $out-by-return. */
     private function jmpBufExpr(string $slotReg): string
     {
-        $off = $this->allocSsa();
-        $this->jmpScratch = $this->allocSsa();
+        $off = $this->ssa->allocReg();
+        $this->jmpScratch = $this->ssa->allocReg();
         $ir = '  ' . $off . ' = mul i64 ' . $slotReg . ", 256\n";
         $ir .= '  ' . $this->jmpScratch . ' = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 ' . $off . "\n";
         return $ir;
@@ -40,9 +40,9 @@ trait EmitLlvmExceptions
      *  a generator / when no slot). The frame survives a yield suspension. */
     private function tryStoreDepth(int $slot, string $val): string
     {
-        if ($slot < 0 || !$this->inGenerator) { return ''; }
+        if ($slot < 0 || !$this->gen->inGenerator) { return ''; }
         $off = self::GEN_HEADER + 8 * $slot;
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         return '  ' . $p . ' = getelementptr inbounds i8, ptr %frame, i64 '
              . (string)$off . "\n  store i64 " . $val . ', ptr ' . $p . "\n";
     }
@@ -51,10 +51,10 @@ trait EmitLlvmExceptions
      *  $tryDepthScratch}. Falls back to the entry SSA outside a generator. */
     private function tryReloadDepth(int $slot, string $fallback): string
     {
-        if ($slot < 0 || !$this->inGenerator) { $this->tryDepthScratch = $fallback; return ''; }
+        if ($slot < 0 || !$this->gen->inGenerator) { $this->tryDepthScratch = $fallback; return ''; }
         $off = self::GEN_HEADER + 8 * $slot;
-        $p = $this->allocSsa();
-        $v = $this->allocSsa();
+        $p = $this->ssa->allocReg();
+        $v = $this->ssa->allocReg();
         $this->tryDepthScratch = $v;
         return '  ' . $p . ' = getelementptr inbounds i8, ptr %frame, i64 '
              . (string)$off . "\n  " . $v . ' = load i64, ptr ' . $p . "\n";
@@ -62,13 +62,13 @@ trait EmitLlvmExceptions
 
     private function emitThrow(\Compile\Mir\Throw_ $n): string
     {
-        $this->needsExceptions = true;
+        $this->rt->needsExceptions = true;
         $out = $this->emitNode($n->value);
         $out .= $this->coerceToPtr();
         $out .= '  store ptr ' . $this->lastValue . ", ptr @__mir_thrown\n";
-        $depth = $this->allocSsa();
+        $depth = $this->ssa->allocReg();
         $out .= '  ' . $depth . " = load i64, ptr @__mir_jmp_depth\n";
-        $slot = $this->allocSsa();
+        $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . ' = sub i64 ' . $depth . ", 1\n";
         $out .= $this->jmpBufExpr($slot);
         $out .= '  call void @longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
@@ -84,17 +84,17 @@ trait EmitLlvmExceptions
     private function btRestore(string $btSlot): string
     {
         if ($btSlot === '') { return ''; }
-        $b = $this->allocSsa();
+        $b = $this->ssa->allocReg();
         return '  ' . $b . ' = load i64, ptr ' . $btSlot . "\n"
              . '  store i64 ' . $b . ", ptr @__mir_bt_depth\n";
     }
 
     private function emitTryCatch(\Compile\Mir\TryCatch_ $n): string
     {
-        $this->needsExceptions = true;
+        $this->rt->needsExceptions = true;
         $hasFinally = $n->hasFinally;
-        $endLbl = $this->allocLabel('try_end');
-        $finLbl = $hasFinally ? $this->allocLabel('try_fin') : '';
+        $endLbl = $this->ssa->allocLabel('try_end');
+        $finLbl = $hasFinally ? $this->ssa->allocLabel('try_fin') : '';
         $joinLbl = $hasFinally ? $finLbl : $endLbl;
 
         $out = '';
@@ -102,19 +102,19 @@ trait EmitLlvmExceptions
         // the per-call bt_pop()s, so the catch restores it (else the stack keeps
         // the unwound frames and later traces grow). alloca survives setjmp.
         $btSlot = '';
-        if ($this->needsBacktrace) {
-            $btSlot = $this->allocSsa();
+        if ($this->rt->needsBacktrace) {
+            $btSlot = $this->ssa->allocReg();
             $out .= '  ' . $btSlot . " = alloca i64\n";
-            $bd = $this->allocSsa();
+            $bd = $this->ssa->allocReg();
             $out .= '  ' . $bd . " = load i64, ptr @__mir_bt_depth\n";
             $out .= '  store i64 ' . $bd . ', ptr ' . $btSlot . "\n";
         }
         $pendFlag = '';
         $pendVal = '';
         if ($hasFinally) {
-            $pendFlag = $this->allocSsa();
-            $pendVal = $this->allocSsa();
-            if ($this->inGenerator && $n->genPendSlot >= 0) {
+            $pendFlag = $this->ssa->allocReg();
+            $pendVal = $this->ssa->allocReg();
+            if ($this->gen->inGenerator && $n->genPendSlot >= 0) {
                 // Frame cells (a yield in the try bypasses an alloca via the
                 // resume switch). Use the entry-block GEPs precomputed in
                 // {@see $this->slots} so the pointer dominates every use across
@@ -132,48 +132,48 @@ trait EmitLlvmExceptions
         // Outer buf (finally only) — routes escapes through finally.
         $outerCatchLbl = '';
         if ($hasFinally) {
-            $outerCatchLbl = $this->allocLabel('try_outercatch');
-            $bodyLbl = $this->allocLabel('try_outerbody');
-            $od = $this->allocSsa();
+            $outerCatchLbl = $this->ssa->allocLabel('try_outercatch');
+            $bodyLbl = $this->ssa->allocLabel('try_outerbody');
+            $od = $this->ssa->allocReg();
             $out .= '  ' . $od . " = load i64, ptr @__mir_jmp_depth\n";
             $out .= $this->tryStoreDepth($n->genOuterSlot, $od);
             $out .= $this->jmpBufExpr($od);
             $outerBuf = $this->jmpScratch;
-            $nd = $this->allocSsa();
+            $nd = $this->ssa->allocReg();
             $out .= '  ' . $nd . ' = add i64 ' . $od . ", 1\n";
             $out .= '  store i64 ' . $nd . ", ptr @__mir_jmp_depth\n";
-            $osj = $this->allocSsa();
+            $osj = $this->ssa->allocReg();
             $out .= '  ' . $osj . ' = call i32 @setjmp(ptr ' . $outerBuf . ")\n";
-            $oc = $this->allocSsa();
+            $oc = $this->ssa->allocReg();
             $out .= '  ' . $oc . ' = icmp eq i32 ' . $osj . ", 0\n";
             $out .= '  br i1 ' . $oc . ', label %' . $bodyLbl . ', label %' . $outerCatchLbl . "\n";
             $out .= $bodyLbl . ":\n";
         }
 
         // Inner buf — try body / catch dispatch.
-        $idb = $this->allocSsa();
+        $idb = $this->ssa->allocReg();
         $out .= '  ' . $idb . " = load i64, ptr @__mir_jmp_depth\n";
         $out .= $this->tryStoreDepth($n->genDepthSlot, $idb);
         $out .= $this->jmpBufExpr($idb);
         $innerBuf = $this->jmpScratch;
-        $ind = $this->allocSsa();
+        $ind = $this->ssa->allocReg();
         $out .= '  ' . $ind . ' = add i64 ' . $idb . ", 1\n";
         $out .= '  store i64 ' . $ind . ", ptr @__mir_jmp_depth\n";
-        $sj = $this->allocSsa();
+        $sj = $this->ssa->allocReg();
         $out .= '  ' . $sj . ' = call i32 @setjmp(ptr ' . $innerBuf . ")\n";
-        $tryLbl = $this->allocLabel('try_body');
+        $tryLbl = $this->ssa->allocLabel('try_body');
         $hasCatch = \count($n->catches) > 0;
         // No catch but finally present: an inner throw must still record
         // the pending exception so finally re-throws it afterwards.
         $catchlessFin = (!$hasCatch && $hasFinally);
         if ($hasCatch) {
-            $catchLbl = $this->allocLabel('try_catch');
+            $catchLbl = $this->ssa->allocLabel('try_catch');
         } elseif ($catchlessFin) {
-            $catchLbl = $this->allocLabel('try_catchless');
+            $catchLbl = $this->ssa->allocLabel('try_catchless');
         } else {
             $catchLbl = $joinLbl;
         }
-        $cnd = $this->allocSsa();
+        $cnd = $this->ssa->allocReg();
         $out .= '  ' . $cnd . ' = icmp eq i32 ' . $sj . ", 0\n";
         $out .= '  br i1 ' . $cnd . ', label %' . $tryLbl . ', label %' . $catchLbl . "\n";
 
@@ -199,7 +199,7 @@ trait EmitLlvmExceptions
             $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             $out .= $this->btRestore($btSlot);
-            $clt = $this->allocSsa();
+            $clt = $this->ssa->allocReg();
             $out .= '  ' . $clt . " = load ptr, ptr @__mir_thrown\n";
             $out .= '  store ptr ' . $clt . ', ptr ' . $pendVal . "\n";
             $out .= '  store i64 1, ptr ' . $pendFlag . "\n";
@@ -212,13 +212,13 @@ trait EmitLlvmExceptions
             $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             $out .= $this->btRestore($btSlot);
-            $thrown = $this->allocSsa();
+            $thrown = $this->ssa->allocReg();
             $out .= '  ' . $thrown . " = load ptr, ptr @__mir_thrown\n";
             $out .= $this->emitLoadClassId($thrown);
             $cid = $this->classIdReg;
             foreach ($n->catches as $c) {
-                $matchLbl = $this->allocLabel('catch_match');
-                $nextLbl = $this->allocLabel('catch_next');
+                $matchLbl = $this->ssa->allocLabel('catch_match');
+                $nextLbl = $this->ssa->allocLabel('catch_next');
                 $cVar = $this->catchVar($c);
                 $cTypes = $this->catchTypes($c);
                 if ($this->catchAcceptsAll($cTypes)) {
@@ -230,7 +230,7 @@ trait EmitLlvmExceptions
                 }
                 $out .= $matchLbl . ":\n";
                 if ($cVar !== null && isset($this->slots[$cVar])) {
-                    $ti = $this->allocSsa();
+                    $ti = $this->ssa->allocReg();
                     $out .= '  ' . $ti . ' = ptrtoint ptr ' . $thrown . " to i64\n";
                     $out .= '  store i64 ' . $ti . ', ptr ' . $this->slots[$cVar] . "\n";
                 }
@@ -248,7 +248,7 @@ trait EmitLlvmExceptions
             \array_pop($this->finallyStack);
             $out .= $outerCatchLbl . ":\n";
             // Record the in-flight exception for rethrow after finally.
-            $oce = $this->allocSsa();
+            $oce = $this->ssa->allocReg();
             $out .= '  ' . $oce . " = load ptr, ptr @__mir_thrown\n";
             $out .= '  store ptr ' . $oce . ', ptr ' . $pendVal . "\n";
             $out .= '  store i64 1, ptr ' . $pendFlag . "\n";
@@ -261,14 +261,14 @@ trait EmitLlvmExceptions
             $out .= $this->tryReloadDepth($n->genOuterSlot, $od);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             foreach ($n->finallyBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
-            $rethrowLbl = $this->allocLabel('try_rethrow');
-            $pf = $this->allocSsa();
+            $rethrowLbl = $this->ssa->allocLabel('try_rethrow');
+            $pf = $this->ssa->allocReg();
             $out .= '  ' . $pf . ' = load i64, ptr ' . $pendFlag . "\n";
-            $pc = $this->allocSsa();
+            $pc = $this->ssa->allocReg();
             $out .= '  ' . $pc . ' = icmp ne i64 ' . $pf . ", 0\n";
             $out .= '  br i1 ' . $pc . ', label %' . $rethrowLbl . ', label %' . $endLbl . "\n";
             $out .= $rethrowLbl . ":\n";
-            $sv = $this->allocSsa();
+            $sv = $this->ssa->allocReg();
             $out .= '  ' . $sv . ' = load ptr, ptr ' . $pendVal . "\n";
             $out .= '  store ptr ' . $sv . ", ptr @__mir_thrown\n";
             $out .= $this->emitRethrowAt();
@@ -283,9 +283,9 @@ trait EmitLlvmExceptions
     /** longjmp through the current topmost buf (depth-1). */
     private function emitRethrowAt(): string
     {
-        $d = $this->allocSsa();
+        $d = $this->ssa->allocReg();
         $out = '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
-        $s = $this->allocSsa();
+        $s = $this->ssa->allocReg();
         $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
         $out .= $this->jmpBufExpr($s);
         $out .= '  call void @longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
@@ -310,10 +310,10 @@ trait EmitLlvmExceptions
         $first = true;
         $out = '';
         foreach ($ids as $id) {
-            $eq = $this->allocSsa();
+            $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $cidReg . ', ' . (string)$id . "\n";
             if ($first) { $acc = $eq; $first = false; continue; }
-            $or = $this->allocSsa();
+            $or = $this->ssa->allocReg();
             $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $eq . "\n";
             $acc = $or;
         }

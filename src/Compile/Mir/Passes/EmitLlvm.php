@@ -38,6 +38,10 @@ use Compile\Mir\Isset_;
 use Compile\Mir\Unset_;
 use Compile\Mir\ClassName_;
 use Compile\Mir\RefAlias_;
+use Compile\Mir\RuntimeFeatures;
+use Compile\Mir\StringPool;
+use Compile\Mir\SsaBuilder;
+use Compile\Mir\GeneratorContext;
 use Compile\Mir\RefBind_;
 use Compile\Mir\RefAddr_;
 use Compile\Mir\Throw_;
@@ -105,11 +109,11 @@ final class EmitLlvm
 
     public function name(): string { return 'emit-llvm'; }
 
-    /** @var array<string, int> string → pool id */
-    private array $stringPool = [];
+    /** Interned string-literal pool (fresh each {@see emit}). */
+    private ?StringPool $pool = null;
 
-    private int $nextId = 0;
-    private int $nextLabel = 0;
+    /** Per-function SSA register + label allocator (fresh each {@see emit}). */
+    private ?SsaBuilder $ssa = null;
     /** @var array<string,string> user goto-label name → stable LLVM block label
      *  (allocated on first goto/label reference; reset per function). */
     private array $userLabels = [];
@@ -174,25 +178,11 @@ final class EmitLlvm
     private array $byRefCaptured = [];
 
     // ── generator state (set while emitting a `$resume` function) ──
-    /** True while emitting a generator resume body. */
-    private bool $inGenerator = false;
-    /** Running yield index (1..N) — each yield's suspend/resume state number. */
-    private int $genYieldCounter = 0;
-    /** SSA ptr to the frame's `state` word (entry GEP, dominates all). */
-    private string $genStatePtr = '';
-    /** SSA ptr to the frame's `current` word (entry GEP). */
-    private string $genCurrentPtr = '';
-    /** SSA ptr to the frame's `key` word (yielded key). */
-    private string $genKeyPtr = '';
-    /** SSA ptr to the frame's `nextkey` word (auto-increment key counter). */
-    private string $genNextKeyPtr = '';
-    /** SSA ptr to the frame's `sent` word (value passed in via send()). */
-    private string $genSentPtr = '';
+    /** Per-function generator emit state (fresh each {@see emit}). */
+    private ?GeneratorContext $gen = null;
     /** Name of the function currently being emitted (property-hook self-ref guard). */
     private string $currentFnName = '';
 
-    /** Emit the runtime call-stack + instrument user calls (backtrace support). */
-    private bool $needsBacktrace = false;
 
     /** Program source path (exception file() / trace frames). */
     private string $sourceFile = '';
@@ -200,8 +190,6 @@ final class EmitLlvm
     /** Display name of the function currently being emitted, for a trace frame. */
     private string $currentFnDisplay = '';
 
-    /** SSA ptr to the frame's `retval` word (return value for getReturn()). */
-    private string $genRetvalPtr = '';
 
     /** @var array<string, bool> fn name → returns by reference */
     private array $fnReturnsByRef = [];
@@ -228,27 +216,9 @@ final class EmitLlvm
     /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
     private array $closureHasThis = [];
 
-    /** Whether any `.` concat was emitted (gates the string runtime). */
-    private bool $needsConcat = false;
-    /** Whether amortized self-append (`$s .= …`) was emitted (gates __mir_str_append). */
-    private bool $needsStrAppend = false;
-    /** Whether any arena alloc / scope was emitted (gates the arena runtime). */
-    private bool $needsArena = false;
-    /** Whether an rc retain/release was emitted (gates the rc runtime). */
-    private bool $needsRc = false;
     /** Out-param for {@see emitLoadClassId} — the class_id SSA reg (avoids a
      *  list-destructure return, which self-host doesn't support). */
     private string $classIdReg = '';
-    /** True if `gc_collect_cycles()` is used — gates the Bacon-Rajan cycle
-     *  collector runtime AND its `cc_add_root` hook in obj release. Opt-in:
-     *  programs that never call it pay zero CC overhead (cycles just leak). */
-    private bool $needsCc = false;
-    /** True if any string is rc retained/released — emit the sentinel-
-     *  guarded `@__mir_rc_retain_str` / `@__mir_rc_release_str`. */
-    private bool $needsStrRc = false;
-    /** True if a loop resets the arena per iteration — emit the position
-     *  save/restore helpers (`@__mir_arena_used` / `@__mir_arena_restore`). */
-    private bool $needsArenaReset = false;
     /** @var array<string, bool> vec locals mutated in the current fn
      *  (append / element store) — drive copy-on-assign value semantics. */
     private array $mutatedVecLocals = [];
@@ -296,30 +266,8 @@ final class EmitLlvm
     /** @var array<string, bool> locals holding an arena-allocated vec —
      *  their `$x[]=` appends must use @__mir_arena_realloc. */
     private array $arenaVecLocals = [];
-    private bool $needsFloatStr = false;
-    private bool $needsFloatShortest = false;
-    private bool $needsStrtol = false;
-    private bool $needsStrtod = false;
-    private bool $needsStrcmp = false;
-    private bool $needsIntStr = false;
-    private bool $needsExceptions = false;
     /** This module defines `@main` (the user program, not the stdlib library). */
     private bool $moduleHasMain = false;
-    /** Module uses `$gen->throw($e)` → emit the per-yield injection check. */
-    private bool $genThrowUsed = false;
-    private bool $needsTagged = false;
-    private bool $needsTaggedEcho = false;
-    private bool $needsTaggedToStr = false;
-    private bool $needsImplodeCell = false;
-    private bool $needsTaggedToInt = false;
-    private bool $needsTaggedToFloat = false;
-    private bool $needsTaggedCompare = false;
-    private bool $needsTaggedEq = false;
-    private bool $needsTaggedArith = false;
-    private bool $needsTaggedTruthy = false;
-    /** Module indexes an array with a `mixed`/cell key → emit the
-     *  runtime int-vs-string key dispatch helpers (`__mir_array_*_cell`). */
-    private bool $needsCellKey = false;
     /** @var array<string, string> libc symbol → declare line (builtins) */
     private array $libcExtra = [];
     /**
@@ -338,21 +286,6 @@ final class EmitLlvm
      * the `--emit-library` compile path.
      */
     public bool $emitLibrary = false;
-    private bool $needsSubstr = false;
-    private bool $needsStrRepeat = false;
-    private bool $needsStrtolower = false;
-    private bool $needsStrtoupper = false;
-    private bool $needsIpow = false;
-    private bool $needsAddslashes = false;
-    private bool $needsJsonEscape = false;
-    private bool $needsJsonEnc = false;
-    private bool $needsStrReplaceOne = false;
-    /** Main captured argc/argv → emit @manticore_cli_argc/argv definitions. */
-    private bool $needsCliArgv = false;
-    /** STDIN/STDOUT/STDERR used → emit @manticore_std{in,out,err} accessors. */
-    private bool $needsStdStreams = false;
-    private bool $needsStrpos = false;
-    private bool $needsStrExplode = false;
     /** Scratch: address reg set by foreachElemAddr / foreachKeyAddr. */
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */
@@ -364,13 +297,19 @@ final class EmitLlvm
     /** @var string[] names declared `global $x` — __main shares the cell */
     private array $globalVarNames = [];
 
+    /** Per-module runtime-feature demand set (fresh each {@see emit}). */
+    private ?RuntimeFeatures $rt = null;
+
     public function emit(Module $module): string
     {
+        $this->rt = new RuntimeFeatures();
         // Arena arrays force the arena runtime on: the unified-array grow /
         // promote / index paths reference @__mir_arena_* under this flag, so
         // those symbols must be emitted even if no string took the arena path.
-        if (\Compile\Debug::$arenaArrays) { $this->needsArena = true; }
-        $this->stringPool = [];
+        if (\Compile\Debug::$arenaArrays) { $this->rt->needsArena = true; }
+        $this->pool = new StringPool();
+        $this->ssa = new SsaBuilder();
+        $this->gen = new GeneratorContext();
         $this->classes = $module->classes;
         $this->enums = $module->enums;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
@@ -381,7 +320,7 @@ final class EmitLlvm
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
         $this->globalVarNames = $module->globalVarNames;
-        $this->needsBacktrace = $module->needsBacktrace;
+        $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         $this->fnRefParams = [];
@@ -411,25 +350,25 @@ final class EmitLlvm
         // an injected exception. Must be known BEFORE emitting any generator
         // body (emitYield emits the check inline). Over-triggering on a user
         // `->throw()` method only adds a dead load+branch + one global.
-        $this->genThrowUsed = false;
+        $this->gen->throwUsed = false;
         foreach ($module->functions as $fn) {
-            if ($this->scanGenThrow($fn->body)) { $this->genThrowUsed = true; break; }
+            if ($this->scanGenThrow($fn->body)) { $this->gen->throwUsed = true; break; }
         }
-        if ($this->genThrowUsed) { $this->needsExceptions = true; }
+        if ($this->gen->throwUsed) { $this->rt->needsExceptions = true; }
         // Pre-scan for throw / try-catch so `needsExceptions` is settled BEFORE
         // any function body emits — @main's base landing pad (emitMain) is gated
         // on it and @main may be emitted before a throwing function is reached.
-        if (!$this->needsExceptions) {
+        if (!$this->rt->needsExceptions) {
             foreach ($module->functions as $fn) {
-                if ($this->scanUsesExceptions($fn->body)) { $this->needsExceptions = true; break; }
+                if ($this->scanUsesExceptions($fn->body)) { $this->rt->needsExceptions = true; break; }
             }
         }
         // A readonly property write emits a synthesized `throw Error` at emit time
         // (see emitStoreProperty) that the scan above can't see, so the base
         // landing pad must be set up if any class has a readonly property.
-        if (!$this->needsExceptions) {
+        if (!$this->rt->needsExceptions) {
             foreach ($this->classes as $cd) {
-                if ($cd->propertyReadonly !== []) { $this->needsExceptions = true; break; }
+                if ($cd->propertyReadonly !== []) { $this->rt->needsExceptions = true; break; }
             }
         }
         // Classify cell/`mixed` properties: a name that is EVER stored a
@@ -490,8 +429,8 @@ final class EmitLlvm
         // The unified PhpArray release helpers always drop hashed string keys
         // (→ __mir_rc_release_str) and the _obj variant drops obj values
         // (→ __mir_rc_release); force both — the unified runtime always emits.
-        $this->needsRc = true;
-        $this->needsStrRc = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
         $out  = "; ModuleID = 'mir'\n";
         $out .= "source_filename = \"mir\"\n\n";
         $out .= "@.fmt.d = private unnamed_addr constant [5 x i8] c\"%lld\\00\", align 1\n";
@@ -528,7 +467,7 @@ final class EmitLlvm
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
         // literal share one layout so retain/release work on either.
-        foreach ($this->stringPool as $value => $id) {
+        foreach ($this->pool->all() as $value => $id) {
             $out .= $this->strGlobalDef('@.str.' . (string)$id, (string)$value);
         }
         $out .= $globalCells;
@@ -536,7 +475,7 @@ final class EmitLlvm
         // stores `[]` as a null ptr) is redirected here so a foreach length
         // load reads 0 instead of faulting.
         $out .= "@__mir_zero_word = internal global i64 0\n";
-        if ($this->needsBacktrace) {
+        if ($this->rt->needsBacktrace) {
             // Runtime call-stack for backtraces: parallel name/line rings + depth.
             // linkonce_odr so user.o + stdlib.o share one stack.
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
@@ -565,7 +504,7 @@ final class EmitLlvm
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
         }
-        if ($this->needsExceptions) {
+        if ($this->rt->needsExceptions) {
             // setjmp/longjmp exception runtime. 16 nested-try slots ×
             // 256B jmp_buf (macOS arm64 needs 192). @thrown holds the
             // in-flight exception ptr.
@@ -578,7 +517,7 @@ final class EmitLlvm
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
             // `$gen->throw($e)` pending injection: non-null = throw at the
             // next yield resume point (the suspended `yield` expression raises).
-            if ($this->genThrowUsed) {
+            if ($this->gen->throwUsed) {
                 $out .= "@__mir_gen_throw = linkonce_odr global ptr null\n";
             }
             // Top-level fatal for an UNCAUGHT throw. @main installs a base
@@ -611,21 +550,21 @@ final class EmitLlvm
             $decls['abort'] = "declare void @abort() noreturn";
             $decls['dprintf'] = "declare i32 @dprintf(i32, ptr, ...)";
         }
-        if ($this->needsArena) {
+        if ($this->rt->needsArena) {
             $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
             $decls['memcpy']  = "declare ptr @memcpy(ptr, ptr, i64)";
         }
-        if ($this->needsConcat) { $decls['strlen'] = "declare i64 @strlen(ptr)"; }
-        if ($this->needsConcat || $this->needsFloatStr || $this->needsIntStr || $this->needsTaggedToStr) { $decls['snprintf'] = "declare i32 @snprintf(ptr, i64, ptr, ...)"; }
-        if ($this->needsStrtol) { $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)"; }
-        if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
-        if ($this->needsExceptions) {
+        if ($this->rt->needsConcat) { $decls['strlen'] = "declare i64 @strlen(ptr)"; }
+        if ($this->rt->needsConcat || $this->rt->needsFloatStr || $this->rt->needsIntStr || $this->rt->needsTaggedToStr) { $decls['snprintf'] = "declare i32 @snprintf(ptr, i64, ptr, ...)"; }
+        if ($this->rt->needsStrtol) { $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)"; }
+        if ($this->rt->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
+        if ($this->rt->needsExceptions) {
             $decls['setjmp'] = "declare i32 @setjmp(ptr) returns_twice";
             $decls['longjmp'] = "declare void @longjmp(ptr, i32) noreturn";
         }
         // tagged_to_double's string-tag branch parses via strtod, so declare it
         // whenever that helper is emitted (not only on a direct (float)"str" cast).
-        if ($this->needsStrtod || $this->needsTaggedToFloat) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
+        if ($this->rt->needsStrtod || $this->rt->needsTaggedToFloat) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
         // Unified PhpArray runtime libc deps (docs/16).
         $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
         $decls['memset']  = "declare ptr @memset(ptr, i32, i64)";
@@ -639,7 +578,7 @@ final class EmitLlvm
         foreach ($this->libcExtra as $sym => $line) { $decls[$sym] = $line; }
         foreach ($this->rtExterns as $sym => $line) { $decls[$sym] = $line; }
         foreach ($decls as $line) { $out .= $line . "\n"; }
-        if ($this->needsCliArgv) {
+        if ($this->rt->needsCliArgv) {
             // linkonce_odr: argc/argv are SET by @main in user.o and READ by
             // CLI helpers that may live in stdlib.o; per-.o internal copies
             // would leave stdlib reading 0/null. Coalesce to one address.
@@ -661,7 +600,7 @@ final class EmitLlvm
             $out .= "  %e = load ptr, ptr %g\n";
             $out .= "  ret ptr %e\n}\n";
         }
-        if ($this->needsStdStreams) {
+        if ($this->rt->needsStdStreams) {
             // STDIN/STDOUT/STDERR resolve to libc's own FILE* globals so a
             // fwrite(STDOUT, ...) shares the SAME buffer as echo (printf →
             // stdout) and ordering matches PHP. The symbol names differ per
@@ -684,59 +623,59 @@ final class EmitLlvm
         }
         $out .= $this->profileRuntime();
         $out .= $this->allocRuntime();
-        if ($this->needsFloatStr) {
+        if ($this->rt->needsFloatStr) {
             $out .= $this->floatToStrImpl('@__mir_float_to_str', '@__mir_str_alloc');
-            if ($this->needsArena) {
+            if ($this->rt->needsArena) {
                 $out .= $this->floatToStrImpl('@__mir_float_to_str_arena', '@__mir_str_alloc_arena');
             }
         }
-        if ($this->needsFloatShortest) {
+        if ($this->rt->needsFloatShortest) {
             $out .= $this->floatShortestImpl();
         }
         // tagged_to_str (mixed→string) calls @__mir_int_to_str for the int
         // tag, so pull the int-to-string helper in whenever it's emitted.
-        if ($this->needsConcat || $this->needsIntStr || $this->needsTaggedToStr) {
+        if ($this->rt->needsConcat || $this->rt->needsIntStr || $this->rt->needsTaggedToStr) {
             $out .= $this->intToStrRuntime();
         }
         // box_int/unbox_int: needed by the full tagged runtime AND by every
         // tagged render helper (asint arm calls unbox_int). Emit once, under the
         // union of those gates, else a helper links an undefined ref (→ identity
         // stub → boxed bits printed).
-        if ($this->needsTagged || $this->needsTaggedToStr || $this->needsTaggedToInt
-            || $this->needsTaggedToFloat || $this->needsTaggedEcho || $this->needsIntStr) {
+        if ($this->rt->needsTagged || $this->rt->needsTaggedToStr || $this->rt->needsTaggedToInt
+            || $this->rt->needsTaggedToFloat || $this->rt->needsTaggedEcho || $this->rt->needsIntStr) {
             $out .= $this->boxIntRuntime();
         }
-        if ($this->needsTagged) {
+        if ($this->rt->needsTagged) {
             $out .= $this->taggedRuntime();
         }
-        if ($this->needsTaggedEcho) {
+        if ($this->rt->needsTaggedEcho) {
             $out .= $this->taggedEchoRuntime();
         }
-        if ($this->needsTaggedToStr) {
+        if ($this->rt->needsTaggedToStr) {
             $out .= $this->taggedToStrRuntime();
         }
-        if ($this->needsImplodeCell) {
+        if ($this->rt->needsImplodeCell) {
             $out .= $this->implodeCellRuntime();
         }
-        if ($this->needsTaggedToInt) {
+        if ($this->rt->needsTaggedToInt) {
             $out .= $this->taggedToIntRuntime();
         }
-        if ($this->needsTaggedToFloat) {
+        if ($this->rt->needsTaggedToFloat) {
             $out .= $this->taggedToFloatRuntime();
         }
-        if ($this->needsTaggedCompare) {
+        if ($this->rt->needsTaggedCompare) {
             $out .= $this->taggedCompareRuntime();
         }
-        if ($this->needsTaggedEq) {
+        if ($this->rt->needsTaggedEq) {
             $out .= $this->taggedEqRuntime();
         }
-        if ($this->needsTaggedArith) {
+        if ($this->rt->needsTaggedArith) {
             $out .= $this->taggedArithRuntime();
         }
-        if ($this->needsTaggedTruthy) {
+        if ($this->rt->needsTaggedTruthy) {
             $out .= $this->taggedTruthyRuntime();
         }
-        if ($this->needsConcat) {
+        if ($this->rt->needsConcat) {
             $out .= $this->concatRuntime();
         }
         $out .= $this->stringBuiltinRuntime();
@@ -747,7 +686,7 @@ final class EmitLlvm
         $arrMod = new LlvmModule('mir_array_rt');
         (new UnifiedArrayRuntime($arrMod, new BareHost()))->emitAll();
         $out .= "\n" . $arrMod->emitFunctionsOnly();
-        if ($this->needsCellKey) {
+        if ($this->rt->needsCellKey) {
             $out .= $this->cellKeyRuntime();
         }
         $out .= $this->emitEnumTables();
@@ -1016,13 +955,13 @@ final class EmitLlvm
      */
     private function cellTagIr(string $v): string
     {
-        $istag = $this->allocSsa();
-        $ts = $this->allocSsa();
-        $nib = $this->allocSsa();
-        $tag = $this->allocSsa();
+        $istag = $this->ssa->allocReg();
+        $ts = $this->ssa->allocReg();
+        $nib = $this->ssa->allocReg();
+        $tag = $this->ssa->allocReg();
         $this->cellTagReg = $tag;
-        $nibr = $this->allocSsa();
-        $is5 = $this->allocSsa();
+        $nibr = $this->ssa->allocReg();
+        $is5 = $this->ssa->allocReg();
         return '  ' . $istag . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n"
             . '  ' . $ts . ' = lshr i64 ' . $v . ", 48\n"
             . '  ' . $nibr . ' = and i64 ' . $ts . ", 15\n"
@@ -1153,7 +1092,7 @@ final class EmitLlvm
      */
     private function taggedToStrRuntime(): string
     {
-        $this->needsIntStr = true;
+        $this->rt->needsIntStr = true;
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         // Headered so a (string)-cast result (which may be one of these
@@ -1272,7 +1211,7 @@ final class EmitLlvm
      */
     private function taggedToIntRuntime(): string
     {
-        $this->needsStrtol = true;
+        $this->rt->needsStrtol = true;
         $out  = "\ndefine i64 @__manticore_tagged_to_int(i64 %v) {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
@@ -1429,7 +1368,7 @@ final class EmitLlvm
      */
     private function taggedEqRuntime(): string
     {
-        $this->needsStrcmp = true;
+        $this->rt->needsStrcmp = true;
         $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
         // __mir_is_numeric_str(s) -> i1
         $out  = "\ndefine i1 @__mir_is_numeric_str(ptr %s) {\nentry:\n";
@@ -1636,7 +1575,7 @@ final class EmitLlvm
     private function intToStrRuntime(): string
     {
         $out = $this->intToStrImpl('@__mir_int_to_str', '@__mir_str_alloc');
-        if ($this->needsArena) {
+        if ($this->rt->needsArena) {
             $out .= $this->intToStrImpl('@__mir_int_to_str_arena', '@__mir_str_alloc_arena');
         }
         $out .= $this->intFmtRuntime();
@@ -1904,8 +1843,7 @@ final class EmitLlvm
             return 'declare i64 @manticore_' . $this->mangle($fn->name)
                 . '(' . $params . ")\n";
         }
-        $this->nextId = 0;
-        $this->nextLabel = 0;
+        $this->ssa->reset();
         $this->userLabels = [];
         $this->currentFnName = $fn->name;
         $this->currentFnBody = $fn->body;
@@ -1981,19 +1919,19 @@ final class EmitLlvm
             $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
-                $slot = $this->allocSsa();
+                $slot = $this->ssa->allocReg();
                 $this->slots[$cn] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
-                $gep = $this->allocSsa();
+                $gep = $this->ssa->allocReg();
                 $body .= '  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 ' . (string)($pi + 1) . "\n";
-                $cv = $this->allocSsa();
+                $cv = $this->ssa->allocReg();
                 $body .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
                 $body .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
             }
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
                 $pp = $fn->params[$pi];
                 $cn = $pp->name;
-                $slot = $this->allocSsa();
+                $slot = $this->ssa->allocReg();
                 $this->slots[$cn] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 // Uniform closure ABI: the caller passes every scalar arg as a
@@ -2020,7 +1958,7 @@ final class EmitLlvm
             }
             $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
             foreach ($fn->params as $p) {
-                $slot = $this->allocSsa();
+                $slot = $this->ssa->allocReg();
                 $this->slots[$p->name] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
@@ -2037,11 +1975,11 @@ final class EmitLlvm
                 // keeps aliasing the caller.
                 if (!$p->byRef && $p->arrayHinted
                     && $this->localMutatedAsArray($fn->body, $p->name)) {
-                    $ld = $this->allocSsa();
+                    $ld = $this->ssa->allocReg();
                     $body .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
-                    $lp = $this->allocSsa();
+                    $lp = $this->ssa->allocReg();
                     $body .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
-                    $cp = $this->allocSsa();
+                    $cp = $this->ssa->allocReg();
                     if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
                         // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so
                         // a tag-aware copy separates each boxed-array element (a
@@ -2055,7 +1993,7 @@ final class EmitLlvm
                         $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
                               . ', i64 ' . (string)$depth . ")\n";
                     }
-                    $ci = $this->allocSsa();
+                    $ci = $this->ssa->allocReg();
                     $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
                     $body .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
                 }
@@ -2079,10 +2017,10 @@ final class EmitLlvm
             if (isset($paramNames[$bname])) { continue; }
             if (!isset($this->slots[$bname])) { continue; }
             if (isset($this->refLocals[$bname])) { continue; }
-            $box = $this->allocSsa();
+            $box = $this->ssa->allocReg();
             $body .= '  ' . $box . " = call ptr @__mir_alloc(i64 8)\n";
             $body .= '  store i64 0, ptr ' . $box . "\n";
-            $bi = $this->allocSsa();
+            $bi = $this->ssa->allocReg();
             $body .= '  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n";
             $body .= '  store i64 ' . $bi . ', ptr ' . $this->slots[$bname] . "\n";
             $this->refLocals[$bname] = true;
@@ -2092,7 +2030,7 @@ final class EmitLlvm
         // header). The caller pushed a bare method-name placeholder because a
         // stable receiver class isn't available at the call site under the
         // self-host. Overwrites this frame's name slot (index depth-1).
-        if ($this->needsBacktrace && isset($this->methodDisplay[$fn->name])) {
+        if ($this->rt->needsBacktrace && isset($this->methodDisplay[$fn->name])) {
             $body .= $this->btNameFix($this->methodDisplay[$fn->name]);
         }
         $body .= $this->emitNode($fn->body);
@@ -2105,19 +2043,19 @@ final class EmitLlvm
      *  the exact "Class->method" / "Class::method" the callee knows. */
     private function btNameFix(string $disp): string
     {
-        $d = $this->allocSsa();
+        $d = $this->ssa->allocReg();
         $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
-        $c = $this->allocSsa();
+        $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp sgt i64 ' . $d . ", 0\n";
-        $set = $this->allocLabel('btfix.set');
-        $end = $this->allocLabel('btfix.end');
+        $set = $this->ssa->allocLabel('btfix.set');
+        $end = $this->ssa->allocLabel('btfix.end');
         $out .= '  br i1 ' . $c . ', label %' . $set . ', label %' . $end . "\n" . $set . ":\n";
-        $i = $this->allocSsa();
+        $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = sub i64 ' . $d . ", 1\n";
-        $ep = $this->allocSsa();
+        $ep = $this->ssa->allocReg();
         $out .= '  ' . $ep . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 ' . $i . "\n";
-        $sv = $this->allocSsa();
-        $out .= '  ' . $sv . ' = ptrtoint ptr ' . $this->strLitId($this->internString($disp)) . " to i64\n";
+        $sv = $this->ssa->allocReg();
+        $out .= '  ' . $sv . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($disp)) . " to i64\n";
         $out .= '  store i64 ' . $sv . ', ptr ' . $ep . "\n";
         $out .= '  br label %' . $end . "\n" . $end . ":\n";
         return $out;
@@ -2321,16 +2259,16 @@ final class EmitLlvm
         // yet dropped — a bounded residual leak (the frame buffer was the O(N)
         // dominant one). MUST match the string header size ({@see
         // __mir_str_alloc}) — the string release computes free base = ptr-24.
-        $this->needsStrRc = true;
+        $this->rt->needsStrRc = true;
         $strHdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
-        $base = $this->allocSsa();
+        $base = $this->ssa->allocReg();
         $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . (string)($frameSize + $strHdr) . ")\n";
-        $fr = $this->allocSsa();
+        $fr = $this->ssa->allocReg();
         $out .= '  ' . $fr . ' = getelementptr inbounds i8, ptr ' . $base . ", i64 " . (string)$strHdr . "\n";
         $out .= $this->genStoreAt($fr, -24, '0');                     // cap@-24 = 0 (unused)
         $out .= $this->genStoreAt($fr, -16, '0');                     // len@-16 = 0 (unused)
         $out .= $this->genStoreAt($fr, -8, '1');                      // rc@-8 = 1
-        $rp = $this->allocSsa();
+        $rp = $this->ssa->allocReg();
         $out .= '  ' . $rp . ' = ptrtoint ptr ' . $resume . " to i64\n";
         $out .= '  store i64 ' . $rp . ', ptr ' . $fr . "\n";        // resume_fn@0
         $out .= $this->genStoreAt($fr, 8, '0');                       // state@8 = 0
@@ -2340,8 +2278,8 @@ final class EmitLlvm
         // sent@40: the inbound yield-expression value (cell-typed). Default to a
         // boxed null so an unsent `$x = yield` reads NULL (not raw 0) and
         // var_dump / echo render it correctly; send()/throw() box their arg.
-        $this->needsTagged = true;
-        $bn = $this->allocSsa();
+        $this->rt->needsTagged = true;
+        $bn = $this->ssa->allocReg();
         $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
         $out .= $this->genStoreAt($fr, 40, $bn);                      // sent@40 = null cell
         $out .= $this->genStoreAt($fr, 48, '0');                      // retval@48 = 0
@@ -2352,10 +2290,10 @@ final class EmitLlvm
             $off = self::GEN_HEADER + 8 * $idx;
             if (isset($capIndex[$name])) {
                 // capture: load from env slot (capIndex+1), store into frame.
-                $gep = $this->allocSsa();
+                $gep = $this->ssa->allocReg();
                 $out .= '  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 '
                       . (string)($capIndex[$name] + 1) . "\n";
-                $cv = $this->allocSsa();
+                $cv = $this->ssa->allocReg();
                 $out .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
                 $out .= $this->genStoreAt($fr, $off, $cv);
             } elseif (isset($paramNames[$name])) {
@@ -2378,7 +2316,7 @@ final class EmitLlvm
                 $out .= $this->genStoreAt($fr, $off, '0');
             }
         }
-        $ri = $this->allocSsa();
+        $ri = $this->ssa->allocReg();
         $out .= '  ' . $ri . ' = ptrtoint ptr ' . $fr . " to i64\n";
         $out .= '  ret i64 ' . $ri . "\n}\n\n";
 
@@ -2390,27 +2328,27 @@ final class EmitLlvm
         // Local slots = frame GEPs computed in entry (dominate every block).
         foreach ($locals as $name => $idx) {
             $off = self::GEN_HEADER + 8 * $idx;
-            $slot = $this->allocSsa();
+            $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr %frame, i64 '
                   . (string)$off . "\n";
             $this->slots[$name] = $slot;
         }
-        $this->genStatePtr = $this->allocSsa();
-        $out .= '  ' . $this->genStatePtr . " = getelementptr inbounds i8, ptr %frame, i64 8\n";
-        $this->genCurrentPtr = $this->allocSsa();
-        $out .= '  ' . $this->genCurrentPtr . " = getelementptr inbounds i8, ptr %frame, i64 16\n";
-        $this->genKeyPtr = $this->allocSsa();
-        $out .= '  ' . $this->genKeyPtr . " = getelementptr inbounds i8, ptr %frame, i64 24\n";
-        $this->genNextKeyPtr = $this->allocSsa();
-        $out .= '  ' . $this->genNextKeyPtr . " = getelementptr inbounds i8, ptr %frame, i64 32\n";
-        $this->genSentPtr = $this->allocSsa();
-        $out .= '  ' . $this->genSentPtr . " = getelementptr inbounds i8, ptr %frame, i64 40\n";
-        $this->genRetvalPtr = $this->allocSsa();
-        $out .= '  ' . $this->genRetvalPtr . " = getelementptr inbounds i8, ptr %frame, i64 48\n";
-        $st = $this->allocSsa();
-        $out .= '  ' . $st . ' = load i64, ptr ' . $this->genStatePtr . "\n";
+        $this->gen->statePtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->statePtr . " = getelementptr inbounds i8, ptr %frame, i64 8\n";
+        $this->gen->currentPtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->currentPtr . " = getelementptr inbounds i8, ptr %frame, i64 16\n";
+        $this->gen->keyPtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->keyPtr . " = getelementptr inbounds i8, ptr %frame, i64 24\n";
+        $this->gen->nextKeyPtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->nextKeyPtr . " = getelementptr inbounds i8, ptr %frame, i64 32\n";
+        $this->gen->sentPtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->sentPtr . " = getelementptr inbounds i8, ptr %frame, i64 40\n";
+        $this->gen->retvalPtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->retvalPtr . " = getelementptr inbounds i8, ptr %frame, i64 48\n";
+        $st = $this->ssa->allocReg();
+        $out .= '  ' . $st . ' = load i64, ptr ' . $this->gen->statePtr . "\n";
         $nYields = $this->countYields($fn->body);
-        $startLabel = $this->allocLabel('gen.start');
+        $startLabel = $this->ssa->allocLabel('gen.start');
         $cases = '';
         for ($k = 1; $k <= $nYields; $k = $k + 1) {
             $cases .= '    i64 ' . (string)$k . ', label %gen.resume.' . (string)$k . "\n";
@@ -2418,16 +2356,16 @@ final class EmitLlvm
         $out .= '  switch i64 ' . $st . ', label %' . $startLabel . " [\n" . $cases . "  ]\n";
         $out .= $startLabel . ":\n";
 
-        $savedInGen = $this->inGenerator;
-        $savedCounter = $this->genYieldCounter;
-        $this->inGenerator = true;
-        $this->genYieldCounter = 0;
+        $savedInGen = $this->gen->inGenerator;
+        $savedCounter = $this->gen->yieldCounter;
+        $this->gen->inGenerator = true;
+        $this->gen->yieldCounter = 0;
         $out .= $this->emitNode($fn->body);
-        $this->inGenerator = $savedInGen;
-        $this->genYieldCounter = $savedCounter;
+        $this->gen->inGenerator = $savedInGen;
+        $this->gen->yieldCounter = $savedCounter;
 
         // Fell off the end → finished.
-        $out .= '  store i64 -1, ptr ' . $this->genStatePtr . "\n";
+        $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
         $out .= "  ret i64 0\n}\n\n";
         return $out;
     }
@@ -2438,7 +2376,7 @@ final class EmitLlvm
         if ($off === 0) {
             return '  store i64 ' . $val . ', ptr ' . $base . "\n";
         }
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         return '  ' . $p . ' = getelementptr inbounds i8, ptr ' . $base . ', i64 '
              . (string)$off . "\n  store i64 " . $val . ', ptr ' . $p . "\n";
     }
@@ -2525,7 +2463,7 @@ final class EmitLlvm
      */
     private function emitYield(\Compile\Mir\Yield_ $n): string
     {
-        if (!$this->inGenerator) {
+        if (!$this->gen->inGenerator) {
             throw new \RuntimeException('EmitLlvm: yield outside a generator');
         }
         $y = $n;
@@ -2543,19 +2481,19 @@ final class EmitLlvm
         if ($y->key !== null) {
             $out .= $this->emitNode($y->key);
             $out .= $this->coerceToI64();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->genKeyPtr . "\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->keyPtr . "\n";
         } else {
-            $nk = $this->allocSsa();
-            $out .= '  ' . $nk . ' = load i64, ptr ' . $this->genNextKeyPtr . "\n";
-            $out .= '  store i64 ' . $nk . ', ptr ' . $this->genKeyPtr . "\n";
-            $nk1 = $this->allocSsa();
+            $nk = $this->ssa->allocReg();
+            $out .= '  ' . $nk . ' = load i64, ptr ' . $this->gen->nextKeyPtr . "\n";
+            $out .= '  store i64 ' . $nk . ', ptr ' . $this->gen->keyPtr . "\n";
+            $nk1 = $this->ssa->allocReg();
             $out .= '  ' . $nk1 . ' = add i64 ' . $nk . ", 1\n";
-            $out .= '  store i64 ' . $nk1 . ', ptr ' . $this->genNextKeyPtr . "\n";
+            $out .= '  store i64 ' . $nk1 . ', ptr ' . $this->gen->nextKeyPtr . "\n";
         }
-        $out .= '  store i64 ' . $val . ', ptr ' . $this->genCurrentPtr . "\n";
-        $k = $this->genYieldCounter + 1;
-        $this->genYieldCounter = $k;
-        $out .= '  store i64 ' . (string)$k . ', ptr ' . $this->genStatePtr . "\n";
+        $out .= '  store i64 ' . $val . ', ptr ' . $this->gen->currentPtr . "\n";
+        $k = $this->gen->yieldCounter + 1;
+        $this->gen->yieldCounter = $k;
+        $out .= '  store i64 ' . (string)$k . ', ptr ' . $this->gen->statePtr . "\n";
         $out .= "  ret i64 1\n";
         $out .= 'gen.resume.' . (string)$k . ":\n";
         // `$gen->throw($e)` injection: on resume, a pending exception makes the
@@ -2563,20 +2501,20 @@ final class EmitLlvm
         // generator, else propagated to the consumer via the jmp stack). The
         // longjmp targets depth-1 — the generator's own try setjmp (left at this
         // depth by the suspend; yield-ret doesn't pop it) or the consumer's.
-        if ($this->genThrowUsed) {
-            $gt = $this->allocSsa();
+        if ($this->gen->throwUsed) {
+            $gt = $this->ssa->allocReg();
             $out .= '  ' . $gt . " = load ptr, ptr @__mir_gen_throw\n";
-            $inj = $this->allocSsa();
+            $inj = $this->ssa->allocReg();
             $out .= '  ' . $inj . ' = icmp ne ptr ' . $gt . ", null\n";
-            $thrL = $this->allocLabel('gen.inject');
-            $contL = $this->allocLabel('gen.resumed');
+            $thrL = $this->ssa->allocLabel('gen.inject');
+            $contL = $this->ssa->allocLabel('gen.resumed');
             $out .= '  br i1 ' . $inj . ', label %' . $thrL . ', label %' . $contL . "\n";
             $out .= $thrL . ":\n";
             $out .= "  store ptr null, ptr @__mir_gen_throw\n";
             $out .= '  store ptr ' . $gt . ", ptr @__mir_thrown\n";
-            $d = $this->allocSsa();
+            $d = $this->ssa->allocReg();
             $out .= '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
-            $s = $this->allocSsa();
+            $s = $this->ssa->allocReg();
             $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
             $out .= $this->jmpBufExpr($s);
             $out .= '  call void @longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
@@ -2584,8 +2522,8 @@ final class EmitLlvm
             $out .= $contL . ":\n";
         }
         // Resumed: the yield expression evaluates to the sent-in value.
-        $sent = $this->allocSsa();
-        $out .= '  ' . $sent . ' = load i64, ptr ' . $this->genSentPtr . "\n";
+        $sent = $this->ssa->allocReg();
+        $out .= '  ' . $sent . ' = load i64, ptr ' . $this->gen->sentPtr . "\n";
         $this->lastValue = $sent;
         $this->lastValueType = 'i64';
         return $out;
@@ -2643,12 +2581,12 @@ final class EmitLlvm
     {
         $out = '';
         if (!isset($this->slots[$fe->valueVar])) {
-            $vs = $this->allocSsa();
+            $vs = $this->ssa->allocReg();
             $this->slots[$fe->valueVar] = $vs;
             $out .= '  ' . $vs . " = alloca i64\n";
         }
         if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
-            $ks = $this->allocSsa();
+            $ks = $this->ssa->allocReg();
             $this->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
@@ -2662,21 +2600,21 @@ final class EmitLlvm
         $gSlot = '';
         if ($framed) {
             $gSlot = $this->slots["@fe.0." . (string)$fe->genSlotBase];
-            $gi = $this->allocSsa();
+            $gi = $this->ssa->allocReg();
             $out .= '  ' . $gi . ' = ptrtoint ptr ' . $g . " to i64\n";
             $out .= '  store i64 ' . $gi . ', ptr ' . $gSlot . "\n";
         }
 
-        $rewindLabel = $this->allocLabel('feg.rewind');
-        $condLabel = $this->allocLabel('feg.cond');
-        $bodyLabel = $this->allocLabel('feg.body');
-        $stepLabel = $this->allocLabel('feg.step');
-        $endLabel  = $this->allocLabel('feg.end');
+        $rewindLabel = $this->ssa->allocLabel('feg.rewind');
+        $condLabel = $this->ssa->allocLabel('feg.cond');
+        $bodyLabel = $this->ssa->allocLabel('feg.body');
+        $stepLabel = $this->ssa->allocLabel('feg.step');
+        $endLabel  = $this->ssa->allocLabel('feg.end');
 
         // rewind: resume once if not yet started (state == 0).
         $out .= $this->genFieldLoad($g, 8);
         $st0 = $this->lastValue;
-        $fresh = $this->allocSsa();
+        $fresh = $this->ssa->allocReg();
         $out .= '  ' . $fresh . ' = icmp eq i64 ' . $st0 . ", 0\n";
         $out .= '  br i1 ' . $fresh . ', label %' . $rewindLabel . ', label %' . $condLabel . "\n";
         $out .= $rewindLabel . ":\n";
@@ -2687,7 +2625,7 @@ final class EmitLlvm
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
         $out .= $this->genFieldLoad($g, 8);
         $st = $this->lastValue;
-        $fin = $this->allocSsa();
+        $fin = $this->ssa->allocReg();
         $out .= '  ' . $fin . ' = icmp eq i64 ' . $st . ", -1\n";
         $out .= '  br i1 ' . $fin . ', label %' . $endLabel . ', label %' . $bodyLabel . "\n";
 
@@ -2728,7 +2666,7 @@ final class EmitLlvm
             || $ak === Node::KIND_STATIC_CALL || $ak === Node::KIND_INVOKE) {
             $relPtr = $g;
             if ($framed) { $out .= $this->genReloadArr($gSlot); $relPtr = $this->lastValue; }
-            $this->needsStrRc = true;
+            $this->rt->needsStrRc = true;
             $out .= '  call void @__mir_rc_release_str(ptr ' . $relPtr . ")\n";
         }
         $this->lastValue = '0';
@@ -2750,12 +2688,12 @@ final class EmitLlvm
     {
         $out = '';
         if (!isset($this->slots[$fe->valueVar])) {
-            $vs = $this->allocSsa();
+            $vs = $this->ssa->allocReg();
             $this->slots[$fe->valueVar] = $vs;
             $out .= '  ' . $vs . " = alloca i64\n";
         }
         if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
-            $ks = $this->allocSsa();
+            $ks = $this->ssa->allocReg();
             $this->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
@@ -2763,7 +2701,7 @@ final class EmitLlvm
         // there so the subject expression is evaluated exactly once.
         $iterName = "@it." . (string)$this->iterCounter;
         $this->iterCounter = $this->iterCounter + 1;
-        $iterSlot = $this->allocSsa();
+        $iterSlot = $this->ssa->allocReg();
         $this->slots[$iterName] = $iterSlot;
         $out .= '  ' . $iterSlot . " = alloca i64\n";
         $out .= $this->emitNode($fe->array);
@@ -2781,16 +2719,16 @@ final class EmitLlvm
 
         $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'rewind', [], \Compile\Mir\Type::void()));
 
-        $condL = $this->allocLabel('feo.cond');
-        $bodyL = $this->allocLabel('feo.body');
-        $stepL = $this->allocLabel('feo.step');
-        $endL  = $this->allocLabel('feo.end');
+        $condL = $this->ssa->allocLabel('feo.cond');
+        $bodyL = $this->ssa->allocLabel('feo.body');
+        $stepL = $this->ssa->allocLabel('feo.step');
+        $endL  = $this->ssa->allocLabel('feo.end');
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $condL . ":\n";
         $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'valid', [], \Compile\Mir\Type::bool_()));
         $out .= $this->coerceToI64();
-        $v = $this->allocSsa();
+        $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
         $out .= '  br i1 ' . $v . ', label %' . $bodyL . ', label %' . $endL . "\n";
 
@@ -2829,11 +2767,11 @@ final class EmitLlvm
     /** Indirectly call a generator's resume fn (ptr at frame@0). */
     private function genResumeCall(string $frame): string
     {
-        $fnw = $this->allocSsa();
+        $fnw = $this->ssa->allocReg();
         $out  = '  ' . $fnw . ' = load i64, ptr ' . $frame . "\n";
-        $fp = $this->allocSsa();
+        $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = inttoptr i64 ' . $fnw . " to ptr\n";
-        $rr = $this->allocSsa();
+        $rr = $this->ssa->allocReg();
         $out .= '  ' . $rr . ' = call i64 ' . $fp . '(ptr ' . $frame . ")\n";
         return $out;
     }
@@ -2864,15 +2802,15 @@ final class EmitLlvm
             $ct = $fn->ffiParamCTypes[$idx] ?? 'i64';
             $src = '%arg.' . $p->name;
             if ($ct === 'ptr') {
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = inttoptr i64 ' . $src . " to ptr\n";
                 $cargs[] = 'ptr ' . $r;
             } elseif ($ct === 'double') {
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = bitcast i64 ' . $src . " to double\n";
                 $cargs[] = 'double ' . $r;
             } elseif ($ct === 'i1') {
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = trunc i64 ' . $src . " to i1\n";
                 $cargs[] = 'i1 ' . $r;
             } else {
@@ -2892,18 +2830,18 @@ final class EmitLlvm
             $out .= '  call void @' . $cSym . '(' . $callArgs . ")\n";
             $out .= "  ret i64 0\n";
         } else {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call ' . $ret . ' @' . $cSym . '(' . $callArgs . ")\n";
             if ($ret === 'ptr') {
-                $ri = $this->allocSsa();
+                $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
             } elseif ($ret === 'double') {
-                $ri = $this->allocSsa();
+                $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = bitcast double ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
             } elseif ($ret === 'i1') {
-                $ri = $this->allocSsa();
+                $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = zext i1 ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
             } else {
@@ -3049,9 +2987,9 @@ final class EmitLlvm
 
     private function emitMain(FunctionDef $fn): string
     {
-        $this->needsCliArgv = true;
+        $this->rt->needsCliArgv = true;
         $header = "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n";
-        if ($this->needsExceptions) {
+        if ($this->rt->needsExceptions) {
             // Install the base landing pad: depth 1 reserves slot 0 for this
             // catch-all, so user tries take slots 1+ and a throw that escapes
             // them all unwinds here instead of computing an OOB slot -1.
@@ -3070,7 +3008,7 @@ final class EmitLlvm
         }
         // Capture argc/argv into module globals so the FFI-bound
         // manticore_cli_argc/argv (Main.php #[Symbol]) can read them.
-        $ac = $this->allocSsa();
+        $ac = $this->ssa->allocReg();
         $header .= '  ' . $ac . ' = sext i32 %argc to i64' . "\n";
         $header .= '  store i64 ' . $ac . ", ptr @__manticore_argc\n";
         $header .= "  store ptr %argv, ptr @__manticore_argv\n";
@@ -3432,7 +3370,7 @@ final class EmitLlvm
         if ($k === Node::KIND_STORE_LOCAL) {
             $out = '';
             if (!isset($this->globalBackedLocals[$n->name]) && !isset($this->slots[$n->name])) {
-                $slot = $this->allocSsa();
+                $slot = $this->ssa->allocReg();
                 $this->slots[$n->name] = $slot;
                 $out .= '  ' . $slot . " = alloca i64\n";
             }
@@ -3453,7 +3391,7 @@ final class EmitLlvm
             foreach ($tc->catches as $c) {
                 $cVar = $this->catchVar($c);
                 if ($cVar !== null && !isset($this->slots[$cVar])) {
-                    $slot = $this->allocSsa();
+                    $slot = $this->ssa->allocReg();
                     $this->slots[$cVar] = $slot;
                     $out .= '  ' . $slot . " = alloca i64\n";
                 }
@@ -3487,12 +3425,12 @@ final class EmitLlvm
             // branch doesn't leave its slot alloca dominating only that
             // branch (two sibling foreaches reusing `$val` then break LLVM).
             if (!isset($this->slots[$n->valueVar])) {
-                $vs = $this->allocSsa();
+                $vs = $this->ssa->allocReg();
                 $this->slots[$n->valueVar] = $vs;
                 $out .= '  ' . $vs . " = alloca i64\n";
             }
             if ($n->keyVar !== null && !isset($this->slots[$n->keyVar])) {
-                $ks = $this->allocSsa();
+                $ks = $this->ssa->allocReg();
                 $this->slots[$n->keyVar] = $ks;
                 $out .= '  ' . $ks . " = alloca i64\n";
             }
@@ -3693,14 +3631,14 @@ final class EmitLlvm
      */
     private function emitDeadLabel(): string
     {
-        $label = $this->allocLabel('dead');
+        $label = $this->ssa->allocLabel('dead');
         return $label . ":\n";
     }
 
     private function emitStringConst(StringConst $n): string
     {
         $sc = $n;
-        $id = $this->internString($sc->value);
+        $id = $this->pool->intern($sc->value);
         $this->lastValue = $this->strLitId($id);
         $this->lastValueType = 'ptr';
         return '';
@@ -3710,10 +3648,10 @@ final class EmitLlvm
     {
         $ll = $n;
         if (isset($this->globalBackedLocals[$ll->name])) {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = load i64, ptr ' . $this->globalBackedLocals[$ll->name] . "\n";
             if ($ll->type->kind === Type::KIND_FLOAT) {
-                $regF = $this->allocSsa();
+                $regF = $this->ssa->allocReg();
                 $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
                 $this->lastValue = $regF;
                 $this->lastValueType = 'double';
@@ -3728,12 +3666,12 @@ final class EmitLlvm
             $this->lastValueType = 'i64';
             return '';
         }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         if (isset($this->refLocals[$ll->name])) {
             // By-ref: slot holds the address; deref to the value.
-            $addr = $this->allocSsa();
+            $addr = $this->ssa->allocReg();
             $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$ll->name] . "\n";
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= '  ' . $reg . ' = load i64, ptr ' . $p . "\n";
         } else {
@@ -3743,7 +3681,7 @@ final class EmitLlvm
         // inferred type for this local says it carries a float —
         // gives downstream `fadd` / `fdiv` a usable operand.
         if ($ll->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -3756,7 +3694,7 @@ final class EmitLlvm
             // gets a clean ptr. The mask is IDENTITY on a real heap pointer
             // (< 2^48), so it's a safe no-op for a genuine object local too.
             if ($ll->type->kind === Type::KIND_OBJ) {
-                $masked = $this->allocSsa();
+                $masked = $this->ssa->allocReg();
                 $out .= '  ' . $masked . ' = and i64 ' . $reg . ", 281474976710655\n";
                 $this->lastValue = $masked;
             }
@@ -3841,9 +3779,9 @@ final class EmitLlvm
             && isset($this->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
             $out .= $this->coerceToI64();
-            $d = $this->allocSsa();
+            $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
-            $bits = $this->allocSsa();
+            $bits = $this->ssa->allocReg();
             $out .= '  ' . $bits . ' = bitcast double ' . $d . " to i64\n";
             $out .= '  store i64 ' . $bits . ', ptr ' . $this->slots[$sl->name] . "\n";
             $this->lastValue = $bits;
@@ -3869,7 +3807,7 @@ final class EmitLlvm
                 || isset($this->mutatedVecLocals[$sl->name]))) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
-            $cp = $this->allocSsa();
+            $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
@@ -3888,7 +3826,7 @@ final class EmitLlvm
             && $v->type->isVec()) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
-            $cp = $this->allocSsa();
+            $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
@@ -3922,20 +3860,20 @@ final class EmitLlvm
         // bitcast. Pointers (strings) ptrtoint similarly so the
         // i64 slot stays the universal carrier.
         if ($this->lastValueType === 'double') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = bitcast double ' . $val . " to i64\n";
             $val = $reg;
         } elseif ($this->lastValueType === 'ptr') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = ptrtoint ptr ' . $val . " to i64\n";
             $val = $reg;
         }
         if (isset($this->globalBackedLocals[$sl->name])) {
             $out .= '  store i64 ' . $val . ', ptr ' . $this->globalBackedLocals[$sl->name] . "\n";
         } elseif (isset($this->refLocals[$sl->name])) {
-            $addr = $this->allocSsa();
+            $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = load i64, ptr ' . $this->slots[$sl->name] . "\n";
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
@@ -3964,24 +3902,24 @@ final class EmitLlvm
      */
     private function emitSelfAppend(StoreLocal $sl, Concat $c): string
     {
-        $this->needsStrAppend = true;
-        $this->needsStrRc = true;
-        $this->needsConcat = true; // pulls strlen + the string runtime decls
+        $this->rt->needsStrAppend = true;
+        $this->rt->needsStrRc = true;
+        $this->rt->needsConcat = true; // pulls strlen + the string runtime decls
         $slot = $this->slots[$sl->name];
         $out = $this->emitNode($c->right);
         $out .= $this->coerceToStr($c->right, false);
         $rp = $this->lastValue;
-        $curI = $this->allocSsa();
+        $curI = $this->ssa->allocReg();
         $out .= '  ' . $curI . ' = load i64, ptr ' . $slot . "\n";
-        $curP = $this->allocSsa();
+        $curP = $this->ssa->allocReg();
         $out .= '  ' . $curP . ' = inttoptr i64 ' . $curI . " to ptr\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_append(ptr ' . $curP
               . ', ptr ' . $rp . ")\n";
         // A freshly-produced rhs (coercion temp / nested concat / call) is
         // copied into the accumulator and now dead; a borrow is left alone.
         $out .= $this->concatTempRelease($c->right, $rp);
-        $ri = $this->allocSsa();
+        $ri = $this->ssa->allocReg();
         $out .= '  ' . $ri . ' = ptrtoint ptr ' . $reg . " to i64\n";
         $out .= '  store i64 ' . $ri . ', ptr ' . $slot . "\n";
         $this->lastValue = $ri;
@@ -3998,14 +3936,14 @@ final class EmitLlvm
     {
         if ($this->lastValueType === $target) { return ''; }
         if ($target === 'double' && $this->lastValueType === 'i64') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = sitofp i64 ' . $this->lastValue . " to double\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'double';
             return $out;
         }
         if ($target === 'i64' && $this->lastValueType === 'double') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = fptosi double ' . $this->lastValue . " to i64\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
@@ -4033,7 +3971,7 @@ final class EmitLlvm
         $out .= $this->emitNode($right);
         $out .= $this->coerceArithOperand($right, $isFloat);
         $r = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = $target;
@@ -4045,19 +3983,19 @@ final class EmitLlvm
      *  to float iff either is float and re-boxes a cell. */
     private function emitTaggedArith(Node $left, Node $right, string $op): string
     {
-        $this->needsTaggedArith = true;
-        $this->needsTagged = true;
-        $this->needsTaggedToInt = true;
-        $this->needsStrtol = true;
-        $this->needsTaggedToFloat = true;
-        $this->needsStrtod = true;
+        $this->rt->needsTaggedArith = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsTaggedToInt = true;
+        $this->rt->needsStrtol = true;
+        $this->rt->needsTaggedToFloat = true;
+        $this->rt->needsStrtod = true;
         $out = $this->emitNode($left);
         $out .= $this->boxToCell($left->type);
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
         $out .= $this->boxToCell($right->type);
         $r = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_' . $op
               . '(i64 ' . $l . ', i64 ' . $r . ")\n";
         $this->lastValue = $reg;
@@ -4077,9 +4015,9 @@ final class EmitLlvm
         // numeric value (strtol base 10), NOT ptrtoint'd — else `"2026" + "06"`
         // adds the raw pointers. (`explode(...)[i] + …` is the canonical case.)
         if ($op->type->kind === Type::KIND_STRING) {
-            $this->needsStrtol = true;
+            $this->rt->needsStrtol = true;
             $out = $this->coerceToPtr();
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
@@ -4099,9 +4037,9 @@ final class EmitLlvm
         // A STRING operand in float arithmetic → its numeric value via strtod
         // (PHP numeric-string coercion), not a bitcast of the pointer.
         if ($op->type->kind === Type::KIND_STRING) {
-            $this->needsStrtod = true;
+            $this->rt->needsStrtod = true;
             $out = $this->coerceToPtr();
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ', ptr null)' . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'double';
@@ -4110,10 +4048,10 @@ final class EmitLlvm
         if ($op->type->kind !== Type::KIND_CELL) {
             return $this->coerceTo('double');
         }
-        $this->needsTaggedToFloat = true;
-        $this->needsStrtod = true;
+        $this->rt->needsTaggedToFloat = true;
+        $this->rt->needsStrtod = true;
         $out = $this->coerceToI64();
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'double';
@@ -4127,8 +4065,8 @@ final class EmitLlvm
      */
     private function unboxCellInt(string $v): string
     {
-        $this->needsTagged = true;
-        $u = $this->allocSsa();
+        $this->rt->needsTagged = true;
+        $u = $this->ssa->allocReg();
         $this->lastValue = $u;
         $this->lastValueType = 'i64';
         return '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $v . ")\n";
@@ -4164,7 +4102,7 @@ final class EmitLlvm
         $out .= $this->emitNode($d->right);
         $out .= $this->coerceDoubleOperand($d->right);
         $r = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fdiv double ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'double';
@@ -4179,18 +4117,18 @@ final class EmitLlvm
         // The operand is ALREADY a boxed cell, so it is passed to tagged_sub
         // as-is (not re-boxed, which would double-tag).
         if ($neg->operand->type->isNumericCell()) {
-            $this->needsTaggedArith = true;
-            $this->needsTagged = true;
-            $this->needsTaggedToInt = true;
-            $this->needsStrtol = true;
-            $this->needsTaggedToFloat = true;
-            $this->needsStrtod = true;
+            $this->rt->needsTaggedArith = true;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsStrtol = true;
+            $this->rt->needsTaggedToFloat = true;
+            $this->rt->needsStrtod = true;
             $out = $this->emitNode($neg->operand);
             $out .= $this->coerceToI64();
             $xc = $this->lastValue;
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . " = call i64 @__manticore_box_int(i64 0)\n";
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_sub(i64 ' . $z
                   . ', i64 ' . $xc . ")\n";
             $this->lastValue = $reg;
@@ -4202,7 +4140,7 @@ final class EmitLlvm
         // operand carries a double — e.g. `-PHP_FLOAT_MAX`).
         if ($this->lastValueType === 'double' || $neg->operand->type->kind === Type::KIND_FLOAT) {
             $out .= $this->coerceTo('double');
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = fneg double ' . $this->lastValue . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'double';
@@ -4212,7 +4150,7 @@ final class EmitLlvm
         // negate — negating the raw NaN-boxed bits of `-$x` on a mixed/untyped
         // param produced garbage. Mirrors {@see coerceArithOperand}.
         $out .= $this->coerceArithOperand($neg->operand, false);
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sub i64 0, ' . $this->lastValue . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -4223,9 +4161,9 @@ final class EmitLlvm
     {
         $out = $this->emitCondVal($n->operand);
         $val = $this->lastValue;
-        $cmpReg = $this->allocSsa();
+        $cmpReg = $this->ssa->allocReg();
         $out .= '  ' . $cmpReg . ' = icmp eq i64 ' . $val . ", 0\n";
-        $extReg = $this->allocSsa();
+        $extReg = $this->ssa->allocReg();
         $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
         $this->lastValue = $extReg;
         return $out;
@@ -4247,7 +4185,7 @@ final class EmitLlvm
         elseif ($op === 'shr')  { $ll = 'ashr'; }
         elseif ($op === 'or')   { $ll = 'or'; }
         elseif ($op === 'xor')  { $ll = 'xor'; }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $ll . ' i64 ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -4259,7 +4197,7 @@ final class EmitLlvm
         $out = $this->emitNode($n->operand);
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = xor i64 ' . $val . ", -1\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -4290,10 +4228,10 @@ final class EmitLlvm
         // closure invoked through a `Closure`-typed value (returned /
         // passed) dispatch indirectly; captures follow at slot 1+.
         $sz = 8 * (1 + $cnt);
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out = '  ' . $buf . ' = call ptr @__mir_alloc(i64 ' . (string)$sz . ")\n";
         $fnName = '__closure_' . (string)$cl->id;
-        $fp = $this->allocSsa();
+        $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = ptrtoint ptr @manticore_' . $this->mangle($fnName) . " to i64\n";
         $out .= '  store i64 ' . $fp . ', ptr ' . $buf . "\n";
         $i = 0;
@@ -4304,7 +4242,7 @@ final class EmitLlvm
                 // Already-ref enclosing locals hold the address; plain locals
                 // take the slot address. No rc retain on a raw address.
                 $name = $c->name;
-                $capV = $this->allocSsa();
+                $capV = $this->ssa->allocReg();
                 if (isset($this->refLocals[$name])) {
                     $out .= '  ' . $capV . ' = load i64, ptr ' . $this->slots[$name] . "\n";
                 } else {
@@ -4317,7 +4255,7 @@ final class EmitLlvm
                 // The closure owns a reference to each captured obj.
                 $out .= $this->rcRetainByType($c, $capV, null, 1);
             }
-            $gep = $this->allocSsa();
+            $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)($i + 1) . "\n";
             $out .= '  store i64 ' . $capV . ', ptr ' . $gep . "\n";
             $i = $i + 1;
@@ -4356,21 +4294,21 @@ final class EmitLlvm
     private function boxLastByRepr(): string
     {
         if ($this->lastValueType === 'double') {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = call i64 @__manticore_box_float(double ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;
         }
         if ($this->lastValueType === 'ptr') {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = call i64 @__manticore_box_ptr(ptr ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;
         }
         $out = $this->coerceToI64();
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__manticore_box_int(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -4412,16 +4350,16 @@ final class EmitLlvm
             $argTypes .= ', i64';
         }
         $known = $fn !== '' && isset($this->closureCaptures[$fn]);
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         if ($known) {
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList . ")\n";
         } else {
             // Dynamic dispatch: load the fn ptr from struct slot 0 and call
             // indirectly (the callee is a `Closure`-typed value whose
             // concrete __closure_N isn't known statically).
-            $fpi = $this->allocSsa();
+            $fpi = $this->ssa->allocReg();
             $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
-            $fp = $this->allocSsa();
+            $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
         }
@@ -4460,15 +4398,15 @@ final class EmitLlvm
             // instead of re-boxing the cell arm (the double-box masked by the
             // 48-bit truncation).
             $wantCell = $n->type->kind === Type::KIND_CELL;
-            $res = $this->allocSsa();
+            $res = $this->ssa->allocReg();
             $out = '  ' . $res . " = alloca i64\n";
             $out .= $this->emitIssetTarget($nc->left);
             $present = $this->lastValue;
-            $bit = $this->allocSsa();
+            $bit = $this->ssa->allocReg();
             $out .= '  ' . $bit . ' = icmp ne i64 ' . $present . ", 0\n";
-            $useL = $this->allocLabel('nc.left');
-            $useR = $this->allocLabel('nc.right');
-            $end  = $this->allocLabel('nc.end');
+            $useL = $this->ssa->allocLabel('nc.left');
+            $useR = $this->ssa->allocLabel('nc.right');
+            $end  = $this->ssa->allocLabel('nc.end');
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
             $out .= $this->emitNode($nc->left);
@@ -4481,7 +4419,7 @@ final class EmitLlvm
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $end . ":\n";
-            $loaded = $this->allocSsa();
+            $loaded = $this->ssa->allocReg();
             $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
             $this->lastValue = $loaded;
             $this->lastValueType = 'i64';
@@ -4498,23 +4436,23 @@ final class EmitLlvm
         // (string/obj/array), a null SCALAR is the boxed-NULL sentinel (a
         // nullable `?int`/`?float`/`?bool` rides a numeric cell) — reject both.
         // The raw int/float/bool cases returned above, so box_null can't collide.
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out = '  ' . $res . " = alloca i64\n";
         $out .= $this->emitNode($nc->left);
         $out .= $this->coerceToI64();
         $lv = $this->lastValue;
-        $nz = $this->allocSsa();
+        $nz = $this->ssa->allocReg();
         $out .= '  ' . $nz . ' = icmp ne i64 ' . $lv . ", 0\n";
-        $nnul = $this->allocSsa();
+        $nnul = $this->ssa->allocReg();
         $out .= '  ' . $nnul . ' = icmp ne i64 ' . $lv . ", -3659174697238528\n";
-        $bit = $this->allocSsa();
+        $bit = $this->ssa->allocReg();
         $out .= '  ' . $bit . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
         // A cell result (arms of differing repr) boxes BOTH arms so a consumer
         // (echo / var_dump) dispatches on the arm actually taken.
         $wantCell = $n->type->kind === Type::KIND_CELL;
-        $useL = $this->allocLabel('nc.left');
-        $useR = $this->allocLabel('nc.right');
-        $end  = $this->allocLabel('nc.end');
+        $useL = $this->ssa->allocLabel('nc.left');
+        $useR = $this->ssa->allocLabel('nc.right');
+        $end  = $this->ssa->allocLabel('nc.end');
         $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
         $out .= $useL . ":\n";
         if ($wantCell) {
@@ -4532,7 +4470,7 @@ final class EmitLlvm
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
@@ -4567,11 +4505,11 @@ final class EmitLlvm
             ? ($this->classes[$leafCls]->propertyTypes[$leafPa->property] ?? Type::unknown())
             : Type::unknown();
         $wantCell = $resultType->kind === Type::KIND_CELL;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out = '  ' . $res . " = alloca i64\n";
-        $useR = $this->allocLabel('ncc.right');
-        $keep = $this->allocLabel('ncc.keep');
-        $end  = $this->allocLabel('ncc.end');
+        $useR = $this->ssa->allocLabel('ncc.right');
+        $keep = $this->ssa->allocLabel('ncc.keep');
+        $end  = $this->ssa->allocLabel('ncc.end');
         $out .= $this->emitNode($node);
         $out .= $this->coerceToI64();
         $cur = $this->lastValue;
@@ -4581,21 +4519,21 @@ final class EmitLlvm
                 throw new \RuntimeException('emitCoalesceChain: non-property hop');
             }
             $hoff = $this->propertyOffset($hop->object, $hop->property);
-            $z0 = $this->allocSsa();
+            $z0 = $this->ssa->allocReg();
             $out .= '  ' . $z0 . ' = icmp eq i64 ' . $cur . ", 0\n";
-            $cont = $this->allocLabel('ncc.hop');
+            $cont = $this->ssa->allocLabel('ncc.hop');
             $out .= '  br i1 ' . $z0 . ', label %' . $useR . ', label %' . $cont . "\n";
             $out .= $cont . ":\n";
-            $op = $this->allocSsa();
+            $op = $this->ssa->allocReg();
             $out .= '  ' . $op . ' = inttoptr i64 ' . $cur . " to ptr\n";
-            $fp = $this->allocSsa();
+            $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $op . ', i64 ' . (string)$hoff . "\n";
-            $nx = $this->allocSsa();
+            $nx = $this->ssa->allocReg();
             $out .= '  ' . $nx . ' = load i64, ptr ' . $fp . "\n";
             $cur = $nx;
         }
         // A present-but-NULL leaf value also takes the default.
-        $vn = $this->allocSsa();
+        $vn = $this->ssa->allocReg();
         $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
@@ -4611,7 +4549,7 @@ final class EmitLlvm
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
@@ -4637,12 +4575,12 @@ final class EmitLlvm
         $out = '';
         $acc = '';
         foreach ($ids as $id) {
-            $m = $this->allocSsa();
+            $m = $this->ssa->allocReg();
             $out .= '  ' . $m . ' = icmp eq i64 ' . $cid . ', ' . (string)$id . "\n";
             if ($acc === '') {
                 $acc = $m;
             } else {
-                $or = $this->allocSsa();
+                $or = $this->ssa->allocReg();
                 $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $m . "\n";
                 $acc = $or;
             }
@@ -4653,11 +4591,11 @@ final class EmitLlvm
 
     private function emitLoadClassId(string $objpReg): string
     {
-        $descI = $this->allocSsa();
+        $descI = $this->ssa->allocReg();
         $ir = '  ' . $descI . ' = load i64, ptr ' . $objpReg . "\n";
-        $descP = $this->allocSsa();
+        $descP = $this->ssa->allocReg();
         $ir .= '  ' . $descP . ' = inttoptr i64 ' . $descI . " to ptr\n";
-        $cid = $this->allocSsa();
+        $cid = $this->ssa->allocReg();
         $ir .= '  ' . $cid . ' = load i64, ptr ' . $descP . "\n";
         $this->classIdReg = $cid;
         return $ir;
@@ -4681,30 +4619,30 @@ final class EmitLlvm
         // not an object ptr) and unbox the payload before reading the id. A
         // result slot avoids a phi.
         if ($io->operand->type->kind === Type::KIND_CELL) {
-            $slot = $this->allocSsa();
+            $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $slot . "\n";
             $out .= $this->cellTagIr($obj);
             $tag = $this->cellTagReg;
-            $isObj = $this->allocSsa();
+            $isObj = $this->ssa->allocReg();
             $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
-            $objL = $this->allocLabel('io.obj');
-            $doneL = $this->allocLabel('io.done');
+            $objL = $this->ssa->allocLabel('io.obj');
+            $doneL = $this->ssa->allocLabel('io.done');
             $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
             $out .= $objL . ":\n";
-            $payload = $this->allocSsa();
+            $payload = $this->ssa->allocReg();
             $out .= '  ' . $payload . ' = and i64 ' . $obj . ", 281474976710655\n";
-            $objpc = $this->allocSsa();
+            $objpc = $this->ssa->allocReg();
             $out .= '  ' . $objpc . ' = inttoptr i64 ' . $payload . " to ptr\n";
             $out .= $this->emitLoadClassId($objpc);
             $out .= $this->emitClassIdMatch($this->classIdReg, $ids);
             $accc = $this->classIdMatchReg;
-            $mext = $this->allocSsa();
+            $mext = $this->ssa->allocReg();
             $out .= '  ' . $mext . ' = zext i1 ' . $accc . " to i64\n";
             $out .= '  store i64 ' . $mext . ', ptr ' . $slot . "\n";
             $out .= '  br label %' . $doneL . "\n";
             $out .= $doneL . ":\n";
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = load i64, ptr ' . $slot . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
@@ -4715,25 +4653,25 @@ final class EmitLlvm
         // Reading the class id from a null ptr is a wild load (heap roulette
         // SIGSEGV); guard it — null is an instance of nothing. A result slot
         // avoids a phi (mirrors the cell path above).
-        $slot = $this->allocSsa();
+        $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $slot . "\n";
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq i64 ' . $obj . ", 0\n";
-        $objL = $this->allocLabel('io.obj');
-        $doneL = $this->allocLabel('io.done');
+        $objL = $this->ssa->allocLabel('io.obj');
+        $doneL = $this->ssa->allocLabel('io.done');
         $out .= '  br i1 ' . $isNull . ', label %' . $doneL . ', label %' . $objL . "\n";
         $out .= $objL . ":\n";
-        $objp = $this->allocSsa();
+        $objp = $this->ssa->allocReg();
         $out .= '  ' . $objp . ' = inttoptr i64 ' . $obj . " to ptr\n";
         $out .= $this->emitLoadClassId($objp);
         $out .= $this->emitClassIdMatch($this->classIdReg, $ids);
-        $mx = $this->allocSsa();
+        $mx = $this->ssa->allocReg();
         $out .= '  ' . $mx . ' = zext i1 ' . $this->classIdMatchReg . " to i64\n";
         $out .= '  store i64 ' . $mx . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $doneL . "\n";
         $out .= $doneL . ":\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = load i64, ptr ' . $slot . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -4781,9 +4719,9 @@ final class EmitLlvm
         if ($c->target === 'string') {
             if ($ok === Type::KIND_STRING) { $out .= $this->coerceToPtr(); return $out; }
             if ($ok === Type::KIND_CELL) {
-                $this->needsTaggedToStr = true;
+                $this->rt->needsTaggedToStr = true;
                 $out .= $this->coerceToI64();
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
                 $this->lastValue = $r; $this->lastValueType = 'ptr';
                 return $out;
@@ -4793,25 +4731,25 @@ final class EmitLlvm
         }
         if ($c->target === 'int') {
             if ($ok === Type::KIND_STRING) {
-                $this->needsStrtol = true;
+                $this->rt->needsStrtol = true;
                 $out .= $this->coerceToPtr();
-                $reg = $this->allocSsa();
+                $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
                 $this->lastValue = $reg; $this->lastValueType = 'i64';
                 return $out;
             }
             if ($ok === Type::KIND_FLOAT) {
                 $out .= $this->coerceTo('double');
-                $reg = $this->allocSsa();
+                $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = fptosi double ' . $this->lastValue . " to i64\n";
                 $this->lastValue = $reg; $this->lastValueType = 'i64';
                 return $out;
             }
             if ($ok === Type::KIND_CELL) {
-                $this->needsTaggedToInt = true;
-                $this->needsStrtol = true;
+                $this->rt->needsTaggedToInt = true;
+                $this->rt->needsStrtol = true;
                 $out .= $this->coerceToI64();
-                $reg = $this->allocSsa();
+                $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
                 $this->lastValue = $reg; $this->lastValueType = 'i64';
                 return $out;
@@ -4821,24 +4759,24 @@ final class EmitLlvm
         }
         if ($c->target === 'float') {
             if ($ok === Type::KIND_STRING) {
-                $this->needsStrtod = true;
+                $this->rt->needsStrtod = true;
                 $out .= $this->coerceToPtr();
-                $reg = $this->allocSsa();
+                $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ', ptr null)' . "\n";
                 $this->lastValue = $reg; $this->lastValueType = 'double';
                 return $out;
             }
             if ($ok === Type::KIND_FLOAT) { $out .= $this->coerceTo('double'); return $out; }
             if ($ok === Type::KIND_CELL) {
-                $this->needsTaggedToFloat = true;
+                $this->rt->needsTaggedToFloat = true;
                 $out .= $this->coerceToI64();
-                $reg = $this->allocSsa();
+                $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
                 $this->lastValue = $reg; $this->lastValueType = 'double';
                 return $out;
             }
             $out .= $this->coerceToI64();
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = sitofp i64 ' . $this->lastValue . " to double\n";
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
@@ -4849,15 +4787,15 @@ final class EmitLlvm
             $bagOff = $std === null ? 16 : $std->bagOffset();
             $size = $std === null ? 24 : $std->instanceSize();
             $out .= $this->coerceToPtr();
-            $bagI = $this->allocSsa();
+            $bagI = $this->ssa->allocReg();
             $out .= '  ' . $bagI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
-            $obj = $this->allocSsa();
+            $obj = $this->ssa->allocReg();
             $out .= '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
             $out .= '  store i64 ' . $this->descSlotValue($std) . ', ptr ' . $obj . "\n";
-            $rcg = $this->allocSsa();
+            $rcg = $this->ssa->allocReg();
             $out .= '  ' . $rcg . ' = getelementptr inbounds i64, ptr ' . $obj . ", i64 1\n";
             $out .= '  store i64 1, ptr ' . $rcg . "\n";
-            $bg = $this->allocSsa();
+            $bg = $this->ssa->allocReg();
             $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$bagOff . "\n";
             $out .= '  store i64 ' . $bagI . ', ptr ' . $bg . "\n";
             $this->lastValue = $obj; $this->lastValueType = 'ptr';
@@ -4869,11 +4807,11 @@ final class EmitLlvm
                 $out .= $this->cellToPtr();
                 $std = $this->classes['stdClass'] ?? null;
                 $bagOff = $std === null ? 16 : $std->bagOffset();
-                $bg = $this->allocSsa();
+                $bg = $this->ssa->allocReg();
                 $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $this->lastValue . ', i64 ' . (string)$bagOff . "\n";
-                $bagI = $this->allocSsa();
+                $bagI = $this->ssa->allocReg();
                 $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-                $bagP = $this->allocSsa();
+                $bagP = $this->ssa->allocReg();
                 $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
                 $this->lastValue = $bagP; $this->lastValueType = 'ptr';
                 return $out;
@@ -4883,11 +4821,11 @@ final class EmitLlvm
                 $std = $this->classes['stdClass'] ?? null;
                 $bagOff = $std === null ? 16 : $std->bagOffset();
                 $out .= $this->coerceToPtr();
-                $bg = $this->allocSsa();
+                $bg = $this->ssa->allocReg();
                 $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $this->lastValue . ', i64 ' . (string)$bagOff . "\n";
-                $bagI = $this->allocSsa();
+                $bagI = $this->ssa->allocReg();
                 $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-                $bagP = $this->allocSsa();
+                $bagP = $this->ssa->allocReg();
                 $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
                 $this->lastValue = $bagP; $this->lastValueType = 'ptr';
                 return $out;
@@ -4898,17 +4836,17 @@ final class EmitLlvm
         // bool: truthiness → i64 0/1. A cell must unbox by tag (a boxed
         // 0/false/"" has non-zero raw bits → would read truthy).
         if ($ok === Type::KIND_CELL) {
-            $this->needsTaggedTruthy = true;
+            $this->rt->needsTaggedTruthy = true;
             $out .= $this->coerceToI64();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r; $this->lastValueType = 'i64';
             return $out;
         }
         $out .= $this->coerceToI64();
-        $bit = $this->allocSsa();
+        $bit = $this->ssa->allocReg();
         $out .= '  ' . $bit . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = zext i1 ' . $bit . " to i64\n";
         $this->lastValue = $reg; $this->lastValueType = 'i64';
         return $out;
@@ -4923,9 +4861,9 @@ final class EmitLlvm
         if ($d->type->kind === Type::KIND_CELL && $d->op === '+'
             && isset($this->slots[$d->name])) {
             $slot = $this->slots[$d->name];
-            $old = $this->allocSsa();
+            $old = $this->ssa->allocReg();
             $out = '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
-            $new = $this->allocSsa();
+            $new = $this->ssa->allocReg();
             $out .= '  ' . $new . ' = call i64 @manticore___mir_str_increment(i64 ' . $old . ")\n";
             $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
             $this->lastValue = $d->prefix ? $new : $old;
@@ -4939,9 +4877,9 @@ final class EmitLlvm
         // Load/StoreLocal, else the write-back hits a stale local and no-ops.
         if (isset($this->globalBackedLocals[$d->name])) {
             $cell = $this->globalBackedLocals[$d->name];
-            $old = $this->allocSsa();
+            $old = $this->ssa->allocReg();
             $out = '  ' . $old . ' = load i64, ptr ' . $cell . "\n";
-            $new = $this->allocSsa();
+            $new = $this->ssa->allocReg();
             $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
             $out .= '  store i64 ' . $new . ', ptr ' . $cell . "\n";
             $this->lastValue = $d->prefix ? $new : $old;
@@ -4949,13 +4887,13 @@ final class EmitLlvm
             return $out;
         }
         if (isset($this->refLocals[$d->name]) && isset($this->slots[$d->name])) {
-            $addr = $this->allocSsa();
+            $addr = $this->ssa->allocReg();
             $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$d->name] . "\n";
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
-            $old = $this->allocSsa();
+            $old = $this->ssa->allocReg();
             $out .= '  ' . $old . ' = load i64, ptr ' . $p . "\n";
-            $new = $this->allocSsa();
+            $new = $this->ssa->allocReg();
             $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
             $out .= '  store i64 ' . $new . ', ptr ' . $p . "\n";
             $this->lastValue = $d->prefix ? $new : $old;
@@ -4965,16 +4903,16 @@ final class EmitLlvm
         $slot = $this->slots[$d->name] ?? null;
         if ($slot === null) {
             // No prior assignment seen — treat as starting from 0.
-            $slot = $this->allocSsa();
+            $slot = $this->ssa->allocReg();
             $this->slots[$d->name] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $slot . "\n";
         } else {
             $out = '';
         }
-        $old = $this->allocSsa();
+        $old = $this->ssa->allocReg();
         $out .= '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
-        $new = $this->allocSsa();
+        $new = $this->ssa->allocReg();
         $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
         $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
         $this->lastValue = $d->prefix ? $new : $old;
@@ -4985,7 +4923,7 @@ final class EmitLlvm
     private function emitTernary(Ternary $n): string
     {
         $t = $n;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out = '  ' . $res . " = alloca i64\n";
         // Short ternary (`?:`) reuses the operand as its then-value, so keep its
         // RAW value and compute truthiness separately — else a string/cell operand
@@ -5002,10 +4940,10 @@ final class EmitLlvm
             $out .= $this->emitCondVal($t->cond);
             $cond = $this->lastValue;
         }
-        $thenLabel = $this->allocLabel('tern.then');
-        $elseLabel = $this->allocLabel('tern.else');
-        $endLabel  = $this->allocLabel('tern.end');
-        $condBit = $this->allocSsa();
+        $thenLabel = $this->ssa->allocLabel('tern.then');
+        $elseLabel = $this->ssa->allocLabel('tern.else');
+        $endLabel  = $this->ssa->allocLabel('tern.end');
+        $condBit = $this->ssa->allocReg();
         $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
         $out .= '  br i1 ' . $condBit . ', label %' . $thenLabel . ', label %' . $elseLabel . "\n";
         // When the result type is a cell (heterogeneous branches, see
@@ -5036,12 +4974,12 @@ final class EmitLlvm
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $loaded . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -5060,7 +4998,7 @@ final class EmitLlvm
     /** Emit a GEP to generator frame slot `$idx`; sets lastValue to the ptr. */
     private function genFrameSlotPtr(int $idx): string
     {
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         $this->lastValue = $p;
         $this->lastValueType = 'ptr';
         return '  ' . $p . ' = getelementptr inbounds i8, ptr %frame, i64 '
@@ -5070,9 +5008,9 @@ final class EmitLlvm
     /** Reload the frame-stored array ptr into a fresh SSA; sets lastValue. */
     private function genReloadArr(string $arrSlot): string
     {
-        $ai = $this->allocSsa();
+        $ai = $this->ssa->allocReg();
         $out = '  ' . $ai . ' = load i64, ptr ' . $arrSlot . "\n";
-        $ap = $this->allocSsa();
+        $ap = $this->ssa->allocReg();
         $out .= '  ' . $ap . ' = inttoptr i64 ' . $ai . " to ptr\n";
         $this->lastValue = $ap;
         $this->lastValueType = 'ptr';
@@ -5090,12 +5028,12 @@ final class EmitLlvm
         }
         $out = '';
         if (!isset($this->slots[$fe->valueVar])) {
-            $vs = $this->allocSsa();
+            $vs = $this->ssa->allocReg();
             $this->slots[$fe->valueVar] = $vs;
             $out .= '  ' . $vs . " = alloca i64\n";
         }
         if ($fe->keyVar !== null && !isset($this->slots[$fe->keyVar])) {
-            $ks = $this->allocSsa();
+            $ks = $this->ssa->allocReg();
             $this->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
@@ -5110,9 +5048,9 @@ final class EmitLlvm
         // Empty vec/assoc literals lower to a null ptr; reading the length
         // word from null faults. Redirect a null base to a shared zero word
         // so `len` reads 0 and the loop body is skipped entirely.
-        $nz = $this->allocSsa();
+        $nz = $this->ssa->allocReg();
         $out .= '  ' . $nz . ' = icmp eq ptr ' . $arr . ", null\n";
-        $arrSafe = $this->allocSsa();
+        $arrSafe = $this->ssa->allocReg();
         $out .= '  ' . $arrSafe . ' = select i1 ' . $nz
               . ', ptr @__mir_zero_word, ptr ' . $arr . "\n";
         $arr = $arrSafe;
@@ -5130,22 +5068,22 @@ final class EmitLlvm
             $iSlot = $this->slots["@fe.0." . (string)$fe->genSlotBase];
             $arrSlot = $this->slots["@fe.1." . (string)$fe->genSlotBase];
             $out .= '  store i64 0, ptr ' . $iSlot . "\n";
-            $aint = $this->allocSsa();
+            $aint = $this->ssa->allocReg();
             $out .= '  ' . $aint . ' = ptrtoint ptr ' . $arr . " to i64\n";
             $out .= '  store i64 ' . $aint . ', ptr ' . $arrSlot . "\n";
             $len = '0'; // recomputed in cond (reloaded array)
         } else {
-            $iSlot = $this->allocSsa();
+            $iSlot = $this->ssa->allocReg();
             $out .= '  ' . $iSlot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $iSlot . "\n";
-            $len = $this->allocSsa();
+            $len = $this->ssa->allocReg();
             $out .= '  ' . $len . ' = load i64, ptr ' . $arr . "\n";
         }
 
-        $condLabel = $this->allocLabel('fe.cond');
-        $bodyLabel = $this->allocLabel('fe.body');
-        $stepLabel = $this->allocLabel('fe.step');
-        $endLabel  = $this->allocLabel('fe.end');
+        $condLabel = $this->ssa->allocLabel('fe.cond');
+        $bodyLabel = $this->ssa->allocLabel('fe.body');
+        $stepLabel = $this->ssa->allocLabel('fe.step');
+        $endLabel  = $this->ssa->allocLabel('fe.end');
         $savedBreak = $this->breakLabel;
         $savedCont  = $this->continueLabel;
         $this->breakLabel = $endLabel;
@@ -5167,12 +5105,12 @@ final class EmitLlvm
         if ($framed) {
             $out .= $this->genReloadArr($arrSlot);
             $arr = $this->lastValue;
-            $len = $this->allocSsa();
+            $len = $this->ssa->allocReg();
             $out .= '  ' . $len . ' = load i64, ptr ' . $arr . "\n";
         }
-        $i = $this->allocSsa();
+        $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
-        $c = $this->allocSsa();
+        $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
 
@@ -5182,7 +5120,7 @@ final class EmitLlvm
         $out .= $this->foreachElemAddrUnified($arr, $i);
         $valAddr = $this->feAddr;
         $valSlot = $this->slots[$fe->valueVar];
-        $ev = $this->allocSsa();
+        $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $valAddr . "\n";
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {
@@ -5193,7 +5131,7 @@ final class EmitLlvm
             // so route to the cell-boxing variant — matches the cell key type
             // InferTypes assigns there, so a downstream `$out[$k]=…` dispatches
             // by tag (set_cell).
-            $kp = $this->allocSsa();
+            $kp = $this->ssa->allocReg();
             $kk = $fe->array->type->kind;
             $elemK = $fe->array->type->element !== null ? $fe->array->type->element->kind : '';
             $keyK = $fe->array->type->key !== null ? $fe->array->type->key->kind : '';
@@ -5216,16 +5154,16 @@ final class EmitLlvm
 
         $out .= $stepLabel . ":\n";
         if ($framed && $fe->byRef) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
-        $si = $this->allocSsa();
+        $si = $this->ssa->allocReg();
         $out .= '  ' . $si . ' = load i64, ptr ' . $iSlot . "\n";
         if ($fe->byRef) {
             $out .= $this->foreachElemAddrUnified($arr, $si);
             $wAddr = $this->feAddr;
-            $wv = $this->allocSsa();
+            $wv = $this->ssa->allocReg();
             $out .= '  ' . $wv . ' = load i64, ptr ' . $this->slots[$fe->valueVar] . "\n";
             $out .= '  store i64 ' . $wv . ', ptr ' . $wAddr . "\n";
         }
-        $si2 = $this->allocSsa();
+        $si2 = $this->ssa->allocReg();
         $out .= '  ' . $si2 . ' = add i64 ' . $si . ", 1\n";
         $out .= '  store i64 ' . $si2 . ', ptr ' . $iSlot . "\n";
         $out .= '  br label %' . $condLabel . "\n";
@@ -5254,25 +5192,25 @@ final class EmitLlvm
         $E = (string)\Compile\MemoryAbi::ARRAY_ENTRY_SIZE;
         $V = (string)\Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET;
         $fo = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
-        $fa = $this->allocSsa();
+        $fa = $this->ssa->allocReg();
         $out  = '  ' . $fa . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . $fo . "\n";
-        $fl = $this->allocSsa();
+        $fl = $this->ssa->allocReg();
         $out .= '  ' . $fl . ' = load i64, ptr ' . $fa . "\n";
-        $ish = $this->allocSsa();
+        $ish = $this->ssa->allocReg();
         $out .= '  ' . $ish . ' = icmp ne i64 ' . $fl . ", 0\n";
-        $po0 = $this->allocSsa();
+        $po0 = $this->ssa->allocReg();
         $out .= '  ' . $po0 . ' = mul i64 ' . $i . ', ' . (string)\Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE . "\n";
-        $po = $this->allocSsa();
+        $po = $this->ssa->allocReg();
         $out .= '  ' . $po . ' = add i64 ' . $po0 . ', ' . $H . "\n";
-        $pa = $this->allocSsa();
+        $pa = $this->ssa->allocReg();
         $out .= '  ' . $pa . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . $po . "\n";
-        $ho0 = $this->allocSsa();
+        $ho0 = $this->ssa->allocReg();
         $out .= '  ' . $ho0 . ' = mul i64 ' . $i . ', ' . $E . "\n";
-        $ho = $this->allocSsa();
+        $ho = $this->ssa->allocReg();
         $out .= '  ' . $ho . ' = add i64 ' . $ho0 . ', ' . (string)(\Compile\MemoryAbi::ARRAY_HEADER_SIZE + \Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET) . "\n";
-        $ha = $this->allocSsa();
+        $ha = $this->ssa->allocReg();
         $out .= '  ' . $ha . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . $ho . "\n";
-        $addr = $this->allocSsa();
+        $addr = $this->ssa->allocReg();
         $out .= '  ' . $addr . ' = select i1 ' . $ish . ', ptr ' . $ha . ', ptr ' . $pa . "\n";
         $this->feAddr = $addr;
         return $out;
@@ -5284,7 +5222,7 @@ final class EmitLlvm
         $out = $this->emitNode($sw->subject);
         $out .= $this->coerceToI64();
         $subj = $this->lastValue;
-        $endLabel = $this->allocLabel('sw.end');
+        $endLabel = $this->ssa->allocLabel('sw.end');
         $savedBreak = $this->breakLabel;
         $this->breakLabel = $endLabel;
         // A switch counts as a break/continue level; continue inside a
@@ -5328,7 +5266,7 @@ final class EmitLlvm
                 $out .= $base . '_t' . (string)$vi . ":\n";
                 $out .= $this->emitNode($arm->value);
                 $vk = $arm->value->type->kind;
-                $eq = $this->allocSsa();
+                $eq = $this->ssa->allocReg();
                 if ($subjK === Type::KIND_CELL) {
                     // A cell (untyped/`mixed`) subject is NaN-boxed, so a raw
                     // `icmp eq` of its boxed bits against a raw arm value never
@@ -5337,10 +5275,10 @@ final class EmitLlvm
                     // loose-juggling tagged compare (mirrors emitCmp's cell path).
                     $out .= $this->boxToCell($arm->value->type);
                     $armCell = $this->lastValue;
-                    $this->needsTaggedEq = true;
-                    $this->needsTagged = true;
-                    $this->needsTaggedToFloat = true;
-                    $le = $this->allocSsa();
+                    $this->rt->needsTaggedEq = true;
+                    $this->rt->needsTagged = true;
+                    $this->rt->needsTaggedToFloat = true;
+                    $le = $this->ssa->allocReg();
                     $out .= '  ' . $le . ' = call i64 @__manticore_tagged_loose_eq(i64 '
                           . $subj . ', i64 ' . $armCell . ")\n";
                     $out .= '  ' . $eq . ' = icmp ne i64 ' . $le . ", 0\n";
@@ -5350,10 +5288,10 @@ final class EmitLlvm
                     $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
                         && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
                     if ($useStr) {
-                        $this->needsStrcmp = true;
-                        $sp = $this->allocSsa();
+                        $this->rt->needsStrcmp = true;
+                        $sp = $this->ssa->allocReg();
                         $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
-                        $vp = $this->allocSsa();
+                        $vp = $this->ssa->allocReg();
                         $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
                         $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $vp . ")\n";
                     } else {
@@ -5387,7 +5325,7 @@ final class EmitLlvm
     private function emitMatch(Match_ $n): string
     {
         $m = $n;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out = '  ' . $res . " = alloca i64\n";
         $out .= $this->emitNode($m->subject);
         $out .= $this->coerceToI64();
@@ -5403,17 +5341,17 @@ final class EmitLlvm
         // the unboxed int payload, string conds via a tag-guarded strcmp.
         $subjIsCell = $subjK === Type::KIND_CELL;
         $subjInt = '';   // lazily-unboxed int carrier (cell subject, scalar cond)
-        $endLabel = $this->allocLabel('match.end');
+        $endLabel = $this->ssa->allocLabel('match.end');
         foreach ($m->arms as $arm) {
-            $bodyLabel = $this->allocLabel('match.body');
-            $afterLabel = $this->allocLabel('match.after');
+            $bodyLabel = $this->ssa->allocLabel('match.body');
+            $afterLabel = $this->ssa->allocLabel('match.after');
             $conds = $arm->conds;
             if ($conds === null) {
                 $out .= '  br label %' . $bodyLabel . "\n";
             } else {
                 foreach ($conds as $c) {
                     $vk = $this->nodeTypeKind($c);
-                    $eq = $this->allocSsa();
+                    $eq = $this->ssa->allocReg();
                     if ($subjIsCell) {
                         if ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN) {
                             // string cond: tag-guarded strcmp (a non-string
@@ -5423,8 +5361,8 @@ final class EmitLlvm
                             // int/bool/null cond: unbox the subject's payload
                             // once, then `icmp eq` against the raw cond value.
                             if ($subjInt === '') {
-                                $this->needsTagged = true;
-                                $subjInt = $this->allocSsa();
+                                $this->rt->needsTagged = true;
+                                $subjInt = $this->ssa->allocReg();
                                 $out .= '  ' . $subjInt . ' = call i64 @__manticore_unbox_int(i64 ' . $subj . ")\n";
                             }
                             $out .= $this->emitNode($c);
@@ -5438,17 +5376,17 @@ final class EmitLlvm
                         $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
                             && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
                         if ($useStr) {
-                            $this->needsStrcmp = true;
-                            $sp = $this->allocSsa();
+                            $this->rt->needsStrcmp = true;
+                            $sp = $this->ssa->allocReg();
                             $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
-                            $cp = $this->allocSsa();
+                            $cp = $this->ssa->allocReg();
                             $out .= '  ' . $cp . ' = inttoptr i64 ' . $cv . " to ptr\n";
                             $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
                         } else {
                             $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $cv . "\n";
                         }
                     }
-                    $condNext = $this->allocLabel('match.cond');
+                    $condNext = $this->ssa->allocLabel('match.cond');
                     $out .= '  br i1 ' . $eq . ', label %' . $bodyLabel . ', label %' . $condNext . "\n";
                     $out .= $condNext . ":\n";
                 }
@@ -5464,12 +5402,12 @@ final class EmitLlvm
         // No arm matched (no default) — yield 0 (PHP throws; we don't).
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $loaded . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -5485,24 +5423,24 @@ final class EmitLlvm
      */
     private function emitCellStrEq(string $subj, Node $cond, string $eq): string
     {
-        $this->needsStrcmp = true;
+        $this->rt->needsStrcmp = true;
         $out = $this->emitNode($cond);
         $out .= $this->coerceToPtr();
         $cp = $this->lastValue;
         $out .= $this->cellTagIr($subj);
         $tag = $this->cellTagReg;
-        $isStr = $this->allocSsa();
+        $isStr = $this->ssa->allocReg();
         $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
-        $cmpL = $this->allocLabel('match.streq');
-        $nsL  = $this->allocLabel('match.strne');
-        $jnL  = $this->allocLabel('match.strjoin');
+        $cmpL = $this->ssa->allocLabel('match.streq');
+        $nsL  = $this->ssa->allocLabel('match.strne');
+        $jnL  = $this->ssa->allocLabel('match.strjoin');
         $out .= '  br i1 ' . $isStr . ', label %' . $cmpL . ', label %' . $nsL . "\n";
         $out .= $cmpL . ":\n";
-        $payload = $this->allocSsa();
+        $payload = $this->ssa->allocReg();
         $out .= '  ' . $payload . ' = and i64 ' . $subj . ", 281474976710655\n";
-        $sp = $this->allocSsa();
+        $sp = $this->ssa->allocReg();
         $out .= '  ' . $sp . ' = inttoptr i64 ' . $payload . " to ptr\n";
-        $eqc = $this->allocSsa();
+        $eqc = $this->ssa->allocReg();
         $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
         $out .= '  br label %' . $jnL . "\n";
         $out .= $nsL . ":\n  br label %" . $jnL . "\n";
@@ -5513,7 +5451,7 @@ final class EmitLlvm
 
     private function emitConcat(Concat $n): string
     {
-        $this->needsConcat = true;
+        $this->rt->needsConcat = true;
         $c = $n;
         // Route confined (Arena) concats through the arena allocator so
         // they are bulk-freed at the frame's mem_arena_leave; escaping
@@ -5522,7 +5460,7 @@ final class EmitLlvm
         // operand int/float→string coercions are confined too, so they
         // bump-allocate alongside the concat buffer.
         $arena = $n->allocKind === \Compile\Mir\AllocationKind::ARENA;
-        if ($arena) { $this->needsArena = true; }
+        if ($arena) { $this->rt->needsArena = true; }
         // Tier-1 fusion: a chain `a.b.c.d` lowers to nested Concat nodes, each
         // doing its own malloc+memcpy (N-1 mallocs, N-2 dead intermediates).
         // Flatten the chain to its leaf operands and build the result in ONE
@@ -5560,7 +5498,7 @@ final class EmitLlvm
         $out .= $this->emitNode($r);
         $out .= $this->coerceToStr($r, $arena);
         $rp = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $fn = $arena ? '@__mir_concat_arena' : '@__mir_concat';
         $out .= '  ' . $reg . ' = call ptr ' . $fn . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
         // The concat copied both operands' bytes; a freshly-produced operand
@@ -5640,7 +5578,7 @@ final class EmitLlvm
                 $intVals[] = $iv;
                 $raws[] = '';
                 $gptrs[] = '';
-                $l = $this->allocSsa();
+                $l = $this->ssa->allocReg();
                 $out .= '  ' . $l . ' = call i64 @__mir_int_len(i64 ' . $iv . ")\n";
                 $lens[] = $l;
                 continue;
@@ -5661,29 +5599,29 @@ final class EmitLlvm
             }
             // A null `?string` operand concatenates as "" (PHP), not a memcpy
             // of null — map 0 to the empty C-string, exactly like __mir_concat.
-            $nn = $this->allocSsa();
+            $nn = $this->ssa->allocReg();
             $out .= '  ' . $nn . ' = icmp eq ptr ' . $raw . ", null\n";
-            $g = $this->allocSsa();
+            $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = select i1 ' . $nn . ', ptr ' . $empty
                   . ', ptr ' . $raw . "\n";
             $gptrs[] = $g;
             // O(1) binary-safe length (len@-16) with a libc-strlen fallback for
             // a raw operand — same contract as __mir_concat.
-            $l = $this->allocSsa();
+            $l = $this->ssa->allocReg();
             $out .= '  ' . $l . ' = call i64 @__mir_strlen(ptr ' . $g . ")\n";
             $lens[] = $l;
         }
         $sum = $lens[0];
         $n = count($lens);
         for ($i = 1; $i < $n; $i++) {
-            $ns = $this->allocSsa();
+            $ns = $this->ssa->allocReg();
             $out .= '  ' . $ns . ' = add i64 ' . $sum . ', ' . $lens[$i] . "\n";
             $sum = $ns;
         }
-        $sz = $this->allocSsa();
+        $sz = $this->ssa->allocReg();
         $out .= '  ' . $sz . ' = add i64 ' . $sum . ", 1\n";
         $alloc = $arena ? '@__mir_str_alloc_arena' : '@__mir_str_alloc';
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . ' = call ptr ' . $alloc . '(i64 ' . $sz . ")\n";
         // Copy each operand at a running offset: an int operand is formatted
         // in place (__mir_int_fmt), a string operand is memcpy'd.
@@ -5696,19 +5634,19 @@ final class EmitLlvm
                 $out .= '  call ptr @memcpy(ptr ' . $buf . ', ptr ' . $gptrs[$i]
                       . ', i64 ' . $lens[$i] . ")\n";
             } else {
-                $d = $this->allocSsa();
+                $d = $this->ssa->allocReg();
                 $out .= '  ' . $d . ' = getelementptr inbounds i8, ptr ' . $buf
                       . ', i64 ' . $off . "\n";
                 $out .= '  call ptr @memcpy(ptr ' . $d . ', ptr ' . $gptrs[$i]
                       . ', i64 ' . $lens[$i] . ")\n";
             }
             if ($i < $n - 1) {
-                $no = $this->allocSsa();
+                $no = $this->ssa->allocReg();
                 $out .= '  ' . $no . ' = add i64 ' . $off . ', ' . $lens[$i] . "\n";
                 $off = $no;
             }
         }
-        $dend = $this->allocSsa();
+        $dend = $this->ssa->allocReg();
         $out .= '  ' . $dend . ' = getelementptr inbounds i8, ptr ' . $buf
               . ', i64 ' . $sum . "\n";
         $out .= '  store i8 0, ptr ' . $dend . "\n";
@@ -5738,7 +5676,7 @@ final class EmitLlvm
         if ($tk === Type::KIND_INT || $tk === Type::KIND_FLOAT
             || $tk === Type::KIND_BOOL) {
             // int/float_to_str coercion temp — always fresh.
-            $this->needsStrRc = true;
+            $this->rt->needsStrRc = true;
             return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
         }
         return $this->freeStrTemp($op, $ptr);
@@ -5763,7 +5701,7 @@ final class EmitLlvm
     private function freeStrTemp(Node $node, string $ptr): string
     {
         if (!$this->isFreshStringTemp($node)) { return ''; }
-        $this->needsStrRc = true;
+        $this->rt->needsStrRc = true;
         return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
     }
 
@@ -5776,7 +5714,7 @@ final class EmitLlvm
     {
         $mo = $n;
         if ($mo->op === 'arena_enter') {
-            $this->needsArena = true;
+            $this->rt->needsArena = true;
             $this->currentFnHasArena = true;
             return "  call void @__mir_arena_enter()\n";
         }
@@ -5785,7 +5723,7 @@ final class EmitLlvm
             // implicit `ret`. After an explicit `return` it lands in a
             // dead block (harmless) — that path's leave is emitted by
             // emitReturn instead.
-            $this->needsArena = true;
+            $this->rt->needsArena = true;
             return "  call void @__mir_arena_leave()\n";
         }
         if ($mo->op === 'rc_release') {
@@ -5866,11 +5804,11 @@ final class EmitLlvm
      */
     private function rcRetainSlot(string $slot, string $flavor): string
     {
-        if ($flavor === 'str') { $this->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
-        elseif ($flavor === 'obj') { $this->needsRc = true; $fn = '@__mir_rc_retain'; }
+        if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
+        elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
         else { $fn = '@__mir_array_retain'; } // any vec/assoc flavor → unified buffer rc
-        $iv = $this->allocSsa();
-        $pv = $this->allocSsa();
+        $iv = $this->ssa->allocReg();
+        $pv = $this->ssa->allocReg();
         $out  = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
         $out .= '  ' . $pv . ' = inttoptr i64 ' . $iv . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
@@ -5880,7 +5818,7 @@ final class EmitLlvm
     /** Emit a release of the rc value held in `$slot` (obj / vec / vecobj / str). */
     private function rcReleaseSlot(string $slot, string $flavor): string
     {
-        $iv = $this->allocSsa();
+        $iv = $this->ssa->allocReg();
         $out = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
         return $out . $this->rcReleaseReg($iv, $flavor);
     }
@@ -5892,12 +5830,12 @@ final class EmitLlvm
         // (mode-driven; drops hashed string keys, and the _obj/_str variants
         // drop element values). str/obj scalars keep their own helpers.
         $fn = '@__mir_array_release';
-        if ($flavor === 'str') { $this->needsStrRc = true; $fn = '@__mir_rc_release_str'; }
-        elseif ($flavor === 'obj') { $this->needsRc = true; $fn = '@__mir_rc_release'; }
+        if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }
+        elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_release'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
-        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->needsRc = true; $this->needsStrRc = true; $fn = '@__mir_array_release_cell'; }
-        $pv = $this->allocSsa();
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_cell'; }
+        $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
         return $out;
@@ -5957,7 +5895,7 @@ final class EmitLlvm
                 // Unified arrays: every vec/assoc flavor releases via
                 // __mir_array_release* whose deps (needsRc/needsStrRc) are
                 // forced unconditionally in emit(); str/obj likewise covered.
-                if ($flavor !== '') { $this->needsRc = true; $this->needsStrRc = true; }
+                if ($flavor !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
             }
         }
     }
@@ -6055,21 +5993,21 @@ final class EmitLlvm
             if ($cls === 'Ffi\\Ptr' || $cls === 'Generator' || $this->isClosureClass($cls)) { return ''; }
             if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
             if ($this->isEnumClass($cls)) { return ''; }
-            $this->needsRc = true;
-            $p = $this->allocSsa();
+            $this->rt->needsRc = true;
+            $p = $this->ssa->allocReg();
             $o  = '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
             $o .= '  call void @__mir_rc_retain(ptr ' . $p . ")\n";
             return $o;
         }
         if ($tk === Type::KIND_STRING) {
-            $this->needsStrRc = true;
-            $p = $this->allocSsa();
+            $this->rt->needsStrRc = true;
+            $p = $this->ssa->allocReg();
             $o  = '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
             $o .= '  call void @__mir_rc_retain_str(ptr ' . $p . ")\n";
             return $o;
         }
         if ($tk === Type::KIND_ARRAY) {
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $o  = '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
             $o .= '  call void @__mir_array_retain(ptr ' . $p . ")\n";
             return $o;
@@ -6168,17 +6106,17 @@ final class EmitLlvm
         // immortal (retain is a sentinel no-op — skip it).
         if ($tk === Type::KIND_STRING
             && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return ''; }
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         $out  = $this->profBump(7 + $cat);
         $out .= '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         if ($tk === Type::KIND_STRING) {
-            $this->needsStrRc = true;
+            $this->rt->needsStrRc = true;
             $out .= '  call void @__mir_rc_retain_str(ptr ' . $p . ")\n";
         } elseif ($tk === Type::KIND_ARRAY) {
             // ONE tag-guarded buffer-rc retain for every array value.
             $out .= '  call void @__mir_array_retain(ptr ' . $p . ")\n";
         } else {
-            $this->needsRc = true;
+            $this->rt->needsRc = true;
             $out .= '  call void @__mir_rc_retain(ptr ' . $p . ")\n";
         }
         return $out;
@@ -6204,9 +6142,9 @@ final class EmitLlvm
         }
         // A tagged cell (mixed) → dispatch on its tag at runtime.
         if ($operand->type->kind === Type::KIND_CELL) {
-            $this->needsTaggedToStr = true;
+            $this->rt->needsTaggedToStr = true;
             $out = $this->coerceToI64();
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'ptr';
@@ -6220,21 +6158,21 @@ final class EmitLlvm
         // the coercion buffer is confined too — bump-allocate it so it is
         // freed at the same scope exit instead of leaking on the heap.
         if ($operand->type->kind === Type::KIND_FLOAT) {
-            $this->needsFloatStr = true;
+            $this->rt->needsFloatStr = true;
             $out = $this->coerceTo('double');
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $fn = $arena ? '@__mir_float_to_str_arena' : '@__mir_float_to_str';
-            if ($arena) { $this->needsArena = true; }
+            if ($arena) { $this->rt->needsArena = true; }
             $out .= '  ' . $reg . ' = call ptr ' . $fn . '(double ' . $this->lastValue . ")\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'ptr';
             return $out;
         }
-        $this->needsIntStr = true;
+        $this->rt->needsIntStr = true;
         $out = $this->coerceToI64();
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $fn = $arena ? '@__mir_int_to_str_arena' : '@__mir_int_to_str';
-        if ($arena) { $this->needsArena = true; }
+        if ($arena) { $this->rt->needsArena = true; }
         $out .= '  ' . $reg . ' = call ptr ' . $fn . '(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
@@ -6271,10 +6209,10 @@ final class EmitLlvm
                 $out .= $this->coerceToI64();
                 $out .= $this->cellTagIr($this->lastValue);
                 $tag = $this->cellTagReg;
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $tag . ", 3\n";
-                $z = $this->allocSsa();
+                $z = $this->ssa->allocReg();
                 $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
@@ -6286,10 +6224,10 @@ final class EmitLlvm
             if (!($leftNull && $rightNull) && $ptrCarried) {
                 $out = $this->emitNode($other);
                 $out .= $this->coerceToI64();
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $this->lastValue . ", 0\n";
-                $z = $this->allocSsa();
+                $z = $this->ssa->allocReg();
                 $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
@@ -6318,10 +6256,10 @@ final class EmitLlvm
             $v = $this->lastValue;
             $out .= $this->cellTagIr($v);
             $tag = $this->cellTagReg;
-            $cmpReg = $this->allocSsa();
+            $cmpReg = $this->ssa->allocReg();
             $pred = $isEq ? 'eq' : 'ne';
             $out .= '  ' . $cmpReg . ' = icmp ' . $pred . ' i64 ' . $tag . ", 2\n";
-            $extReg = $this->allocSsa();
+            $extReg = $this->ssa->allocReg();
             $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
@@ -6345,12 +6283,12 @@ final class EmitLlvm
             if ($ak === Type::KIND_ARRAY || $ak === Type::KIND_UNKNOWN) {
                 $out = $this->emitNode($arrNode);
                 $out .= $this->coerceToPtr();
-                $len = $this->allocSsa();
+                $len = $this->ssa->allocReg();
                 $out .= '  ' . $len . ' = load i64, ptr ' . $this->lastValue . "\n";
-                $cmpReg = $this->allocSsa();
+                $cmpReg = $this->ssa->allocReg();
                 $out .= '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $len . ", 0\n";
-                $extReg = $this->allocSsa();
+                $extReg = $this->ssa->allocReg();
                 $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
                 $this->lastValue = $extReg;
                 $this->lastValueType = 'i64';
@@ -6384,11 +6322,11 @@ final class EmitLlvm
                     $out .= $this->boxToCell($c->right->type);
                     $r = $this->lastValue; $rt = $this->lastValueType;
                 }
-                if ($lt === 'ptr') { $tmp = $this->allocSsa(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; }
-                if ($rt === 'ptr') { $tmp = $this->allocSsa(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; }
-                $cmpReg = $this->allocSsa();
+                if ($lt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; }
+                if ($rt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; }
+                $cmpReg = $this->ssa->allocReg();
                 $out .= '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $l . ', ' . $r . "\n";
-                $z = $this->allocSsa();
+                $z = $this->ssa->allocReg();
                 $out .= '  ' . $z . ' = zext i1 ' . $cmpReg . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
@@ -6404,38 +6342,38 @@ final class EmitLlvm
         if ($strictEq
             && (($lk === Type::KIND_STRING && $rk === Type::KIND_CELL)
                 || ($lk === Type::KIND_CELL && $rk === Type::KIND_STRING))) {
-            $this->needsStrcmp = true;
+            $this->rt->needsStrcmp = true;
             $cellI = ($lk === Type::KIND_CELL) ? $l : $r;
             $cellT = ($lk === Type::KIND_CELL) ? $lt : $rt;
             $strV  = ($lk === Type::KIND_CELL) ? $r : $l;
             $strT  = ($lk === Type::KIND_CELL) ? $rt : $lt;
             $ci = $cellI;
-            if ($cellT === 'ptr') { $ci = $this->allocSsa(); $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cellI . " to i64\n"; }
+            if ($cellT === 'ptr') { $ci = $this->ssa->allocReg(); $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cellI . " to i64\n"; }
             $sp = $strV;
-            if ($strT !== 'ptr') { $sp = $this->allocSsa(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $strV . " to ptr\n"; }
+            if ($strT !== 'ptr') { $sp = $this->ssa->allocReg(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $strV . " to ptr\n"; }
             $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
-            $isStr = $this->allocSsa(); $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
+            $isStr = $this->ssa->allocReg(); $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
             // Guard a null string carrier (a `?string` operand) — skip the deref.
             $stri = $strV;
-            if ($strT === 'ptr') { $stri = $this->allocSsa(); $out .= '  ' . $stri . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
-            $spNN = $this->allocSsa(); $out .= '  ' . $spNN . ' = icmp ne i64 ' . $stri . ", 0\n";
-            $can = $this->allocSsa(); $out .= '  ' . $can . ' = and i1 ' . $isStr . ', ' . $spNN . "\n";
-            $cmpL = $this->allocLabel('streqc.cmp');
-            $nsL = $this->allocLabel('streqc.ns');
-            $jnL = $this->allocLabel('streqc.join');
+            if ($strT === 'ptr') { $stri = $this->ssa->allocReg(); $out .= '  ' . $stri . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
+            $spNN = $this->ssa->allocReg(); $out .= '  ' . $spNN . ' = icmp ne i64 ' . $stri . ", 0\n";
+            $can = $this->ssa->allocReg(); $out .= '  ' . $can . ' = and i1 ' . $isStr . ', ' . $spNN . "\n";
+            $cmpL = $this->ssa->allocLabel('streqc.cmp');
+            $nsL = $this->ssa->allocLabel('streqc.ns');
+            $jnL = $this->ssa->allocLabel('streqc.join');
             $out .= '  br i1 ' . $can . ', label %' . $cmpL . ', label %' . $nsL . "\n";
             $out .= $cmpL . ":\n";
-            $payload = $this->allocSsa(); $out .= '  ' . $payload . ' = and i64 ' . $ci . ", 281474976710655\n";
-            $cp = $this->allocSsa(); $out .= '  ' . $cp . ' = inttoptr i64 ' . $payload . " to ptr\n";
-            $eqc = $this->allocSsa(); $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+            $payload = $this->ssa->allocReg(); $out .= '  ' . $payload . ' = and i64 ' . $ci . ", 281474976710655\n";
+            $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+            $eqc = $this->ssa->allocReg(); $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
             $out .= '  br label %' . $jnL . "\n";
             $out .= $nsL . ":\n  br label %" . $jnL . "\n";
             $out .= $jnL . ":\n";
-            $phi = $this->allocSsa();
+            $phi = $this->ssa->allocReg();
             $out .= '  ' . $phi . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
             $res = $phi;
-            if ($op === '!==') { $res = $this->allocSsa(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
-            $z = $this->allocSsa(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            if ($op === '!==') { $res = $this->ssa->allocReg(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
+            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
             return $out;
         }
@@ -6446,21 +6384,21 @@ final class EmitLlvm
         if ($strictEq
             && (($lk === Type::KIND_FLOAT && $rk === Type::KIND_CELL)
                 || ($lk === Type::KIND_CELL && $rk === Type::KIND_FLOAT))) {
-            $this->needsTaggedToFloat = true;
+            $this->rt->needsTaggedToFloat = true;
             $ci    = ($lk === Type::KIND_CELL) ? $l : $r;
             $cellT = ($lk === Type::KIND_CELL) ? $lt : $rt;
             $fltV  = ($lk === Type::KIND_CELL) ? $r : $l;
             $fltT  = ($lk === Type::KIND_CELL) ? $rt : $lt;
-            if ($cellT === 'ptr') { $cp = $this->allocSsa(); $out .= '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
+            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
             $fd = $fltV;
-            if ($fltT !== 'double') { $fd = $this->allocSsa(); $out .= '  ' . $fd . ' = bitcast i64 ' . $fltV . " to double\n"; }
+            if ($fltT !== 'double') { $fd = $this->ssa->allocReg(); $out .= '  ' . $fd . ' = bitcast i64 ' . $fltV . " to double\n"; }
             $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
-            $isFlt = $this->allocSsa(); $out .= '  ' . $isFlt . ' = icmp eq i64 ' . $tag . ", 6\n";
-            $cd = $this->allocSsa(); $out .= '  ' . $cd . ' = call double @__manticore_tagged_to_double(i64 ' . $ci . ")\n";
-            $eqf = $this->allocSsa(); $out .= '  ' . $eqf . ' = fcmp oeq double ' . $cd . ', ' . $fd . "\n";
-            $res = $this->allocSsa(); $out .= '  ' . $res . ' = and i1 ' . $isFlt . ', ' . $eqf . "\n";
-            if ($op === '!==') { $nn = $this->allocSsa(); $out .= '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
-            $z = $this->allocSsa(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            $isFlt = $this->ssa->allocReg(); $out .= '  ' . $isFlt . ' = icmp eq i64 ' . $tag . ", 6\n";
+            $cd = $this->ssa->allocReg(); $out .= '  ' . $cd . ' = call double @__manticore_tagged_to_double(i64 ' . $ci . ")\n";
+            $eqf = $this->ssa->allocReg(); $out .= '  ' . $eqf . ' = fcmp oeq double ' . $cd . ', ' . $fd . "\n";
+            $res = $this->ssa->allocReg(); $out .= '  ' . $res . ' = and i1 ' . $isFlt . ', ' . $eqf . "\n";
+            if ($op === '!==') { $nn = $this->ssa->allocReg(); $out .= '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
+            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
             return $out;
         }
@@ -6474,46 +6412,46 @@ final class EmitLlvm
         if ($looseEqNum
             && (($lk === Type::KIND_STRING && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT))
                 || ($rk === Type::KIND_STRING && ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT)))) {
-            $this->needsTaggedEq = true;   // emits __mir_is_numeric_str
-            $this->needsStrtod = true;
+            $this->rt->needsTaggedEq = true;   // emits __mir_is_numeric_str
+            $this->rt->needsStrtod = true;
             $lStr = $lk === Type::KIND_STRING;
             $strV = $lStr ? $l : $r; $strT = $lStr ? $lt : $rt;
             $numV = $lStr ? $r : $l; $numT = $lStr ? $rt : $lt;
             $numK = $lStr ? $rk : $lk;
             $si = $strV;
-            if ($strT === 'ptr') { $si = $this->allocSsa(); $out .= '  ' . $si . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
-            $sp = $this->allocSsa(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $si . " to ptr\n";
+            if ($strT === 'ptr') { $si = $this->ssa->allocReg(); $out .= '  ' . $si . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
+            $sp = $this->ssa->allocReg(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $si . " to ptr\n";
             if ($numK === Type::KIND_FLOAT && $numT === 'double') {
                 $nd = $numV;
             } elseif ($numK === Type::KIND_FLOAT) {
-                $nd = $this->allocSsa(); $out .= '  ' . $nd . ' = bitcast i64 ' . $numV . " to double\n";
+                $nd = $this->ssa->allocReg(); $out .= '  ' . $nd . ' = bitcast i64 ' . $numV . " to double\n";
             } else {
-                $nd = $this->allocSsa(); $out .= '  ' . $nd . ' = sitofp i64 ' . $numV . " to double\n";
+                $nd = $this->ssa->allocReg(); $out .= '  ' . $nd . ' = sitofp i64 ' . $numV . " to double\n";
             }
-            $snz = $this->allocSsa(); $out .= '  ' . $snz . ' = icmp ne i64 ' . $si . ", 0\n";
-            $chkL = $this->allocLabel('nseq.chk');
-            $nullL = $this->allocLabel('nseq.null');
-            $numL = $this->allocLabel('nseq.num');
-            $nnumL = $this->allocLabel('nseq.nnum');
-            $joinL = $this->allocLabel('nseq.join');
+            $snz = $this->ssa->allocReg(); $out .= '  ' . $snz . ' = icmp ne i64 ' . $si . ", 0\n";
+            $chkL = $this->ssa->allocLabel('nseq.chk');
+            $nullL = $this->ssa->allocLabel('nseq.null');
+            $numL = $this->ssa->allocLabel('nseq.num');
+            $nnumL = $this->ssa->allocLabel('nseq.nnum');
+            $joinL = $this->ssa->allocLabel('nseq.join');
             $out .= '  br i1 ' . $snz . ', label %' . $chkL . ', label %' . $nullL . "\n";
             $out .= $chkL . ":\n";
-            $isn = $this->allocSsa(); $out .= '  ' . $isn . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
+            $isn = $this->ssa->allocReg(); $out .= '  ' . $isn . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
             $out .= '  br i1 ' . $isn . ', label %' . $numL . ', label %' . $nnumL . "\n";
             $out .= $numL . ":\n";
-            $sd = $this->allocSsa(); $out .= '  ' . $sd . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
-            $eqn = $this->allocSsa(); $out .= '  ' . $eqn . ' = fcmp oeq double ' . $sd . ', ' . $nd . "\n";
+            $sd = $this->ssa->allocReg(); $out .= '  ' . $sd . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
+            $eqn = $this->ssa->allocReg(); $out .= '  ' . $eqn . ' = fcmp oeq double ' . $sd . ', ' . $nd . "\n";
             $out .= '  br label %' . $joinL . "\n";
             $out .= $nnumL . ":\n  br label %" . $joinL . "\n";
             $out .= $nullL . ":\n";
-            $eqz = $this->allocSsa(); $out .= '  ' . $eqz . ' = fcmp oeq double 0.0, ' . $nd . "\n";
+            $eqz = $this->ssa->allocReg(); $out .= '  ' . $eqz . ' = fcmp oeq double 0.0, ' . $nd . "\n";
             $out .= '  br label %' . $joinL . "\n";
             $out .= $joinL . ":\n";
-            $phi = $this->allocSsa();
+            $phi = $this->ssa->allocReg();
             $out .= '  ' . $phi . ' = phi i1 [ ' . $eqn . ', %' . $numL . ' ], [ false, %' . $nnumL . ' ], [ ' . $eqz . ', %' . $nullL . " ]\n";
             $res = $phi;
-            if ($isNe) { $res = $this->allocSsa(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
-            $z = $this->allocSsa(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            if ($isNe) { $res = $this->ssa->allocReg(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
+            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
             return $out;
         }
@@ -6528,16 +6466,16 @@ final class EmitLlvm
         $rStrish = $rk === Type::KIND_STRING || $rk === Type::KIND_UNKNOWN;
         if (($lk === Type::KIND_STRING || $rk === Type::KIND_STRING)
             && $lStrish && $rStrish) {
-            $this->needsStrcmp = true;
+            $this->rt->needsStrcmp = true;
             // i64 carriers for the null guard (a `?string` operand carries 0
             // when null at runtime, e.g. an unset `?string` field).
             $li = $l;
-            if ($lt === 'ptr') { $li = $this->allocSsa(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
             $ri = $r;
-            if ($rt === 'ptr') { $ri = $this->allocSsa(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
-            $lp = $this->allocSsa();
+            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            $lp = $this->ssa->allocReg();
             $out .= '  ' . $lp . ' = inttoptr i64 ' . $li . " to ptr\n";
-            $rp = $this->allocSsa();
+            $rp = $this->ssa->allocReg();
             $out .= '  ' . $rp . ' = inttoptr i64 ' . $ri . " to ptr\n";
             // Equality (=== / == / !== / !=): null is a valid operand value
             // (a string is never == to null). strcmp(null, …) dereferences
@@ -6545,43 +6483,43 @@ final class EmitLlvm
             // non-null; otherwise the result is the i64-carrier identity
             // (both null → equal, one null → unequal).
             if ($isEq || $isNe) {
-                $lnz = $this->allocSsa();
+                $lnz = $this->ssa->allocReg();
                 $out .= '  ' . $lnz . ' = icmp ne i64 ' . $li . ", 0\n";
-                $rnz = $this->allocSsa();
+                $rnz = $this->ssa->allocReg();
                 $out .= '  ' . $rnz . ' = icmp ne i64 ' . $ri . ", 0\n";
-                $both = $this->allocSsa();
+                $both = $this->ssa->allocReg();
                 $out .= '  ' . $both . ' = and i1 ' . $lnz . ', ' . $rnz . "\n";
-                $scLbl = $this->allocLabel('streq.cmp');
-                $idLbl = $this->allocLabel('streq.id');
-                $jnLbl = $this->allocLabel('streq.join');
+                $scLbl = $this->ssa->allocLabel('streq.cmp');
+                $idLbl = $this->ssa->allocLabel('streq.id');
+                $jnLbl = $this->ssa->allocLabel('streq.join');
                 $out .= '  br i1 ' . $both . ', label %' . $scLbl . ', label %' . $idLbl . "\n";
                 $out .= $scLbl . ":\n";
-                $eqr = $this->allocSsa();
+                $eqr = $this->ssa->allocReg();
                 $out .= '  ' . $eqr . ' = call i1 @__mir_str_eq(ptr ' . $lp . ', ptr ' . $rp . ")\n";
                 $scRes = $eqr;
                 if ($isNe) {
-                    $scRes = $this->allocSsa();
+                    $scRes = $this->ssa->allocReg();
                     $out .= '  ' . $scRes . ' = xor i1 ' . $eqr . ", true\n";
                 }
                 $out .= '  br label %' . $jnLbl . "\n";
                 $out .= $idLbl . ":\n";
-                $idRes = $this->allocSsa();
+                $idRes = $this->ssa->allocReg();
                 $out .= '  ' . $idRes . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $li . ', ' . $ri . "\n";
                 $out .= '  br label %' . $jnLbl . "\n";
                 $out .= $jnLbl . ":\n";
-                $phi = $this->allocSsa();
+                $phi = $this->ssa->allocReg();
                 $out .= '  ' . $phi . ' = phi i1 [ ' . $scRes . ', %' . $scLbl . ' ], [ ' . $idRes . ', %' . $idLbl . " ]\n";
-                $extReg = $this->allocSsa();
+                $extReg = $this->ssa->allocReg();
                 $out .= '  ' . $extReg . ' = zext i1 ' . $phi . " to i64\n";
                 $this->lastValue = $extReg;
                 $this->lastValueType = 'i64';
                 return $out;
             }
-            $call = $this->allocSsa();
+            $call = $this->ssa->allocReg();
             $out .= '  ' . $call . ' = call i64 @__mir_str_cmp(ptr ' . $lp . ', ptr ' . $rp . ")\n";
-            $cmpReg = $this->allocSsa();
+            $cmpReg = $this->ssa->allocReg();
             $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $call . ", 0\n";
-            $extReg = $this->allocSsa();
+            $extReg = $this->ssa->allocReg();
             $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
@@ -6594,19 +6532,19 @@ final class EmitLlvm
         // strings; it misses int-vs-numeric-string and non-interned strings.
         if (($isEq || $isNe)
             && $lk === Type::KIND_CELL && $rk === Type::KIND_CELL) {
-            $this->needsTaggedEq = true;
-            $this->needsTagged = true;
-            $this->needsTaggedToFloat = true;
+            $this->rt->needsTaggedEq = true;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToFloat = true;
             $li = $l;
-            if ($lt === 'ptr') { $li = $this->allocSsa(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
             $ri = $r;
-            if ($rt === 'ptr') { $ri = $this->allocSsa(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
             $fn = $strictEq ? '@__manticore_tagged_strict_eq' : '@__manticore_tagged_loose_eq';
-            $eq = $this->allocSsa();
+            $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
             $res = $eq;
             if ($isNe) {
-                $res = $this->allocSsa();
+                $res = $this->ssa->allocReg();
                 $out .= '  ' . $res . ' = xor i64 ' . $eq . ", 1\n";
             }
             $this->lastValue = $res;
@@ -6620,19 +6558,19 @@ final class EmitLlvm
         // mixed array). Eq/ne keep the existing tag/carrier paths above.
         if (!$isEq && !$isNe
             && $lk === Type::KIND_CELL && $rk === Type::KIND_CELL) {
-            $this->needsTaggedCompare = true;
-            $this->needsTagged = true;
-            $this->needsTaggedToFloat = true;
-            $this->needsStrcmp = true;
+            $this->rt->needsTaggedCompare = true;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToFloat = true;
+            $this->rt->needsStrcmp = true;
             $li = $l;
-            if ($lt === 'ptr') { $li = $this->allocSsa(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
             $ri = $r;
-            if ($rt === 'ptr') { $ri = $this->allocSsa(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
-            $cmp = $this->allocSsa();
+            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            $cmp = $this->ssa->allocReg();
             $out .= '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
-            $cmpReg = $this->allocSsa();
+            $cmpReg = $this->ssa->allocReg();
             $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
-            $extReg = $this->allocSsa();
+            $extReg = $this->ssa->allocReg();
             $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
@@ -6643,18 +6581,18 @@ final class EmitLlvm
             || $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT) {
             $ld = $l;
             if ($lt !== 'double') {
-                $ld = $this->allocSsa();
+                $ld = $this->ssa->allocReg();
                 $out .= '  ' . $ld . ' = sitofp i64 ' . $l . " to double\n";
             }
             $rd = $r;
             if ($rt !== 'double') {
-                $rd = $this->allocSsa();
+                $rd = $this->ssa->allocReg();
                 $out .= '  ' . $rd . ' = sitofp i64 ' . $r . " to double\n";
             }
-            $cmpReg = $this->allocSsa();
+            $cmpReg = $this->ssa->allocReg();
             $out .= '  ' . $cmpReg . ' = fcmp ' . $this->cmpPredicateF($c->op)
                   . ' double ' . $ld . ', ' . $rd . "\n";
-            $extReg = $this->allocSsa();
+            $extReg = $this->ssa->allocReg();
             $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
@@ -6672,16 +6610,16 @@ final class EmitLlvm
             || $rk === Type::KIND_INT || $rk === Type::KIND_BOOL
             || $lk === Type::KIND_INT || $lk === Type::KIND_BOOL;
         if ($lk === Type::KIND_CELL && $numericCtx) {
-            if ($lt === 'ptr') { $tmp = $this->allocSsa(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; $lt = 'i64'; }
-            $this->needsTagged = true;
-            $u = $this->allocSsa();
+            if ($lt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; $lt = 'i64'; }
+            $this->rt->needsTagged = true;
+            $u = $this->ssa->allocReg();
             $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $l . ")\n";
             $l = $u; $lt = 'i64';
         }
         if ($rk === Type::KIND_CELL && $numericCtx) {
-            if ($rt === 'ptr') { $tmp = $this->allocSsa(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; $rt = 'i64'; }
-            $this->needsTagged = true;
-            $u = $this->allocSsa();
+            if ($rt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; $rt = 'i64'; }
+            $this->rt->needsTagged = true;
+            $u = $this->ssa->allocReg();
             $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $r . ")\n";
             $r = $u; $rt = 'i64';
         }
@@ -6689,19 +6627,19 @@ final class EmitLlvm
         // handles, e.g. `$x !== []`): the carrier is i64, so a ptr operand
         // (a fresh array-literal / alloc) must be ptrtoint'd first.
         if ($lt === 'ptr') {
-            $lp = $this->allocSsa();
+            $lp = $this->ssa->allocReg();
             $out .= '  ' . $lp . ' = ptrtoint ptr ' . $l . " to i64\n";
             $l = $lp;
         }
         if ($rt === 'ptr') {
-            $rp = $this->allocSsa();
+            $rp = $this->ssa->allocReg();
             $out .= '  ' . $rp . ' = ptrtoint ptr ' . $r . " to i64\n";
             $r = $rp;
         }
         $pred = $this->cmpPredicate($c->op);
-        $cmpReg = $this->allocSsa();
+        $cmpReg = $this->ssa->allocReg();
         $out .= '  ' . $cmpReg . ' = icmp ' . $pred . ' i64 ' . $l . ', ' . $r . "\n";
-        $extReg = $this->allocSsa();
+        $extReg = $this->ssa->allocReg();
         $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
         $this->lastValue = $extReg;
         $this->lastValueType = 'i64';
@@ -6757,9 +6695,9 @@ final class EmitLlvm
     {
         $out = $this->coerceToI64();
         $obj = $this->lastValue;
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($tsClass) . '____toString(i64 ' . $obj . ")\n";
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
         $this->lastValue = $p;
         $this->lastValueType = 'ptr';
@@ -6783,7 +6721,7 @@ final class EmitLlvm
             // print nothing, matching PHP echo.
             if ($kind === Type::KIND_CELL) {
                 $out .= $this->coerceToI64();
-                $this->needsTaggedEcho = true;
+                $this->rt->needsTaggedEcho = true;
                 $out .= '  call void @__manticore_echo_tagged(i64 '
                       . $this->lastValue . ")\n";
                 continue;
@@ -6796,9 +6734,9 @@ final class EmitLlvm
             // arg gates whether the single "1" char prints.
             if ($kind === Type::KIND_BOOL) {
                 $out .= $this->coerceToI64();
-                $nz = $this->allocSsa();
-                $w = $this->allocSsa();
-                $reg = $this->allocSsa();
+                $nz = $this->ssa->allocReg();
+                $w = $this->ssa->allocReg();
+                $reg = $this->ssa->allocReg();
                 $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
                 $out .= '  ' . $w . ' = zext i1 ' . $nz . " to i32\n";
                 $out .= '  ' . $reg . ' = call i32 (ptr, ...) @printf(ptr @.fmt.ds, i32 '
@@ -6814,8 +6752,8 @@ final class EmitLlvm
                 // A null `?string` (ptr 0) echoes "" in PHP — map 0 → the empty
                 // C-string so printf doesn't dereference null.
                 $sp = $this->lastValue;
-                $snn = $this->allocSsa();
-                $ssafe = $this->allocSsa();
+                $snn = $this->ssa->allocReg();
+                $ssafe = $this->ssa->allocReg();
                 $out .= '  ' . $snn . ' = icmp eq ptr ' . $sp . ", null\n";
                 $out .= '  ' . $ssafe . ' = select i1 ' . $snn
                       . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $sp . "\n";
@@ -6828,7 +6766,7 @@ final class EmitLlvm
                 $argType = 'i64';
             }
             $val = $this->lastValue;
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i32 (ptr, ...) @printf(ptr '
                   . $fmt . ', ' . $argType . ' ' . $val . ")\n";
             // A fresh string temp (`echo $a . $b`) is dead after printing.
@@ -6862,14 +6800,14 @@ final class EmitLlvm
         $v = $r->value;
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
         // The return value (if any) is stashed in `retval` for getReturn().
-        if ($this->inGenerator) {
+        if ($this->gen->inGenerator) {
             $out = '';
             if ($v !== null) {
                 $out .= $this->emitNode($v);
                 $out .= $this->coerceToI64();
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->genRetvalPtr . "\n";
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
-            $out .= '  store i64 -1, ptr ' . $this->genStatePtr . "\n";
+            $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
         // Close the frame arena before every exit, so confined values
@@ -6916,7 +6854,7 @@ final class EmitLlvm
         // A passthrough `return $x` of a cell param is typed CELL (handled
         // above), never reaches here; arrays/objects travel raw (below).
         if ($this->currentFnIsClosure && $v->type->kind === Type::KIND_UNKNOWN) {
-            $this->needsTagged = true;
+            $this->rt->needsTagged = true;
             $out .= $this->boxLastByRepr();
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
@@ -7079,15 +7017,15 @@ final class EmitLlvm
      *  no-op unless the program queries traces. */
     private function btPush(string $display, int $line): string
     {
-        if (!$this->needsBacktrace) { return ''; }
-        return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->internString($display))
+        if (!$this->rt->needsBacktrace) { return ''; }
+        return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
              . ', i64 ' . (string)$line . ")\n";
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
     private function btPop(): string
     {
-        return $this->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
+        return $this->rt->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
     }
 
     /**
@@ -7098,44 +7036,44 @@ final class EmitLlvm
      */
     private function emitBtVec(string $global): string
     {
-        $dep = $this->allocSsa();
+        $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
-        $slot = $this->allocSsa();
+        $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
-        $nv = $this->allocSsa();
+        $nv = $this->ssa->allocReg();
         $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $dep . ")\n";
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
-        $iSlot = $this->allocSsa();
+        $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
-        $i0 = $this->allocSsa();
+        $i0 = $this->ssa->allocReg();
         $out .= '  ' . $i0 . ' = sub i64 ' . $dep . ", 1\n";
         $out .= '  store i64 ' . $i0 . ', ptr ' . $iSlot . "\n";
-        $cond = $this->allocLabel('bt.cond');
-        $body = $this->allocLabel('bt.body');
-        $end  = $this->allocLabel('bt.end');
+        $cond = $this->ssa->allocLabel('bt.cond');
+        $body = $this->ssa->allocLabel('bt.body');
+        $end  = $this->ssa->allocLabel('bt.end');
         $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
-        $i = $this->allocSsa();
+        $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
-        $c = $this->allocSsa();
+        $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp sge i64 ' . $i . ", 0\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
-        $ep = $this->allocSsa();
+        $ep = $this->ssa->allocReg();
         $out .= '  ' . $ep . ' = getelementptr inbounds [4096 x i64], ptr ' . $global . ', i64 0, i64 ' . $i . "\n";
-        $ev = $this->allocSsa();
+        $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $ep . "\n";
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-        $nx = $this->allocSsa();
+        $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $ev . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
-        $i2 = $this->allocSsa();
+        $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = sub i64 ' . $i . ", 1\n";
         $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
-        $dst = $this->allocSsa();
+        $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = ptrtoint ptr ' . $dst . " to i64\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -7242,9 +7180,9 @@ final class EmitLlvm
             if (!isset($this->slots[$name])) { return null; }
             if (isset($this->refLocals[$name])) {
                 // The slot holds the address of the caller's cell — deref once.
-                $ai = $this->allocSsa();
+                $ai = $this->ssa->allocReg();
                 $out = '  ' . $ai . ' = load i64, ptr ' . $this->slots[$name] . "\n";
-                $p = $this->allocSsa();
+                $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $ai . " to ptr\n";
                 $this->lastValue = $p;
                 $this->lastValueType = 'ptr';
@@ -7258,7 +7196,7 @@ final class EmitLlvm
             // The property field IS the cell holding the array pointer.
             $addr = $this->byRefAddrOf($base);
             if ($addr === null) { return null; }
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $addr .= '  ' . $p . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
             $this->lastValue = $p;
             $this->lastValueType = 'ptr';
@@ -7279,7 +7217,7 @@ final class EmitLlvm
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
             if (!isset($this->slots[$name])) { return null; }
-            $addr = $this->allocSsa();
+            $addr = $this->ssa->allocReg();
             if (isset($this->refLocals[$name])) {
                 $out = '  ' . $addr . ' = load i64, ptr ' . $this->slots[$name] . "\n";
             } else {
@@ -7297,10 +7235,10 @@ final class EmitLlvm
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
             $off = $this->propertyOffset($pa->object, $pa->property);
-            $g = $this->allocSsa();
+            $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
                   . ', i64 ' . (string)$off . "\n";
-            $addr = $this->allocSsa();
+            $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
             $this->lastValue = $addr;
             $this->lastValueType = 'i64';
@@ -7314,7 +7252,7 @@ final class EmitLlvm
             $out = $this->containerCellPtr($aa->array);
             if ($out === null) { return null; }
             $slotPtr = $this->lastValue;
-            $ep = $this->allocSsa();
+            $ep = $this->ssa->allocReg();
             if ($keyKind === 'str') {
                 $out .= $this->emitNode($aa->index);
                 $out .= $this->coerceToPtr();
@@ -7328,7 +7266,7 @@ final class EmitLlvm
                 $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot(ptr '
                       . $slotPtr . ', i64 ' . $keyReg . ")\n";
             }
-            $addr = $this->allocSsa();
+            $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
             $this->lastValue = $addr;
             $this->lastValueType = 'i64';
@@ -7366,14 +7304,14 @@ final class EmitLlvm
     {
         $pk = $pt->kind;
         if ($pk === Type::KIND_BOOL) {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 1\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;
         }
         if ($pk === Type::KIND_INT) {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -7383,8 +7321,8 @@ final class EmitLlvm
             // A boxed cell is a NaN-pattern i64; reinterpreting it as a double
             // yields NaN. Unbox by tag to a real double (the caller coerces it
             // back through the i64 carrier for the ABI).
-            $this->needsTaggedToFloat = true;
-            $r = $this->allocSsa();
+            $this->rt->needsTaggedToFloat = true;
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'double';
@@ -7394,13 +7332,13 @@ final class EmitLlvm
             // Enum cell → the ORDINAL a typed-enum consumer expects. The cell is
             // box_object(singleton); mask to the data ptr, load ordinal @+16
             // (mirrors emitEnumCellSingletons' layout), NOT the raw payload.
-            $m = $this->allocSsa();
+            $m = $this->ssa->allocReg();
             $out = '  ' . $m . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
-            $g = $this->allocSsa();
+            $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = load i64, ptr ' . $g . "\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -7408,7 +7346,7 @@ final class EmitLlvm
         }
         if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_STRING
             || $pk === Type::KIND_OBJ) {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -7454,7 +7392,7 @@ final class EmitLlvm
                 while ($k < $nparams) {
                     if (!$first) { $argList .= ', '; }
                     $first = false;
-                    $ev = $this->allocSsa();
+                    $ev = $this->ssa->allocReg();
                     $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
                           . ', i64 ' . (string)($k - $ai) . ")\n";
                     // A cell/tagged param needs the raw element boxed by its
@@ -7491,12 +7429,12 @@ final class EmitLlvm
                 // filled default expr. Back it with a throwaway stack slot so
                 // the callee's write lands somewhere (PHP discards it) instead
                 // of dereferencing a null address.
-                $tmp = $this->allocSsa();
+                $tmp = $this->ssa->allocReg();
                 $out .= '  ' . $tmp . " = alloca i64\n";
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
-                $addr = $this->allocSsa();
+                $addr = $this->ssa->allocReg();
                 $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
                 $argList .= 'i64 ' . $addr;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -7515,7 +7453,7 @@ final class EmitLlvm
                 if ($pt !== null && $pt->kind === Type::KIND_FLOAT
                     && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)) {
                     $out .= $this->coerceToI64();
-                    $d = $this->allocSsa();
+                    $d = $this->ssa->allocReg();
                     $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
                     $this->lastValue = $d;
                     $this->lastValueType = 'double';
@@ -7534,7 +7472,7 @@ final class EmitLlvm
             }
             $ai = $ai + 1;
         }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $mangled = $this->mangle($c->function);
         // A `manticore_rt_*` callee with no PHP definition is a native
         // FFI-boundary primitive — declare it as an extern so the module
@@ -7555,7 +7493,7 @@ final class EmitLlvm
         }
         // Backtrace frame around a user call (not an rt_ FFI primitive).
         $btName = '';
-        if ($this->needsBacktrace && \substr($mangled, 0, 13) !== 'manticore_rt_') {
+        if ($this->rt->needsBacktrace && \substr($mangled, 0, 13) !== 'manticore_rt_') {
             $btName = $c->function;
             $bs = \strrpos($btName, '\\');
             if ($bs !== false) { $btName = \substr($btName, $bs + 1); }
@@ -7579,9 +7517,9 @@ final class EmitLlvm
         // By-ref-returning callee yields an address. In value context
         // (everything but a `$r = &fn()` bind) deref it to the value.
         if (($this->fnReturnsByRef[$c->function] ?? false) && !$this->rawRefCall) {
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
-            $dv = $this->allocSsa();
+            $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $reg = $dv;
@@ -7589,7 +7527,7 @@ final class EmitLlvm
         // If the inferred return type is float, bitcast the i64
         // back to a usable double for the caller side.
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -7627,9 +7565,9 @@ final class EmitLlvm
     private function truthinessOf(Type $t): string
     {
         if ($t->kind === Type::KIND_CELL) {
-            $this->needsTaggedTruthy = true;
+            $this->rt->needsTaggedTruthy = true;
             $out = $this->coerceToI64();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -7637,8 +7575,8 @@ final class EmitLlvm
         }
         if ($t->kind === Type::KIND_STRING) {
             $out = $this->boxToCell(Type::string_());
-            $this->needsTaggedTruthy = true;
-            $r = $this->allocSsa();
+            $this->rt->needsTaggedTruthy = true;
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -7650,11 +7588,11 @@ final class EmitLlvm
         // length check.
         if ($t->isArray()) {
             $out = $this->coerceToPtr();
-            $this->needsTagged = true;
-            $ba = $this->allocSsa();
+            $this->rt->needsTagged = true;
+            $ba = $this->ssa->allocReg();
             $out .= '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
-            $this->needsTaggedTruthy = true;
-            $r = $this->allocSsa();
+            $this->rt->needsTaggedTruthy = true;
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $ba . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -7667,14 +7605,14 @@ final class EmitLlvm
     {
         if ($this->lastValueType === 'i64') { return ''; }
         if ($this->lastValueType === 'double') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = bitcast double ' . $this->lastValue . " to i64\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
             return $out;
         }
         if ($this->lastValueType === 'ptr') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
@@ -7688,11 +7626,11 @@ final class EmitLlvm
         $i = $n;
         $out = $this->emitCondVal($i->cond);
         $cond = $this->lastValue;
-        $thenLabel = $this->allocLabel('then');
-        $elseLabel = $i->else === null ? $this->allocLabel('endif') : $this->allocLabel('else');
-        $endLabel = $i->else === null ? $elseLabel : $this->allocLabel('endif');
+        $thenLabel = $this->ssa->allocLabel('then');
+        $elseLabel = $i->else === null ? $this->ssa->allocLabel('endif') : $this->ssa->allocLabel('else');
+        $endLabel = $i->else === null ? $elseLabel : $this->ssa->allocLabel('endif');
         // Truncate i64 → i1 for the branch condition.
-        $condBit = $this->allocSsa();
+        $condBit = $this->ssa->allocReg();
         $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
         $out .= '  br i1 ' . $condBit . ', label %' . $thenLabel . ', label %' . $elseLabel . "\n";
         $out .= $thenLabel . ":\n";
@@ -7736,7 +7674,7 @@ final class EmitLlvm
         // switch (irreducible CFG), so a per-iteration arena save placed
         // before the loop no longer dominates the in-loop reset. Disable the
         // arena loop optimization inside generators.
-        if ($this->inGenerator) { return false; }
+        if ($this->gen->inGenerator) { return false; }
         $this->arenaHasAlloc = false;
         $this->arenaBindsNonLocal = false;
         $this->arenaBoundLocals = [];
@@ -7872,10 +7810,10 @@ final class EmitLlvm
      */
     private function emitArenaSave(): string
     {
-        $this->needsArena = true;
-        $this->needsArenaReset = true;
-        $cr = $this->allocSsa();
-        $ur = $this->allocSsa();
+        $this->rt->needsArena = true;
+        $this->rt->needsArenaReset = true;
+        $cr = $this->ssa->allocReg();
+        $ur = $this->ssa->allocReg();
         $this->arenaSaveCurReg = $cr;
         $this->arenaSaveUsedReg = $ur;
         $out  = '  ' . $cr . " = load ptr, ptr @__mir_arena_cur\n";
@@ -7893,9 +7831,9 @@ final class EmitLlvm
     private function emitWhile(While_ $n): string
     {
         $w = $n;
-        $condLabel = $this->allocLabel('loop.cond');
-        $bodyLabel = $this->allocLabel('loop.body');
-        $endLabel  = $this->allocLabel('loop.end');
+        $condLabel = $this->ssa->allocLabel('loop.cond');
+        $bodyLabel = $this->ssa->allocLabel('loop.body');
+        $endLabel  = $this->ssa->allocLabel('loop.end');
         $savedBreak = $this->breakLabel;
         $savedCont  = $this->continueLabel;
         $this->breakLabel = $endLabel;
@@ -7911,7 +7849,7 @@ final class EmitLlvm
         if ($reset) { $out .= $this->emitArenaReset(); }
         $out .= $this->emitCondVal($w->cond);
         $cond = $this->lastValue;
-        $condBit = $this->allocSsa();
+        $condBit = $this->ssa->allocReg();
         $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
         $out .= '  br i1 ' . $condBit . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
         $out .= $bodyLabel . ":\n";
@@ -7929,10 +7867,10 @@ final class EmitLlvm
     private function emitFor(For_ $n): string
     {
         $f = $n;
-        $condLabel = $this->allocLabel('for.cond');
-        $bodyLabel = $this->allocLabel('for.body');
-        $stepLabel = $this->allocLabel('for.step');
-        $endLabel  = $this->allocLabel('for.end');
+        $condLabel = $this->ssa->allocLabel('for.cond');
+        $bodyLabel = $this->ssa->allocLabel('for.body');
+        $stepLabel = $this->ssa->allocLabel('for.step');
+        $endLabel  = $this->ssa->allocLabel('for.end');
         $savedBreak = $this->breakLabel;
         $savedCont  = $this->continueLabel;
         // `continue` runs the step before re-testing the condition.
@@ -7951,7 +7889,7 @@ final class EmitLlvm
         if ($f->cond !== null) {
             $out .= $this->emitCondVal($f->cond);
             $cond = $this->lastValue;
-            $condBit = $this->allocSsa();
+            $condBit = $this->ssa->allocReg();
             $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
             $out .= '  br i1 ' . $condBit . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
         } else {
@@ -7975,9 +7913,9 @@ final class EmitLlvm
     private function emitDoWhile(DoWhile_ $n): string
     {
         $d = $n;
-        $bodyLabel = $this->allocLabel('do.body');
-        $condLabel = $this->allocLabel('do.cond');
-        $endLabel  = $this->allocLabel('do.end');
+        $bodyLabel = $this->ssa->allocLabel('do.body');
+        $condLabel = $this->ssa->allocLabel('do.cond');
+        $endLabel  = $this->ssa->allocLabel('do.end');
         $savedBreak = $this->breakLabel;
         $savedCont  = $this->continueLabel;
         $this->breakLabel = $endLabel;
@@ -7996,7 +7934,7 @@ final class EmitLlvm
         $out .= $condLabel . ":\n";
         $out .= $this->emitCondVal($d->cond);
         $cond = $this->lastValue;
-        $condBit = $this->allocSsa();
+        $condBit = $this->ssa->allocReg();
         $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
         $out .= '  br i1 ' . $condBit . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
@@ -8009,14 +7947,6 @@ final class EmitLlvm
     }
 
     // ── String pool / escaping ─────────────────────────────────
-
-    private function internString(string $s): int
-    {
-        if (isset($this->stringPool[$s])) { return $this->stringPool[$s]; }
-        $id = \count($this->stringPool);
-        $this->stringPool[$s] = $id;
-        return $id;
-    }
 
     private function llvmStringBytes(string $s): string
     {
@@ -8126,7 +8056,7 @@ final class EmitLlvm
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
-            $buf = $this->allocSsa();
+            $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
                   . $base . ', i64 ' . $idx . ")\n";
             $this->lastValue = $buf;
@@ -8161,7 +8091,7 @@ final class EmitLlvm
             $out .= $this->emitNode($se->value);
             $out .= $this->coerceToPtr();
             $chs = $this->lastValue;
-            $nw = $this->allocSsa();
+            $nw = $this->ssa->allocReg();
             $out .= '  ' . $nw . ' = call ptr @__mir_str_set_char(ptr ' . $base
                   . ', i64 ' . $idx . ', ptr ' . $chs . ")\n";
             $out .= $this->vecWriteBack($se->array, $nw, false);
@@ -8200,10 +8130,10 @@ final class EmitLlvm
         // retain/release bail on that tag, so nothing else in codegen changes.
         $arena = $al->allocKind === \Compile\Mir\AllocationKind::ARENA;
         $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
-        if ($arena) { $this->needsArena = true; $this->vecAllocArena = true; }
-        $slot = $this->allocSsa();
+        if ($arena) { $this->rt->needsArena = true; $this->vecAllocArena = true; }
+        $slot = $this->ssa->allocReg();
         $out  = '  ' . $slot . " = alloca ptr\n";
-        $init = $this->allocSsa();
+        $init = $this->ssa->allocReg();
         $out .= '  ' . $init . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
         $out .= '  store ptr ' . $init . ', ptr ' . $slot . "\n";
         foreach ($al->elements as $el) {
@@ -8222,9 +8152,9 @@ final class EmitLlvm
                 $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
                 $val = $this->lastValue;
                 if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
-                $cur = $this->allocSsa();
+                $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-                $next = $this->allocSsa();
+                $next = $this->ssa->allocReg();
                 if ($keyIsString) {
                     $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $cur . ', ptr ' . $keyReg . ', i64 ' . $val . $this->litKeyHashArgs($el->key) . ")\n";
                 } else {
@@ -8237,14 +8167,14 @@ final class EmitLlvm
                 $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
                 $val = $this->lastValue;
                 if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
-                $cur = $this->allocSsa();
+                $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-                $next = $this->allocSsa();
+                $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $val . ")\n";
                 $out .= '  store ptr ' . $next . ', ptr ' . $slot . "\n";
             }
         }
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
@@ -8259,9 +8189,9 @@ final class EmitLlvm
         $out = $this->emitNode($sp->operand);
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-        $nx = $this->allocSsa();
+        $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_spread_into(ptr ' . $cur . ', ptr ' . $src . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
         return $out;
@@ -8286,9 +8216,9 @@ final class EmitLlvm
         $out .= $this->emitNode($aa->index);
         $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
         $key = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         if ($keyIsCell) {
-            $this->needsCellKey = true;
+            $this->rt->needsCellKey = true;
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
         } elseif ($keyIsString) {
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($aa->index) . ")\n";
@@ -8298,7 +8228,7 @@ final class EmitLlvm
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         if ($self->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -8320,12 +8250,12 @@ final class EmitLlvm
         // COW shared buffers (PHP array value semantics) before mutating.
         if ($se->array->kind === Node::KIND_LOAD_LOCAL
             || $se->array->kind === Node::KIND_PROPERTY_ACCESS) {
-            $cow = $this->allocSsa();
+            $cow = $this->ssa->allocReg();
             $out .= '  ' . $cow . ' = call ptr @__mir_array_cow(ptr ' . $arrPtr . ")\n";
             $out .= $this->vecWriteBack($se->array, $cow, $baseCell);
             $arrPtr = $cow;
         } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
-            $cow = $this->allocSsa();
+            $cow = $this->ssa->allocReg();
             $out .= '  ' . $cow . ' = call ptr @__mir_array_cow(ptr ' . $arrPtr . ")\n";
             $arrPtr = $cow;
         }
@@ -8342,14 +8272,14 @@ final class EmitLlvm
             && ($et = $se->array->type->element) !== null
             && $et->kind === Type::KIND_CELL;
         $boxVal = $baseCell || $elemCell;
-        $next = $this->allocSsa();
+        $next = $this->ssa->allocReg();
         if ($isAppend) {
             $out .= $this->emitNode($se->value);
             if ($boxVal) { $out .= $this->boxToCell($se->value->type); $val = $this->lastValue; }
             else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, null, 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
         } elseif ($keyIsCell) {
-            $this->needsCellKey = true;
+            $this->rt->needsCellKey = true;
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToI64();
             $key = $this->lastValue;
@@ -8390,7 +8320,7 @@ final class EmitLlvm
     {
         if ($this->lastValueType === 'ptr') { return ''; }
         if ($this->lastValueType === 'i64') {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'ptr';
@@ -8457,26 +8387,12 @@ final class EmitLlvm
 
     // ── SSA / label minting ────────────────────────────────────
 
-    private function allocSsa(): string
-    {
-        $id = $this->nextId;
-        $this->nextId = $this->nextId + 1;
-        return '%r' . (string)$id;
-    }
-
-    private function allocLabel(string $hint): string
-    {
-        $id = $this->nextLabel;
-        $this->nextLabel = $this->nextLabel + 1;
-        return $hint . '.' . (string)$id;
-    }
-
     /** Stable LLVM block label for a user `goto` label name — allocated once per
      *  function so a `goto L` and the `L:` label resolve to the SAME block. */
     private function userLabel(string $name): string
     {
         if (!isset($this->userLabels[$name])) {
-            $this->userLabels[$name] = $this->allocLabel('user.' . $name);
+            $this->userLabels[$name] = $this->ssa->allocLabel('user.' . $name);
         }
         return $this->userLabels[$name];
     }

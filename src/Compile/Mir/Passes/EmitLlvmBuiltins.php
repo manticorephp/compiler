@@ -172,42 +172,42 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
         $cell = $this->lastValue;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca ptr\n";
         $out .= '  store ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $res . "\n";
         $out .= $this->cellTagIr($cell);
         $tag = $this->cellTagReg;
-        $isObj = $this->allocSsa();
+        $isObj = $this->ssa->allocReg();
         $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
-        $objL = $this->allocLabel('en.obj');
-        $doneL = $this->allocLabel('en.done');
+        $objL = $this->ssa->allocLabel('en.obj');
+        $doneL = $this->ssa->allocLabel('en.done');
         $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
         $out .= $objL . ":\n";
-        $m = $this->allocSsa();
+        $m = $this->ssa->allocReg();
         $out .= '  ' . $m . ' = and i64 ' . $cell . ", 281474976710655\n";
-        $dp = $this->allocSsa();
+        $dp = $this->ssa->allocReg();
         $out .= '  ' . $dp . ' = inttoptr i64 ' . $m . " to ptr\n";
-        $descI = $this->allocSsa();
+        $descI = $this->ssa->allocReg();
         $out .= '  ' . $descI . ' = load i64, ptr ' . $dp . "\n";
-        $descP = $this->allocSsa();
+        $descP = $this->ssa->allocReg();
         $out .= '  ' . $descP . ' = inttoptr i64 ' . $descI . " to ptr\n";
-        $cid = $this->allocSsa();
+        $cid = $this->ssa->allocReg();
         $out .= '  ' . $cid . ' = load i64, ptr ' . $descP . "\n";
         foreach ($this->enums as $ename => $ed) {
             $ct = (string)\count($ed->caseNames);
-            $eq = $this->allocSsa();
+            $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $cid . ', ' . (string)$ed->classId . "\n";
-            $hitL = $this->allocLabel('en.hit');
-            $nextL = $this->allocLabel('en.next');
+            $hitL = $this->ssa->allocLabel('en.hit');
+            $nextL = $this->ssa->allocLabel('en.next');
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $og = $this->allocSsa();
+            $og = $this->ssa->allocReg();
             $out .= '  ' . $og . ' = getelementptr i8, ptr ' . $dp . ", i64 16\n";
-            $ord = $this->allocSsa();
+            $ord = $this->ssa->allocReg();
             $out .= '  ' . $ord . ' = load i64, ptr ' . $og . "\n";
-            $fg = $this->allocSsa();
+            $fg = $this->ssa->allocReg();
             $out .= '  ' . $fg . ' = getelementptr [' . $ct . ' x ptr], ptr @' . $ename . '__fqns, i64 0, i64 ' . $ord . "\n";
-            $fp = $this->allocSsa();
+            $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = load ptr, ptr ' . $fg . "\n";
             $out .= '  store ptr ' . $fp . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $doneL . "\n";
@@ -215,7 +215,7 @@ trait EmitLlvmBuiltins
         }
         $out .= '  br label %' . $doneL . "\n";
         $out .= $doneL . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load ptr, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
@@ -224,24 +224,24 @@ trait EmitLlvmBuiltins
 
     private function boxToCell(Type $t): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $k = $t->kind;
         // Already a tagged cell — don't double-box.
         if ($k === Type::KIND_CELL) { return $this->coerceToI64(); }
         if ($k === Type::KIND_FLOAT) {
             $out = $this->coerceTo('double');
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_float(double ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
         if ($k === Type::KIND_STRING) {
             $out = $this->coerceToPtr();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_ptr(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
         if ($k === Type::KIND_NULL) {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out = '  ' . $r . " = call i64 @__manticore_box_null()\n";
             return $this->finishI64($out, $r);
         }
@@ -255,7 +255,7 @@ trait EmitLlvmBuiltins
                 return $this->emitVecToCellArray($elem);
             }
             $out = $this->coerceToPtr();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
@@ -272,7 +272,7 @@ trait EmitLlvmBuiltins
                 return $this->emitAssocToCellArrayUnified($elem);
             }
             $out = $this->coerceToPtr();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
@@ -284,13 +284,13 @@ trait EmitLlvmBuiltins
             $ord = $this->lastValue;
             $tbl = '@' . $t->class . '__cases';
             $ct = (string)\count($this->enums[$t->class]->caseNames);
-            $g = $this->allocSsa();
+            $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
-            $dp = $this->allocSsa();
+            $dp = $this->ssa->allocReg();
             $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
-            $pp = $this->allocSsa();
+            $pp = $this->ssa->allocReg();
             $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
             return $this->finishI64($out, $r);
         }
@@ -299,13 +299,13 @@ trait EmitLlvmBuiltins
             // an object cell so a tagged consumer (var_dump / a mixed param)
             // dispatches on the object tag and the class_id resolves the type.
             $out = $this->coerceToPtr();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
         $helper = ($k === Type::KIND_BOOL) ? '__manticore_box_bool' : '__manticore_box_int';
         $out = $this->coerceToI64();
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $helper . '(i64 ' . $this->lastValue . ")\n";
         return $this->finishI64($out, $r);
     }
@@ -317,9 +317,9 @@ trait EmitLlvmBuiltins
     private function cellToPtr(): string
     {
         $out = $this->coerceToI64();
-        $m = $this->allocSsa();
+        $m = $this->ssa->allocReg();
         $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
         $this->lastValue = $p;
         $this->lastValueType = 'ptr';
@@ -363,54 +363,54 @@ trait EmitLlvmBuiltins
      */
     private function emitAssocToCellArrayUnified(Type $elem): string
     {
-        $this->needsTagged = true;
-        $this->needsCellKey = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsCellKey = true;
         $out = $this->coerceToPtr();
         $rawSrc = $this->lastValue;
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0.
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
-        $src = $this->allocSsa();
+        $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
-        $len = $this->allocSsa();
+        $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
-        $slot = $this->allocSsa();
+        $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
-        $nv = $this->allocSsa();
+        $nv = $this->ssa->allocReg();
         $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $len . ")\n";
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
-        $iSlot = $this->allocSsa();
+        $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $iSlot . "\n";
-        $cond = $this->allocLabel('uac.cond');
-        $body = $this->allocLabel('uac.body');
-        $end  = $this->allocLabel('uac.end');
+        $cond = $this->ssa->allocLabel('uac.cond');
+        $body = $this->ssa->allocLabel('uac.body');
+        $end  = $this->ssa->allocLabel('uac.end');
         $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
-        $i = $this->allocSsa();
+        $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
-        $c = $this->allocSsa();
+        $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
-        $kb = $this->allocSsa();
+        $kb = $this->ssa->allocReg();
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        $ev = $this->allocSsa();
+        $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        $boxed = $this->allocSsa();
+        $boxed = $this->ssa->allocReg();
         $ek = $elem->kind;
         if ($ek === Type::KIND_STRING) {
-            $ep = $this->allocSsa();
+            $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_FLOAT) {
-            $ed = $this->allocSsa();
+            $ed = $this->ssa->allocReg();
             $out .= '  ' . $ed . ' = bitcast i64 ' . $ev . " to double\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
         } elseif ($ek === Type::KIND_OBJ) {
-            $ep = $this->allocSsa();
+            $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_ARRAY) {
@@ -420,7 +420,7 @@ trait EmitLlvmBuiltins
                 // cells) — box it as a plain array cell. Rebuilding would re-box
                 // each already-boxed cell (else-branch box_int) → double-box
                 // garbage (a vec of mixed assocs read raw by var_dump/json).
-                $ep = $this->allocSsa();
+                $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
             } else {
@@ -436,18 +436,18 @@ trait EmitLlvmBuiltins
         } else {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
         }
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-        $nx = $this->allocSsa();
+        $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $boxed . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
-        $i2 = $this->allocSsa();
+        $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
         $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
-        $dst = $this->allocSsa();
+        $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $dst . ")\n";
         return $this->finishI64($out, $r);
     }
@@ -467,10 +467,10 @@ trait EmitLlvmBuiltins
         $names = $this->lastValue;
         $out .= $this->emitBtVec('@__mir_bt_line');
         $lines = $this->lastValue;
-        $fp = $this->allocSsa();
+        $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = ptrtoint ptr '
-              . $this->strLitId($this->internString($this->sourceFile)) . " to i64\n";
-        $r = $this->allocSsa();
+              . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_bt_frames(i64 '
               . $names . ', i64 ' . $lines . ', i64 ' . $fp . ")\n";
         return $this->finishI64($out, $r);
@@ -479,10 +479,10 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  NaN-boxing helper call: i64 -> i64. */
     private function biTaggedCall(string $helper, array $args): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @' . $helper . '(i64 ' . $this->lastValue . ")\n";
         return $this->finishI64($out, $reg);
     }
@@ -505,9 +505,9 @@ trait EmitLlvmBuiltins
         // string builtins must not deref it. Map a null ptr to the empty
         // string — PHP coerces null to "" for these (strlen("")=0, substr=").
         $ptr = $this->lastValue;
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $ptr . ", null\n";
-        $safe = $this->allocSsa();
+        $safe = $this->ssa->allocReg();
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $ptr . "\n";
         $this->lastValue = $safe;
@@ -529,7 +529,7 @@ trait EmitLlvmBuiltins
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
         $n = $this->lastValue;
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call ptr @__mir_str_new(ptr ' . $p . ', i64 ' . $n . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
@@ -547,7 +547,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call ptr @__mir_str_from_cstr(ptr ' . $p . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
@@ -561,8 +561,8 @@ trait EmitLlvmBuiltins
      */
     private function biStdStream(string $stream): string
     {
-        $this->needsStdStreams = true;
-        $r = $this->allocSsa();
+        $this->rt->needsStdStreams = true;
+        $r = $this->ssa->allocReg();
         $out = '  ' . $r . ' = call ptr @manticore_' . $stream . "()\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
@@ -586,8 +586,8 @@ trait EmitLlvmBuiltins
     /** `$argc` source: the captured process argc (preamble cli_argv block). */
     private function biCliArgc(): string
     {
-        $this->needsCliArgv = true;
-        $r = $this->allocSsa();
+        $this->rt->needsCliArgv = true;
+        $r = $this->ssa->allocReg();
         $out = '  ' . $r . " = call i64 @manticore_cli_argc()\n";
         return $this->finishI64($out, $r);
     }
@@ -599,11 +599,11 @@ trait EmitLlvmBuiltins
      */
     private function biCliArgvAt(array $args): string
     {
-        $this->needsCliArgv = true;
+        $this->rt->needsCliArgv = true;
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
         $i = $this->lastValue;
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call ptr @manticore_cli_argv(i64 ' . $i . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
@@ -617,7 +617,7 @@ trait EmitLlvmBuiltins
         // reach a string only via str_from_buffer / cstr_to_str).
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_strlen(ptr ' . $a0 . ")\n";
         $out .= $this->freeStrTemp($args[0], $a0);
         return $this->finishI64($out, $reg);
@@ -642,12 +642,12 @@ trait EmitLlvmBuiltins
         // null base to the zero-word so the length load reads 0 rather than
         // dereferencing address 0.
         $ptr = $this->lastValue;
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $ptr . ", null\n";
-        $safe = $this->allocSsa();
+        $safe = $this->ssa->allocReg();
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $ptr . "\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = load i64, ptr ' . $safe . "\n";
         return $this->finishI64($out, $reg);
     }
@@ -667,8 +667,8 @@ trait EmitLlvmBuiltins
      */
     private function biArrayEndpoint(array $args, bool $last, bool $wantKey): string
     {
-        $this->needsTagged = true;
-        if ($wantKey) { $this->needsCellKey = true; }
+        $this->rt->needsTagged = true;
+        if ($wantKey) { $this->rt->needsCellKey = true; }
         $arrT = $args[0]->type;
         $out = $this->emitNode($args[0]);
         if ($arrT->kind === Type::KIND_CELL) {
@@ -679,40 +679,40 @@ trait EmitLlvmBuiltins
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0
         // (mirrors biCount / biArrayKeys).
         $rawSrc = $this->lastValue;
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
-        $src = $this->allocSsa();
+        $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
-        $len = $this->allocSsa();
+        $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $empty = $this->allocLabel('ae.empty');
-        $take  = $this->allocLabel('ae.take');
-        $done  = $this->allocLabel('ae.done');
-        $isEmpty = $this->allocSsa();
+        $empty = $this->ssa->allocLabel('ae.empty');
+        $take  = $this->ssa->allocLabel('ae.take');
+        $done  = $this->ssa->allocLabel('ae.done');
+        $isEmpty = $this->ssa->allocReg();
         $out .= '  ' . $isEmpty . ' = icmp eq i64 ' . $len . ", 0\n";
         $out .= '  br i1 ' . $isEmpty . ', label %' . $empty . ', label %' . $take . "\n";
         // Empty → null cell.
         $out .= $empty . ":\n";
-        $bn = $this->allocSsa();
+        $bn = $this->ssa->allocReg();
         $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
         $out .= '  store i64 ' . $bn . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $done . "\n";
         // Non-empty → index 0 (first) or len-1 (last).
         $out .= $take . ":\n";
         if ($last) {
-            $idx = $this->allocSsa();
+            $idx = $this->ssa->allocReg();
             $out .= '  ' . $idx . ' = sub i64 ' . $len . ", 1\n";
         } else {
             $idx = '0';
         }
         if ($wantKey) {
-            $boxed = $this->allocSsa();
+            $boxed = $this->ssa->allocReg();
             $out .= '  ' . $boxed . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
         } else {
-            $ev = $this->allocSsa();
+            $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
             $out .= $this->boxRawElem($ev, $arrT);
             $boxed = $this->lastValue;
@@ -720,7 +720,7 @@ trait EmitLlvmBuiltins
         $out .= '  store i64 ' . $boxed . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $done . "\n";
         $out .= $done . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         return $this->finishI64($out, $r);
     }
@@ -762,21 +762,21 @@ trait EmitLlvmBuiltins
             return '';
         }
         $elem = $t;
-        $this->needsTagged = true;
-        $boxed = $this->allocSsa();
+        $this->rt->needsTagged = true;
+        $boxed = $this->ssa->allocReg();
         $out = '';
         if ($ek === Type::KIND_STRING) {
-            $ep = $this->allocSsa();
+            $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_FLOAT) {
-            $ed = $this->allocSsa();
+            $ed = $this->ssa->allocReg();
             $out .= '  ' . $ed . ' = bitcast i64 ' . $ev . " to double\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
         } elseif ($ek === Type::KIND_OBJ) {
-            $ep = $this->allocSsa();
+            $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_ARRAY) {
@@ -784,7 +784,7 @@ trait EmitLlvmBuiltins
             if ($nestElem->kind === Type::KIND_CELL || $nestElem->kind === Type::KIND_UNKNOWN) {
                 // Inner array already cell-repr (or erased) — box as a plain
                 // array cell (mirrors emitAssocToCellArrayUnified's array branch).
-                $ep = $this->allocSsa();
+                $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
             } else {
@@ -819,7 +819,7 @@ trait EmitLlvmBuiltins
      */
     private function biArrayKeys(array $args): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $out = $this->emitNode($args[0]);
         if ($args[0]->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
@@ -829,43 +829,43 @@ trait EmitLlvmBuiltins
         // An empty `[]` literal lowers to a null ptr; redirect to the
         // zero-word so the length load reads 0 (mirrors biCount).
         $rawSrc = $this->lastValue;
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
-        $src = $this->allocSsa();
+        $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
-        $len = $this->allocSsa();
+        $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
-        $slot = $this->allocSsa();
+        $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
-        $nv = $this->allocSsa();
+        $nv = $this->ssa->allocReg();
         $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $len . ")\n";
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
-        $iSlot = $this->allocSsa();
+        $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $iSlot . "\n";
-        $cond = $this->allocLabel('akeys.cond');
-        $body = $this->allocLabel('akeys.body');
-        $end  = $this->allocLabel('akeys.end');
+        $cond = $this->ssa->allocLabel('akeys.cond');
+        $body = $this->ssa->allocLabel('akeys.body');
+        $end  = $this->ssa->allocLabel('akeys.end');
         $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
-        $i = $this->allocSsa();
+        $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
-        $c = $this->allocSsa();
+        $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
-        $kb = $this->allocSsa();
+        $kb = $this->ssa->allocReg();
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-        $nx = $this->allocSsa();
+        $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $kb . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
-        $i2 = $this->allocSsa();
+        $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
         $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
-        $dst = $this->allocSsa();
+        $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
         $this->lastValue = $dst;
         $this->lastValueType = 'ptr';
@@ -898,7 +898,7 @@ trait EmitLlvmBuiltins
      */
     private function biArrayValues(array $args, ?Type $boxElem): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $out = $this->emitNode($args[0]);
         if ($args[0]->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
@@ -908,67 +908,67 @@ trait EmitLlvmBuiltins
         // An empty `[]` literal lowers to a null ptr; redirect to the
         // zero-word so the length load reads 0 (mirrors biArrayKeys).
         $rawSrc = $this->lastValue;
-        $isNull = $this->allocSsa();
+        $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
-        $src = $this->allocSsa();
+        $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
-        $len = $this->allocSsa();
+        $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
-        $slot = $this->allocSsa();
+        $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
-        $nv = $this->allocSsa();
+        $nv = $this->ssa->allocReg();
         $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $len . ")\n";
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
-        $iSlot = $this->allocSsa();
+        $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $iSlot . "\n";
-        $cond = $this->allocLabel('avals.cond');
-        $body = $this->allocLabel('avals.body');
-        $end  = $this->allocLabel('avals.end');
+        $cond = $this->ssa->allocLabel('avals.cond');
+        $body = $this->ssa->allocLabel('avals.body');
+        $end  = $this->ssa->allocLabel('avals.end');
         $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
-        $i = $this->allocSsa();
+        $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
-        $c = $this->allocSsa();
+        $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
-        $ev = $this->allocSsa();
+        $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         // A cell source ($boxElem null) and a CELL-element typed source already
         // carry cells; a typed source re-boxes each raw value per its kind.
         $bv = $ev;
         if ($boxElem !== null && $boxElem->kind !== Type::KIND_CELL) {
-            $bv = $this->allocSsa();
+            $bv = $this->ssa->allocReg();
             $ek = $boxElem->kind;
             if ($ek === Type::KIND_STRING) {
-                $ep = $this->allocSsa();
+                $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
             } elseif ($ek === Type::KIND_FLOAT) {
-                $ed = $this->allocSsa();
+                $ed = $this->ssa->allocReg();
                 $out .= '  ' . $ed . ' = bitcast i64 ' . $ev . " to double\n";
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
             } elseif ($ek === Type::KIND_BOOL) {
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
             } elseif ($ek === Type::KIND_OBJ) {
-                $ep = $this->allocSsa();
+                $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
             } else {
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
             }
         }
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
-        $nx = $this->allocSsa();
+        $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $bv . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
-        $i2 = $this->allocSsa();
+        $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
         $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
-        $dst = $this->allocSsa();
+        $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
         $this->lastValue = $dst;
         $this->lastValueType = 'ptr';
@@ -980,9 +980,9 @@ trait EmitLlvmBuiltins
     {
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
-        $byte = $this->allocSsa();
+        $byte = $this->ssa->allocReg();
         $out .= '  ' . $byte . ' = load i8, ptr ' . $a0 . "\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = zext i8 ' . $byte . " to i64\n";
         $out .= $this->freeStrTemp($args[0], $a0);
         return $this->finishI64($out, $reg);
@@ -993,12 +993,12 @@ trait EmitLlvmBuiltins
     {
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
-        $t = $this->allocSsa();
+        $t = $this->ssa->allocReg();
         $out .= '  ' . $t . ' = trunc i64 ' . $this->lastValue . " to i8\n";
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 2)\n";
         $out .= '  store i8 ' . $t . ', ptr ' . $buf . "\n";
-        $nul = $this->allocSsa();
+        $nul = $this->ssa->allocReg();
         $out .= '  ' . $nul . ' = getelementptr inbounds i8, ptr ' . $buf . ", i64 1\n";
         $out .= '  store i8 0, ptr ' . $nul . "\n";
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
@@ -1013,18 +1013,18 @@ trait EmitLlvmBuiltins
         if ($isFloat) {
             $this->libcExtra['llvm.fabs.f64'] = 'declare double @llvm.fabs.f64(double)';
             $out .= $this->coerceTo('double');
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call double @llvm.fabs.f64(double ' . $this->lastValue . ")\n";
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
         }
         $out .= $this->coerceToI64();
         $v = $this->lastValue;
-        $neg = $this->allocSsa();
+        $neg = $this->ssa->allocReg();
         $out .= '  ' . $neg . ' = sub i64 0, ' . $v . "\n";
-        $isNeg = $this->allocSsa();
+        $isNeg = $this->ssa->allocReg();
         $out .= '  ' . $isNeg . ' = icmp slt i64 ' . $v . ", 0\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = select i1 ' . $isNeg . ', i64 ' . $neg . ', i64 ' . $v . "\n";
         return $this->finishI64($out, $reg);
     }
@@ -1040,7 +1040,7 @@ trait EmitLlvmBuiltins
         if (\count($args) !== 2) { return null; }
         $out = $this->emitNode($args[0]); $out .= $this->coerceToI64(); $a = $this->lastValue;
         $out .= $this->emitNode($args[1]); $out .= $this->coerceToI64(); $b = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sdiv i64 ' . $a . ', ' . $b . "\n";
         return $this->finishI64($out, $reg);
     }
@@ -1059,17 +1059,17 @@ trait EmitLlvmBuiltins
         $bothInt = $args[0]->type->kind === Type::KIND_INT
             && $args[1]->type->kind === Type::KIND_INT;
         if ($bothInt) {
-            $this->needsIpow = true;
+            $this->rt->needsIpow = true;
             $out = $this->emitNode($args[0]); $out .= $this->coerceToI64(); $b = $this->lastValue;
             $out .= $this->emitNode($args[1]); $out .= $this->coerceToI64(); $e = $this->lastValue;
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @__mir_ipow(i64 ' . $b . ', i64 ' . $e . ")\n";
             return $this->finishI64($out, $reg);
         }
         $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
         $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $b = $this->lastValue;
         $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $e = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @llvm.pow.f64(double ' . $b . ', double ' . $e . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1083,7 +1083,7 @@ trait EmitLlvmBuiltins
         $this->libcExtra[$intrinsic] = 'declare double @' . $intrinsic . '(double)';
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceTo('double');
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @' . $intrinsic . '(double ' . $this->lastValue . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1103,7 +1103,7 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceTo('double');
         $x = $this->lastValue;
         if (\count($args) < 2) {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call double @llvm.round.f64(double ' . $x . ")\n";
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
@@ -1112,24 +1112,24 @@ trait EmitLlvmBuiltins
         $out .= $this->emitNode($args[1]);
         $out .= $this->coerceTo('double');
         $p = $this->lastValue;
-        $scale = $this->allocSsa();
+        $scale = $this->ssa->allocReg();
         $out .= '  ' . $scale . ' = call double @llvm.pow.f64(double 1.000000e+01, double ' . $p . ")\n";
-        $scaled = $this->allocSsa();
+        $scaled = $this->ssa->allocReg();
         $out .= '  ' . $scaled . ' = fmul double ' . $x . ', ' . $scale . "\n";
         // Pre-round the scaled value at 15 significant digits (snprintf+strtod)
         // to cancel the binary representation error before the final round —
         // PHP's php_round pre-rounding, so round(1.005, 2) → 1.01 not 1.
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
         $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-        $pbuf = $this->allocSsa();
+        $pbuf = $this->ssa->allocReg();
         $out .= '  ' . $pbuf . " = alloca [40 x i8]\n";
         $out .= '  call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $pbuf
               . ', i64 40, ptr @.fmt.p15, double ' . $scaled . ")\n";
-        $cleaned = $this->allocSsa();
+        $cleaned = $this->ssa->allocReg();
         $out .= '  ' . $cleaned . ' = call double @strtod(ptr ' . $pbuf . ", ptr null)\n";
-        $rounded = $this->allocSsa();
+        $rounded = $this->ssa->allocReg();
         $out .= '  ' . $rounded . ' = call double @llvm.round.f64(double ' . $cleaned . ")\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fdiv double ' . $rounded . ', ' . $scale . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1141,7 +1141,7 @@ trait EmitLlvmBuiltins
     {
         $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
         $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $y = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = frem double ' . $x . ', ' . $y . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1154,7 +1154,7 @@ trait EmitLlvmBuiltins
         $this->libcExtra[$fn] = 'declare double @' . $fn . '(double, double)';
         $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
         $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $y = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @' . $fn . '(double ' . $x . ', double ' . $y . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1165,16 +1165,16 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['llvm.log.f64'] = 'declare double @llvm.log.f64(double)';
         $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
-        $lx = $this->allocSsa();
+        $lx = $this->ssa->allocReg();
         $out .= '  ' . $lx . ' = call double @llvm.log.f64(double ' . $x . ")\n";
         if (\count($args) < 2) {
             $this->lastValue = $lx; $this->lastValueType = 'double';
             return $out;
         }
         $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $b = $this->lastValue;
-        $lb = $this->allocSsa();
+        $lb = $this->ssa->allocReg();
         $out .= '  ' . $lb . ' = call double @llvm.log.f64(double ' . $b . ")\n";
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fdiv double ' . $lx . ', ' . $lb . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1183,7 +1183,7 @@ trait EmitLlvmBuiltins
     /** `pi()` → the M_PI constant (no libm call). */
     private function biPi(): string
     {
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out = '  ' . $reg . ' = fadd double 0x400921FB54442D18, 0.000000e+00' . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1194,7 +1194,7 @@ trait EmitLlvmBuiltins
     private function biFloatScale(array $args, string $hexConst): string
     {
         $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fmul double ' . $x . ', ' . $hexConst . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1207,14 +1207,14 @@ trait EmitLlvmBuiltins
         $ok = $args[0]->type->kind;
         if ($ok === Type::KIND_FLOAT) {
             $out .= $this->coerceTo('double');
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = fptosi double ' . $this->lastValue . " to i64\n";
             return $this->finishI64($out, $reg);
         }
         if ($ok === Type::KIND_STRING) {
-            $this->needsStrtol = true;
+            $this->rt->needsStrtol = true;
             $out .= $this->coerceToPtr();
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
             return $this->finishI64($out, $reg);
         }
@@ -1232,7 +1232,7 @@ trait EmitLlvmBuiltins
             return $out;
         }
         $out .= $this->coerceToI64();
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sitofp i64 ' . $this->lastValue . " to double\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
@@ -1253,7 +1253,7 @@ trait EmitLlvmBuiltins
     /** Data-bytes ptr for an interned string literal (header is 8B). */
     private function strRef(string $s): string
     {
-        return $this->strLitId($this->internString($s));
+        return $this->strLitId($this->pool->intern($s));
     }
 
     /**
@@ -1313,42 +1313,42 @@ trait EmitLlvmBuiltins
             $this->lastValue = '1'; $this->lastValueType = 'i64'; return '';
         }
         if ($k === Type::KIND_STRING) {
-            $this->needsTaggedEq = true; // emits __mir_is_numeric_str
+            $this->rt->needsTaggedEq = true; // emits __mir_is_numeric_str
             $out = $this->emitNode($a);
             $out .= $this->coerceToPtr();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i1 @__mir_is_numeric_str(ptr ' . $this->lastValue . ")\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
             return $this->finishI64($out, $z);
         }
         if ($k === Type::KIND_CELL) {
-            $this->needsTagged = true;
-            $this->needsTaggedEq = true;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedEq = true;
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $v = $this->lastValue;
-            $tg = $this->allocSsa();
+            $tg = $this->ssa->allocReg();
             $out .= '  ' . $tg . ' = call i64 @__manticore_tag(i64 ' . $v . ")\n";
-            $isI = $this->allocSsa();
+            $isI = $this->ssa->allocReg();
             $out .= '  ' . $isI . ' = icmp eq i64 ' . $tg . ", 1\n";
-            $isF = $this->allocSsa();
+            $isF = $this->ssa->allocReg();
             $out .= '  ' . $isF . ' = icmp eq i64 ' . $tg . ", 6\n";
-            $isNum = $this->allocSsa();
+            $isNum = $this->ssa->allocReg();
             $out .= '  ' . $isNum . ' = or i1 ' . $isI . ', ' . $isF . "\n";
-            $isS = $this->allocSsa();
+            $isS = $this->ssa->allocReg();
             $out .= '  ' . $isS . ' = icmp eq i64 ' . $tg . ", 4\n";
-            $sp = $this->allocSsa();
+            $sp = $this->ssa->allocReg();
             $out .= '  ' . $sp . ' = and i64 ' . $v . ", 281474976710655\n";
-            $spp = $this->allocSsa();
+            $spp = $this->ssa->allocReg();
             $out .= '  ' . $spp . ' = inttoptr i64 ' . $sp . " to ptr\n";
-            $sn = $this->allocSsa();
+            $sn = $this->ssa->allocReg();
             $out .= '  ' . $sn . ' = call i1 @__mir_is_numeric_str(ptr ' . $spp . ")\n";
-            $strNum = $this->allocSsa();
+            $strNum = $this->ssa->allocReg();
             $out .= '  ' . $strNum . ' = and i1 ' . $isS . ', ' . $sn . "\n";
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = or i1 ' . $isNum . ', ' . $strNum . "\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
             return $this->finishI64($out, $z);
         }
@@ -1359,14 +1359,14 @@ trait EmitLlvmBuiltins
     {
         $a = $args[0];
         if ($a->type->kind === Type::KIND_CELL) {
-            $this->needsTagged = true;
+            $this->rt->needsTagged = true;
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
-            $tg = $this->allocSsa();
+            $tg = $this->ssa->allocReg();
             $out .= '  ' . $tg . ' = call i64 @__manticore_tag(i64 ' . $this->lastValue . ")\n";
-            $eq = $this->allocSsa();
+            $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $tg . ', ' . (string)$wantTag . "\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $eq . " to i64\n";
             return $this->finishI64($out, $z);
         }
@@ -1380,9 +1380,9 @@ trait EmitLlvmBuiltins
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
-            $cmp = $this->allocSsa();
+            $cmp = $this->ssa->allocReg();
             $out .= '  ' . $cmp . ' = icmp ' . $pred . ' i64 ' . $this->lastValue . ", 0\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
             return $this->finishI64($out, $z);
         }
@@ -1408,25 +1408,25 @@ trait EmitLlvmBuiltins
         $nObj   = 'object';
         $nUnk   = $debug ? 'unknown' : 'unknown type';
         if ($a->type->kind === Type::KIND_CELL) {
-            $this->needsTagged = true;
+            $this->rt->needsTagged = true;
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
-            $tg = $this->allocSsa();
+            $tg = $this->ssa->allocReg();
             $out .= '  ' . $tg . ' = call i64 @__manticore_tag(i64 ' . $this->lastValue . ")\n";
-            $e1 = $this->allocSsa(); $out .= '  ' . $e1 . ' = icmp eq i64 ' . $tg . ", 1\n";
-            $e2 = $this->allocSsa(); $out .= '  ' . $e2 . ' = icmp eq i64 ' . $tg . ", 2\n";
-            $e3 = $this->allocSsa(); $out .= '  ' . $e3 . ' = icmp eq i64 ' . $tg . ", 3\n";
-            $e4 = $this->allocSsa(); $out .= '  ' . $e4 . ' = icmp eq i64 ' . $tg . ", 4\n";
-            $e6 = $this->allocSsa(); $out .= '  ' . $e6 . ' = icmp eq i64 ' . $tg . ", 6\n";
-            $e7 = $this->allocSsa(); $out .= '  ' . $e7 . ' = icmp eq i64 ' . $tg . ", 7\n";
-            $e8 = $this->allocSsa(); $out .= '  ' . $e8 . ' = icmp eq i64 ' . $tg . ", 8\n";
-            $r8 = $this->allocSsa(); $out .= '  ' . $r8 . ' = select i1 ' . $e8 . ', ptr ' . $this->strRef($nObj) . ', ptr ' . $this->strRef($nUnk) . "\n";
-            $r7 = $this->allocSsa(); $out .= '  ' . $r7 . ' = select i1 ' . $e7 . ', ptr ' . $this->strRef($nArr) . ', ptr ' . $r8 . "\n";
-            $r6 = $this->allocSsa(); $out .= '  ' . $r6 . ' = select i1 ' . $e6 . ', ptr ' . $this->strRef($nFloat) . ', ptr ' . $r7 . "\n";
-            $r4 = $this->allocSsa(); $out .= '  ' . $r4 . ' = select i1 ' . $e4 . ', ptr ' . $this->strRef($nStr) . ', ptr ' . $r6 . "\n";
-            $r3 = $this->allocSsa(); $out .= '  ' . $r3 . ' = select i1 ' . $e3 . ', ptr ' . $this->strRef($nNull) . ', ptr ' . $r4 . "\n";
-            $r2 = $this->allocSsa(); $out .= '  ' . $r2 . ' = select i1 ' . $e2 . ', ptr ' . $this->strRef($nBool) . ', ptr ' . $r3 . "\n";
-            $r1 = $this->allocSsa(); $out .= '  ' . $r1 . ' = select i1 ' . $e1 . ', ptr ' . $this->strRef($nInt) . ', ptr ' . $r2 . "\n";
+            $e1 = $this->ssa->allocReg(); $out .= '  ' . $e1 . ' = icmp eq i64 ' . $tg . ", 1\n";
+            $e2 = $this->ssa->allocReg(); $out .= '  ' . $e2 . ' = icmp eq i64 ' . $tg . ", 2\n";
+            $e3 = $this->ssa->allocReg(); $out .= '  ' . $e3 . ' = icmp eq i64 ' . $tg . ", 3\n";
+            $e4 = $this->ssa->allocReg(); $out .= '  ' . $e4 . ' = icmp eq i64 ' . $tg . ", 4\n";
+            $e6 = $this->ssa->allocReg(); $out .= '  ' . $e6 . ' = icmp eq i64 ' . $tg . ", 6\n";
+            $e7 = $this->ssa->allocReg(); $out .= '  ' . $e7 . ' = icmp eq i64 ' . $tg . ", 7\n";
+            $e8 = $this->ssa->allocReg(); $out .= '  ' . $e8 . ' = icmp eq i64 ' . $tg . ", 8\n";
+            $r8 = $this->ssa->allocReg(); $out .= '  ' . $r8 . ' = select i1 ' . $e8 . ', ptr ' . $this->strRef($nObj) . ', ptr ' . $this->strRef($nUnk) . "\n";
+            $r7 = $this->ssa->allocReg(); $out .= '  ' . $r7 . ' = select i1 ' . $e7 . ', ptr ' . $this->strRef($nArr) . ', ptr ' . $r8 . "\n";
+            $r6 = $this->ssa->allocReg(); $out .= '  ' . $r6 . ' = select i1 ' . $e6 . ', ptr ' . $this->strRef($nFloat) . ', ptr ' . $r7 . "\n";
+            $r4 = $this->ssa->allocReg(); $out .= '  ' . $r4 . ' = select i1 ' . $e4 . ', ptr ' . $this->strRef($nStr) . ', ptr ' . $r6 . "\n";
+            $r3 = $this->ssa->allocReg(); $out .= '  ' . $r3 . ' = select i1 ' . $e3 . ', ptr ' . $this->strRef($nNull) . ', ptr ' . $r4 . "\n";
+            $r2 = $this->ssa->allocReg(); $out .= '  ' . $r2 . ' = select i1 ' . $e2 . ', ptr ' . $this->strRef($nBool) . ', ptr ' . $r3 . "\n";
+            $r1 = $this->ssa->allocReg(); $out .= '  ' . $r1 . ' = select i1 ' . $e1 . ', ptr ' . $this->strRef($nInt) . ', ptr ' . $r2 . "\n";
             $this->lastValue = $r1;
             $this->lastValueType = 'ptr';
             return $out;
@@ -1445,9 +1445,9 @@ trait EmitLlvmBuiltins
             $objName = $debug && ($a->type->class ?? '') !== '' ? $a->type->class : $nObj;
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
-            $isN = $this->allocSsa();
+            $isN = $this->ssa->allocReg();
             $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
-            $sel = $this->allocSsa();
+            $sel = $this->ssa->allocReg();
             $out .= '  ' . $sel . ' = select i1 ' . $isN . ', ptr ' . $this->strRef($nNull) . ', ptr ' . $this->strRef($objName) . "\n";
             $this->lastValue = $sel;
             $this->lastValueType = 'ptr';
@@ -1472,26 +1472,26 @@ trait EmitLlvmBuiltins
             if ($a->type->kind === Type::KIND_FLOAT) { $anyFloat = true; break; }
         }
         if ($anyFloat) {
-            $this->needsTagged = true;
-            $this->needsTaggedToFloat = true;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToFloat = true;
             $fpred = $pred === 'sgt' ? 'ogt' : 'olt';
             $out = $this->emitNode($args[0]);
             $out .= $this->boxToCell($args[0]->type);
             $acc = $this->lastValue;
-            $accd = $this->allocSsa();
+            $accd = $this->ssa->allocReg();
             $out .= '  ' . $accd . ' = call double @__manticore_tagged_to_double(i64 ' . $acc . ")\n";
             $count = \count($args);
             for ($i = 1; $i < $count; $i = $i + 1) {
                 $out .= $this->emitNode($args[$i]);
                 $out .= $this->boxToCell($args[$i]->type);
                 $v = $this->lastValue;
-                $vd = $this->allocSsa();
+                $vd = $this->ssa->allocReg();
                 $out .= '  ' . $vd . ' = call double @__manticore_tagged_to_double(i64 ' . $v . ")\n";
-                $cmp = $this->allocSsa();
+                $cmp = $this->ssa->allocReg();
                 $out .= '  ' . $cmp . ' = fcmp ' . $fpred . ' double ' . $vd . ', ' . $accd . "\n";
-                $sel = $this->allocSsa();
+                $sel = $this->ssa->allocReg();
                 $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', i64 ' . $v . ', i64 ' . $acc . "\n";
-                $seld = $this->allocSsa();
+                $seld = $this->ssa->allocReg();
                 $out .= '  ' . $seld . ' = select i1 ' . $cmp . ', double ' . $vd . ', double ' . $accd . "\n";
                 $acc = $sel;
                 $accd = $seld;
@@ -1513,9 +1513,9 @@ trait EmitLlvmBuiltins
             $out .= $this->emitNode($args[$i]);
             $out .= $this->minMaxOperandI64($args[$i]);
             $v = $this->lastValue;
-            $cmp = $this->allocSsa();
+            $cmp = $this->ssa->allocReg();
             $out .= '  ' . $cmp . ' = icmp ' . $pred . ' i64 ' . $v . ', ' . $acc . "\n";
-            $sel = $this->allocSsa();
+            $sel = $this->ssa->allocReg();
             $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', i64 ' . $v . ', i64 ' . $acc . "\n";
             $acc = $sel;
         }
@@ -1527,8 +1527,8 @@ trait EmitLlvmBuiltins
     {
         $out = $this->coerceToI64();
         if ($a->type->kind !== Type::KIND_CELL) { return $out; }
-        $this->needsTagged = true;
-        $u = $this->allocSsa();
+        $this->rt->needsTagged = true;
+        $u = $this->ssa->allocReg();
         $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $u;
         $this->lastValueType = 'i64';
@@ -1542,11 +1542,11 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
         $v = $this->lastValue;
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 17)\n";
-        $tmp = $this->allocSsa();
+        $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf . ', i64 17, ptr @.fmt.x, i64 ' . $v . ")\n";
-        $tl = $this->allocSsa();
+        $tl = $this->ssa->allocReg();
         $out .= '  ' . $tl . ' = sext i32 ' . $tmp . " to i64\n";
         $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $tl . ")\n";
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
@@ -1556,7 +1556,7 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  substr($s, $start[, $len]). */
     private function biSubstr(array $args): string
     {
-        $this->needsSubstr = true;
+        $this->rt->needsSubstr = true;
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
@@ -1575,7 +1575,7 @@ trait EmitLlvmBuiltins
             $len = '0';
             $haveLen = '0';
         }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_substr(ptr ' . $s . ', i64 ' . $start . ', i64 ' . $len . ', i64 ' . $haveLen . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
         $this->lastValue = $reg; $this->lastValueType = 'ptr';
@@ -1585,7 +1585,7 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args */
     private function biStrRepeat(array $args): string
     {
-        $this->needsStrRepeat = true;
+        $this->rt->needsStrRepeat = true;
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
@@ -1594,7 +1594,7 @@ trait EmitLlvmBuiltins
         $out .= $this->emitNode($args[1]);
         $out .= $this->coerceToI64();
         $n = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_repeat(ptr ' . $s . ', i64 ' . $n . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
         $this->lastValue = $reg; $this->lastValueType = 'ptr';
@@ -1604,13 +1604,13 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  strtolower / strtoupper via $fn helper. */
     private function biCaseConv(array $args, string $fn): string
     {
-        if ($fn === '__mir_strtolower') { $this->needsStrtolower = true; }
-        else { $this->needsStrtoupper = true; }
+        if ($fn === '__mir_strtolower') { $this->rt->needsStrtolower = true; }
+        else { $this->rt->needsStrtoupper = true; }
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @' . $fn . '(ptr ' . $a0 . ")\n";
         $out .= $this->freeStrTemp($args[0], $a0);
         $this->lastValue = $reg; $this->lastValueType = 'ptr';
@@ -1620,7 +1620,7 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args */
     private function biStrpos(array $args): string
     {
-        $this->needsStrpos = true;
+        $this->rt->needsStrpos = true;
         $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
@@ -1635,7 +1635,7 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             $off = $this->lastValue;
         }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_strpos(ptr ' . $h . ', ptr ' . $n
               . ', i64 ' . $off . ")\n";
         $out .= $this->freeStrTemp($args[0], $h);
@@ -1663,7 +1663,7 @@ trait EmitLlvmBuiltins
      *  PHP explode's per-segment strpos-cell + substr-malloc + append overhead. */
     private function biExplode(array $args): string
     {
-        $this->needsStrExplode = true;
+        $this->rt->needsStrExplode = true;
         $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
@@ -1677,7 +1677,7 @@ trait EmitLlvmBuiltins
         } else {
             $limit = '9223372036854775807';
         }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_explode(ptr ' . $delim
               . ', ptr ' . $subj . ', i64 ' . $limit . ")\n";
         $out .= $this->freeStrTemp($args[0], $delim);
@@ -1706,16 +1706,16 @@ trait EmitLlvmBuiltins
             $out .= $this->boxToCell($args[1]->type);
             $out .= $this->cellToPtr();
             $vec = $this->lastValue;
-            $this->needsTaggedToStr = true;
-            $this->needsImplodeCell = true;
-            $reg = $this->allocSsa();
+            $this->rt->needsTaggedToStr = true;
+            $this->rt->needsImplodeCell = true;
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
             $this->lastValue = $reg; $this->lastValueType = 'ptr';
             return $out;
         }
         $out .= $this->coerceToPtr();
         $vec = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_array_implode(ptr ' . $sep . ', ptr ' . $vec . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'ptr';
         return $out;
@@ -1741,11 +1741,11 @@ trait EmitLlvmBuiltins
                 // block) would be too late.
                 $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
                 $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-                $this->needsFloatShortest = true;
+                $this->rt->needsFloatShortest = true;
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $d = $this->lastValue;
-                $fs = $this->allocSsa();
+                $fs = $this->ssa->allocReg();
                 $out .= '  ' . $fs . ' = call ptr @__mir_float_shortest(double ' . $d . ")\n";
                 $out .= '  call i32 (ptr, ...) @printf(ptr @.fmt.vdfloat, ptr ' . $fs . ")\n";
             } else {
@@ -1774,19 +1774,19 @@ trait EmitLlvmBuiltins
         // Declared here (body-emission) so they precede the header declare block.
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
         $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-        $this->needsFloatShortest = true;
+        $this->rt->needsFloatShortest = true;
         $a = $args[0];
         $out = $this->emitNode($a);
         if ($a->type->kind === Type::KIND_CELL) {
-            $this->needsTaggedToFloat = true;
-            $d = $this->allocSsa();
+            $this->rt->needsTaggedToFloat = true;
+            $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $d; $this->lastValueType = 'double';
         } else {
             $out .= $this->coerceTo('double');
             $d = $this->lastValue;
         }
-        $fs = $this->allocSsa();
+        $fs = $this->ssa->allocReg();
         $out .= '  ' . $fs . ' = call ptr @__mir_float_shortest(double ' . $this->lastValue . ")\n";
         $this->lastValue = $fs;
         $this->lastValueType = 'ptr';
@@ -1860,7 +1860,7 @@ trait EmitLlvmBuiltins
             }
             $i = $j;
         }
-        $fmtId = $this->internString($trans);
+        $fmtId = $this->pool->intern($trans);
         $fmtPtr = $this->strLitId($fmtId);
         // Evaluate + coerce each consumed arg in order.
         $out = '';
@@ -1874,8 +1874,8 @@ trait EmitLlvmBuiltins
                 // A `mixed`/cell `%s` arg → stringify by tag (int→"9", a string
                 // cell→its bytes); a plain value coerces to a ptr directly.
                 if ($argNode->type->kind === Type::KIND_CELL) {
-                    $this->needsTaggedToStr = true;
-                    $s = $this->allocSsa();
+                    $this->rt->needsTaggedToStr = true;
+                    $s = $this->ssa->allocReg();
                     $out .= '  ' . $s . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
                     $this->lastValue = $s; $this->lastValueType = 'ptr';
                 } else {
@@ -1888,8 +1888,8 @@ trait EmitLlvmBuiltins
                 // (tagged_to_double); coerceTo('double') would sitofp the tagged
                 // i64 bits (a NaN-boxed double read as an integer → garbage).
                 if ($argNode->type->kind === Type::KIND_CELL) {
-                    $this->needsTaggedToFloat = true;
-                    $d = $this->allocSsa();
+                    $this->rt->needsTaggedToFloat = true;
+                    $d = $this->ssa->allocReg();
                     $out .= '  ' . $d . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
                     $this->lastValue = $d; $this->lastValueType = 'double';
                 } else {
@@ -1902,9 +1902,9 @@ trait EmitLlvmBuiltins
                 // int's payload, a float truncated) rather than passing the
                 // tagged carrier bits straight to printf.
                 if ($argNode->type->kind === Type::KIND_CELL) {
-                    $this->needsTaggedToInt = true;
-                    $this->needsStrtol = true;
-                    $iv = $this->allocSsa();
+                    $this->rt->needsTaggedToInt = true;
+                    $this->rt->needsStrtol = true;
+                    $iv = $this->ssa->allocReg();
                     $out .= '  ' . $iv . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
                     $this->lastValue = $iv; $this->lastValueType = 'i64';
                 } else {
@@ -1914,23 +1914,23 @@ trait EmitLlvmBuiltins
             }
         }
         if ($toStdout) {
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $fmtPtr . $vararg . ")\n";
-            $r2 = $this->allocSsa();
+            $r2 = $this->ssa->allocReg();
             $out .= '  ' . $r2 . ' = sext i32 ' . $r . " to i64\n";
             $this->lastValue = $r2; $this->lastValueType = 'i64';
             return $out;
         }
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 256)\n";
-        $tmp = $this->allocSsa();
+        $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf . ', i64 256, ptr ' . $fmtPtr . $vararg . ")\n";
-        $tl = $this->allocSsa();
+        $tl = $this->ssa->allocReg();
         $out .= '  ' . $tl . ' = sext i32 ' . $tmp . " to i64\n";
-        $ov = $this->allocSsa();
+        $ov = $this->ssa->allocReg();
         $out .= '  ' . $ov . ' = icmp sgt i64 ' . $tl . ", 255\n";
-        $cl = $this->allocSsa();
+        $cl = $this->ssa->allocReg();
         $out .= '  ' . $cl . ' = select i1 ' . $ov . ', i64 255, i64 ' . $tl . "\n";
         $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $cl . ")\n";
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
@@ -1940,9 +1940,9 @@ trait EmitLlvmBuiltins
     /** `gc_collect_cycles()` → run the Bacon-Rajan collector, return freed count. */
     private function biGcCollect(): string
     {
-        $this->needsCc = true;
-        $this->needsRc = true;
-        $reg = $this->allocSsa();
+        $this->rt->needsCc = true;
+        $this->rt->needsRc = true;
+        $reg = $this->ssa->allocReg();
         $out = '  ' . $reg . " = call i64 @__manticore_cc_collect_cycles()\n";
         return $this->finishI64($out, $reg);
     }
@@ -1968,7 +1968,7 @@ trait EmitLlvmBuiltins
             if ($args[0]->type->kind === Type::KIND_INT
                 || $args[0]->type->kind === Type::KIND_BOOL) {
                 $out .= $this->coerceToI64();
-                $code = $this->allocSsa();
+                $code = $this->ssa->allocReg();
                 $out .= '  ' . $code . ' = trunc i64 ' . $this->lastValue . " to i32\n";
             }
         }
@@ -1986,14 +1986,14 @@ trait EmitLlvmBuiltins
         $this->libcExtra['write']  = 'declare i64 @write(i32, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $msg = $this->lastValue;
-        $len = $this->allocSsa();
+        $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = call i64 @strlen(ptr ' . $msg . ")\n";
-        $w = $this->allocSsa();
+        $w = $this->ssa->allocReg();
         $out .= '  ' . $w . ' = call i64 @write(i32 2, ptr ' . $msg . ', i64 ' . $len . ")\n";
-        $nl = $this->allocSsa();
+        $nl = $this->ssa->allocReg();
         $out .= '  ' . $nl . " = alloca i8\n";
         $out .= '  store i8 10, ptr ' . $nl . "\n";
-        $w2 = $this->allocSsa();
+        $w2 = $this->ssa->allocReg();
         $out .= '  ' . $w2 . ' = call i64 @write(i32 2, ptr ' . $nl . ", i64 1)\n";
         $out .= $this->freeStrTemp($args[0], $msg);
         // PHP error_log returns true.
@@ -2007,7 +2007,7 @@ trait EmitLlvmBuiltins
     private function biSplObjectId(array $args): string
     {
         $out = $this->emitPtrArg($args[0]);
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         return $this->finishI64($out, $reg);
     }
@@ -2024,7 +2024,7 @@ trait EmitLlvmBuiltins
         // is exact, so emit the name literal directly.
         if (\count($cands) <= 1) {
             $out = $this->emitNode($args[0]);
-            $this->lastValue = $this->strLitId($this->internString($cls));
+            $this->lastValue = $this->strLitId($this->pool->intern($cls));
             $this->lastValueType = 'ptr';
             return $out;
         }
@@ -2037,28 +2037,28 @@ trait EmitLlvmBuiltins
         $objp = $this->lastValue;
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca ptr\n";
-        $endL = $this->allocLabel('gc.end');
-        $defL = $this->allocLabel('gc.def');
+        $endL = $this->ssa->allocLabel('gc.end');
+        $defL = $this->ssa->allocLabel('gc.def');
         $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
         $bodies = '';
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
-            $caseL = $this->allocLabel('gc.case');
+            $caseL = $this->ssa->allocLabel('gc.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
             $bodies .= $caseL . ":\n";
-            $bodies .= '  store ptr ' . $this->strLitId($this->internString($c)) . ', ptr ' . $res . "\n";
+            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($c)) . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endL . "\n";
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $out .= $defL . ":\n";
-        $out .= '  store ptr ' . $this->strLitId($this->internString($cls)) . ', ptr ' . $res . "\n";
+        $out .= '  store ptr ' . $this->strLitId($this->pool->intern($cls)) . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load ptr, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'ptr';
@@ -2077,7 +2077,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($c->args[0]);
         $out .= $this->coerceToPtr();
         $arr = $this->lastValue;
-        $v = $this->allocSsa();
+        $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = call i64 @__mir_array_pop(ptr ' . $arr . ")\n";
         return $out . $this->finishElem($c, $v);
     }
@@ -2092,7 +2092,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($c->args[0]);
         $out .= $this->coerceToPtr();
         $arr = $this->lastValue;
-        $v = $this->allocSsa();
+        $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = call i64 @__mir_array_shift(ptr ' . $arr . ")\n";
         return $out . $this->finishElem($c, $v);
     }
@@ -2114,10 +2114,10 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $out .= $this->rcRetainByType($c->args[1], $val, null, 2);
-        $new = $this->allocSsa();
+        $new = $this->ssa->allocReg();
         $out .= '  ' . $new . ' = call ptr @__mir_array_unshift(ptr ' . $arr . ', i64 ' . $val . ")\n";
         $out .= $this->vecWriteBack($arrNode, $new);
-        $nl = $this->allocSsa();
+        $nl = $this->ssa->allocReg();
         $out .= '  ' . $nl . ' = load i64, ptr ' . $new . "\n";
         $this->lastValue = $nl;
         $this->lastValueType = 'i64';
@@ -2128,39 +2128,39 @@ trait EmitLlvmBuiltins
      * a copy of the C env string, or boxed false when unset. */
     private function biGetenv(array $args): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $nm = $this->lastValue;
-        $ev = $this->allocSsa();
+        $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call ptr @getenv(ptr ' . $nm . ")\n";
         $out .= $this->freeStrTemp($args[0], $nm);
-        $isnull = $this->allocSsa();
+        $isnull = $this->ssa->allocReg();
         $out .= '  ' . $isnull . ' = icmp eq ptr ' . $ev . ", null\n";
-        $lSet = $this->allocLabel('genv.set');
-        $lNull = $this->allocLabel('genv.null');
-        $lEnd = $this->allocLabel('genv.end');
+        $lSet = $this->ssa->allocLabel('genv.set');
+        $lNull = $this->ssa->allocLabel('genv.null');
+        $lEnd = $this->ssa->allocLabel('genv.end');
         $out .= '  br i1 ' . $isnull . ', label %' . $lNull . ', label %' . $lSet . "\n";
         $out .= $lSet . ":\n";
-        $len = $this->allocSsa();
+        $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = call i64 @strlen(ptr ' . $ev . ")\n";
-        $sz = $this->allocSsa();
+        $sz = $this->ssa->allocReg();
         $out .= '  ' . $sz . ' = add i64 ' . $len . ", 1\n";
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . ' = call ptr @__mir_str_alloc(i64 ' . $sz . ")\n";
-        $mc = $this->allocSsa();
+        $mc = $this->ssa->allocReg();
         $out .= '  ' . $mc . ' = call ptr @memcpy(ptr ' . $buf . ', ptr ' . $ev . ', i64 ' . $sz . ")\n";
-        $sc = $this->allocSsa();
+        $sc = $this->ssa->allocReg();
         $out .= '  ' . $sc . ' = call i64 @__manticore_box_ptr(ptr ' . $buf . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
-        $fc = $this->allocSsa();
+        $fc = $this->ssa->allocReg();
         $out .= '  ' . $fc . " = call i64 @__manticore_box_bool(i64 0)\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lEnd . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = phi i64 [' . $sc . ', %' . $lSet . '], ['
               . $fc . ', %' . $lNull . "]\n";
         $this->lastValue = $r;
@@ -2171,7 +2171,7 @@ trait EmitLlvmBuiltins
     /** Ptr to an interned string literal. */
     private function litStr(string $s): string
     {
-        return $this->strLitId($this->internString($s));
+        return $this->strLitId($this->pool->intern($s));
     }
 
     // --- Reflection Tier-1 (compile-time class queries, no runtime metadata) ---
@@ -2293,21 +2293,21 @@ trait EmitLlvmBuiltins
         if ($ptrCallable) {
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
-            $ne = $this->allocSsa();
+            $ne = $this->ssa->allocReg();
             $out .= '  ' . $ne . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
             return $this->finishI64($out, $z);
         }
         // A tagged cell that carries an object/closure (tag 8) is callable.
         if ($k === Type::KIND_CELL) {
-            $this->needsTagged = true;
+            $this->rt->needsTagged = true;
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $out .= $this->cellTagIr($this->lastValue);
-            $eq = $this->allocSsa();
+            $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $eq . " to i64\n";
             return $this->finishI64($out, $z);
         }
@@ -2364,12 +2364,12 @@ trait EmitLlvmBuiltins
     /** get_parent_class($obj|'C') — parent name string, or boxed false. */
     private function biGetParentClass(array $args): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $out = \count($args) >= 1 ? $this->reflEvalArgs($args) : '';
         $cls = \count($args) >= 1 ? $this->reflClassName($args[0]) : '';
         $parent = ($cls !== '' && isset($this->classes[$cls]))
             ? \ltrim($this->classes[$cls]->parent, '\\') : '';
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         if ($parent === '') {
             $out .= '  ' . $r . " = call i64 @__manticore_box_bool(i64 0)\n";
         } else {
@@ -2385,18 +2385,18 @@ trait EmitLlvmBuiltins
      *  names. The full list is known at compile time → a fixed append chain. */
     private function biGetClassMethods(array $args): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $out = $this->reflEvalArgs($args);
         $cls = $this->reflClassName($args[0]);
         $names = $this->reflAllMethods($cls);
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = call ptr @__mir_array_alloc(i64 '
               . (string)\count($names) . ")\n";
         foreach ($names as $nm) {
-            $b = $this->allocSsa();
+            $b = $this->ssa->allocReg();
             $out .= '  ' . $b . ' = call i64 @__manticore_box_ptr(ptr '
                   . $this->litStr($nm) . ")\n";
-            $nx = $this->allocSsa();
+            $nx = $this->ssa->allocReg();
             $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr '
                   . $cur . ', i64 ' . $b . ")\n";
             $cur = $nx;
@@ -2432,12 +2432,12 @@ trait EmitLlvmBuiltins
      */
     private function biGetObjectVars(array $args): string
     {
-        $this->needsTagged = true;
+        $this->rt->needsTagged = true;
         $obj = $args[0];
         $out = $this->emitNode($obj);
         $out .= $this->coerceToPtr();
         $objp = $this->lastValue;
-        $initg = $this->allocSsa();
+        $initg = $this->ssa->allocReg();
         $out .= '  ' . $initg . " = call ptr @__mir_array_alloc(i64 0)\n";
         $cur = $initg;
         $cls = $obj->type->class ?? '';
@@ -2448,16 +2448,16 @@ trait EmitLlvmBuiltins
                 if ($pt === null) { continue; }
                 $off = (string)$cd->propertyOffset($pn);
                 $key = $this->litStr($pn);
-                $g = $this->allocSsa();
+                $g = $this->ssa->allocReg();
                 $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
-                $v = $this->allocSsa();
+                $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
                 // Box the raw i64 carrier to a tagged cell per its static type.
                 $this->lastValue = $v;
                 $this->lastValueType = 'i64';
                 $out .= $this->boxToCell($pt);
                 $boxed = $this->lastValue;
-                $next = $this->allocSsa();
+                $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
                       . $cur . ', ptr ' . $key . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
                 $cur = $next;
@@ -2477,7 +2477,7 @@ trait EmitLlvmBuiltins
      */
     private function biVarExport(array $args): string
     {
-        $this->needsConcat = true;
+        $this->rt->needsConcat = true;
         $k = $args[0]->type->kind;
         if ($k === Type::KIND_NULL) {
             $this->lastValue = $this->litStr('NULL');
@@ -2487,9 +2487,9 @@ trait EmitLlvmBuiltins
         if ($k === Type::KIND_BOOL) {
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToI64();
-            $b = $this->allocSsa();
+            $b = $this->ssa->allocReg();
             $out .= '  ' . $b . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = select i1 ' . $b . ', ptr ' . $this->litStr('true')
                   . ', ptr ' . $this->litStr('false') . "\n";
             $this->lastValue = $r;
@@ -2497,10 +2497,10 @@ trait EmitLlvmBuiltins
             return $out;
         }
         if ($k === Type::KIND_INT) {
-            $this->needsIntStr = true;
+            $this->rt->needsIntStr = true;
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToI64();
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call ptr @__mir_int_to_str(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'ptr';
@@ -2527,23 +2527,23 @@ trait EmitLlvmBuiltins
      */
     private function wrapOrNull(string $s, string $pre, string $post, string $nullLit): string
     {
-        $isnull = $this->allocSsa();
+        $isnull = $this->ssa->allocReg();
         $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
-        $lNull = $this->allocLabel('we.null');
-        $lSet = $this->allocLabel('we.set');
-        $lEnd = $this->allocLabel('we.end');
+        $lNull = $this->ssa->allocLabel('we.null');
+        $lSet = $this->ssa->allocLabel('we.set');
+        $lEnd = $this->ssa->allocLabel('we.end');
         $out .= '  br i1 ' . $isnull . ', label %' . $lNull . ', label %' . $lSet . "\n";
         $out .= $lSet . ":\n";
-        $c1 = $this->allocSsa();
+        $c1 = $this->ssa->allocReg();
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr($pre) . ', ptr ' . $s . ")\n";
-        $c2 = $this->allocSsa();
+        $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr($post) . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lEnd . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = phi ptr [' . $c2 . ', %' . $lSet . '], [' . $nl . ', %' . $lNull . "]\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
@@ -2553,11 +2553,11 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  addslashes($s) — backslash-escape ' " \. */
     private function biAddslashes(array $args): string
     {
-        $this->needsAddslashes = true;
+        $this->rt->needsAddslashes = true;
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_addslashes(ptr ' . $a0 . ")\n";
         $out .= $this->freeStrTemp($args[0], $a0);
         $this->lastValue = $reg;
@@ -2624,11 +2624,11 @@ trait EmitLlvmBuiltins
      */
     private function biJsonEscape(array $args): string
     {
-        $this->needsJsonEscape = true;
+        $this->rt->needsJsonEscape = true;
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_escape(ptr ' . $a0 . ")\n";
         $out .= $this->freeStrTemp($args[0], $a0);
         $this->lastValue = $reg;
@@ -2713,19 +2713,19 @@ trait EmitLlvmBuiltins
      */
     private function biJsonEncode(array $args): string
     {
-        $this->needsJsonEnc = true;
-        $this->needsIntStr = true;    // __mir_int_len / __mir_int_fmt + unbox_int
-        $this->needsFloatStr = true;  // __mir_float_to_str
-        $this->needsStrRc = true;     // __mir_rc_release_str (float / object temps)
-        $this->needsConcat = true;    // __mir_strlen + string runtime decls
-        $this->needsTagged = true;    // box helpers for boxToCell
+        $this->rt->needsJsonEnc = true;
+        $this->rt->needsIntStr = true;    // __mir_int_len / __mir_int_fmt + unbox_int
+        $this->rt->needsFloatStr = true;  // __mir_float_to_str
+        $this->rt->needsStrRc = true;     // __mir_rc_release_str (float / object temps)
+        $this->rt->needsConcat = true;    // __mir_strlen + string runtime decls
+        $this->rt->needsTagged = true;    // box helpers for boxToCell
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         // NB: manticore___mc_json_enc is auto-injected as a stdlib extern
         // (declare i64 @…(i64)); do NOT re-declare it here (signature clash).
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cell = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_enc(i64 ' . $cell . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
@@ -3059,7 +3059,7 @@ trait EmitLlvmBuiltins
      */
     private function biStrReplaceOne(array $args): string
     {
-        $this->needsStrReplaceOne = true;
+        $this->rt->needsStrReplaceOne = true;
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
@@ -3069,7 +3069,7 @@ trait EmitLlvmBuiltins
         $rp = $this->lastValue;
         $out .= $this->emitPtrArg($args[2]);
         $sj = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_replace_one(ptr ' . $se
               . ', ptr ' . $rp . ', ptr ' . $sj . ")\n";
         $out .= $this->freeStrTemp($args[0], $se);
@@ -3178,23 +3178,23 @@ trait EmitLlvmBuiltins
             // Without this the append result is discarded and the global keeps the
             // stale base.
             if (isset($this->globalBackedLocals[$name])) {
-                $asI = $this->allocSsa();
+                $asI = $this->ssa->allocReg();
                 $out = $this->packArrayBack($arr2, $asI, $asCell);
                 $out .= '  store i64 ' . $asI . ', ptr '
                       . $this->globalBackedLocals[$name] . "\n";
                 return $out;
             }
             if (!isset($this->slots[$name])) { return ''; }
-            $asI = $this->allocSsa();
+            $asI = $this->ssa->allocReg();
             $out = $this->packArrayBack($arr2, $asI, $asCell);
             if (isset($this->refLocals[$name])) {
                 // By-ref param: the slot holds the CALLER's address — store the
                 // (possibly realloced) buffer THROUGH it, so `$arr[] = …` on a
                 // `&$arr` is visible to the caller. Writing the slot directly
                 // would clobber the address and leave the caller's array stale.
-                $addr = $this->allocSsa();
+                $addr = $this->ssa->allocReg();
                 $out .= '  ' . $addr . ' = load i64, ptr ' . $this->slots[$name] . "\n";
-                $p = $this->allocSsa();
+                $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
                 $out .= '  store i64 ' . $asI . ', ptr ' . $p . "\n";
             } else {
@@ -3207,10 +3207,10 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
             $off = $this->propertyOffset($arrNode->object, $arrNode->property);
-            $g = $this->allocSsa();
+            $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
                   . ', i64 ' . (string)$off . "\n";
-            $asI = $this->allocSsa();
+            $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";
             return $out;
@@ -3228,15 +3228,15 @@ trait EmitLlvmBuiltins
             // when the parent holds cells (mixed/cell element type).
             $innerCell = $arrNode->array->type->element !== null
                 && $arrNode->array->type->element->kind === Type::KIND_CELL;
-            $valI = $this->allocSsa();
+            $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
             $keyIsCell = $arrNode->index->type->kind === Type::KIND_CELL;
             $keyIsString = !$keyIsCell
                 && ($arrNode->index->type->kind === Type::KIND_STRING
                     || $arrNode->index->kind === Node::KIND_STRING_CONST);
-            $parent2 = $this->allocSsa();
+            $parent2 = $this->ssa->allocReg();
             if ($keyIsCell) {
-                $this->needsCellKey = true;
+                $this->rt->needsCellKey = true;
                 $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToI64();
                 $key = $this->lastValue;
@@ -3264,7 +3264,7 @@ trait EmitLlvmBuiltins
         // stale pre-grow pointer (a first string-keyed store reallocs from the
         // empty `[]` default → the write is silently lost).
         if ($arrNode->kind === Node::KIND_STATIC_PROP) {
-            $asI = $this->allocSsa();
+            $asI = $this->ssa->allocReg();
             $out = $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $arrNode->global . "\n";
             return $out;
@@ -3281,7 +3281,7 @@ trait EmitLlvmBuiltins
     private function packArrayBack(string $ptr, string $reg, bool $asCell): string
     {
         if ($asCell) {
-            $this->needsTagged = true;
+            $this->rt->needsTagged = true;
             return '  ' . $reg . ' = call i64 @__manticore_box_array(ptr ' . $ptr . ")\n";
         }
         return '  ' . $reg . ' = ptrtoint ptr ' . $ptr . " to i64\n";
@@ -3295,7 +3295,7 @@ trait EmitLlvmBuiltins
     private function finishElem(Call $c, string $reg): string
     {
         if ($c->type->kind === Type::KIND_FLOAT) {
-            $f = $this->allocSsa();
+            $f = $this->ssa->allocReg();
             $this->lastValue = $f;
             $this->lastValueType = 'double';
             return '  ' . $f . ' = bitcast i64 ' . $reg . " to double\n";
@@ -3306,7 +3306,7 @@ trait EmitLlvmBuiltins
         if ($isPtr) {
             // The element rides the vec as an i64 carrier; surface it as a
             // real ptr so string/obj/array consumers (echo %s, etc.) type.
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $this->lastValue = $p;
             $this->lastValueType = 'ptr';
             return '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";

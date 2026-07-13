@@ -45,14 +45,14 @@ trait EmitLlvmObjects
         // Header slot count before properties: 2 (class_id + rc) for a
         // normal object, 0 for a `#[Struct]` value type.
         $hdr = $isStruct ? 0 : 2;
-        $obj = $this->allocSsa();
+        $obj = $this->ssa->allocReg();
         $out = '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
         if (!$isStruct) {
             // header[0] = class descriptor ptr ({class_id, drop_fn}); class_id
             // and drop are read THROUGH it so drops compose across objects.
             $out .= '  store i64 ' . $this->descSlotValue($cd) . ', ptr ' . $obj . "\n";
             // header[1] = refcount = 1
-            $rcGep = $this->allocSsa();
+            $rcGep = $this->ssa->allocReg();
             $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $obj . ", i64 1\n";
             $out .= '  store i64 1, ptr ' . $rcGep . "\n";
         }
@@ -62,7 +62,7 @@ trait EmitLlvmObjects
         if ($cd !== null) {
             $pi = 0;
             foreach ($cd->propertyNames as $pname) {
-                $pGep = $this->allocSsa();
+                $pGep = $this->ssa->allocReg();
                 $out .= '  ' . $pGep . ' = getelementptr inbounds i64, ptr '
                       . $obj . ', i64 ' . (string)($pi + $hdr) . "\n";
                 $ptype = $cd->propertyTypes[$pname] ?? null;
@@ -77,7 +77,7 @@ trait EmitLlvmObjects
             }
             // Dynamic-property bag starts null (assoc_set allocates lazily).
             if ($cd->usesBag()) {
-                $bGep = $this->allocSsa();
+                $bGep = $this->ssa->allocReg();
                 $out .= '  ' . $bGep . ' = getelementptr inbounds i8, ptr '
                       . $obj . ', i64 ' . (string)$cd->bagOffset() . "\n";
                 $out .= '  store i64 0, ptr ' . $bGep . "\n";
@@ -87,7 +87,7 @@ trait EmitLlvmObjects
         // with no ctor inherits its parent's).
         $ctorClass = $this->resolveMethodClass($n->class, '__construct');
         if ($ctorClass !== '') {
-            $objInt = $this->allocSsa();
+            $objInt = $this->ssa->allocReg();
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
@@ -112,7 +112,7 @@ trait EmitLlvmObjects
                     if ($pt !== null && $pt->kind === Type::KIND_FLOAT
                         && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)) {
                         $out .= $this->coerceToI64();
-                        $d = $this->allocSsa();
+                        $d = $this->ssa->allocReg();
                         $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
                         $this->lastValue = $d;
                         $this->lastValueType = 'double';
@@ -132,7 +132,7 @@ trait EmitLlvmObjects
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
-            $cr = $this->allocSsa();
+            $cr = $this->ssa->allocReg();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
             $out .= $this->btPop();
@@ -142,7 +142,7 @@ trait EmitLlvmObjects
         }
         // Capture the thrown location + call stack into a Throwable at `new`
         // (PHP records these at construction), when the program queries a trace.
-        if ($this->needsBacktrace && $cd !== null
+        if ($this->rt->needsBacktrace && $cd !== null
             && $this->classImplements($n->class, 'Throwable')) {
             $out .= $this->emitThrowableCapture($obj, $n);
         }
@@ -165,23 +165,23 @@ trait EmitLlvmObjects
         $lnOff = $cd->propertyOffset('traceLines');
         $out = '';
         // line = the `new` site line; file = the source path.
-        $lp = $this->allocSsa();
+        $lp = $this->ssa->allocReg();
         $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lineOff . "\n";
         $out .= '  store i64 ' . (string)$no->line . ', ptr ' . $lp . "\n";
-        $fp = $this->allocSsa();
+        $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fileOff . "\n";
-        $fstr = $this->allocSsa();
-        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->internString($this->sourceFile)) . " to i64\n";
+        $fstr = $this->ssa->allocReg();
+        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
         // Two packed vecs of the active frames, innermost first.
         $out .= $this->emitBtVec('@__mir_bt_name');
         $namesVec = $this->lastValue;
-        $np = $this->allocSsa();
+        $np = $this->ssa->allocReg();
         $out .= '  ' . $np . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$nmOff . "\n";
         $out .= '  store i64 ' . $namesVec . ', ptr ' . $np . "\n";
         $out .= $this->emitBtVec('@__mir_bt_line');
         $linesVec = $this->lastValue;
-        $lnp = $this->allocSsa();
+        $lnp = $this->ssa->allocReg();
         $out .= '  ' . $lnp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lnOff . "\n";
         $out .= '  store i64 ' . $linesVec . ', ptr ' . $lnp . "\n";
         return $out;
@@ -206,20 +206,20 @@ trait EmitLlvmObjects
             return $out;
         }
         $size = $cd->instanceSize();
-        $new = $this->allocSsa();
+        $new = $this->ssa->allocReg();
         $out .= '  ' . $new . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
         $out .= '  store i64 ' . $this->descSlotValue($cd) . ', ptr ' . $new . "\n";
-        $rcGep = $this->allocSsa();
+        $rcGep = $this->ssa->allocReg();
         $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $new . ", i64 1\n";
         $out .= '  store i64 1, ptr ' . $rcGep . "\n";
         // Copy each property slot; co-own rc-managed values (shallow copy).
         foreach ($cd->propertyNames as $pname) {
             $off = $cd->propertyOffset($pname);
-            $sg = $this->allocSsa();
+            $sg = $this->ssa->allocReg();
             $out .= '  ' . $sg . ' = getelementptr inbounds i8, ptr ' . $src . ', i64 ' . (string)$off . "\n";
-            $v = $this->allocSsa();
+            $v = $this->ssa->allocReg();
             $out .= '  ' . $v . ' = load i64, ptr ' . $sg . "\n";
-            $dg = $this->allocSsa();
+            $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
             $pt = $cd->propertyTypes[$pname] ?? null;
             // PHP arrays are VALUES: `clone` must copy each array property (a
@@ -232,14 +232,14 @@ trait EmitLlvmObjects
             $arrHint = ($cd->propertyArrayHinted[$pname] ?? false)
                 || ($pt !== null && $pt->isArray());
             if ($arrHint) {
-                $vp = $this->allocSsa();
+                $vp = $this->ssa->allocReg();
                 $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
                 $isCellElem = $pt !== null && $pt->element !== null
                     && $pt->element->kind === Type::KIND_CELL;
-                $cp = $this->allocSsa();
+                $cp = $this->ssa->allocReg();
                 $fn = $isCellElem ? '__mir_array_copy_cells' : '__mir_array_copy';
                 $out .= '  ' . $cp . ' = call ptr @' . $fn . '(ptr ' . $vp . ")\n";
-                $cpi = $this->allocSsa();
+                $cpi = $this->ssa->allocReg();
                 $out .= '  ' . $cpi . ' = ptrtoint ptr ' . $cp . " to i64\n";
                 $out .= '  store i64 ' . $cpi . ', ptr ' . $dg . "\n";
             } else {
@@ -250,20 +250,20 @@ trait EmitLlvmObjects
         // Dynamic-property bag: shallow-share the same assoc pointer.
         if ($cd->usesBag()) {
             $bo = $cd->bagOffset();
-            $sg = $this->allocSsa();
+            $sg = $this->ssa->allocReg();
             $out .= '  ' . $sg . ' = getelementptr inbounds i8, ptr ' . $src . ', i64 ' . (string)$bo . "\n";
-            $bv = $this->allocSsa();
+            $bv = $this->ssa->allocReg();
             $out .= '  ' . $bv . ' = load i64, ptr ' . $sg . "\n";
-            $dg = $this->allocSsa();
+            $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$bo . "\n";
             $out .= '  store i64 ' . $bv . ', ptr ' . $dg . "\n";
         }
         // __clone() hook on the fresh copy.
         $cloneCls = $this->resolveMethodClass($cls, '__clone');
         if ($cloneCls !== '') {
-            $ni = $this->allocSsa();
+            $ni = $this->ssa->allocReg();
             $out .= '  ' . $ni . ' = ptrtoint ptr ' . $new . " to i64\n";
-            $cr = $this->allocSsa();
+            $cr = $this->ssa->allocReg();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($cloneCls)
                   . '____clone(i64 ' . $ni . ")\n";
         }
@@ -281,7 +281,7 @@ trait EmitLlvmObjects
             }
             $pv = $this->lastValue;
             $out .= $this->rcRetainByType($pair->value, $pv, $pt, 4);
-            $dg = $this->allocSsa();
+            $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
             $out .= '  store i64 ' . $pv . ', ptr ' . $dg . "\n";
         }
@@ -326,15 +326,15 @@ trait EmitLlvmObjects
             $out = $this->emitNode($pa->object);
             $out .= $this->coerceToPtr();
             $objPtr = $this->lastValue;
-            $bg = $this->allocSsa();
+            $bg = $this->ssa->allocReg();
             $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
                   . ', i64 ' . (string)$bcd->bagOffset() . "\n";
-            $bagI = $this->allocSsa();
+            $bagI = $this->ssa->allocReg();
             $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-            $bagP = $this->allocSsa();
+            $bagP = $this->ssa->allocReg();
             $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-            $kid = $this->internString($pa->property);
-            $reg = $this->allocSsa();
+            $kid = $this->pool->intern($pa->property);
+            $reg = $this->ssa->allocReg();
                         $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
                   . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
             $this->lastValue = $reg;
@@ -369,15 +369,15 @@ trait EmitLlvmObjects
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
         $offset = $this->propertyOffset($pa->object, $pa->property);
-        $gep = $this->allocSsa();
+        $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
               . $objPtr . ', i64 ' . (string)$offset . "\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $gep . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $loaded . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -386,7 +386,7 @@ trait EmitLlvmObjects
             // `mixed` prop holding an object, or one narrowed via a property-path
             // instanceof) — strip the tag so the result is a clean obj ptr. The
             // 48-bit mask is identity on a real heap ptr (no-op for a raw obj).
-            $masked = $this->allocSsa();
+            $masked = $this->ssa->allocReg();
             $out .= '  ' . $masked . ' = and i64 ' . $loaded . ", 281474976710655\n";
             $this->lastValue = $masked;
         }
@@ -433,14 +433,14 @@ trait EmitLlvmObjects
         // Runtime dispatch on the object's class_id.
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $end = $this->allocLabel('cp.end');
-        $def = $this->allocLabel('cp.default');
+        $end = $this->ssa->allocLabel('cp.end');
+        $def = $this->ssa->allocLabel('cp.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
         foreach ($fixed as $cd) {
-            $lbl = $this->allocLabel('cp.case');
+            $lbl = $this->ssa->allocLabel('cp.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
@@ -453,15 +453,15 @@ trait EmitLlvmObjects
         if ($hasBag) {
             $out .= $this->emitBagReadInto($pa, $objPtr);
         } else {
-            $this->needsTagged = true;
-            $bn = $this->allocSsa();
+            $this->rt->needsTagged = true;
+            $bn = $this->ssa->allocReg();
             $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
             $this->lastValue = $bn;
         }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -476,10 +476,10 @@ trait EmitLlvmObjects
     private function emitFixedPropLoad(string $objPtr, ClassDef $cd, string $prop): string
     {
         $off = $cd->propertyOffset($prop);
-        $gep = $this->allocSsa();
+        $gep = $this->ssa->allocReg();
         $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$off . "\n";
-        $ld = $this->allocSsa();
+        $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
         $out .= $this->boxRawValue($ld, $cd->propertyTypes[$prop] ?? null);
         return $out;
@@ -493,8 +493,8 @@ trait EmitLlvmObjects
         $bagOff = $std === null ? 16 : $std->bagOffset();
         $out = $this->emitBagPtr($pa->object, $objPtr, $bagOff);
         $bagP = $this->bagPtrReg;
-        $kid = $this->internString($pa->property);
-        $reg = $this->allocSsa();
+        $kid = $this->pool->intern($pa->property);
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
               . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
         $this->lastValue = $reg;
@@ -524,9 +524,9 @@ trait EmitLlvmObjects
         $objPtr = $this->lastValue;
         // No known holder → nothing better than the historical raw slot-16 read.
         if (\count($fixed) === 0) {
-            $gep = $this->allocSsa();
+            $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
-            $ld = $this->allocSsa();
+            $ld = $this->ssa->allocReg();
             $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
             $this->lastValue = $ld;
             $this->lastValueType = 'i64';
@@ -539,14 +539,14 @@ trait EmitLlvmObjects
         // Dispatch on class_id: each holder reads (and boxes) its OWN slot.
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $end = $this->allocLabel('rp.end');
-        $def = $this->allocLabel('rp.default');
+        $end = $this->ssa->allocLabel('rp.end');
+        $def = $this->ssa->allocLabel('rp.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
         foreach ($fixed as $cd) {
-            $lbl = $this->allocLabel('rp.case');
+            $lbl = $this->ssa->allocLabel('rp.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
@@ -556,14 +556,14 @@ trait EmitLlvmObjects
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $out .= $def . ":\n";
-        $gep = $this->allocSsa();
+        $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
-        $ld = $this->allocSsa();
+        $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
         $out .= '  store i64 ' . $ld . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -585,13 +585,13 @@ trait EmitLlvmObjects
         $out = $this->emitNode($objNode);
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($hookSym)
               . '(i64 ' . $thisArg . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         if ($resultType->kind === Type::KIND_FLOAT) {
-            $rf = $this->allocSsa();
+            $rf = $this->ssa->allocReg();
             $out .= '  ' . $rf . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $rf;
             $this->lastValueType = 'double';
@@ -609,7 +609,7 @@ trait EmitLlvmObjects
         $out .= $this->emitNode($valueNode);
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($hookSym)
               . '(i64 ' . $thisArg . ', i64 ' . $val . ")\n";
         $this->lastValue = $val;
@@ -629,31 +629,31 @@ trait EmitLlvmObjects
         // box_object(singleton), not a raw ordinal — mask to the data ptr and
         // load the ordinal at +16 (mirrors emitEnumCellSingletons' layout).
         if ($pa->object->type->kind === Type::KIND_CELL) {
-            $m = $this->allocSsa();
+            $m = $this->ssa->allocReg();
             $out .= '  ' . $m . ' = and i64 ' . $ord . ", 281474976710655\n";
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
-            $g0 = $this->allocSsa();
+            $g0 = $this->ssa->allocReg();
             $out .= '  ' . $g0 . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
-            $ordR = $this->allocSsa();
+            $ordR = $this->ssa->allocReg();
             $out .= '  ' . $ordR . ' = load i64, ptr ' . $g0 . "\n";
             $ord = $ordR;
         }
         if ($pa->property === 'value' && $this->edBacking($ed) === 'int') {
-            $gep = $this->allocSsa();
+            $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x i64], ptr @'
                   . $ecls . '__values, i64 0, i64 ' . $ord . "\n";
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = load i64, ptr ' . $gep . "\n";
             $this->lastValue = $r; $this->lastValueType = 'i64';
             return $out;
         }
         // 'name', or string-backed 'value' → a ptr array.
         $table = ($pa->property === 'value') ? '__values' : '__names';
-        $gep = $this->allocSsa();
+        $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x ptr], ptr @'
               . $ecls . $table . ', i64 0, i64 ' . $ord . "\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load ptr, ptr ' . $gep . "\n";
         $this->lastValue = $r; $this->lastValueType = 'ptr';
         return $out;
@@ -667,14 +667,14 @@ trait EmitLlvmObjects
      */
     private function emitMagicCall(string $methodCls, string $method, string $objPtrReg, string $propName, ?string $valArg): string
     {
-        $oi = $this->allocSsa();
+        $oi = $this->ssa->allocReg();
         $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtrReg . " to i64\n";
-        $kid = $this->internString($propName);
-        $si = $this->allocSsa();
+        $kid = $this->pool->intern($propName);
+        $si = $this->ssa->allocReg();
         $out .= '  ' . $si . ' = ptrtoint ptr ' . $this->strLitId($kid) . " to i64\n";
         $args = 'i64 ' . $oi . ', i64 ' . $si;
         if ($valArg !== null) { $args .= ', i64 ' . $valArg; }
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($methodCls)
               . '__' . $method . '(' . $args . ")\n";
         $this->lastValue = $r;
@@ -743,21 +743,21 @@ trait EmitLlvmObjects
             $out = $this->emitNode($n->object);
             $out .= $this->coerceToPtr();
             $objPtr = $this->lastValue;
-            $bg = $this->allocSsa();
+            $bg = $this->ssa->allocReg();
             $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
                   . ', i64 ' . (string)$bcd->bagOffset() . "\n";
-            $bagI = $this->allocSsa();
+            $bagI = $this->ssa->allocReg();
             $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-            $bagP = $this->allocSsa();
+            $bagP = $this->ssa->allocReg();
             $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
             $out .= $this->emitNode($n->value);
             $out .= $this->boxToCell($n->value->type);
             $val = $this->lastValue;
-            $kid = $this->internString($n->property);
-            $nb = $this->allocSsa();
+            $kid = $this->pool->intern($n->property);
+            $nb = $this->ssa->allocReg();
                         $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
                   . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $val . ", i64 0, i64 0)\n";
-            $nbI = $this->allocSsa();
+            $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
             $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
             $this->lastValue = $val;
@@ -829,7 +829,7 @@ trait EmitLlvmObjects
             $out .= $this->rcRetainByType($n->value, $val, $propType, 4);
         }
         $offset = $this->propertyOffset($n->object, $n->property);
-        $gep = $this->allocSsa();
+        $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
               . $objPtr . ', i64 ' . (string)$offset . "\n";
         $out .= '  store i64 ' . $val . ', ptr ' . $gep . "\n";
@@ -849,7 +849,7 @@ trait EmitLlvmObjects
         if ($k === Node::KIND_INT_CONST)  { return (string)$def->value; }
         if ($k === Node::KIND_BOOL_CONST) { return $def->value ? '1' : '0'; }
         if ($k === Node::KIND_STRING_CONST) {
-            $id = $this->internString($def->value);
+            $id = $this->pool->intern($def->value);
             return 'ptrtoint (ptr ' . $this->strLitId($id) . ' to i64)';
         }
         if ($k === Node::KIND_FLOAT_CONST) {
@@ -864,10 +864,10 @@ trait EmitLlvmObjects
             return '';
         }
         // Once-init guard: `if (guard == 0) { cell = init; guard = 1; }`.
-        $g = $this->allocSsa();
-        $cond = $this->allocSsa();
-        $doLbl = $this->allocLabel('slinit');
-        $skipLbl = $this->allocLabel('slskip');
+        $g = $this->ssa->allocReg();
+        $cond = $this->ssa->allocReg();
+        $doLbl = $this->ssa->allocLabel('slinit');
+        $skipLbl = $this->ssa->allocLabel('slskip');
         $out = '  ' . $g . ' = load i64, ptr ' . $n->guard . "\n";
         $out .= '  ' . $cond . ' = icmp eq i64 ' . $g . ", 0\n";
         $out .= '  br i1 ' . $cond . ', label %' . $doLbl . ', label %' . $skipLbl . "\n";
@@ -897,7 +897,7 @@ trait EmitLlvmObjects
     private function emitRefBind(RefBind_ $n): string
     {
         if (!isset($this->slots[$n->target])) {
-            $slot = $this->allocSsa();
+            $slot = $this->ssa->allocReg();
             $this->slots[$n->target] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
@@ -922,7 +922,7 @@ trait EmitLlvmObjects
     private function emitRefAddr(RefAddr_ $n): string
     {
         if (!isset($this->slots[$n->target])) {
-            $slot = $this->allocSsa();
+            $slot = $this->ssa->allocReg();
             $this->slots[$n->target] = $slot;
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
@@ -960,12 +960,12 @@ trait EmitLlvmObjects
     /** Emit the object → bag-assoc ptr; leaves bag ptr + slot gep regs. */
     private function emitBagPtr(Node $objNode, string $objPtr, int $bagOff): string
     {
-        $bg = $this->allocSsa();
+        $bg = $this->ssa->allocReg();
         $out = '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$bagOff . "\n";
-        $bagI = $this->allocSsa();
+        $bagI = $this->ssa->allocReg();
         $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-        $bagP = $this->allocSsa();
+        $bagP = $this->ssa->allocReg();
         $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
         $this->bagSlotReg = $bg;
         $this->bagPtrReg = $bagP;
@@ -984,7 +984,7 @@ trait EmitLlvmObjects
         $out .= $this->emitNode($n->name);
         $out .= $this->coerceToPtr();
         $keyP = $this->lastValue;
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
               . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
         $this->lastValue = $reg;
@@ -1008,10 +1008,10 @@ trait EmitLlvmObjects
         $out .= $this->emitNode($n->value);
         $out .= $this->boxToCell($n->value->type);
         $val = $this->lastValue;
-        $nb = $this->allocSsa();
+        $nb = $this->ssa->allocReg();
                 $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
               . ', ptr ' . $keyP . ', i64 ' . $val . ", i64 0, i64 0)\n";
-        $nbI = $this->allocSsa();
+        $nbI = $this->ssa->allocReg();
         $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
         $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
         $this->lastValue = $val;
@@ -1022,7 +1022,7 @@ trait EmitLlvmObjects
     private function emitClassName(ClassName_ $n): string
     {
         $cls = $n->operand->type->class ?? '';
-        $id = $this->internString($cls);
+        $id = $this->pool->intern($cls);
         $this->lastValue = $this->strLitId($id);
         $this->lastValueType = 'ptr';
         return '';
@@ -1037,7 +1037,7 @@ trait EmitLlvmObjects
             $out .= $this->emitIssetTarget($t);
             $cur = $this->lastValue;
             if ($first) { $acc = $cur; $first = false; continue; }
-            $a = $this->allocSsa();
+            $a = $this->ssa->allocReg();
             $out .= '  ' . $a . ' = and i64 ' . $acc . ', ' . $cur . "\n";
             $acc = $a;
         }
@@ -1057,9 +1057,9 @@ trait EmitLlvmObjects
                 $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetExists', [$aa->index], Type::bool_());
                 $out = $this->emitMethodCall($mc);
                 $out .= $this->coerceToI64();
-                $cmp = $this->allocSsa();
+                $cmp = $this->ssa->allocReg();
                 $out .= '  ' . $cmp . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-                $z = $this->allocSsa();
+                $z = $this->ssa->allocReg();
                 $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
@@ -1082,9 +1082,9 @@ trait EmitLlvmObjects
                 $out .= $this->emitNode($aa->index);
                 $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                 $key = $this->lastValue;
-                $r = $this->allocSsa();
+                $r = $this->ssa->allocReg();
                 if ($keyIsCell) {
-                    $this->needsCellKey = true;
+                    $this->rt->needsCellKey = true;
                     $out .= '  ' . $r . ' = call i64 @__mir_array_isset_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
                 } elseif ($keyIsString) {
                     $out .= '  ' . $r . ' = call i64 @__mir_array_isset_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
@@ -1097,7 +1097,7 @@ trait EmitLlvmObjects
                 // default and is masked by the presence bit anyway). A raw-valued
                 // array never holds the NULL sentinel, so the check is a no-op
                 // there. `array_key_exists` keeps pure presence (a different path).
-                $val = $this->allocSsa();
+                $val = $this->ssa->allocReg();
                 if ($keyIsCell) {
                     $out .= '  ' . $val . ' = call i64 @__mir_array_get_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
                 } elseif ($keyIsString) {
@@ -1105,11 +1105,11 @@ trait EmitLlvmObjects
                 } else {
                     $out .= '  ' . $val . ' = call i64 @__mir_array_get_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
                 }
-                $nn = $this->allocSsa();
+                $nn = $this->ssa->allocReg();
                 $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n"; // != box_null
-                $nnz = $this->allocSsa();
+                $nnz = $this->ssa->allocReg();
                 $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
-                $rr = $this->allocSsa();
+                $rr = $this->ssa->allocReg();
                 $out .= '  ' . $rr . ' = and i64 ' . $r . ', ' . $nnz . "\n";
                 $this->lastValue = $rr;
                 $this->lastValueType = 'i64';
@@ -1124,10 +1124,10 @@ trait EmitLlvmObjects
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
-            $ok = $this->allocSsa();
+            $ok = $this->ssa->allocReg();
             $out .= '  ' . $ok . ' = call i1 @__mir_str_offset_isset(ptr ' . $arr
                   . ', i64 ' . $idx . ")\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $ok . " to i64\n";
             $this->lastValue = $z;
             $this->lastValueType = 'i64';
@@ -1146,9 +1146,9 @@ trait EmitLlvmObjects
                     $out .= $this->coerceToPtr();
                     $out .= $this->emitMagicCall($isCls, '__isset', $this->lastValue, $ipa->property, null);
                     $out .= $this->coerceToI64();
-                    $cmp = $this->allocSsa();
+                    $cmp = $this->ssa->allocReg();
                     $out .= '  ' . $cmp . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-                    $z = $this->allocSsa();
+                    $z = $this->ssa->allocReg();
                     $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
                     $this->lastValue = $z; $this->lastValueType = 'i64';
                     return $out;
@@ -1170,16 +1170,16 @@ trait EmitLlvmObjects
                 $objNode = $t;
             }
             if ($objNode->kind === Node::KIND_LOAD_LOCAL) {
-                $rSlot = $this->allocSsa();
+                $rSlot = $this->ssa->allocReg();
                 $out = '  ' . $rSlot . " = alloca i64\n";
                 $out .= $this->emitNode($objNode);
                 $out .= $this->coerceToPtr();
                 $objPtr = $this->lastValue;
-                $isnull = $this->allocSsa();
+                $isnull = $this->ssa->allocReg();
                 $out .= '  ' . $isnull . ' = icmp eq ptr ' . $objPtr . ", null\n";
-                $lNull = $this->allocLabel('iss.null');
-                $lRead = $this->allocLabel('iss.read');
-                $lEnd = $this->allocLabel('iss.end');
+                $lNull = $this->ssa->allocLabel('iss.null');
+                $lRead = $this->ssa->allocLabel('iss.read');
+                $lEnd = $this->ssa->allocLabel('iss.end');
                 $out .= '  br i1 ' . $isnull . ', label %' . $lNull
                       . ', label %' . $lRead . "\n";
                 $out .= $lRead . ":\n";
@@ -1189,13 +1189,13 @@ trait EmitLlvmObjects
                 // Set iff non-null: a null POINTER is 0 (`?string`/`?obj`), a
                 // null SCALAR is the boxed-NULL sentinel (`?int`/`?float`/`?bool`
                 // ride a numeric cell). PHP isset() is false for either.
-                $nz = $this->allocSsa();
+                $nz = $this->ssa->allocReg();
                 $out .= '  ' . $nz . ' = icmp ne i64 ' . $rv . ", 0\n";
-                $nnul = $this->allocSsa();
+                $nnul = $this->ssa->allocReg();
                 $out .= '  ' . $nnul . ' = icmp ne i64 ' . $rv . ", -3659174697238528\n";
-                $setc = $this->allocSsa();
+                $setc = $this->ssa->allocReg();
                 $out .= '  ' . $setc . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
-                $setz = $this->allocSsa();
+                $setz = $this->ssa->allocReg();
                 $out .= '  ' . $setz . ' = zext i1 ' . $setc . " to i64\n";
                 $out .= '  store i64 ' . $setz . ', ptr ' . $rSlot . "\n";
                 $out .= '  br label %' . $lEnd . "\n";
@@ -1203,7 +1203,7 @@ trait EmitLlvmObjects
                 $out .= '  store i64 0, ptr ' . $rSlot . "\n";
                 $out .= '  br label %' . $lEnd . "\n";
                 $out .= $lEnd . ":\n";
-                $z = $this->allocSsa();
+                $z = $this->ssa->allocReg();
                 $out .= '  ' . $z . ' = load i64, ptr ' . $rSlot . "\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
@@ -1215,9 +1215,9 @@ trait EmitLlvmObjects
         $out = $this->emitNode($t);
         $out .= $this->coerceToI64();
         $v = $this->lastValue;
-        $cmp = $this->allocSsa();
+        $cmp = $this->ssa->allocReg();
         $out .= '  ' . $cmp . ' = icmp ne i64 ' . $v . ", 0\n";
-        $z = $this->allocSsa();
+        $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
         $this->lastValue = $z;
         $this->lastValueType = 'i64';
@@ -1261,7 +1261,7 @@ trait EmitLlvmObjects
                     $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                     $key = $this->lastValue;
                     if ($keyIsCell) {
-                        $this->needsCellKey = true;
+                        $this->rt->needsCellKey = true;
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
                     } elseif ($keyIsString) {
                         $out .= '  call void @__mir_array_unset_str(ptr ' . $arrPtr . ', ptr ' . $key . ")\n";
@@ -1294,10 +1294,10 @@ trait EmitLlvmObjects
 
     private function emitStaticProp(\Compile\Mir\StaticProp_ $n): string
     {
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out = '  ' . $reg . ' = load i64, ptr ' . $n->global . "\n";
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -1348,11 +1348,11 @@ trait EmitLlvmObjects
     {
         $ed = $this->enums[$enum];
         $n = \count($ed->caseNames);
-        $cur = $this->allocSsa();
+        $cur = $this->ssa->allocReg();
         $out = '  ' . $cur . ' = call ptr @__mir_array_alloc(i64 ' . (string)$n . ")\n";
         $i = 0;
         while ($i < $n) {
-            $nx = $this->allocSsa();
+            $nx = $this->ssa->allocReg();
             $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur
                   . ', i64 ' . (string)$i . ")\n";
             $cur = $nx;
@@ -1377,19 +1377,19 @@ trait EmitLlvmObjects
         $out = $this->emitNode($arg);
         $out .= $isStr ? $this->coerceToPtr() : $this->coerceToI64();
         $needle = $this->lastValue;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $done = $this->allocLabel('efrom.done');
+        $done = $this->ssa->allocLabel('efrom.done');
         $vt = $isStr ? 'ptr' : 'i64';
         for ($i = 0; $i < $n; $i = $i + 1) {
-            $hit = $this->allocLabel('efrom.hit');
-            $nextL = $this->allocLabel('efrom.next');
-            $g = $this->allocSsa();
+            $hit = $this->ssa->allocLabel('efrom.hit');
+            $nextL = $this->ssa->allocLabel('efrom.next');
+            $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr [' . (string)$n . ' x ' . $vt . '], ptr @'
                   . $enum . '__values, i64 0, i64 ' . (string)$i . "\n";
-            $v = $this->allocSsa();
+            $v = $this->ssa->allocReg();
             $out .= '  ' . $v . ' = load ' . $vt . ', ptr ' . $g . "\n";
-            $eq = $this->allocSsa();
+            $eq = $this->ssa->allocReg();
             if ($isStr) {
                 $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $needle . ', ptr ' . $v . ")\n";
             } else {
@@ -1398,14 +1398,14 @@ trait EmitLlvmObjects
             $out .= '  br i1 ' . $eq . ', label %' . $hit . ', label %' . $nextL . "\n";
             $out .= $hit . ":\n";
             if ($try) {
-                $cg = $this->allocSsa();
+                $cg = $this->ssa->allocReg();
                 $out .= '  ' . $cg . ' = getelementptr [' . (string)$n . ' x i64], ptr @'
                       . $enum . '__cases, i64 0, i64 ' . (string)$i . "\n";
-                $dp = $this->allocSsa();
+                $dp = $this->ssa->allocReg();
                 $out .= '  ' . $dp . ' = load i64, ptr ' . $cg . "\n";
-                $pp = $this->allocSsa();
+                $pp = $this->ssa->allocReg();
                 $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
-                $bx = $this->allocSsa();
+                $bx = $this->ssa->allocReg();
                 $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
                 $out .= '  store i64 ' . $bx . ', ptr ' . $res . "\n";
             } else {
@@ -1449,7 +1449,7 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $done . "\n";
         }
         $out .= $done . ":\n";
-        $r = $this->allocSsa();
+        $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -1471,14 +1471,14 @@ trait EmitLlvmObjects
         $fnName = $fnNode->type->class ?? '';
         $cnt = $this->closureCaptures[$fnName] ?? 1;
         $slots = 1 + $cnt;
-        $buf = $this->allocSsa();
+        $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . ' = call ptr @__mir_alloc(i64 ' . (string)(8 * $slots) . ")\n";
         for ($i = 0; $i < $slots; $i = $i + 1) {
-            $sg = $this->allocSsa();
+            $sg = $this->ssa->allocReg();
             $out .= '  ' . $sg . ' = getelementptr inbounds i64, ptr ' . $src . ', i64 ' . (string)$i . "\n";
-            $sv = $this->allocSsa();
+            $sv = $this->ssa->allocReg();
             $out .= '  ' . $sv . ' = load i64, ptr ' . $sg . "\n";
-            $dg = $this->allocSsa();
+            $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$i . "\n";
             $out .= '  store i64 ' . $sv . ', ptr ' . $dg . "\n";
         }
@@ -1487,7 +1487,7 @@ trait EmitLlvmObjects
             $out .= $this->emitNode($objNode);
             $out .= $this->coerceToI64();
             $objV = $this->lastValue;
-            $tg = $this->allocSsa();
+            $tg = $this->ssa->allocReg();
             $out .= '  ' . $tg . ' = getelementptr inbounds i64, ptr ' . $buf . ", i64 1\n";
             $out .= '  store i64 ' . $objV . ', ptr ' . $tg . "\n";
         }
@@ -1571,11 +1571,11 @@ trait EmitLlvmObjects
         $out .= $this->emitDefaultArgPad($cls . '__' . $n->method, $ai, !$first);
         $argList .= $this->lastPadArgs;
         $btName = '';
-        if ($this->needsBacktrace) {
+        if ($this->rt->needsBacktrace) {
             $btName = $n->class . '::' . $n->method;
             $out .= $this->btPush($btName, $n->line);
         }
-        $reg = $this->allocSsa();
+        $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
@@ -1583,16 +1583,16 @@ trait EmitLlvmObjects
         // By-ref return (`static function &m()`): the callee yields the slot
         // ADDRESS; deref in value context, keep raw under rawRefCall (RefBind).
         if (($this->fnReturnsByRef[$target] ?? false) && !$this->rawRefCall) {
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
-            $dv = $this->allocSsa();
+            $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
             $reg = $dv;
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -1636,22 +1636,22 @@ trait EmitLlvmObjects
      */
     private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method): string
     {
-        $objp = $this->allocSsa();
+        $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $endLabel = $this->allocLabel('vd.end');
-        $defLabel = $this->allocLabel('vd.default');
+        $endLabel = $this->ssa->allocLabel('vd.end');
+        $defLabel = $this->ssa->allocLabel('vd.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $defLabel . " [\n";
         $bodies = '';
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
-            $caseLabel = $this->allocLabel('vd.case');
+            $caseLabel = $this->ssa->allocLabel('vd.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseLabel . "\n";
-            $r = $this->allocSsa();
+            $r = $this->ssa->allocReg();
             $bodies .= $caseLabel . ":\n";
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
                      . '(' . $argList . ")\n";
@@ -1660,14 +1660,14 @@ trait EmitLlvmObjects
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
-        $rd = $this->allocSsa();
+        $rd = $this->ssa->allocReg();
         $out .= $defLabel . ":\n";
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $argList . ")\n";
         $out .= '  store i64 ' . $rd . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->vdResult = $loaded;
         return $out;
@@ -1712,7 +1712,7 @@ trait EmitLlvmObjects
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
         if ($m === 'next')   { $out .= $this->genResumeCall($g); return $this->finishI64($out, '0'); }
         if ($m === 'send') {
-            $sentPtr = $this->allocSsa();
+            $sentPtr = $this->ssa->allocReg();
             $out .= '  ' . $sentPtr . ' = getelementptr inbounds i8, ptr ' . $g . ", i64 40\n";
             if (\count($mc->args) >= 1) {
                 // The yield expression is cell-typed — box the sent value so
@@ -1742,13 +1742,13 @@ trait EmitLlvmObjects
         }
         if ($m === 'valid') {
             $out .= $this->genPrimeIfFresh($g);
-            $statePtr = $this->allocSsa();
+            $statePtr = $this->ssa->allocReg();
             $out .= '  ' . $statePtr . ' = getelementptr inbounds i8, ptr ' . $g . ", i64 8\n";
-            $st2 = $this->allocSsa();
+            $st2 = $this->ssa->allocReg();
             $out .= '  ' . $st2 . ' = load i64, ptr ' . $statePtr . "\n";
-            $ne = $this->allocSsa();
+            $ne = $this->ssa->allocReg();
             $out .= '  ' . $ne . ' = icmp ne i64 ' . $st2 . ", -1\n";
-            $z = $this->allocSsa();
+            $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
             return $this->finishI64($out, $z);
         }
@@ -1758,14 +1758,14 @@ trait EmitLlvmObjects
     /** Resume a generator once iff it is not yet started (state == 0). */
     private function genPrimeIfFresh(string $g): string
     {
-        $statePtr = $this->allocSsa();
+        $statePtr = $this->ssa->allocReg();
         $out = '  ' . $statePtr . ' = getelementptr inbounds i8, ptr ' . $g . ", i64 8\n";
-        $st = $this->allocSsa();
+        $st = $this->ssa->allocReg();
         $out .= '  ' . $st . ' = load i64, ptr ' . $statePtr . "\n";
-        $fresh = $this->allocSsa();
+        $fresh = $this->ssa->allocReg();
         $out .= '  ' . $fresh . ' = icmp eq i64 ' . $st . ", 0\n";
-        $doL = $this->allocLabel('gm.prime');
-        $skL = $this->allocLabel('gm.primed');
+        $doL = $this->ssa->allocLabel('gm.prime');
+        $skL = $this->ssa->allocLabel('gm.primed');
         $out .= '  br i1 ' . $fresh . ', label %' . $doL . ', label %' . $skL . "\n";
         $out .= $doL . ":\n" . $this->genResumeCall($g) . '  br label %' . $skL . "\n";
         $out .= $skL . ":\n";
@@ -1775,9 +1775,9 @@ trait EmitLlvmObjects
     /** Emit `load (frame + off)` into a fresh reg; sets $this->lastValue. */
     private function genFieldLoad(string $g, int $off): string
     {
-        $p = $this->allocSsa();
+        $p = $this->ssa->allocReg();
         $out = '  ' . $p . ' = getelementptr inbounds i8, ptr ' . $g . ', i64 ' . (string)$off . "\n";
-        $v = $this->allocSsa();
+        $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = load i64, ptr ' . $p . "\n";
         $this->lastValue = $v;
         $this->lastValueType = 'i64';
@@ -1813,11 +1813,11 @@ trait EmitLlvmObjects
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
             }
-            $fpi = $this->allocSsa();
+            $fpi = $this->ssa->allocReg();
             $out .= '  ' . $fpi . ' = load i64, ptr ' . $bound . "\n";
-            $fp = $this->allocSsa();
+            $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
@@ -1845,7 +1845,7 @@ trait EmitLlvmObjects
         // the raw object pointer so both the `$this` arg and the class_id
         // virtual dispatch read the object, not the boxed bits (else SIGSEGV).
         if ($mc->object->type->kind === Type::KIND_CELL) {
-            $unb = $this->allocSsa();
+            $unb = $this->ssa->allocReg();
             $out .= '  ' . $unb . ' = and i64 ' . $thisArg . ", 281474976710655\n";
             $thisArg = $unb;
         }
@@ -1961,7 +1961,7 @@ trait EmitLlvmObjects
             $fallbackFull = $distinct[0] ?? $fallbackFull;
         }
         $btName = '';
-        if ($this->needsBacktrace) {
+        if ($this->rt->needsBacktrace) {
             // Push a bare method-name placeholder + the call-site line. The
             // callee overwrites the name with "Class->method" at its entry
             // (a stable receiver class isn't available here under the self-host).
@@ -1969,7 +1969,7 @@ trait EmitLlvmObjects
             $out .= $this->btPush($btName, $n->line);
         }
         if (\count($distinct) <= 1) {
-            $reg = $this->allocSsa();
+            $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($distinct[0] ?? $fallbackFull)
                   . '(' . $argList . ")\n";
         } else {
@@ -1982,16 +1982,16 @@ trait EmitLlvmObjects
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
         // (rawRefCall) keeps the raw address so RefBind can alias through it.
         if (($this->fnReturnsByRef[$fallbackFull] ?? false) && !$this->rawRefCall) {
-            $p = $this->allocSsa();
+            $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
-            $dv = $this->allocSsa();
+            $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
             $reg = $dv;
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->allocSsa();
+            $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
@@ -2009,10 +2009,10 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($i64regs as $tv) {
-            $tp = $this->allocSsa();
+            $tp = $this->ssa->allocReg();
             $out .= '  ' . $tp . ' = inttoptr i64 ' . $tv . " to ptr\n";
             $out .= '  call void @__mir_rc_release_str(ptr ' . $tp . ")\n";
-            $this->needsStrRc = true;
+            $this->rt->needsStrRc = true;
         }
         return $out;
     }
@@ -2036,10 +2036,10 @@ trait EmitLlvmObjects
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
         if ($agree) {
-            $gep = $this->allocSsa();
+            $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
                   . ', i64 ' . (string)$firstOff . "\n";
-            $loaded = $this->allocSsa();
+            $loaded = $this->ssa->allocReg();
             $out .= '  ' . $loaded . ' = load i64, ptr ' . $gep . "\n";
             $this->lastValue = $loaded;
             $this->lastValueType = 'i64';
@@ -2047,10 +2047,10 @@ trait EmitLlvmObjects
         }
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
-        $res = $this->allocSsa();
+        $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $endL = $this->allocLabel('up.end');
-        $defL = $this->allocLabel('up.def');
+        $endL = $this->ssa->allocLabel('up.end');
+        $defL = $this->ssa->allocLabel('up.def');
         $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
         $bodies = '';
         $seen = [];
@@ -2060,13 +2060,13 @@ trait EmitLlvmObjects
                 $cd = $this->classes[$c] ?? null;
                 if ($cd === null || isset($seen[$c])) { continue; }
                 $seen[$c] = true;
-                $caseL = $this->allocLabel('up.case');
+                $caseL = $this->ssa->allocLabel('up.case');
                 $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
-                $g = $this->allocSsa();
+                $g = $this->ssa->allocReg();
                 $bodies .= $caseL . ":\n";
                 $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
                          . ', i64 ' . (string)$offByClass[$ac] . "\n";
-                $vv = $this->allocSsa();
+                $vv = $this->ssa->allocReg();
                 $bodies .= '  ' . $vv . ' = load i64, ptr ' . $g . "\n";
                 $bodies .= '  store i64 ' . $vv . ', ptr ' . $res . "\n";
                 $bodies .= '  br label %' . $endL . "\n";
@@ -2074,16 +2074,16 @@ trait EmitLlvmObjects
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
-        $gd = $this->allocSsa();
+        $gd = $this->ssa->allocReg();
         $out .= $defL . ":\n";
         $out .= '  ' . $gd . ' = getelementptr inbounds i8, ptr ' . $objPtr
               . ', i64 ' . (string)$firstOff . "\n";
-        $vd = $this->allocSsa();
+        $vd = $this->ssa->allocReg();
         $out .= '  ' . $vd . ' = load i64, ptr ' . $gd . "\n";
         $out .= '  store i64 ' . $vd . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
-        $loaded = $this->allocSsa();
+        $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
