@@ -26,4 +26,67 @@ final class LocalSlots
     public array $globalBacked = [];
     /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
     public array $byRefCaptured = [];
+
+    public function collectByRefCaptured(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $cl = $n;
+            $i = 0;
+            foreach ($cl->captures as $c) {
+                if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
+                    $this->byRefCaptured[$c->name] = true;
+                }
+                $i = $i + 1;
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectByRefCaptured($c);
+        }
+    }
+
+    /**
+     * Pre-scan: register every static-local name → its global cell so
+     * Load/StoreLocal route to the cell and preallocateLocals skips an
+     * alloca. Recurses through structured control flow.
+     */
+    public function collectStatics(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STATIC_LOCAL_DECL) {
+            $this->globalBacked[$n->name] = $n->cell;
+            return;
+        }
+        if ($k === Node::KIND_BLOCK) {
+            foreach ($n->stmts as $s) { $this->collectStatics($s); }
+            return;
+        }
+        if ($k === Node::KIND_IF) {
+            $this->collectStatics($n->then);
+            if ($n->else !== null) { $this->collectStatics($n->else); }
+            return;
+        }
+        if ($k === Node::KIND_WHILE) {
+            $this->collectStatics($n->body);
+            return;
+        }
+        if ($k === Node::KIND_FOR) {
+            $this->collectStatics($n->body);
+            return;
+        }
+        if ($k === Node::KIND_DOWHILE) {
+            $this->collectStatics($n->body);
+            return;
+        }
+        if ($k === Node::KIND_FOREACH) {
+            $this->collectStatics($n->body);
+            return;
+        }
+        if ($k === Node::KIND_SWITCH) {
+            foreach ($n->arms as $arm) {
+                foreach ($arm->body as $s) { $this->collectStatics($s); }
+            }
+            return;
+        }
+    }
 }

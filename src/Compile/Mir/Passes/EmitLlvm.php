@@ -470,48 +470,10 @@ final class EmitLlvm
                 $out .= $this->emitUncaughtHandler();
             }
         }
-        // Dedup libc declares by symbol — flag-driven needs + the
-        // per-builtin needs registered in $libcExtra. A symbol declared
-        // twice is a hard LLVM error, so route everything through one map.
-        $decls = [];
-        $decls['printf'] = "declare i32 @printf(ptr, ...) nofree nounwind";
-        $decls['malloc'] = "declare ptr @malloc(i64)";
-        $decls['free']   = "declare void @free(ptr)";
-        // __mir_realloc_tagged is always emitted (tagged vec grow), so the
-        // realloc decl must always be present.
-        $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
-        // A2 verify mode (MANTICORE_DEBUG_VERIFY): rc helpers abort on an
-        // over-release (rc<1 before decrement = double-free / UAF). Gated so
-        // production IR is byte-identical.
-        if (\Compile\Debug::$verify) {
-            $decls['abort'] = "declare void @abort() noreturn";
-            $decls['dprintf'] = "declare i32 @dprintf(i32, ptr, ...)";
-        }
-        if ($this->rt->needsArena) {
-            $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
-            $decls['memcpy']  = "declare ptr @memcpy(ptr, ptr, i64)";
-        }
-        if ($this->rt->needsConcat) { $decls['strlen'] = "declare i64 @strlen(ptr)"; }
-        if ($this->rt->needsConcat || $this->rt->needsFloatStr || $this->rt->needsIntStr || $this->rt->needsTaggedToStr) { $decls['snprintf'] = "declare i32 @snprintf(ptr, i64, ptr, ...)"; }
-        if ($this->rt->needsStrtol) { $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)"; }
-        if ($this->rt->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
-        if ($this->rt->needsExceptions) {
-            $decls['setjmp'] = "declare i32 @setjmp(ptr) returns_twice";
-            $decls['longjmp'] = "declare void @longjmp(ptr, i32) noreturn";
-        }
-        // tagged_to_double's string-tag branch parses via strtod, so declare it
-        // whenever that helper is emitted (not only on a direct (float)"str" cast).
-        if ($this->rt->needsStrtod || $this->rt->needsTaggedToFloat) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
-        // Unified PhpArray runtime libc deps (docs/16).
-        $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
-        $decls['memset']  = "declare ptr @memset(ptr, i32, i64)";
-        $decls['memcpy']  = "declare ptr @memcpy(ptr, ptr, i64)";
-        $decls['memmove'] = "declare ptr @memmove(ptr, ptr, i64)";
-        $decls['memcmp']  = "declare i32 @memcmp(ptr, ptr, i64)";
-        $decls['malloc']  = "declare ptr @malloc(i64)";
-        $decls['strlen']  = "declare i64 @strlen(ptr)";
-        $decls['free']    = "declare void @free(ptr)";
-        $decls['strcmp']  = "declare i32 @strcmp(ptr, ptr)";
+        // The runtime's own libc demand, plus the per-builtin extras registered
+        // in $libcExtra and the FFI externs. Keyed by symbol: declaring one
+        // twice is a hard LLVM error, so everything routes through one map.
+        $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
         foreach ($this->libcExtra as $sym => $line) { $decls[$sym] = $line; }
         foreach ($this->rtExterns as $sym => $line) { $decls[$sym] = $line; }
         foreach ($decls as $line) { $out .= $line . "\n"; }
@@ -569,17 +531,10 @@ final class EmitLlvm
         if ($this->rt->needsFloatShortest) {
             $out .= $this->floatShortestImpl();
         }
-        // tagged_to_str (mixed→string) calls @__mir_int_to_str for the int
-        // tag, so pull the int-to-string helper in whenever it's emitted.
-        if ($this->rt->needsConcat || $this->rt->needsIntStr || $this->rt->needsTaggedToStr) {
+        if ($this->rt->needsIntToStr()) {
             $out .= $this->intToStrRuntime();
         }
-        // box_int/unbox_int: needed by the full tagged runtime AND by every
-        // tagged render helper (asint arm calls unbox_int). Emit once, under the
-        // union of those gates, else a helper links an undefined ref (→ identity
-        // stub → boxed bits printed).
-        if ($this->rt->needsTagged || $this->rt->needsTaggedToStr || $this->rt->needsTaggedToInt
-            || $this->rt->needsTaggedToFloat || $this->rt->needsTaggedEcho || $this->rt->needsIntStr) {
+        if ($this->rt->needsBoxInt()) {
             $out .= $this->boxIntRuntime();
         }
         if ($this->rt->needsTagged) {
@@ -1790,7 +1745,7 @@ final class EmitLlvm
         $this->locals->globalBacked = [];
         $this->frame->mutatedVecLocals = [];
         $this->collectMutatedVecs($fn->body);
-        $this->collectStaticLocals($fn->body);
+        $this->locals->collectStatics($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
         // same `@g_x` cell so writes are visible inside functions.
         if ($fn->name === '__main') {
@@ -1944,7 +1899,7 @@ final class EmitLlvm
         // already holds an inherited box ptr). The box leaks (bounded — one
         // per by-ref-captured local per call), like the generator frame.
         $this->locals->byRefCaptured = [];
-        $this->collectByRefCaptured($fn->body);
+        $this->locals->collectByRefCaptured($fn->body);
         foreach ($this->locals->byRefCaptured as $bname => $_) {
             if (isset($paramNames[$bname])) { continue; }
             if (!isset($this->locals->slots[$bname])) { continue; }
@@ -2106,24 +2061,6 @@ final class EmitLlvm
             return false;
         }
         return true;
-    }
-
-    private function collectByRefCaptured(Node $n): void
-    {
-        if ($n->kind === Node::KIND_CLOSURE) {
-            $cl = $n;
-            $i = 0;
-            foreach ($cl->captures as $c) {
-                if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
-                    $this->locals->byRefCaptured[$c->name] = true;
-                }
-                $i = $i + 1;
-            }
-            return;
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            $this->collectByRefCaptured($c);
-        }
     }
 
     // Generator frame layout:
@@ -3232,51 +3169,6 @@ final class EmitLlvm
         $arr = $a->array;
         if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
             $this->frame->mutatedVecLocals[$arr->name] = true;
-        }
-    }
-
-    /**
-     * Pre-scan: register every static-local name → its global cell so
-     * Load/StoreLocal route to the cell and preallocateLocals skips an
-     * alloca. Recurses through structured control flow.
-     */
-    private function collectStaticLocals(Node $n): void
-    {
-        $k = $n->kind;
-        if ($k === Node::KIND_STATIC_LOCAL_DECL) {
-            $this->locals->globalBacked[$n->name] = $n->cell;
-            return;
-        }
-        if ($k === Node::KIND_BLOCK) {
-            foreach ($n->stmts as $s) { $this->collectStaticLocals($s); }
-            return;
-        }
-        if ($k === Node::KIND_IF) {
-            $this->collectStaticLocals($n->then);
-            if ($n->else !== null) { $this->collectStaticLocals($n->else); }
-            return;
-        }
-        if ($k === Node::KIND_WHILE) {
-            $this->collectStaticLocals($n->body);
-            return;
-        }
-        if ($k === Node::KIND_FOR) {
-            $this->collectStaticLocals($n->body);
-            return;
-        }
-        if ($k === Node::KIND_DOWHILE) {
-            $this->collectStaticLocals($n->body);
-            return;
-        }
-        if ($k === Node::KIND_FOREACH) {
-            $this->collectStaticLocals($n->body);
-            return;
-        }
-        if ($k === Node::KIND_SWITCH) {
-            foreach ($n->arms as $arm) {
-                foreach ($arm->body as $s) { $this->collectStaticLocals($s); }
-            }
-            return;
         }
     }
 
@@ -5007,7 +4899,7 @@ final class EmitLlvm
         // are materialized, so a reset never frees the array being walked.
         // By-ref foreach writes the value slot back into the element, so an
         // arena value could escape into the (pre-save) array — skip it.
-        $reset = !$fe->byRef && $this->loopArenaResettable(null, $fe->body, null);
+        $reset = !$fe->byRef && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
         $out .= '  br label %' . $condLabel . "\n";
@@ -7571,148 +7463,6 @@ final class EmitLlvm
 
 
     /**
-     * A loop may reset the arena each iteration iff its body (+cond/step)
-     * allocates Arena temporaries and every Arena value it *binds* is safe to
-     * free at the iteration boundary. Binding to a non-local sink (property /
-     * element / static) is never safe. Binding to a LOCAL is safe when the
-     * local is (A) written before it is read on each iteration (so the prior
-     * iteration's freed value is never observed) AND (B) not read anywhere in
-     * the function outside this loop (so the last iteration's value — freed by
-     * the pre-exit reset — is never observed either). `$step` may be null.
-     */
-    private function loopArenaResettable(?Node $cond, Node $body, ?Node $step): bool
-    {
-        // A generator resume body re-enters mid-loop via the entry state
-        // switch (irreducible CFG), so a per-iteration arena save placed
-        // before the loop no longer dominates the in-loop reset. Disable the
-        // arena loop optimization inside generators.
-        if ($this->gen->inGenerator) { return false; }
-        $this->arena->resetScan();
-        if ($cond !== null) { $this->arenaScan($cond); }
-        $this->arenaScan($body);
-        if ($step !== null) { $this->arenaScan($step); }
-        if (!$this->arena->hasAlloc || $this->arena->bindsNonLocal) { return false; }
-        foreach ($this->arena->boundLocals as $name => $ignored) {
-            // (B) read outside the loop? Reads within the loop are cond+body+step;
-            // any surplus in the whole function body is an outside read.
-            $inLoop = $this->countLocalReads($name, $body)
-                + ($cond !== null ? $this->countLocalReads($name, $cond) : 0)
-                + ($step !== null ? $this->countLocalReads($name, $step) : 0);
-            $total = $this->frame->body !== null
-                ? $this->countLocalReads($name, $this->frame->body) : $inLoop;
-            if ($total > $inLoop) { return false; }
-            // (A) written before read on each iteration.
-            if (!$this->writtenBeforeRead($name, $body)) { return false; }
-        }
-        return true;
-    }
-
-    private function arenaScan(Node $n): void
-    {
-        if ($n->allocKind === \Compile\Mir\AllocationKind::ARENA) {
-            $this->arena->hasAlloc = true;
-        }
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
-            if ($this->bindsArenaValue($n->value)) {
-                $this->arena->boundLocals[$n->name] = true;
-            }
-        } else {
-            $sv = $this->storeBoundValue($n);
-            if ($sv !== null && $this->bindsArenaValue($sv)) {
-                $this->arena->bindsNonLocal = true;
-            }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->arenaScan($c); }
-    }
-
-    /** Count LOAD_LOCAL reads of `$name` in the subtree. */
-    private function countLocalReads(string $name, Node $n): int
-    {
-        $c = 0;
-        if ($n->kind === Node::KIND_LOAD_LOCAL && $n->name === $name) {
-            $c = 1;
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $ch) {
-            $c = $c + $this->countLocalReads($name, $ch);
-        }
-        return $c;
-    }
-
-    /**
-     * Whether, in `$body`, `$name` is assigned by a plain StoreLocal (whose
-     * value does NOT read `$name`) before any read of it — sound if the body
-     * is a statement sequence: the first statement that mentions `$name` must
-     * be that fresh assignment. Conservative (false) for any other first use
-     * (a read, an element/compound store, or a self-referential value).
-     */
-    private function writtenBeforeRead(string $name, Node $body): bool
-    {
-        foreach ($this->stmtList($body) as $stmt) {
-            if ($stmt->kind === Node::KIND_STORE_LOCAL
-                && $stmt->name === $name) {
-                // Fresh re-init iff the value doesn't read $name itself.
-                return $this->countLocalReads($name, $stmt->value) === 0;
-            }
-            // Any other statement that mentions $name (read, or a nested/
-            // conditional/element write) reaches a use before a clean write.
-            if ($this->countLocalReads($name, $stmt) > 0
-                || $this->mentionsLocalStore($name, $stmt)) {
-                return false;
-            }
-        }
-        return false;
-    }
-
-    /** Statement list of a block body (else a one-element list). */
-    private function stmtList(Node $body): array
-    {
-        if ($body->kind === Node::KIND_BLOCK) {
-            return $body->stmts;
-        }
-        return [$body];
-    }
-
-    /** Whether the subtree contains a StoreLocal targeting `$name` (any depth). */
-    private function mentionsLocalStore(string $name, Node $n): bool
-    {
-        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
-            return true;
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $ch) {
-            if ($this->mentionsLocalStore($name, $ch)) { return true; }
-        }
-        return false;
-    }
-
-    /** The value a store binds to a name, or null for a non-store node. */
-    private function storeBoundValue(Node $n): ?Node
-    {
-        $k = $n->kind;
-        if ($k === Node::KIND_STORE_LOCAL) { return $n->value; }
-        if ($k === Node::KIND_STORE_PROPERTY) { return $n->value; }
-        if ($k === Node::KIND_STORE_ELEMENT) { return $n->value; }
-        if ($k === Node::KIND_STORE_STATIC_PROP) { return $n->value; }
-        if ($k === Node::KIND_STORE_DYN_PROP) { return $n->value; }
-        return null;
-    }
-
-    /** Whether the value bound by a store is (or yields) an Arena alloc. */
-    private function bindsArenaValue(Node $v): bool
-    {
-        if ($v->allocKind === \Compile\Mir\AllocationKind::ARENA) { return true; }
-        if ($v->kind === Node::KIND_TERNARY) {
-            $t = $v;
-            if ($t->then !== null && $this->bindsArenaValue($t->then)) { return true; }
-            return $this->bindsArenaValue($t->else_);
-        }
-        if ($v->kind === Node::KIND_NULLCOALESCE) {
-            $nc = $v;
-            return $this->bindsArenaValue($nc->left) || $this->bindsArenaValue($nc->right);
-        }
-        return false;
-    }
-
-    /**
      * Emit the pre-loop arena position save. The saved (cur, used) are
      * loop-invariant SSA values — computed once before the loop, they
      * dominate the loop header, so no alloca is needed (an alloca here
@@ -7746,7 +7496,7 @@ final class EmitLlvm
         $endLabel  = $this->ssa->allocLabel('loop.end');
         $this->cf->enterLoop($endLabel, $condLabel);
 
-        $reset = $this->loopArenaResettable($w->cond, $w->body, null);
+        $reset = $this->arena->canResetPerIteration($w->cond, $w->body, null, $this->frame->body, $this->gen->inGenerator);
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
         $out .= '  br label %' . $condLabel . "\n";
@@ -7776,7 +7526,7 @@ final class EmitLlvm
         // `continue` runs the step before re-testing the condition.
         $this->cf->enterLoop($endLabel, $stepLabel);
 
-        $reset = $this->loopArenaResettable($f->cond, $f->body, $f->step);
+        $reset = $this->arena->canResetPerIteration($f->cond, $f->body, $f->step, $this->frame->body, $this->gen->inGenerator);
         $out = '';
         if ($f->init !== null) { $out .= $this->emitNode($f->init); }
         if ($reset) { $out .= $this->emitArenaSave(); }
@@ -7812,7 +7562,7 @@ final class EmitLlvm
         $endLabel  = $this->ssa->allocLabel('do.end');
         $this->cf->enterLoop($endLabel, $condLabel);
 
-        $reset = $this->loopArenaResettable($d->cond, $d->body, null);
+        $reset = $this->arena->canResetPerIteration($d->cond, $d->body, null, $this->frame->body, $this->gen->inGenerator);
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
         $out .= '  br label %' . $bodyLabel . "\n";

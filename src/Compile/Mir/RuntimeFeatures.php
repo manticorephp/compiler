@@ -64,4 +64,89 @@ final class RuntimeFeatures
     public bool $needsStdStreams = false;
     public bool $needsStrpos = false;
     public bool $needsStrExplode = false;
+
+    // ── derived demands ────────────────────────────────────────────────────
+    // A helper is often pulled in by more than one feature. Naming each union
+    // once here keeps the subtle "why" with the flags instead of re-deriving
+    // the condition at every emit site (where a missing arm links an undefined
+    // ref and degrades to an identity stub — boxed bits printed as garbage).
+
+    /** Every string-formatting path renders through snprintf. */
+    public function needsSnprintf(): bool
+    {
+        return $this->needsConcat || $this->needsFloatStr
+            || $this->needsIntStr || $this->needsTaggedToStr;
+    }
+
+    /** tagged_to_str (mixed→string) calls int_to_str for the int tag. */
+    public function needsIntToStr(): bool
+    {
+        return $this->needsConcat || $this->needsIntStr || $this->needsTaggedToStr;
+    }
+
+    /** box_int/unbox_int: the full tagged runtime AND every tagged render
+     *  helper (whose `asint` arm calls unbox_int). */
+    public function needsBoxInt(): bool
+    {
+        return $this->needsTagged || $this->needsTaggedToStr || $this->needsTaggedToInt
+            || $this->needsTaggedToFloat || $this->needsTaggedEcho || $this->needsIntStr;
+    }
+
+    /** tagged_to_double's string-tag branch parses via strtod, so it is needed
+     *  whenever that helper is emitted — not only on a direct `(float)"str"`. */
+    public function needsStrtodDecl(): bool
+    {
+        return $this->needsStrtod || $this->needsTaggedToFloat;
+    }
+
+    /**
+     * The libc symbols this module's runtime needs → their `declare` line.
+     *
+     * Keyed by symbol because declaring one twice is a hard LLVM error: the
+     * always-on set, the flag-driven set and the per-builtin extras all route
+     * through this one map. Insertion order is the emit order.
+     *
+     * @return array<string, string> symbol → declare line
+     */
+    public function libcDecls(bool $verify): array
+    {
+        $decls = [];
+        $decls['printf'] = "declare i32 @printf(ptr, ...) nofree nounwind";
+        $decls['malloc'] = "declare ptr @malloc(i64)";
+        $decls['free']   = "declare void @free(ptr)";
+        // __mir_realloc_tagged is always emitted (tagged vec grow), so the
+        // realloc decl must always be present.
+        $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
+        // A2 verify mode (MANTICORE_DEBUG_VERIFY): rc helpers abort on an
+        // over-release (rc<1 before decrement = double-free / UAF). Gated so
+        // production IR is byte-identical.
+        if ($verify) {
+            $decls['abort'] = "declare void @abort() noreturn";
+            $decls['dprintf'] = "declare i32 @dprintf(i32, ptr, ...)";
+        }
+        if ($this->needsArena) {
+            $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
+            $decls['memcpy']  = "declare ptr @memcpy(ptr, ptr, i64)";
+        }
+        if ($this->needsConcat) { $decls['strlen'] = "declare i64 @strlen(ptr)"; }
+        if ($this->needsSnprintf()) { $decls['snprintf'] = "declare i32 @snprintf(ptr, i64, ptr, ...)"; }
+        if ($this->needsStrtol) { $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)"; }
+        if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
+        if ($this->needsExceptions) {
+            $decls['setjmp'] = "declare i32 @setjmp(ptr) returns_twice";
+            $decls['longjmp'] = "declare void @longjmp(ptr, i32) noreturn";
+        }
+        if ($this->needsStrtodDecl()) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
+        // Unified PhpArray runtime libc deps (docs/16).
+        $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
+        $decls['memset']  = "declare ptr @memset(ptr, i32, i64)";
+        $decls['memcpy']  = "declare ptr @memcpy(ptr, ptr, i64)";
+        $decls['memmove'] = "declare ptr @memmove(ptr, ptr, i64)";
+        $decls['memcmp']  = "declare i32 @memcmp(ptr, ptr, i64)";
+        $decls['malloc']  = "declare ptr @malloc(i64)";
+        $decls['strlen']  = "declare i64 @strlen(ptr)";
+        $decls['free']    = "declare void @free(ptr)";
+        $decls['strcmp']  = "declare i32 @strcmp(ptr, ptr)";
+        return $decls;
+    }
 }
