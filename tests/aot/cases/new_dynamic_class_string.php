@@ -41,10 +41,10 @@ foreach (['Cat', 'Dog'] as $which) {
     echo $o->speak(), ' ', $o->legs, "\n";
 }
 
-// a class-string<T> factory: the property reads resolve through the runtime
-// class_id. (A METHOD call on a factory's result needs a union RETURN type,
-// which no function carries yet — a separate, pre-existing gap.)
+// a class-string<T> factory
 $c = make(Cat::class, 'felix');
 $d = make(Dog::class, 'rex');
 echo $c->name, ' ', $d->name, "\n";
+echo $c->speak(), "\n";
+echo $d->speak(), "\n";
 echo $c->legs + $d->legs, "\n";

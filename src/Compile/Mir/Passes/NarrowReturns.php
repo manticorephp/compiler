@@ -45,6 +45,11 @@ final class NarrowReturns implements Pass
      */
     private array $collected = [];
 
+    /** @var array<string, \Compile\Mir\ClassDef> */
+    private array $classes = [];
+    /** @var array<string, \Compile\Mir\EnumDef> */
+    private array $enums = [];
+
     /**
      * @param bool $concreteOnly when true, narrow ONLY to a concretely-shaped
      *   array (definite element/key). Used for an EARLY pass before Monomorphize
@@ -63,6 +68,8 @@ final class NarrowReturns implements Pass
 
     public function run(Module $module): Module
     {
+        $this->classes = $module->classes;
+        $this->enums = $module->enums;
         // A GENERIC method's body is shared by every instantiation, so its
         // return type is deliberately erased (a cell carrying its tag). Narrowing
         // it to whatever one call site happened to store would type every OTHER
@@ -115,6 +122,18 @@ final class NarrowReturns implements Pass
         // the caller types the result `unknown` and reads `$r["k"]` as a
         // vec index (the key pointer as an i64 offset) → wild read.
         $first = $returns[0]->value->type;
+        // An OBJECT return. This pass was built for bare-`array` erasure, so it
+        // only ever narrowed arrays — a function returning an object, or a union
+        // of them, kept its `unknown` return and the caller could resolve NOTHING
+        // on the result: `pick(true)->speak()` rendered its string as a raw
+        // pointer. Join the returns into the one class they all are, or the union
+        // of the classes they can be, so a method call dispatches on class_id.
+        //
+        // Only in the FULL pass: the early one exists to leave shapes that
+        // Monomorphize will still change, and an object return is not one.
+        if (!$this->concreteOnly && $this->isObjectish($first)) {
+            return $this->narrowObjectReturn($fn, $returns);
+        }
         if (!$first->isArray()) { return false; }
         $isAssoc = $first->isAssoc();
         $elem = null;
@@ -140,6 +159,71 @@ final class NarrowReturns implements Pass
         if ($this->concreteOnly && !$this->isConcreteArray($result)) { return false; }
         $fn->returnType = $result;
         return true;
+    }
+
+    /**
+     * Narrow a function whose every return is an object to that class, or to the
+     * union of the classes it can be.
+     *
+     * @param \Compile\Mir\Return_[] $returns
+     */
+    private function narrowObjectReturn(FunctionDef $fn, array $returns): bool
+    {
+        $names = [];
+        $atoms = [];
+        foreach ($returns as $ret) {
+            $t = $ret->value->type;
+            if (!$this->isObjectish($t)) { return false; }
+            foreach ($this->atomsOf($t) as $a) {
+                $cls = $a->class ?? '';
+                if (!$this->isPlainClass($cls)) { return false; }
+                if (isset($names[$cls])) { continue; }
+                $names[$cls] = true;
+                $atoms[] = $a;
+            }
+        }
+        if ($atoms === []) { return false; }
+        $result = \count($atoms) === 1 ? $atoms[0] : Type::union($atoms);
+        if ($result->kind === $fn->returnType->kind
+            && ($result->class ?? '') === ($fn->returnType->class ?? '')) {
+            return false;
+        }
+        $fn->returnType = $result;
+        return true;
+    }
+
+    /** An object, or a static union of object classes. */
+    private function isObjectish(Type $t): bool
+    {
+        return $t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION;
+    }
+
+    /**
+     * A plain user class — one whose value really is just a pointer to an object
+     * of that layout.
+     *
+     * A Generator carries its yielded element/key IN the type, so narrowing to a
+     * bare `obj<Generator>` would DROP them. A closure has no rc header and must
+     * never be rc-managed as an object. An enum case is an ordinal, not a pointer.
+     * None of the three may be joined into an object union.
+     */
+    private function isPlainClass(string $cls): bool
+    {
+        if ($cls === '' || $cls === 'Generator' || $cls === 'Closure') { return false; }
+        if (\str_starts_with($cls, '__closure_')) { return false; }
+        if (isset($this->enums[$cls])) { return false; }
+        return isset($this->classes[$cls]);
+    }
+
+    /**
+     * The object arms a type can be.
+     *
+     * @return Type[]
+     */
+    private function atomsOf(Type $t): array
+    {
+        if ($t->kind === Type::KIND_UNION) { return $t->atoms; }
+        return [$t];
     }
 
     /** Any param is an erased array (bare `array` → unknown, or vec[unknown]) —
