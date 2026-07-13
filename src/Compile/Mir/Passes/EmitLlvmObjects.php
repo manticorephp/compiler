@@ -1784,6 +1784,24 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** Whether `$cls` (or an ancestor) implements `$iface`. */
+    private function classImplementsIface(string $cls, string $iface): bool
+    {
+        $seen = [];
+        $stack = [$cls];
+        while ($stack !== []) {
+            $c = \ltrim((string)\array_pop($stack), '\\');
+            if ($c === '' || isset($seen[$c])) { continue; }
+            $seen[$c] = true;
+            if ($c === $iface) { return true; }
+            if (!isset($this->classes[$c])) { continue; }
+            $cd = $this->classes[$c];
+            foreach ($cd->interfaces as $i) { $stack[] = $i; }
+            if ($cd->parent !== '') { $stack[] = $cd->parent; }
+        }
+        return false;
+    }
+
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
@@ -1854,6 +1872,19 @@ trait EmitLlvmObjects
         $static = $mc->object->type->class ?? '';
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
+        if ($static !== '' && !isset($this->classes[$static])) {
+            foreach ($this->classes as $cd) {
+                if (!$this->classImplementsIface($cd->name, $static)) { continue; }
+                $r = $this->resolveMethodClass($cd->name, $mc->method);
+                if ($r !== '') { $fallback = $r; break; }
+            }
+            if ($fallback === $static) {
+                foreach ($this->classes as $cd) {
+                    $r = $this->resolveMethodClass($cd->name, $mc->method);
+                    if ($r !== '') { $fallback = $r; break; }
+                }
+            }
+        }
         // By-ref mask of the resolved callee. A method's param 0 is the
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —
         // forward the slot address rather than the dereferenced value, or a

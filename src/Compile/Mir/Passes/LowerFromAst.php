@@ -4319,14 +4319,15 @@ final class LowerFromAst implements Pass
             && $this->looksLikeArrayElemType($docType)) {
             return $docType;
         }
-        // `@return T` / `@param T` on a generic class. A type parameter cannot be
-        // written in PHP syntax, so the docblock is the ONLY source — without
-        // this the hint stays null and `T` erases, which is the whole bug.
-        // Deliberately narrow: adopted only when the docblock names a `@template`
-        // parameter of the class being lowered, so every other un-hinted docblock
-        // keeps its current (ignored) meaning and no existing code moves.
-        if ($hint === null && $docType !== null && $docType !== ''
-            && $this->mentionsTypeParam($docType)) {
+        // No source hint at all → the docblock IS the type. This is what every
+        // reader (and PHPStan) already assumes, and it was NOT honoured: a
+        // `/** @param Dog $x */ public function add($x)` typed the param `cell`,
+        // so the caller NaN-boxed the object — while `@var Dog[]` on the property
+        // it gets stored into WAS honoured (a raw obj array). A boxed cell landed
+        // in an object array and the next read took offset 16 of a tag → SIGSEGV.
+        // A type parameter (`@param T`) is the same case: `T` cannot be written in
+        // PHP syntax at all, so the docblock is its only source.
+        if ($hint === null && $docType !== null && $docType !== '') {
             return $docType;
         }
         return $hint;
