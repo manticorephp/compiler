@@ -140,6 +140,12 @@ trait LowerTypes
         // lowercasing — a type-parameter name is case-sensitive. `T[]` and
         // `array<string, T>` reach this through the recursive element/value
         // lowering below, so they need no separate case.
+        // A generic TRAIT's parameter, already bound by the using class's
+        // `@use Items<string>`. The trait is copied per class, so there is no shared
+        // body to keep erased — `T` resolves straight to the concrete type.
+        if (isset($this->currentTypeSubst[$hint])) {
+            return $this->currentTypeSubst[$hint];
+        }
         if ($this->isTypeParam($hint)) {
             // A BOUNDED `T of Animal` carries its bound, so it erases to a raw
             // obj<Animal> pointer rather than a tagged cell.
@@ -538,6 +544,41 @@ trait LowerTypes
      * `$varName` is non-empty) or `@return X[]` / `@var X[]` (empty
      * `$varName`). Returns the raw token (`PropertyDecl[]`) or null.
      */
+    /**
+     * What a class binds its generic traits to — `/** @use Items<string> *\/ use Items;`.
+     *
+     * @return array<string, Type> trait type-param name → the type it is bound to
+     */
+    private function traitTypeSubst(\Parser\Ast\ClassDecl $decl): array
+    {
+        $out = [];
+        foreach ($decl->uses as $traitName) {
+            $tn = \ltrim($traitName, '\\');
+            if (!isset($this->traitTable[$tn])) { continue; }
+            $td = $this->traitTable[$tn];
+            if (!isset($decl->useDocs[$tn])) { continue; }
+            $hint = $this->docTagType($decl->useDocs[$tn], '@use', '');
+            if ($hint === null || $hint === '') { continue; }
+            $lt = \strpos($hint, '<');
+            if ($lt === false || $lt <= 0) { continue; }
+            $inner = \substr($hint, $lt + 1, \strlen($hint) - $lt - 2);
+            $args = $this->lowerTypeArgs($inner);
+            // docTemplates also fills the pending bound/default maps — keep them.
+            $savedB = $this->pendingTypeBounds;
+            $savedD = $this->pendingTypeDefaults;
+            $params = $this->docTemplates($td->docComment);
+            $this->pendingTypeBounds = $savedB;
+            $this->pendingTypeDefaults = $savedD;
+            $i = 0;
+            foreach ($params as $p) {
+                if ($i >= \count($args)) { break; }
+                $out[$p] = $args[$i];
+                $i = $i + 1;
+            }
+        }
+        return $out;
+    }
+
     /** Whether `$hint` names a `@template` parameter of the class being lowered. */
     private function isTypeParam(string $hint): bool
     {

@@ -151,6 +151,17 @@ final class LowerFromAst implements Pass
      *  @var array<string, Type> */
     private array $currentTypeBounds = [];
 
+    /** What the class being lowered binds its generic TRAITS to, from
+     *  `/** @use Items<string> *\/ use Items;`.
+     *
+     *  A trait is COPIED into every class that uses it — unlike a generic class,
+     *  which has ONE shared body and must therefore keep `T` erased. So the binding
+     *  is substituted right at the source: `T` never becomes a typevar at all, it
+     *  lowers STRAIGHT to `string`. The merged members come out fully CONCRETE —
+     *  no cells, no boxing. This is the one place generics buy speed for free.
+     *  @var array<string, Type> */
+    private array $currentTypeSubst = [];
+
     /**
      * Late-static-binding scope while lowering a method body — the *called*
      * class for `static::`. Equals `$currentLowerClass` for the normal copy;

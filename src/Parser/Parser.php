@@ -520,6 +520,9 @@ final class Parser
         $consts = [];
         $cases = [];
         $uses = [];
+        /** @var array<string,string> trait name → the docblock on its `use` line
+         *  (carries `@use Items<string>`, the binding for a generic trait). */
+        $useDocs = [];
         $traitAdaptations = [];
 
         while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
@@ -541,9 +544,13 @@ final class Parser
                 // braces (`use Foo { Foo::m insteadof Bar; }`) are not
                 // yet supported.
                 $this->advance();
-                $uses[] = $this->parseClassName();
+                $tn = $this->parseClassName();
+                $uses[] = $tn;
+                if ($memberDoc !== null) { $useDocs[$tn] = $memberDoc; }
                 while ($this->match(TokenKind::Comma)) {
-                    $uses[] = $this->parseClassName();
+                    $tn = $this->parseClassName();
+                    $uses[] = $tn;
+                    if ($memberDoc !== null) { $useDocs[$tn] = $memberDoc; }
                 }
                 // `use A, B { A::m insteadof B; m as x; }` conflict resolution.
                 if ($this->check(TokenKind::OpenBrace)) {
@@ -603,6 +610,7 @@ final class Parser
             $uses,
             $traitAdaptations,
             $docComment,
+            $useDocs,
         );
     }
 

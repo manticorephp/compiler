@@ -49,5 +49,11 @@ final class ClassDecl
         public readonly array $traitAdaptations = [],
         /** The docblock preceding the declaration — carries `@template T`. */
         public readonly ?string $docComment = null,
+        /**
+         * Trait name → the docblock on its `use` line, which carries the binding
+         * for a generic trait: `/** @use Items<string> *\/ use Items;`.
+         * @var array<string, string>
+         */
+        public readonly array $useDocs = [],
     ) {}
 }
