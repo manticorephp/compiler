@@ -512,8 +512,14 @@ trait LowerClasses
             );
         }
         $sawCtor = false;
+        $isTypeDefDecl = $this->isTypeDef($decl->name);
         foreach ($methods as $m) {
             if ($m->body === null) { continue; }
+            // A `#[TypeDef]`'s constructor is Zend-only glue: it exists so `new C($x)`
+            // builds a real object when `php` runs the same source. The compiler never
+            // needs it — `new` lowers to the normaliser (`__invoke`) or, for the bare
+            // promoted-property shape, to the argument itself.
+            if ($isTypeDefDecl && $m->name === '__construct') { continue; }
             if ($m->name === '__construct') { $sawCtor = true; }
             // Normal copy: late-static scope == the lexical class.
             $mfn = $this->lowerMethodFn(
@@ -530,6 +536,31 @@ trait LowerClasses
             if ($this->sawStaticUse) {
                 $this->lsbPending[] = new LsbPending($decl, $m, $cd, $defaultStores);
             }
+        }
+        // A `#[TypeDef]` is constructed through exactly ONE function — its
+        // normaliser `C____invoke(carrier): carrier`. The promoted-property shape
+        // declares none, because it needs none, so synthesise the identity. Making
+        // the two shapes uniform is not tidiness: `new U8(5)` must produce a value
+        // TAGGED `U8`, and lowering it to the bare argument node would hand back a
+        // plain `int` — the tag lost, and `$byte->raw()` then resolving against no
+        // class at all (`@manticore___raw`). A call carries the callee's declared
+        // return type, and that type is the tag. LLVM inlines `ret i64 %value` away.
+        if ($isTypeDefDecl && !isset($cd->methodNames['__invoke'])) {
+            $carrier = $this->typeDefCarrier($decl->name);
+            $module->addFunction(new FunctionDef(
+                name: $decl->name . '____invoke',
+                params: [new Param(
+                    name: 'raw',
+                    type: $carrier->stripTypeDef(),
+                    byRef: false,
+                    variadic: false,
+                )],
+                returnType: $carrier,
+                body: new Block(
+                    [new Return_(new LoadLocal('raw', $carrier->stripTypeDef()), $carrier)],
+                    Type::void(),
+                ),
+            ));
         }
         // No user ctor but defaulted properties → synthesise a ctor
         // (`Class____construct($this)`) holding just the default stores.

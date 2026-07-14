@@ -220,10 +220,11 @@ final class Type
         return new self($carrier->kind, class: $class);
     }
 
-    /** The `#[TypeDef]` class this scalar was declared as, or null. */
+    /** The `#[TypeDef]` class this value was declared as, or null. */
     public function typeDefClass(): ?string
     {
-        if ($this->kind !== self::KIND_INT && $this->kind !== self::KIND_FLOAT) {
+        if ($this->kind !== self::KIND_INT && $this->kind !== self::KIND_FLOAT
+            && $this->kind !== self::KIND_STRING) {
             return null;
         }
         return $this->class;
@@ -455,9 +456,10 @@ final class Type
         // Two scalars of the same kind but a different `#[TypeDef]` tag (one of
         // them possibly untagged) join to the BARE carrier. Keeping the tag would
         // let a merge with a plain int smuggle the marker onto a value that is no
-        // longer a TypeDef, and TypeCheck would then reject a use that is fine.
+        // longer a TypeDef, and CheckTypeDefs would then reject a use that is fine.
         if ($this->class !== $other->class
-            && ($this->kind === self::KIND_INT || $this->kind === self::KIND_FLOAT)) {
+            && ($this->kind === self::KIND_INT || $this->kind === self::KIND_FLOAT
+                || $this->kind === self::KIND_STRING)) {
             return new self($this->kind);
         }
         // Arrays join element- AND key-wise so a control-flow merge keeps a

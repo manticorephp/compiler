@@ -408,18 +408,6 @@ trait LowerExprs
             return new StoreElement($arr, $idx, $value, $value->type);
         }
         if ($target->kind === 'PropertyAccess') {
-            // `$this->value = <expr>;` inside a `#[TypeDef]` constructor IS the
-            // constructor's result — there is no object to store into. The ctor
-            // lowers to a function that takes the params and RETURNS the carrier,
-            // so the store becomes that return. (Outside the ctor the property is
-            // readonly, so this is the only place it can be written.)
-            if ($this->currentTypeDefClass !== ''
-                && $this->currentLowerFn === '__construct'
-                && $target->object->kind === 'Variable'
-                && $target->object->name === 'this'
-                && $target->property === $this->typeDefProp($this->currentTypeDefClass)) {
-                return new Return_($value, $value->type);
-            }
             $obj = $this->lowerExpr($target->object);
             return new StoreProperty($obj, $target->property, $value, $value->type);
         }

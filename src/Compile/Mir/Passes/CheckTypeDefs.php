@@ -2,6 +2,7 @@
 
 namespace Compile\Mir\Passes;
 
+use Compile\Mir\BitOp;
 use Compile\Mir\Call;
 use Compile\Mir\Cmp;
 use Compile\Mir\FunctionDef;
@@ -84,7 +85,19 @@ final class CheckTypeDefs
 
     private function checkNode(Node $n, FunctionDef $fn): void
     {
-        if ($n->kind === Node::KIND_CMP) {
+        if ($n->kind === Node::KIND_ADD || $n->kind === Node::KIND_SUB
+            || $n->kind === Node::KIND_MUL || $n->kind === Node::KIND_DIV
+            || $n->kind === Node::KIND_MOD || $n->kind === Node::KIND_CONCAT) {
+            $this->checkArith($n);
+        } elseif ($n->kind === Node::KIND_BITOP) {
+            // Through a TYPED param, not the base-Node read above: BitOp declares
+            // `op` FIRST and only then `left`/`right`, while Add/Sub/Cmp/Concat all
+            // start with `left`. A base-`Node`-typed `->left` resolves by OFFSET
+            // natively (by name under Zend), so on a BitOp it reads the `op` STRING
+            // and the next `->type` dereferences it — a SIGSEGV in the compiler,
+            // and only once self-built.
+            $this->checkBitOp($n);
+        } elseif ($n->kind === Node::KIND_CMP) {
             $this->checkIdentity($n);
         } elseif ($n->kind === Node::KIND_INSTANCEOF) {
             $this->checkInstanceof($n);
@@ -98,6 +111,37 @@ final class CheckTypeDefs
             $this->checkStoreProperty($n);
         }
         foreach (Walk::children($n) as $c) { $this->checkNode($c, $fn); }
+    }
+
+    /**
+     * `$a + $b` on a TypeDef. PHP has no userland operator overloading: Zend
+     * raises `TypeError: Unsupported operand types: U8 + U8`. The erased form
+     * would happily emit an `add i64` and print 300 — a SILENT divergence, and the
+     * worst kind, because the answer looks reasonable. Refuse it: the carrier is
+     * one `->value` away, and that is a real number PHP agrees about.
+     */
+    private function checkArith(Node $n): void
+    {
+        $this->failIfOperand($n->left, $n->right);
+    }
+
+    /** `$a & $b` — see the layout note at the dispatch site for why this is typed. */
+    private function checkBitOp(BitOp $n): void
+    {
+        $this->failIfOperand($n->left, $n->right);
+    }
+
+    private function failIfOperand(Node $left, Node $right): void
+    {
+        $cls = $left->type->typeDefClass() ?? $right->type->typeDefClass();
+        if ($cls === null || !isset($this->typeDefs[$cls])) { return; }
+        $prop = $this->typeDefs[$cls]->typeDefProp;
+        $this->fail(
+            $cls,
+            'PHP has no operator overloading — `$a op $b` on two `' . $cls . '` objects is a TypeError'
+                . ' under `php`, and an erased value would quietly compute a number instead.'
+                . ' Operate on the carrier: `$a->' . $prop . ' op $b->' . $prop . '`',
+        );
     }
 
     /** `$a === $b` on a TypeDef — Zend compares object identity, we compare values. */

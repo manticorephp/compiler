@@ -19,12 +19,7 @@ final class U8
 #[TypeDef(repr: 'f64')]
 final class Meters
 {
-    public readonly float $length;
-
-    public function __construct(float $length)
-    {
-        $this->length = $length;
-    }
+    public function __construct(public readonly float $length) {}
 
     public function plus(Meters $other): Meters
     {

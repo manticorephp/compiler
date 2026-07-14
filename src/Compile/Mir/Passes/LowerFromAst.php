@@ -116,15 +116,28 @@ final class LowerFromAst implements Pass
     /** @var array<string, bool> every class name (known before defs are built) */
     private array $knownClassNames = [];
 
-    /** `#[TypeDef]` classes ({@see LowerTypeDefs}): class name → its `repr`.
-     *  Filled BEFORE any ClassDef is built — a class lowered earlier may already
-     *  name one in a property or parameter hint.
+    /** `#[TypeDef]` classes ({@see LowerTypeDefs}): class name → its `repr`
+     *  (`u8`, `f32`, … — '' when the attribute names none, which is a plain
+     *  newtype over whatever its property declares).
      *  @var array<string, string> */
     private array $typeDefReprs = [];
+
+    /** `#[TypeDef]` class name → its CARRIER (`int` / `float` / `string`). This is
+     *  the membership test: a class is a TypeDef iff it has an entry here. Filled
+     *  BEFORE any ClassDef is built — a class lowered earlier may already name one
+     *  in a property or parameter hint.
+     *  @var array<string, string> */
+    private array $typeDefCarriers = [];
 
     /** `#[TypeDef]` class name → the name of its single value property.
      *  @var array<string, string> */
     private array $typeDefProps = [];
+
+    /** `#[TypeDef]` classes that declare a `__invoke` NORMALISER — the function
+     *  `new C($raw)` lowers to. Without one the class is the bare promoted-property
+     *  shape and `new C($x)` is just `$x`.
+     *  @var array<string, true> */
+    private array $typeDefInvokes = [];
 
     /** The `#[TypeDef]` class whose method body is being lowered, or ''. Inside
      *  one, `$this` IS the carrier scalar — not an object pointer. */
@@ -861,16 +874,16 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
-        // Inside a `#[TypeDef]` body `$this` IS the carrier scalar: there is no
-        // object to point at. The CONSTRUCTOR loses `$this` entirely — it is not
-        // an initializer of something already allocated, it is the function that
-        // COMPUTES the value, so it takes the ctor params and returns the carrier.
+        // Inside a `#[TypeDef]` body `$this` IS the carrier: there is no object to
+        // point at. `__invoke` — the normaliser — takes no `$this` at all: it is a
+        // pure carrier→carrier function, and `new C($x)` calls it directly. (Zend
+        // reaches it as `$this($x)` from the constructor, which never runs here.)
         $isTypeDef = $this->isTypeDef($decl->name);
         $this->currentTypeDefClass = $isTypeDef ? \ltrim($decl->name, '\\') : '';
-        $tdCtor = $isTypeDef && $m->name === '__construct';
+        $tdInvoke = $isTypeDef && $m->name === '__invoke';
         $params = [];
         // Static methods have no implicit `$this`.
-        if (!$m->isStatic && !$tdCtor) {
+        if (!$m->isStatic && !$tdInvoke) {
             $params[] = new Param(
                 name: 'this',
                 type: $isTypeDef
@@ -915,20 +928,7 @@ final class LowerFromAst implements Pass
             $pi = $pi + 1;
         }
         $stmts = [];
-        if ($tdCtor) {
-            // A promoted `public readonly int $v` IS the whole constructor: the
-            // value is the parameter. An explicit body instead RETURNS it — its
-            // `$this->value = <expr>;` was rewritten to `return <expr>;` while lowering
-            // (see lowerStmt / StoreProperty on a TypeDef receiver).
-            $tdCarrier = $this->typeDefCarrier($decl->name);
-            foreach ($m->params as $p) {
-                if ($p->promoted === '') { continue; }
-                $stmts[] = new Return_(
-                    new LoadLocal($p->name, $cd->propertyTypes[$p->name] ?? $tdCarrier),
-                    $tdCarrier,
-                );
-            }
-        } elseif ($m->name === '__construct') {
+        if ($m->name === '__construct') {
             // Property defaults run first, then promoted-param stores.
             foreach ($defaultStores as $ds) { $stmts[] = $ds; }
             foreach ($m->params as $p) {
@@ -965,8 +965,11 @@ final class LowerFromAst implements Pass
             $elem = $mret->isGenerator() ? $mret->element : null;
             $mret = Type::generator($elem);
         }
-        // The constructor of a `#[TypeDef]` returns the value it computed.
-        if ($tdCtor) { $mret = $this->typeDefCarrier($decl->name); }
+        // The normaliser RETURNS the value type, not the bare carrier: `new Email($s)`
+        // lowers to this call, and its result must stay tagged `Email` — else the
+        // signature narrows it back to a plain string and `$email->domain()` no
+        // longer resolves against the class it came from.
+        if ($tdInvoke) { $mret = $this->typeDefCarrier($decl->name); }
         $this->currentTypeDefClass = '';
         $mfn = new FunctionDef(
             name: $fnName,
@@ -1873,12 +1876,21 @@ final class LowerFromAst implements Pass
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
         }
-        // `new U8(x)` allocates NOTHING: a TypeDef's constructor is the function
-        // that COMPUTES its scalar, so the `new` IS that call. The class has no
-        // runtime form for a NewObj to point at.
+        // `new U8(x)` allocates NOTHING — there is no runtime form for a NewObj to
+        // point at. A TypeDef's constructor is Zend-only glue; the compiler never
+        // lowers it. What `new` means here is decided by the class's shape:
+        //
+        //   - a NORMALISER (`__invoke(T $raw): T`) → the `new` IS that call. The
+        //     validation / sanitisation runs exactly once, here, and the type then
+        //     carries the proof: no later use re-checks anything.
+        //   - a promoted `public readonly T $value` and nothing else → the value IS
+        //     the argument. Not even a call: `new U8(7)` emits the literal 7.
         if ($this->isTypeDef($cls)) {
+            if ($expr->args === []) {
+                $this->typeDefError($cls, 'constructed with no argument — a value type needs its value');
+            }
             return new Call(
-                \ltrim($cls, '\\') . '____construct',
+                \ltrim($cls, '\\') . '____invoke',
                 $args,
                 $this->typeDefCarrier($cls),
             );
