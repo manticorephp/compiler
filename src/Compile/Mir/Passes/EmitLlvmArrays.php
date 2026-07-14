@@ -362,6 +362,28 @@ trait EmitLlvmArrays
         return '@__mir_array_cow';
     }
 
+    /**
+     * Element-type fallback for a StoreElement's retain / transfer decision.
+     *
+     * The destination's element type decides the DEPTH — but only for a value
+     * that travels RAW. A cell-typed value is NaN-boxed (boxToCell co-owns its
+     * payload), and retaining it as the element type would rc-bump the tagged
+     * bits, not a pointer: `$_SERVER[$k] = $v` came back with a corrupted PATH.
+     * An UNKNOWN value is raw, and that is the one the element type must cover
+     * (`$out[] = $s` off a bare-`array` property, whose caller sees `Node[]`).
+     */
+    private function storeRetainFallback(StoreElement $se): ?Type
+    {
+        if ($se->value->type->kind === Type::KIND_CELL) { return null; }
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
+        $el = $at->element;
+        if ($el !== null && ($el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN)) {
+            return null;
+        }
+        return $el;
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -405,8 +427,17 @@ trait EmitLlvmArrays
         $next = $this->ssa->allocReg();
         if ($isAppend) {
             $out .= $this->emitNode($se->value);
-            if ($boxVal) { $out .= $this->boxToCell($se->value->type); $val = $this->lastValue; }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, null, 3); }
+            if ($boxVal) {
+                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
+                // the cell array-literal path does. Without this the value is freed
+                // by its source's release while the array still points at it:
+                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
+                // $_SERVER value dangling the moment the temp subject was released.
+                $out .= $this->retainCellPayload($se->value);
+                $out .= $this->boxToCell($se->value->type);
+                $val = $this->lastValue;
+            }
+            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
         } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
@@ -414,24 +445,51 @@ trait EmitLlvmArrays
             $out .= $this->coerceToI64();
             $key = $this->lastValue;
             $out .= $this->emitNode($se->value);
-            if ($boxVal) { $out .= $this->boxToCell($se->value->type); $val = $this->lastValue; }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, null, 3); }
+            if ($boxVal) {
+                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
+                // the cell array-literal path does. Without this the value is freed
+                // by its source's release while the array still points at it:
+                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
+                // $_SERVER value dangling the moment the temp subject was released.
+                $out .= $this->retainCellPayload($se->value);
+                $out .= $this->boxToCell($se->value->type);
+                $val = $this->lastValue;
+            }
+            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
         } elseif ($keyIsString) {
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToPtr();
             $key = $this->lastValue;
             $out .= $this->emitNode($se->value);
-            if ($boxVal) { $out .= $this->boxToCell($se->value->type); $val = $this->lastValue; }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, null, 3); }
+            if ($boxVal) {
+                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
+                // the cell array-literal path does. Without this the value is freed
+                // by its source's release while the array still points at it:
+                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
+                // $_SERVER value dangling the moment the temp subject was released.
+                $out .= $this->retainCellPayload($se->value);
+                $out .= $this->boxToCell($se->value->type);
+                $val = $this->lastValue;
+            }
+            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
         } else {
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
             $out .= $this->emitNode($se->value);
-            if ($boxVal) { $out .= $this->boxToCell($se->value->type); $val = $this->lastValue; }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, null, 3); }
+            if ($boxVal) {
+                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
+                // the cell array-literal path does. Without this the value is freed
+                // by its source's release while the array still points at it:
+                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
+                // $_SERVER value dangling the moment the temp subject was released.
+                $out .= $this->retainCellPayload($se->value);
+                $out .= $this->boxToCell($se->value->type);
+                $val = $this->lastValue;
+            }
+            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
         }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
