@@ -600,9 +600,11 @@ trait LowerReify
         $out = [];
         foreach ($module->functions as $fn) {
             // `$this` is still typed `unknown` here (InferTypes types it later), so
-            // a store through it is attributed by the function that owns it — the
-            // method of `$cls`, whose lowered name is `<cls>__<method>`.
-            $inOwnMethod = \strncmp($fn->name, $cls . '__', \strlen($cls) + 2) === 0;
+            // a store through it is attributed by the class that OWNS the body —
+            // recorded when the method was lowered. Not by parsing the function
+            // name: a specialization's name contains `__` as well, so `Box__` is a
+            // prefix of `Box__of__float__add` too.
+            $owner = $this->methodOwner[$fn->name] ?? '';
             foreach ($this->flattenNodes($fn->body) as $n) {
                 // A dynamic write or a `clone with` could put anything in the slot
                 // and is not worth modelling — give up on the whole property.
@@ -614,7 +616,7 @@ trait LowerReify
                 }
                 if (!($n instanceof \Compile\Mir\StoreProperty)) { continue; }
                 if ($n->property !== $prop) { continue; }
-                $mine = $this->storeTargetsClass($n, $cls, $inOwnMethod);
+                $mine = $this->storeTargetsClass($n, $cls, $owner);
                 // Not ours (a same-named property on an unrelated class).
                 if ($mine === 0) { continue; }
                 // Ours, or unattributable — an untyped receiver outside the class
@@ -631,12 +633,17 @@ trait LowerReify
     /**
      * Does this store write `$cls`'s slot? 1 = yes, 0 = no (someone else's
      * same-named property), -1 = cannot tell (the caller must give up).
+     *
+     * `$owner` is the class whose body the store sits in, or '' outside any
+     * method — a `$this` store there is impossible, but an UNRECORDED owner is
+     * not something to assume about, so it gives up.
      */
-    private function storeTargetsClass(\Compile\Mir\StoreProperty $st, string $cls, bool $inOwnMethod): int
+    private function storeTargetsClass(\Compile\Mir\StoreProperty $st, string $cls, string $owner): int
     {
         $obj = $st->object;
         if ($obj instanceof \Compile\Mir\LoadLocal && $obj->name === 'this') {
-            return $inOwnMethod ? 1 : 0;
+            if ($owner === '') { return -1; }
+            return $owner === $cls ? 1 : 0;
         }
         if ($obj->type->kind === Type::KIND_OBJ) {
             return ($obj->type->class ?? '') === $cls ? 1 : 0;

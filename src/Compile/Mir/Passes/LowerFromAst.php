@@ -135,6 +135,12 @@ final class LowerFromAst implements Pass
      *  @var array<string, \Parser\Ast\ClassDecl> */
     private array $reifyMethodQueue = [];
 
+    /** Lowered method function name → the class whose body it is. Set in
+     *  {@see lowerMethodFn}, the funnel every method (incl. the late-static-bound
+     *  copies) passes through.
+     *  @var array<string, string> */
+    private array $methodOwner = [];
+
     /**
      * Namespace of the class / function whose signature or property
      * types are currently being lowered (e.g. `Compile\Mir` for
@@ -817,6 +823,13 @@ final class LowerFromAst implements Pass
         $this->currentLowerClass = $decl->name;
         $this->currentStaticClass = $staticClass;
         $this->currentLowerFn = $m->name;
+        // Which class a lowered method body belongs to. `$this` is untyped until
+        // InferTypes runs, so a pass that needs to attribute a `$this->p = …`
+        // store while still lowering (LowerReify) asks HERE instead of guessing
+        // from the receiver — or from the function name, which cannot be parsed
+        // back: a specialization's name has `__` in it too (`Box__of__float__add`
+        // starts with `Box__`).
+        $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
         $params = [];
         // Static methods have no implicit `$this`.
