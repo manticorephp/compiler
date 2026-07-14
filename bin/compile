@@ -62,6 +62,13 @@ clang -c "$STUBS_C" -o "$STUBS_O"
 echo "[4/5] link seed -> $SEED"
 cc "$OBJ" "$STUBS_O" -o "$SEED"
 
+# Install the prelude beside the shipped stdlib object: `lib/prelude/` is one of
+# find_prelude_src's argv0-relative candidates, so a distribution is binary + lib/
+# and needs no MANTICORE_PRELUDE. Done BEFORE the seed runs — the seed compiles
+# the compiler, and the compiler it produces must find its prelude the same way.
+mkdir -p lib/prelude
+cp prelude/*.php lib/prelude/
+
 echo "[5/5] seed builds the manifest -> $OUT + lib/manticore_stdlib.{o,sig}"
 # The manifest's application output is bin/manticore; redirect it to $OUT when a
 # custom path was requested (bin/build --seed passes a temp). The seed lives in

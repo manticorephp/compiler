@@ -274,15 +274,23 @@ final class LowerFromAst implements Pass
     /** @var array<string, Type> `Class::prop` → declared static-prop type */
     private array $staticPropTypes = [];
 
+    /** The Throwable hierarchy, read by Main from `prelude/exceptions.php`.
+     *  Unconditional — every program can `throw`. */
+    public string $exceptionsSrc = '';
+    /** `__mir_bt_frames`: read by Main from `prelude/backtrace.php` when the
+     *  program queries a trace, else from the `prelude/backtrace_stub.php`
+     *  one-liner. Exactly one of the two, always — `exceptions.php` calls it. */
+    public string $backtraceSrc = '';
     public bool $includeVarDump = false;
+    /** `__mir_var_dump` prelude source, read by Main from `prelude/var_dump.php`. */
+    public string $varDumpSrc = '';
     public bool $includePrintR = false;
     /** print_r prelude source, read by Main from `prelude/print_r.php`. */
     public string $printRSrc = '';
     /** Inject the built-in SPL ArrayIterator / ArrayObject classes (gated on
      *  the user program referencing them — see Main.php). */
     public bool $includeArrayClasses = false;
-    /** SPL array-class prelude source, read by Main from `prelude/spl_arrays.php`.
-     *  Empty → {@see arrayClassesPreludeSrc} uses its embedded fallback. */
+    /** SPL array-class prelude source, read by Main from `prelude/spl_arrays.php`. */
     public string $arrayClassesSrc = '';
     /** Inject the callback/element array functions (usort/sort/rsort/array_reduce)
      *  as prelude — compiled WITH the user program so call-site element inference
@@ -298,12 +306,6 @@ final class LowerFromAst implements Pass
     public bool $includeCli = false;
     /** CLI prelude source, read by Main from `prelude/cli.php`. */
     public string $cliSrc = '';
-    /** Inject the backtrace-frame builder (`__mir_bt_frames`) and make
-     *  Throwable::getTrace return PHP-shaped assoc frames. Gated on a source
-     *  reference to a trace getter / debug_backtrace (see Main.php) so the
-     *  compiler self-build (which uses none) never compiles the nested-assoc
-     *  builder. */
-    public bool $includeBacktrace = false;
 
     /**
      * Bundled-stdlib function declarations (parsed from `src/Runtime/**`)
@@ -664,67 +666,6 @@ final class LowerFromAst implements Pass
         $this->injectSuperglobals($module);
         $module->markPassApplied(self::NAME);
         return $module;
-    }
-
-    /**
-     * PHP source for `__mir_bt_frames` — turns the captured name vec into
-     * PHP-shaped backtrace frames (innermost first). The captured name is the
-     * combined display ("Class->method" / "Class::m" / "fn"); split it back into
-     * function/class/type so getTrace() and debug_backtrace() match PHP's frame
-     * assoc. Frames carry file + line + function[/class/type]; `args` is still
-     * omitted. `line` is a real int mixed with the substr-derived strings (a
-     * cell assoc) — this used to miscompile; fixed by retaining string payloads
-     * boxed into a cell array (see EmitLlvm::retainCellPayload).
-     */
-    private function backtraceFramesSrc(): string
-    {
-        return "/** @param string[] \$names @param int[] \$lines\n"
-            . "  * @return array<int,array<string,mixed>> */\n"
-            . "function __mir_bt_frames(array \$names, array \$lines, string \$file): array {\n"
-            . "  \$out = []; \$n = \\count(\$names); \$i = 0;\n"
-            . "  while (\$i < \$n) {\n"
-            . "    \$name = \$names[\$i]; \$ln = \$lines[\$i]; \$type = \"\";\n"
-            . "    \$p = \\strpos(\$name, \"::\");\n"
-            . "    if (\$p === false) { \$p = \\strpos(\$name, \"->\"); if (\$p !== false) { \$type = \"->\"; } }\n"
-            . "    else { \$type = \"::\"; }\n"
-            . "    if (\$type !== \"\") {\n"
-            . "      \$cls = \\substr(\$name, 0, \$p); \$fn = \\substr(\$name, \$p + 2);\n"
-            . "      \$out[] = [\"file\" => \$file, \"line\" => \$ln, \"function\" => \$fn, \"class\" => \$cls, \"type\" => \$type];\n"
-            . "    } else {\n"
-            . "      \$out[] = [\"file\" => \$file, \"line\" => \$ln, \"function\" => \$name];\n"
-            . "    }\n"
-            . "    \$i = \$i + 1;\n"
-            . "  }\n"
-            . "  return \$out;\n"
-            . "}\n";
-    }
-
-    /**
-     * PHP source for `__mir_var_dump`, the recursive backend of the
-     * `var_dump` builtin. Walks a tagged cell via the is_type, cast,
-     * and foreach primitives. Included only when the program uses
-     * var_dump (avoids pulling the tagged/assoc runtime into every
-     * binary).
-     */
-    private function varDumpPreludeSrc(): string
-    {
-        return "function __mir_var_dump(mixed \$v, int \$indent): void {\n"
-            . "  \$pad = ''; \$j = 0;\n"
-            . "  while (\$j < \$indent) { \$pad = \$pad . '  '; \$j = \$j + 1; }\n"
-            . "  if (is_int(\$v)) { echo 'int(', (string)\$v, \")\\n\"; return; }\n"
-            . "  if (is_float(\$v)) { echo 'float(', __mir_float_repr(\$v), \")\\n\"; return; }\n"
-            . "  if (is_bool(\$v)) { \$b = (string)\$v; if (\$b === '1') { echo \"bool(true)\\n\"; } else { echo \"bool(false)\\n\"; } return; }\n"
-            . "  if (is_null(\$v)) { echo \"NULL\\n\"; return; }\n"
-            . "  if (is_string(\$v)) { \$sv = (string)\$v; echo 'string(', (string)strlen(\$sv), ') \"', \$sv, \"\\\"\\n\"; return; }\n"
-            . "  if (is_object(\$v)) { __mir_dump_object(\$v, \$indent); return; }\n"
-            . "  echo 'array(', (string)count(\$v), \") {\\n\";\n"
-            . "  foreach (\$v as \$k => \$val) {\n"
-            . "    if (is_int(\$k)) { echo \$pad, '  [', (string)\$k, \"]=>\\n\", \$pad, '  '; }\n"
-            . "    else { echo \$pad, '  [\"', \$k, \"\\\"]=>\\n\", \$pad, '  '; }\n"
-            . "    __mir_var_dump(\$val, \$indent + 1);\n"
-            . "  }\n"
-            . "  echo \$pad, \"}\\n\";\n"
-            . "}\n";
     }
 
     /** Depth of a class in its inheritance chain (0 = no parent). */

@@ -90,138 +90,44 @@ use Parser\Ast\Program;
 trait LowerPrelude
 {
     /**
-     * Built-in Throwable / Exception hierarchy, parsed as PHP so it
-     * lowers through the normal class path. Clean, minimal — a string
-     * `message` + `getMessage()` (no is_string/tagged-value deps).
+     * The prelude as PHP source, assembled from `prelude/*.php` and parsed once.
+     *
+     * Nothing here is a string literal in the compiler any more: the Throwable
+     * hierarchy, the backtrace-frame builder, var_dump's recursive backend, the
+     * SPL array classes, the array functions, the CLI superglobals and print_r
+     * are ordinary PHP files, read by Main (see {@see \Manticore\find_prelude_src})
+     * and gated by what the program actually demands ({@see \Compile\Mir\PreludeDemand}).
+     *
+     * `exceptions.php` is unconditional — every program can `throw`. It calls
+     * `__mir_bt_frames`, which arrives from `backtrace.php` (a program that
+     * queries a trace) or `backtrace_stub.php` (one that does not); Main picks
+     * one, so the name is always defined exactly once.
+     *
+     * The one thing still GENERATED is `__mir_dump_object` — it is written from
+     * the finished class table, so it cannot be a file. See {@see dumpObjectSrc}.
+     *
      * @return \Parser\Ast\Stmt[]
      */
-    /**
-     * A Throwable class body (Exception / Error). Carries the message/code/
-     * previous plus the thrown-location (`line`/`file`) and the captured call
-     * stack (`traceNames`/`traceLines`, filled at `new` by EmitLlvm when the
-     * program queries a trace). The trace getters read those; the trace-usage
-     * gate matches the arrow-call form of these getters, so their bare
-     * `function get...(` definitions here do not trip a self-build.
-     */
-    private function throwableClassSrc(string $name, string $iface): string
-    {
-        // getTrace: PHP-shaped assoc frames only when the backtrace prelude is
-        // injected (a trace user); otherwise the bare name vec (the builder is
-        // absent, so it must not be referenced — keeps the self-build clean).
-        $getTrace = $this->includeBacktrace
-            ? "  public function getTrace(): array { return __mir_bt_frames(\$this->traceNames, \$this->traceLines, \$this->file); }\n"
-            : "  public function getTrace(): array { return \$this->traceNames; }\n";
-        return "class " . $name . " implements " . $iface . " {\n"
-            . "  public string \$message;\n"
-            . "  public int \$code;\n"
-            . "  public ?Throwable \$previous;\n"
-            . "  public int \$line = 0;\n"
-            . "  public string \$file = \"\";\n"
-            . "  /** @var string[] */ public array \$traceNames = [];\n"
-            . "  /** @var int[] */ public array \$traceLines = [];\n"
-            . "  public function __construct(string \$message = \"\", int \$code = 0, ?Throwable \$previous = null) {\n"
-            . "    \$this->message = \$message; \$this->code = \$code; \$this->previous = \$previous;\n"
-            . "  }\n"
-            . "  public function getMessage(): string { return \$this->message; }\n"
-            . "  public function getCode(): int { return \$this->code; }\n"
-            . "  public function getPrevious(): ?Throwable { return \$this->previous; }\n"
-            . "  public function getLine(): int { return \$this->line; }\n"
-            . "  public function getFile(): string { return \$this->file; }\n"
-            . $getTrace
-            . "  public function getTraceAsString(): string {\n"
-            . "    \$s = \"\"; \$n = \\count(\$this->traceNames); \$i = 0;\n"
-            . "    while (\$i < \$n) {\n"
-            . "      \$s = \$s . \"#\" . \$i . \" \" . \$this->file . \"(\" . \$this->traceLines[\$i] . \"): \" . \$this->traceNames[\$i] . \"()\\n\";\n"
-            . "      \$i = \$i + 1;\n"
-            . "    }\n"
-            . "    return \$s . \"#\" . \$n . \" {main}\";\n"
-            . "  }\n"
-            . "}\n";
-    }
-
     private function preludeStatements(): array
     {
-        $src = "<?php\n"
-            . "interface Throwable {}\n"
-            . $this->throwableClassSrc("Exception", "Throwable")
-            . $this->throwableClassSrc("Error", "Throwable")
-            . "class RuntimeException extends Exception {}\n"
-            . "class LogicException extends Exception {}\n"
-            . "class InvalidArgumentException extends LogicException {}\n"
-            . "class OutOfRangeException extends LogicException {}\n"
-            . "class TypeError extends Error {}\n"
-            . "class ValueError extends Error {}\n";
-        if ($this->includeBacktrace) {
-            $src = $src . $this->backtraceFramesSrc();
-        }
+        $src = "<?php\n" . $this->exceptionsSrc . $this->backtraceSrc;
         if ($this->includeVarDump) {
-            $src = $src . $this->varDumpPreludeSrc();
+            $src = $src . $this->varDumpSrc;
         }
         if ($this->includeArrayClasses) {
-            $src = $src . $this->arrayClassesPreludeSrc();
+            $src = $src . $this->arrayClassesSrc;
         }
-        if ($this->includeArrayFns && $this->arrayFnsSrc !== '') {
+        if ($this->includeArrayFns) {
             $src = $src . $this->arrayFnsSrc;
         }
-        if ($this->includeCli && $this->cliSrc !== '') {
+        if ($this->includeCli) {
             $src = $src . $this->cliSrc;
         }
-        if ($this->includePrintR && $this->printRSrc !== '') {
+        if ($this->includePrintR) {
             $src = $src . $this->printRSrc;
         }
         $program = \Parser\Parser::parseSource($src);
         return $program->statements;
-    }
-
-    /**
-     * PHP source for the built-in SPL ArrayIterator / ArrayObject. Backed by a
-     * `mixed` (cell) array so any value type round-trips; keys are rebuilt with
-     * a foreach (NOT array_keys, which a prelude-only call wouldn't link). All
-     * key/value params are `mixed` so the call sites NaN-box them — the cell
-     * array store/get/isset/unset/foreach paths then handle them. Included only
-     * when the program references either name (avoids the cell runtime in every
-     * binary). Practical subset; matches PHP for the common surface.
-     *
-     * The readable source of truth is `prelude/spl_arrays.php` (read by Main
-     * into {@see $arrayClassesSrc}); the inline copy below is the byte-identical
-     * bootstrap/distribution fallback used when that file can't be read (the
-     * Zend cold-seed `read_file` stub throws; a no-src distribution). Keep both
-     * in sync.
-     */
-    private function arrayClassesPreludeSrc(): string
-    {
-        if ($this->arrayClassesSrc !== '') {
-            return $this->arrayClassesSrc;
-        }
-        return "class ArrayIterator implements Iterator, ArrayAccess, Countable {\n"
-            . "  private mixed \$__s; private mixed \$__k; private int \$__i = 0;\n"
-            . "  public function __construct(mixed \$array = []) { \$this->__s = \$array; \$this->__rebuildKeys(); }\n"
-            . "  private function __rebuildKeys(): void { \$ks = []; foreach (\$this->__s as \$k => \$v) { \$ks[] = \$k; } \$this->__k = \$ks; }\n"
-            . "  public function rewind(): void { \$this->__rebuildKeys(); \$this->__i = 0; }\n"
-            . "  public function valid(): bool { return \$this->__i < count(\$this->__k); }\n"
-            . "  public function current(): mixed { return \$this->__s[\$this->__k[\$this->__i]]; }\n"
-            . "  public function key(): mixed { return \$this->__k[\$this->__i]; }\n"
-            . "  public function next(): void { \$this->__i = \$this->__i + 1; }\n"
-            . "  public function offsetExists(mixed \$o): bool { return isset(\$this->__s[\$o]); }\n"
-            . "  public function offsetGet(mixed \$o): mixed { return \$this->__s[\$o]; }\n"
-            . "  public function offsetSet(mixed \$o, mixed \$v): void { if (\$o === null) { \$this->__s[] = \$v; } else { \$this->__s[\$o] = \$v; } }\n"
-            . "  public function offsetUnset(mixed \$o): void { unset(\$this->__s[\$o]); }\n"
-            . "  public function count(): int { return count(\$this->__s); }\n"
-            . "  public function append(mixed \$v): void { \$this->__s[] = \$v; }\n"
-            . "  public function getArrayCopy(): mixed { return \$this->__s; }\n"
-            . "}\n"
-            . "class ArrayObject implements IteratorAggregate, ArrayAccess, Countable {\n"
-            . "  private mixed \$__s;\n"
-            . "  public function __construct(mixed \$array = []) { \$this->__s = \$array; }\n"
-            . "  public function offsetExists(mixed \$o): bool { return isset(\$this->__s[\$o]); }\n"
-            . "  public function offsetGet(mixed \$o): mixed { return \$this->__s[\$o]; }\n"
-            . "  public function offsetSet(mixed \$o, mixed \$v): void { if (\$o === null) { \$this->__s[] = \$v; } else { \$this->__s[\$o] = \$v; } }\n"
-            . "  public function offsetUnset(mixed \$o): void { unset(\$this->__s[\$o]); }\n"
-            . "  public function count(): int { return count(\$this->__s); }\n"
-            . "  public function append(mixed \$v): void { \$this->__s[] = \$v; }\n"
-            . "  public function getArrayCopy(): mixed { return \$this->__s; }\n"
-            . "  public function getIterator(): ArrayIterator { return new ArrayIterator(\$this->__s); }\n"
-            . "}\n";
     }
 
     /**
