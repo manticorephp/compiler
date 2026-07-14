@@ -1680,6 +1680,9 @@ use LowerSuperglobals;
     /** `$t op= v` → `$t = ($t op v)`. */
     private function lowerCompoundAssign(\Parser\Ast\CompoundAssign $expr): Node
     {
+        // `$GLOBALS += […]` is a WRITE of the whole array (a php 8.1 fatal), so
+        // say so — lowering the target as a read below would blame the read.
+        if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite(); }
         $read = $this->lowerExpr($expr->target);
         $value = $this->lowerExpr($expr->value);
         // `$t ??= v` → `$t = $t ?? v`.

@@ -123,6 +123,10 @@ trait LowerExprs
             return new NullConst(Type::null_());
         }
         if ($expr->kind === 'Variable') {
+            // A BARE `$GLOBALS` — every legal use ($GLOBALS['x']) is intercepted
+            // at the ArrayAccess above it, so reaching here means the whole array
+            // was read (foreach/count) or handed to a by-ref parameter.
+            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
             return new LoadLocal($expr->name, Type::unknown());
         }
         if ($expr->kind === 'Assign') { return $this->lowerAssign($expr); }
@@ -232,9 +236,20 @@ trait LowerExprs
                 return new Isset_($ts, Type::bool_());
             }
             if ($fn === 'unset') {
+                // `unset($GLOBALS['x'])` nulls the module cell — Unset_ itself has
+                // no idea what a cell is and silently no-ops on one.
                 $ts = [];
-                foreach ($expr->args as $a) { $ts[] = $this->lowerExpr($a); }
-                return new Unset_($ts, Type::void());
+                $cells = [];
+                foreach ($expr->args as $a) {
+                    if ($this->isGlobalsAccess($a)) {
+                        $cells[] = $this->unsetGlobalsCell($a);
+                        continue;
+                    }
+                    $ts[] = $this->lowerExpr($a);
+                }
+                if ($cells === []) { return new Unset_($ts, Type::void()); }
+                if ($ts !== []) { $cells[] = new Unset_($ts, Type::void()); }
+                return \count($cells) === 1 ? $cells[0] : new Block($cells, Type::void());
             }
             // `empty($x)` → falsiness test (carrier == 0). Matches the
             // self-host usage (bool / null / `?? false` flags); the
@@ -398,6 +413,10 @@ trait LowerExprs
     private function storeToTarget(\Parser\Ast\Expr $target, Node $value): Node
     {
         if ($target->kind === 'Variable') {
+            // `$GLOBALS = […]` / `$GLOBALS += […]` — a php 8.1 fatal, and silently
+            // accepting it wrote a bogus local named GLOBALS while the real globals
+            // sat untouched. {@see rejectGlobalsWrite}
+            if ($this->isGlobalsVar($target)) { $this->rejectGlobalsWrite(); }
             return new StoreLocal($target->name, $value, $value->type);
         }
         if ($target->kind === 'ArrayAccess') {

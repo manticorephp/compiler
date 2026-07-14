@@ -32,3 +32,11 @@ function bump(): int
     return $GLOBALS['counter'];
 }
 echo bump(), bump(), " ", $counter, "\n";
+// Since php 8.1, `$GLOBALS[$k] = v` is the ONE write syntax (re-assigning the
+// array as a whole is a fatal — a compile error here). isset/unset of a key stay
+// legal, and unsetting through the view unsets the variable itself.
+$tmp = "gone";
+echo isset($GLOBALS['tmp']) ? "isset\n" : "not-set\n";
+unset($GLOBALS['tmp']);
+echo isset($tmp) ? "still-set\n" : "unset\n";
+echo isset($GLOBALS['tmp']) ? "still-set\n" : "unset-view\n";

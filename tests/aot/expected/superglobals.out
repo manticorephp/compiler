@@ -5,3 +5,6 @@ set-in-fn
 set-at-top
 1 argv0=self
 89 9
+isset
+unset
+unset-view

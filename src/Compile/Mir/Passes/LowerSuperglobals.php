@@ -8,6 +8,7 @@ use Compile\Mir\Call;
 use Compile\Mir\IntConst;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
+use Compile\Mir\NullConst;
 use Compile\Mir\StaticLocalDecl_;
 use Compile\Mir\StaticProp_;
 use Compile\Mir\StoreLocal;
@@ -135,5 +136,67 @@ trait LowerSuperglobals
         $cell = $this->globalsCell($target);
         if ($cell === null) { return null; }
         return new StoreStaticProp_($cell, $value, $value->type);
+    }
+
+    /** Is `$expr` the bare `$GLOBALS` variable (not a `$GLOBALS[…]` access)? */
+    private function isGlobalsVar(\Parser\Ast\Expr $expr): bool
+    {
+        return $expr->kind === 'Variable' && $this->varName($expr) === 'GLOBALS';
+    }
+
+    /**
+     * PHP 8.1 (RFC "Restrict $GLOBALS usage") made $GLOBALS a read-only view:
+     * `$GLOBALS[$k] = v` is the ONE write syntax, and re-assigning the array as a
+     * whole (`$GLOBALS = […]`, `+=`, an `&` alias, a by-ref argument) is a
+     * COMPILE-TIME fatal. Reject it with php's own wording — silently accepting
+     * it wrote a bogus local named GLOBALS and left the real globals untouched.
+     */
+    private function rejectGlobalsWrite(): void
+    {
+        throw new \RuntimeException(
+            'MIR.lower: $GLOBALS can only be modified using the '
+            . '$GLOBALS[$name] = $value syntax'
+        );
+    }
+
+    /**
+     * A whole-$GLOBALS READ (`foreach ($GLOBALS …)`, `count($GLOBALS)`, passing it
+     * on) is legal PHP but has nothing to read here: the globals are individual
+     * module cells, and materialising them as an array needs the runtime name
+     * table this design deliberately does not carry. An honest error beats a
+     * silently empty array.
+     */
+    private function rejectGlobalsRead(): void
+    {
+        throw new \RuntimeException(
+            'MIR.lower: $GLOBALS as a whole array is unsupported '
+            . '(it would need a runtime name table); use $GLOBALS[\'name\']'
+        );
+    }
+
+    /** Is `$expr` a `$GLOBALS[…]` access? */
+    private function isGlobalsAccess(\Parser\Ast\Expr $expr): bool
+    {
+        if ($expr->kind !== 'ArrayAccess') { return false; }
+        return $this->isGlobalsVar($this->arrayAccessBase($expr));
+    }
+
+    /**
+     * `unset($GLOBALS['x'])` → NULL the cell, so a later `isset($x)` is false.
+     * The cell itself cannot go away (it is a module global), but PHP's own
+     * observable effect of unsetting a global IS that it stops being set — and
+     * the plain `Unset_` node silently no-ops on a module cell, which left the
+     * variable stubbornly set.
+     */
+    private function unsetGlobalsCell(\Parser\Ast\ArrayAccess $target): Node
+    {
+        $cell = $this->globalsCell($target);
+        return new StoreStaticProp_($cell, new NullConst(Type::null_()), Type::null_());
+    }
+
+    /** The indexed expression of an ArrayAccess, read through a TYPE-PINNED param. */
+    private function arrayAccessBase(\Parser\Ast\ArrayAccess $e): \Parser\Ast\Expr
+    {
+        return $e->array;
     }
 }
