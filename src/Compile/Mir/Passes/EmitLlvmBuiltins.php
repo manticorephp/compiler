@@ -46,6 +46,8 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
         if ($name === '__mir_argc')                   { return $this->biCliArgc(); }
         if ($name === '__mir_argv_at')                { return $this->biCliArgvAt($args); }
+        if ($name === '__mir_env_count')              { return $this->biEnvCount(); }
+        if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
         if ($name === 'ord')                          { return $this->biOrd($args); }
@@ -605,6 +607,33 @@ trait EmitLlvmBuiltins
         $i = $this->lastValue;
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call ptr @manticore_cli_argv(i64 ' . $i . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** `$_ENV` / `$_SERVER` source: how many "KEY=VALUE" entries `environ` has. */
+    private function biEnvCount(): string
+    {
+        $this->rt->needsEnviron = true;
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . " = call i64 @manticore_env_count()\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `__mir_env_at($i)` → the i-th raw "KEY=VALUE" C-string (no rc header);
+     * the caller copies it via cstr_to_str. Bounded by __mir_env_count().
+     * @param Node[] $args
+     */
+    private function biEnvAt(array $args): string
+    {
+        $this->rt->needsEnviron = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $i = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @manticore_env_at(i64 ' . $i . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
         return $out;

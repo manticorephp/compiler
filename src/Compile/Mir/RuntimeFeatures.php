@@ -61,6 +61,11 @@ final class RuntimeFeatures
     public bool $needsJsonEnc = false;
     public bool $needsStrReplaceOne = false;
     public bool $needsCliArgv = false;
+
+    /** The program reads the process environment ($_SERVER / $_ENV): emit the
+     *  `environ` accessors. Off by default — a program that never asks pays
+     *  nothing. */
+    public bool $needsEnviron = false;
     public bool $needsStdStreams = false;
     public bool $needsStrpos = false;
     public bool $needsStrExplode = false;

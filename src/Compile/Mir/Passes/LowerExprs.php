@@ -401,6 +401,8 @@ trait LowerExprs
             return new StoreLocal($target->name, $value, $value->type);
         }
         if ($target->kind === 'ArrayAccess') {
+            $g = $this->storeToGlobals($target, $value);
+            if ($g !== null) { return $g; }
             $arr = $this->lowerExpr($target->array);
             $idx = $target->index === null
                 ? new NullConst(Type::null_())

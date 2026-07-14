@@ -243,6 +243,35 @@ trait EmitLlvmModule
             $out .= "  %e = load ptr, ptr %g\n";
             $out .= "  ret ptr %e\n}\n";
         }
+        if ($this->rt->needsEnviron) {
+            // The process environment ($_SERVER / $_ENV). `environ` is the
+            // POSIX `char **`: a NULL-terminated vector of "KEY=VALUE" strings,
+            // provided by the C runtime of an EXECUTABLE on both Linux and
+            // Darwin (a shared library on Darwin would need _NSGetEnviron —
+            // we only ever emit executables). Count first, then index: that
+            // mirrors the argc/argv pair above, so the PHP-side builder walks
+            // a bounded range and never has to null-check a raw pointer.
+            $out .= "@environ = external global ptr\n";
+            $out .= "define i64 @manticore_env_count() {\nentry:\n";
+            $out .= "  %e = load ptr, ptr @environ\n";
+            $out .= "  br label %loop\n";
+            $out .= "loop:\n";
+            $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+            $out .= "  %g = getelementptr inbounds ptr, ptr %e, i64 %i\n";
+            $out .= "  %p = load ptr, ptr %g\n";
+            $out .= "  %z = icmp eq ptr %p, null\n";
+            $out .= "  br i1 %z, label %done, label %next\n";
+            $out .= "next:\n";
+            $out .= "  %i1 = add i64 %i, 1\n";
+            $out .= "  br label %loop\n";
+            $out .= "done:\n";
+            $out .= "  ret i64 %i\n}\n";
+            $out .= "define ptr @manticore_env_at(i64 %i) {\nentry:\n";
+            $out .= "  %e = load ptr, ptr @environ\n";
+            $out .= "  %g = getelementptr inbounds ptr, ptr %e, i64 %i\n";
+            $out .= "  %p = load ptr, ptr %g\n";
+            $out .= "  ret ptr %p\n}\n";
+        }
         if ($this->rt->needsStdStreams) {
             // STDIN/STDOUT/STDERR resolve to libc's own FILE* globals so a
             // fwrite(STDOUT, ...) shares the SAME buffer as echo (printf →

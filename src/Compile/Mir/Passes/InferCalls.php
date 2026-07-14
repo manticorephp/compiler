@@ -124,10 +124,11 @@ trait InferCalls
         // CLI / stdio primitives: STDIN/OUT/ERR and a raw argv entry are libc
         // FILE*/char* handles (obj<Ffi\Ptr>); the captured argc is a plain int.
         if ($n === '__mir_stdin' || $n === '__mir_stdout'
-            || $n === '__mir_stderr' || $n === '__mir_argv_at') {
+            || $n === '__mir_stderr' || $n === '__mir_argv_at'
+            || $n === '__mir_env_at') {
             return Type::obj('Ffi\\Ptr');
         }
-        if ($n === '__mir_argc') { return Type::int_(); }
+        if ($n === '__mir_argc' || $n === '__mir_env_count') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'

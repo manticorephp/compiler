@@ -1271,8 +1271,13 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
             || \strpos($source, 'explode(') !== false) { $useArrayFns = true; }
         // CLI prelude (__mc_argv / getopt): gate on a $argv / $argc reference
         // or a getopt( call. Over-injection is harmless (dead-stripped).
+        // $_SERVER / $_ENV are BUILT by the CLI prelude (__mc_server / __mc_env),
+        // so they gate it too. The other superglobals seed an empty array literal
+        // and need nothing.
         if (\strpos($source, 'argv') !== false
             || \strpos($source, 'argc') !== false
+            || \strpos($source, '_SER' . 'VER') !== false
+            || \strpos($source, '_ENV') !== false
             || \strpos($source, 'getopt(') !== false) { $useCli = true; }
         if (\strpos($source, 'print_r(') !== false) { $usePrintR = true; }
         // Stack traces: only instrument calls when the program actually queries

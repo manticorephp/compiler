@@ -31,6 +31,57 @@ function __mc_argv(): array
 }
 
 /**
+ * The process environment as a PHP array (`$_ENV`). `environ` hands us
+ * "KEY=VALUE" strings; split on the FIRST '=' only — a value may contain more
+ * (e.g. LS_COLORS). An entry with no '=' at all is not a variable; skip it.
+ * @return array<string, string>
+ */
+function __mc_env(): array
+{
+    $n = __mir_env_count();
+    $out = [];
+    $i = 0;
+    while ($i < $n) {
+        $s = \cstr_to_str(__mir_env_at($i));
+        $i = $i + 1;
+        $eq = \strpos($s, '=');
+        if ($eq === false) { continue; }
+        $out[\substr($s, 0, $eq)] = \substr($s, $eq + 1);
+    }
+    return $out;
+}
+
+/**
+ * `$_SERVER` for the CLI SAPI: the environment first, then the CLI keys PHP
+ * adds on top of it (php.net/reserved.variables.server). Values are mixed —
+ * argv is an ARRAY, argc an int — so the nested array is boxed to a cell, the
+ * same way getopt's repeated option is.
+ *
+ * REQUEST_TIME / REQUEST_TIME_FLOAT are NOT here: the compiler has no time()
+ * builtin yet. A program reading them gets null instead of a wrong number.
+ * @return array<string, mixed>
+ */
+function __mc_server(): array
+{
+    // Built as a MIXED-valued array from the start: seeding it with __mc_env()'s
+    // array<string,string> would pin the value type to `string`, and the int
+    // argc / array argv stored below would erase to garbage.
+    /** @var array<string, mixed> $out */
+    $out = [];
+    foreach (__mc_env() as $ek => $ev) { $out[$ek] = $ev; }
+    $argv = __mc_argv();
+    $self = $argv[0] ?? '';
+    $out['PHP_SELF'] = $self;
+    $out['SCRIPT_NAME'] = $self;
+    $out['SCRIPT_FILENAME'] = $self;
+    $out['PATH_TRANSLATED'] = $self;
+    $out['DOCUMENT_ROOT'] = '';
+    $out['argv'] = __mir_to_cell($argv);
+    $out['argc'] = __mir_argc();
+    return $out;
+}
+
+/**
  * Append a parsed option to the result, folding repeats into an array the way
  * PHP getopt does: first hit stores the scalar, the next promotes to a list.
  * @param array<string, mixed> $result

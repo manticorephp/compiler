@@ -96,6 +96,7 @@ final class LowerFromAst implements Pass
     use LowerExprs;
     use LowerTypes;
     use LowerReify;
+use LowerSuperglobals;
 
     public const NAME = 'lower-from-ast';
 
@@ -615,6 +616,9 @@ final class LowerFromAst implements Pass
             returnType: Type::int_(),
             body: $mainBody,
         ));
+        // Last: the superglobal binding scans EVERY function body (including
+        // __main and the closures), so it needs the complete function list.
+        $this->injectSuperglobals($module);
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -1762,8 +1766,10 @@ final class LowerFromAst implements Pass
         return new ArrayLit($elems, Type::unknown());
     }
 
-    private function lowerArrayAccess(\Parser\Ast\ArrayAccess $expr): ArrayAccess_
+    private function lowerArrayAccess(\Parser\Ast\ArrayAccess $expr): Node
     {
+        $g = $this->lowerGlobalsRead($expr);
+        if ($g !== null) { return $g; }
         $arr = $this->lowerExpr($expr->array);
         $idx = $expr->index === null
             ? new NullConst(Type::null_())
