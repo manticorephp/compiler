@@ -169,6 +169,32 @@ final class RuntimeLibrary
         $out .= "  %r = call ptr @__mir_str_new(ptr %cp, i64 1)\n";
         $out .= "  ret ptr %r\n}\n";
 
+        // `\$s[\$i]` read as a BYTE — the same access as __mir_str_char_at, minus
+        // the allocation. char_at must hand back a `string`, so it mints a fresh
+        // 1-char headered buffer for every character read: scanning a 2 MB source
+        // costs ~80 MB of arena garbage (measured: 100 MB RSS to read 2 MB). When
+        // the character is only ever compared to a 1-char literal or passed to
+        // ord() — which is what every scanner does — the string is never observed,
+        // and DemoteCharLocals rewrites the read to this instead.
+        //
+        // Out of range → 0, which is exactly `ord("")`, so a demoted local keeps
+        // char_at's own out-of-range behaviour. Negative counts from the end.
+        $out .= "\ndefine i64 @__mir_str_byte_at(ptr %s, i64 %i) {\nentry:\n";
+        $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %neg = icmp slt i64 %i, 0\n";
+        $out .= "  %iadj = add i64 %i, %len\n";
+        $out .= "  %ix = select i1 %neg, i64 %iadj, i64 %i\n";
+        $out .= "  %lo = icmp slt i64 %ix, 0\n";
+        $out .= "  %hi = icmp sge i64 %ix, %len\n";
+        $out .= "  %oob = or i1 %lo, %hi\n";
+        $out .= "  br i1 %oob, label %zero, label %one\n";
+        $out .= "zero:\n  ret i64 0\n";
+        $out .= "one:\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %ix\n";
+        $out .= "  %b = load i8, ptr %cp\n";
+        $out .= "  %z = zext i8 %b to i64\n";
+        $out .= "  ret i64 %z\n}\n";
+
         // isset(\$s[\$i]) — true iff the (end-relative) offset is in range.
         $out .= "\ndefine i1 @__mir_str_offset_isset(ptr %s, i64 %i) {\nentry:\n";
         $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";

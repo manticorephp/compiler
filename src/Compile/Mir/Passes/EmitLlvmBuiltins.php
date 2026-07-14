@@ -39,6 +39,7 @@ trait EmitLlvmBuiltins
         if ($name === 'manticore_unbox_int')          { return $this->biTaggedCall('__manticore_unbox_int', $args); }
         if ($name === 'manticore_tag')                { return $this->biTaggedCall('__manticore_tag', $args); }
         if ($name === 'strlen')                       { return $this->biStrlen($args); }
+        if ($name === '__str_byte_at')                { return $this->biStrByteAt($args); }
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
         if ($name === '__mir_stdin')                  { return $this->biStdStream('stdin'); }
@@ -608,6 +609,27 @@ trait EmitLlvmBuiltins
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * `$s[$i]` read as a raw byte — what {@see Passes\DemoteCharLocals} rewrites a
+     * character read to once it has proved the character is never observed AS a
+     * string. Not user-callable: the pass synthesizes it.
+     *
+     * @param \Compile\Mir\Node[] $args
+     */
+    private function biStrByteAt(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $i = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_str_byte_at(ptr ' . $s
+              . ', i64 ' . $i . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        return $this->finishI64($out, $reg);
     }
 
     private function biStrlen(array $args): string

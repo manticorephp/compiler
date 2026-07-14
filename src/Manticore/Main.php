@@ -1400,6 +1400,11 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // a boxed cell downstream has already lost the marker. Throws; the catch
         // below turns it into a compile error.
         $module = (new \Compile\Mir\Passes\CheckTypeDefs())->run($module);
+        // `$s[$i]` mints a fresh 1-char string — a malloc per character read.
+        // Where the character is only ever compared to a one-char literal or
+        // passed to ord(), read the byte instead. Before the memory passes, so rc
+        // never sees the strings that are no longer created.
+        $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
