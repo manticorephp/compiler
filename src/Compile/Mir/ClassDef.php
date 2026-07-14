@@ -128,7 +128,31 @@ final class ClassDef
     public function bagOffset(): int
     {
         if (!$this->hasBag) { return -1; }
-        return $this->headerSize() + 8 * \count($this->propertyNames);
+        return $this->layoutEnd();
+    }
+
+    /**
+     * Byte offset just past the last property — where the bag goes, and what the
+     * instance size is built from.
+     *
+     * Each slot is aligned to its own width, so a narrow property can never leave
+     * the NEXT one straddling a word. With every slot 8 bytes wide (today) the
+     * alignment is a no-op and this is exactly `header + 8 * count`.
+     */
+    private function layoutEnd(): int
+    {
+        $off = $this->headerSize();
+        foreach ($this->propertyNames as $name) {
+            $w = $this->propertyWidth($name);
+            $off = $this->alignUp($off, $w) + $w;
+        }
+        return $this->alignUp($off, 8);
+    }
+
+    private function alignUp(int $off, int $align): int
+    {
+        $rem = $off % $align;
+        return $rem === 0 ? $off : $off + ($align - $rem);
     }
 
     /** Whether this class directly declares static property `$name`. */
@@ -146,22 +170,36 @@ final class ClassDef
         return $this->isStruct ? 0 : 16;
     }
 
+    /**
+     * Width in bytes of `$prop`'s slot.
+     *
+     * Every slot is 8 bytes today — a raw i64, or a NaN-boxed cell, or a pointer.
+     * This exists so that the ONE place a slot's size is decided is a function
+     * rather than a `8 *` scattered through the emitter: narrowing a
+     * `#[TypeDef(repr: 'u8')]` property to a single byte then becomes a change
+     * HERE, not thirty edits across six files.
+     */
+    public function propertyWidth(string $prop): int
+    {
+        return 8;
+    }
+
     /** Byte offset of `$prop` within an instance, or -1 if unknown. */
     public function propertyOffset(string $prop): int
     {
-        $base = $this->headerSize();
-        $i = 0;
+        $off = $this->headerSize();
         foreach ($this->propertyNames as $name) {
-            if ($name === $prop) { return $base + 8 * $i; }
-            $i = $i + 1;
+            $w = $this->propertyWidth($name);
+            $off = $this->alignUp($off, $w);
+            if ($name === $prop) { return $off; }
+            $off = $off + $w;
         }
         return -1;
     }
 
-    /** Instance size in bytes: header + 8 per property + bag slot. */
+    /** Instance size in bytes: header + every property's slot + the bag slot. */
     public function instanceSize(): int
     {
-        $bag = $this->hasBag ? 8 : 0;
-        return $this->headerSize() + 8 * \count($this->propertyNames) + $bag;
+        return $this->layoutEnd() + ($this->hasBag ? 8 : 0);
     }
 }
