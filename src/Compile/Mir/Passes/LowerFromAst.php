@@ -96,6 +96,7 @@ final class LowerFromAst implements Pass
     use LowerExprs;
     use LowerTypes;
     use LowerReify;
+    use LowerTypeDefs;
 
     public const NAME = 'lower-from-ast';
 
@@ -114,6 +115,20 @@ final class LowerFromAst implements Pass
 
     /** @var array<string, bool> every class name (known before defs are built) */
     private array $knownClassNames = [];
+
+    /** `#[TypeDef]` classes ({@see LowerTypeDefs}): class name → its `repr`.
+     *  Filled BEFORE any ClassDef is built — a class lowered earlier may already
+     *  name one in a property or parameter hint.
+     *  @var array<string, string> */
+    private array $typeDefReprs = [];
+
+    /** `#[TypeDef]` class name → the name of its single value property.
+     *  @var array<string, string> */
+    private array $typeDefProps = [];
+
+    /** The `#[TypeDef]` class whose method body is being lowered, or ''. Inside
+     *  one, `$this` IS the carrier scalar — not an object pointer. */
+    private string $currentTypeDefClass = '';
 
     /** @var array<string, string> unambiguous short class name → FQN */
     private array $shortClassFqn = [];
@@ -406,6 +421,10 @@ final class LowerFromAst implements Pass
                 }
             }
         }
+        // `#[TypeDef]` classes, BEFORE any ClassDef is built: a class registered
+        // earlier may already name one in a property or parameter hint, and
+        // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
+        $this->registerTypeDefs($stmts);
         foreach ($stmts as $stmt) {
             if ($stmt->kind === 'Class') {
                 $decl = $stmt->decl;
@@ -452,6 +471,17 @@ final class LowerFromAst implements Pass
                 if ($dkind !== 'class') { continue; }
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $this->classTable[$cd->name] = $cd;
+                // A `#[TypeDef]` is a VALUE, not an object: it keeps a ClassDef so
+                // its methods and its one property still resolve, but it goes to
+                // the module's TypeDef table, never the class list — no class
+                // descriptor, no drop fn, no instanceof arm, no var_dump case. At
+                // runtime nothing is left of it but the scalar.
+                if ($this->isTypeDef($cd->name)) {
+                    $cd->typeDefRepr = $this->typeDefReprs[\ltrim($cd->name, '\\')];
+                    $cd->typeDefProp = $this->typeDefProp($cd->name);
+                    $module->typeDefs[$cd->name] = $cd;
+                    continue;
+                }
                 $module->addClass($cd);
             }
         }
@@ -831,12 +861,21 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
+        // Inside a `#[TypeDef]` body `$this` IS the carrier scalar: there is no
+        // object to point at. The CONSTRUCTOR loses `$this` entirely — it is not
+        // an initializer of something already allocated, it is the function that
+        // COMPUTES the value, so it takes the ctor params and returns the carrier.
+        $isTypeDef = $this->isTypeDef($decl->name);
+        $this->currentTypeDefClass = $isTypeDef ? \ltrim($decl->name, '\\') : '';
+        $tdCtor = $isTypeDef && $m->name === '__construct';
         $params = [];
         // Static methods have no implicit `$this`.
-        if (!$m->isStatic) {
+        if (!$m->isStatic && !$tdCtor) {
             $params[] = new Param(
                 name: 'this',
-                type: Type::obj($decl->name),
+                type: $isTypeDef
+                    ? $this->typeDefCarrier($decl->name)
+                    : Type::obj($decl->name),
                 byRef: false,
                 variadic: false,
             );
@@ -876,7 +915,20 @@ final class LowerFromAst implements Pass
             $pi = $pi + 1;
         }
         $stmts = [];
-        if ($m->name === '__construct') {
+        if ($tdCtor) {
+            // A promoted `public readonly int $v` IS the whole constructor: the
+            // value is the parameter. An explicit body instead RETURNS it — its
+            // `$this->value = <expr>;` was rewritten to `return <expr>;` while lowering
+            // (see lowerStmt / StoreProperty on a TypeDef receiver).
+            $tdCarrier = $this->typeDefCarrier($decl->name);
+            foreach ($m->params as $p) {
+                if ($p->promoted === '') { continue; }
+                $stmts[] = new Return_(
+                    new LoadLocal($p->name, $cd->propertyTypes[$p->name] ?? $tdCarrier),
+                    $tdCarrier,
+                );
+            }
+        } elseif ($m->name === '__construct') {
             // Property defaults run first, then promoted-param stores.
             foreach ($defaultStores as $ds) { $stmts[] = $ds; }
             foreach ($m->params as $p) {
@@ -913,6 +965,9 @@ final class LowerFromAst implements Pass
             $elem = $mret->isGenerator() ? $mret->element : null;
             $mret = Type::generator($elem);
         }
+        // The constructor of a `#[TypeDef]` returns the value it computed.
+        if ($tdCtor) { $mret = $this->typeDefCarrier($decl->name); }
+        $this->currentTypeDefClass = '';
         $mfn = new FunctionDef(
             name: $fnName,
             params: $params,
@@ -1803,7 +1858,7 @@ final class LowerFromAst implements Pass
         return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
     }
 
-    private function lowerNewExpr(\Parser\Ast\NewExpr $expr): NewObj
+    private function lowerNewExpr(\Parser\Ast\NewExpr $expr): Node
     {
         // `new self` / `new static` / `new parent` → concrete class.
         $cls = $this->resolveStaticClass($expr->class);
@@ -1813,6 +1868,16 @@ final class LowerFromAst implements Pass
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
+        }
+        // `new U8(x)` allocates NOTHING: a TypeDef's constructor is the function
+        // that COMPUTES its scalar, so the `new` IS that call. The class has no
+        // runtime form for a NewObj to point at.
+        if ($this->isTypeDef($cls)) {
+            return new Call(
+                \ltrim($cls, '\\') . '____construct',
+                $args,
+                $this->typeDefCarrier($cls),
+            );
         }
         return new NewObj($cls, $args, Type::obj($cls));
     }

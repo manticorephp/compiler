@@ -88,6 +88,16 @@ final class ClassDef
      *  receiver keep seeing it — they all walk the parent chain. */
     public string $originClass = '';
 
+    /** `#[TypeDef(repr: …)]` — the machine type this value type declares
+     *  (`u8`, `i32`, `f32`). Empty for an ordinary class. A TypeDef ClassDef is
+     *  NEVER added to the module's class list: it exists only so the front end
+     *  can resolve `$c->value` / `$byte->method()` against a declaration that has no runtime
+     *  form at all. See {@see Passes\LowerTypeDefs}. */
+    public string $typeDefRepr = '';
+
+    /** The single property a `#[TypeDef]` carries — the value itself. */
+    public string $typeDefProp = '';
+
     /** The name PHP must report — `Box` for every `Box$of$T`. `get_class()`,
      *  `::class` and var_dump print THIS, never the internal spec name. Empty
      *  for an ordinary class, which is its own display name. */

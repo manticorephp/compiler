@@ -21,6 +21,14 @@ final class Module
     /** @var array<string, EnumDef> enum name → case table */
     public array $enums = [];
 
+    /** `#[TypeDef]` value types — class name → its descriptor. Deliberately NOT
+     *  in {@see $classes}: a TypeDef has no runtime form (no class id, no header,
+     *  no drop fn), so nothing that walks the class list may see it. It lives
+     *  here only so InferTypes can resolve a method's return type and EmitLlvm
+     *  can route `$c->value` / `$byte->method()` on an erased receiver.
+     *  @var array<string, ClassDef> */
+    public array $typeDefs = [];
+
     /** @var array<string, true> declared interface names (no ClassDef — used by
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];

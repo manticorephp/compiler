@@ -402,6 +402,13 @@ trait EmitLlvmObjects
     private function emitPropertyAccess(PropertyAccess_ $n): string
     {
         $pa = $n;
+        // `$byte->value` on a `#[TypeDef]`: the value IS the property. No load, no
+        // offset — emit the receiver and stop.
+        $td = $pa->object->type->typeDefClass();
+        if ($td !== null && isset($this->typeDefs[$td])
+            && $pa->property === $this->typeDefs[$td]->typeDefProp) {
+            return $this->emitNode($pa->object);
+        }
         // Enum case `->name` / `->value` → index the per-enum global
         // table by the case ordinal.
         $ecls = $pa->object->type->class ?? '';
@@ -1955,6 +1962,18 @@ trait EmitLlvmObjects
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
+        // A method on a `#[TypeDef]` receiver: a direct call with the scalar as
+        // the first argument. Nothing to dispatch on — the class is final and has
+        // no runtime identity. Routed through the ordinary Call path so the
+        // callee's declared param types drive the arg coercions.
+        $td = $mc->object->type->typeDefClass();
+        if ($td !== null && isset($this->typeDefs[$td])) {
+            $tdArgs = [$mc->object];
+            foreach ($mc->args as $a) { $tdArgs[] = $a; }
+            return $this->emitNode(
+                new \Compile\Mir\Call($td . '__' . $mc->method, $tdArgs, $n->type),
+            );
+        }
         if ($this->isGeneratorType($mc->object->type)) {
             return $this->emitGeneratorMethod($mc);
         }

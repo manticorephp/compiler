@@ -453,6 +453,16 @@ trait InferCalls
         foreach ($node->args as $a) {
             $this->inferNode($a);
         }
+        // A method on a `#[TypeDef]` receiver is a plain function of the scalar —
+        // no dispatch, no vtable, nothing to be virtual over (the class is final
+        // and has no runtime identity). Its return type comes from the same
+        // `Class__method` signature every other call reads.
+        $tdRecv = $objType->typeDefClass();
+        if ($tdRecv !== null && isset($this->typeDefs[$tdRecv])) {
+            $sig = $this->sigs[$tdRecv . '__' . $node->method] ?? null;
+            $node->type = $sig ?? Type::unknown();
+            return $node->type;
+        }
         // Closure methods on a closure receiver: `->bindTo()` yields a (rebound)
         // closure; `->call()` invokes it and returns a tagged cell (uniform ABI).
         $recvCls = $objType->class ?? '';

@@ -1235,6 +1235,17 @@ trait InferNodes
     private function inferPropertyAccess(PropertyAccess_ $node): Type
     {
         $objType = $this->inferNode($node->object);
+        // `$byte->value` on a `#[TypeDef]` receiver IS `$c` — the value and its one
+        // property are the same scalar. Type it as the BARE carrier: reading the
+        // property is where the TypeDef ends and a plain int/float begins, which
+        // is exactly what lets `$this->v + 1` do arithmetic without CheckTypeDefs
+        // objecting. (EmitLlvm emits the receiver itself; there is no load.)
+        $td = $objType->typeDefClass();
+        if ($td !== null && isset($this->typeDefs[$td])
+            && $node->property === $this->typeDefs[$td]->typeDefProp) {
+            $node->type = $objType->stripTypeDef();
+            return $node->type;
+        }
         // A property PATH narrowed by an enclosing `$local->prop instanceof C`
         // wins (the branch-local map; see narrowFromCond) — so a `mixed` prop
         // holding an object resolves `$local->prop->field` to a typed offset.

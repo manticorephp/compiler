@@ -306,6 +306,13 @@ trait LowerTypes
             }
         }
         $cls = \ltrim($hint, '?\\');
+        // A `#[TypeDef]` names its CARRIER, not an object: the class is erased,
+        // so a slot declared `U8 $x` holds the bare scalar. Checked before the
+        // class table — a TypeDef is registered there too (its ClassDef is what
+        // resolves `->value` and its methods), and obj<U8> would point at nothing.
+        if ($this->isTypeDef($cls)) {
+            return $this->typeDefCarrier($cls);
+        }
         // A bare class name → obj<Class> (so method returns / params of
         // a class type carry their class for dispatch + __toString).
         // `Ffi\Ptr` stays obj<Ffi\Ptr> but is treated as an opaque FOREIGN

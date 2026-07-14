@@ -222,11 +222,17 @@ final class InferTypes implements Pass
     /** @var array<string, \Compile\Mir\EnumDef> */
     private array $enums = [];
 
+    /** `#[TypeDef]` value types — kept apart from {@see $classes} because they
+     *  have no runtime object form. Only `$byte->value` and `$byte->method()` consult them.
+     *  @var array<string, \Compile\Mir\ClassDef> */
+    private array $typeDefs = [];
+
     public function run(Module $module): Module
     {
         $this->sigs = [];
         $this->classes = $module->classes;
         $this->enums = $module->enums;
+        $this->typeDefs = $module->typeDefs;
         $this->fnByName = [];
         $this->closureNodeByName = [];
         $this->sawClosures = false;

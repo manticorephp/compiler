@@ -201,6 +201,42 @@ final class Type
     }
 
     /**
+     * A `#[TypeDef]` value — its CARRIER scalar (int/float), tagged with the
+     * declaring class name.
+     *
+     * The kind stays KIND_INT / KIND_FLOAT: every codegen site that asks
+     * `isInt()` / `isFloat()` keeps working untouched, so a TypeDef costs no
+     * allocation, no refcount and no indirection — it IS the machine scalar.
+     * The class name rides along purely so the front end can resolve `$byte->value`
+     * and `$byte->method()` against the declaration, and so {@see Passes\TypeCheck} can
+     * refuse the sites where an erased value would be observed as an OBJECT
+     * (`===`, var_dump, a cell/mixed slot) and diverge from Zend.
+     *
+     * Same trick as {@see record}: a payload that shape-unaware consumers may
+     * ignore, because without it the type is still exactly right.
+     */
+    public static function typeDef(string $class, self $carrier): self
+    {
+        return new self($carrier->kind, class: $class);
+    }
+
+    /** The `#[TypeDef]` class this scalar was declared as, or null. */
+    public function typeDefClass(): ?string
+    {
+        if ($this->kind !== self::KIND_INT && $this->kind !== self::KIND_FLOAT) {
+            return null;
+        }
+        return $this->class;
+    }
+
+    /** This type with any `#[TypeDef]` tag dropped — the bare carrier scalar. */
+    public function stripTypeDef(): self
+    {
+        if ($this->typeDefClass() === null) { return $this; }
+        return new self($this->kind);
+    }
+
+    /**
      * The `T` of a `@template T` — see {@see KIND_TYPEVAR}.
      *
      * `$bound` is the upper bound of `@template T of Animal`, carried in
@@ -415,6 +451,14 @@ final class Type
         if ($this->kind === self::KIND_OBJ) {
             if ($this->class !== $other->class) { return self::unknown(); }
             return $this;
+        }
+        // Two scalars of the same kind but a different `#[TypeDef]` tag (one of
+        // them possibly untagged) join to the BARE carrier. Keeping the tag would
+        // let a merge with a plain int smuggle the marker onto a value that is no
+        // longer a TypeDef, and TypeCheck would then reject a use that is fine.
+        if ($this->class !== $other->class
+            && ($this->kind === self::KIND_INT || $this->kind === self::KIND_FLOAT)) {
+            return new self($this->kind);
         }
         // Arrays join element- AND key-wise so a control-flow merge keeps a
         // refined shape (`vec[unknown]` ∪ `vec[string]` → `vec[string]`; a
