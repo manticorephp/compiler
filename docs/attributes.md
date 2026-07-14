@@ -145,10 +145,28 @@ is what the value really is. Reading the property is where the TypeDef ends and
 a plain scalar begins — `$byte->value + 1` is ordinary integer arithmetic and is
 always allowed.
 
-`repr` names the intended machine form (`i8`/`i16`/`i32`/`i64`, `u8`/`u16`/`u32`/
-`u64`, `f32`/`f64`). Today it is **declarative**: it is validated against the
-carrier and recorded, but the value still occupies a full `i64`/`double`. It
-becomes load-bearing when narrow layouts land. Omit it for a plain newtype.
+`repr` names the machine form (`i8`/`i16`/`i32`/`i64`, `u8`/`u16`/`u32`/`u64`,
+`f32`/`f64`), and it **costs what it says**: a property declared as one occupies
+exactly its repr — 1 byte for `i8`/`u8`, 2 for `i16`/`u16`, 4 for `i32`/`u32`/`f32`
+— aligned to its own width.
+
+```php
+final class Pixel {
+    public function __construct(
+        public U8 $r, public U8 $g, public U8 $b, public U8 $a,
+    ) {}
+}
+// 24 bytes, not 48.
+```
+
+A property slot is the only place the promise can be kept: in a register a narrow
+type buys nothing, because a register is 64 bits either way. Loads widen back to
+the carrier (sign-extending for the signed reprs, zero-extending for the unsigned,
+`fpext` for an `f32`), so the value your program sees is unchanged — only the bytes
+on the heap differ.
+
+Omit `repr` for a plain newtype: then the property is a full word, and the type is
+about meaning, not layout.
 
 #### What the compiler refuses, and why
 
