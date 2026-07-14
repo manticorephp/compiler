@@ -72,6 +72,7 @@ final class RuntimeFeatures
     public bool $needsClock = false;
     public bool $needsStdStreams = false;
     public bool $needsStrpos = false;
+    public bool $needsStrcspn = false;
     public bool $needsStrExplode = false;
 
     // ── derived demands ────────────────────────────────────────────────────

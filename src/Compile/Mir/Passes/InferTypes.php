@@ -668,6 +668,7 @@ final class InferTypes implements Pass
         $bare = $pos === false ? $fn : \substr($fn, $pos + 1);
         $bare = \strtolower($bare);
         return $bare === 'substr' || $bare === 'strlen' || $bare === 'strpos'
+            || $bare === 'strcspn'
             || $bare === 'str_contains' || $bare === 'str_starts_with'
             || $bare === 'str_ends_with' || $bare === 'trim' || $bare === 'ltrim'
             || $bare === 'rtrim' || $bare === 'strtolower' || $bare === 'strtoupper';

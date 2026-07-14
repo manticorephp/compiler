@@ -104,6 +104,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strtolower')                   { return $this->biCaseConv($args, '__mir_strtolower'); }
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
+        if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === 'explode' && \count($args) >= 2) { return $this->biExplode($args); }
         if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
@@ -1711,6 +1712,44 @@ trait EmitLlvmBuiltins
               . ', i64 ' . $off . ")\n";
         $out .= $this->freeStrTemp($args[0], $h);
         $out .= $this->freeStrTemp($args[1], $n);
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * strcspn($s, $chars [, $offset [, $length]]) → int. The bounded, binary-safe
+     * "scan until one of these bytes" primitive: one pass over the span, no
+     * overshoot past `$length`. Backs the JSON parser's string scanner (a
+     * per-byte PHP loop there costs a 1-char string temp per byte).
+     * @param Node[] $args
+     */
+    private function biStrcspn(array $args): string
+    {
+        $this->rt->needsStrcspn = true;
+        $this->rt->needsConcat = true;   // pulls __mir_strlen + the string decls
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $cs = $this->lastValue;
+        $off = '0';
+        if (\count($args) >= 3) {
+            $out .= $this->emitNode($args[2]);
+            $out .= $this->coerceToI64();
+            $off = $this->lastValue;
+        }
+        $len = '0';
+        $haveLen = '0';
+        if (\count($args) >= 4) {
+            $out .= $this->emitNode($args[3]);
+            $out .= $this->coerceToI64();
+            $len = $this->lastValue;
+            $haveLen = '1';
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_strcspn(ptr ' . $s . ', ptr ' . $cs
+              . ', i64 ' . $off . ', i64 ' . $len . ', i64 ' . $haveLen . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $out .= $this->freeStrTemp($args[1], $cs);
         return $this->finishI64($out, $reg);
     }
 

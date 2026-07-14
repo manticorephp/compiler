@@ -135,6 +135,7 @@ trait InferCalls
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'
+            || $n === 'strcspn'
             || $n === 'array_unshift' || $n === '__str_byte_at') {
             return Type::int_();
         }
