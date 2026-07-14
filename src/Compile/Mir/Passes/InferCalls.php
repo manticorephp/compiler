@@ -292,11 +292,14 @@ trait InferCalls
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];
         } elseif ($ct->kind === Type::KIND_CLOSURE) {
-            // A generic `callable` (e.g. an array_map/usort `$cb` param) is
-            // dispatched dynamically — the concrete closure isn't known. Under
-            // the uniform closure ABI it returns a tagged cell, so type the
-            // result cell (the caller reads it by tag instead of as raw bits).
-            $node->type = Type::cell();
+            // A `callable(int): string` states its return type, so the invoke can
+            // be typed concretely — the value still ARRIVES as a tagged cell under
+            // the uniform closure ABI, and the emitter unboxes it to this type.
+            //
+            // A bare `callable` (an array_map / usort `$cb` param) says nothing:
+            // the concrete closure isn't known, so the result stays a cell and the
+            // caller reads it by tag.
+            $node->type = $ct->closureReturn() ?? Type::cell();
         }
         // An invokable object (`$obj(...)` on a class with __invoke) → its
         // __invoke return type (the reroute happens in EmitLlvm).
@@ -362,27 +365,86 @@ trait InferCalls
         return $t->kind === Type::KIND_CELL;
     }
 
+    /**
+     * The concrete return type of `$method` for a receiver that bound its class's
+     * `@template` parameters (`Box<Tag>` → `@return T` becomes `Tag`).
+     *
+     * Climbs the inheritance chain: the generic method is often declared on a
+     * generic BASE (`/** @extends Base<T> *\/ class Bag extends Base {}`), while
+     * the receiver binds BAG's parameters. Each `@extends` re-maps the arguments
+     * on the way up, so `Bag<float>` reaches `Base` as `Base<float>`.
+     *
+     * Null when nothing along the chain is generic — which leaves the erased
+     * signature in place, so a program using no generics is untouched.
+     */
     private function genericReturnType(string $cls, string $method, Type $recv): ?Type
     {
-        if ($recv->typeArgs === []) { return null; }
-        // The receiver's DECLARED class carries the binding.
         $decl = $recv->class ?? '';
-        if (!isset($this->classes[$decl])) { return null; }
-        $cd = $this->classes[$decl];
-        if (!isset($cd->genericReturns[$method])) { return null; }
-        $generic = $cd->genericReturns[$method];
-        $bindings = [];
-        $i = 0;
+        $args = $recv->typeArgs;
+        // No `<…>` at the use site: fall back to `@template T = int` defaults, so a
+        // plain `Box` still types as the author said it should rather than erasing.
+        if ($args === [] && isset($this->classes[$decl])) {
+            $args = $this->defaultTypeArgs($this->classes[$decl]);
+        }
+        if ($args === []) { return null; }
+        $seen = [];
+        while ($decl !== '' && isset($this->classes[$decl]) && !isset($seen[$decl])) {
+            $seen[$decl] = true;
+            $cd = $this->classes[$decl];
+            $bindings = $this->bindTypeParams($cd->typeParams, $args);
+            if (isset($cd->genericReturns[$method])) {
+                if ($bindings === []) { return null; }
+                $g = $cd->genericReturns[$method];
+                // An unbound leftover stays erased rather than leaking a typevar
+                // into codegen, which knows nothing about KIND_TYPEVAR.
+                return $g->substitute($bindings)->eraseTypeVars();
+            }
+            // Declared further up. Translate our arguments into the parent's.
+            if ($cd->parent === '' || $cd->parentTypeArgs === []) { return null; }
+            $next = [];
+            foreach ($cd->parentTypeArgs as $pa) { $next[] = $pa->substitute($bindings); }
+            $decl = $cd->parent;
+            $args = $next;
+        }
+        return null;
+    }
+
+    /**
+     * A generic class's `@template T = X` defaults, in parameter order. Empty
+     * unless EVERY parameter has one — a partial default list cannot be matched
+     * positionally against the parameters.
+     *
+     * @return Type[]
+     */
+    private function defaultTypeArgs(\Compile\Mir\ClassDef $cd): array
+    {
+        if ($cd->typeParams === []) { return []; }
+        $out = [];
         foreach ($cd->typeParams as $p) {
-            if ($i >= \count($recv->typeArgs)) { break; }
-            $bindings[$p] = $recv->typeArgs[$i];
+            if (!isset($cd->typeParamDefaults[$p])) { return []; }
+            $out[] = $cd->typeParamDefaults[$p];
+        }
+        return $out;
+    }
+
+    /**
+     * Bind a class's type parameters to a use site's arguments, positionally.
+     *
+     * @param string[] $params
+     * @param Type[]   $args
+     * @return array<string, Type>
+     */
+    private function bindTypeParams(array $params, array $args): array
+    {
+        $out = [];
+        $i = 0;
+        $n = \count($args);
+        foreach ($params as $p) {
+            if ($i >= $n) { break; }
+            $out[$p] = $args[$i];
             $i = $i + 1;
         }
-        if ($bindings === []) { return null; }
-        $r = $generic->substitute($bindings);
-        // An unbound leftover stays erased rather than leaking a typevar into
-        // codegen, which knows nothing about KIND_TYPEVAR.
-        return $r->eraseTypeVars();
+        return $out;
     }
 
     private function inferMethodCall(MethodCall_ $node): Type

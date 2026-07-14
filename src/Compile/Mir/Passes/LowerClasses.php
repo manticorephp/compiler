@@ -112,7 +112,16 @@ trait LowerClasses
         // `@template T` — in scope for every property / param / return hint of
         // this class, so `T` and `T[]` lower to a typevar rather than erasing.
         $savedTypeParams = $this->currentTypeParams;
+        $savedTypeBounds = $this->currentTypeBounds;
+        $this->pendingTypeBounds = [];
+        $this->pendingTypeDefaults = [];
         $this->currentTypeParams = $this->docTemplates($decl->docComment);
+        // Lower the bounds FIRST: `lowerTypeHint` consults them when it turns a
+        // `T` into a typevar, and the typevar's erasure depends on them.
+        $this->currentTypeBounds = [];
+        foreach ($this->pendingTypeBounds as $tp => $hint) {
+            $this->currentTypeBounds[$tp] = $this->lowerTypeHint($hint);
+        }
         $names = [];
         $types = [];
         $arrHinted = [];
@@ -282,7 +291,20 @@ trait LowerClasses
         $cd->propertyArrayHinted = $arrHinted;
         $cd->propertyReadonly = $roProps;
         $cd->typeParams = $this->currentTypeParams;
+        $cd->typeParamBounds = $this->currentTypeBounds;
+        foreach ($this->pendingTypeDefaults as $tp => $hint) {
+            $cd->typeParamDefaults[$tp] = $this->lowerTypeHint($hint);
+        }
+        // `@extends Base<T>` — how this class binds its generic parent. Read while
+        // its own `@template` params are still in scope, so a `T` here resolves to
+        // a typevar that climbing the chain can substitute.
+        $ext = $this->docTagType($decl->docComment, '@extends', '');
+        if ($ext !== null && $ext !== '') {
+            $et = $this->lowerTypeHint($ext);
+            if ($et->kind === Type::KIND_OBJ) { $cd->parentTypeArgs = $et->typeArgs; }
+        }
         $this->currentTypeParams = $savedTypeParams;
+        $this->currentTypeBounds = $savedTypeBounds;
         return $cd;
     }
 
@@ -334,8 +356,10 @@ trait LowerClasses
         // guard on the table itself — reading `$cd->typeParams` unconditionally
         // dereferences null (a warning under Zend, a SIGSEGV once self-built).
         $this->currentTypeParams = [];
+        $this->currentTypeBounds = [];
         if (isset($this->classTable[$decl->name])) {
             $this->currentTypeParams = $this->classTable[$decl->name]->typeParams;
+            $this->currentTypeBounds = $this->classTable[$decl->name]->typeParamBounds;
         }
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         // Property-default stores (`public int $c = 7` → `$this->c = 7`),

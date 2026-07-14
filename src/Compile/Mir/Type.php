@@ -57,8 +57,11 @@ final class Type
      * integer path for `+` / `.` / echo (which silently printed a pointer or a
      * double's bit pattern).
      *
-     * A typevar must never be allowed to degrade to `cell` — that would box the
-     * hot path, which is the erasure this feature exists to remove.
+     * An UNBOUND `T` erases to a tagged `cell`: nothing is known about it, so the
+     * value must carry its own type at runtime. A BOUNDED `T of Animal` erases to
+     * `obj<Animal>` instead — a raw pointer, no boxing — because the bound already
+     * says what the value representationally IS. That is why a bound is more than
+     * an analyzer's check here: it changes the emitted code.
      */
     public const KIND_TYPEVAR = 'typevar';
 
@@ -104,6 +107,38 @@ final class Type
     public static function string_(): self { return new self(self::KIND_STRING); }
     public static function unknown(): self { return new self(self::KIND_UNKNOWN); }
     public static function closure(): self { return new self(self::KIND_CLOSURE); }
+
+    /**
+     * A callable with its signature known — `callable(int): string`.
+     *
+     * The signature rides in {@see $typeArgs} — the return type first, then the
+     * parameters. NOT in {@see $element}: many consumers read `element` to mean
+     * "this is a container", and a closure carrying one there segfaults them.
+     * `typeArgs` is a compile-time-only payload nothing else inspects.
+     *
+     * Same representation as a bare closure (a struct pointer); the payload only
+     * lets an invoke site type its RESULT concretely instead of taking the
+     * uniform tagged-cell return of a dynamically-dispatched callable.
+     *
+     * @param self[] $params
+     */
+    public static function closureOf(?self $ret, array $params): self
+    {
+        $sig = [];
+        $sig[] = $ret ?? self::unknown();
+        foreach ($params as $p) { $sig[] = $p; }
+        return new self(self::KIND_CLOSURE, typeArgs: $sig);
+    }
+
+    /** The declared return type of a `callable(…): R`, or null for a bare callable. */
+    public function closureReturn(): ?self
+    {
+        if ($this->kind !== self::KIND_CLOSURE) { return null; }
+        if ($this->typeArgs === []) { return null; }
+        $r = $this->typeArgs[0];
+        if ($r->kind === self::KIND_UNKNOWN) { return null; }
+        return $r;
+    }
 
     public static function vec(self $element): self
     {
@@ -165,10 +200,17 @@ final class Type
         return new self(self::KIND_OBJ, class: $class);
     }
 
-    /** The `T` of a `@template T` — see {@see KIND_TYPEVAR}. */
-    public static function typeVar(string $name): self
+    /**
+     * The `T` of a `@template T` — see {@see KIND_TYPEVAR}.
+     *
+     * `$bound` is the upper bound of `@template T of Animal`, carried in
+     * {@see $element}. It is not a mere check: it tells the compiler what a `T`
+     * value REPRESENTATIONALLY is, so an unbound `T` (which must erase to a boxed
+     * cell, since nothing is known about it) becomes a raw `obj<Animal>` pointer.
+     */
+    public static function typeVar(string $name, ?self $bound = null): self
     {
-        return new self(self::KIND_TYPEVAR, class: $name);
+        return new self(self::KIND_TYPEVAR, element: $bound, class: $name);
     }
 
     public function isTypeVar(): bool
@@ -245,7 +287,13 @@ final class Type
         // consumer a raw i64 and it silently takes the integer path (printing a
         // pointer, or a double's bit pattern) — the bug this feature exists to
         // remove.
-        if ($this->kind === self::KIND_TYPEVAR) { return self::cell(); }
+        if ($this->kind === self::KIND_TYPEVAR) {
+            // A BOUNDED `T of Animal` is known to be an object, so it erases to
+            // that object — a raw pointer, no boxing. Only a wholly unknown `T`
+            // needs the tagged cell.
+            if ($this->element !== null) { return $this->element; }
+            return self::cell();
+        }
         if ($this->kind === self::KIND_ARRAY && $this->hasTypeVar()) {
             return new self(
                 self::KIND_ARRAY,

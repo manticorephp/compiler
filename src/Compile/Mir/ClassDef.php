@@ -72,6 +72,21 @@ final class ClassDef
      *  @var array<string, Type> */
     public array $genericReturns = [];
 
+    /** `@template T of Animal` — the upper bound of a type parameter. Not a check:
+     *  a bounded `T` erases to the BOUND (a raw pointer) instead of a tagged cell.
+     *  @var array<string, Type> */
+    public array $typeParamBounds = [];
+
+    /** `@template T = int` — the type a parameter takes when a use site names none.
+     *  @var array<string, Type> */
+    public array $typeParamDefaults = [];
+
+    /** The arguments this class passes to its generic PARENT, from
+     *  `/** @extends Base<T> *\/`. May itself mention this class's own type
+     *  parameters — climbing the chain re-maps them.
+     *  @var Type[] */
+    public array $parentTypeArgs = [];
+
     /** Whether this class carries a dynamic-property bag. */
     public function usesBag(): bool
     {

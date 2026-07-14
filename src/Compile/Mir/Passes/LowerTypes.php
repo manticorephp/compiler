@@ -140,7 +140,16 @@ trait LowerTypes
         // lowercasing — a type-parameter name is case-sensitive. `T[]` and
         // `array<string, T>` reach this through the recursive element/value
         // lowering below, so they need no separate case.
-        if ($this->isTypeParam($hint)) { return Type::typeVar($hint); }
+        if ($this->isTypeParam($hint)) {
+            // A BOUNDED `T of Animal` carries its bound, so it erases to a raw
+            // obj<Animal> pointer rather than a tagged cell.
+            return Type::typeVar($hint, $this->currentTypeBounds[$hint] ?? null);
+        }
+        // `callable(int): string` — a callable with its signature spelled out.
+        // Checked BEFORE the union / intersection branches below, whose `|` and
+        // `&` scans would otherwise trip over a union INSIDE the parameter list.
+        $sig = $this->lowerCallableSignature($hint);
+        if ($sig !== null) { return $sig; }
         // `mixed` and union types (`int|string`, DNF `(A&B)|C`) become a tagged
         // cell (NaN-boxed i64): the value carries its runtime type tag. A purely
         // NUMERIC union (`int|float`) is a NUMERIC cell — arithmetic promotes by
@@ -601,10 +610,108 @@ trait LowerTypes
                 $j = $j + 1;
             }
             $name = \substr($doc, $start, $j - $start);
-            if ($name !== '') { $out[] = $name; }
+            if ($name !== '') {
+                $out[] = $name;
+                // `@template T of Animal` / `@template T = int` — an upper bound or
+                // a default, on the same line. A bound is not a mere check here: a
+                // bounded T erases to the BOUND (a raw pointer) rather than a cell.
+                $j = $this->skipDocSpaces($doc, $j, $n);
+                $kw = $this->readDocWord($doc, $j, $n);
+                if ($kw === 'of' || $kw === '=') {
+                    $j = $this->skipDocSpaces($doc, $j + \strlen($kw), $n);
+                    $k = $j;
+                    $j = $this->readDocTypeEnd($doc, $j, $n);
+                    $hint = \substr($doc, $k, $j - $k);
+                    if ($hint !== '') {
+                        if ($kw === 'of') { $this->pendingTypeBounds[$name] = $hint; }
+                        else { $this->pendingTypeDefaults[$name] = $hint; }
+                    }
+                }
+            }
             $i = $j;
         }
         return $out;
+    }
+
+    /** Advance past spaces/tabs. */
+    private function skipDocSpaces(string $doc, int $j, int $n): int
+    {
+        while ($j < $n) {
+            $c = \substr($doc, $j, 1);
+            if ($c !== ' ' && $c !== "\t") { break; }
+            $j = $j + 1;
+        }
+        return $j;
+    }
+
+    /** The word at `$j` (empty at a line end). */
+    private function readDocWord(string $doc, int $j, int $n): string
+    {
+        $k = $j;
+        while ($k < $n) {
+            $c = \substr($doc, $k, 1);
+            if ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r") { break; }
+            $k = $k + 1;
+        }
+        return \substr($doc, $j, $k - $j);
+    }
+
+    /** End of a type token, keeping `<…>` together (`array<string, int>`). */
+    private function readDocTypeEnd(string $doc, int $j, int $n): int
+    {
+        $depth = 0;
+        while ($j < $n) {
+            $c = \substr($doc, $j, 1);
+            if ($c === '<') { $depth = $depth + 1; }
+            elseif ($c === '>') { if ($depth > 0) { $depth = $depth - 1; } }
+            elseif ($depth === 0
+                && ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r")) {
+                break;
+            }
+            $j = $j + 1;
+        }
+        return $j;
+    }
+
+    /**
+     * `callable(A, B): R` / `Closure(A): R`, with the parameter and return types
+     * carried on the closure type. Null when `$hint` is not that shape.
+     *
+     * A bare `callable` / `Closure` keeps the plain closure type — it says nothing
+     * about the signature, so an invoke through it still returns a tagged cell.
+     */
+    private function lowerCallableSignature(?string $hint): ?Type
+    {
+        if ($hint === null) { return null; }
+        $h = \ltrim($hint, '?\\');
+        $lp = \strpos($h, '(');
+        if ($lp === false || $lp <= 0) { return null; }
+        $head = \strtolower(\substr($h, 0, $lp));
+        if ($head !== 'callable' && $head !== 'closure') { return null; }
+        $n = \strlen($h);
+        $depth = 0;
+        $i = $lp;
+        $rp = -1;
+        while ($i < $n) {
+            $c = \substr($h, $i, 1);
+            if ($c === '(') { $depth = $depth + 1; }
+            elseif ($c === ')') {
+                $depth = $depth - 1;
+                if ($depth === 0) { $rp = $i; break; }
+            }
+            $i = $i + 1;
+        }
+        if ($rp < 0) { return null; }
+        $inner = \substr($h, $lp + 1, $rp - $lp - 1);
+        $params = \trim($inner) === '' ? [] : $this->lowerTypeArgs($inner);
+        $ret = null;
+        $j = $this->skipDocSpaces($h, $rp + 1, $n);
+        if ($j < $n && \substr($h, $j, 1) === ':') {
+            $j = $this->skipDocSpaces($h, $j + 1, $n);
+            $rt = \trim(\substr($h, $j, $n - $j));
+            if ($rt !== '') { $ret = $this->lowerTypeHint($rt); }
+        }
+        return Type::closureOf($ret, $params);
     }
 
     private function docTagType(?string $doc, string $tag, string $varName): ?string
@@ -638,6 +745,14 @@ trait LowerTypes
                 $c = \substr($doc, $j, 1);
                 if ($c === '<') { $depth = $depth + 1; }
                 elseif ($c === '>') { if ($depth > 0) { $depth = $depth - 1; } }
+                // Paren-aware too, and a `callable(int): int` continues PAST the
+                // colon: the type token is `callable(int): int`, not the prefix up
+                // to the first space. Truncating it left `callable(int):`, which
+                // resolved to no type at all — and once a docblock became the type
+                // of an un-hinted param, that segfaulted instead of being ignored.
+                elseif ($c === '(') { $depth = $depth + 1; }
+                elseif ($c === ')') { if ($depth > 0) { $depth = $depth - 1; } }
+                elseif ($depth === 0 && $c === ':') { $j = $this->skipDocSpaces($doc, $j + 1, $n); continue; }
                 elseif ($depth === 0
                     && ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r")) {
                     break;

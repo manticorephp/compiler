@@ -138,6 +138,19 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentTypeParams = [];
 
+    /** Filled by {@see docTemplates}: type-param name → its `of X` bound hint.
+     *  @var array<string, string> */
+    private array $pendingTypeBounds = [];
+
+    /** Filled by {@see docTemplates}: type-param name → its `= X` default hint.
+     *  @var array<string, string> */
+    private array $pendingTypeDefaults = [];
+
+    /** Bounds of the class being lowered, as types — so `T` lowers to a typevar
+     *  that KNOWS what it is bounded by, and erases into it.
+     *  @var array<string, Type> */
+    private array $currentTypeBounds = [];
+
     /**
      * Late-static-binding scope while lowering a method body — the *called*
      * class for `static::`. Equals `$currentLowerClass` for the normal copy;
