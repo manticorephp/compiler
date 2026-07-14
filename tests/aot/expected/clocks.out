@@ -1,0 +1,12 @@
+time-sane
+mf-float
+mf-agrees
+2
+ms-frac
+ms-secs
+hr-int
+hr-monotonic
+2
+hr-nsrange
+req-time
+req-float

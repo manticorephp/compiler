@@ -35,7 +35,15 @@ fi
 # NEW findings. Keep each with a one-line reason.
 #   assoc_missing.php — typed-int assoc read of a missing key yields 0, not
 #     null/"" (a typed-slot i64 can't carry null without boxing).
-is_known_divergence() { case "$1" in assoc_missing.php) return 0;; esac; return 1; }
+#   superglobals_env.php — $_ENV is populated; php's default variables_order
+#     ("GPCS") leaves it empty. A native binary has no php.ini to flip.
+is_known_divergence() {
+    case "$1" in
+        assoc_missing.php) return 0;;
+        superglobals_env.php) return 0;;
+    esac
+    return 1
+}
 
 match=0 diff=0 compile=0 phpskip=0
 declare -a DIFFS COMPILES

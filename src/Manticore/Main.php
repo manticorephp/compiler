@@ -107,8 +107,12 @@ function is_directory(string $path): bool {
  * under Zend.
  */
 function dprint(string $s): void {
-    write(2, $s, \strlen($s));
-    write(2, "\n", 1);
+    // error_log, NOT the libc `write` binding: the binding's body is EMPTY, so
+    // every diagnostic vanished whenever the compiler ran under Zend (the cold
+    // seed, tools/compile_files_mir.php) and a real "compile failed: <reason>"
+    // surfaced as a bare "compile error (MIR)". error_log is a codegen builtin
+    // natively AND a php function under Zend — the message survives both.
+    \error_log($s);
 }
 
 // ── Driver entry point ────────────────────────────────────────────────
@@ -1271,8 +1275,13 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
             || \strpos($source, 'explode(') !== false) { $useArrayFns = true; }
         // CLI prelude (__mc_argv / getopt): gate on a $argv / $argc reference
         // or a getopt( call. Over-injection is harmless (dead-stripped).
+        // $_SERVER / $_ENV are BUILT by the CLI prelude (__mc_server / __mc_env),
+        // so they gate it too. The other superglobals seed an empty array literal
+        // and need nothing.
         if (\strpos($source, 'argv') !== false
             || \strpos($source, 'argc') !== false
+            || \strpos($source, '_SER' . 'VER') !== false
+            || \strpos($source, '_ENV') !== false
             || \strpos($source, 'getopt(') !== false) { $useCli = true; }
         if (\strpos($source, 'print_r(') !== false) { $usePrintR = true; }
         // Stack traces: only instrument calls when the program actually queries

@@ -175,6 +175,25 @@ final class InferTypes implements Pass
      *  fn — ineligible for cell-merge promotion (the cell-key store/access path
      *  does not yet render a NaN-boxed key, so a merge-cell key mis-dispatches). */
     private array $keyUsedLocals = [];
+    /** @var array<string,bool> locals whose kind CHANGES across a loop back-edge
+     *  (`$x = 0; while (…) { $x = getenv("H"); }`) — promoted to a cell for the
+     *  WHOLE function. The if/else shadow-store trick can't work here: a read at
+     *  the top of iteration 2 already sees the slot the body wrote, so the slot
+     *  must be self-describing from its FIRST store, not merely after the loop.
+     *  Discovered during inference (a call's kind isn't knowable to a pre-scan),
+     *  so a promotion re-runs the function — see inferFunction. */
+    private array $cellLoopLocals = [];
+    /** @var array<string,bool> locals a loop widens int→float (`$f = 1;` then
+     *  `$f = 2.5` in the body). Same story, cheaper answer: the slot is a FLOAT,
+     *  not a cell, so the pre-loop int store rides a sitofp ({@see floatLocals},
+     *  which the syntactic scan only fills for a self-referential `$s += 1.5`). */
+    private array $floatLoopLocals = [];
+    /** Set when a loop promoted a NEW name this round (re-infer needed). */
+    private bool $loopPromoGrew = false;
+    /** @var array<string,bool> "fn|param" already boxed at entry — a promoted
+     *  PARAM arrives raw, so the box-back store is prepended once, not per round. */
+    private array $cellLoopBoxedParams = [];
+
     /** Set when scanCtorPropContainers retypes a property (triggers re-infer). */
     private bool $ctorPropChanged = false;
 
@@ -1025,10 +1044,14 @@ final class InferTypes implements Pass
     }
 
     /** `$name = box($name)`: a StoreLocal typed cell whose value is the concrete
-     *  read of $name — the (store cell + value concrete) combo EmitLlvm boxes. */
-    private function boxBackStore(string $name, Type $concrete): StoreLocal
+     *  read of $name — the (store cell + value concrete) combo EmitLlvm boxes.
+     *  `$slot` overrides the destination type: a float slot coerces the same way
+     *  (store float + int value → sitofp), which is what a loop-widened numeric
+     *  PARAM needs at entry. */
+    private function boxBackStore(string $name, Type $concrete, ?Type $slot = null): StoreLocal
     {
-        return new StoreLocal($name, new LoadLocal($name, $concrete), Type::cell());
+        $dest = $slot ?? Type::cell();
+        return new StoreLocal($name, new LoadLocal($name, $concrete), $dest);
     }
 
     /** A scalar value kind (or an already-boxed cell) — boxable into a slot. */
@@ -1184,8 +1207,36 @@ final class InferTypes implements Pass
         $out = $this->mergeLocals($saved, $body);
         foreach ($saved as $name => $st) {
             if (!isset($body[$name])) { continue; }
-            $w = $this->widenNumeric($st, $body[$name]);
-            if ($w !== null) { $out[$name] = $w; }
+            $bt = $body[$name];
+            $w = $this->widenNumeric($st, $bt);
+            if ($w !== null) {
+                $out[$name] = $w;
+                // int slot, float body: the merged type is float, but the PRE-LOOP
+                // `$f = 1` store already emitted a raw i64 — a float read then
+                // bitcasts it to a denormal. Record the name so the re-infer types
+                // the whole slot float and that store rides a sitofp.
+                if ($w->kind === Type::KIND_FLOAT && $st->kind === Type::KIND_INT
+                    && !isset($this->floatLoopLocals[$name])
+                    && !isset($this->assocLocals[$name])) {
+                    $this->floatLoopLocals[$name] = true;
+                    $this->loopPromoGrew = true;
+                }
+                continue;
+            }
+            // A NON-numeric kind change across the back-edge (`$x = 0;` then
+            // `$x = getenv(…)` in the body) has no raw i64 repr that both sides
+            // agree on: unionWith collapses it to `unknown`, which reads back as
+            // a raw bit pattern (a float printed as its bits, a string as its
+            // pointer). Promote the NAME to a cell — it carries its own tag —
+            // and re-run the function so EVERY store to it boxes.
+            if ($st->kind === $bt->kind) { continue; }
+            if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
+            if (isset($this->keyUsedLocals[$name])) { continue; }
+            $out[$name] = Type::cell();
+            if (!isset($this->cellLoopLocals[$name])) {
+                $this->cellLoopLocals[$name] = true;
+                $this->loopPromoGrew = true;
+            }
         }
         return $out;
     }

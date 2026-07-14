@@ -97,6 +97,7 @@ final class LowerFromAst implements Pass
     use LowerTypes;
     use LowerReify;
     use LowerTypeDefs;
+    use LowerSuperglobals;
 
     public const NAME = 'lower-from-ast';
 
@@ -658,6 +659,9 @@ final class LowerFromAst implements Pass
             returnType: Type::int_(),
             body: $mainBody,
         ));
+        // Last: the superglobal binding scans EVERY function body (including
+        // __main and the closures), so it needs the complete function list.
+        $this->injectSuperglobals($module);
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -1734,6 +1738,9 @@ final class LowerFromAst implements Pass
     /** `$t op= v` → `$t = ($t op v)`. */
     private function lowerCompoundAssign(\Parser\Ast\CompoundAssign $expr): Node
     {
+        // `$GLOBALS += […]` is a WRITE of the whole array (a php 8.1 fatal), so
+        // say so — lowering the target as a read below would blame the read.
+        if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite(); }
         $read = $this->lowerExpr($expr->target);
         $value = $this->lowerExpr($expr->value);
         // `$t ??= v` → `$t = $t ?? v`.
@@ -1820,8 +1827,10 @@ final class LowerFromAst implements Pass
         return new ArrayLit($elems, Type::unknown());
     }
 
-    private function lowerArrayAccess(\Parser\Ast\ArrayAccess $expr): ArrayAccess_
+    private function lowerArrayAccess(\Parser\Ast\ArrayAccess $expr): Node
     {
+        $g = $this->lowerGlobalsRead($expr);
+        if ($g !== null) { return $g; }
         $arr = $this->lowerExpr($expr->array);
         $idx = $expr->index === null
             ? new NullConst(Type::null_())

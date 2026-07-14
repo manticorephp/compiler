@@ -243,6 +243,75 @@ trait EmitLlvmModule
             $out .= "  %e = load ptr, ptr %g\n";
             $out .= "  ret ptr %e\n}\n";
         }
+        if ($this->rt->needsEnviron) {
+            // The process environment ($_SERVER / $_ENV). `environ` is the
+            // POSIX `char **`: a NULL-terminated vector of "KEY=VALUE" strings,
+            // provided by the C runtime of an EXECUTABLE on both Linux and
+            // Darwin (a shared library on Darwin would need _NSGetEnviron —
+            // we only ever emit executables). Count first, then index: that
+            // mirrors the argc/argv pair above, so the PHP-side builder walks
+            // a bounded range and never has to null-check a raw pointer.
+            $out .= "@environ = external global ptr\n";
+            $out .= "define i64 @manticore_env_count() {\nentry:\n";
+            $out .= "  %e = load ptr, ptr @environ\n";
+            $out .= "  br label %loop\n";
+            $out .= "loop:\n";
+            $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+            $out .= "  %g = getelementptr inbounds ptr, ptr %e, i64 %i\n";
+            $out .= "  %p = load ptr, ptr %g\n";
+            $out .= "  %z = icmp eq ptr %p, null\n";
+            $out .= "  br i1 %z, label %done, label %next\n";
+            $out .= "next:\n";
+            $out .= "  %i1 = add i64 %i, 1\n";
+            $out .= "  br label %loop\n";
+            $out .= "done:\n";
+            $out .= "  ret i64 %i\n}\n";
+            $out .= "define ptr @manticore_env_at(i64 %i) {\nentry:\n";
+            $out .= "  %e = load ptr, ptr @environ\n";
+            $out .= "  %g = getelementptr inbounds ptr, ptr %e, i64 %i\n";
+            $out .= "  %p = load ptr, ptr %g\n";
+            $out .= "  ret ptr %p\n}\n";
+        }
+        if ($this->rt->needsClock) {
+            // time / microtime / hrtime, all off one clock_gettime. `struct
+            // timespec` is { i64 tv_sec, i64 tv_nsec } on every 64-bit Linux and
+            // Darwin, so a [2 x i64] alloca IS the struct — no per-OS layout.
+            //
+            // The argument is a LOGICAL clock (0 wall, else monotonic), because
+            // CLOCK_MONOTONIC is 1 on Linux but 6 on Darwin. The OS is NOT
+            // detected at compile time: `host_os()` rides the libc uname/calloc
+            // bindings, whose bodies are EMPTY under the Zend seed — calling it
+            // from an emitter is a hard crash the moment the seed compiles a
+            // source that uses this builtin. So try Linux's id and fall back to
+            // Darwin's: a wrong id is a clean EINVAL that leaves the buffer
+            // untouched (verified on Darwin: id 1 → rc -1), never garbage.
+            //
+            // Seconds fold into the nanosecond count here, so the PHP side does
+            // one division instead of reaching into the struct.
+            $out .= "declare i32 @clock_gettime(i32, ptr)\n";
+            $out .= "define i64 @manticore_clock_ns(i64 %logical) {\nentry:\n";
+            $out .= "  %ts = alloca [2 x i64], align 8\n";
+            $out .= "  %mono = icmp ne i64 %logical, 0\n";
+            $out .= "  br i1 %mono, label %m1, label %wall\n";
+            $out .= "wall:\n";
+            $out .= "  %rcw = call i32 @clock_gettime(i32 0, ptr %ts)\n";
+            $out .= "  br label %read\n";
+            $out .= "m1:\n";
+            $out .= "  %rc1 = call i32 @clock_gettime(i32 1, ptr %ts)\n";
+            $out .= "  %bad = icmp ne i32 %rc1, 0\n";
+            $out .= "  br i1 %bad, label %m6, label %read\n";
+            $out .= "m6:\n";
+            $out .= "  %rc6 = call i32 @clock_gettime(i32 6, ptr %ts)\n";
+            $out .= "  br label %read\n";
+            $out .= "read:\n";
+            $out .= "  %sp = getelementptr inbounds [2 x i64], ptr %ts, i64 0, i64 0\n";
+            $out .= "  %s = load i64, ptr %sp\n";
+            $out .= "  %np = getelementptr inbounds [2 x i64], ptr %ts, i64 0, i64 1\n";
+            $out .= "  %n = load i64, ptr %np\n";
+            $out .= "  %sn = mul i64 %s, 1000000000\n";
+            $out .= "  %t = add i64 %sn, %n\n";
+            $out .= "  ret i64 %t\n}\n";
+        }
         if ($this->rt->needsStdStreams) {
             // STDIN/STDOUT/STDERR resolve to libc's own FILE* globals so a
             // fwrite(STDOUT, ...) shares the SAME buffer as echo (printf →
