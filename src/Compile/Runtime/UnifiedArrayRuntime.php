@@ -53,6 +53,7 @@ final class UnifiedArrayRuntime
     {
         $this->emitAllocTagged();
         $this->emitAlloc();
+        $this->emitAllocHashed();
         $this->emitRetainVariant('__mir_array_retain', '');
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
@@ -1242,6 +1243,46 @@ final class UnifiedArrayRuntime
         $next->br($head);
         $hit->ret($hit->load(Type::i64(), $this->entryAddr($hit, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET)));
         $retzero->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_array_alloc_hashed(cap) -> ptr` — allocate an array that is ALREADY
+     * hashed, with room for `cap` entries. Header zeroed, capacity set, rc = 1,
+     * flags = HASHED, no bucket index yet (built lazily, exactly as after a
+     * promote).
+     *
+     * A literal whose keys are string CONSTANTS (`["id" => …, "name" => …]`)
+     * knows its shape at compile time, but was built packed and then promoted by
+     * its first `set_str` — a second allocation, a copy of everything inserted so
+     * far, and a free, on every construction. Allocating hashed up front lands in
+     * the identical end state with one allocation. {@see emitPromote} stays the
+     * path for an array that only turns out to need hashing at runtime.
+     */
+    private function emitAllocHashed(): void
+    {
+        $fn = $this->module->func('__mir_array_alloc_hashed', Type::ptr());
+        $capIn = $fn->param(Type::i64(), 'cap');
+        $b = $fn->block('entry');
+        // Match promote's floor of 4 so a small literal has the same headroom.
+        $neg = $b->icmp('slt', $capIn, Value::int(Type::i64(), 4));
+        $cap = $b->select($neg, Value::int(Type::i64(), 4), $capIn);
+        $bytes = $b->add(
+            $b->mul($cap, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        $arr = $b->call('__mir_alloc_array_tagged', Type::ptr(), [$bytes]);
+        $b->call('memset', Type::ptr(), [
+            $arr,
+            Value::int(Type::i32(), 0),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        ]);
+        $b->store($cap, $this->hdr($b, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $b->store(Value::int(Type::i64(), 1), $this->hdr($b, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+        $b->store(
+            Value::int(Type::i64(), MemoryAbi::ARRAY_FLAG_HASHED),
+            $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET),
+        );
+        $b->ret($arr);
     }
 
     /**

@@ -251,6 +251,15 @@ trait EmitLlvmArrays
         $arena = $al->allocKind === \Compile\Mir\AllocationKind::ARENA;
         $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
         if ($arena) { $this->rt->needsArena = true; $this->arena->vecAllocated = true; }
+        // A literal that carries a string key is hashed the moment its first
+        // `set_str` runs — building it packed only to have that first insert
+        // promote it costs a second allocation, a copy, and a free. Allocate it
+        // hashed up front instead; the end state is identical. An arena literal
+        // never gets here (arena needs an int key, {@see InferAllocKind::
+        // isArenaEligibleType}), so the two paths cannot collide.
+        if (!$arena && $this->litHasStringKey($al)) {
+            $allocFn = '__mir_array_alloc_hashed';
+        }
         $slot = $this->ssa->allocReg();
         $out  = '  ' . $slot . " = alloca ptr\n";
         $init = $this->ssa->allocReg();
@@ -299,6 +308,24 @@ trait EmitLlvmArrays
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * True when a literal element carries a key that is statically a string —
+     * the array is then certain to be hashed, so it can be allocated that way.
+     * A spread contributes no key of its own (its own keys decide at runtime),
+     * and an int / unknown key does not force hashing.
+     */
+    private function litHasStringKey(ArrayLit $al): bool
+    {
+        foreach ($al->elements as $el) {
+            if ($el->key === null) { continue; }
+            if ($el->key->kind === Node::KIND_STRING_CONST
+                || $el->key->type->kind === Type::KIND_STRING) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
