@@ -128,7 +128,8 @@ trait InferCalls
             || $n === '__mir_env_at') {
             return Type::obj('Ffi\\Ptr');
         }
-        if ($n === '__mir_argc' || $n === '__mir_env_count') { return Type::int_(); }
+        if ($n === '__mir_argc' || $n === '__mir_env_count'
+            || $n === '__mir_clock_ns') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'

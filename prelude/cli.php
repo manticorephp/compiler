@@ -56,9 +56,6 @@ function __mc_env(): array
  * adds on top of it (php.net/reserved.variables.server). Values are mixed —
  * argv is an ARRAY, argc an int — so the nested array is boxed to a cell, the
  * same way getopt's repeated option is.
- *
- * REQUEST_TIME / REQUEST_TIME_FLOAT are NOT here: the compiler has no time()
- * builtin yet. A program reading them gets null instead of a wrong number.
  * @return array<string, mixed>
  */
 function __mc_server(): array
@@ -78,6 +75,10 @@ function __mc_server(): array
     $out['DOCUMENT_ROOT'] = '';
     $out['argv'] = __mir_to_cell($argv);
     $out['argc'] = __mir_argc();
+    // php stamps the request time once, at startup; here that IS process start,
+    // since __main seeds $_SERVER before any user statement runs.
+    $out['REQUEST_TIME'] = \time();
+    $out['REQUEST_TIME_FLOAT'] = \microtime(true);
     return $out;
 }
 

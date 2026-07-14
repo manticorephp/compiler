@@ -241,6 +241,7 @@ trait LowerFns
             || $n === '__mir_stdin' || $n === '__mir_stdout' || $n === '__mir_stderr'
             || $n === '__mir_argc' || $n === '__mir_argv_at' || $n === '__mir_to_cell'
             || $n === '__mir_env_count' || $n === '__mir_env_at'
+            || $n === '__mir_clock_ns'
             || $n === 'strtolower' || $n === 'strtoupper' || $n === 'strpos'
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'

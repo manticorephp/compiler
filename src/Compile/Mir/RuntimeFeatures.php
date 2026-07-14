@@ -66,6 +66,10 @@ final class RuntimeFeatures
      *  `environ` accessors. Off by default — a program that never asks pays
      *  nothing. */
     public bool $needsEnviron = false;
+
+    /** The program asks the clock (time/microtime/hrtime): emit the
+     *  clock_gettime wrapper. */
+    public bool $needsClock = false;
     public bool $needsStdStreams = false;
     public bool $needsStrpos = false;
     public bool $needsStrExplode = false;
