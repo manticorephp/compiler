@@ -397,7 +397,13 @@ function __mir_str_increment(mixed $v): mixed
 {
     if (\is_int($v)) { return $v + 1; }
     if (\is_float($v)) { return $v + 1; }
-    $s = (string)$v;
+    // Unboxing a cell hands back the CALLER's buffer, BORROWED — the `+1`
+    // convention retains only what a callee keeps. This function mutates
+    // (`$s[$i] = …`), and `__mir_str_set_char` writes in place when it is the sole
+    // owner, so without an explicit copy the caller's own string changes under it:
+    // `$out[] = $col; $col++;` in a loop filled the array with one aliased value.
+    // PHP's `$s = (string)$v` IS a copy; make that copy real.
+    $s = \substr((string)$v, 0);
     if (\is_numeric($s)) {
         if (\strpos($s, ".") !== false || \strpos($s, "e") !== false || \strpos($s, "E") !== false) {
             return ((float)$s) + 1.0;

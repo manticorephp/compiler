@@ -207,19 +207,43 @@ final class RuntimeLibrary
         $out .= "  %ok = xor i1 %oob, true\n";
         $out .= "  ret i1 %ok\n}\n";
 
-        // `$s[$i] = $c` — returns a NEW headered string with byte %ix set to the
-        // first byte of %chs. Growing past the end pads the gap with spaces
-        // (PHP). Negative offset counts from the end; still-negative → no-op copy.
+        // `$s[$i] = $c` — byte %ix becomes the first byte of %chs. Growing past
+        // the end pads the gap with spaces (PHP). Negative offset counts from the
+        // end; still-negative → no-op copy.
+        //
+        // SOLE OWNER + IN RANGE → mutate in place. Copying on every write made a
+        // byte-at-a-time loop QUADRATIC: filling a 160 KB buffer allocated 20 GB
+        // (php stays flat at 25 MB), because each write memcpy'd the whole string
+        // and the arena keeps every copy alive. Same sole-ownership test
+        // `__mir_str_append` already uses — rc@-8 == 1, so a shared string (rc>1)
+        // or an immortal literal (rc == -1) still copies, and PHP's value
+        // semantics hold.
         $out .= "\ndefine ptr @__mir_str_set_char(ptr %s, i64 %i, ptr %chs) {\nentry:\n";
         $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %neg = icmp slt i64 %i, 0\n";
         $out .= "  %iadj = add i64 %i, %len\n";
         $out .= "  %ix = select i1 %neg, i64 %iadj, i64 %i\n";
         $out .= "  %bad = icmp slt i64 %ix, 0\n";
-        $out .= "  br i1 %bad, label %nop, label %go\n";
+        $out .= "  br i1 %bad, label %nop, label %tryinplace\n";
         $out .= "nop:\n";
         $out .= "  %cpy = call ptr @__mir_str_new(ptr %s, i64 %len)\n";
         $out .= "  ret ptr %cpy\n";
+        $out .= "tryinplace:\n";
+        $out .= "  %rcp = getelementptr i8, ptr %s, i64 -8\n";
+        $out .= "  %rc = load i64, ptr %rcp\n";
+        $out .= "  %sole = icmp eq i64 %rc, 1\n";
+        $out .= "  %fits = icmp slt i64 %ix, %len\n";     // no growth: no realloc
+        $out .= "  %canmut = and i1 %sole, %fits\n";
+        $out .= "  br i1 %canmut, label %inplace, label %go\n";
+        $out .= "inplace:\n";
+        $out .= "  %ipd = getelementptr inbounds i8, ptr %s, i64 %ix\n";
+        $out .= "  %ipb = load i8, ptr %chs\n";
+        $out .= "  store i8 %ipb, ptr %ipd\n";
+        // Content changed under the same ptr → invalidate the cached hash, or an
+        // assoc keyed by this string would look it up under its old contents.
+        $out .= "  %iph = getelementptr inbounds i8, ptr %s, i64 " . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $out .= "  store i64 0, ptr %iph\n";
+        $out .= "  ret ptr %s\n";
         $out .= "go:\n";
         $out .= "  %ix1 = add i64 %ix, 1\n";
         $out .= "  %grow = icmp sgt i64 %ix1, %len\n";
