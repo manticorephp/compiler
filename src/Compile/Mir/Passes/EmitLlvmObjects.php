@@ -64,20 +64,30 @@ trait EmitLlvmObjects
         // property must default to a NaN-boxed NULL, not raw 0 — else a read /
         // var_dump dispatches on tag 0 (an invalid cell) and faults.
         if ($cd !== null) {
-            $pi = 0;
             foreach ($cd->propertyNames as $pname) {
+                // Byte offset from the class's own layout, and a store of exactly
+                // the slot's WIDTH. This used to stride `i64` units — one word per
+                // property — which wrote four words into a class whose four narrow
+                // slots occupy four BYTES, corrupting the heap past the allocation.
+                // The layout has one owner; nothing may re-derive it.
                 $pGep = $this->ssa->allocReg();
-                $out .= '  ' . $pGep . ' = getelementptr inbounds i64, ptr '
-                      . $obj . ', i64 ' . (string)($pi + $hdr) . "\n";
+                $out .= '  ' . $pGep . ' = getelementptr inbounds i8, ptr '
+                      . $obj . ', i64 ' . (string)$cd->propertyOffset($pname) . "\n";
                 $ptype = $cd->propertyTypes[$pname] ?? null;
                 // A self-describing cell prop (scalar-nullable OR a `mixed` prop
                 // only ever holding scalars) defaults to a boxed NULL so a read
                 // dispatches by tag, not on a raw 0. A cell-array backing slot
-                // (`$__s`, ever stored an array) stays raw 0.
+                // (`$__s`, ever stored an array) stays raw 0. A narrow slot can
+                // never be a cell — a NaN-boxed tag does not fit in a byte — so it
+                // simply zeroes.
+                $w = $cd->propertyWidth($pname);
+                if ($w !== 8) {
+                    $out .= '  store i' . (string)($w * 8) . ' 0, ptr ' . $pGep . "\n";
+                    continue;
+                }
                 $initVal = $this->cellPropBoxed($ptype, $pname)
                     ? '-3659174697238528' : '0';
                 $out .= '  store i64 ' . $initVal . ', ptr ' . $pGep . "\n";
-                $pi = $pi + 1;
             }
             // Dynamic-property bag starts null (assoc_set allocates lazily).
             if ($cd->usesBag()) {
@@ -489,10 +499,13 @@ trait EmitLlvmObjects
         $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
               . $objPtr . ', i64 ' . (string)$offset . "\n";
-        $loaded = $this->ssa->allocReg();
-        $out .= '  ' . $loaded . ' = load i64, ptr ' . $gep . "\n";
-        $this->lastValue = $loaded;
-        $this->lastValueType = 'i64';
+        $out .= $this->emitSlotLoad(
+            $gep,
+            $this->slotHolder($pa->object, $pa->property),
+            $pa->property,
+            $n->type,
+        );
+        $loaded = $this->lastValue;
         if ($n->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $loaded . " to double\n";
@@ -596,8 +609,8 @@ trait EmitLlvmObjects
         $gep = $this->ssa->allocReg();
         $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$off . "\n";
-        $ld = $this->ssa->allocReg();
-        $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
+        $out .= $this->emitSlotLoad($gep, $cd, $prop, $cd->propertyTypes[$prop] ?? Type::unknown());
+        $ld = $this->lastValue;
         $out .= $this->boxRawValue($ld, $cd->propertyTypes[$prop] ?? null);
         return $out;
     }
@@ -949,7 +962,12 @@ trait EmitLlvmObjects
         $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
               . $objPtr . ', i64 ' . (string)$offset . "\n";
-        $out .= '  store i64 ' . $val . ', ptr ' . $gep . "\n";
+        $out .= $this->emitSlotStore(
+            $gep,
+            $this->slotHolder($n->object, $n->property),
+            $n->property,
+            $val,
+        );
         $this->lastValue = $val;
         $this->lastValueType = 'i64';
         return $out;
@@ -2306,6 +2324,91 @@ trait EmitLlvmObjects
      * though such a fallback only stays correct for single-property
      * classes.
      */
+    /**
+     * The ClassDef whose layout an `$obj->prop` access resolves against, or null.
+     * The same walk `propertyOffset` does — the width of a slot and the offset of
+     * a slot must never be read from different classes.
+     */
+    private function slotHolder(Node $objExpr, string $prop): ?ClassDef
+    {
+        $cls = $objExpr->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return null; }
+        if ($this->classes[$cls]->propertyOffset($prop) >= 0) {
+            return $this->classes[$cls];
+        }
+        $sub = $this->subclassPropHolder($cls, $prop);
+        return $sub;
+    }
+
+    /**
+     * Load a property slot at its declared WIDTH, widened back to the carrier.
+     *
+     * A full-word slot is a plain `load i64` — what every property was before
+     * `#[TypeDef(repr: …)]` could narrow one. A narrow slot loads exactly its own
+     * bytes and widens: sign-extending for `i8`/`i16`/`i32`, zero-extending for
+     * the unsigned reprs, and `fpext`ing an `f32` back to the double the rest of
+     * the compiler works in. The VALUE the program sees is identical either way —
+     * only the bytes on the heap differ, which is the whole point.
+     */
+    private function emitSlotLoad(string $gep, ?ClassDef $cd, string $prop, Type $t): string
+    {
+        $w = $cd !== null ? $cd->propertyWidth($prop) : 8;
+        if ($w === 8) {
+            $reg = $this->ssa->allocReg();
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return '  ' . $reg . ' = load i64, ptr ' . $gep . "\n";
+        }
+        // ALWAYS hands back i64 BITS, exactly as a full-word load does — every
+        // caller then applies its own coercion (a float property bitcasts, an
+        // object property masks the tag). An f32 that arrived here as a `double`
+        // would be bitcast a second time and come out as garbage.
+        if ($cd->propertyFloat32[$prop] ?? false) {
+            $f = $this->ssa->allocReg();
+            $d = $this->ssa->allocReg();
+            $bits64 = $this->ssa->allocReg();
+            $this->lastValue = $bits64;
+            $this->lastValueType = 'i64';
+            return '  ' . $f . ' = load float, ptr ' . $gep . "\n"
+                 . '  ' . $d . ' = fpext float ' . $f . " to double\n"
+                 . '  ' . $bits64 . ' = bitcast double ' . $d . " to i64\n";
+        }
+        $bits = (string)($w * 8);
+        $nreg = $this->ssa->allocReg();
+        $ext = $this->ssa->allocReg();
+        $op = ($cd->propertySigned[$prop] ?? false) ? 'sext' : 'zext';
+        $this->lastValue = $ext;
+        $this->lastValueType = 'i64';
+        return '  ' . $nreg . ' = load i' . $bits . ', ptr ' . $gep . "\n"
+             . '  ' . $ext . ' = ' . $op . ' i' . $bits . ' ' . $nreg . " to i64\n";
+    }
+
+    /**
+     * Store into a property slot at its declared WIDTH. The value arrives as the
+     * carrier (i64, or a double for a float) and is truncated to the slot.
+     *
+     * Truncation is not a loss the program can observe: a `#[TypeDef]` value can
+     * only have come from its own normaliser, which is what put it in range.
+     */
+    private function emitSlotStore(string $gep, ?ClassDef $cd, string $prop, string $val): string
+    {
+        $w = $cd !== null ? $cd->propertyWidth($prop) : 8;
+        if ($w === 8) {
+            return '  store i64 ' . $val . ', ptr ' . $gep . "\n";
+        }
+        if ($cd->propertyFloat32[$prop] ?? false) {
+            $d = $this->ssa->allocReg();
+            $f = $this->ssa->allocReg();
+            return '  ' . $d . ' = bitcast i64 ' . $val . " to double\n"
+                 . '  ' . $f . ' = fptrunc double ' . $d . " to float\n"
+                 . '  store float ' . $f . ', ptr ' . $gep . "\n";
+        }
+        $bits = (string)($w * 8);
+        $t = $this->ssa->allocReg();
+        return '  ' . $t . ' = trunc i64 ' . $val . ' to i' . $bits . "\n"
+             . '  store i' . $bits . ' ' . $t . ', ptr ' . $gep . "\n";
+    }
+
     private function propertyOffset(Node $objExpr, string $prop): int
     {
         $cls = $objExpr->type->class ?? '';
@@ -2340,6 +2443,18 @@ trait EmitLlvmObjects
             if ($off >= 0) { return $off; }
         }
         return -1;
+    }
+
+    /** The subclass whose layout `subclassPropOffset` borrows — same walk, so the
+     *  slot's WIDTH is read from the very class its OFFSET came from. */
+    private function subclassPropHolder(string $base, string $prop): ?ClassDef
+    {
+        foreach ($this->classes as $cd) {
+            if ($cd->name === $base) { continue; }
+            if (!$this->classExtends($cd->name, $base)) { continue; }
+            if ($cd->propertyOffset($prop) >= 0) { return $cd; }
+        }
+        return null;
     }
 
     /** Whether class `$name` transitively extends `$base`. */

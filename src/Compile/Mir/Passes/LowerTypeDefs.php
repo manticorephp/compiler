@@ -93,6 +93,36 @@ trait LowerTypeDefs
         return Type::int_();
     }
 
+    /**
+     * Bytes a `repr` occupies in a SLOT — the whole point of declaring one.
+     *
+     * In a register a narrow type buys nothing (a register is 64 bits either way),
+     * so this is only ever asked of an object's property slot, where it is the
+     * difference between a class of four bytes and a class of thirty-two.
+     * 8 for a repr this compiler does not narrow, and for no repr at all.
+     */
+    private function reprWidth(string $repr): int
+    {
+        if ($repr === 'i8'  || $repr === 'u8')  { return 1; }
+        if ($repr === 'i16' || $repr === 'u16') { return 2; }
+        if ($repr === 'i32' || $repr === 'u32' || $repr === 'f32') { return 4; }
+        return 8;
+    }
+
+    /** Whether a `repr` SIGN-extends when it is widened back to the carrier. */
+    private function reprSigned(string $repr): bool
+    {
+        return $repr === 'i8' || $repr === 'i16' || $repr === 'i32' || $repr === 'i64';
+    }
+
+    /** The slot width of a property, from the `#[TypeDef]` it is declared as. */
+    private function typeDefSlotWidth(Type $t): int
+    {
+        $cls = $t->typeDefClass();
+        if ($cls === null) { return 8; }
+        return $this->reprWidth($this->typeDefReprs[$cls] ?? '');
+    }
+
     /** The carrier a `repr` demands, or '' when the repr is unknown. */
     private function reprCarrier(string $repr): string
     {

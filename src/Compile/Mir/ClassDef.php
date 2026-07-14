@@ -170,18 +170,31 @@ final class ClassDef
         return $this->isStruct ? 0 : 16;
     }
 
+    /** Slots narrower than a word: property name → 1 / 2 / 4, from the `repr` of
+     *  the `#[TypeDef]` it is declared as. Filled at lowering, where the TypeDef
+     *  table is in scope. Absent → a full 8-byte word.
+     *  @var array<string, int> */
+    public array $propertyWidths = [];
+
+    /** Narrow slots that must SIGN-extend on load (`i8`/`i16`/`i32`, not `u*`).
+     *  @var array<string, bool> */
+    public array $propertySigned = [];
+
+    /** Narrow slots holding an `f32` — a float, not an integer.
+     *  @var array<string, bool> */
+    public array $propertyFloat32 = [];
+
     /**
-     * Width in bytes of `$prop`'s slot.
+     * Width in bytes of `$prop`'s slot: 8 unless the property is declared as a
+     * `#[TypeDef]` whose `repr` is narrower.
      *
-     * Every slot is 8 bytes today — a raw i64, or a NaN-boxed cell, or a pointer.
-     * This exists so that the ONE place a slot's size is decided is a function
-     * rather than a `8 *` scattered through the emitter: narrowing a
-     * `#[TypeDef(repr: 'u8')]` property to a single byte then becomes a change
-     * HERE, not thirty edits across six files.
+     * This is the ONE place a slot's size is decided — the emitter never assumes
+     * eight — which is what makes `repr` an honest promise rather than a validated
+     * label. See {@see Passes\LowerTypeDefs}.
      */
     public function propertyWidth(string $prop): int
     {
-        return 8;
+        return $this->propertyWidths[$prop] ?? 8;
     }
 
     /** Byte offset of `$prop` within an instance, or -1 if unknown. */

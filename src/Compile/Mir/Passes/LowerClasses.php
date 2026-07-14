@@ -306,6 +306,23 @@ trait LowerClasses
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
         $cd->propertyReadonly = $roProps;
+        // Narrow slots: a property declared as a `#[TypeDef(repr: 'u8')]` occupies
+        // ONE byte, not a word. This is where `repr` stops being a validated label
+        // and starts costing what it says. In a register a narrow type buys nothing
+        // — a register is 64 bits either way — so a slot is the only place the
+        // promise can be kept.
+        foreach ($names as $pname) {
+            $pt = $types[$pname] ?? null;
+            if ($pt === null) { continue; }
+            $tdCls = $pt->typeDefClass();
+            if ($tdCls === null) { continue; }
+            $repr = $this->typeDefReprs[$tdCls] ?? '';
+            $w = $this->reprWidth($repr);
+            if ($w === 8) { continue; }
+            $cd->propertyWidths[$pname] = $w;
+            $cd->propertySigned[$pname] = $this->reprSigned($repr);
+            $cd->propertyFloat32[$pname] = $repr === 'f32';
+        }
         $cd->typeParams = $this->currentTypeParams;
         $cd->typeParamBounds = $this->currentTypeBounds;
         foreach ($this->pendingTypeDefaults as $tp => $hint) {
