@@ -188,6 +188,13 @@ trait LowerClasses
                 }
             }
             if ($prop->isStatic) {
+                // A REIFIED specialization declares NO static of its own: PHP has
+                // ONE static slot per class, shared by every binding of it, and a
+                // spec that registered its own would silently give each binding a
+                // private counter. Registering nothing makes the declaring-class
+                // walk (staticPropDeclClass) climb straight to the origin, which
+                // owns the one slot. {@see LowerReify}
+                if ($this->isReifiedDecl($decl)) { continue; }
                 $spNames[] = $prop->name;
                 $spTypes[] = $pt;
                 $this->staticProps[$decl->name . '::' . $prop->name] = true;
@@ -286,6 +293,9 @@ trait LowerClasses
         $this->currentLowerClass = $decl->name;
         foreach ($decl->properties as $prop) {
             if (!$prop->isStatic) { continue; }
+            // The origin already owns the one slot (see above) — a second global
+            // per specialization is exactly the bug.
+            if ($this->isReifiedDecl($decl)) { continue; }
             $def = $prop->default !== null ? $this->lowerExpr($prop->default) : new IntConst(0, Type::int_());
             $this->module->addGlobalCell('@' . $this->sanitizeSym($decl->name . '__sp_' . $prop->name), $def);
         }

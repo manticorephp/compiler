@@ -593,6 +593,10 @@ final class LowerFromAst implements Pass
         // Bodies for the reified classes. Last: a body can itself bind a new
         // specialization (`@var Box<int>` inside a method), and the drain loops.
         $this->lowerReifiedMethods($module);
+        // Now that every body exists, a PROPERTY holding a bound container can be
+        // typed as the specialization — decided from the stores the module really
+        // contains. {@see LowerReify::reifyProperties}
+        $this->reifyProperties($module);
         // The class table is now complete, so descendant sets are known —
         // materialise the late-static-binding specialisations.
         $this->emitLsbSpecializations($module);

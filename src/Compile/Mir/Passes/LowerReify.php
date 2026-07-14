@@ -279,6 +279,13 @@ trait LowerReify
         return $prop->visibility;
     }
 
+    /** Whether this declaration is a specialization's copy (read through a typed
+     *  param — T5 offset). */
+    private function isReifiedDecl(\Parser\Ast\ClassDecl $decl): bool
+    {
+        return isset($this->reifySubst[$decl->name]);
+    }
+
     /** The `@template` parameters of an already-registered class. @return string[] */
     private function classTypeParams(string $cls): array
     {
@@ -542,6 +549,121 @@ trait LowerReify
             returnType: $base->returnType,
             body: new \Compile\Mir\Block($stmts, Type::void()),
         );
+    }
+
+    /**
+     * A PROPERTY that holds a bound container — `/** @var Box<float> *\/ private
+     * Box $box;` — typed as the specialization, so `$this->box->get(0)` is a
+     * direct raw call instead of an erased dispatch through a thunk.
+     *
+     * The same rule as everywhere else applies: a slot may only name a spec if
+     * the compiler also OWNS what goes into it. Here that is decided from the
+     * lowered MIR rather than guessed from the source — every store to the
+     * property in the whole module must be a `new Box(...)`. Anything the pass
+     * cannot attribute (a store through an untyped receiver, a dynamic
+     * `$o->$name =`, a `clone with`) makes it give up and leave the property
+     * erased, which is always correct.
+     *
+     * Runs last, when every body — including the specializations' — is lowered.
+     */
+    private function reifyProperties(Module $module): void
+    {
+        if ($this->reifyOrigin === []) { return; }
+        foreach ($this->classTable as $cls => $cd) {
+            // A specialization's own properties are already concrete.
+            if ($cd->originClass !== '') { continue; }
+            foreach ($cd->propertyTypes as $p => $pt) {
+                if ($pt->kind !== Type::KIND_OBJ || $pt->typeArgs === []) { continue; }
+                $spec = $this->reifiedClassFor($pt->class ?? '', $pt->typeArgs);
+                if ($spec === '') { continue; }
+                $stores = $this->attributableStores($module, $cls, $p, $pt->class ?? '');
+                if ($stores === []) { continue; }
+                $cd->propertyTypes[$p] = Type::obj($spec);
+                foreach ($stores as $st) {
+                    $st->value = new NewObj($spec, $this->storedNew($st)->args, Type::obj($spec));
+                    $st->type = Type::obj($spec);
+                }
+            }
+        }
+    }
+
+    /**
+     * Every store to `$cls::$prop` in the module, but ONLY if all of them are a
+     * `new $origin(...)` and every one of them can be attributed to a receiver of
+     * a known class. Returns [] the moment anything is unaccounted for — the
+     * property then stays erased.
+     *
+     * @return StoreProperty[]
+     */
+    private function attributableStores(Module $module, string $cls, string $prop, string $origin): array
+    {
+        $out = [];
+        foreach ($module->functions as $fn) {
+            // `$this` is still typed `unknown` here (InferTypes types it later), so
+            // a store through it is attributed by the function that owns it — the
+            // method of `$cls`, whose lowered name is `<cls>__<method>`.
+            $inOwnMethod = \strncmp($fn->name, $cls . '__', \strlen($cls) + 2) === 0;
+            foreach ($this->flattenNodes($fn->body) as $n) {
+                // A dynamic write or a `clone with` could put anything in the slot
+                // and is not worth modelling — give up on the whole property.
+                if ($n instanceof \Compile\Mir\StoreDynProp_) { return []; }
+                if ($n instanceof \Compile\Mir\Clone_) {
+                    foreach ($n->withProps as $pair) {
+                        if ($pair->name === $prop) { return []; }
+                    }
+                }
+                if (!($n instanceof \Compile\Mir\StoreProperty)) { continue; }
+                if ($n->property !== $prop) { continue; }
+                $mine = $this->storeTargetsClass($n, $cls, $inOwnMethod);
+                // Not ours (a same-named property on an unrelated class).
+                if ($mine === 0) { continue; }
+                // Ours, or unattributable — an untyped receiver outside the class
+                // could still BE the class, so it cannot be ruled out.
+                if ($mine < 0) { return []; }
+                $v = $n->value;
+                if (!($v instanceof NewObj) || $v->class !== $origin) { return []; }
+                $out[] = $n;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Does this store write `$cls`'s slot? 1 = yes, 0 = no (someone else's
+     * same-named property), -1 = cannot tell (the caller must give up).
+     */
+    private function storeTargetsClass(\Compile\Mir\StoreProperty $st, string $cls, bool $inOwnMethod): int
+    {
+        $obj = $st->object;
+        if ($obj instanceof \Compile\Mir\LoadLocal && $obj->name === 'this') {
+            return $inOwnMethod ? 1 : 0;
+        }
+        if ($obj->type->kind === Type::KIND_OBJ) {
+            return ($obj->type->class ?? '') === $cls ? 1 : 0;
+        }
+        return -1;
+    }
+
+    /** Read the NewObj a store carries through a typed local (T5 offset). */
+    private function storedNew(\Compile\Mir\StoreProperty $st): NewObj
+    {
+        return $st->value;
+    }
+
+    /** Every node in a body, flattened via the structural child iterator.
+     *  @return Node[] */
+    private function flattenNodes(Node $root): array
+    {
+        $out = [];
+        $stack = [$root];
+        $guard = 0;
+        while ($stack !== [] && $guard < 2000000) {
+            $guard = $guard + 1;
+            $n = \array_pop($stack);
+            $out[] = $n;
+            foreach (\Compile\Mir\Walk::children($n) as $c) { $stack[] = $c; }
+        }
+        return $out;
     }
 
     /**
