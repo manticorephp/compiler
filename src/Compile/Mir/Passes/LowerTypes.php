@@ -293,6 +293,15 @@ trait LowerTypes
             $gname = \substr($gbase, 0, $glt);
             $ginner = \substr($gbase, $glt + 1, \strlen($gbase) - $glt - 2);
             if (isset($this->classTable[$gname]) || isset($this->knownClassNames[$gname])) {
+                // Stays the ERASED class carrying its binding. A hint does not get
+                // to name a specialization: a hint types a SLOT, and a slot can be
+                // handed an object built somewhere else — an unannotated
+                // `new Box()` is an erased instance, and a slot typed as the
+                // specialization would then read its cells as raw doubles. Only a
+                // site that also owns the CONSTRUCTION may name a spec, which is
+                // the `@var` + `new` pair in LowerStmts. Every other use of a
+                // specialized object goes through the erased type, which is sound:
+                // dispatch routes it to the erased thunks (see LowerReify).
                 return Type::objOf($gname, $this->lowerTypeArgs($ginner));
             }
         }
@@ -517,7 +526,27 @@ trait LowerTypes
         if ($hint === null && $docType !== null && $docType !== '') {
             return $docType;
         }
+        // `Box $b` + `@param Box<float> $b` — the SAME class, and the docblock
+        // additionally carries the binding. PHP has no syntax for the arguments,
+        // so this is the only way to write them next to a real hint, and taking
+        // the bare hint threw the binding away: `T` erased to a plain (non-numeric)
+        // cell, and `$b->get(0) + $b->get(1)` on a Box<float> then took the INTEGER
+        // arithmetic path and printed 0. The docblock does not widen the type here,
+        // it refines it — prefer it.
+        if ($hint !== null && $docType !== null && $this->bindsSameClass($hint, $docType)) {
+            return $docType;
+        }
         return $hint;
+    }
+
+    /** Whether `$docType` is `$hint` with generic arguments spelled out —
+     *  `Box` vs `Box<float>`, modulo a leading `?` / `\`. */
+    private function bindsSameClass(string $hint, string $docType): bool
+    {
+        $lt = \strpos($docType, '<');
+        if ($lt === false || $lt <= 0) { return false; }
+        $base = \ltrim(\substr($docType, 0, $lt), '?\\');
+        return $base !== '' && $base === \ltrim($hint, '?\\');
     }
 
     /** Whether `$t` is a `@template` parameter of the class being lowered (`T`, `T[]`). */
@@ -544,6 +573,21 @@ trait LowerTypes
      * `$varName` is non-empty) or `@return X[]` / `@var X[]` (empty
      * `$varName`). Returns the raw token (`PropertyDecl[]`) or null.
      */
+    /**
+     * The substitution every member of `$decl` lowers under: what its generic
+     * TRAITS are bound to, plus — for a reified class — what its OWN type
+     * parameters are bound to. Both are copies of a body, so in both the binding
+     * substitutes at the source and no type variable survives.
+     *
+     * @return array<string, Type> type-param name → the type it is bound to
+     */
+    private function memberTypeSubst(\Parser\Ast\ClassDecl $decl): array
+    {
+        $out = $this->traitTypeSubst($decl);
+        foreach ($this->reifySubst[$decl->name] ?? [] as $tp => $t) { $out[$tp] = $t; }
+        return $out;
+    }
+
     /**
      * What a class binds its generic traits to — `/** @use Items<string> *\/ use Items;`.
      *

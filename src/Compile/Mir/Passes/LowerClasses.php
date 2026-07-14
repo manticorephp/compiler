@@ -115,8 +115,10 @@ trait LowerClasses
         $savedTypeBounds = $this->currentTypeBounds;
         $savedTypeSubst = $this->currentTypeSubst;
         // A generic TRAIT's parameter is bound HERE, at the copy — see
-        // {@see traitTypeSubst}. Set before any member hint is lowered.
-        $this->currentTypeSubst = $this->traitTypeSubst($decl);
+        // {@see traitTypeSubst}. A REIFIED class's own parameter is bound the
+        // same way ({@see LowerReify}): the copy IS the binding, so `T` lowers
+        // straight to the concrete type and never becomes a type variable.
+        $this->currentTypeSubst = $this->memberTypeSubst($decl);
         $this->pendingTypeBounds = [];
         $this->pendingTypeDefaults = [];
         $this->currentTypeParams = $this->docTemplates($decl->docComment);
@@ -362,7 +364,7 @@ trait LowerClasses
         // dereferences null (a warning under Zend, a SIGSEGV once self-built).
         $this->currentTypeParams = [];
         $this->currentTypeBounds = [];
-        $this->currentTypeSubst = $this->traitTypeSubst($decl);
+        $this->currentTypeSubst = $this->memberTypeSubst($decl);
         if (isset($this->classTable[$decl->name])) {
             $this->currentTypeParams = $this->classTable[$decl->name]->typeParams;
             $this->currentTypeBounds = $this->classTable[$decl->name]->typeParamBounds;

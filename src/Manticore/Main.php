@@ -1223,6 +1223,7 @@ function cmd_dump_ast(array $args): int {
 function lower_module(array $sources): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
+    $docs = [];
     foreach ($sources as $source) {
         try {
             $program = Parser::parseSource($source);
@@ -1232,6 +1233,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         }
         foreach ($program->statements as $s) { $stmts[] = $s; }
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
+        foreach ($program->docComments as $d) { $docs[] = $d; }
     }
     $useVarDump = false;
     $useArrayClasses = false;
@@ -1283,7 +1285,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
             || \strpos($source, '->get' . 'Line(') !== false
             || \strpos($source, '->get' . 'File(') !== false) { $useBacktrace = true; }
     }
-    $program = new \Parser\Ast\Program($stmts, '', $aliases);
+    $program = new \Parser\Ast\Program($stmts, '', $aliases, $docs);
     // The pipeline throws RuntimeException on an unsupported construct.
     // Catch it so the compiler reports cleanly (and, in the self-hosted
     // binary, does NOT crash on an uncaught throw — the top-level uncaught

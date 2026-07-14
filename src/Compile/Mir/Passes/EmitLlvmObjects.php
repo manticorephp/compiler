@@ -1129,9 +1129,22 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * The name PHP must see for a class. A REIFIED generic specialization
+     * (`Box$of$float`) reports its origin — `Box` — everywhere a name is
+     * observable: `get_class()`, `::class`, var_dump. The spec name is an
+     * internal artefact of the layout, never a PHP-visible identity.
+     */
+    private function displayClassName(string $cls): string
+    {
+        $cd = $this->classes[$cls] ?? null;
+        if ($cd === null) { return $cls; }
+        return $cd->display();
+    }
+
     private function emitClassName(ClassName_ $n): string
     {
-        $cls = $n->operand->type->class ?? '';
+        $cls = $this->displayClassName($n->operand->type->class ?? '');
         $id = $this->pool->intern($cls);
         $this->lastValue = $this->strLitId($id);
         $this->lastValueType = 'ptr';
@@ -1725,6 +1738,13 @@ trait EmitLlvmObjects
         foreach ($this->classes as $cd) {
             $nm = $cd->name;
             if ($nm === $class) { continue; }
+            // classIsA also follows the ORIGIN edge, so a reified specialization
+            // counts as a descendant of the generic class it specializes — which
+            // is what puts it in the dispatch switch of an erased receiver.
+            if ($cd->originClass !== '' && $this->classIsA($nm, $class)) {
+                $result[] = $nm;
+                continue;
+            }
             $c = $cd->parent;
             while ($c !== '') {
                 if ($c === $class) { $result[] = $nm; break; }
@@ -1781,6 +1801,26 @@ trait EmitLlvmObjects
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->vdResult = $loaded;
         return $out;
+    }
+
+    /**
+     * The entry point of `$class::$method` a caller that knows only the erased
+     * origin must use. For a reified specialization that is its erased thunk
+     * (raw double in, tagged cell out); for every other class, the symbol it was
+     * already given. Falls back to the raw entry if no thunk was emitted —
+     * specializing did not move the ABI, so there is nothing to adapt.
+     */
+    private function erasedEntry(string $class, string $static, string $method, string $full): string
+    {
+        // The receiver's static type IS the specialization — the site speaks its
+        // raw representation, so call the raw entry. This is also what keeps the
+        // thunk itself from recursing: its body calls `$this->m()` on a
+        // spec-typed `$this`, which lands here.
+        if ($class === $static) { return $full; }
+        $cd = $this->classes[$class] ?? null;
+        if ($cd === null || $cd->originClass === '') { return $full; }
+        $thunk = $class . '__' . $method . '$erased';
+        return isset($this->sigs->paramTypes[$thunk]) ? $thunk : $full;
     }
 
     /**
@@ -2087,6 +2127,14 @@ trait EmitLlvmObjects
             $t = $this->resolveMethodClass($c, $mc->method);
             if ($t === '') { $t = $fallback; }
             $full = $this->lsbTarget($t, $mc->method, $c);
+            // A REIFIED specialization reached through its erased origin: this
+            // switch only exists because the receiver's static type is a
+            // SUPERTYPE of the candidate (a spec has no subclasses of its own, so
+            // a spec-typed receiver dispatches monomorphically and never gets
+            // here). The site therefore reads the result — and passes its args —
+            // in the ORIGIN's erased representation, which the spec's raw entry
+            // does not speak. Call its erased thunk instead (see LowerReify).
+            $full = $this->erasedEntry($c, $static, $mc->method, $full);
             // An ABSTRACT method (declared, no emitted body) has no function —
             // an abstract class is never instantiated, so its switch case is
             // dead and would reference an undefined symbol. Drop the candidate.

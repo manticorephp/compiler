@@ -270,8 +270,12 @@ trait LowerPrelude
             $cd = $this->classTable[$cname];
             $props = $cd->propertyNames;
             $pc = (string)\count($props);
+            // A reified specialization reports its ORIGIN's name (`Box`, not
+            // `Box__of__float`) — but is still matched by its OWN name, so the
+            // props read at the specialized (concrete) types. Depth-sorting puts
+            // it before its origin, which is what makes the narrowing land here.
             $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n"
-                . "    echo 'object(" . $cname . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+                . "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
             foreach ($props as $p) {
                 $body = $body . "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
             }

@@ -142,7 +142,15 @@ trait LowerStmts
             if ($stmt->docComment !== null && $lowered instanceof StoreLocal) {
                 $vt = $this->docTagType($stmt->docComment, '@var', $lowered->name);
                 if ($vt === null) { $vt = $this->docTagType($stmt->docComment, '@var', ''); }
-                if ($vt !== null) { $lowered->declaredType = $this->lowerTypeHint($vt); }
+                if ($vt !== null) {
+                    $lowered->declaredType = $this->lowerTypeHint($vt);
+                    // `/** @var Box<float> $b */ $b = new Box();` — the binding is
+                    // written on the SLOT (PHP has no syntax for it on `new`), so
+                    // this is the one place the two meet, and the only one that
+                    // owns BOTH: construct the reified class here, and type the
+                    // slot as it. {@see LowerReify}
+                    $this->reifiedNew($lowered);
+                }
             }
             return $lowered;
         }

@@ -20,5 +20,13 @@ final class Program
         public readonly array $statements,
         public readonly string $namespace = '',
         public readonly array $useAliases = [],
+        /**
+         * Every doc comment in the file, in source order. A generic BINDING
+         * (`@var Box<float> $b`) is only ever written in a docblock, and the
+         * one on a local statement is attached too deep in the tree for a
+         * cheap walk — reification pre-scans this flat list instead.
+         * @var string[]
+         */
+        public readonly array $docComments = [],
     ) {}
 }

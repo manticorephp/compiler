@@ -2024,7 +2024,7 @@ trait EmitLlvmBuiltins
         // is exact, so emit the name literal directly.
         if (\count($cands) <= 1) {
             $out = $this->emitNode($args[0]);
-            $this->lastValue = $this->strLitId($this->pool->intern($cls));
+            $this->lastValue = $this->strLitId($this->pool->intern($this->displayClassName($cls)));
             $this->lastValueType = 'ptr';
             return $out;
         }
@@ -2049,13 +2049,13 @@ trait EmitLlvmBuiltins
             $caseL = $this->ssa->allocLabel('gc.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
             $bodies .= $caseL . ":\n";
-            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($c)) . ', ptr ' . $res . "\n";
+            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($c))) . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endL . "\n";
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $out .= $defL . ":\n";
-        $out .= '  store ptr ' . $this->strLitId($this->pool->intern($cls)) . ', ptr ' . $res . "\n";
+        $out .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cls))) . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();

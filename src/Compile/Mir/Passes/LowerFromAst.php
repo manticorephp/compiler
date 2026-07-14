@@ -95,6 +95,7 @@ final class LowerFromAst implements Pass
     use LowerFns;
     use LowerExprs;
     use LowerTypes;
+    use LowerReify;
 
     public const NAME = 'lower-from-ast';
 
@@ -119,6 +120,20 @@ final class LowerFromAst implements Pass
 
     /** @var array<string, bool> short names declared by 2+ classes (unresolvable) */
     private array $shortClassAmbiguous = [];
+
+    /** Reified generic classes ({@see LowerReify}): spec class name → the generic
+     *  class it specializes (`Box$of$float` → `Box`).
+     *  @var array<string, string> */
+    private array $reifyOrigin = [];
+
+    /** Spec class name → the type-param substitution its members lower under
+     *  (`Box$of$float` → `['T' => float]`).
+     *  @var array<string, array<string, Type>> */
+    private array $reifySubst = [];
+
+    /** Spec classes whose methods are still to be lowered.
+     *  @var array<string, \Parser\Ast\ClassDecl> */
+    private array $reifyMethodQueue = [];
 
     /**
      * Namespace of the class / function whose signature or property
@@ -435,6 +450,12 @@ final class LowerFromAst implements Pass
             }
         }
 
+        // Reify every `Box<float>` the program's docblocks bind. Runs HERE: the
+        // origin classes (and their parents) now exist, and no body has been
+        // lowered yet — so a spec class is already in the class table when a body
+        // first mentions it, and `new Box()` can be pointed at it.
+        $this->reifyPreScan($module);
+
         // Built-in `stdClass`: a bag-only object (dynamic properties),
         // used by `(object)` casts and `json_decode`.
         if (!isset($this->classTable['stdClass'])) {
@@ -569,6 +590,9 @@ final class LowerFromAst implements Pass
         $this->currentTypeParams = [];
             $mainStmts[] = $this->lowerStmt($stmt);
         }
+        // Bodies for the reified classes. Last: a body can itself bind a new
+        // specialization (`@var Box<int>` inside a method), and the drain loops.
+        $this->lowerReifiedMethods($module);
         // The class table is now complete, so descendant sets are known —
         // materialise the late-static-binding specialisations.
         $this->emitLsbSpecializations($module);
@@ -1829,6 +1853,7 @@ final class LowerFromAst implements Pass
     private function lowerPropertyAccess(\Parser\Ast\PropertyAccess $expr): PropertyAccess_
     {
         $obj = $this->lowerExpr($expr->object);
+        $this->checkErasedGenericPropRead($obj, $expr->property);
         return new PropertyAccess_($obj, $expr->property, Type::unknown());
     }
 

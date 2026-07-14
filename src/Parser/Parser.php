@@ -77,6 +77,15 @@ final class Parser
     private array $docCommentByPos = [];
 
     /**
+     * Every doc comment, in source order — the flat list {@see Program::$docComments}
+     * carries. Generic reification pre-scans it for bindings (`Box<float>`), which
+     * are written ONLY in docblocks, including on statements deep inside a body.
+     *
+     * @var string[]
+     */
+    private array $allDocComments = [];
+
+    /**
      * Anonymous-class declarations (`new class { … }`) parsed inline, hoisted
      * to the program's top-level statement list so they register + lower like
      * any class. `$anonClassCounter` makes each synthetic name unique.
@@ -115,6 +124,7 @@ final class Parser
             }
             if ($pendingDoc !== null) {
                 $this->docCommentByPos[(string)count($filtered)] = $pendingDoc;
+                $this->allDocComments[] = $pendingDoc;
                 $pendingDoc = null;
             }
             $filtered[] = $tok;
@@ -144,7 +154,7 @@ final class Parser
         }
         // Capture the file's final namespace + use-aliases context so
         // compile-time short-name resolution can map `Foo` → `Use\Foo`.
-        return new Program($stmts, $this->currentNamespace, $this->useAliases);
+        return new Program($stmts, $this->currentNamespace, $this->useAliases, $this->allDocComments);
     }
 
     // ── Statements ───────────────────────────────────────────────────────────

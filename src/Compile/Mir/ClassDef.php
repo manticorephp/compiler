@@ -81,6 +81,24 @@ final class ClassDef
      *  @var array<string, Type> */
     public array $typeParamDefaults = [];
 
+    /** The generic class this one is a REIFIED specialization of (`Box` for
+     *  `Box$of$float`), or '' for an ordinary class. The specialization also
+     *  carries the origin as its {@see $parent}, which is what makes
+     *  `instanceof Box`, `catch (Box)` and virtual dispatch on a bare `Box`
+     *  receiver keep seeing it — they all walk the parent chain. */
+    public string $originClass = '';
+
+    /** The name PHP must report — `Box` for every `Box$of$T`. `get_class()`,
+     *  `::class` and var_dump print THIS, never the internal spec name. Empty
+     *  for an ordinary class, which is its own display name. */
+    public string $displayName = '';
+
+    /** The name this class reports to PHP (`get_class`, `::class`, var_dump). */
+    public function display(): string
+    {
+        return $this->displayName !== '' ? $this->displayName : $this->name;
+    }
+
     /** The arguments this class passes to its generic PARENT, from
      *  `/** @extends Base<T> *\/`. May itself mention this class's own type
      *  parameters — climbing the chain re-maps them.

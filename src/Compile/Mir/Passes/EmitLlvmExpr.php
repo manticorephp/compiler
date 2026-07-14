@@ -2421,7 +2421,13 @@ trait EmitLlvmExpr
         if ($a->type->kind !== Type::KIND_CELL) { return ''; }
         $pt = $ptypes[$pi] ?? null;
         if ($pt === null) { return ''; }
-        return $this->unboxCellToType($pt);
+        $out = $this->unboxCellToType($pt);
+        // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
+        // leaves a `double` behind (the tag has to be read to get a real value
+        // out of the cell) — carry it over as its bit pattern, or the call site
+        // emits `i64 %d` for a double-typed register and clang rejects the
+        // module. Every other kind already leaves an i64 and this is a no-op.
+        return $out . $this->coerceToI64();
     }
 
     /**

@@ -364,6 +364,13 @@ trait EmitLlvmExceptions
         if ($self !== null) { $ids[] = $self->classId; }
         foreach ($this->classes as $cd) {
             if ($cd->name === $class) { continue; }
+            // A reified specialization is caught by its ORIGIN's name, which the
+            // plain parent walk cannot see once the spec's parent is itself a
+            // specialization (see classIsA).
+            if ($cd->originClass !== '' && $this->classIsA($cd->name, $class)) {
+                $ids[] = $cd->classId;
+                continue;
+            }
             $c = $cd->parent;
             while ($c !== '') {
                 if ($c === $class) { $ids[] = $cd->classId; break; }

@@ -1093,6 +1093,15 @@ final class EmitLlvm implements EmitVisitor
             if ($cd === null) { return false; }
             if ($c === $target) { return true; }
             if (\in_array($target, $cd->interfaces, true)) { return true; }
+            // A REIFIED specialization is-a its ORIGIN, and everything the origin
+            // is: `Box$of$float` answers `instanceof Box`, and `Bag$of$float` —
+            // whose PARENT is the specialized `Base$of$float`, so the plain chain
+            // never reaches `Bag` — answers `instanceof Bag` and `instanceof Base`.
+            // The origin edge is what carries PHP's identity across the layout
+            // split (see LowerReify).
+            if ($cd->originClass !== '' && $this->classIsA($cd->originClass, $target)) {
+                return true;
+            }
             $c = $cd->parent;
         }
         return false;
