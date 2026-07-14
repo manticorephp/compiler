@@ -71,7 +71,61 @@ use Compile\Mir\While_;
  */
 trait InferNodes
 {
+    /**
+     * Infer one function to a fixpoint over the loop-cell promotions. A local a
+     * loop re-kinds is only discovered by inferring the loop (a call's return
+     * kind is invisible to a pre-scan), and the promotion must hold from the
+     * name's FIRST store — so the body is re-inferred with the name seeded as a
+     * cell. Bounded: each round promotes at least one new name, and a promoted
+     * name never demotes, so the set only grows.
+     */
     private function inferFunction(FunctionDef $fn): void
+    {
+        $this->cellLoopLocals = [];
+        $this->floatLoopLocals = [];
+        $rounds = 0;
+        while (true) {
+            $this->loopPromoGrew = false;
+            $this->inferFunctionOnce($fn);
+            $rounds = $rounds + 1;
+            if (!$this->loopPromoGrew || $rounds >= 4) { break; }
+            $this->coercePromotedParams($fn);
+        }
+    }
+
+    /**
+     * A promoted PARAM arrives RAW — the caller passed a concrete int/string, and
+     * nothing in the body converts it before the first read. Prepend one
+     * `$p = box($p)` (cell) / `$p = (float)$p` (widened numeric) at entry: the same
+     * self-coercing store the if/else merge uses. Keyed per fn+param so the
+     * module-level re-infers do not stack copies.
+     */
+    private function coercePromotedParams(FunctionDef $fn): void
+    {
+        foreach ($fn->params as $p) {
+            $isCell = isset($this->cellLoopLocals[$p->name]);
+            $isFloat = !$isCell && isset($this->floatLoopLocals[$p->name])
+                && $p->type->kind === Type::KIND_INT;
+            if (!$isCell && !$isFloat) { continue; }
+            $key = $fn->name . '|' . $p->name;
+            if (isset($this->cellLoopBoxedParams[$key])) { continue; }
+            $this->cellLoopBoxedParams[$key] = true;
+            $slot = $isCell ? Type::cell() : Type::float_();
+            $stmts = [$this->boxBackStore($p->name, $p->type, $slot)];
+            foreach ($fn->body->stmts as $s) { $stmts[] = $s; }
+            $fn->body = new Block($stmts, Type::void());
+        }
+    }
+
+    private function isParamName(FunctionDef $fn, string $name): bool
+    {
+        foreach ($fn->params as $p) {
+            if ($p->name === $name) { return true; }
+        }
+        return false;
+    }
+
+    private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
         $this->localTypes = [];
@@ -188,10 +242,18 @@ trait InferNodes
         // An array local (assoc) is never a float slot.
         $this->floatLocals = [];
         $this->scanFloatLocals($fn->body);
+        // A loop-widened numeric (found by inferring a PREVIOUS round — a plain
+        // `$f = 2.5` in the body, which the syntactic scan above deliberately
+        // ignores) joins the float slots, so its pre-loop int store sitofp's.
+        foreach ($this->floatLoopLocals as $fll => $unused) {
+            $this->floatLocals[$fll] = true;
+        }
         foreach ($this->floatLocals as $fln => $unused) {
-            if (!isset($this->assocLocals[$fln])) {
-                $this->localTypes[$fln] = Type::float_();
-            }
+            if (isset($this->assocLocals[$fln])) { continue; }
+            // A loop-widened PARAM arrives raw int — its slot only becomes float
+            // after the entry sitofp store, exactly as for a cell-promoted one.
+            if (isset($this->floatLoopLocals[$fln]) && $this->isParamName($fn, $fln)) { continue; }
+            $this->localTypes[$fln] = Type::float_();
         }
         $this->genValueType = null;
         $this->genKeyType = null;
@@ -199,6 +261,20 @@ trait InferNodes
         $this->cellMergeLocals = [];
         $this->keyUsedLocals = [];
         $this->scanKeyUsedLocals($fn->body);
+        // LAST, so it wins over every seeding scan above (a float/assoc seed would
+        // otherwise pin a slot the loop already proved polymorphic): a name a loop
+        // re-kinds is a cell from function ENTRY — its reads dispatch by tag
+        // everywhere, not merely after the loop. {@see loopMerge}
+        //
+        // A PARAM is the exception: it arrives raw, so its slot is only a cell
+        // AFTER the entry box-back store ({@see coercePromotedParams}). Seeding it
+        // cell here would type that store's own `box($p)` operand as an
+        // already-boxed cell — the store would copy the raw bits through and the
+        // first read would unbox garbage.
+        foreach ($this->cellLoopLocals as $cln => $unused) {
+            if ($this->isParamName($fn, $cln)) { continue; }
+            $this->localTypes[$cln] = Type::cell();
+        }
         $this->inferNode($fn->body);
         // A function returning a CLOSURE loses the concrete `obj<__closure_N>`
         // class otherwise — an undeclared return is `unknown`, a declared
@@ -414,6 +490,15 @@ trait InferNodes
         // uniformly tagged (a string cell here; an int/float cell after `++`
         // promotes a numeric string). The store NODE typed cell + a concrete value
         // triggers emitStoreLocal's box-back. {@see inferIncDec}
+        //
+        // Same discipline for a local a LOOP re-kinds ({@see loopMerge}): the slot
+        // is polymorphic across the back-edge, so every store boxes and every read
+        // dispatches by tag.
+        if (isset($this->cellLoopLocals[$node->name])) {
+            $this->localTypes[$node->name] = Type::cell();
+            $node->type = Type::cell();
+            return $node->type;
+        }
         if (isset($this->incStrLocals[$node->name])) {
             $this->localTypes[$node->name] = Type::cell();
             $node->type = Type::cell();
@@ -762,7 +847,14 @@ trait InferNodes
         // below unions back the un-narrowed pre-loop map, so it stays body-scoped.
         $this->narrowFromCond($node->cond);
         $this->inferNode($node->body);
-        $this->localTypes = $this->mergeLocals($saved, $this->localTypes);
+        $merged = $this->loopMerge($saved, $this->localTypes);
+        if ($this->localTypesWidened($saved, $merged)) {
+            $this->localTypes = $merged;
+            $this->narrowFromCond($node->cond);
+            $this->inferNode($node->body);
+            $merged = $this->loopMerge($saved, $this->localTypes);
+        }
+        $this->localTypes = $merged;
         return Type::void();
     }
 
@@ -1023,6 +1115,13 @@ trait InferNodes
         return $result;
     }
 
+    /**
+     * `for` — the back-edge merge is {@see loopMerge} (NOT the plain if/else
+     * mergeLocals): a local the body re-kinds must widen numerically or promote
+     * to a cell, and the body is re-inferred under the widened map so the reads
+     * INSIDE it (which see the previous iteration's value) are typed on the
+     * merged slot, not on the pre-loop one. Same discipline as inferForeach.
+     */
     private function inferFor(For_ $node): Type
     {
         if ($node->init !== null) { $this->inferNode($node->init); }
@@ -1030,7 +1129,14 @@ trait InferNodes
         $saved = $this->localTypes;
         $this->inferNode($node->body);
         if ($node->step !== null) { $this->inferNode($node->step); }
-        $this->localTypes = $this->mergeLocals($saved, $this->localTypes);
+        $merged = $this->loopMerge($saved, $this->localTypes);
+        if ($this->localTypesWidened($saved, $merged)) {
+            $this->localTypes = $merged;
+            $this->inferNode($node->body);
+            if ($node->step !== null) { $this->inferNode($node->step); }
+            $merged = $this->loopMerge($saved, $this->localTypes);
+        }
+        $this->localTypes = $merged;
         return Type::void();
     }
 
@@ -1039,7 +1145,14 @@ trait InferNodes
         $saved = $this->localTypes;
         $this->inferNode($node->body);
         $this->inferNode($node->cond);
-        $this->localTypes = $this->mergeLocals($saved, $this->localTypes);
+        $merged = $this->loopMerge($saved, $this->localTypes);
+        if ($this->localTypesWidened($saved, $merged)) {
+            $this->localTypes = $merged;
+            $this->inferNode($node->body);
+            $this->inferNode($node->cond);
+            $merged = $this->loopMerge($saved, $this->localTypes);
+        }
+        $this->localTypes = $merged;
         return Type::void();
     }
 

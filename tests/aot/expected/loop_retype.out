@@ -1,0 +1,10 @@
+for-float: 1.5
+for-string: str
+while-float: 3.5
+dowhile-string: dw
+foreach-float: 2.5
+carried: |1|2.5|2.5
+getenv-in-loop: string
+zero-trip: 7
+param: now-a-string
+param-zero-trip: 9
