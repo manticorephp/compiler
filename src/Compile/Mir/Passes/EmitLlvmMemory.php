@@ -160,9 +160,11 @@ trait EmitLlvmMemory
     {
         $k = $n->kind;
         if ($k === Node::KIND_STORE_ELEMENT) {
-            // assoc store retains by its element type; vec offers no fallback.
-            $fallback = $n->array->type->isAssoc()
-                ? ($n->array->type->element ?? null) : null;
+            // The DESTINATION's element type decides whether the store retains —
+            // for a vec exactly as for an assoc, and ONLY for a raw-repr value
+            // ({@see storeRetainFallback}): a CELL value is NaN-boxed, and its
+            // co-ownership is boxToCell's business, not the element type's.
+            $fallback = $this->storeRetainFallback($n);
             $this->maybeTransfer($n->value, $fallback);
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
             $pcls = $n->object->type->class ?? '';
@@ -195,16 +197,6 @@ trait EmitLlvmMemory
     private function collectElementSharedLocals(Node $n): void
     {
         $k = $n->kind;
-        // A hoisted foreach subject ({@see LowerFromAst::FE_SUBJ_PREFIX}) drops
-        // its BUFFER — that is the leak, one array per call, 56M of them in a
-        // self-build — and never the elements. Iterating a temp container
-        // borrows what is inside it; the caller took the container, not its
-        // contents, and Walk::children hands back arrays whose element refs
-        // belong to the tree.
-        if ($k === Node::KIND_STORE_LOCAL
-            && \str_starts_with($n->name, LowerFromAst::FE_SUBJ_PREFIX)) {
-            $this->frame->elementSharedLocals[$n->name] = true;
-        }
         if ($k === Node::KIND_NEW_OBJ) {
             $this->shareCallArgs($n->args);
         } elseif ($n->type->kind === Type::KIND_OBJ) {
