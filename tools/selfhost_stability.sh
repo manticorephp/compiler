@@ -23,6 +23,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Every rebuild lands in $WORK and is smoke-tested THERE — a bare binary with no
+# lib/ beside it, so its argv0-relative prelude lookup finds nothing. Point it at
+# the canonical dir, exactly as tools/selfhost.sh and bin/build do.
+export MANTICORE_PRELUDE="$ROOT/prelude"
+
 N="${1:-8}"
 
 if [[ ! -x bin/manticore ]]; then
@@ -38,11 +43,14 @@ printf '<?php echo "selfhost-stable\\n";\n' > "$SMOKE"
 # Smoke-test one compiler binary: front-end startup + full compile→run.
 # Returns 0 on success; prints a diagnosis and returns 1 on any failure.
 smoke() {
-    local bin="$1" tag="$2"
-    if ! "$bin" dump-llvm-mir "$SMOKE" >/dev/null 2>&1; then
-        echo "  $tag: FAIL (dump-llvm-mir crashed, rc=$?)"
+    local bin="$1" tag="$2" rc
+    # `if ! cmd; then ... $?` always reads 0 (the negation's status) — capture the
+    # real rc, and show what the compiler said instead of swallowing it.
+    "$bin" dump-llvm-mir "$SMOKE" >/dev/null 2>"$WORK/smoke.err" || {
+        rc=$?
+        echo "  $tag: FAIL (dump-llvm-mir rc=$rc: $(head -1 "$WORK/smoke.err"))"
         return 1
-    fi
+    }
     local out
     "$bin" compile "$SMOKE" -o "$WORK/smoke_bin" >/dev/null 2>&1 || {
         echo "  $tag: FAIL (compile crashed, rc=$?)"; return 1; }
