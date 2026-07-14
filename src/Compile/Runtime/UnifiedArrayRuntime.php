@@ -53,7 +53,10 @@ final class UnifiedArrayRuntime
     {
         $this->emitAllocTagged();
         $this->emitAlloc();
-        $this->emitRetain();
+        $this->emitRetainVariant('__mir_array_retain', '');
+        $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
+        $this->emitRetainVariant('__mir_array_retain_str', 'str');
+        $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
         $this->emitRelease();
         $this->emitIsHashed();
         $this->emitGetInt();
@@ -62,7 +65,10 @@ final class UnifiedArrayRuntime
         $this->emitSetInt();
         $this->emitSetStr();
         $this->emitAppend();
-        $this->emitCow();
+        $this->emitCowVariant('__mir_array_cow', '');
+        $this->emitCowVariant('__mir_array_cow_obj', 'obj');
+        $this->emitCowVariant('__mir_array_cow_str', 'str');
+        $this->emitCowVariant('__mir_array_cow_cell', 'cell');
         $this->emitRefSlot();
         $this->emitRefSlotStr();
         $this->emitValueAt();
@@ -749,13 +755,22 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_array_retain(arr)` — rc += 1. No-op on NULL. Tag-guarded:
-     * a buffer carrying any sentinel other than {@see MemoryAbi::ARRAY_TAG_MAGIC}
-     * at `ptr-8` is not a unified array → bail before touching rc@24.
+     * `__mir_array_retain[_obj|_str|_cell](arr)` — rc += 1. No-op on NULL.
+     * Tag-guarded: a buffer carrying any sentinel other than
+     * {@see MemoryAbi::ARRAY_TAG_MAGIC} at `ptr-8` is not a unified array →
+     * bail before touching rc@24.
+     *
+     * The flavored variants additionally CO-OWN what the matching
+     * {@see emitReleaseVariant} drops — hashed string keys always, element
+     * values per `$valueFlavor`. Retain used to be buffer-only for every array
+     * flavor while release dropped elements, so a second owner of a `Node[]`
+     * (`return $this->stmts;` — the +1 borrow-return convention) dropped every
+     * child on its release without ever having retained one: the tree's nodes
+     * were freed under it. Retain must undo exactly what release does.
      */
-    private function emitRetain(): void
+    private function emitRetainVariant(string $symbol, string $valueFlavor): void
     {
-        $fn = $this->module->func('__mir_array_retain', Type::void());
+        $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
         $entry = $fn->block('entry');
         $cont = $fn->block('cont');
@@ -786,7 +801,46 @@ final class UnifiedArrayRuntime
             $rcAddr = $bump->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::ARRAY_RC_OFFSET)]);
         }
         $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
-        $bump->retVoid();
+
+        // ── co-own exactly what the matching release will drop ──
+        $ret = $fn->block('rt_ret');
+        $len = $bump->load(Type::i64(), $arr);
+        $flags = $bump->load(Type::i64(), $this->hdr($bump, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $isH = $bump->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $iSlot = $bump->alloca(Type::i64(), 'ri');
+        $bump->store(Value::int(Type::i64(), 0), $iSlot);
+        $hhead = $fn->block('rt_hhead');
+        if ($valueFlavor === '') {
+            $bump->brIf($isH, $hhead, $ret);
+        } else {
+            $phead = $fn->block('rt_phead');
+            $pbody = $fn->block('rt_pbody');
+            $bump->brIf($isH, $hhead, $phead);
+            $pi = $phead->load(Type::i64(), $iSlot);
+            $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
+            $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
+            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp');
+            $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
+            $pbody->br($phead);
+        }
+        $hbody = $fn->block('rt_hbody');
+        $hkey  = $fn->block('rt_hkey');
+        $hval  = $fn->block('rt_hval');
+        $hi = $hhead->load(Type::i64(), $iSlot);
+        $hhead->brIf($hhead->icmp('sge', $hi, $len), $ret, $hbody);
+        $kind = $hbody->load(Type::i64(), $this->entryAddr($hbody, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
+        $kp = $hkey->load(Type::ptr(), $this->entryAddr($hkey, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $hkey->call('__mir_rc_retain_str', Type::void(), [$kp]);
+        $hkey->br($hval);
+        if ($valueFlavor !== '') {
+            $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+            $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth');
+        }
+        $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hval->br($hhead);
+
+        $ret->retVoid();
     }
 
     /**
@@ -801,6 +855,7 @@ final class UnifiedArrayRuntime
     private function emitRelease(): void
     {
         $this->emitCellDrop();
+        $this->emitCellRetain();
         $this->emitReleaseVariant('__mir_array_release', '');
         $this->emitReleaseVariant('__mir_array_release_obj', 'obj');
         $this->emitReleaseVariant('__mir_array_release_str', 'str');
@@ -883,6 +938,80 @@ final class UnifiedArrayRuntime
         $p = $b->inttoptr($v, Type::ptr());
         $fn = $flavor === 'str' ? '__mir_rc_release_str' : '__mir_rc_release';
         $b->call($fn, Type::void(), [$p]);
+    }
+
+    /**
+     * Co-own one rc value `v` (i64) as obj / str / cell — the mirror of
+     * {@see emitDropValue}. No-op for ''.
+     *
+     * Guarded on `v > 0xFFFF`, exactly as {@see emitCellDrop} guards its object
+     * payload: a slot whose STATIC element type says obj/string can still hold a
+     * bare scalar at runtime (an erased `array<string,bool>` reaching an _obj
+     * flavor), and an rc helper on a `1` reads its header at address -7. The
+     * release side has always had the same exposure and simply never
+     * dereferenced first; the retain does, so it must guard.
+     */
+    private function emitRetainValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag): Block
+    {
+        if ($flavor === '') { return $b; }
+        if ($flavor === 'cell') { $b->call('__mir_cell_retain', Type::void(), [$v]); return $b; }
+        $fnName = $flavor === 'str' ? '__mir_rc_retain_str' : '__mir_rc_retain';
+        $doit = $fn->block('rv_do_' . $tag);
+        $skip = $fn->block('rv_skip_' . $tag);
+        $b->brIf($b->icmp('ugt', $v, Value::int(Type::i64(), 65535)), $doit, $skip);
+        $p = $doit->inttoptr($v, Type::ptr());
+        $doit->call($fnName, Type::void(), [$p]);
+        $doit->br($skip);
+        return $skip;
+    }
+
+    /**
+     * `__mir_cell_retain(v)` — the exact mirror of {@see emitCellDrop}: co-own
+     * the rc payload NaN-boxed into a cell, with the same tag dispatch and the
+     * same guards (enum ordinal / #[Struct] / closure have no rc header and are
+     * left alone). Used by the cow variants, which must retain precisely what
+     * the matching release variant drops.
+     */
+    private function emitCellRetain(): void
+    {
+        $fn = $this->module->func('__mir_cell_retain', Type::void());
+        $v = $fn->param(Type::i64(), 'v');
+        $entry = $fn->block('entry');
+        $tagged = $fn->block('tagged');
+        $chkobj = $fn->block('chkobj');
+        $chkarr = $fn->block('chkarr');
+        $doarr = $fn->block('doarr');
+        $dostr = $fn->block('dostr');
+        $doobj = $fn->block('doobj');
+        $chkmagic = $fn->block('chkmagic');
+        $doret = $fn->block('doret');
+        $done = $fn->block('done');
+
+        $istag = $entry->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $entry->brIf($istag, $tagged, $done);
+
+        $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $tagged->brIf($tagged->icmp('eq', $nib, Value::int(Type::i64(), 4)), $dostr, $chkobj);
+
+        $sp = $dostr->inttoptr($dostr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
+        $dostr->call('__mir_rc_retain_str', Type::void(), [$sp]);
+        $dostr->br($done);
+
+        $chkobj->brIf($chkobj->icmp('eq', $nib, Value::int(Type::i64(), 8)), $doobj, $chkarr);
+        $op = $doobj->and_($v, Value::int(Type::i64(), 281474976710655));
+        $doobj->brIf($doobj->icmp('ugt', $op, Value::int(Type::i64(), 65535)), $chkmagic, $done);
+        $opp = $chkmagic->inttoptr($op, Type::ptr());
+        $hdr = $chkmagic->load(Type::i64(), $chkmagic->gep(Type::i8(), $opp, [Value::int(Type::i64(), -8)]));
+        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $doret, $done);
+        $doret->call('__mir_rc_retain', Type::void(), [$opp]);
+        $doret->br($done);
+
+        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $done);
+        $ap = $doarr->inttoptr($doarr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
+        $doarr->call('__mir_array_retain', Type::void(), [$ap]);
+        $doarr->br($done);
+
+        $done->retVoid();
     }
 
     private function emitReleaseVariant(string $symbol, string $valueFlavor): void
@@ -1470,15 +1599,22 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_array_cow(arr) -> ptr` — clone when shared (rc > 1), drop
-     * the source rc, return the rc=1 clone; else return arr. Flat
-     * memcpy of header + body (packed cap*8 or hashed cap*24). String
-     * keys / ptr values stay shared (Stage 1 does not deep-retain on
-     * cow; matches the assoc model).
+     * `__mir_array_cow[_obj|_str|_cell](arr) -> ptr` — clone when shared
+     * (rc > 1), drop the source rc, return the rc=1 clone; else return arr.
+     * Flat memcpy of header + body (packed cap*8 or hashed cap*24).
+     *
+     * The clone then DEEP-RETAINS exactly what the matching
+     * {@see emitReleaseVariant} will drop — hashed string KEYS always, and
+     * element VALUES per `$valueFlavor`. Without that the two buffers shared
+     * every key/value at +0 and both owners dropped them: a double release
+     * that only ever corrupted the freelist somewhere far away (the string rc
+     * path had no rc<=0 guard, so nothing named it). It surfaced the moment a
+     * borrowed ASSOC return started being +1-retained, which is what makes a
+     * `$t = $pool->all(); … $pool->intern(x)` pair two real owners.
      */
-    private function emitCow(): void
+    private function emitCowVariant(string $symbol, string $valueFlavor): void
     {
-        $fn = $this->module->func('__mir_array_cow', Type::ptr());
+        $fn = $this->module->func($symbol, Type::ptr());
         $arr = $fn->param(Type::ptr(), 'arr');
         $e = $fn->block('entry');
         $chk = $fn->block('chk');
@@ -1489,9 +1625,11 @@ final class UnifiedArrayRuntime
         $rc = $chk->load(Type::i64(), $rcAddr);
         $chk->brIf($chk->icmp('sle', $rc, Value::int(Type::i64(), 1)), $keep, $clone);
 
+        $len = $clone->load(Type::i64(), $arr);
         $cap = $clone->load(Type::i64(), $this->hdr($clone, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
         $flags = $clone->load(Type::i64(), $this->hdr($clone, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $esz = $clone->select($clone->icmp('ne', $flags, Value::int(Type::i64(), 0)),
+        $isH = $clone->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $esz = $clone->select($isH,
             Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE),
             Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
         $bytes = $clone->add($clone->mul($cap, $esz), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
@@ -1501,7 +1639,45 @@ final class UnifiedArrayRuntime
         $clone->store(Value::int(Type::i64(), 0), $this->hdr($clone, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $clone->store(Value::null(), $this->hdr($clone, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
         $clone->store($clone->sub($rc, Value::int(Type::i64(), 1)), $rcAddr);
-        $clone->ret($copy);
+
+        // ── co-own everything the clone now shares with the source ──
+        $ret = $fn->block('cow_ret');
+        $iSlot = $clone->alloca(Type::i64(), 'ci');
+        $clone->store(Value::int(Type::i64(), 0), $iSlot);
+        $hhead = $fn->block('cow_hhead');
+        if ($valueFlavor === '') {
+            // PACKED scalars share nothing rc'd → done. HASHED: retain keys.
+            $clone->brIf($isH, $hhead, $ret);
+        } else {
+            $phead = $fn->block('cow_phead');
+            $pbody = $fn->block('cow_pbody');
+            $clone->brIf($isH, $hhead, $phead);
+            $pi = $phead->load(Type::i64(), $iSlot);
+            $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
+            $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $copy, $pi));
+            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'cowp');
+            $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
+            $pbody->br($phead);
+        }
+
+        $hbody = $fn->block('cow_hbody');
+        $hkey  = $fn->block('cow_hkey');
+        $hval  = $fn->block('cow_hval');
+        $hi = $hhead->load(Type::i64(), $iSlot);
+        $hhead->brIf($hhead->icmp('sge', $hi, $len), $ret, $hbody);
+        $kind = $hbody->load(Type::i64(), $this->entryAddr($hbody, $copy, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
+        $kp = $hkey->load(Type::ptr(), $this->entryAddr($hkey, $copy, $hi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $hkey->call('__mir_rc_retain_str', Type::void(), [$kp]);
+        $hkey->br($hval);
+        if ($valueFlavor !== '') {
+            $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+            $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'cowh');
+        }
+        $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hval->br($hhead);
+
+        $ret->ret($copy);
         $keep->ret($arr);
     }
 

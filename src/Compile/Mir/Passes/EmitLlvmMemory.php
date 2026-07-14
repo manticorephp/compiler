@@ -126,6 +126,14 @@ trait EmitLlvmMemory
             // entry so the frame co-owns the slot; the matching release
             // then cancels cleanly. (Slot already holds the incoming arg.)
             if (isset($paramNames[$name])) {
+                // A BY-REF param's slot holds the caller's ADDRESS, not the
+                // value. Retaining it rc-bumps whatever sits at (addr-8) — the
+                // caller's stack — and the paired scope-exit release then frees
+                // it: `emit(string &$o) { $o = $o . $s; }` double-released, a
+                // corruption that stayed silent only because the bytes it hit
+                // happened to be harmless. The caller owns the value; the
+                // callee co-owns nothing.
+                if (isset($this->locals->refLocals[$name])) { continue; }
                 if (isset($this->locals->slots[$name])) {
                     $out .= $this->rcRetainSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
                 }
@@ -187,6 +195,16 @@ trait EmitLlvmMemory
     private function collectElementSharedLocals(Node $n): void
     {
         $k = $n->kind;
+        // A hoisted foreach subject ({@see LowerFromAst::FE_SUBJ_PREFIX}) drops
+        // its BUFFER — that is the leak, one array per call, 56M of them in a
+        // self-build — and never the elements. Iterating a temp container
+        // borrows what is inside it; the caller took the container, not its
+        // contents, and Walk::children hands back arrays whose element refs
+        // belong to the tree.
+        if ($k === Node::KIND_STORE_LOCAL
+            && \str_starts_with($n->name, LowerFromAst::FE_SUBJ_PREFIX)) {
+            $this->frame->elementSharedLocals[$n->name] = true;
+        }
         if ($k === Node::KIND_NEW_OBJ) {
             $this->shareCallArgs($n->args);
         } elseif ($n->type->kind === Type::KIND_OBJ) {
@@ -315,20 +333,31 @@ trait EmitLlvmMemory
 
     /**
      * Emit a retain of the rc value held in `$slot`, by the same flavor
-     * vocabulary as {@see rcReleaseSlot}. Buffer-rc only: a vecobj/assocobj
-     * retain bumps the container header (its elements keep their own refs),
-     * mirroring how the paired release decrements the header. Used to
-     * co-own a reassigned param's borrowed incoming value on entry.
+     * vocabulary as {@see rcReleaseSlot}, and — critically — the same DEPTH:
+     * a vecobj/vecstr/veccell retain co-owns the element refs its paired
+     * release drops. Retain used to bump only the container header while
+     * release dropped the elements too, so any second owner of a `Node[]`
+     * freed the tree's children on its release without ever retaining one.
      */
     private function rcRetainSlot(string $slot, string $flavor): string
     {
+        $iv = $this->ssa->allocReg();
+        $out = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
+        return $out . $this->rcRetainReg($iv, $flavor);
+    }
+
+    /** Emit a retain of the rc value carried in the i64 register `$i64reg` —
+     *  the exact mirror of {@see rcReleaseReg}. */
+    private function rcRetainReg(string $i64reg, string $flavor): string
+    {
+        $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
-        else { $fn = '@__mir_array_retain'; } // any vec/assoc flavor → unified buffer rc
-        $iv = $this->ssa->allocReg();
+        elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
+        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
         $pv = $this->ssa->allocReg();
-        $out  = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
-        $out .= '  ' . $pv . ' = inttoptr i64 ' . $iv . " to ptr\n";
+        $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
         return $out;
     }
@@ -465,8 +494,23 @@ trait EmitLlvmMemory
             $this->rt->needsStrRc = true;
             $out .= '  call void @__mir_rc_retain_str(ptr ' . $p . ")\n";
         } elseif ($tk === Type::KIND_ARRAY) {
-            // ONE tag-guarded buffer-rc retain for every array value.
-            $out .= '  call void @__mir_array_retain(ptr ' . $p . ")\n";
+            // Retain to the same DEPTH the paired release drops: a co-owner of
+            // a vec<obj> must co-own the elements, or its release frees refs it
+            // never took (the `Node[]` borrow-return that ate the AST).
+            //
+            // Depth is decided by the DESTINATION's type, never the value's: a
+            // bare-`array` property (`Isset_::$targets`) erases its element, so
+            // retaining by the value's type takes the buffer alone while the
+            // caller — who sees the declared `Node[]` — drops every element.
+            // The fallback IS what the other side assumes.
+            $at = $valueNode->type->kind === Type::KIND_ARRAY ? $valueNode->type : null;
+            if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY
+                && ($at === null || $at->element === null)) {
+                $at = $fallback;
+            }
+            $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
+            if ($flavor === '') { $flavor = 'vec'; }
+            return $out . $this->rcRetainReg($i64reg, $flavor);
         } else {
             $this->rt->needsRc = true;
             $out .= '  call void @__mir_rc_retain(ptr ' . $p . ")\n";

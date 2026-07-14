@@ -1236,6 +1236,10 @@ final class EmitLlvm implements EmitVisitor
             $t = $mo->target;
             if ($t !== null && $t->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $t->name;
+                // A BY-REF param's slot holds an ADDRESS — releasing it frees
+                // the caller's slot, not a value we own. The counterpart of the
+                // suppressed entry retain ({@see initRcObjSlots}).
+                if (isset($this->locals->refLocals[$name])) { return ''; }
                 // Transferred (escaped into a borrowing container): ownership
                 // moved to the container, so skip the scope-exit release.
                 if (isset($this->frame->transferredLocals[$name])) { return ''; }
