@@ -1007,8 +1007,12 @@ trait EmitLlvmModule
     {
         $t = $this->ownershipReturnType($v);
         $tk = $t->kind;
-        $isVec = $t->isVec();
-        if ($tk !== Type::KIND_OBJ && !$isVec
+        // vec AND assoc: both are one rc'd buffer. Testing only isVec() (an
+        // array that is NOT string-keyed) left a borrowed ASSOC return at +0
+        // while every caller assumed +1 — `$t = $p->all(); count($t)` read a
+        // buffer the object still owned and had already freed.
+        $isArr = $t->isVec() || $t->isAssoc();
+        if ($tk !== Type::KIND_OBJ && !$isArr
             && $tk !== Type::KIND_STRING) { return false; }
         if ($tk === Type::KIND_OBJ && ($this->objTypeIsStruct($t)
             || $this->isClosureClass($t->class ?? ''))) { return false; }
@@ -1018,7 +1022,7 @@ trait EmitLlvmModule
             return false; // owned producer — already +1
         }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
-        if ($isVec && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
+        if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
         // A concat is an owned +1; a literal is immortal — neither needs a
         // borrow retain. (rcRetainByType also no-ops these, but short-
         // circuit here so the convention reads clearly.)

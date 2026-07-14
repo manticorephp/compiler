@@ -238,7 +238,7 @@ trait LowerStmts
         return new Block($stmts, Type::void());
     }
 
-    private function lowerForeach(\Parser\Ast\ForeachStmt $stmt): Foreach_
+    private function lowerForeach(\Parser\Ast\ForeachStmt $stmt): Node
     {
         $array = $this->lowerExpr($stmt->expr);
         $keyVar = null;
@@ -254,11 +254,44 @@ trait LowerStmts
             $body = $this->lowerBlockNode($stmt->body);
             $stmts = [$destr];
             foreach ($body->stmts as $s) { $stmts[] = $s; }
-            return new Foreach_($array, $keyVar, $tmp, $stmt->valueByRef, new Block($stmts, Type::void()));
+            return $this->hoistForeachSubject(
+                new Foreach_($array, $keyVar, $tmp, $stmt->valueByRef, new Block($stmts, Type::void())));
         }
         $valueVar = $stmt->value->name;
         $body = $this->lowerBlockNode($stmt->body);
-        return new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body);
+        return $this->hoistForeachSubject(
+            new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body));
+    }
+
+    /**
+     * Bind a CALL subject to a synthetic local: `foreach (f() as $v)` becomes
+     * `$__fe_subj_N = f(); foreach ($__fe_subj_N as $v)`.
+     *
+     * A call hands back a +1 owned value (the return convention), but a subject
+     * written inline is a TEMP with no owner — no store to release at scope
+     * exit, and emitForeach never released it either, so every iteration of an
+     * enclosing loop leaked the whole container. `Walk::children` alone (64 call
+     * sites, all `foreach (Walk::children($n) as $c)`) leaked ~30M arrays in a
+     * self-build. Naming the temp puts it back on the one path that already owns
+     * this: InsertMemoryOps sees a plain owned store and releases it — and a
+     * re-entered foreach releases the previous value on the overwrite.
+     *
+     * Only call kinds are hoisted. A borrow producer (local / property / element
+     * read) is owned elsewhere and must NOT be released here, and an array
+     * literal is arena-confined (the arena reclaims it).
+     */
+    private function hoistForeachSubject(Foreach_ $fe): Node
+    {
+        $k = $fe->array->kind;
+        if ($k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
+            && $k !== Node::KIND_STATIC_CALL && $k !== Node::KIND_INVOKE) {
+            return $fe;
+        }
+        $tmp = LowerFromAst::FE_SUBJ_PREFIX . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $store = new StoreLocal($tmp, $fe->array, Type::void());
+        $fe->array = new LoadLocal($tmp, Type::unknown());
+        return new Block([$store, $fe], Type::void());
     }
 
     private function lowerSwitch(\Parser\Ast\SwitchStmt $stmt): Switch_

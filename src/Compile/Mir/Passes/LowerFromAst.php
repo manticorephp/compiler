@@ -321,6 +321,11 @@ final class LowerFromAst implements Pass
     /** True once at least one stdlib extern was injected → driver links stdlib.o. */
     public bool $externInjected = false;
 
+    /** Name prefix of a hoisted foreach subject — the one owner of the
+     *  convention. {@see LowerStmts::hoistForeachSubject} makes them;
+     *  {@see EmitLlvmMemory::collectElementSharedLocals} reads them. */
+    public const FE_SUBJ_PREFIX = '__fe_subj_';
+
     private ?Module $module = null;
     private int $closureCounter = 0;
     private int $destrCounter = 0;

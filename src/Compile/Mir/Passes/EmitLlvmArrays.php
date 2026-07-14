@@ -340,6 +340,28 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    /**
+     * The `__mir_array_cow*` variant for a container of static type `$t` — the
+     * exact counterpart of {@see EmitLlvm::discardReleaseFlavor}'s choice, so
+     * a cow retains what the release will drop. An erased / cell base carries
+     * NaN-boxed elements → the cell variant.
+     */
+    private function cowSymbolFor(Type $t): string
+    {
+        if ($t->kind === Type::KIND_CELL || $t->kind === Type::KIND_UNKNOWN) {
+            return '@__mir_array_cow_cell';
+        }
+        $el = $t->element;
+        if ($el === null) { return '@__mir_array_cow'; }
+        $ek = $el->kind;
+        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { return '@__mir_array_cow_cell'; }
+        if ($ek === Type::KIND_STRING) { return '@__mir_array_cow_str'; }
+        if ($ek === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) {
+            return '@__mir_array_cow_obj';
+        }
+        return '@__mir_array_cow';
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -351,16 +373,20 @@ trait EmitLlvmArrays
         $out = $this->emitNode($se->array);
         $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
         $arrPtr = $this->lastValue;
-        // COW shared buffers (PHP array value semantics) before mutating.
+        // COW shared buffers (PHP array value semantics) before mutating. The
+        // clone co-owns every key / value it now shares with the source, so the
+        // variant must match the element type exactly the way the release
+        // variant does — else the two buffers drop the same refs twice.
+        $cowFn = $this->cowSymbolFor($se->array->type);
         if ($se->array->kind === Node::KIND_LOAD_LOCAL
             || $se->array->kind === Node::KIND_PROPERTY_ACCESS) {
             $cow = $this->ssa->allocReg();
-            $out .= '  ' . $cow . ' = call ptr @__mir_array_cow(ptr ' . $arrPtr . ")\n";
+            $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $arrPtr . ")\n";
             $out .= $this->vecWriteBack($se->array, $cow, $baseCell);
             $arrPtr = $cow;
         } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
             $cow = $this->ssa->allocReg();
-            $out .= '  ' . $cow . ' = call ptr @__mir_array_cow(ptr ' . $arrPtr . ")\n";
+            $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $arrPtr . ")\n";
             $arrPtr = $cow;
         }
         $isAppend = $se->index->kind === Node::KIND_NULL_CONST;

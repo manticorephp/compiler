@@ -392,6 +392,11 @@ trait EmitLlvmRuntime
             $out .= "done:\n";
             $out .= "  ret void\n";
             $out .= "}\n";
+            if (\Compile\Debug::$verify) {
+                $raw = '[VERIFY] str_release: rc <= 0 (double release / UAF) str=%p rc=%lld';
+                $out .= '@.vfy.strrc = private unnamed_addr constant ['
+                    . (string)(\strlen($raw) + 2) . ' x i8] c"' . $raw . '\0A\00", align 1' . "\n";
+            }
             // Self-routing: misrouted obj/vec (tag at ptr-8) → rc@+8 path
             // (no drop_dispatch — a leak is safe; never corrupt the tag).
             $out .= "define void @__mir_rc_release_str(ptr %p) {\n";
@@ -418,6 +423,19 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %imm, label %done, label %dec\n";
             $out .= "dec:\n";
             $out .= $this->profBump(2);
+            // The array path has had an rc<=0 guard since forever; the STRING
+            // path had none, so a string double-release just corrupted the
+            // freelist somewhere else entirely. Same guard, same abort.
+            if (\Compile\Debug::$verify) {
+                $fmt = '@.vfy.strrc';
+                $out .= "  %vbad = icmp sle i64 %rc, 0\n";
+                $out .= "  br i1 %vbad, label %vfail, label %vok\n";
+                $out .= "vfail:\n";
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr " . $fmt . ", ptr %p, i64 %rc)\n";
+                $out .= "  call void @abort()\n";
+                $out .= "  unreachable\n";
+                $out .= "vok:\n";
+            }
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %h\n";
             $out .= "  %zero = icmp sle i64 %rc1, 0\n";
