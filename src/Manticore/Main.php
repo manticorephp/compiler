@@ -1394,6 +1394,12 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         }
         $narrow = new \Compile\Mir\Passes\NarrowReturns();
         $module = $narrow->run($module);
+        // The `#[TypeDef]` soundness gate: an erased value must never reach a
+        // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a
+        // `mixed` slot). Runs once types are final and before any memory pass —
+        // a boxed cell downstream has already lost the marker. Throws; the catch
+        // below turns it into a compile error.
+        $module = (new \Compile\Mir\Passes\CheckTypeDefs())->run($module);
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
@@ -1478,6 +1484,7 @@ function cmd_dump_mir(array $args): int {
     $module = $mono->run($module);
     $narrow = new \Compile\Mir\Passes\NarrowReturns();
     $module = $narrow->run($module);
+    $module = (new \Compile\Mir\Passes\CheckTypeDefs())->run($module);
     $effects = new \Compile\Mir\Passes\InferEffects();
     $module = $effects->run($module);
     $allocKind = new \Compile\Mir\Passes\InferAllocKind();

@@ -1197,8 +1197,19 @@ final class InferTypes implements Pass
         $aNum = $ak === Type::KIND_INT || $ak === Type::KIND_FLOAT;
         $bNum = $bk === Type::KIND_INT || $bk === Type::KIND_FLOAT;
         if (!$aNum || !$bNum) { return null; }
-        if ($ak === Type::KIND_FLOAT || $bk === Type::KIND_FLOAT) { return Type::float_(); }
-        return Type::int_();
+        $wide = ($ak === Type::KIND_FLOAT || $bk === Type::KIND_FLOAT)
+            ? Type::float_()
+            : Type::int_();
+        // A loop-carried `#[TypeDef]` keeps its tag when BOTH sides are the same
+        // one. Widening to the BARE carrier would erase what the value is, and the
+        // `$x->value` after the loop would then emit as an object property read at
+        // offset 16 — a load through the scalar itself. A merge with a plain int
+        // (or a different TypeDef) genuinely IS a plain number: tag dropped.
+        $td = $a->typeDefClass();
+        if ($td !== null && $td === $b->typeDefClass()) {
+            return Type::typeDef($td, $wide);
+        }
+        return $wide;
     }
 
     /**

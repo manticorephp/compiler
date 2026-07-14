@@ -240,6 +240,11 @@ trait LowerPrelude
         foreach ($this->classTable as $cname => $cd) {
             if ($cname === 'stdClass') { continue; }
             if ($cd->isStruct) { continue; }
+            // A `#[TypeDef]` has no object to dump — and the dumper is generated as
+            // PHP SOURCE, so an arm for one would emit `$x instanceof U8` against a
+            // class that no longer exists at runtime (CheckTypeDefs then rejects the
+            // compiler's own generated code, blaming the user's program).
+            if ($this->isTypeDef($cname)) { continue; }
             $names[] = $cname;
             $depths[] = $this->classDepth($cname);
         }

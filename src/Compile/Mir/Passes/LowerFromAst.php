@@ -1847,6 +1847,10 @@ final class LowerFromAst implements Pass
         // nothing, so `$obj->speak()` rendered its string result as a raw pointer.
         $arms = [];
         foreach ($this->classTable as $name => $cd) {
+            // A `#[TypeDef]` is not a candidate for a DYNAMIC `new $cls(…)`: the
+            // class has no runtime form to select, and obj<U8> would be a pointer
+            // to nothing. A TypeDef is constructed only where its name is written.
+            if ($this->isTypeDef($name)) { continue; }
             $params = $this->resolveMethodParams($name, '__construct');
             $need = $params === null ? 0 : \count($params);
             if ($need !== $argc) { continue; }
