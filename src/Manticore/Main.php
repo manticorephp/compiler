@@ -107,8 +107,12 @@ function is_directory(string $path): bool {
  * under Zend.
  */
 function dprint(string $s): void {
-    write(2, $s, \strlen($s));
-    write(2, "\n", 1);
+    // error_log, NOT the libc `write` binding: the binding's body is EMPTY, so
+    // every diagnostic vanished whenever the compiler ran under Zend (the cold
+    // seed, tools/compile_files_mir.php) and a real "compile failed: <reason>"
+    // surfaced as a bare "compile error (MIR)". error_log is a codegen builtin
+    // natively AND a php function under Zend — the message survives both.
+    \error_log($s);
 }
 
 // ── Driver entry point ────────────────────────────────────────────────
