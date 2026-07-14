@@ -402,8 +402,24 @@ function find_stdlib_sig(): string
  *   - <argv0_dir>/../prelude/<file>   (dev tree: bin/manticore → repo/prelude)
  *   - <argv0_dir>/prelude/<file>      (flat install next to the binary)
  *   - <argv0_dir>/../lib/prelude/<file>, <argv0_dir>/lib/prelude/<file>  (shipped under lib)
- * Returns "" when absent / unreadable (caller falls back to the embedded copy).
+ * Returns "" when absent / unreadable — the prelude is REQUIRED (there is no
+ * embedded copy any more), so lower_module turns that into a clean compile error,
+ * exactly as a missing `lib/manticore_stdlib.o` already does.
  */
+/**
+ * {@see find_prelude_src}, but never throws: the libc `argv`/`fopen` bindings are
+ * throwing stubs under the Zend cold-seed. "" means the prelude module provides
+ * nothing, so nothing demands it.
+ */
+function prelude_src_or_empty(string $file): string
+{
+    try {
+        return find_prelude_src($file);
+    } catch (\Throwable $e) {
+        return "";
+    }
+}
+
 function find_prelude_src(string $file): string
 {
     $cands = [];
@@ -1239,60 +1255,54 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
         foreach ($program->docComments as $d) { $docs[] = $d; }
     }
-    $useVarDump = false;
-    $useArrayClasses = false;
-    $useArrayFns = false;
-    $useCli = false;
-    $usePrintR = false;
-    $useBacktrace = false;
-    // Detect a REAL `var_dump(` call, not the mere identifier: the compiler
-    // IMPLEMENTS var_dump (its source is full of `__mir_var_dump(` and the
-    // `var_dump` dispatch string), so a substring test was always-true for the
-    // self-build and pulled the whole var_dump runtime (incl. the per-class
-    // __mir_dump_object) into the compiler binary. Strip the `__mir_var_dump(`
-    // builder occurrences first; the search needle is split so THIS source
-    // stays free of a literal call token.
-    $vdNeedle = 'var_dump' . '(';
-    foreach ($sources as $source) {
-        $cleaned = \str_replace('__mir_var_dump(', '', $source);
-        if (\strpos($cleaned, $vdNeedle) !== false) { $useVarDump = true; }
-        if (\strpos($source, 'ArrayIterator') > 0
-            || \strpos($source, 'ArrayObject') > 0) { $useArrayClasses = true; }
-        // `sort(` covers usort(/rsort(/sort(; plus array_reduce(. Over-injection
-        // is harmless (unused prelude fns are dead-stripped); these live in the
-        // prelude, NOT the stdlib .o, so there is no double definition.
-        if (\strpos($source, 'sort(') !== false
-            || \strpos($source, 'array_reduce(') !== false
-            || \strpos($source, 'array_map(') !== false
-            || \strpos($source, 'array_sum(') !== false
-            || \strpos($source, 'array_product(') !== false
-            || \strpos($source, 'array_flip(') !== false
-            || \strpos($source, 'str_split(') !== false
-            || \strpos($source, 'array_filter(') !== false
-            || \strpos($source, 'array_reverse(') !== false
-            || \strpos($source, 'array_slice(') !== false
-            || \strpos($source, 'array_pad(') !== false
-            || \strpos($source, 'explode(') !== false) { $useArrayFns = true; }
-        // CLI prelude (__mc_argv / getopt): gate on a $argv / $argc reference
-        // or a getopt( call. Over-injection is harmless (dead-stripped).
-        // $_SERVER / $_ENV are BUILT by the CLI prelude (__mc_server / __mc_env),
-        // so they gate it too. The other superglobals seed an empty array literal
-        // and need nothing.
-        if (\strpos($source, 'argv') !== false
-            || \strpos($source, 'argc') !== false
-            || \strpos($source, '_SER' . 'VER') !== false
-            || \strpos($source, '_ENV') !== false
-            || \strpos($source, 'getopt(') !== false) { $useCli = true; }
-        if (\strpos($source, 'print_r(') !== false) { $usePrintR = true; }
-        // Stack traces: only instrument calls when the program actually queries
-        // a trace. Match the CALL forms (`->getTrace(` etc.) not the method
-        // definitions, and BUILD the needles (not literal) so this gate source
-        // and the prelude `function getTrace(...)` definitions do not trip a
-        // self-build (the var_dump-needle problem above).
-        if (\strpos($source, '->get' . 'Trace') !== false
-            || \strpos($source, 'debug_' . 'backtrace(') !== false
-            || \strpos($source, '->get' . 'Line(') !== false
-            || \strpos($source, '->get' . 'File(') !== false) { $useBacktrace = true; }
+    // What the program DEMANDS of the prelude, asked of the tokens. A substring
+    // gate cannot tell a call from a mention, and this compiler is made of the
+    // names it implements — `var_dump(` in a doc comment used to pull the whole
+    // var_dump runtime (per-class __mir_dump_object, ~58k IR lines) into the
+    // compiler's own binary. See Compile\Mir\PreludeDemand.
+    $demand = new \Compile\Mir\PreludeDemand($sources);
+
+    // The on-disk prelude sources. Reading them goes through the libc fopen
+    // binding (a throwing stub under the Zend cold-seed), so guard: an
+    // unreadable file provides nothing, and LowerFromAst falls back to its
+    // embedded copy for the classes the bootstrap cannot live without.
+    $arrayFnsSrc = prelude_src_or_empty("array_fns.php");
+    $cliSrc = prelude_src_or_empty("cli.php");
+    $printRSrc = prelude_src_or_empty("print_r.php");
+    $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
+
+    // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
+    // so adding one there needs no second edit here. These live in the prelude,
+    // not the stdlib .o, so injecting the file cannot double-define anything.
+    $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
+    $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
+    $useVarDump = $demand->calls('var_dump');
+    $usePrintR = $demand->calls('print_r');
+    // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
+    // (__mc_server / __mc_env), so they gate it too; the other superglobals seed
+    // an empty array literal and need nothing.
+    $useCli = $demand->usesVar('argv') || $demand->usesVar('argc')
+        || $demand->usesVar('_SERVER') || $demand->usesVar('_ENV')
+        || $demand->calls('getopt');
+    // Stack traces cost a frame push at EVERY call, so instrument only when the
+    // program actually QUERIES a trace — the arrow-call form, never the prelude's
+    // own `function getTrace(…)` definitions.
+    $useBacktrace = $demand->callsAnyMethod(['getTrace', 'getTraceAsString', 'getLine', 'getFile'])
+        || $demand->calls('debug_backtrace');
+
+    // The Throwable hierarchy is unconditional, and it calls __mir_bt_frames —
+    // supplied either by the real frame builder or by the stub, never both.
+    $exceptionsSrc = prelude_src_or_empty("exceptions.php");
+    $backtraceSrc = prelude_src_or_empty($useBacktrace ? "backtrace.php" : "backtrace_stub.php");
+    $varDumpSrc = $useVarDump ? prelude_src_or_empty("var_dump.php") : "";
+    if ($exceptionsSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
+        dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
+            . "<compiler>/../prelude and <compiler>/../lib/prelude)");
+        return null;
+    }
+    if ($useArrayClasses && $arrayClassesSrc === "") {
+        dprint("compile failed: prelude: cannot read spl_arrays.php");
+        return null;
     }
     $program = new \Parser\Ast\Program($stmts, '', $aliases, $docs);
     // The pipeline throws RuntimeException on an unsupported construct.
@@ -1309,39 +1319,13 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
-        $lower->includeBacktrace = $useBacktrace;
-        // Prefer the readable on-disk prelude (`prelude/spl_arrays.php`); the
-        // read goes through the libc fopen binding (a throwing stub under the
-        // Zend cold-seed), so guard — on failure LowerFromAst uses its embedded
-        // fallback copy.
-        if ($useArrayClasses) {
-            try {
-                $lower->arrayClassesSrc = find_prelude_src("spl_arrays.php");
-            } catch (\Throwable $e) {
-                $lower->arrayClassesSrc = "";
-            }
-        }
-        if ($useArrayFns) {
-            try {
-                $lower->arrayFnsSrc = find_prelude_src("array_fns.php");
-            } catch (\Throwable $e) {
-                $lower->arrayFnsSrc = "";
-            }
-        }
-        if ($useCli) {
-            try {
-                $lower->cliSrc = find_prelude_src("cli.php");
-            } catch (\Throwable $e) {
-                $lower->cliSrc = "";
-            }
-        }
-        if ($usePrintR) {
-            try {
-                $lower->printRSrc = find_prelude_src("print_r.php");
-            } catch (\Throwable $e) {
-                $lower->printRSrc = "";
-            }
-        }
+        $lower->exceptionsSrc = $exceptionsSrc;
+        $lower->backtraceSrc = $backtraceSrc;
+        $lower->varDumpSrc = $varDumpSrc;
+        $lower->arrayClassesSrc = $arrayClassesSrc;
+        $lower->arrayFnsSrc = $arrayFnsSrc;
+        $lower->cliSrc = $cliSrc;
+        $lower->printRSrc = $printRSrc;
         // Bundled-stdlib signatures (declare-only externs) so user calls
         // (str_starts_with / ctype_* / file_*) resolve + type, with the body
         // linked from stdlib.o. Collected by cmd_compile on the native path;

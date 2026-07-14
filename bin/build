@@ -22,6 +22,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# The self build lands on a temp path and is smoke-tested THERE, so its
+# argv0-relative prelude lookup can't reach repo/prelude. Point it at the
+# canonical dir, as tools/selfhost.sh does for the same reason.
+export MANTICORE_PRELUDE="$ROOT/prelude"
+
 SEED=0
 VERIFY=0
 OUT="bin/manticore"
