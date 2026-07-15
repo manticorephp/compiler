@@ -277,6 +277,9 @@ trait EmitLlvmArrays
                 $next = $this->ssa->allocReg();
                 if ($keyIsString) {
                     $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $cur . ', ptr ' . $keyReg . ', i64 ' . $val . $this->litKeyHashArgs($el->key) . ")\n";
+                    // Release our +1 on a fresh key temp — set_str retained its own
+                    // (see the StoreElement path); a literal / local key is untouched.
+                    $out .= $this->concatTempRelease($el->key, $keyReg);
                 } else {
                     $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $cur . ', i64 ' . $keyReg . ', i64 ' . $val . ")\n";
                 }
@@ -474,6 +477,11 @@ trait EmitLlvmArrays
             }
             else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
+            // set_str RETAINS the stored key (append) — release our own +1 on a
+            // fresh key temp (`$m["k".$i]`), or it leaks (borrowed locals/literals
+            // stay untouched, balanced by their own later release). Without this the
+            // string keys of a reassigned/dropped map are never reclaimed.
+            $out .= $this->concatTempRelease($se->index, $key);
         } else {
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToI64();
