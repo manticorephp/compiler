@@ -1,0 +1,22 @@
+<?php
+var_dump(stripos("Hello World", "world"));
+var_dump(strripos("aXbXc", "x"));
+echo stristr("USER@Example.com", "@example"), "\n";
+echo strpbrk("This is a test", "st"), "\n";
+var_dump(strspn("42 answers", "0123456789"));
+echo substr_replace("Hello World", "PHP", 6), "\n";
+echo substr_replace("Hello World", "PHP", 6, 5), "\n";
+echo substr_replace("abcdef", "_", 2, -1), "\n";
+echo chunk_split("abcdefgh", 3, "-");
+echo quotemeta("1+1=2 (a.b)"), "\n";
+echo bin2hex("AB"), "\n";
+echo strlen(hex2bin("414200")), "\n";
+echo str_rot13("Hello, World"), "\n";
+echo stripslashes("a\\'b\\\\c"), "\n";
+echo htmlspecialchars("<a href=\"x\">&'"), "\n";
+echo strtr("Hello World", "lo", "LO"), "\n";
+echo str_ireplace("WORLD", "PHP", "Hello World, hello world"), "\n";
+var_dump(similar_text("World", "word"), similar_text("Hello", "Hello"));
+var_dump(levenshtein("kitten", "sitting"), levenshtein("", "abc"), levenshtein("abc", "abc"));
+echo wordwrap("The quick brown fox jumped", 10, "\n", false), "\n";
+echo wordwrap("A verylongword here", 5, "|", true), "\n";
