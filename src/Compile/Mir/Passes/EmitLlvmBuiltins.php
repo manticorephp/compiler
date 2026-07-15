@@ -105,6 +105,9 @@ trait EmitLlvmBuiltins
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
+        if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
+        if ($name === '__ugt')                        { return $this->biUgt($args); }
+        if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
         if ($name === 'explode' && \count($args) >= 2) { return $this->biExplode($args); }
         if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
@@ -1753,6 +1756,57 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /** `__float_bits(float): int` — the IEEE-754 bit pattern of a double as an
+     *  i64 (bitcast, no conversion). Backs the PHP shortest-float encoder.
+     *  @param Node[] $args */
+    private function biFloatBits(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceTo('double');
+        $d = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = bitcast double ' . $d . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__ugt(a, b): bool` — unsigned `a > b` on the raw 64-bit patterns (PHP's
+     *  `>` is signed; Ryu's pow5Factor needs the unsigned compare).
+     *  @param Node[] $args */
+    private function biUgt(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $a = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $b = $this->lastValue;
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp ugt i64 ' . $a . ', ' . $b . "\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = zext i1 ' . $c . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__ryu_msp(m, idx, j, inv): int` — Ryu mulShift over the pow5 table entry
+     *  at `idx` (inverse when `inv`), the one 128-bit primitive the PHP encoder
+     *  needs. {@see \Compile\Mir\RuntimeLibrary::ryuMsp}.
+     *  @param Node[] $args */
+    private function biRyuMsp(array $args): string
+    {
+        $this->rt->needsRyu = true;
+        $vals = [];
+        $out = '';
+        for ($k = 0; $k < 4; $k = $k + 1) {
+            $out .= $this->emitNode($args[$k]);
+            $out .= $this->coerceToI64();
+            $vals[] = $this->lastValue;
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_ryu_msp(i64 ' . $vals[0]
+              . ', i64 ' . $vals[1] . ', i64 ' . $vals[2] . ', i64 ' . $vals[3] . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
     /** @param Node[] $args  print_r($v [, $return]) — echo form only. DEEP-boxes
      *  the value (a nested array's elements become tagged cells, so the recursive
      *  __mir_print_r reads real cells, not raw pointers) then calls the prelude
@@ -2700,15 +2754,14 @@ trait EmitLlvmBuiltins
      * cell and recurses through `@__mir_json_enc`, which walks the value into ONE
      * growing buffer (php smart_str style): ints via `__mir_int_fmt` and string
      * escaping written straight into the buffer (no per-node temp), floats via
-     * `__mir_float_to_str` (`%.14g`, byte-matching `(string)$f` — what the PHP
-     * reference `__mc_json_enc` uses). An OBJECT cell falls back to the compiled
-     * reference `@manticore___mc_json_enc` for parity. @param Node[] $args
+     * the Ryu shortest-decimal formatter `manticore___mc_dtoa_bits` (byte-exact
+     * with php's serialize_precision=-1). An OBJECT cell falls back to the
+     * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
      */
     private function biJsonEncode(array $args): string
     {
         $this->rt->needsJsonEnc = true;
         $this->rt->needsIntStr = true;    // __mir_int_len / __mir_int_fmt + unbox_int
-        $this->rt->needsFloatStr = true;  // __mir_float_to_str
         $this->rt->needsStrRc = true;     // __mir_rc_release_str (float / object temps)
         $this->rt->needsConcat = true;    // __mir_strlen + string runtime decls
         $this->rt->needsTagged = true;    // box helpers for boxToCell

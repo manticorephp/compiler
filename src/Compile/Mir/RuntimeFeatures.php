@@ -59,6 +59,7 @@ final class RuntimeFeatures
     public bool $needsAddslashes = false;
     public bool $needsJsonEscape = false;
     public bool $needsJsonEnc = false;
+    public bool $needsRyu = false;
     public bool $needsStrReplaceOne = false;
     public bool $needsCliArgv = false;
 

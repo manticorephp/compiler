@@ -136,9 +136,11 @@ trait InferCalls
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'
             || $n === 'strcspn'
+            || $n === '__float_bits' || $n === '__ryu_msp'
             || $n === 'array_unshift' || $n === '__str_byte_at') {
             return Type::int_();
         }
+        if ($n === '__ugt') { return Type::bool_(); }
         // min/max: a float operand makes the result a numericCell (the winner's
         // own type is preserved — {@see EmitLlvmBuiltins::biMinMax}); else int.
         if ($n === 'min' || $n === 'max') {

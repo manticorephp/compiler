@@ -503,6 +503,251 @@ final class RuntimeLibrary
     }
 
     /**
+     * Ryu `mulShift(m, pow5(idx), j)` as one i128 runtime primitive
+     * (`__mir_ryu_msp`), backing the shortest-float encoder in PHP. Porting the
+     * whole of Ryu's d2d in PHP is clean EXCEPT the 128-bit power-of-five table
+     * math; that lives here, in native i128, and PHP holds the readable
+     * skeleton. Small-table variant (Ulf Adams' d2s_small_table.h): any pow5
+     * index is derived from a 26-entry base table + SPLIT2/OFFSETS, so the whole
+     * table is ~90 constants, not ~1200.
+     *
+     * `__mir_ryu_msp(m, idx, j, inv)` computes `computePow5(idx)` (inv==0) or
+     * `computeInvPow5(idx)` (inv!=0) into a 128-bit {lo,hi}, then returns
+     * `mulShift64(m, {lo,hi}, j) = (((m*lo)>>64) + m*hi) >> (j-64)`. Every
+     * intermediate fits i128: `b2 << (64-delta)` self-balances to ~2^125
+     * because delta grows ~2.32 bits per pow5 index exactly as b2 does.
+     */
+    /** Comma-join decimal-string entries as `i64 <v>` for an LLVM array literal.
+     *  @param string[] $a */
+    private function ryuI64List(array $a): string
+    {
+        $out = '';
+        $first = true;
+        foreach ($a as $v) {
+            if (!$first) { $out .= ', '; }
+            $first = false;
+            $out .= 'i64 ' . $v;
+        }
+        return $out;
+    }
+
+    /** @param string[] $a */
+    private function ryuI32List(array $a): string
+    {
+        $out = '';
+        $first = true;
+        foreach ($a as $v) {
+            if (!$first) { $out .= ', '; }
+            $first = false;
+            $out .= 'i32 ' . $v;
+        }
+        return $out;
+    }
+
+    public function ryuMsp(): string
+    {
+        // Every entry is a STRING literal so the array stays uniformly typed —
+        // a mixed int|string array infers cell elements, and `(string)$cell`
+        // through the concat below mis-unboxes to a tagged value under the
+        // native self-build ({@see the cell-unbox hazards}).
+        $p5tab = [
+            '1', '5', '25', '125', '625', '3125', '15625', '78125', '390625',
+            '1953125', '9765625', '48828125', '244140625', '1220703125',
+            '6103515625', '30517578125', '152587890625', '762939453125',
+            '3814697265625', '19073486328125', '95367431640625',
+            '476837158203125', '2384185791015625', '11920928955078125',
+            '59604644775390625', '298023223876953125',
+        ];
+        // DOUBLE_POW5_SPLIT2 (13 pairs), flattened lo,hi.
+        $s2 = [
+            '0', '1152921504606846976', '0', '1490116119384765625',
+            '1032610780636961552', '1925929944387235853',
+            '7910200175544436838', '1244603055572228341',
+            '16941905809032713930', '1608611746708759036',
+            '13024893955298202172', '2079081953128979843',
+            '6607496772837067824', '1343575221513417750',
+            '17332926989895652603', '1736530273035216783',
+            '13037379183483547984', '2244412773384604712',
+            '1605989338741628675', '1450417759929778918',
+            '9630225068416591280', '1874621017369538693',
+            '665883850346957067', '1211445438634777304',
+            '14931890668723713708', '1565756531257009982',
+        ];
+        // DOUBLE_POW5_INV_SPLIT2 (15 pairs), flattened lo,hi.
+        $is2 = [
+            '1', '2305843009213693952',
+            '5955668970331000884', '1784059615882449851',
+            '8982663654677661702', '1380349269358112757',
+            '7286864317269821294', '2135987035920910082',
+            '7005857020398200553', '1652639921975621497',
+            '17965325103354776697', '1278668206209430417',
+            '8928596168509315048', '1978643211784836272',
+            '10075671573058298858', '1530901034580419511',
+            '597001226353042382', '1184477304306571148',
+            '1527430471115325346', '1832889850782397517',
+            '12533209867169019542', '1418129833677084982',
+            '5577825024675947042', '2194449627517475473',
+            '11006974540203867551', '1697873161311732311',
+            '10313493231639821582', '1313665730009899186',
+            '12701016819766672773', '2032799256770390445',
+        ];
+        // POW5_OFFSETS (21) / POW5_INV_OFFSETS (22), u32 each — decimal strings
+        // of the ryu hex constants, kept as strings for the same uniform-typing
+        // reason as the pow5 tables above.
+        $off = [
+            '0', '0', '0', '0', '1073741824', '1500076437', '1431590229',
+            '1448432917', '1091896580', '1079333904', '1146442053',
+            '1146111296', '1163220304', '1073758208', '2521039936',
+            '1431721317', '1413824581', '1075134801', '1431671125',
+            '1363170645', '261',
+        ];
+        $ioff = [
+            '1414808916', '67458373', '268701696', '4195348', '1073807360',
+            '1091917141', '1108', '65604', '1073741824', '1140850753',
+            '1346716752', '1431634004', '1365595476', '1073758208', '16777217',
+            '66816', '1364284433', '89478484', '1346442496', '1074003968',
+            '84148496', '0',
+        ];
+        $out  = "\n@.ryu.p5tab = private unnamed_addr constant [26 x i64] ["
+              . $this->ryuI64List($p5tab) . "]\n";
+        $out .= "@.ryu.s2 = private unnamed_addr constant [26 x i64] ["
+              . $this->ryuI64List($s2) . "]\n";
+        $out .= "@.ryu.is2 = private unnamed_addr constant [30 x i64] ["
+              . $this->ryuI64List($is2) . "]\n";
+        $out .= "@.ryu.off = private unnamed_addr constant [21 x i32] ["
+              . $this->ryuI32List($off) . "]\n";
+        $out .= "@.ryu.ioff = private unnamed_addr constant [22 x i32] ["
+              . $this->ryuI32List($ioff) . "]\n";
+
+        $out .= "\ndefine i64 @__mir_ryu_msp(i64 %m, i64 %idx, i64 %j, i64 %inv) {\n";
+        $out .= "entry:\n";
+        $out .= "  %isinv = icmp ne i64 %inv, 0\n";
+        $out .= "  br i1 %isinv, label %invb, label %pow\n";
+
+        // ── computePow5(idx) ──
+        $out .= "pow:\n";
+        $out .= "  %pbase = udiv i64 %idx, 26\n";
+        $out .= "  %pbase2 = mul i64 %pbase, 26\n";
+        $out .= "  %poff = sub i64 %idx, %pbase2\n";
+        $out .= "  %pbi = mul i64 %pbase, 2\n";
+        $out .= "  %plop = getelementptr [26 x i64], ptr @.ryu.s2, i64 0, i64 %pbi\n";
+        $out .= "  %pmullo = load i64, ptr %plop\n";
+        $out .= "  %pbi1 = add i64 %pbi, 1\n";
+        $out .= "  %phip = getelementptr [26 x i64], ptr @.ryu.s2, i64 0, i64 %pbi1\n";
+        $out .= "  %pmulhi = load i64, ptr %phip\n";
+        $out .= "  %poff0 = icmp eq i64 %poff, 0\n";
+        $out .= "  br i1 %poff0, label %pdone0, label %pcomp\n";
+        $out .= "pdone0:\n  br label %merge\n";
+        $out .= "pcomp:\n";
+        $out .= "  %pm5p = getelementptr [26 x i64], ptr @.ryu.p5tab, i64 0, i64 %poff\n";
+        $out .= "  %pm5 = load i64, ptr %pm5p\n";
+        $out .= "  %pm5x = zext i64 %pm5 to i128\n";
+        $out .= "  %pmullox = zext i64 %pmullo to i128\n";
+        $out .= "  %pmulhix = zext i64 %pmulhi to i128\n";
+        $out .= "  %pb0 = mul i128 %pm5x, %pmullox\n";
+        $out .= "  %pb2 = mul i128 %pm5x, %pmulhix\n";
+        $out .= "  %ppim = mul i64 %idx, 1217359\n";
+        $out .= "  %ppis = lshr i64 %ppim, 19\n";
+        $out .= "  %ppi = add i64 %ppis, 1\n";
+        $out .= "  %ppbm = mul i64 %pbase2, 1217359\n";
+        $out .= "  %ppbs = lshr i64 %ppbm, 19\n";
+        $out .= "  %ppb = add i64 %ppbs, 1\n";
+        $out .= "  %pdelta = sub i64 %ppi, %ppb\n";
+        $out .= "  %pdeltax = zext i64 %pdelta to i128\n";
+        $out .= "  %pb0s = lshr i128 %pb0, %pdeltax\n";
+        $out .= "  %psh = sub i64 64, %pdelta\n";
+        $out .= "  %pshx = zext i64 %psh to i128\n";
+        $out .= "  %pb2s = shl i128 %pb2, %pshx\n";
+        $out .= "  %pw = udiv i64 %idx, 16\n";
+        $out .= "  %pwp = getelementptr [21 x i32], ptr @.ryu.off, i64 0, i64 %pw\n";
+        $out .= "  %pw32 = load i32, ptr %pwp\n";
+        $out .= "  %pw64 = zext i32 %pw32 to i64\n";
+        $out .= "  %pr = urem i64 %idx, 16\n";
+        $out .= "  %prs = mul i64 %pr, 2\n";
+        $out .= "  %pov = lshr i64 %pw64, %prs\n";
+        $out .= "  %pov3 = and i64 %pov, 3\n";
+        $out .= "  %pov3x = zext i64 %pov3 to i128\n";
+        $out .= "  %psum01 = add i128 %pb0s, %pb2s\n";
+        $out .= "  %psum = add i128 %psum01, %pov3x\n";
+        $out .= "  %plo = trunc i128 %psum to i64\n";
+        $out .= "  %psumhi = lshr i128 %psum, 64\n";
+        $out .= "  %phi = trunc i128 %psumhi to i64\n";
+        $out .= "  br label %merge\n";
+
+        // ── computeInvPow5(idx) ──
+        $out .= "invb:\n";
+        $out .= "  %iidx25 = add i64 %idx, 25\n";
+        $out .= "  %ibase = udiv i64 %iidx25, 26\n";
+        $out .= "  %ibase2 = mul i64 %ibase, 26\n";
+        $out .= "  %ioff = sub i64 %ibase2, %idx\n";
+        $out .= "  %ibi = mul i64 %ibase, 2\n";
+        $out .= "  %ilop = getelementptr [30 x i64], ptr @.ryu.is2, i64 0, i64 %ibi\n";
+        $out .= "  %imullo = load i64, ptr %ilop\n";
+        $out .= "  %ibi1 = add i64 %ibi, 1\n";
+        $out .= "  %ihip = getelementptr [30 x i64], ptr @.ryu.is2, i64 0, i64 %ibi1\n";
+        $out .= "  %imulhi = load i64, ptr %ihip\n";
+        $out .= "  %ioff0 = icmp eq i64 %ioff, 0\n";
+        $out .= "  br i1 %ioff0, label %idone0, label %icomp\n";
+        $out .= "idone0:\n  br label %merge\n";
+        $out .= "icomp:\n";
+        $out .= "  %im5p = getelementptr [26 x i64], ptr @.ryu.p5tab, i64 0, i64 %ioff\n";
+        $out .= "  %im5 = load i64, ptr %im5p\n";
+        $out .= "  %im5x = zext i64 %im5 to i128\n";
+        $out .= "  %imullo1 = sub i64 %imullo, 1\n";
+        $out .= "  %imullox = zext i64 %imullo1 to i128\n";
+        $out .= "  %imulhix = zext i64 %imulhi to i128\n";
+        $out .= "  %ib0 = mul i128 %im5x, %imullox\n";
+        $out .= "  %ib2 = mul i128 %im5x, %imulhix\n";
+        $out .= "  %ipbm = mul i64 %ibase2, 1217359\n";
+        $out .= "  %ipbs = lshr i64 %ipbm, 19\n";
+        $out .= "  %ipb = add i64 %ipbs, 1\n";
+        $out .= "  %ipim = mul i64 %idx, 1217359\n";
+        $out .= "  %ipis = lshr i64 %ipim, 19\n";
+        $out .= "  %ipi = add i64 %ipis, 1\n";
+        $out .= "  %idelta = sub i64 %ipb, %ipi\n";
+        $out .= "  %ideltax = zext i64 %idelta to i128\n";
+        $out .= "  %ib0s = lshr i128 %ib0, %ideltax\n";
+        $out .= "  %ish = sub i64 64, %idelta\n";
+        $out .= "  %ishx = zext i64 %ish to i128\n";
+        $out .= "  %ib2s = shl i128 %ib2, %ishx\n";
+        $out .= "  %iw = udiv i64 %idx, 16\n";
+        $out .= "  %iwp = getelementptr [22 x i32], ptr @.ryu.ioff, i64 0, i64 %iw\n";
+        $out .= "  %iw32 = load i32, ptr %iwp\n";
+        $out .= "  %iw64 = zext i32 %iw32 to i64\n";
+        $out .= "  %ir = urem i64 %idx, 16\n";
+        $out .= "  %irs = mul i64 %ir, 2\n";
+        $out .= "  %iov = lshr i64 %iw64, %irs\n";
+        $out .= "  %iov3 = and i64 %iov, 3\n";
+        $out .= "  %iov3x = zext i64 %iov3 to i128\n";
+        $out .= "  %isum01 = add i128 %ib0s, %ib2s\n";
+        $out .= "  %isumc = add i128 %isum01, 1\n";
+        $out .= "  %isum = add i128 %isumc, %iov3x\n";
+        $out .= "  %ilo = trunc i128 %isum to i64\n";
+        $out .= "  %isumhi = lshr i128 %isum, 64\n";
+        $out .= "  %ihi = trunc i128 %isumhi to i64\n";
+        $out .= "  br label %merge\n";
+
+        // ── mulShift64(m, {lo,hi}, j) ──
+        $out .= "merge:\n";
+        $out .= "  %lo = phi i64 [%pmullo, %pdone0], [%plo, %pcomp], [%imullo, %idone0], [%ilo, %icomp]\n";
+        $out .= "  %hi = phi i64 [%pmulhi, %pdone0], [%phi, %pcomp], [%imulhi, %idone0], [%ihi, %icomp]\n";
+        $out .= "  %mx = zext i64 %m to i128\n";
+        $out .= "  %lox = zext i64 %lo to i128\n";
+        $out .= "  %hix = zext i64 %hi to i128\n";
+        $out .= "  %b0 = mul i128 %mx, %lox\n";
+        $out .= "  %b2 = mul i128 %mx, %hix\n";
+        $out .= "  %b0s = lshr i128 %b0, 64\n";
+        $out .= "  %sum = add i128 %b0s, %b2\n";
+        $out .= "  %jm = sub i64 %j, 64\n";
+        $out .= "  %jmx = zext i64 %jm to i128\n";
+        $out .= "  %rsh = lshr i128 %sum, %jmx\n";
+        $out .= "  %res = trunc i128 %rsh to i64\n";
+        $out .= "  ret i64 %res\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
      * Native json_encode runtime. A recursive `@__mir_json_app(ptr* slot, i64
      * cell)` appends into the buffer held at `*slot`, growing via
      * `@__mir_json_reserve` (str_alloc + memcpy + release old). Cell tag is the
@@ -659,8 +904,11 @@ final class RuntimeLibrary
         $out .= "  %tagged = icmp ugt i64 %cell, $T\n";
         $out .= "  br i1 %tagged, label %istag, label %isfloat\n";
         $out .= "isfloat:\n";
-        $out .= "  %d = bitcast i64 %cell to double\n";
-        $out .= "  %fs = call ptr @__mir_float_to_str(double %d)\n";
+        // Shortest round-tripping decimal via the Ryu-backed PHP formatter
+        // (__mc_dtoa_bits); the cell already holds the raw double bits. Replaces
+        // the `%.14g` snprintf, which was slow AND not shortest.
+        $out .= "  %fsi = call i64 @manticore___mc_dtoa_bits(i64 %cell)\n";
+        $out .= "  %fs = inttoptr i64 %fsi to ptr\n";
         $out .= "  %fn = call i64 @__mir_strlen(ptr %fs)\n";
         $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %fs, i64 %fn)\n";
         $out .= "  call void @__mir_rc_release_str(ptr %fs)\n";
