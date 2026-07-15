@@ -333,6 +333,11 @@ final class LowerFromAst implements Pass
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
 
+    /** @var Node[] Auto-viv StoreLocals for `#[RefOut]` args, flushed by
+     *  {@see lowerStmt} immediately before the statement whose call produced
+     *  them (so an undefined out-var is defined + typed ahead of the call). */
+    private array $pendingCallInits = [];
+
     /**
      * Bare fn name → its single namespaced FQN, for unqualified call
      * resolution (PHP `use function`). A call `free()` in namespace `Foo`
@@ -851,6 +856,7 @@ final class LowerFromAst implements Pass
             || $m->name === '__isset' || $m->name === '__unset'
             || $m->name === '__call' || $m->name === '__callStatic';
         $magicArgs = $m->name === '__call' || $m->name === '__callStatic';
+        $refOutNames = $this->refOutParamNames($m->attributes);
         $pi = 0;
         foreach ($m->params as $p) {
             $isVar = (bool)($p->variadic ?? false);
@@ -858,11 +864,12 @@ final class LowerFromAst implements Pass
             // one vec param (caller packs at the call site) — same as the plain
             // function path. Without the Type::vec wrapper the callee reads the
             // param as a single T, so `$xs` is garbage (a raw arg, not the vec).
+            $outType = $this->docTagType($m->docComment, '@param-out', $p->name);
             $pt = $isVar
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
                 : $this->lowerParamType($this->effectiveHint(
                     $p->typeHint,
-                    $this->docTagType($m->docComment, '@param', $p->name),
+                    $outType ?? $this->docTagType($m->docComment, '@param', $p->name),
                 ));
             if ($magicName && $pi === 0) { $pt = Type::string_(); }
             if ($magicArgs && $pi === 1) { $pt = Type::vec(Type::cell()); }
@@ -874,6 +881,8 @@ final class LowerFromAst implements Pass
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $mp->refOut = $outType !== null || isset($refOutNames[$p->name])
+                || $this->paramHasRefOutAttr($p);
             $params[] = $mp;
             $pi = $pi + 1;
         }
@@ -982,6 +991,53 @@ final class LowerFromAst implements Pass
      *
      * @param \Parser\Ast\AttributeNode[] $attributes
      */
+    /**
+     * True when a param carries `#[RefOut]` / `#[Ffi\RefOut]` — a pure-output
+     * by-ref param the caller may auto-vivify.
+     *
+     * @param \Parser\Ast\AttributeNode[] $attributes
+     */
+    /**
+     * Out-param names declared by a function's `#[RefOut('a', 'b')]` attribute
+     * (core semantics, `Manticore\Attr\RefOut`). Named at the function so the
+     * marker survives both the `.sig` and the self-host parse — a param-position
+     * attribute is dropped on both today.
+     *
+     * @param \Parser\Ast\AttributeNode[] $attributes
+     * @return array<string,bool> name → true
+     */
+    private function refOutParamNames(array $attributes): array
+    {
+        $out = [];
+        foreach ($attributes as $attr) {
+            $name = \ltrim($this->attrName($attr), '\\');
+            if ($name !== 'RefOut' && $name !== 'Attr\\RefOut'
+                && $name !== 'Manticore\\Attr\\RefOut') { continue; }
+            foreach ($this->attrArgs($attr) as $arg) {
+                if ($arg->kind === 'StringLiteral') { $out[$this->strLitValue($arg)] = true; }
+            }
+        }
+        return $out;
+    }
+
+    /** AttributeNode fields via a typed param — a base-typed read resolves by
+     *  OFFSET under self-host and picks the wrong slot. */
+    private function attrName(\Parser\Ast\AttributeNode $a): string { return $a->name; }
+    /** @return \Parser\Ast\Expr[] */
+    private function attrArgs(\Parser\Ast\AttributeNode $a): array { return $a->args; }
+
+    /** A param-position `#[RefOut]` (no arg — marks THIS param). Read through a
+     *  typed `$p` so `->attributes` resolves by name, not a base offset. */
+    private function paramHasRefOutAttr(\Parser\Ast\Param $p): bool
+    {
+        foreach ($p->attributes as $attr) {
+            $name = \ltrim($this->attrName($attr), '\\');
+            if ($name === 'RefOut' || $name === 'Attr\\RefOut'
+                || $name === 'Manticore\\Attr\\RefOut') { return true; }
+        }
+        return false;
+    }
+
     private function ffiSymbolOf(array $attributes): ?string
     {
         foreach ($attributes as $attr) {
@@ -1574,6 +1630,60 @@ final class LowerFromAst implements Pass
      * @param \Parser\Ast\Expr[] $astArgs
      * @return Node[]
      */
+    /**
+     * Queue an auto-viv init for every `#[RefOut]` arg that is a bare variable:
+     * an empty array typed as the (out) parameter's element type, stored into
+     * the variable before the call. That defines an otherwise-undefined out-var
+     * (`preg_match($p, $s, $m)` with no prior `$m`) AND types it so the read-back
+     * carries the parameter's element type instead of erasing to `unknown`.
+     * Positional-only — a named-arg call skips this (rare for out-params).
+     * An out-param is known from the callee's `#[RefOut(...)]` attribute
+     * (same-unit decl) OR the param's `refOut` flag (carried across the .sig).
+     *
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
+    private function collectRefOutInits(\Parser\Ast\FunctionDecl $decl, array $astArgs): void
+    {
+        $names = $this->refOutParamNames($decl->attributes);
+        $params = $decl->params;
+        $i = 0;
+        foreach ($astArgs as $a) {
+            $p = $params[$i] ?? null;
+            $i = $i + 1;
+            if ($a->kind === 'NamedArg') { return; }
+            if ($p === null) { continue; }
+            // Typed reads — a base-typed `$p`/`$a` resolves fields by OFFSET
+            // under self-host and picks the wrong slot.
+            if (!isset($names[$this->paramName($p)]) && !$this->paramRefOut($p)
+                && !$this->paramHasRefOutAttr($p)) { continue; }
+            if ($a->kind !== 'Variable') { continue; }
+            // Only ARRAY out-params get auto-vivified: the empty-array init both
+            // defines the var and types it `vec[cell]` (so captures read back as
+            // tagged cells). A SCALAR out-param (`int &$count`) must NOT get an
+            // array init — that would clobber a pre-set `$c = 0` with an array and
+            // corrupt the heap when the callee writes an int through the ref.
+            $hint = $this->paramTypeHint($p);
+            if ($hint === null) {
+                $pt = Type::vec(Type::cell());          // erased out-array → cell array
+            } else {
+                $pt = $this->lowerTypeHint($hint);
+                if (!$pt->isArray()) { continue; }       // scalar out-param: leave it alone
+            }
+            // declaredType seeds the SLOT type (the `@var` path) so InferTypes
+            // keeps `vec[cell]` — an empty `[]` literal otherwise re-infers to
+            // vec[unknown], and the callee-written cells read back as raw ints.
+            $init = new StoreLocal($this->variableName($a), new ArrayLit([], $pt), $pt);
+            $init->declaredType = $pt;
+            $this->pendingCallInits[] = $init;
+        }
+    }
+
+    /** Param->refOut via a typed param (self-host offset). */
+    private function paramRefOut(\Parser\Ast\Param $p): bool { return $p->refOut; }
+
+    /** Variable->name via a typed param (subclass field, self-host offset). */
+    private function variableName(\Parser\Ast\Variable $v): string { return $v->name; }
+
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
         if (!isset($this->fnDecls[$fnName])) {
@@ -1582,6 +1692,7 @@ final class LowerFromAst implements Pass
             return $out;
         }
         $params = $this->fnDecls[$fnName]->params;
+        $this->collectRefOutInits($this->fnDecls[$fnName], $astArgs);
         // Fast positional path also coerces a literal callable bound to a
         // `callable` param into a closure (`array_map("strtoupper", …)`), so the
         // callee invokes it like any closure. Named / defaulted / variadic calls

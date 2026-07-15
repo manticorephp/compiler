@@ -126,9 +126,21 @@ trait LowerStmts
         $cf = $k === 'If' || $k === 'While' || $k === 'For' || $k === 'DoWhile'
             || $k === 'Switch' || $k === 'Foreach' || $k === 'TryCatch';
         if ($cf) { $this->constCallables = []; }
+        // Isolate `#[RefOut]` auto-viv inits produced WHILE lowering THIS
+        // statement (a nested statement saves/restores its own, so an init from
+        // an `if (preg_match(…,$m))` condition flushes at the `if`, not inside
+        // its body). Flush them right before the statement that uses them.
+        $savedInits = $this->pendingCallInits;
+        $this->pendingCallInits = [];
         $node = $this->lowerStmtInner($stmt);
+        $myInits = $this->pendingCallInits;
+        $this->pendingCallInits = $savedInits;
         if ($cf) { $this->constCallables = []; }
         if ($node->line === 0) { $node->line = $stmt->span->line; }
+        if ($myInits !== []) {
+            $myInits[] = $node;
+            return new Block($myInits, Type::void());
+        }
         return $node;
     }
 

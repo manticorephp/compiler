@@ -289,6 +289,12 @@ trait LowerPrelude
             'PREG_PATTERN_ORDER' => 1, 'PREG_SET_ORDER' => 2, 'PREG_OFFSET_CAPTURE' => 256,
             'PREG_UNMATCHED_AS_NULL' => 512, 'PREG_SPLIT_NO_EMPTY' => 1,
             'PREG_SPLIT_DELIM_CAPTURE' => 2, 'PREG_SPLIT_OFFSET_CAPTURE' => 4,
+            'PREG_GREP_INVERT' => 1,
+            // preg_last_error() codes
+            'PREG_NO_ERROR' => 0, 'PREG_INTERNAL_ERROR' => 1,
+            'PREG_BACKTRACK_LIMIT_ERROR' => 2, 'PREG_RECURSION_LIMIT_ERROR' => 3,
+            'PREG_BAD_UTF8_ERROR' => 4, 'PREG_BAD_UTF8_OFFSET_ERROR' => 5,
+            'PREG_JIT_STACKLIMIT_ERROR' => 6,
             // htmlspecialchars / entities (common subset)
             'ENT_NOQUOTES' => 0, 'ENT_COMPAT' => 2, 'ENT_QUOTES' => 3, 'ENT_HTML5' => 48,
             // filesystem: fseek whence + file_put_contents / flock flags

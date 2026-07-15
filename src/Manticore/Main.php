@@ -277,6 +277,25 @@ function read_stdlib_dir(string $dir): array {
 }
 
 /**
+ * Linker flags for the host PCRE2 (dynamic link), via `pcre2-config --libs8`
+ * so the -L path is right on any host (e.g. Homebrew's non-standard prefix).
+ * Falls back to a bare `-lpcre2-8`; empty only if that too would be pointless.
+ * Used by the preg_* stdlib wrappers; dead-strip drops it when regex is unused.
+ */
+function pcre2_link_flags(): string {
+    $listPath = "/tmp/manticore_pcre2_" . (string)getpid() . ".txt";
+    $rc = system("pcre2-config --libs8 > " . $listPath . " 2>/dev/null");
+    if ($rc === 0) {
+        $c = read_file($listPath);
+        if ($c !== null) {
+            $t = \trim($c);
+            if ($t !== "") { return $t; }
+        }
+    }
+    return "-lpcre2-8";
+}
+
+/**
  * Parse the bundled stdlib sources and collect every GLOBAL-namespace
  * function declaration, for signature-only extern injection (so user code
  * can call `str_starts_with`, `ctype_*`, `file_get_contents`, … with the
@@ -819,13 +838,23 @@ function cmd_compile(array $args): int {
         } else {
             dprint("compile: program uses bundled stdlib but stdlib.o not found — link may fail");
         }
+        // The bundled stdlib carries the preg_* FFI wrappers, which reference
+        // the host libpcre2-8. Dead-strip drops those wrappers (and the dylib
+        // load command, see the flags below) for a program that never calls a
+        // preg_* function, so this is harmless when regex is unused.
+        $pcre = pcre2_link_flags();
+        if ($pcre !== "") { $linkExtra .= " " . $pcre; }
     }
     // Dead-strip unreferenced functions at link time — the prebuilt stdlib.o
     // is one object (linked wholesale), so without this a tiny program carries
     // the entire stdlib (~75 KB hello-world). macOS ld64 strips at the
     // symbol/atom level (`-dead_strip`); GNU/lld need section GC (`--gc-sections`,
-    // paired with the `-ffunction-sections` above).
-    $gc = \substr(host_os(), 0, 6) === "Darwin" ? " -Wl,-dead_strip" : " -Wl,--gc-sections";
+    // paired with the `-ffunction-sections` above). `-dead_strip_dylibs` /
+    // `--as-needed` drop a linked-but-unreferenced dylib (e.g. libpcre2 in a
+    // program that uses the stdlib but no preg_*).
+    $gc = \substr(host_os(), 0, 6) === "Darwin"
+        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs"
+        : " -Wl,--gc-sections -Wl,--as-needed";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
         dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objPath);

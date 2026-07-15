@@ -79,6 +79,7 @@ final class Sig
             $out = $out . "{\"name\":" . self::jsonStr($p->name)
                 . ",\"type\":" . self::jsonStr(self::encodeType($p->type))
                 . ",\"byref\":" . ($p->byRef ? "true" : "false")
+                . ",\"refout\":" . ($p->refOut ? "true" : "false")
                 . ",\"variadic\":" . ($p->variadic ? "true" : "false");
             $def = self::encodeDefault($p->default);
             if ($def !== "") { $out = $out . ",\"default\":" . $def; }
@@ -138,6 +139,19 @@ final class Sig
         if ($k === Node::KIND_NULL_CONST) {
             return "{\"k\":\"null\",\"v\":\"\"}";
         }
+        // A negative literal (`-1`) lowers to Neg(IntConst) — fold it so the
+        // consumer fills the real value, not null→0 (which broke a `$limit = -1`
+        // "no limit" default into "0 replacements").
+        if ($k === Node::KIND_NEG) {
+            $inner = self::negOperand($d);
+            $ik = $inner->kind;
+            if ($ik === Node::KIND_INT_CONST) {
+                return "{\"k\":\"int\",\"v\":" . self::jsonStr((string)(-self::intVal($inner))) . "}";
+            }
+            if ($ik === Node::KIND_FLOAT_CONST) {
+                return "{\"k\":\"float\",\"v\":" . self::jsonStr((string)(-self::floatVal($inner))) . "}";
+            }
+        }
         // Has a default we couldn't fold to a literal — mark it so the consumer
         // still treats the param as optional (filled with null is acceptable).
         return "{\"k\":\"null\",\"v\":\"\"}";
@@ -145,6 +159,7 @@ final class Sig
 
     // Typed const-node readers (read ->value through the concrete class so the
     // self-host backend uses the right field offset).
+    private static function negOperand(\Compile\Mir\Neg $n): Node { return $n->operand; }
     private static function intVal(IntConst $n): int { return $n->value; }
     private static function strVal(StringConst $n): string { return $n->value; }
     private static function boolVal(BoolConst $n): bool { return $n->value; }
@@ -175,9 +190,10 @@ final class Sig
                 $pName = (string)$p["name"];
                 $pType = (string)$p["type"];
                 $byref = self::truthy($p["byref"] ?? false);
+                $refout = self::truthy($p["refout"] ?? false);
                 $variadic = self::truthy($p["variadic"] ?? false);
                 $default = self::decodeDefault($p, $span);
-                $params[] = new AstParam(
+                $ap = new AstParam(
                     name: $pName,
                     typeHint: $pType === "" ? null : $pType,
                     default: $default,
@@ -188,6 +204,8 @@ final class Sig
                     attributes: [],
                     span: $span,
                 );
+                $ap->refOut = $refout;
+                $params[] = $ap;
             }
             $decls[] = new FunctionDecl(
                 name: $name,

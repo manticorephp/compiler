@@ -93,16 +93,21 @@ trait LowerFns
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->constCallables = [];
+        // `#[RefOut('a', 'b')]` names the pure-output by-ref params (portable
+        // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side
+        // equivalent.
+        $refOutNames = $this->refOutParamNames($decl->attributes);
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
             // `T ...$xs` collects trailing args into a vec[T] the callee
             // sees as a single vec param (caller packs at the call site).
+            $outType = $this->docTagType($decl->docComment, '@param-out', $p->name);
             $pt = $isVariadic
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
                 : $this->lowerParamType($this->effectiveHint(
                     $p->typeHint,
-                    $this->docTagType($decl->docComment, '@param', $p->name),
+                    $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
                 ));
             $fp = new Param(
                 name: $p->name,
@@ -112,6 +117,8 @@ trait LowerFns
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $fp->refOut = $outType !== null || isset($refOutNames[$p->name])
+                || $this->paramHasRefOutAttr($p);
             $params[] = $fp;
         }
         $this->currentLowerClass = '';
@@ -177,6 +184,10 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
+        // params (survives the .sig + self-host parse; a param-position marker
+        // does not). `@param-out T $x` is the PHPStan-compatible equivalent.
+        $refOutNames = $this->refOutParamNames($decl->attributes);
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
@@ -188,19 +199,25 @@ trait LowerFns
             // as a plain array pointer → tag deref SIGSEGV: array_key_exists /
             // array_slice on a concrete assoc). A user function's own untyped
             // param still routes through lowerParamType (mixed) elsewhere.
+            // `@param-out T $x` (PHPStan's ref-out tag) both types the OUT value
+            // and marks the param `#[RefOut]` — and, unlike a param attribute,
+            // survives the interface `.sig`, so it is the portable signal.
+            $outType = $this->docTagType($decl->docComment, '@param-out', $p->name);
             $pt = $isVariadic
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
                 : $this->lowerTypeHint($this->effectiveHint(
                     $p->typeHint,
-                    $this->docTagType($decl->docComment, '@param', $p->name),
+                    $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
                 ));
-            $params[] = new Param(
+            $fnp = new Param(
                 name: $p->name,
                 type: $pt,
                 byRef: (bool)($p->byRef ?? false),
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
+            $fnp->refOut = $outType !== null || isset($refOutNames[$p->name]);
+            $params[] = $fnp;
         }
         return new FunctionDef(
             name: $decl->name,

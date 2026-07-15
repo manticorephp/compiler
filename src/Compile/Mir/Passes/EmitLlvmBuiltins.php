@@ -42,6 +42,7 @@ trait EmitLlvmBuiltins
         if ($name === '__str_byte_at')                { return $this->biStrByteAt($args); }
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
+        if ($name === 'peek_i64')                     { return $this->biPeekI64($args); }
         if ($name === '__mir_stdin')                  { return $this->biStdStream('stdin'); }
         if ($name === '__mir_stdout')                 { return $this->biStdStream('stdout'); }
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
@@ -542,6 +543,27 @@ trait EmitLlvmBuiltins
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * `peek_i64(\Ffi\Ptr $p, int $off): int` — load a native i64 from a raw
+     * address at a byte offset. The read boundary for FFI out-params and
+     * pointer-array results (e.g. a PCRE2 ovector of size_t pairs). Unsafe:
+     * no bounds check. Callers mask/sign-extend a narrower C int themselves.
+     * @param Node[] $args
+     */
+    private function biPeekI64(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $gp . "\n";
+        return $this->finishI64($out, $r);
     }
 
     /**
