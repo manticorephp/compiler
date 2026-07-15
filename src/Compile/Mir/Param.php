@@ -9,6 +9,10 @@ final class Param
      *  even after a bare `array` hint erased the element type to unknown. */
     public bool $arrayHinted = false;
 
+    /** A by-ref param marked `#[RefOut]`: pure output, safe to auto-vivify
+     *  at the caller. Serialized into the interface `.sig`. */
+    public bool $refOut = false;
+
     public function __construct(
         public readonly string $name,
         public Type $type,

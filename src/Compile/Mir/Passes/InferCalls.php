@@ -137,6 +137,7 @@ trait InferCalls
             || $n === 'printf' || $n === 'spl_object_id'
             || $n === 'strcspn'
             || $n === '__float_bits' || $n === '__ryu_msp'
+            || $n === 'peek_i64'
             || $n === 'array_unshift' || $n === '__str_byte_at') {
             return Type::int_();
         }

@@ -248,7 +248,10 @@ final class Monomorphize implements Pass
             if (isset($isDim[$idx]) && $idx < \count($repCall->args)) {
                 $t = $repCall->args[$idx]->type;
             }
-            $newParams[] = new Param($p->name, $t, $p->byRef, $p->variadic, $p->default);
+            $np = new Param($p->name, $t, $p->byRef, $p->variadic, $p->default);
+            $np->refOut = $p->refOut;
+            $np->arrayHinted = $p->arrayHinted;
+            $newParams[] = $np;
         }
         try {
             $body = NodeClone::block($fn->body);

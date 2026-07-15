@@ -12,6 +12,11 @@ namespace Parser\Ast;
  */
 final class Param
 {
+    /** A by-ref param marked `#[RefOut]`: pure output, safe to auto-vivify
+     *  at the caller. Carried across the interface `.sig` (param attributes
+     *  themselves do not survive the sig round-trip). */
+    public bool $refOut = false;
+
     /**
      * @param AttributeNode[] $attributes
      */
