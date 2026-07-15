@@ -462,6 +462,111 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * The REVERSE of {@see emitAssocToCellArrayUnified}: rebuild a cell-repr
+     * array (its values boxed cells) into a fresh CONCRETE array of `$arrType`
+     * — each value UNBOXED to the target element's raw representation, keys
+     * preserved. Used at a store where a cell-element array is bound to a slot
+     * whose declared type is a concrete-element array (the de-cellify boundary —
+     * e.g. `uasort`'s `$arr = $new` writeback restoring the byref param's typed
+     * representation). lastValue holds the source array cell/ptr on entry; the
+     * boxed concrete array on exit.
+     */
+    private function emitCellArrayToTyped(Type $arrType): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsCellKey = true;
+        $elem = $arrType->element ?? Type::unknown();
+        $isAssoc = $arrType->isAssoc();
+        $out = $this->coerceToPtr();
+        $rawSrc = $this->lastValue;
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
+        $src = $this->ssa->allocReg();
+        $out .= '  ' . $src . ' = select i1 ' . $isNull
+              . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
+        $len = $this->ssa->allocReg();
+        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca ptr\n";
+        $nv = $this->ssa->allocReg();
+        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $len . ")\n";
+        $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
+        $iSlot = $this->ssa->allocReg();
+        $out .= '  ' . $iSlot . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $iSlot . "\n";
+        $cond = $this->ssa->allocLabel('uct.cond');
+        $body = $this->ssa->allocLabel('uct.body');
+        $end  = $this->ssa->allocLabel('uct.end');
+        $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
+        $i = $this->ssa->allocReg();
+        $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
+        $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
+        $out .= $body . ":\n";
+        $ev = $this->ssa->allocReg();
+        $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+        // Unbox the boxed cell value to the element's raw representation.
+        $raw = $this->ssa->allocReg();
+        if ($elem->kind === Type::KIND_ARRAY && ($elem->element->kind ?? '') !== Type::KIND_CELL) {
+            // Nested concrete array: recursively de-cellify.
+            $this->lastValue = $ev;
+            $this->lastValueType = 'i64';
+            $out .= $this->emitCellArrayToTyped($elem);
+            $raw = $this->lastValue;
+        } else {
+            $this->lastValue = $ev;
+            $this->lastValueType = 'i64';
+            $out .= $this->unboxCellToType($elem);
+            if ($this->lastValueType === 'double') {
+                $bc = $this->ssa->allocReg();
+                $out .= '  ' . $bc . ' = bitcast double ' . $this->lastValue . " to i64\n";
+                $raw = $bc;
+            } else {
+                $raw = $this->lastValue;
+            }
+        }
+        $cur = $this->ssa->allocReg();
+        $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
+        $nx = $this->ssa->allocReg();
+        if ($isAssoc) {
+            $kb = $this->ssa->allocReg();
+            $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
+        } else {
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $raw . ")\n";
+        }
+        $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
+        $i2 = $this->ssa->allocReg();
+        $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
+        $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";
+        $out .= '  br label %' . $cond . "\n" . $end . ":\n";
+        $dst = $this->ssa->allocReg();
+        $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        // Leave the RAW array pointer (concrete-array slot repr — arrays pass
+        // raw), NOT a boxed array cell.
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = ptrtoint ptr ' . $dst . " to i64\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /** True when a store of a cell-element array into a `$slotType`-declared slot
+     *  needs de-cellifying: the slot is a CONCRETE-element array (scalar/obj/
+     *  nested-concrete element) while the value carries boxed cells. */
+    private function needsDeCellify(Type $slotType, Type $valueType): bool
+    {
+        if (!$slotType->isArray() || !$valueType->isArray()) { return false; }
+        $se = $slotType->element;
+        $ve = $valueType->element;
+        if ($se === null || $ve === null) { return false; }
+        if ($ve->kind !== Type::KIND_CELL) { return false; }
+        $sk = $se->kind;
+        return $sk === Type::KIND_INT || $sk === Type::KIND_FLOAT
+            || $sk === Type::KIND_STRING || $sk === Type::KIND_BOOL
+            || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
+    }
+
+    /**
      * The debug-backtrace builtin — a packed list of the active call frames'
      * NAMES, innermost first (from the runtime call-stack {@see needsBacktrace}).
      * V1 returns vec[string] of names (not PHP's assoc frames); count() and

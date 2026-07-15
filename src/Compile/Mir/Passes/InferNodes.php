@@ -130,8 +130,10 @@ trait InferNodes
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
         $this->localTypes = [];
         $this->kindAliasOf = [];
+        $this->currentParamTypes = [];
         foreach ($fn->params as $p) {
             $this->localTypes[$p->name] = $p->type;
+            $this->currentParamTypes[$p->name] = $p->type;
         }
         // Closure body: seed its capture params (the first N) with the value
         // types observed at the capture site (recorded in pass 1). Safe — this
@@ -472,6 +474,22 @@ trait InferNodes
         return $node->type;
     }
 
+    /** A store needing de-cellify: `$slotType` is a CONCRETE-element array
+     *  (scalar/obj/nested-array element) and `$valueType` is a cell-element
+     *  array. Mirrors EmitLlvmBuiltins::needsDeCellify (the emit side). */
+    private function isDeCellifyStore(Type $slotType, Type $valueType): bool
+    {
+        if (!$slotType->isArray() || !$valueType->isArray()) { return false; }
+        $se = $slotType->element;
+        $ve = $valueType->element;
+        if ($se === null || $ve === null) { return false; }
+        if ($ve->kind !== Type::KIND_CELL) { return false; }
+        $sk = $se->kind;
+        return $sk === Type::KIND_INT || $sk === Type::KIND_FLOAT
+            || $sk === Type::KIND_STRING || $sk === Type::KIND_BOOL
+            || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
+    }
+
     private function inferStoreLocal(StoreLocal $node): Type
     {
         $valueType = $this->inferNode($node->value);
@@ -503,6 +521,19 @@ trait InferNodes
             $this->localTypes[$node->name] = Type::cell();
             $node->type = Type::cell();
             return $node->type;
+        }
+        // De-cellify plant: a store to a concrete-element array PARAM from a
+        // cell-element array value. The param's concrete type is authoritative
+        // (a byref contract / typed slot), so keep it and mark the store NODE
+        // with it — emitStoreLocal then rebuilds the value with each element
+        // unboxed to the param's repr. Without this a cell-valued array bound
+        // back to a typed param (uasort's `$arr = $new` undecorate) leaves boxed
+        // values that a later typed read renders raw. {@see emitCellArrayToTyped}
+        $pt = $this->currentParamTypes[$node->name] ?? null;
+        if ($pt !== null && $this->isDeCellifyStore($pt, $valueType)) {
+            $this->localTypes[$node->name] = $pt;
+            $node->type = $pt;
+            return $pt;
         }
         // An inline `/** @var T $x */` on the binding is authoritative: seed the
         // slot with the declared type (retyping an array-literal init to match
