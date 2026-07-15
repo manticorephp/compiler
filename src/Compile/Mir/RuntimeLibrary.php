@@ -1116,24 +1116,40 @@ final class RuntimeLibrary
      * Always returns a FRESH string. Empty/absent search → a plain copy. */
     public function strReplaceOne(): string
     {
+        // Header-aware lengths (cached len@-16) — never a libc O(n) rescan of an
+        // already-headered manticore string. A single-byte search (%is1, the
+        // overwhelmingly common explode/implode delimiter) probes with memchr
+        // instead of strstr (no substring-match machinery) in both passes.
         $out  = "\ndefine ptr @__mir_str_replace_one(ptr %se, ptr %rp, ptr %sj) {\n";
         $out .= "entry:\n";
-        $out .= "  %slen = call i64 @strlen(ptr %se)\n";
-        $out .= "  %rlen = call i64 @strlen(ptr %rp)\n";
-        $out .= "  %jlen = call i64 @strlen(ptr %sj)\n";
+        $out .= "  %slen = call i64 @__mir_strlen(ptr %se)\n";
+        $out .= "  %rlen = call i64 @__mir_strlen(ptr %rp)\n";
+        $out .= "  %jlen = call i64 @__mir_strlen(ptr %sj)\n";
         // Empty search or search longer than subject → copy subject verbatim.
         $out .= "  %semp = icmp eq i64 %slen, 0\n";
         $out .= "  %stoolong = icmp ugt i64 %slen, %jlen\n";
         $out .= "  %nomatchposs = or i1 %semp, %stoolong\n";
-        $out .= "  br i1 %nomatchposs, label %copy, label %count\n";
-        // ── Pass 1: count matches ──
-        $out .= "count:\n";
+        $out .= "  br i1 %nomatchposs, label %copy, label %prep\n";
+        $out .= "prep:\n";
+        $out .= "  %is1 = icmp eq i64 %slen, 1\n";
+        $out .= "  %c0b = load i8, ptr %se\n";
+        $out .= "  %c0 = zext i8 %c0b to i32\n";
         $out .= "  br label %cloop\n";
+        // ── Pass 1: count matches ──
         $out .= "cloop:\n";
-        $out .= "  %cpos = phi i64 [0, %count], [%cpos2, %chit]\n";
-        $out .= "  %ccnt = phi i64 [0, %count], [%ccnt1, %chit]\n";
+        $out .= "  %cpos = phi i64 [0, %prep], [%cpos2, %chit]\n";
+        $out .= "  %ccnt = phi i64 [0, %prep], [%ccnt1, %chit]\n";
         $out .= "  %cfrom = getelementptr inbounds i8, ptr %sj, i64 %cpos\n";
-        $out .= "  %cf = call ptr @strstr(ptr %cfrom, ptr %se)\n";
+        $out .= "  br i1 %is1, label %cm, label %cs\n";
+        $out .= "cm:\n";
+        $out .= "  %crem = sub i64 %jlen, %cpos\n";
+        $out .= "  %cmr = call ptr @memchr(ptr %cfrom, i32 %c0, i64 %crem)\n";
+        $out .= "  br label %cj\n";
+        $out .= "cs:\n";
+        $out .= "  %csr = call ptr @strstr(ptr %cfrom, ptr %se)\n";
+        $out .= "  br label %cj\n";
+        $out .= "cj:\n";
+        $out .= "  %cf = phi ptr [%cmr, %cm], [%csr, %cs]\n";
         $out .= "  %cnull = icmp eq ptr %cf, null\n";
         $out .= "  br i1 %cnull, label %sized, label %chit\n";
         $out .= "chit:\n";
@@ -1157,7 +1173,16 @@ final class RuntimeLibrary
         $out .= "  %src = phi i64 [0, %sized], [%src2, %fhit]\n";
         $out .= "  %dst = phi i64 [0, %sized], [%dst2, %fhit]\n";
         $out .= "  %ffrom = getelementptr inbounds i8, ptr %sj, i64 %src\n";
-        $out .= "  %ff = call ptr @strstr(ptr %ffrom, ptr %se)\n";
+        $out .= "  br i1 %is1, label %fm, label %fs\n";
+        $out .= "fm:\n";
+        $out .= "  %frem = sub i64 %jlen, %src\n";
+        $out .= "  %fmr = call ptr @memchr(ptr %ffrom, i32 %c0, i64 %frem)\n";
+        $out .= "  br label %fj\n";
+        $out .= "fs:\n";
+        $out .= "  %fsr = call ptr @strstr(ptr %ffrom, ptr %se)\n";
+        $out .= "  br label %fj\n";
+        $out .= "fj:\n";
+        $out .= "  %ff = phi ptr [%fmr, %fm], [%fsr, %fs]\n";
         $out .= "  %fnull = icmp eq ptr %ff, null\n";
         $out .= "  br i1 %fnull, label %tail, label %fhit\n";
         $out .= "fhit:\n";

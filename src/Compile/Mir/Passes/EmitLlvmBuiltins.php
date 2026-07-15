@@ -2805,6 +2805,7 @@ trait EmitLlvmBuiltins
         $this->rt->needsStrReplaceOne = true;
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $se = $this->lastValue;
