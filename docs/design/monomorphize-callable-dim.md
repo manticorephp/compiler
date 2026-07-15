@@ -1,9 +1,13 @@
 # Monomorphize — the callable dimension (dynamic-callback specialization)
 
-Status: DESIGN. Branch `mono-callback`, worktree `../manticore-mono`.
-Extends `Monomorphize.php` (array dimension, shipped) with a **callable
-dimension**. Prereq landed: the KNOWN-closure cellify milestone (`0b0fbc7`,
-[[cell-array-closure-arg-misbox-2026-07-15]]).
+Status: **SHIPPED** (`main` `a6e062a`). Extends `Monomorphize.php` (array
+dimension) with a **callable dimension** + the de-cellify store boundary that
+resolves the representation roundtrip it exposed. Gated: fixpoint byte-identical,
+self-host AOT 465/465, stability 5×2, difftest 455/0 (merged tree 467/467, 458/0).
+
+The sections below record the design AND the diagnosis journey (Phase A → Phase B
+attempt → the representation root → the de-cellify fix) — kept as the rationale
+for the final shape. Prereq: the KNOWN-closure cellify milestone (`0b0fbc7`).
 
 ## The bug this closes
 

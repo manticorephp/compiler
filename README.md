@@ -18,9 +18,13 @@ potential for creating a fully self-contained PHP runtime environment.
 
 - ✅ **Self-host fixpoint holds.** `manticore build manticore.json` rebuilds the
   compiler from PHP source; gen2 and gen3 emit byte-identical IR.
-- ✅ **AOT suite 384/384** green (`tests/aot/`).
-- ✅ **Differential parity 375/0** vs the Zend `php` interpreter (PHP 8.5.3) —
+- ✅ **AOT suite 467/467** green (`tests/aot/`).
+- ✅ **Differential parity 458/0** vs the Zend `php` interpreter (PHP 8.5.8) —
   manticore output matches the reference on every plain-runnable case.
+- ✅ **~228 standard-library functions** implemented (array 35, string 43, type
+  30, math 28, ctype 11, `preg_*` 10, plus JSON / var-dump / SPL / date / I/O) —
+  each as a PHP-level stdlib function, an injected prelude helper, or an inlined
+  codegen builtin. See [Standard library](#standard-library).
 - ✅ **Rebuild-stable** — 5×2 cold/self rebuilds, every binary smoke-clean (no
   build-to-build heap-layout roulette).
 - ✅ **Faster than Zend on every benchmark** — up to **44×** on compute/algorithms,
@@ -44,8 +48,11 @@ potential for creating a fully self-contained PHP runtime environment.
   `|>`, `match`, DNF types, null-coalescing / nullsafe (`??`, `?->`), `global` /
   `static` locals, heredoc / nowdoc, encapsed-string interpolation,
   `define`/constants, generators (`yield` / `yield from`), exceptions with
-  `try`/`catch`/`finally` and stack traces (`getTrace` / `debug_backtrace`), and
-  file I/O over libc.
+  `try`/`catch`/`finally` and stack traces (`getTrace` / `debug_backtrace`),
+  the full `preg_*` family (10 functions via the host PCRE2 library),
+  by-reference to an **array element / object property** (`f($a[0])`, `f($o->v)`)
+  and out-parameter auto-vivification (`preg_match($re, $s, $m)`), reference
+  returns (`function &f()`), and file I/O over libc.
 
 ## Benchmarks
 
@@ -197,6 +204,26 @@ opt out with `"stdlib": false` (only the self-contained compiler, which embeds
 attributes compile to direct C calls; declare them as manifest `extensions`.
 Mechanism + type mapping: [`docs/ffi.md`](docs/ffi.md).
 
+## Standard library
+
+**~228 PHP standard-library functions** are implemented across three tiers, all
+exposed to user programs transparently (no imports, no registration):
+
+| Family | Count | Examples |
+|--------|------:|----------|
+| `array_*` | 35 | `array_map`/`filter`/`reduce`, `usort`/`uasort`/`uksort`, `array_merge`, `array_column`, `array_diff`, `array_unique` |
+| String | 43 | `str_replace`, `substr`, `explode`/`implode`, `sprintf`, `preg_*` (10, via host PCRE2), `str_pad`, `wordwrap`, `levenshtein` |
+| Type / reflection | 30 | `is_*`, `gettype`, `get_class`, `get_object_vars`, `class_exists`, `method_exists` |
+| Math | 28 | `abs`, `sqrt`, trig, `intdiv`, `fmod`, `round`, `pow`, `max`/`min` |
+| `ctype_*` | 11 | `ctype_digit`, `ctype_alpha`, … |
+| Var / JSON / SPL / date / I/O | remainder | `var_dump`, `var_export`, `print_r`, `json_encode`, `SplStack`/`SplQueue`, `time`/`date`, `fopen`/`fread` over libc |
+
+Each function is one of: a **PHP-level stdlib function** (`src/Runtime/Stdlib/`,
+compiled into `lib/manticore_stdlib.o` and auto-linked), an **injected prelude
+helper** (`prelude/`, inlined into each program), or an **inlined codegen
+builtin** (`src/Compile/Mir/Passes/EmitLlvmBuiltins.php`, emitted as a primitive
+/ libc call / LLVM intrinsic). See `docs/ROADMAP.md` for the gap matrix.
+
 ## Compiler pipeline
 
 ```
@@ -207,8 +234,12 @@ PHP source
   → ConstFold         │
   → DeadStore         │
   → InferTypes        │  MIR  (src/Compile/Mir) — flat, typed, SSA-ish IR
-  → NarrowReturns     │  The only backend (the AST backend was removed);
-  → InferEffects      │  EmitLlvm builds IR text via the src/Codegen/Llvm helpers.
+  → InlineClosures    │  The only backend (the AST backend was removed);
+  → Monomorphize      │  EmitLlvm builds IR text via the src/Codegen/Llvm helpers.
+  → NarrowReturns     │  Monomorphize specializes erased-array / callable params
+  → CheckTypeDefs     │  per concrete call-site shape (see docs/design).
+  → DemoteCharLocals  │
+  → InferEffects      │
   → InferAllocKind    │
   → ApplyMemoryMode   │
   → InsertMemoryOps   │  (rc retain/release/CoW insertion)
@@ -271,9 +302,9 @@ binary's `main` lowers to.
 ## Self-hosting & gates
 
 ```bash
-bash tests/aot/run.sh                 # AOT suite (384 cases)
+bash tests/aot/run.sh                 # AOT suite (467 cases)
 bash tests/aot/run.sh -k hello        # filter by substring
-bash tools/difftest.sh                # parity vs `php` (PHP 8.5.3)
+bash tools/difftest.sh                # parity vs `php` (PHP 8.5.8)
 bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + stability
 ```
 
@@ -284,42 +315,47 @@ catch layout roulette.
 
 ## Known limitations
 
-- **Multi-object linking now composes.** A binary linked from two manticore
-  objects (user `.o` + prebuilt `stdlib.o`) is correct and byte-identical:
-  class ids are content-hashed (stable across objects), and object drops go
-  through a per-class `linkonce_odr` descriptor + indirect drop_fn, so a class
-  one object doesn't know still drops correctly. The compiler still self-builds self-contained
-  (stdlib embedded) for simplicity; user programs link the cached `stdlib.o`.
-- Cycle collector is manual-trigger only; static/global roots not scanned.
-- A few PHP corners are not yet covered: by-ref to an **array element / object
-  property** (`f($a[0])`, `f($o->v)` — plain and typed by-ref params work),
-  string-valued `global`s, `goto`, reference returns (`function &f()`), the
-  `preg_*` family, and `compact`/`extract`. Integer overflow wraps instead of
-  promoting to float.
+- **Integer overflow wraps** (two's-complement) instead of promoting to float
+  as PHP does — `PHP_INT_MAX + 1` gives `PHP_INT_MIN`, not a float.
+- **`sprintf`/`printf` gaps** — `%b` (binary), zero-pad width + precision
+  combinations (`%05.2f`), and `%e` exponent formatting are incomplete; the
+  common conversions (`%d`/`%s`/`%f`/`%x`/`%e` mantissa) match.
+- **`extract()` / `compact()`** are not implemented (they need dynamic
+  symbol-table access the typed frame does not model).
+- **`goto` into a loop body** is unsupported (plain forward/backward `goto`
+  works).
+- **Cycle collector** is manual-trigger only; static/global roots not scanned.
+- **Multi-object linking composes** (resolved): a binary linked from two
+  manticore objects (user `.o` + prebuilt `stdlib.o`) is correct and
+  byte-identical — class ids are content-hashed (stable across objects) and
+  drops route through a per-class `linkonce_odr` descriptor + indirect drop_fn,
+  so a class one object doesn't know still drops correctly. The compiler still
+  self-builds self-contained (stdlib embedded) for simplicity; user programs
+  link the cached `stdlib.o`.
 
 ## Roadmap / next steps
 
-1. ✅ **Build entrypoint unified (#4).** `bin/compile` / `bin/build` both run
-   `manticore build manticore.json`; the manifest is the single definition.
-2. **Build cache.** A content-addressed cache (`~/.manticore/cache`, keyed by
+1. **Parity tail.** Close the remaining `tools/difftest.sh` gaps toward the full
+   PHP 8.5 surface: integer overflow → float promotion, the `sprintf` flag
+   corners (`%b`, width+precision, `%e` exponent), `extract`/`compact`. Each is a
+   scoped stdlib/codegen fix, not an architectural one.
+2. **Representation soundness.** Continue the typed⇄cell array reabstraction the
+   monomorphization + de-cellify work opened (`docs/design/unknown-cell-soundness.md`,
+   `docs/design/monomorphize-callable-dim.md`): erased-array boundaries now
+   specialize + de-cellify at stores; broaden the same discipline to the last
+   raw-guessing consumers.
+3. **Build cache.** A content-addressed cache (`~/.manticore/cache`, keyed by
    srchash + compiler ABI + target triple) to skip re-lowering/re-clang of
-   unchanged modules. (Multi-object linking already composes correctly, so this
-   is a speed feature, not a correctness one.)
-3. **Extension system** — MVP shipped (manifest `extensions`, glue compiled in,
-   `-l<lib>` linked; proof: `zlib`/`crc32`). Next: static-archive linking (keeps
-   binaries fully static) + real extensions (curl / xml / pdo) on the same
-   mechanism. Native libs are ordinary C archives and never touch the arena/rc
-   runtime, so they add no corruption surface.
-4. **Module system depth.** Weak library symbols (app can override), composer
-   packaging + `dependencies` resolution (`vendor/`, lockfile),
-   cross-library `.sig` classes, element-type precision.
-5. **Memory.** Cycle-collector roots for statics/globals + automatic trigger;
+   unchanged modules — a speed feature (multi-object linking already composes).
+4. **Extension system.** MVP shipped (manifest `extensions`, glue compiled in,
+   `-l<lib>` linked; proof: `zlib`/`crc32`, and the `preg_*` family over host
+   PCRE2). Next: static-archive linking (keeps binaries fully static) + real
+   extensions (curl / xml / pdo) on the same FFI mechanism.
+5. **Module system depth.** Weak library symbols (app can override), composer
+   packaging + `dependencies` resolution (`vendor/`, lockfile), cross-library
+   `.sig` classes.
+6. **Memory.** Cycle-collector roots for statics/globals + automatic trigger;
    broaden arena/hybrid escape routing.
-6. **Parity.** Continue closing `tools/difftest.sh` gaps toward the full PHP 8.5
-   surface.
-7. **(Optional, deferred)** Root-cause the two-object `-O2` fault — now
-   deterministic and isolated — only if the two-object path is ever wanted for
-   large programs (step 2 makes it moot).
 
 ## License
 

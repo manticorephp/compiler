@@ -5,7 +5,7 @@
 `docs/PHP85_SYNTAX_GAP.md` (all deleted). Design *how-it-works* docs are listed
 under [Design references](#design-references) and remain valid.
 
-_Last updated: 2026-06-26 · branch `php/v2` · HEAD `6f64593`._
+_Last updated: 2026-07-15 · branch `main` · HEAD `a6e062a`._
 
 ## Current state
 
@@ -13,26 +13,24 @@ Pure-PHP, self-hosting PHP→native AOT compiler. The runtime is emitted as LLVM
 own `src/`.
 
 **Gates (all green):**
-- `tests/aot/run.sh` — **343/343**
+- `tests/aot/run.sh` — **467/467**
 - `tools/selfhost_fixpoint.sh` — fixpoint byte-identical · self-host · stability 5×2
-- `tools/difftest.sh` — **334 match / 0 diff** vs PHP 8.5.3
+- `tools/difftest.sh` — **458 match / 0 diff** vs PHP 8.5.8
 
 Build: `bin/build --seed` (cold Zend bootstrap → native) / `bin/build`
 (self-host). See `.claude/CLAUDE.md` for the pipeline and key files.
 
-**Recently completed** (CLI layer, 2026-06-29): `$argv`/`$argc` in user programs,
-`STDIN`/`STDOUT`/`STDERR` (libc FILE* globals, shares echo's buffer), `getopt()`
-(full subset in `prelude/cli.php`). General fixes: omitted by-ref default arg
-(throwaway alloca). Open: nested array in an erased cell-array (getopt repeats use
-the `__mir_to_cell` workaround; a general fix needs tag-dispatched cell rc).
-Detail in memory `cli-layer-2026-06-29`.
+**~228 stdlib functions** implemented (array/string/type/math/ctype/`preg_*`/JSON/
+var/SPL/date/IO); see the README's Standard library table.
 
-**Earlier** (monomorphization + float epic):
-monomorphization P0–P5 · canonical NaN-boxing (lossless float-in-cell) · closure
-cell+cell float arith · printf/`===`/var_dump shortest for cell floats · P3
-heterogeneous-`array`→vec[cell] fallback · rebuild-flake root-caused (was a real
-`str_replace` array-search OOB SIGBUS, not a transient). Detail in memory
-`monomorphization-plan` / `float-nanbox-handoff`.
+**Recently completed** (2026-07): full `preg_*` family over host PCRE2 +
+`#[RefOut]` out-param auto-vivification · Monomorphize **callable dimension**
+(specialize callback-takers per concrete closure) · **de-cellify** at the
+concrete-array ← cell-array store boundary — fixes `uasort` with any comparator
+and dents the erased-array representation root · Ryu float formatting · JSON
+decode 3.3× + default-flag escaping · assoc key-leak fix (malloc −97%) ·
+reified-class generics · pin elimination (278→0). Detail in the session memory
+files under `.claude/.../memory/`.
 
 ## The gap matrix (probed, with repros)
 
@@ -62,12 +60,14 @@ variable stay float)._
 
 ### Tier 2 — missing PHP 8.5 syntax (blocks real code / self-host breadth)
 
-| Gap | Repro | Status |
-|---|---|---|
-| Property hooks (8.4) | `public string $x { get => …; }` | no parse |
-| Asymmetric visibility (8.4) | `public private(set) $x` | no parse |
+_All previously-tracked syntax gaps are now closed (property hooks, asymmetric
+visibility, anonymous classes, heredoc/nowdoc, pipe `|>`, first-class callables,
+DNF types, enums, match, named args). The parser covers the PHP 8.5 surface the
+self-host needs; remaining gaps are semantic (see Tier 1 + the README limitations),
+not syntactic._
 
-_Done: **anonymous classes** (`new class(args) extends X implements Y { … }`) —
+_Done: **property hooks** (`public string $x { get => …; }`) + **asymmetric
+visibility** (`public private(set) $x`). **anonymous classes** (`new class(args) extends X implements Y { … }`) —
 parsed under a synthetic name, hoisted to top-level, lowered like any class;
 fixed two surfaced abstract-method bugs (dispatch to a body-less method; abstract
 `: float` return untyped). **heredoc / nowdoc** (`<<<EOT … EOT;`, `<<<'EOT'`) —
@@ -160,9 +160,11 @@ to a dynamic site).
 
 ## Design references (current, keep)
 
-- `docs/design/monomorphization.md` — the generics/erasure engine.
-- `docs/design/type-system-v2.md` — cell / union / NaN-box type system (+ dead ends).
-- `docs/design/generators-and-pointers.md`, `generators-impl-plan.md` — generators.
+- `docs/design/monomorphization.md`, `docs/design/monomorphize-callable-dim.md` —
+  the generics/erasure engine + the callable dimension.
+- `docs/design/type-system-v2.md`, `docs/design/unknown-cell-soundness.md` —
+  cell / union / NaN-box type system + the erased-representation soundness epic.
+- `docs/design/generators-and-pointers.md` — generators.
 - `docs/design/module-system.md`, `docs/modules.md` — modules / manifest build.
 - `docs/design/build-and-packaging.md` — packaging.
 - `docs/design/ptr-attribute-plan.md`, `docs/ffi.md` — typed FFI.
