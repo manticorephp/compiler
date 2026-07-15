@@ -208,6 +208,55 @@ representation-consistency epic makes typed⇄cell array conversion boxing-exact
 at assignment/return/writeback boundaries. `uasort` keeps its KNOWN-LIMITATION
 note.
 
+## Phase B ROOT — precise diagnosis (repr-array branch, 2026-07-15)
+
+Re-enabled Phase B (freshening + cell-element/bare-`array` dim) and reproduced on
+`uasort($data, fn($x,$y)=>$x-$y)`: **ordering now CORRECT, values print boxed**
+(`box(1) = -4222124650659839`). Traced the exact boundary:
+
+1. `$data`:assoc[string,int] → `uasort$mono$p0_assoc_str_int_p1` gets `$arr`:assoc[string,int].
+2. `$pairs[] = ["k"=>$k, "v"=>$v]` — k:string ∪ v:int ⇒ pair is assoc[string,**cell**];
+   storing the int `$v` into a cell slot BOXES it (correct — heterogeneous array
+   needs cell storage).
+3. usort sorts (correct). Undecorate `$new[$p["k"]] = $p["v"]` — `$p["v"]` reads
+   the boxed cell; `$new` infers assoc[?,**cell**].
+4. **`$arr = $new`** — assigns a cell-valued array into the concrete
+   assoc[string,int] byref slot with NO representation conversion. The boxed
+   values stay boxed.
+5. Caller reads `$data` as assoc[string,int] (byref keeps its static type) → `echo`
+   treats each value as a raw int → prints the box bits.
+
+The inlined (non-uasort) form WORKS because there the value stays cell-typed to the
+`echo`, which unboxes a cell. Only the byref writeback through a concrete-typed
+param loses the tag-awareness.
+
+### The fix (mirrors the existing box-back precedent)
+There is already a plant→emit coercion pattern: `InferTypes::planMergeShadow`
+plants a store whose NODE type ≠ VALUE type, and `emitStoreLocal`
+(EmitLlvmLocals.php:388) boxes on that signal. Mirror it for arrays:
+
+- **New runtime helper `emitCellArrayToTyped(Type $elem)`** — the reverse of
+  `emitAssocToCellArrayUnified` (EmitLlvmBuiltins.php:372): walk the cell array,
+  UNBOX each value per `$elem` kind, keys preserved, into a fresh typed array.
+- **`emitStoreLocal` de-cellify branch** — store NODE type is a concrete-element
+  array AND value type is a cell-element array ⇒ de-cellify.
+- **`InferTypes::inferStoreLocal` plant** — a store to a byref param whose declared
+  type is a concrete-element array, from a cell-element-array value, keeps the
+  store node typed as the declared concrete array (the de-cellify signal) instead
+  of overwriting to the value's cell type.
+
+### The risk (why this is checkpoint-worthy, not a quick edit)
+This lives in `InferTypes` + `emitStoreLocal` — the exact pass the
+[[unknown-cell-soundness-epic-2026-07-08]] documents as repeatedly SIGSEGV-ing the
+self-build when a producer/consumer flip is inconsistent. The compiler's own source
+has hundreds of array assignments; a de-cellify that fires one slot too wide
+destabilizes the fixpoint. Two scopes:
+- **Narrow:** de-cellify ONLY at a monomorphized byref-array-param writeback
+  (uasort's exact shape) — minimal blast radius, self-host-safe by construction,
+  fixes uasort, leaves the general array cluster alone.
+- **General:** de-cellify at any concrete-array ← cell-array store — the real
+  representation-consistency fix, but the full self-host-risk surface.
+
 ## First action
 
 Part 1 (NodeClone Closure_) + Part 2/3 (callable dim, guarded to concrete

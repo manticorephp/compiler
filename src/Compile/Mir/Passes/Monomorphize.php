@@ -432,9 +432,11 @@ final class Monomorphize implements Pass
     private function isErasedArrayParam(Type $t): bool
     {
         if ($t->kind === Type::KIND_UNKNOWN) { return true; }
-        if ($t->isVec()) {
+        if ($t->isArray()) {
             $e = $t->element;
-            return $e === null || $e->kind === Type::KIND_UNKNOWN;
+            if ($e === null || $e->kind === Type::KIND_UNKNOWN || $e->kind === Type::KIND_CELL) {
+                return true;
+            }
         }
         return false;
     }
@@ -494,10 +496,10 @@ final class Monomorphize implements Pass
     private function bodyHasUnsupported(Node $n): bool
     {
         $k = $n->kind;
-        if ($k === Node::KIND_CLOSURE
-            || $k === Node::KIND_STATIC_LOCAL_DECL || $k === Node::KIND_YIELD) {
+        if ($k === Node::KIND_STATIC_LOCAL_DECL || $k === Node::KIND_YIELD) {
             return true;
         }
+        if ($k === Node::KIND_CLOSURE) { return false; }
         foreach (Walk::children($n) as $c) {
             if ($this->bodyHasUnsupported($c)) { return true; }
         }

@@ -612,16 +612,11 @@ function array_push(array &$arr, mixed ...$values): int
  */
 function uasort(array &$arr, callable $cmp): bool
 {
-    // Decorate-sort-undecorate over usort, preserving keys. Correct for the
-    // idiomatic comparators — `$a <=> $b`, `strcmp(...)`, or one that extracts
-    // from the value (`$a["k"] - $b["k"]`).
-    //
-    // KNOWN LIMITATION: a comparator that does bare integer arithmetic on the
-    // whole value (`fn($x, $y) => $x - $y`) can mis-order. The callback param
-    // gets monomorphized to `int`, but the value handed in is still a boxed
-    // cell, so `$x - $y` reinterprets the NaN-boxed bits instead of unboxing —
-    // the unknown/cell representation-soundness root, fixable only in the
-    // compiler (InferTypes/call ABI), not here. Use `<=>` meanwhile.
+    // Decorate-sort-undecorate over usort, preserving keys. Correct for every
+    // comparator — `$a <=> $b`, `strcmp(...)`, value-extracting, AND bare integer
+    // arithmetic (`fn($x, $y) => $x - $y`): the callable dimension monomorphizes
+    // `$cmp`/`$arr`, and the decorated pair's boxed values de-cellify back to the
+    // byref param's concrete representation at the `$arr = $new` writeback.
     $pairs = [];
     foreach ($arr as $k => $v) { $pairs[] = ["k" => $k, "v" => $v]; }
     usort($pairs, fn($a, $b) => $cmp($a["v"], $b["v"]));

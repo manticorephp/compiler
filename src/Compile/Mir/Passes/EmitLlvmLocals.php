@@ -420,6 +420,33 @@ trait EmitLlvmLocals
             $this->lastValueType = 'i64';
             return $out;
         }
+        // De-cellify: a cell-element array value bound to a CONCRETE-element
+        // array slot. The store NODE carries the declared concrete array type
+        // (planted by InferTypes::inferStoreLocal for a typed array param/@var);
+        // rebuild the value with each element UNBOXED to the slot's repr so a
+        // later typed read gets a raw value (uasort's `$arr = $new` writeback
+        // restoring the byref param's assoc[string,int] representation). Mirrors
+        // the box-back / float-slot plants above.
+        if ($this->needsDeCellify($sl->type, $sl->value->type)
+            && isset($this->locals->slots[$sl->name])) {
+            $out = $this->emitNode($sl->value);
+            $out .= $this->emitCellArrayToTyped($sl->type);
+            $dv = $this->lastValue;
+            if (isset($this->locals->globalBacked[$sl->name])) {
+                $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->globalBacked[$sl->name] . "\n";
+            } elseif (isset($this->locals->refLocals[$sl->name])) {
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
+                $p = $this->ssa->allocReg();
+                $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+                $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
+            } else {
+                $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
+            }
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
         // The value just emitted an arena vec → this local owns it, so
