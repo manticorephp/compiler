@@ -1,0 +1,12 @@
+"a\/b\/c"
+"he said \"hi\""
+"c:\\path\\to"
+"line\nfeed\ttab\rret"
+"bell\u0007vtab\u000bunit\u001f"
+"caf\u00e9"
+"\u65e5\u672c\u8a9e"
+"emoji \ud83d\ude00 rocket \ud83d\ude80"
+"\u20ac price"
+"\u0000zero"
+"plain ascii word"
+{"url\/path":"http:\/\/x\/y","na\u00efve":["caf\u00e9","\u65e5"],"q\"key":1}

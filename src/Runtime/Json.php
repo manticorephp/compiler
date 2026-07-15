@@ -20,31 +20,71 @@ function json_encode(mixed $value): string {
     return __mc_json_enc($value);
 }
 
+/** `$w` lowercase hex digits of `$v` (JSON `\u` escapes are lowercase). */
+function __mc_json_hex(int $v, int $w): string {
+    $d = "0123456789abcdef";
+    $out = "";
+    for ($i = $w - 1; $i >= 0; $i = $i - 1) {
+        $out = $out . $d[($v >> ($i * 4)) & 15];
+    }
+    return $out;
+}
+
 /**
- * Escape a string for a JSON string literal: `"` and `\` are backslash-escaped,
- * and the C0 control chars that JSON forbids raw (\b \t \n \f \r) use their short
- * form. A fast-return skips the copy when no byte needs escaping (the common
- * case — plain ASCII words). Amortized `.=` builds the escaped copy.
+ * Escape a string for a JSON string literal, matching php json_encode's DEFAULT
+ * flags: `"` `\` and `/` are backslash-escaped; the C0 controls with a short
+ * form (\b \t \n \f \r) use it and any other control is `\u00XX`; and every
+ * NON-ASCII byte is UTF-8-decoded and emitted as `\uXXXX` (a codepoint above the
+ * BMP as a `\uD800`-`\uDC00` surrogate pair). A fast-return skips the copy when
+ * nothing needs escaping — the common case, plain ASCII words. `.=` is amortized.
  */
 function __mc_json_escape(string $s): string {
     $n = \strlen($s);
     $needs = false;
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = $s[$i];
-        if ($c === '"' || $c === '\\' || $c < ' ') { $needs = true; break; }
+        $o = \ord($s[$i]);
+        if ($o < 0x20 || $o === 0x22 || $o === 0x5c || $o === 0x2f || $o >= 0x80) {
+            $needs = true;
+            break;
+        }
     }
     if (!$needs) { return $s; }
     $out = "";
-    for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = $s[$i];
-        if ($c === '"') { $out = $out . '\\"'; }
-        else if ($c === '\\') { $out = $out . '\\\\'; }
-        else if ($c === "\n") { $out = $out . '\\n'; }
-        else if ($c === "\t") { $out = $out . '\\t'; }
-        else if ($c === "\r") { $out = $out . '\\r'; }
-        else if ($c === "\x08") { $out = $out . '\\b'; }
-        else if ($c === "\x0C") { $out = $out . '\\f'; }
-        else { $out = $out . $c; }
+    $i = 0;
+    while ($i < $n) {
+        $o = \ord($s[$i]);
+        if ($o === 0x22) { $out = $out . '\\"'; $i = $i + 1; }
+        elseif ($o === 0x5c) { $out = $out . '\\\\'; $i = $i + 1; }
+        elseif ($o === 0x2f) { $out = $out . '\\/'; $i = $i + 1; }
+        elseif ($o === 0x0a) { $out = $out . '\\n'; $i = $i + 1; }
+        elseif ($o === 0x09) { $out = $out . '\\t'; $i = $i + 1; }
+        elseif ($o === 0x0d) { $out = $out . '\\r'; $i = $i + 1; }
+        elseif ($o === 0x08) { $out = $out . '\\b'; $i = $i + 1; }
+        elseif ($o === 0x0c) { $out = $out . '\\f'; $i = $i + 1; }
+        elseif ($o < 0x20) { $out = $out . '\\u00' . \__mc_json_hex($o, 2); $i = $i + 1; }
+        elseif ($o < 0x80) { $out = $out . $s[$i]; $i = $i + 1; }
+        else {
+            // UTF-8 lead byte → decode the 2/3/4-byte sequence to a codepoint.
+            if ($o >= 0xF0) {
+                $cp = (($o & 7) << 18) | ((\ord($s[$i + 1]) & 0x3f) << 12)
+                    | ((\ord($s[$i + 2]) & 0x3f) << 6) | (\ord($s[$i + 3]) & 0x3f);
+                $i = $i + 4;
+            } elseif ($o >= 0xE0) {
+                $cp = (($o & 0xf) << 12) | ((\ord($s[$i + 1]) & 0x3f) << 6)
+                    | (\ord($s[$i + 2]) & 0x3f);
+                $i = $i + 3;
+            } else {
+                $cp = (($o & 0x1f) << 6) | (\ord($s[$i + 1]) & 0x3f);
+                $i = $i + 2;
+            }
+            if ($cp > 0xFFFF) {
+                $cp = $cp - 0x10000;
+                $out = $out . '\\u' . \__mc_json_hex(0xD800 + ($cp >> 10), 4)
+                     . '\\u' . \__mc_json_hex(0xDC00 + ($cp & 0x3FF), 4);
+            } else {
+                $out = $out . '\\u' . \__mc_json_hex($cp, 4);
+            }
+        }
     }
     return $out;
 }

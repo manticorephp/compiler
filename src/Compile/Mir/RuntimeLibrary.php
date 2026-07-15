@@ -830,9 +830,15 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %nl)\n";
         $out .= "  ret void\n}\n";
 
-        // append `\"<escaped s>\"`, escaping written inline (single up-front
-        // reserve so the buffer never grows mid-scan). Escape set matches
-        // __mir_json_escape: \" \\ \\n \\t \\r \\b \\f.
+        // Append `"<escaped s>"`. Default php flags: `"` `\` `/` and the C0
+        // controls escape, and any non-ASCII byte (>=0x80) becomes `\uXXXX`. The
+        // hot inline loop handles the ASCII escapes in ONE pass (fast for the
+        // common short-word case), writing each byte or its two-char `\x` form.
+        // The moment a byte needs UTF-8 decoding (>=0x80) or is a rare control
+        // with no short form, it BAILS to the PHP `__mc_json_escape` (which owns
+        // the multi-byte + surrogate logic) and rewrites the whole value from the
+        // saved offset — the partial inline bytes are simply overwritten (len is
+        // only committed at the end).
         $out .= "\ndefine void @__mir_json_estr(ptr %slotp, ptr %s) {\n";
         $out .= "entry:\n";
         $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
@@ -853,24 +859,39 @@ final class RuntimeLibrary
         $out .= "body:\n";
         $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
         $out .= "  %c = load i8, ptr %sp\n";
+        $out .= "  %cz = zext i8 %c to i64\n";
         $out .= "  %is34 = icmp eq i8 %c, 34\n";
         $out .= "  %is92 = icmp eq i8 %c, 92\n";
+        $out .= "  %is47 = icmp eq i8 %c, 47\n";
         $out .= "  %is10 = icmp eq i8 %c, 10\n";
         $out .= "  %is9  = icmp eq i8 %c, 9\n";
         $out .= "  %is13 = icmp eq i8 %c, 13\n";
         $out .= "  %is8  = icmp eq i8 %c, 8\n";
         $out .= "  %is12 = icmp eq i8 %c, 12\n";
+        // Bail to PHP on a non-ASCII byte or a control with no short form.
+        $out .= "  %ge80 = icmp uge i64 %cz, 128\n";
+        $out .= "  %lt32 = icmp ult i64 %cz, 32\n";
+        $out .= "  %sh1 = or i1 %is10, %is9\n";
+        $out .= "  %sh2 = or i1 %sh1, %is13\n";
+        $out .= "  %sh3 = or i1 %sh2, %is8\n";
+        $out .= "  %short = or i1 %sh3, %is12\n";
+        $out .= "  %nshort = xor i1 %short, true\n";
+        $out .= "  %rare = and i1 %lt32, %nshort\n";
+        $out .= "  %bail = or i1 %ge80, %rare\n";
+        $out .= "  br i1 %bail, label %phppath, label %ascii\n";
+        $out .= "ascii:\n";
         $out .= "  %e1 = select i1 %is10, i8 110, i8 %c\n";
         $out .= "  %e2 = select i1 %is9,  i8 116, i8 %e1\n";
         $out .= "  %e3 = select i1 %is13, i8 114, i8 %e2\n";
         $out .= "  %e4 = select i1 %is8,  i8 98,  i8 %e3\n";
         $out .= "  %e5 = select i1 %is12, i8 102, i8 %e4\n";
         $out .= "  %o1 = or i1 %is34, %is92\n";
-        $out .= "  %o2 = or i1 %o1, %is10\n";
-        $out .= "  %o3 = or i1 %o2, %is9\n";
-        $out .= "  %o4 = or i1 %o3, %is13\n";
-        $out .= "  %o5 = or i1 %o4, %is8\n";
-        $out .= "  %spec = or i1 %o5, %is12\n";
+        $out .= "  %o2 = or i1 %o1, %is47\n";
+        $out .= "  %o3 = or i1 %o2, %is10\n";
+        $out .= "  %o4 = or i1 %o3, %is9\n";
+        $out .= "  %o5 = or i1 %o4, %is13\n";
+        $out .= "  %o6 = or i1 %o5, %is8\n";
+        $out .= "  %spec = or i1 %o6, %is12\n";
         $out .= "  br i1 %spec, label %esc, label %plain\n";
         $out .= "esc:\n";
         $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %j\n";
@@ -896,6 +917,28 @@ final class RuntimeLibrary
         $out .= "  %ep2 = getelementptr inbounds i8, ptr %buf, i64 %jend\n";
         $out .= "  store i8 0, ptr %ep2\n";
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %jend)\n";
+        $out .= "  ret void\n";
+        // Bail: escape the whole value in PHP, rewrite from the saved offset.
+        $out .= "phppath:\n";
+        $out .= "  %si64 = ptrtoint ptr %s to i64\n";
+        $out .= "  %ei = call i64 @manticore___mc_json_escape(i64 %si64)\n";
+        $out .= "  %esp = inttoptr i64 %ei to ptr\n";
+        $out .= "  %elen = call i64 @__mir_strlen(ptr %esp)\n";
+        $out .= "  %ersv = add i64 %elen, 2\n";
+        $out .= "  %ebuf = call ptr @__mir_json_reserve(ptr %slotp, i64 %ersv)\n";
+        $out .= "  %eq0 = getelementptr inbounds i8, ptr %ebuf, i64 %len0\n";
+        $out .= "  store i8 34, ptr %eq0\n";
+        $out .= "  %edst1 = getelementptr inbounds i8, ptr %eq0, i64 1\n";
+        $out .= "  call ptr @memcpy(ptr %edst1, ptr %esp, i64 %elen)\n";
+        $out .= "  %eqjp = add i64 %len0, 1\n";
+        $out .= "  %eqj = add i64 %eqjp, %elen\n";
+        $out .= "  %eqc = getelementptr inbounds i8, ptr %ebuf, i64 %eqj\n";
+        $out .= "  store i8 34, ptr %eqc\n";
+        $out .= "  %eend = add i64 %eqj, 1\n";
+        $out .= "  %enul = getelementptr inbounds i8, ptr %ebuf, i64 %eend\n";
+        $out .= "  store i8 0, ptr %enul\n";
+        $out .= "  call void @__mir_str_set_len(ptr %ebuf, i64 %eend)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %esp)\n";
         $out .= "  ret void\n}\n";
 
         // recursive walker.
