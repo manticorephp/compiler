@@ -341,3 +341,34 @@ function htmlspecialchars(string $string): string
     }
     return $out;
 }
+
+/**
+ * Rewrite C-style printf exponents (`1.5e+03`) to PHP style (`1.5e+3`): strip
+ * leading zeros from the exponent digits, keeping at least one. Called by the
+ * sprintf/printf codegen builtin when the format has an `%e`/`%E`/`%g`/`%G`
+ * conversion (C always pads the exponent to two digits; PHP uses the minimum).
+ */
+function __mc_fix_exp(string $s): string
+{
+    $out = '';
+    $n = strlen($s);
+    $i = 0;
+    while ($i < $n) {
+        $c = $s[$i];
+        $out = $out . $c;
+        $i = $i + 1;
+        if ($c === 'e' || $c === 'E') {
+            if ($i < $n && ($s[$i] === '+' || $s[$i] === '-')) {
+                $out = $out . $s[$i];
+                $i = $i + 1;
+                // Drop a leading '0' only while another digit still follows,
+                // so a lone `e+0` keeps its zero.
+                while ($i + 1 < $n && $s[$i] === '0'
+                    && $s[$i + 1] >= '0' && $s[$i + 1] <= '9') {
+                    $i = $i + 1;
+                }
+            }
+        }
+    }
+    return $out;
+}
