@@ -1,8 +1,10 @@
 # Monomorphization — non-reified generics for the erased-array boundary
 
-Status: DESIGN / next major milestone. Prereqs landed: uniform closure ABI
-(closure unbox-param / box-return), cell/union type system (type-system-v2.md),
-float literal precision + var_dump INF/NAN.
+Status: **SHIPPED** — the `Monomorphize` pass (array dimension + the callable
+dimension, `docs/design/monomorphize-callable-dim.md`) is in `main`. This doc is
+the original engine design + rationale; read it with the callable-dim doc for
+the current shape. Prereqs (landed): uniform closure ABI, cell/union type system
+(type-system-v2.md), float literal precision.
 
 ## Why this is THE next milestone
 

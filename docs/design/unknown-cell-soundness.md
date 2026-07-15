@@ -340,6 +340,27 @@ call-site/store back-inference for object array elements. And the broader stage-
 (normalize residual unknown → cell; delete raw-unknown fallbacks) now that the invariant is
 proven and the enumeration tool exists.
 
+## 14. ARRAY CLUSTER — first end-to-end fix (2026-07-15, `main` `a6e062a`)
+
+The erased-**array** half (§8 called out: "erased ARRAY ⟹ stays RAW array; array
+consumers must be made cell-unbox-aware") got its first self-host-safe fix, via
+the monomorphization + a store-boundary reabstraction:
+
+- **Monomorphize callable dimension** (`docs/design/monomorphize-callable-dim.md`)
+  specializes callback-takers per concrete closure, so an erased array flowing
+  through a callback (`usort`/`uasort`) reaches a KNOWN callee that can cellify.
+- **De-cellify at the store boundary**: `emitCellArrayToTyped` (reverse of the
+  cellify helper) fires at a concrete-element-array slot ← cell-element-array
+  value, planted by `InferTypes::inferStoreLocal` for a typed array PARAM (the
+  same box-back plant precedent §mergeShadow uses for scalars). This is the
+  typed⇄cell array reabstraction §8 said was needed, landed at the assignment
+  boundary rather than as a blanket flip — so it re-converges the self-host.
+
+Gated: fixpoint byte-identical, self-host 465/465, stability 5×2. Fixes `uasort`
+with any comparator (int-arith, `<=>`, strcmp) — the `bug1`/`bug3` reproducers
+that lived under `docs/bugs/selfhost/` now pass and were removed. The remaining
+array-consumer sites (append/arith on an erased array read) are the next targets.
+
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
   memory `unknown-receiver-propread-offset16-2026-07-08`.

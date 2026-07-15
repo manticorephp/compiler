@@ -210,6 +210,33 @@ because there is nothing to drift from.
 
 ---
 
+## Parameter semantics
+
+### `Manticore\Attr\RefOut`
+
+Mark a by-reference (`&$x`) parameter as pure **output** — the callee assigns it
+fresh and never reads the incoming value. Unlike a plain by-ref param (IN-OUT,
+e.g. `sort()`), a `#[RefOut]` arg is safe for the caller to **auto-vivify**: an
+undefined variable passed to it is defined with the parameter's element type
+before the call, and the read-back carries that static type instead of erasing
+to `unknown`. This is what lets `preg_match($p, $s, $m)` work with no prior
+`$m = []`.
+
+```php
+#[\Attribute(\Attribute::TARGET_PARAMETER | \Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
+
+// on the parameter (natural form)
+function preg_match(string $p, string $s, #[RefOut] array &$matches = []): int;
+
+// on the function, by name (handy for generated / multi-out signatures)
+#[Manticore\Attr\RefOut('matches')]
+function preg_match(string $p, string $s, array &$matches = []): int;
+```
+
+Core compiler semantics (not FFI-specific); used by the `preg_*` family.
+
+---
+
 ## FFI (C Interop)
 
 Bind a PHP function or method directly to a C symbol from a shared library.

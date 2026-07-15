@@ -168,8 +168,6 @@ to a dynamic site).
 - `docs/design/module-system.md`, `docs/modules.md` — modules / manifest build.
 - `docs/design/build-and-packaging.md` — packaging.
 - `docs/design/ptr-attribute-plan.md`, `docs/ffi.md` — typed FFI.
-- `docs/memory.md`, `docs/bootstrap/{07,10,11,12,14}` — memory model / rc / CoW /
+- `docs/memory.md`, `docs/bootstrap/{10,11,12,14}` — memory model / rc / CoW /
   cycle collector / ABI contract (`12` is the "stone tablet").
 - `docs/attributes.md` — attributes.
-- `docs/bootstrap/{06,09,15,16}` — historical design (self-host stages, discovery,
-  type-system redesign, unified PhpArray); accurate as design, not as status.
