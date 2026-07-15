@@ -1899,17 +1899,18 @@ trait EmitLlvmBuiltins
         $out = '';
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
-                // Declared here (body-emission) so they precede the header's
-                // declare block; setting them inside floatShortestImpl (runtime
-                // block) would be too late.
-                $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-                $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-                $this->rt->needsFloatShortest = true;
+                // Shortest round-trip via the Ryu core (uppercase E, no forced
+                // `.0` — var_dump form), byte-exact with php and faster than the
+                // old snprintf-probe. The core takes the raw i64 bits.
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $d = $this->lastValue;
+                $bitsr = $this->ssa->allocReg();
+                $out .= '  ' . $bitsr . ' = bitcast double ' . $d . " to i64\n";
+                $fsi = $this->ssa->allocReg();
+                $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
                 $fs = $this->ssa->allocReg();
-                $out .= '  ' . $fs . ' = call ptr @__mir_float_shortest(double ' . $d . ")\n";
+                $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
                 $out .= '  call i32 (ptr, ...) @printf(ptr @.fmt.vdfloat, ptr ' . $fs . ")\n";
             } else {
                 $out .= $this->emitNode($a);
@@ -1934,10 +1935,6 @@ trait EmitLlvmBuiltins
      */
     private function biFloatRepr(array $args): string
     {
-        // Declared here (body-emission) so they precede the header declare block.
-        $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-        $this->rt->needsFloatShortest = true;
         $a = $args[0];
         $out = $this->emitNode($a);
         if ($a->type->kind === Type::KIND_CELL) {
@@ -1947,10 +1944,14 @@ trait EmitLlvmBuiltins
             $this->lastValue = $d; $this->lastValueType = 'double';
         } else {
             $out .= $this->coerceTo('double');
-            $d = $this->lastValue;
         }
+        // Ryu shortest, var_dump form (uppercase E, no forced `.0`).
+        $bitsr = $this->ssa->allocReg();
+        $out .= '  ' . $bitsr . ' = bitcast double ' . $this->lastValue . " to i64\n";
+        $fsi = $this->ssa->allocReg();
+        $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
         $fs = $this->ssa->allocReg();
-        $out .= '  ' . $fs . ' = call ptr @__mir_float_shortest(double ' . $this->lastValue . ")\n";
+        $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
         $this->lastValue = $fs;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2665,6 +2666,21 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call ptr @__mir_int_to_str(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        if ($k === Type::KIND_FLOAT) {
+            // Ryu shortest, var_export form: uppercase E AND a forced `.0` on an
+            // integer-valued decimal (100.0 -> "100.0") so it re-parses as float.
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceTo('double');
+            $bitsr = $this->ssa->allocReg();
+            $out .= '  ' . $bitsr . ' = bitcast double ' . $this->lastValue . " to i64\n";
+            $fsi = $this->ssa->allocReg();
+            $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 1)' . "\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = inttoptr i64 ' . $fsi . " to ptr\n";
             $this->lastValue = $r;
             $this->lastValueType = 'ptr';
             return $out;

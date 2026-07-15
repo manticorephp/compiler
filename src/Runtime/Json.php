@@ -74,18 +74,33 @@ function __mc_dtoa(float $value): string {
 
 /** As {@see __mc_dtoa} but from the raw IEEE-754 i64 bit pattern — the json
  *  encoder already holds a float cell (bits == cell for a non-tagged double),
- *  so it calls this directly and skips the re-bitcast. */
+ *  so it calls this directly and skips the re-bitcast. json_encode cannot
+ *  represent INF/NAN and emits 0; otherwise it is the shared shortest formatter
+ *  with a lowercase `e` and no trailing `.0`. */
 function __mc_dtoa_bits(int $bits): string {
+    $ieeeExponent = ($bits >> 52) & 2047;
+    if ($ieeeExponent === 2047) { return "0"; }    // INF / NAN → 0 for json
+    return \__mc_dtoa_core($bits, 0, 0);
+}
+
+/**
+ * Shared shortest-decimal core. `$upperE` picks `E` (var_dump / var_export)
+ * over `e` (json); `$forceDot` appends `.0` to an integer-valued decimal
+ * (var_export, which must round-trip as a float) where var_dump / json leave it
+ * bare. Non-finite renders as INF / -INF / NAN (what var_dump / var_export
+ * want; the json entry point intercepts those first).
+ */
+function __mc_dtoa_core(int $bits, int $upperE, int $forceDot): string {
     $sign = ($bits >> 63) & 1;
     $ieeeMantissa = $bits & 4503599627370495;      // (1<<52)-1
     $ieeeExponent = ($bits >> 52) & 2047;          // 0x7FF
-    // Zero (either sign) and the non-finite encodings don't go through Ryu.
-    if (($bits & 9223372036854775807) === 0) {     // mask off sign
-        return $sign === 1 ? "-0" : "0";
+    if (($bits & 9223372036854775807) === 0) {     // ±0
+        $z = $forceDot === 1 ? "0.0" : "0";
+        return $sign === 1 ? ("-" . $z) : $z;
     }
     if ($ieeeExponent === 2047) {
-        // PHP json_encode can't represent INF/NAN; it emits 0.
-        return "0";
+        if ($ieeeMantissa !== 0) { return "NAN"; }
+        return $sign === 1 ? "-INF" : "INF";
     }
 
     if ($ieeeExponent === 0) {
@@ -214,13 +229,16 @@ function __mc_dtoa_bits(int $bits): string {
     $eSci = $exp + $olen - 1;
     $neg = $sign === 1 ? "-" : "";
 
+    $eChar = $upperE === 1 ? "E" : "e";
     if ($eSci < -4 || $eSci > 16) {
         $mant = $olen > 1 ? ($digits[0] . "." . \substr($digits, 1)) : ($digits . ".0");
-        $es = $eSci >= 0 ? ("e+" . (string)$eSci) : ("e-" . (string)(-$eSci));
+        $es = $eSci >= 0 ? ($eChar . "+" . (string)$eSci) : ($eChar . "-" . (string)(-$eSci));
         return $neg . $mant . $es;
     }
     if ($exp >= 0) {
-        return $neg . $digits . \str_repeat("0", $exp);   // integer-valued
+        // integer-valued; var_export appends `.0` so it round-trips as a float.
+        $tail = $forceDot === 1 ? ".0" : "";
+        return $neg . $digits . \str_repeat("0", $exp) . $tail;
     }
     $dp = $olen + $exp;                                    // digits before '.'
     if ($dp <= 0) {
