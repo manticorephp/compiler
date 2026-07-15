@@ -59,6 +59,7 @@ final class RuntimeFeatures
     public bool $needsAddslashes = false;
     public bool $needsJsonEscape = false;
     public bool $needsJsonEnc = false;
+    public bool $needsRyu = false;
     public bool $needsStrReplaceOne = false;
     public bool $needsCliArgv = false;
 
@@ -72,6 +73,7 @@ final class RuntimeFeatures
     public bool $needsClock = false;
     public bool $needsStdStreams = false;
     public bool $needsStrpos = false;
+    public bool $needsStrcspn = false;
     public bool $needsStrExplode = false;
 
     // ── derived demands ────────────────────────────────────────────────────
@@ -152,6 +154,7 @@ final class RuntimeFeatures
         $decls['memcpy']  = "declare ptr @memcpy(ptr, ptr, i64)";
         $decls['memmove'] = "declare ptr @memmove(ptr, ptr, i64)";
         $decls['memcmp']  = "declare i32 @memcmp(ptr, ptr, i64)";
+        $decls['memchr']  = "declare ptr @memchr(ptr, i32, i64)";
         $decls['malloc']  = "declare ptr @malloc(i64)";
         $decls['strlen']  = "declare i64 @strlen(ptr)";
         $decls['free']    = "declare void @free(ptr)";

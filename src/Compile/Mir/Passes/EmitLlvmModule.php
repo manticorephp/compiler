@@ -333,6 +333,15 @@ trait EmitLlvmModule
                 $out .= "  ret ptr %p\n}\n";
             }
         }
+        // The cell echo / (string) helpers now format floats through
+        // __mir_float_to_str (PHP scientific form), so pull it — and the rc
+        // release the echo helper uses — in ahead of their own emission below.
+        if ($this->rt->needsTaggedEcho || $this->rt->needsTaggedToStr) {
+            $this->rt->needsFloatStr = true;
+        }
+        if ($this->rt->needsTaggedEcho) {
+            $this->rt->needsStrRc = true;
+        }
         $out .= $this->profileRuntime();
         $out .= $this->allocRuntime();
         if ($this->rt->needsFloatStr) {

@@ -120,13 +120,35 @@ final class Parser
         return $arr;
     }
 
+    /**
+     * Scan a string literal by RUNS, not by bytes. `strcspn` walks to the next
+     * `"` or `\` in one bounded pass and the run is taken with a single
+     * `substr`; the byte loop it replaces paid a 1-char string temp (malloc +
+     * append) for EVERY byte of every key and value in the document.
+     *
+     * The unescaped run is the overwhelmingly common case, so it returns its
+     * substr directly — no accumulator, no append. Only a literal that actually
+     * carries a `\` escape falls into the run+escape loop below.
+     */
     private function parseString(): string
     {
-        $out = '';
         if ($this->pos >= $this->len || $this->src[$this->pos] !== '"') {
-            return $out;
+            return '';
         }
         $this->pos = $this->pos + 1; // skip opening '"'
+        $start = $this->pos;
+        $n = \strcspn($this->src, "\"\\", $start);
+        $p = $start + $n;
+        if ($p >= $this->len) { // unterminated: take what is there
+            $this->pos = $p;
+            return \substr($this->src, $start, $n);
+        }
+        if ($this->src[$p] === '"') { // no escapes — one substr and done
+            $this->pos = $p + 1;
+            return \substr($this->src, $start, $n);
+        }
+        $out = \substr($this->src, $start, $n);
+        $this->pos = $p;
         while ($this->pos < $this->len) {
             $c = $this->src[$this->pos];
             if ($c === '"') {
@@ -137,13 +159,9 @@ final class Parser
                 $this->pos = $this->pos + 1;
                 if ($this->pos >= $this->len) { break; }
                 $e = $this->src[$this->pos];
-                if ($e === 'n') { $out = $out . "\n"; }
-                elseif ($e === 't') { $out = $out . "\t"; }
-                elseif ($e === 'r') { $out = $out . "\r"; }
-                elseif ($e === 'b') { $out = $out . \chr(8); }
-                elseif ($e === 'f') { $out = $out . \chr(12); }
-                elseif ($e === 'u') {
+                if ($e === 'u') {
                     // \uXXXX — 4 hex digits → the codepoint's UTF-8 bytes.
+                    // Advances past the digits itself.
                     $cp = 0; $k = 0;
                     $this->pos = $this->pos + 1;
                     while ($k < 4 && $this->pos < $this->len) {
@@ -154,14 +172,22 @@ final class Parser
                         $k = $k + 1;
                     }
                     $out = $out . $this->utf8Encode($cp);
-                    continue; // pos already past the digits
+                } else {
+                    if ($e === 'n') { $out = $out . "\n"; }
+                    elseif ($e === 't') { $out = $out . "\t"; }
+                    elseif ($e === 'r') { $out = $out . "\r"; }
+                    elseif ($e === 'b') { $out = $out . \chr(8); }
+                    elseif ($e === 'f') { $out = $out . \chr(12); }
+                    else { $out = $out . $e; } // \\ \" \/ and any other
+                    $this->pos = $this->pos + 1;
                 }
-                else { $out = $out . $e; } // \\ \" \/ and any other
-                $this->pos = $this->pos + 1;
-                continue;
             }
-            $out = $out . $c;
-            $this->pos = $this->pos + 1;
+            // Past the escape: take the next unescaped run in one go.
+            $r = \strcspn($this->src, "\"\\", $this->pos);
+            if ($r > 0) {
+                $out = $out . \substr($this->src, $this->pos, $r);
+                $this->pos = $this->pos + $r;
+            }
         }
         return $out;
     }
@@ -188,23 +214,43 @@ final class Parser
             . \chr(128 + ($cp & 63));
     }
 
+    /**
+     * An integer accumulates straight out of the digit scan — the `substr` the
+     * token used to need was a malloc per number. A float still materializes the
+     * token (strtod needs the bytes), and so does an integer long enough to
+     * overflow, which keeps `strtol`'s saturation instead of a wrapping
+     * accumulator.
+     */
     private function parseNumber(): mixed
     {
         $start = $this->pos;
         $isFloat = false;
+        $neg = false;
+        $iv = 0;
+        $digits = 0;
+        if ($this->pos < $this->len && \ord($this->src[$this->pos]) === 45) { // '-'
+            $neg = true;
+            $this->pos = $this->pos + 1;
+        }
         while ($this->pos < $this->len) {
             $b = \ord($this->src[$this->pos]);
-            if ($b === 45 || $b === 43 || ($b >= 48 && $b <= 57)) {
+            if ($b >= 48 && $b <= 57) {
+                $iv = $iv * 10 + ($b - 48);
+                $digits = $digits + 1;
                 $this->pos = $this->pos + 1;
-            } elseif ($b === 46 || $b === 101 || $b === 69) { // '.' 'e' 'E'
+            } elseif ($b === 46 || $b === 101 || $b === 69 // '.' 'e' 'E'
+                || $b === 43 || $b === 45) {               // exponent sign
                 $isFloat = true;
                 $this->pos = $this->pos + 1;
             } else {
                 break;
             }
         }
-        $tok = \substr($this->src, $start, $this->pos - $start);
-        if ($isFloat) { return (float)$tok; }
-        return (int)$tok;
+        if ($isFloat || $digits > 18) {
+            $tok = \substr($this->src, $start, $this->pos - $start);
+            if ($isFloat) { return (float)$tok; }
+            return (int)$tok;
+        }
+        return $neg ? -$iv : $iv;
     }
 }

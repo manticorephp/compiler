@@ -1294,6 +1294,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsStrtoupper) { $out .= $this->lib->caseConv('__mir_strtoupper', 97, 122, -32); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
+        if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
         if ($this->rt->needsStrReplaceOne) { $out .= $this->lib->strReplaceOne(); }
         if ($this->rt->needsStrpos) {
@@ -1327,6 +1328,113 @@ trait EmitLlvmRuntime
             $out .= "  ret i64 %db\n";
             $out .= "miss:\n";
             $out .= "  ret i64 -3940649673949184\n";
+            $out .= "}\n";
+        }
+        if ($this->rt->needsStrcspn) {
+            // strcspn($s, $chars, $off, $len): bytes from $off before the first
+            // byte that IS in $chars (the whole span if none is). Binary-safe —
+            // the scan is bounded by len@-16, never by a NUL, so it cannot
+            // overshoot into the rest of the buffer (a `strstr`-style chain of
+            // per-char searches can, and that is quadratic on a big document).
+            //
+            // A 256-bit membership bitmap (4 × i64 on the stack) makes the scan
+            // O(span) for ANY charlist size, so the cost never depends on which
+            // charlist byte happens to occur first. A single-byte charlist takes
+            // the memchr fast path (SIMD in libc).
+            $out .= "\ndefine i64 @__mir_strcspn(ptr %s, ptr %cs, i64 %off, i64 %len, i64 %haveLen) {\n";
+            $out .= "entry:\n";
+            $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+            // PHP offset normalization: negative counts from the end, then clamp.
+            $out .= "  %oneg = icmp slt i64 %off, 0\n";
+            $out .= "  %ofe = add i64 %n, %off\n";
+            $out .= "  %ofelt = icmp slt i64 %ofe, 0\n";
+            $out .= "  %ofe0 = select i1 %ofelt, i64 0, i64 %ofe\n";
+            $out .= "  %ogt = icmp sgt i64 %off, %n\n";
+            $out .= "  %ocl = select i1 %ogt, i64 %n, i64 %off\n";
+            $out .= "  %o = select i1 %oneg, i64 %ofe0, i64 %ocl\n";
+            $out .= "  %avail = sub i64 %n, %o\n";
+            // Optional length: negative stops that many bytes from the end.
+            $out .= "  %lneg = icmp slt i64 %len, 0\n";
+            $out .= "  %lfe = add i64 %avail, %len\n";
+            $out .= "  %lfelt = icmp slt i64 %lfe, 0\n";
+            $out .= "  %lfe0 = select i1 %lfelt, i64 0, i64 %lfe\n";
+            $out .= "  %lgt = icmp sgt i64 %len, %avail\n";
+            $out .= "  %lcl = select i1 %lgt, i64 %avail, i64 %len\n";
+            $out .= "  %lsel = select i1 %lneg, i64 %lfe0, i64 %lcl\n";
+            $out .= "  %hl = icmp ne i64 %haveLen, 0\n";
+            $out .= "  %lim = select i1 %hl, i64 %lsel, i64 %avail\n";
+            $out .= "  %p = getelementptr inbounds i8, ptr %s, i64 %o\n";
+            $out .= "  %cl = call i64 @__mir_strlen(ptr %cs)\n";
+            $out .= "  %empty = icmp eq i64 %cl, 0\n";
+            $out .= "  br i1 %empty, label %none, label %chk1\n";
+            $out .= "chk1:\n";
+            $out .= "  %one = icmp eq i64 %cl, 1\n";
+            $out .= "  br i1 %one, label %single, label %bitmap\n";
+            $out .= "single:\n";
+            $out .= "  %c0 = load i8, ptr %cs\n";
+            $out .= "  %c0i = zext i8 %c0 to i32\n";
+            $out .= "  %hit = call ptr @memchr(ptr %p, i32 %c0i, i64 %lim)\n";
+            $out .= "  %miss = icmp eq ptr %hit, null\n";
+            $out .= "  br i1 %miss, label %none, label %found\n";
+            $out .= "found:\n";
+            $out .= "  %hi = ptrtoint ptr %hit to i64\n";
+            $out .= "  %pi = ptrtoint ptr %p to i64\n";
+            $out .= "  %d = sub i64 %hi, %pi\n";
+            $out .= "  ret i64 %d\n";
+            // Build the bitmap: 4 i64 words, bit (b & 63) of word (b >> 6).
+            $out .= "bitmap:\n";
+            $out .= "  %bm = alloca [4 x i64]\n";
+            // Four explicit stores, not a memset call — the bitmap is rebuilt on
+            // every call and a libc memset of 32 bytes showed up in the profile.
+            $out .= "  %bm0 = getelementptr inbounds i64, ptr %bm, i64 0\n";
+            $out .= "  store i64 0, ptr %bm0\n";
+            $out .= "  %bm1 = getelementptr inbounds i64, ptr %bm, i64 1\n";
+            $out .= "  store i64 0, ptr %bm1\n";
+            $out .= "  %bm2 = getelementptr inbounds i64, ptr %bm, i64 2\n";
+            $out .= "  store i64 0, ptr %bm2\n";
+            $out .= "  %bm3 = getelementptr inbounds i64, ptr %bm, i64 3\n";
+            $out .= "  store i64 0, ptr %bm3\n";
+            $out .= "  br label %bloop\n";
+            $out .= "bloop:\n";
+            $out .= "  %bi = phi i64 [ 0, %bitmap ], [ %bi1, %bbody ]\n";
+            $out .= "  %bmore = icmp slt i64 %bi, %cl\n";
+            $out .= "  br i1 %bmore, label %bbody, label %scan\n";
+            $out .= "bbody:\n";
+            $out .= "  %bcp = getelementptr inbounds i8, ptr %cs, i64 %bi\n";
+            $out .= "  %bc = load i8, ptr %bcp\n";
+            $out .= "  %bv = zext i8 %bc to i64\n";
+            $out .= "  %bw = lshr i64 %bv, 6\n";
+            $out .= "  %bb = and i64 %bv, 63\n";
+            $out .= "  %bit = shl i64 1, %bb\n";
+            $out .= "  %bwp = getelementptr inbounds i64, ptr %bm, i64 %bw\n";
+            $out .= "  %bold = load i64, ptr %bwp\n";
+            $out .= "  %bnew = or i64 %bold, %bit\n";
+            $out .= "  store i64 %bnew, ptr %bwp\n";
+            $out .= "  %bi1 = add i64 %bi, 1\n";
+            $out .= "  br label %bloop\n";
+            $out .= "scan:\n";
+            $out .= "  %si = phi i64 [ 0, %bloop ], [ %si1, %snext ]\n";
+            $out .= "  %smore = icmp slt i64 %si, %lim\n";
+            $out .= "  br i1 %smore, label %sbody, label %none\n";
+            $out .= "sbody:\n";
+            $out .= "  %scp = getelementptr inbounds i8, ptr %p, i64 %si\n";
+            $out .= "  %sc = load i8, ptr %scp\n";
+            $out .= "  %sv = zext i8 %sc to i64\n";
+            $out .= "  %sw = lshr i64 %sv, 6\n";
+            $out .= "  %sb = and i64 %sv, 63\n";
+            $out .= "  %sbit = shl i64 1, %sb\n";
+            $out .= "  %swp = getelementptr inbounds i64, ptr %bm, i64 %sw\n";
+            $out .= "  %sword = load i64, ptr %swp\n";
+            $out .= "  %stest = and i64 %sword, %sbit\n";
+            $out .= "  %sin = icmp ne i64 %stest, 0\n";
+            $out .= "  br i1 %sin, label %sstop, label %snext\n";
+            $out .= "snext:\n";
+            $out .= "  %si1 = add i64 %si, 1\n";
+            $out .= "  br label %scan\n";
+            $out .= "sstop:\n";
+            $out .= "  ret i64 %si\n";
+            $out .= "none:\n";
+            $out .= "  ret i64 %lim\n";
             $out .= "}\n";
         }
         if ($this->rt->needsStrExplode) {

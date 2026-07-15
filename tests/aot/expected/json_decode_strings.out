@@ -1,0 +1,28 @@
+a => 1 (len 1)
+b => plain (len 5)
+esc => line
+break	tab\slash"quote/fwd (len 31)
+lead => 
+starts with an escape (len 22)
+trail => ends with an escape
+ (len 20)
+mix => start
+middle plain run here	end (len 31)
+only => \ (len 1)
+empty =>  (len 0)
+one => x (len 1)
+u => café ❤ A (len 11)
+uu => ABC (len 3)
+ctrl =>  (len 2)
+nest => [a|b\c|]
+int(0)
+int(1)
+int(-1)
+int(42)
+int(-42)
+float(3.14)
+float(-3.14)
+float(100000)
+float(0.0015)
+float(100)
+int(7)

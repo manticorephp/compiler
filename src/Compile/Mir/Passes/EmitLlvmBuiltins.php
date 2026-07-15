@@ -104,6 +104,10 @@ trait EmitLlvmBuiltins
         if ($name === 'strtolower')                   { return $this->biCaseConv($args, '__mir_strtolower'); }
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
+        if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
+        if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
+        if ($name === '__ugt')                        { return $this->biUgt($args); }
+        if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
         if ($name === 'explode' && \count($args) >= 2) { return $this->biExplode($args); }
         if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
@@ -1714,6 +1718,94 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /**
+     * strcspn($s, $chars [, $offset [, $length]]) → int. The bounded, binary-safe
+     * "scan until one of these bytes" primitive: one pass over the span, no
+     * overshoot past `$length`. Backs the JSON parser's string scanner (a
+     * per-byte PHP loop there costs a 1-char string temp per byte).
+     * @param Node[] $args
+     */
+    private function biStrcspn(array $args): string
+    {
+        $this->rt->needsStrcspn = true;
+        $this->rt->needsConcat = true;   // pulls __mir_strlen + the string decls
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $cs = $this->lastValue;
+        $off = '0';
+        if (\count($args) >= 3) {
+            $out .= $this->emitNode($args[2]);
+            $out .= $this->coerceToI64();
+            $off = $this->lastValue;
+        }
+        $len = '0';
+        $haveLen = '0';
+        if (\count($args) >= 4) {
+            $out .= $this->emitNode($args[3]);
+            $out .= $this->coerceToI64();
+            $len = $this->lastValue;
+            $haveLen = '1';
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_strcspn(ptr ' . $s . ', ptr ' . $cs
+              . ', i64 ' . $off . ', i64 ' . $len . ', i64 ' . $haveLen . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $out .= $this->freeStrTemp($args[1], $cs);
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__float_bits(float): int` — the IEEE-754 bit pattern of a double as an
+     *  i64 (bitcast, no conversion). Backs the PHP shortest-float encoder.
+     *  @param Node[] $args */
+    private function biFloatBits(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceTo('double');
+        $d = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = bitcast double ' . $d . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__ugt(a, b): bool` — unsigned `a > b` on the raw 64-bit patterns (PHP's
+     *  `>` is signed; Ryu's pow5Factor needs the unsigned compare).
+     *  @param Node[] $args */
+    private function biUgt(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $a = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $b = $this->lastValue;
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp ugt i64 ' . $a . ', ' . $b . "\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = zext i1 ' . $c . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__ryu_msp(m, idx, j, inv): int` — Ryu mulShift over the pow5 table entry
+     *  at `idx` (inverse when `inv`), the one 128-bit primitive the PHP encoder
+     *  needs. {@see \Compile\Mir\RuntimeLibrary::ryuMsp}.
+     *  @param Node[] $args */
+    private function biRyuMsp(array $args): string
+    {
+        $this->rt->needsRyu = true;
+        $vals = [];
+        $out = '';
+        for ($k = 0; $k < 4; $k = $k + 1) {
+            $out .= $this->emitNode($args[$k]);
+            $out .= $this->coerceToI64();
+            $vals[] = $this->lastValue;
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_ryu_msp(i64 ' . $vals[0]
+              . ', i64 ' . $vals[1] . ', i64 ' . $vals[2] . ', i64 ' . $vals[3] . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
     /** @param Node[] $args  print_r($v [, $return]) — echo form only. DEEP-boxes
      *  the value (a nested array's elements become tagged cells, so the recursive
      *  __mir_print_r reads real cells, not raw pointers) then calls the prelude
@@ -1807,17 +1899,18 @@ trait EmitLlvmBuiltins
         $out = '';
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
-                // Declared here (body-emission) so they precede the header's
-                // declare block; setting them inside floatShortestImpl (runtime
-                // block) would be too late.
-                $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-                $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-                $this->rt->needsFloatShortest = true;
+                // Shortest round-trip via the Ryu core (uppercase E, no forced
+                // `.0` — var_dump form), byte-exact with php and faster than the
+                // old snprintf-probe. The core takes the raw i64 bits.
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $d = $this->lastValue;
+                $bitsr = $this->ssa->allocReg();
+                $out .= '  ' . $bitsr . ' = bitcast double ' . $d . " to i64\n";
+                $fsi = $this->ssa->allocReg();
+                $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
                 $fs = $this->ssa->allocReg();
-                $out .= '  ' . $fs . ' = call ptr @__mir_float_shortest(double ' . $d . ")\n";
+                $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
                 $out .= '  call i32 (ptr, ...) @printf(ptr @.fmt.vdfloat, ptr ' . $fs . ")\n";
             } else {
                 $out .= $this->emitNode($a);
@@ -1842,10 +1935,6 @@ trait EmitLlvmBuiltins
      */
     private function biFloatRepr(array $args): string
     {
-        // Declared here (body-emission) so they precede the header declare block.
-        $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-        $this->rt->needsFloatShortest = true;
         $a = $args[0];
         $out = $this->emitNode($a);
         if ($a->type->kind === Type::KIND_CELL) {
@@ -1855,10 +1944,14 @@ trait EmitLlvmBuiltins
             $this->lastValue = $d; $this->lastValueType = 'double';
         } else {
             $out .= $this->coerceTo('double');
-            $d = $this->lastValue;
         }
+        // Ryu shortest, var_dump form (uppercase E, no forced `.0`).
+        $bitsr = $this->ssa->allocReg();
+        $out .= '  ' . $bitsr . ' = bitcast double ' . $this->lastValue . " to i64\n";
+        $fsi = $this->ssa->allocReg();
+        $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
         $fs = $this->ssa->allocReg();
-        $out .= '  ' . $fs . ' = call ptr @__mir_float_shortest(double ' . $this->lastValue . ")\n";
+        $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
         $this->lastValue = $fs;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2577,6 +2670,21 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'ptr';
             return $out;
         }
+        if ($k === Type::KIND_FLOAT) {
+            // Ryu shortest, var_export form: uppercase E AND a forced `.0` on an
+            // integer-valued decimal (100.0 -> "100.0") so it re-parses as float.
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceTo('double');
+            $bitsr = $this->ssa->allocReg();
+            $out .= '  ' . $bitsr . ' = bitcast double ' . $this->lastValue . " to i64\n";
+            $fsi = $this->ssa->allocReg();
+            $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 1)' . "\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = inttoptr i64 ' . $fsi . " to ptr\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         if ($k === Type::KIND_STRING) {
             // `'` . $s . `'`, with NULL when the (nullable) string is null.
             $out = $this->emitNode($args[0]);
@@ -2661,15 +2769,14 @@ trait EmitLlvmBuiltins
      * cell and recurses through `@__mir_json_enc`, which walks the value into ONE
      * growing buffer (php smart_str style): ints via `__mir_int_fmt` and string
      * escaping written straight into the buffer (no per-node temp), floats via
-     * `__mir_float_to_str` (`%.14g`, byte-matching `(string)$f` — what the PHP
-     * reference `__mc_json_enc` uses). An OBJECT cell falls back to the compiled
-     * reference `@manticore___mc_json_enc` for parity. @param Node[] $args
+     * the Ryu shortest-decimal formatter `manticore___mc_dtoa_bits` (byte-exact
+     * with php's serialize_precision=-1). An OBJECT cell falls back to the
+     * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
      */
     private function biJsonEncode(array $args): string
     {
         $this->rt->needsJsonEnc = true;
         $this->rt->needsIntStr = true;    // __mir_int_len / __mir_int_fmt + unbox_int
-        $this->rt->needsFloatStr = true;  // __mir_float_to_str
         $this->rt->needsStrRc = true;     // __mir_rc_release_str (float / object temps)
         $this->rt->needsConcat = true;    // __mir_strlen + string runtime decls
         $this->rt->needsTagged = true;    // box helpers for boxToCell

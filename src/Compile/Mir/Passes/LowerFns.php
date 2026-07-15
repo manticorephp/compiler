@@ -236,6 +236,8 @@ trait LowerFns
             || $n === 'is_object' || $n === 'is_callable'
             || $n === 'gettype' || $n === 'get_debug_type'
             || $n === 'min' || $n === 'max' || $n === 'dechex'
+            || $n === 'strcspn'
+            || $n === '__float_bits' || $n === '__ugt' || $n === '__ryu_msp'
             || $n === 'substr' || $n === 'str_repeat'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === '__mir_stdin' || $n === '__mir_stdout' || $n === '__mir_stderr'
