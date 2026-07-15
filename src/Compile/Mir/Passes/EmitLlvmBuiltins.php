@@ -1416,8 +1416,20 @@ trait EmitLlvmBuiltins
         if ($ok === Type::KIND_STRING) {
             $this->rt->needsStrtol = true;
             $out .= $this->coerceToPtr();
+            $strPtr = $this->lastValue;
+            // `intval($s, $base)` — strtol handles every base natively (2/8/16,
+            // and base 0 = auto-detect `0x`/`0` prefixes), matching PHP. Default
+            // base 10 when the arg is omitted.
+            $baseArg = 'i32 10';
+            if (\count($args) > 1) {
+                $out .= $this->emitNode($args[1]);
+                $out .= $this->coerceToI64();
+                $b32 = $this->ssa->allocReg();
+                $out .= '  ' . $b32 . ' = trunc i64 ' . $this->lastValue . " to i32\n";
+                $baseArg = 'i32 ' . $b32;
+            }
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
+            $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $strPtr . ', ptr null, ' . $baseArg . ")\n";
             return $this->finishI64($out, $reg);
         }
         $out .= $this->coerceToI64();
@@ -2145,8 +2157,13 @@ trait EmitLlvmBuiltins
             elseif ($conv === 'f' || $conv === 'F' || $conv === 'e' || $conv === 'E'
                 || $conv === 'g' || $conv === 'G') {
                 $trans .= '%' . $prefix . $conv; $convs[] = 'f';
+            } elseif ($conv === 'b') {
+                // PHP `%b` (binary) — C printf has no `%b`. Pre-convert the arg to
+                // a binary string via decbin and emit it through `%s`; width/pad
+                // flags in `$prefix` apply to the string (plain `%b` is exact).
+                $trans .= '%' . $prefix . 's'; $convs[] = 'b';
             } else {
-                // Unknown conversion (e.g. PHP %b binary) — pass through, no arg.
+                // Unknown conversion — pass through, no arg.
                 $trans .= '%' . $prefix . $conv;
             }
             $i = $j;
@@ -2187,6 +2204,28 @@ trait EmitLlvmBuiltins
                     $out .= $this->coerceTo('double');
                 }
                 $vararg .= ', double ' . $this->lastValue;
+            }
+            elseif ($conv === 'b') {
+                // `%b` → decbin(arg) string, passed through the `%s` slot. Declare
+                // decbin as an extern ONLY when it is not defined in this module
+                // (a linked stdlib.o); a self-contained build embeds its define,
+                // and a second `declare` there is a redefinition error.
+                if (!isset($this->definedFns[$this->mangle('decbin')])) {
+                    $this->libcExtra['manticore_decbin'] = 'declare i64 @manticore_decbin(i64)';
+                }
+                if ($argNode->type->kind === Type::KIND_CELL) {
+                    $this->rt->needsTaggedToInt = true;
+                    $iv = $this->ssa->allocReg();
+                    $out .= '  ' . $iv . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+                    $this->lastValue = $iv;
+                } else {
+                    $out .= $this->coerceToI64();
+                }
+                $bs = $this->ssa->allocReg();
+                $out .= '  ' . $bs . ' = call i64 @manticore_decbin(i64 ' . $this->lastValue . ")\n";
+                $bp = $this->ssa->allocReg();
+                $out .= '  ' . $bp . ' = inttoptr i64 ' . $bs . " to ptr\n";
+                $vararg .= ', ptr ' . $bp;
             }
             else {
                 // A `mixed`/cell `%d`/`%x`/… arg → unbox to i64 by tag (a boxed
