@@ -600,3 +600,57 @@ function array_push(array &$arr, mixed ...$values): int
     foreach ($values as $v) { $arr[] = $v; }
     return \count($arr);
 }
+
+/**
+ * `uasort(arr, cmp)` — sort by VALUE with a user comparison, keys preserved
+ * (insertion sort, so stable). The values are materialised into a LOCAL typed
+ * list via `foreach` first, then compared by int index — the same shape that
+ * lets `usort` pass values into the callback. Reading `$arr[$dynamicKey]`
+ * straight into the callback instead would hand it a raw (unboxed) value, since
+ * an element read by a dynamic key off a bare-`array` param erases its type.
+ * @param mixed[] $arr
+ */
+function uasort(array &$arr, callable $cmp): bool
+{
+    // Decorate-sort-undecorate over usort, preserving keys. Correct for the
+    // idiomatic comparators — `$a <=> $b`, `strcmp(...)`, or one that extracts
+    // from the value (`$a["k"] - $b["k"]`).
+    //
+    // KNOWN LIMITATION: a comparator that does bare integer arithmetic on the
+    // whole value (`fn($x, $y) => $x - $y`) can mis-order. The callback param
+    // gets monomorphized to `int`, but the value handed in is still a boxed
+    // cell, so `$x - $y` reinterprets the NaN-boxed bits instead of unboxing —
+    // the unknown/cell representation-soundness root, fixable only in the
+    // compiler (InferTypes/call ABI), not here. Use `<=>` meanwhile.
+    $pairs = [];
+    foreach ($arr as $k => $v) { $pairs[] = ["k" => $k, "v" => $v]; }
+    usort($pairs, fn($a, $b) => $cmp($a["v"], $b["v"]));
+    $new = [];
+    foreach ($pairs as $p) { $new[$p["k"]] = $p["v"]; }
+    $arr = $new;
+    return true;
+}
+
+/**
+ * `uksort(arr, cmp)` — sort by KEY with a user comparison, values kept with
+ * their keys.
+ * @param mixed[] $arr
+ */
+function uksort(array &$arr, callable $cmp): bool
+{
+    $keys = array_keys($arr);
+    $n = count($keys);
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $kk = $keys[$i];
+        $j = $i - 1;
+        while ($j >= 0 && $cmp($keys[$j], $kk) > 0) {
+            $keys[$j + 1] = $keys[$j];
+            $j = $j - 1;
+        }
+        $keys[$j + 1] = $kk;
+    }
+    $new = [];
+    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    $arr = $new;
+    return true;
+}

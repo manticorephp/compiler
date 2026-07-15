@@ -15,3 +15,8 @@ echo str_rot13("Hello, World"), "\n";
 echo stripslashes("a\\'b\\\\c"), "\n";
 echo htmlspecialchars("<a href=\"x\">&'"), "\n";
 echo strtr("Hello World", "lo", "LO"), "\n";
+echo str_ireplace("WORLD", "PHP", "Hello World, hello world"), "\n";
+var_dump(similar_text("World", "word"), similar_text("Hello", "Hello"));
+var_dump(levenshtein("kitten", "sitting"), levenshtein("", "abc"), levenshtein("abc", "abc"));
+echo wordwrap("The quick brown fox jumped", 10, "\n", false), "\n";
+echo wordwrap("A verylongword here", 5, "|", true), "\n";

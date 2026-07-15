@@ -14,6 +14,123 @@ function stripos(string $haystack, string $needle, int $offset = 0): int|false
     return \strpos(\strtolower($haystack), \strtolower($needle), $offset);
 }
 
+/** Case-insensitive {@see str_replace}, scalar search/replace/subject (PHP
+ *  `str_ireplace`). Matches are found case-insensitively; the ORIGINAL casing of
+ *  the non-matched text is preserved. */
+function str_ireplace(string $search, string $replace, string $subject): string
+{
+    if ($search === '') { return $subject; }
+    $ls = \strtolower($subject);
+    $ln = \strtolower($search);
+    $sl = \strlen($search);
+    $out = "";
+    $pos = 0;
+    while (true) {
+        $hit = \strpos($ls, $ln, $pos);
+        if ($hit === false) { $out = $out . \substr($subject, $pos); break; }
+        $h = (int)$hit;
+        $out = $out . \substr($subject, $pos, $h - $pos) . $replace;
+        $pos = $h + $sl;
+    }
+    return $out;
+}
+
+/**
+ * Wrap `$string` to lines of at most `$width` bytes, breaking at spaces with
+ * `$break` (PHP `wordwrap`). With `$cut`, a word longer than `$width` is split;
+ * otherwise it overflows the line. Existing `$break`/newline runs are respected.
+ */
+function wordwrap(string $string, int $width = 75, string $break = "\n", bool $cut = false): string
+{
+    if ($width < 1) { return $string; }
+    $n = \strlen($string);
+    $out = "";
+    $lineStart = 0;
+    $lastSpace = -1;
+    $i = 0;
+    while ($i < $n) {
+        $c = $string[$i];
+        if ($c === "\n") {
+            $out = $out . \substr($string, $lineStart, $i - $lineStart + 1);
+            $lineStart = $i + 1;
+            $lastSpace = -1;
+            $i = $i + 1;
+            continue;
+        }
+        if ($c === " ") { $lastSpace = $i; }
+        if ($i - $lineStart >= $width) {
+            if ($lastSpace >= $lineStart) {
+                $out = $out . \substr($string, $lineStart, $lastSpace - $lineStart) . $break;
+                $lineStart = $lastSpace + 1;
+                $lastSpace = -1;
+            } elseif ($cut) {
+                $out = $out . \substr($string, $lineStart, $width) . $break;
+                $lineStart = $lineStart + $width;
+                $lastSpace = -1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return $out . \substr($string, $lineStart);
+}
+
+/**
+ * Number of matching characters between `$string1` and `$string2` (PHP
+ * `similar_text`, 2-arg form): the longest common substring plus, recursively,
+ * the same over the segments to its left and right.
+ */
+function similar_text(string $string1, string $string2): int
+{
+    $la = \strlen($string1);
+    $lb = \strlen($string2);
+    if ($la === 0 || $lb === 0) { return 0; }
+    $max = 0;
+    $pa = 0;
+    $pb = 0;
+    for ($i = 0; $i < $la; $i = $i + 1) {
+        for ($j = 0; $j < $lb; $j = $j + 1) {
+            $k = 0;
+            while ($i + $k < $la && $j + $k < $lb && $string1[$i + $k] === $string2[$j + $k]) {
+                $k = $k + 1;
+            }
+            if ($k > $max) { $max = $k; $pa = $i; $pb = $j; }
+        }
+    }
+    if ($max === 0) { return 0; }
+    $sum = $max;
+    $sum = $sum + similar_text(\substr($string1, 0, $pa), \substr($string2, 0, $pb));
+    $sum = $sum + similar_text(\substr($string1, $pa + $max), \substr($string2, $pb + $max));
+    return $sum;
+}
+
+/** Levenshtein edit distance between `$string1` and `$string2` (insertions,
+ *  deletions and substitutions each cost 1). */
+function levenshtein(string $string1, string $string2): int
+{
+    $la = \strlen($string1);
+    $lb = \strlen($string2);
+    if ($la === 0) { return $lb; }
+    if ($lb === 0) { return $la; }
+    $prev = [];
+    for ($j = 0; $j <= $lb; $j = $j + 1) { $prev[$j] = $j; }
+    for ($i = 1; $i <= $la; $i = $i + 1) {
+        $cur = [];
+        $cur[0] = $i;
+        for ($j = 1; $j <= $lb; $j = $j + 1) {
+            $cost = $string1[$i - 1] === $string2[$j - 1] ? 0 : 1;
+            $del = $prev[$j] + 1;
+            $ins = $cur[$j - 1] + 1;
+            $sub = $prev[$j - 1] + $cost;
+            $m = $del;
+            if ($ins < $m) { $m = $ins; }
+            if ($sub < $m) { $m = $sub; }
+            $cur[$j] = $m;
+        }
+        $prev = $cur;
+    }
+    return $prev[$lb];
+}
+
 /** Case-insensitive {@see strrpos}. */
 function strripos(string $haystack, string $needle, int $offset = 0): int|false
 {
