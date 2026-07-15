@@ -372,10 +372,6 @@ function preg_replace_callback(string $pattern, callable $callback, string $subj
 }
 
 /**
- * NOTE: correct, but currently trips a compiler bug unrelated to PCRE — an
- * assoc array of >=2 closures, iterated and invoked, corrupts the heap (a
- * single-entry map is fine). Lights up once that assoc[closure] rc bug is fixed.
- *
  * @param array<string, callable> $patterns
  */
 function preg_replace_callback_array(array $patterns, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string

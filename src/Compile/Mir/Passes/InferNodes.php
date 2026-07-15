@@ -1208,7 +1208,19 @@ trait InferNodes
                 && $el->key->kind === Node::KIND_STRING_CONST) {
                 $recordFields[$el->key->value] = $vt;
             }
-            $valType = $first ? $vt : $this->unionTypes($valType, $vt);
+            // A literal of distinct closures (each obj<__closure_N>) must keep a
+            // dispatchable KIND_CLOSURE element, not collapse to unknown→cell that
+            // box_object's the struct — the invoke can't unbox that (an array of
+            // >=2 closures would crash). Narrow to the array-literal join only;
+            // the general unionWith stays untouched (closures elsewhere keep their
+            // per-closure class for known-dispatch / generator paths).
+            if ($first) {
+                $valType = $vt;
+            } elseif (Type::isClosureLike($valType) && Type::isClosureLike($vt)) {
+                $valType = Type::closure();
+            } else {
+                $valType = $this->unionTypes($valType, $vt);
+            }
             $first = false;
         }
         // Values are ARRAYS whose element kinds DIFFER (e.g. vec[int] and

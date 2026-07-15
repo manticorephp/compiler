@@ -420,6 +420,14 @@ final class Type
      * same type, anything else → `unknown`. Future passes refine
      * with proper union types (`int|float` → number, …).
      */
+    /** KIND_CLOSURE, or an `obj<__closure_N>` closure-literal handle. */
+    public static function isClosureLike(Type $t): bool
+    {
+        return $t->kind === self::KIND_CLOSURE
+            || ($t->kind === self::KIND_OBJ
+                && \strncmp($t->class ?? '', '__closure_', 10) === 0);
+    }
+
     public function unionWith(Type $other): Type
     {
         // Object arms (either side already a union) join into a static object

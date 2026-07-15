@@ -40,6 +40,12 @@ echo count($gi), "\n";
 preg_match('/x/', 'abc');
 echo preg_last_error(), " ", preg_last_error_msg(), "\n";
 
+// preg_replace_callback_array
+echo preg_replace_callback_array([
+    '/\d+/' => function ($mm) { return '<' . $mm[0] . '>'; },
+    '/[a-z]+/' => function ($mm) { return strtoupper($mm[0]); },
+], 'ab12cd'), "\n";
+
 // named groups (numeric access)
 preg_match('/(?<y>\d{4})-(?<m>\d{2})/', '2026-07', $nm);
 echo $nm[1], " ", $nm[2], "\n";
