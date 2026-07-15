@@ -260,6 +260,17 @@ trait EmitLlvmArrays
         if (!$arena && $this->litHasStringKey($al)) {
             $allocFn = '__mir_array_alloc_hashed';
         }
+        // A literal whose shape is fully known — no spread, and either all
+        // elements unkeyed or all keyed by DISTINCT string constants — needs
+        // none of the generic insert machinery. set_str linear-scans the entries
+        // to see whether the key is already there (it provably is not) and
+        // set_int drops the bucket index, re-reads flags and re-checks capacity
+        // on every element. Store the entries straight into the buffer the
+        // allocation already sized, and write the length once at the end.
+        $shape = $arena ? null : $this->litDirectShape($al);
+        if ($shape !== null) {
+            return $this->emitArrayLitDirect($al, $allocFn, $shape, $cellVals);
+        }
         $slot = $this->ssa->allocReg();
         $out  = '  ' . $slot . " = alloca ptr\n";
         $init = $this->ssa->allocReg();
@@ -306,6 +317,103 @@ trait EmitLlvmArrays
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
         $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * The literal shapes that can be stored straight into the buffer:
+     * `'packed'` — every element unkeyed (a list); `'hashed'` — every element
+     * keyed by a string CONSTANT, all distinct. Anything else (a spread, an int
+     * or dynamic key, a mix, a duplicate key whose last-wins would need the
+     * lookup) returns null and takes the generic path.
+     */
+    private function litDirectShape(ArrayLit $al): ?string
+    {
+        $n = \count($al->elements);
+        if ($n === 0) { return null; }
+        $keyed = 0;
+        /** @var array<string,bool> $seen */
+        $seen = [];
+        foreach ($al->elements as $el) {
+            if ($el->value->kind === Node::KIND_SPREAD) { return null; }
+            if ($el->key === null) { continue; }
+            if ($el->key->kind !== Node::KIND_STRING_CONST) { return null; }
+            $k = $el->key->value;
+            if (isset($seen[$k])) { return null; } // duplicate: last one wins
+            $seen[$k] = true;
+            $keyed = $keyed + 1;
+        }
+        if ($keyed === 0) { return 'packed'; }
+        if ($keyed === $n) { return 'hashed'; }
+        return null;
+    }
+
+    /**
+     * Emit a known-shape literal as direct entry stores. The buffer comes back
+     * from the allocation already big enough for every element (packed: cap =
+     * count; hashed: {@see UnifiedArrayRuntime::emitAllocHashed} floors at 4),
+     * so nothing here can grow or relocate it and the pointer needs no slot.
+     * The length is written once, after the elements.
+     */
+    private function emitArrayLitDirect(ArrayLit $al, string $allocFn, string $shape, bool $cellVals): string
+    {
+        $count = \count($al->elements);
+        $hdr = \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
+        $arr = $this->ssa->allocReg();
+        $out  = '  ' . $arr . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
+        foreach ($al->elements as $i => $el) {
+            // NOT `$keyReg = null` then a string: a null-union local infers
+            // unsoundly under the native self-build (the slot carries a raw
+            // payload, and the concat below then prints a POINTER instead of the
+            // symbol). Zend hides it completely. Keep the local a plain string.
+            $keyReg = '';
+            if ($shape === 'hashed') {
+                $out .= $this->emitNode($el->key);
+                $out .= $this->coerceToPtr();
+                $keyReg = $this->lastValue;
+            }
+            $out .= $this->emitNode($el->value);
+            if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
+            $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
+            $val = $this->lastValue;
+            if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
+            if ($shape === 'packed') {
+                $off = $hdr + $i * \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
+                $p = $this->ssa->allocReg();
+                $out .= '  ' . $p . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . (string)$off . "\n";
+                $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
+                continue;
+            }
+            // The container owns its keys — the release path drops every hashed
+            // string key, so each one is retained here exactly as set_str does.
+            $this->rt->needsStrRc = true;
+            $out .= '  call void @__mir_rc_retain_str(ptr ' . $keyReg . ")\n";
+            $base = $hdr + $i * \Compile\MemoryAbi::ARRAY_ENTRY_SIZE;
+            $kp = $this->ssa->allocReg();
+            $out .= '  ' . $kp . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 '
+                  . (string)($base + \Compile\MemoryAbi::ARRAY_ENTRY_KIND_OFFSET) . "\n";
+            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::ARRAY_KIND_STRING . ', ptr ' . $kp . "\n";
+            $keyp = $this->ssa->allocReg();
+            $out .= '  ' . $keyp . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 '
+                  . (string)($base + \Compile\MemoryAbi::ARRAY_ENTRY_KEY_OFFSET) . "\n";
+            $out .= '  store ptr ' . $keyReg . ', ptr ' . $keyp . "\n";
+            $vp = $this->ssa->allocReg();
+            $out .= '  ' . $vp . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 '
+                  . (string)($base + \Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET) . "\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $vp . "\n";
+        }
+        $out .= '  store i64 ' . (string)$count . ', ptr ' . $arr . "\n"; // length
+        if ($shape === 'packed') {
+            // A packed array's next implicit int key tracks its length (set_int
+            // keeps the two in step) — `$a[] =` on the result must continue from
+            // count, not from 0.
+            $ni = $this->ssa->allocReg();
+            $out .= '  ' . $ni . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 '
+                  . (string)\Compile\MemoryAbi::ARRAY_NEXT_INT_OFFSET . "\n";
+            $out .= '  store i64 ' . (string)$count . ', ptr ' . $ni . "\n";
+        }
+        $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
     }
