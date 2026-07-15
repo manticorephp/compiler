@@ -415,3 +415,188 @@ function explode(string $delim, string $subject, int $limit = PHP_INT_MAX): arra
     $out[] = \substr($subject, $pos, $subLen - $pos);
     return $out;
 }
+
+/**
+ * `array_combine(keys, values)` — a new array pairing each key with the value at
+ * the same position. Both are re-listed into typed in-module vecs first so the
+ * result's keys/values carry real types (an erased stdlib return would misbox).
+ */
+function array_combine(array $keys, array $values): array
+{
+    $ks = [];
+    foreach ($keys as $k) { $ks[] = $k; }
+    $vs = [];
+    foreach ($values as $v) { $vs[] = $v; }
+    $out = [];
+    $n = \count($ks);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $out[$ks[$i]] = $vs[$i];
+    }
+    return $out;
+}
+
+/**
+ * `array_fill_keys(keys, value)` — every key mapped to the same value.
+ */
+function array_fill_keys(array $keys, mixed $value): array
+{
+    $out = [];
+    foreach ($keys as $k) { $out[$k] = $value; }
+    return $out;
+}
+
+/**
+ * `array_diff(arr, ...others)` — elements of `$arr` whose (string) value is in
+ * none of the other arrays, keys preserved (PHP compares values as strings).
+ */
+function array_diff(array $arr, array ...$others): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        $found = false;
+        foreach ($others as $o) {
+            foreach ($o as $w) {
+                if ($w == $v) { $found = true; break; }
+            }
+            if ($found) { break; }
+        }
+        if (!$found) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_intersect(arr, ...others)` — elements of `$arr` whose (string) value is
+ * present in EVERY other array, keys preserved.
+ */
+function array_intersect(array $arr, array ...$others): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        $inAll = true;
+        foreach ($others as $o) {
+            $inThis = false;
+            foreach ($o as $w) {
+                if ($w == $v) { $inThis = true; break; }
+            }
+            if (!$inThis) { $inAll = false; break; }
+        }
+        if ($inAll) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_diff_key(arr, ...others)` — entries of `$arr` whose KEY appears in none
+ * of the other arrays.
+ */
+function array_diff_key(array $arr, array ...$others): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        $ks = (string)$k;
+        $found = false;
+        foreach ($others as $o) {
+            foreach ($o as $ok => $_) {
+                if ((string)$ok === $ks) { $found = true; break; }
+            }
+            if ($found) { break; }
+        }
+        if (!$found) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_intersect_key(arr, ...others)` — entries of `$arr` whose KEY appears in
+ * every other array.
+ */
+function array_intersect_key(array $arr, array ...$others): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        $ks = (string)$k;
+        $inAll = true;
+        foreach ($others as $o) {
+            $inThis = false;
+            foreach ($o as $ok => $_) {
+                if ((string)$ok === $ks) { $inThis = true; break; }
+            }
+            if (!$inThis) { $inAll = false; break; }
+        }
+        if ($inAll) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_unique(arr)` — first occurrence of each (string) value, keys preserved
+ * (PHP default SORT_STRING comparison).
+ */
+function array_unique(array $arr): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        $dup = false;
+        foreach ($out as $w) {
+            if ($w == $v) { $dup = true; break; }
+        }
+        if (!$dup) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_count_values(arr)` — map each (int|string) value to how many times it
+ * occurs.
+ */
+function array_count_values(array $arr): array
+{
+    $out = [];
+    foreach ($arr as $v) {
+        if (isset($out[$v])) { $out[$v] = $out[$v] + 1; }
+        else { $out[$v] = 1; }
+    }
+    return $out;
+}
+
+/**
+ * `array_chunk(arr, size, preserve_keys)` — split into sub-arrays of `$size`.
+ */
+function array_chunk(array $arr, int $size, bool $preserve_keys = false): array
+{
+    if ($size < 1) { $size = 1; }
+    $out = [];
+    $chunk = [];
+    $i = 0;
+    foreach ($arr as $k => $v) {
+        if ($preserve_keys) { $chunk[$k] = $v; } else { $chunk[] = $v; }
+        $i = $i + 1;
+        if ($i === $size) { $out[] = $chunk; $chunk = []; $i = 0; }
+    }
+    if ($i > 0) { $out[] = $chunk; }
+    return $out;
+}
+
+/**
+ * `array_replace(arr, ...others)` — later arrays overwrite earlier entries by
+ * key (a shallow, non-recursive merge that keeps string AND int keys).
+ */
+function array_replace(array $arr, array ...$others): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) { $out[$k] = $v; }
+    foreach ($others as $o) {
+        foreach ($o as $k => $v) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_push(arr, ...values)` — append each value, returning the new count.
+ */
+function array_push(array &$arr, mixed ...$values): int
+{
+    foreach ($values as $v) { $arr[] = $v; }
+    return \count($arr);
+}
