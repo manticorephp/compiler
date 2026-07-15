@@ -1729,7 +1729,6 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsStrcspn = true;
         $this->rt->needsConcat = true;   // pulls __mir_strlen + the string decls
-        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
         $out = $this->emitPtrArg($args[0]);
         $s = $this->lastValue;
         $out .= $this->emitPtrArg($args[1]);

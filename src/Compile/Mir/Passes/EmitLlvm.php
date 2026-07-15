@@ -551,14 +551,94 @@ final class EmitLlvm implements EmitVisitor
         return $out;
     }
 
+    /**
+     * `(string)$float` / echo / concat coercion (PHP `precision=14`). snprintf's
+     * `%.14g` gives the right DIGITS but C's own scientific format ("1e+20",
+     * "1e-05") differs from PHP's ("1.0E+20", "1.0E-5"): PHP forces a `.0`
+     * mantissa, an uppercase `E`, and strips the exponent's leading zeros. The
+     * decimal/scientific THRESHOLD is identical (verified across the boundary),
+     * so only a scientific result is rewritten — a decimal one is copied out
+     * unchanged, no overhead. `var_dump` / json do NOT use this (they are
+     * shortest-round-trip, {@see floatShortestImpl} / the Ryu encoder).
+     */
     private function floatToStrImpl(string $name, string $alloc): string
     {
         $out  = "\ndefine ptr " . $name . "(double %v) {\n";
         $out .= "entry:\n";
-        $out .= "  %buf = call ptr " . $alloc . "(i64 32)\n";
-        $out .= "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 32, ptr @.fmt.pg, double %v)\n";
-        $out .= "  %nl = sext i32 %n to i64\n";
-        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %nl)\n";
+        // snprintf into a stack scratch, then size the heap result exactly.
+        $out .= "  %tmp = alloca [40 x i8]\n";
+        $out .= "  %n32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %tmp, i64 40, ptr @.fmt.pg, double %v)\n";
+        $out .= "  %n = sext i32 %n32 to i64\n";
+        $out .= "  %ep = call ptr @memchr(ptr %tmp, i32 101, i64 %n)\n";   // 'e'
+        $out .= "  %hase = icmp ne ptr %ep, null\n";
+        $out .= "  br i1 %hase, label %sci, label %dec\n";
+        // Decimal (the common case): copy the scratch out verbatim, including
+        // the snprintf NUL at tmp[n] (str_alloc(k) gives exactly k content
+        // bytes, so the terminator needs its own byte).
+        $out .= "dec:\n";
+        $out .= "  %np1 = add i64 %n, 1\n";
+        $out .= "  %dbuf = call ptr " . $alloc . "(i64 %np1)\n";
+        $out .= "  call ptr @memcpy(ptr %dbuf, ptr %tmp, i64 %np1)\n";
+        $out .= "  call void @__mir_str_set_len(ptr %dbuf, i64 %n)\n";
+        $out .= "  ret ptr %dbuf\n";
+        // Scientific: rebuild `<mant>[.0]E<sign><stripped-exp>`.
+        $out .= "sci:\n";
+        $out .= "  %tmpi = ptrtoint ptr %tmp to i64\n";
+        $out .= "  %epi = ptrtoint ptr %ep to i64\n";
+        $out .= "  %p = sub i64 %epi, %tmpi\n";                            // index of 'e'
+        $out .= "  %dotp = call ptr @memchr(ptr %tmp, i32 46, i64 %p)\n";  // '.' in mantissa?
+        $out .= "  %hasdot = icmp ne ptr %dotp, null\n";
+        // strip leading zeros of the exponent digits (keep the last digit).
+        $out .= "  %estart = add i64 %p, 2\n";                             // after 'e' and sign
+        $out .= "  %nm1 = sub i64 %n, 1\n";
+        $out .= "  br label %zloop\n";
+        $out .= "zloop:\n";
+        $out .= "  %k = phi i64 [%estart, %sci], [%k1, %zadv]\n";
+        $out .= "  %klt = icmp slt i64 %k, %nm1\n";
+        $out .= "  br i1 %klt, label %zchk, label %zdone\n";
+        $out .= "zchk:\n";
+        $out .= "  %kp = getelementptr inbounds i8, ptr %tmp, i64 %k\n";
+        $out .= "  %kc = load i8, ptr %kp\n";
+        $out .= "  %kz = icmp eq i8 %kc, 48\n";                            // '0'
+        $out .= "  br i1 %kz, label %zadv, label %zdone\n";
+        $out .= "zadv:\n";
+        $out .= "  %k1 = add i64 %k, 1\n";
+        $out .= "  br label %zloop\n";
+        $out .= "zdone:\n";
+        $out .= "  %kf = phi i64 [%k, %zloop], [%k, %zchk]\n";
+        $out .= "  %explen = sub i64 %n, %kf\n";
+        $out .= "  %mantextra = select i1 %hasdot, i64 0, i64 2\n";        // ".0" if no dot
+        $out .= "  %mantlen = add i64 %p, %mantextra\n";
+        // total = mantlen + 'E' + sign + explen
+        $out .= "  %t1 = add i64 %mantlen, 2\n";
+        $out .= "  %total = add i64 %t1, %explen\n";
+        $out .= "  %totp1 = add i64 %total, 1\n";                          // + NUL byte
+        $out .= "  %buf = call ptr " . $alloc . "(i64 %totp1)\n";
+        $out .= "  call ptr @memcpy(ptr %buf, ptr %tmp, i64 %p)\n";         // mantissa digits
+        $out .= "  br i1 %hasdot, label %afterdot, label %adddot\n";
+        $out .= "adddot:\n";
+        $out .= "  %dpos = getelementptr inbounds i8, ptr %buf, i64 %p\n";
+        $out .= "  store i8 46, ptr %dpos\n";                              // '.'
+        $out .= "  %p1 = add i64 %p, 1\n";
+        $out .= "  %zpos = getelementptr inbounds i8, ptr %buf, i64 %p1\n";
+        $out .= "  store i8 48, ptr %zpos\n";                              // '0'
+        $out .= "  br label %afterdot\n";
+        $out .= "afterdot:\n";
+        $out .= "  %epos = getelementptr inbounds i8, ptr %buf, i64 %mantlen\n";
+        $out .= "  store i8 69, ptr %epos\n";                              // 'E'
+        $out .= "  %sp = add i64 %p, 1\n";
+        $out .= "  %signsrc = getelementptr inbounds i8, ptr %tmp, i64 %sp\n";
+        $out .= "  %signc = load i8, ptr %signsrc\n";
+        $out .= "  %spos = add i64 %mantlen, 1\n";
+        $out .= "  %signdst = getelementptr inbounds i8, ptr %buf, i64 %spos\n";
+        $out .= "  store i8 %signc, ptr %signdst\n";
+        $out .= "  %dpos2 = add i64 %mantlen, 2\n";
+        $out .= "  %ddst = getelementptr inbounds i8, ptr %buf, i64 %dpos2\n";
+        $out .= "  %esrc = getelementptr inbounds i8, ptr %tmp, i64 %kf\n";
+        $out .= "  call ptr @memcpy(ptr %ddst, ptr %esrc, i64 %explen)\n";
+        $out .= "  %nulp = getelementptr inbounds i8, ptr %buf, i64 %total\n";
+        $out .= "  store i8 0, ptr %nulp\n";                               // NUL-terminate
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %total)\n";
         $out .= "  ret ptr %buf\n";
         $out .= "}\n";
         return $out;

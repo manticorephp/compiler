@@ -388,7 +388,10 @@ trait EmitLlvmExpr
         $out .= "  ret void\n";
         $out .= "asfloat:\n";
         $out .= "  %fd = bitcast i64 %v to double\n";
-        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.pg, double %fd)\n";
+        // PHP-formatted (echo scientific form is "1.0E+20", not C's "1e+20").
+        $out .= "  %ffs = call ptr @__mir_float_to_str(double %fd)\n";
+        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr %ffs)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %ffs)\n";
         $out .= "  ret void\n";
         $out .= "}\n";
         return $out;
@@ -440,10 +443,8 @@ trait EmitLlvmExpr
         $out .= "  ret ptr %pptr\n";
         $out .= "asfloat:\n";
         $out .= "  %fd = bitcast i64 %v to double\n";
-        $out .= "  %fbuf = call ptr @__mir_str_alloc(i64 32)\n";
-        $out .= "  %fn = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %fbuf, i64 32, ptr @.fmt.pg, double %fd)\n";
-        $out .= "  %fnl = sext i32 %fn to i64\n";
-        $out .= "  call void @__mir_str_set_len(ptr %fbuf, i64 %fnl)\n";
+        // PHP `(string)` scientific form is "1.0E+20", not C's "1e+20".
+        $out .= "  %fbuf = call ptr @__mir_float_to_str(double %fd)\n";
         $out .= "  ret ptr %fbuf\n";
         $out .= "asarray:\n";
         $out .= "  ret ptr " . $this->strSymBytes('@.ts.array') . "\n";
@@ -2375,10 +2376,20 @@ trait EmitLlvmExpr
                 continue;
             }
             if ($kind === Type::KIND_FLOAT) {
+                // Print via __mir_float_to_str, not a raw `printf("%.14g")`: PHP's
+                // `echo` scientific form is "1.0E+20", which the runtime formatter
+                // produces and C's `%g` ("1e+20") does not.
+                $this->rt->needsFloatStr = true;
+                $this->rt->needsStrRc = true;
                 $out .= $this->coerceTo('double');
-                $fmt = '@.fmt.pg';
-                $argType = 'double';
-            } elseif ($kind === Type::KIND_STRING) {
+                $fsr = $this->ssa->allocReg();
+                $out .= '  ' . $fsr . ' = call ptr @__mir_float_to_str(double ' . $this->lastValue . ")\n";
+                $reg = $this->ssa->allocReg();
+                $out .= '  ' . $reg . ' = call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr ' . $fsr . ")\n";
+                $out .= '  call void @__mir_rc_release_str(ptr ' . $fsr . ")\n";
+                continue;
+            }
+            if ($kind === Type::KIND_STRING) {
                 $out .= $this->coerceToPtr();
                 // A null `?string` (ptr 0) echoes "" in PHP — map 0 → the empty
                 // C-string so printf doesn't dereference null.
