@@ -258,12 +258,35 @@ trait EmitLlvmCalls
         $argTypes = 'ptr';
         // Uniform closure ABI: box each scalar arg into a tagged cell so the
         // call works whether the callee is known or a dynamic `callable` (the
-        // closure entry unboxes a concrete-scalar param). Arrays/objects pass
-        // raw (boxToCell would rebuild an array). Without this a cell-typed
-        // param reads the raw arg bits → a string renders as its pointer.
-        foreach ($iv->args as $a) {
+        // closure entry unboxes a concrete-scalar param). Without this a
+        // cell-typed param reads the raw arg bits → a string renders as its
+        // pointer.
+        //
+        // A typed ARRAY arg is CELLIFIED (its values boxed) ONLY when the
+        // callee param is ERASED (cell/unknown) — the same boundary rule the
+        // scalar box/unbox already follows. A typed `assoc[string,int]` handed
+        // to an untyped `$p` reads back RAW via `$p["k"]` (the read types cell
+        // but the storage is raw), so the callee misboxes it. Gating on the
+        // param type — not the arg type — is the fix: a callee whose param is a
+        // TYPED array (an array_map-style callback) still gets the raw array it
+        // expects, so cellifying blindly (which crashed self-host) is avoided.
+        $known = $fn !== '' && isset($this->closureCaptures[$fn]);
+        $calleeParams = $known ? ($this->sigs->paramTypes[$fn] ?? []) : [];
+        foreach ($iv->args as $ai => $a) {
             $out .= $this->emitNode($a);
+            $pt = $calleeParams[$ai] ?? null;
+            // Cellify only for a KNOWN callee whose param is provably erased
+            // (cell/unknown). A dynamic callee (`callable`) can't be gated — its
+            // param might be a TYPED array (an array_map-style callback) that
+            // needs the raw array, and cellifying it blindly corrupts the
+            // element reads (it crashes self-host). So the dynamic-callback case
+            // — a `usort($x, fn($a,$b)=>$cmp($a["k"],$b["k"]))` with an int-arith
+            // `$cmp` — is still open, pending a representation discriminator.
+            $paramErased = $known && $pt !== null
+                && ($pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN);
             if ($this->isCellBoxableArg($a->type)) {
+                $out .= $this->boxToCell($a->type);
+            } elseif ($paramErased && $a->type->isArray() && $this->hasConcreteScalarElem($a->type)) {
                 $out .= $this->boxToCell($a->type);
             } else {
                 $out .= $this->coerceToI64();
@@ -271,7 +294,6 @@ trait EmitLlvmCalls
             $argList .= ', i64 ' . $this->lastValue;
             $argTypes .= ', i64';
         }
-        $known = $fn !== '' && isset($this->closureCaptures[$fn]);
         $reg = $this->ssa->allocReg();
         if ($known) {
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList . ")\n";

@@ -1107,6 +1107,19 @@ final class EmitLlvm implements EmitVisitor
             || $k === Type::KIND_NULL || $k === Type::KIND_CELL;
     }
 
+    /** True when `$t` is an array whose element is a concrete scalar
+     *  (int/float/bool/string) — stored RAW, so it must be cellified when the
+     *  array crosses into an erased (cell/unknown) parameter. */
+    private function hasConcreteScalarElem(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $e = $t->element;
+        if ($e === null) { return false; }
+        $ek = $e->kind;
+        return $ek === Type::KIND_INT || $ek === Type::KIND_FLOAT
+            || $ek === Type::KIND_BOOL || $ek === Type::KIND_STRING;
+    }
+
     /**
      * Load an object's class_id THROUGH its header-slot-0 descriptor pointer
      * (`{ i64 class_id, ptr drop_fn }`). Leaves the id reg in
