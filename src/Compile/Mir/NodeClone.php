@@ -66,6 +66,12 @@ final class NodeClone
         if ($k === Node::KIND_RETURN) { $x = self::asReturn($n); return new Return_($x->value === null ? null : self::node($x->value), $n->type); }
         if ($k === Node::KIND_CALL)   { $x = self::asCall($n);   return new Call($x->function, self::nodes($x->args), $n->type); }
         if ($k === Node::KIND_INVOKE) { $x = self::asInvoke($n); return new Invoke_(self::node($x->callee), self::nodes($x->args), $n->type); }
+        // Shallow: clones the Closure_ NODE, reusing the underlying `__closure_N`
+        // FunctionDef (same `id` / `->class`). Correct when the enclosing clone
+        // does NOT need its own closure fn (Phase A callable-dim specialization,
+        // where the closure's captures are already concretely typed at the
+        // caller). Freshening the closure fn per specialization is Phase B.
+        if ($k === Node::KIND_CLOSURE) { $x = self::asClosure($n); return new Closure_($x->id, self::nodes($x->captures), $n->type, $x->captureByRef); }
         if ($k === Node::KIND_STORE_LOCAL) { $x = self::asStoreLocal($n); return new StoreLocal($x->name, self::node($x->value), $n->type); }
         if ($k === Node::KIND_NULLCOALESCE) { $x = self::asNullCoalesce($n); return new NullCoalesce_(self::node($x->left), self::node($x->right), $n->type); }
         if ($k === Node::KIND_SPREAD) { $x = self::asSpread($n); return new Spread_(self::node($x->operand), $n->type); }
@@ -208,6 +214,7 @@ final class NodeClone
     private static function asReturn(Node $n): Return_ { return $n; }
     private static function asCall(Node $n): Call { return $n; }
     private static function asInvoke(Node $n): Invoke_ { return $n; }
+    private static function asClosure(Node $n): Closure_ { return $n; }
     private static function asStoreLocal(Node $n): StoreLocal { return $n; }
     private static function asNullCoalesce(Node $n): NullCoalesce_ { return $n; }
     private static function asSpread(Node $n): Spread_ { return $n; }

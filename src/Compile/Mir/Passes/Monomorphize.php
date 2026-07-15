@@ -3,6 +3,7 @@
 namespace Compile\Mir\Passes;
 
 use Compile\Mir\Call;
+use Compile\Mir\Closure_;
 use Compile\Mir\FunctionDef;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
@@ -52,6 +53,32 @@ final class Monomorphize implements Pass
     /** @var array<string, Call[]> call-site nodes grouped by callee name */
     private array $callsByName = [];
 
+    /** @var array<string, bool> concrete closure fn names (`__closure_N`) — a
+     *  callable dimension keys only on these (a real closure struct), never on
+     *  a named-string / FCC / `__invoke`-object callable. */
+    private array $closureNames = [];
+
+    /** The module under specialization (Phase B closure-fn freshening needs it). */
+    private ?Module $module = null;
+
+    /** @var array<string, FunctionDef> name → def, for freshening a closure fn. */
+    private array $fnByName = [];
+
+    /** Next fresh `__closure_N` id (seeded past every existing id in run()). */
+    private int $nextClosureId = 0;
+
+    /** @var FunctionDef[] fresh closure fns minted this round (spliced in runOnce). */
+    private array $newClosureFns = [];
+
+    /** Deferred call-site repoints, applied AFTER every clone in the round is
+     *  built (see specialize). Parallel arrays — a tuple array would erase the
+     *  `Call` static type and native `->function` would resolve by the wrong
+     *  offset (Zend-vs-native divergence).
+     *  @var Call[] */
+    private array $pendingRepointCalls = [];
+    /** @var string[] index-parallel to {@see $pendingRepointCalls}. */
+    private array $pendingRepointNames = [];
+
     public function name(): string { return self::NAME; }
 
     /** @return string[] */
@@ -66,6 +93,13 @@ final class Monomorphize implements Pass
         // Specializations have concrete params, so they are never candidates
         // (isCandidate skips `$mono$`) → the worklist converges. The round cap
         // is a runaway backstop.
+        // Seed the fresh-closure id past every existing `__closure_N` so freshened
+        // copies never collide (across ALL rounds — a persistent counter).
+        $this->nextClosureId = 0;
+        foreach ($module->closureCaptures as $cn => $_) {
+            $id = (int)\substr($cn, \strlen('__closure_'));
+            if ($id >= $this->nextClosureId) { $this->nextClosureId = $id + 1; }
+        }
         $maxRounds = \count($module->functions) + 8;
         $round = 0;
         while ($round < $maxRounds) {
@@ -81,7 +115,14 @@ final class Monomorphize implements Pass
     private function runOnce(Module $module): bool
     {
         $this->callsByName = [];
+        $this->closureNames = $module->closureCaptures;
+        $this->module = $module;
+        $this->newClosureFns = [];
+        $this->pendingRepointCalls = [];
+        $this->pendingRepointNames = [];
+        $this->fnByName = [];
         foreach ($module->functions as $fn) {
+            $this->fnByName[$fn->name] = $fn;
             $this->collectCalls($fn->body);
         }
 
@@ -99,6 +140,12 @@ final class Monomorphize implements Pass
 
         if (!$changed) { return false; }
 
+        // All clones built (from un-repointed originals) — now apply every
+        // deferred call-site repoint at once.
+        foreach ($this->pendingRepointCalls as $i => $call) {
+            $call->function = $this->pendingRepointNames[$i];
+        }
+
         // Splice each specialization in right after its original, so a
         // specialized callee precedes call sites defined later and the
         // scalar-return adoption in InferTypes sees its sig in order.
@@ -109,6 +156,10 @@ final class Monomorphize implements Pass
                 foreach ($clonesByOrig[$fn->name] as $clone) { $rebuilt[] = $clone; }
             }
         }
+        // Fresh closure fns minted while cloning bodies (Phase B). Appended last;
+        // InferTypes re-types every fn regardless of order and seeds each closure
+        // body from its (now unique, concretely-typed) capture site.
+        foreach ($this->newClosureFns as $clFn) { $rebuilt[] = $clFn; }
         $module->functions = $rebuilt;
 
         // Re-type: specialized bodies now have concrete params; rewritten
@@ -129,10 +180,17 @@ final class Monomorphize implements Pass
     private function specialize(FunctionDef $fn): array
     {
         $calls = $this->callsByName[$fn->name] ?? [];
-        if (\count($calls) < 2) { return []; }
+        if (\count($calls) === 0) { return []; }
 
         $dims = $this->dimensions($fn, $calls);
         if (\count($dims) === 0) { return []; }
+
+        // A callable dimension turns a DYNAMIC invoke into a KNOWN one — a real
+        // win from a SINGLE concrete-closure site. A pure array-dim
+        // specialization keeps the conservative >=2-call-sites threshold (a
+        // single-type helper stays on the untouched all-agree path — no bloat).
+        $hasCallableDim = $this->hasCallableDim($fn, $dims);
+        if (!$hasCallableDim && \count($calls) < 2) { return []; }
 
         // Per call site: a specialization key over the dimension arg types,
         // or '' when the site is not fully concrete (stays on the original).
@@ -148,7 +206,10 @@ final class Monomorphize implements Pass
                 $keyToCall[$key] = $call;
             }
         }
-        if (\count($keyToCall) < 2) { return []; }
+        // Callable dim: >=1 concrete key specializes (dynamic -> known). Pure
+        // array dim: keep >=2 distinct keys (the genuinely-erased case).
+        $minKeys = $hasCallableDim ? 1 : 2;
+        if (\count($keyToCall) < $minKeys) { return []; }
 
         // Per-fn specialization cap (code-size / compile-time backstop). On
         // overflow, leave the function unspecialized — every call site falls
@@ -170,11 +231,18 @@ final class Monomorphize implements Pass
             $clones[] = $clone;
         }
 
-        // Repoint each fully-concrete call site to its specialization.
+        // DEFER repointing to the end of the round (applied in runOnce). A
+        // `$mono$` callee name encodes the closure-ARG identity, so a call must
+        // not be repointed before a SIBLING candidate clones a body containing
+        // it: freshenClosures gives the clone a fresh closure id, and a call
+        // already repointed on the shared original would carry a stale
+        // specialization name into the clone (wrong closure). Cloning from
+        // un-repointed originals, then repointing once, avoids the hazard.
         foreach ($calls as $ci => $call) {
             $k = $callKeys[$ci];
             if ($k !== '' && isset($keyToName[$k])) {
-                $call->function = $keyToName[$k];
+                $this->pendingRepointCalls[] = $call;
+                $this->pendingRepointNames[] = $keyToName[$k];
             }
         }
         return $clones;
@@ -199,12 +267,25 @@ final class Monomorphize implements Pass
             // pointer compare. cloneWith keeps `byRef` and the call keeps passing
             // the lvalue, so in-place mutation is preserved.
             if ($p->variadic) { continue; }
-            if (!$this->isErasedArrayParam($p->type)) { continue; }
-            foreach ($calls as $call) {
-                if ($idx < \count($call->args)
-                    && $this->isConcreteArray($call->args[$idx]->type)) {
-                    $dims[] = $idx;
-                    break;
+            // A dimension is either an erased-array param receiving a concrete
+            // array, or a bare `callable` param receiving a concrete closure at
+            // >=1 site. Retyping the callable param to the closure's obj type
+            // makes its internal invoke KNOWN (the milestone cellify then fires).
+            if ($this->isErasedArrayParam($p->type)) {
+                foreach ($calls as $call) {
+                    if ($idx < \count($call->args)
+                        && $this->isConcreteArray($call->args[$idx]->type)) {
+                        $dims[] = $idx;
+                        break;
+                    }
+                }
+            } elseif ($this->isCallableParam($p->type)) {
+                foreach ($calls as $call) {
+                    if ($idx < \count($call->args)
+                        && $this->isConcreteClosure($call->args[$idx]->type)) {
+                        $dims[] = $idx;
+                        break;
+                    }
                 }
             }
         }
@@ -225,7 +306,10 @@ final class Monomorphize implements Pass
         foreach ($dims as $di) {
             if ($di >= \count($call->args)) { return ''; }
             $t = $call->args[$di]->type;
-            if (!$this->isConcreteArray($t)) { return ''; }
+            // A dim's arg is specializable when it is a concrete array OR a
+            // concrete closure (the callable dimension). typeToken renders both
+            // (a closure arg is KIND_OBJ<__closure_N> → `obj_...`).
+            if (!$this->isConcreteArray($t) && !$this->isConcreteClosure($t)) { return ''; }
             $parts[] = 'p' . $di . '_' . $this->typeToken($t);
         }
         return \implode('_', $parts);
@@ -255,6 +339,13 @@ final class Monomorphize implements Pass
         } catch (\Throwable $e) {
             return null;
         }
+        // Phase B: this clone must own any closure it defines — a SHARED
+        // `__closure_N` would be typed by the UNION of every clone's capture
+        // site, collapsing the concrete capture types back to bare. Freshen each
+        // closure fn per clone so a captured callable keeps its concrete type
+        // (the uasort decorate chain). Bail (→ unspecialized, dynamic entry) if a
+        // closure can't be safely freshened (generator / static local).
+        if (!$this->freshenClosures($body)) { return null; }
         return new FunctionDef(
             $specName,
             $newParams,
@@ -300,8 +391,44 @@ final class Monomorphize implements Pass
         return $out;
     }
 
+    /** True when >=1 of `$dims` is a callable param (a callable dimension). */
+    private function hasCallableDim(FunctionDef $fn, array $dims): bool
+    {
+        foreach ($dims as $di) {
+            if ($di < \count($fn->params) && $this->isCallableParam($fn->params[$di]->type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A bare `callable` / `Closure` param (`KIND_CLOSURE`, with or without a
+     *  spelled-out signature). Its invoke is DYNAMIC until specialized to a
+     *  concrete closure. By-ref/variadic excluded by the dimensions() guard. */
+    private function isCallableParam(Type $t): bool
+    {
+        return $t->kind === Type::KIND_CLOSURE;
+    }
+
+    /** A concrete closure ARGUMENT: an `obj<__closure_N>` naming a real closure
+     *  fn (in `closureCaptures`). NOT a named-string / FCC / `__invoke`-object
+     *  callable — retyping the param to those would break the dynamic path. */
+    private function isConcreteClosure(Type $t): bool
+    {
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $c = $t->class;
+        return $c !== null && isset($this->closureNames[$c]);
+    }
+
     /** A param worth specializing: a bare array hint / untyped (`unknown`)
-     *  or a vec with an unknown element. */
+     *  or a vec with an unknown element.
+     *
+     *  NOTE (Phase B, deferred): broadening this to a CELL-element / bare
+     *  `array` param DOES let `uasort(array &$arr, …)` specialize `$arr` and
+     *  order correctly — but the decorated pair's values then round-trip as
+     *  BOXED cells while the writeback slot stays int-typed, printing raw box
+     *  bits. That is the representation-consistency root epic, not a
+     *  monomorphization fix. Kept narrow until that lands. */
     private function isErasedArrayParam(Type $t): bool
     {
         if ($t->kind === Type::KIND_UNKNOWN) { return true; }
@@ -354,9 +481,16 @@ final class Monomorphize implements Pass
 
     /** A body that DEFINES a closure (captures the enclosing scope) or a static
      *  local (a module global a clone must not duplicate), or yields, can't be
-     *  cloned safely yet. A dynamic INVOKE of a passed-in callable IS fine —
-     *  the callee is a parameter, not duplicated (the array_map / array_filter
-     *  prelude shape). */
+     *  cloned safely. A dynamic INVOKE of a passed-in callable IS fine — the
+     *  callee is a parameter, not duplicated (the array_map / array_filter /
+     *  usort callback-taker shape, which the callable dimension specializes).
+     *
+     *  Phase B (deferred) would relax the closure case and let
+     *  {@see freshenClosures} give each clone its own `__closure_N'`; it is kept
+     *  rejecting for now because the transitive case it unlocks (uasort's
+     *  decorate) needs the representation-consistency root fix to be correct —
+     *  see {@see isErasedArrayParam}. The freshening machinery stays in place,
+     *  dormant, so it never fires while this rejects closure bodies. */
     private function bodyHasUnsupported(Node $n): bool
     {
         $k = $n->kind;
@@ -366,6 +500,77 @@ final class Monomorphize implements Pass
         }
         foreach (Walk::children($n) as $c) {
             if ($this->bodyHasUnsupported($c)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * Freshen every closure DEFINED in a cloned body `$n`: mint a fresh
+     * `__closure_N'` FunctionDef (a deep copy) per Closure_ literal and repoint
+     * the literal to it, so this clone OWNS its closures. A shared closure fn
+     * would be typed by the UNION of every clone's capture site, collapsing a
+     * captured callable's concrete type back to bare and re-opening the dynamic
+     * misbox. Mutates Closure_ nodes in place; registers fresh fns in
+     * {@see $newClosureFns}. Returns false when a closure cannot be freshened
+     * safely (unknown fn / generator / static-local body) — the caller then
+     * leaves the whole function unspecialized (the dynamic entry stays correct).
+     */
+    private function freshenClosures(Node $n): bool
+    {
+        if ($n instanceof Closure_) {
+            if (!$this->freshenOneClosure($n)) { return false; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if (!$this->freshenClosures($c)) { return false; }
+        }
+        return true;
+    }
+
+    private function freshenOneClosure(Closure_ $node): bool
+    {
+        $oldName = '__closure_' . (string)$node->id;
+        $orig = $this->fnByName[$oldName] ?? null;
+        if ($orig === null || $orig->isGenerator) { return false; }
+        try {
+            $clBody = NodeClone::block($orig->body);
+        } catch (\Throwable $e) {
+            return false;
+        }
+        if ($this->bodyHasStaticLocal($clBody)) { return false; }
+        // Nested closures inside this one get their own fresh ids too.
+        if (!$this->freshenClosures($clBody)) { return false; }
+
+        $newId = $this->nextClosureId;
+        $this->nextClosureId = $this->nextClosureId + 1;
+        $newName = '__closure_' . (string)$newId;
+        $newParams = [];
+        foreach ($orig->params as $p) {
+            $newParams[] = new Param($p->name, $p->type, $p->byRef, $p->variadic, $p->default);
+        }
+        $clFn = new FunctionDef($newName, $newParams, $orig->returnType, $clBody, $orig->returnsByRef, $orig->isPrelude);
+
+        $m = $this->module;
+        $m->closureCaptures[$newName] = $m->closureCaptures[$oldName] ?? \count($node->captures);
+        $m->closureHasThis[$newName] = $m->closureHasThis[$oldName] ?? false;
+        $this->fnByName[$newName] = $clFn;
+        $this->closureNames[$newName] = true;
+        $this->newClosureFns[] = $clFn;
+
+        // Repoint the literal (id drives the fn name at emit; type->class drives
+        // the KNOWN-invoke resolution).
+        $node->id = $newId;
+        $node->type = Type::obj($newName);
+        return true;
+    }
+
+    /** A STATIC_LOCAL_DECL anywhere in `$n` EXCEPT inside a nested closure (whose
+     *  body is a separate FunctionDef, not a child here). */
+    private function bodyHasStaticLocal(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) { return true; }
+        if ($n->kind === Node::KIND_CLOSURE) { return false; }
+        foreach (Walk::children($n) as $c) {
+            if ($this->bodyHasStaticLocal($c)) { return true; }
         }
         return false;
     }
