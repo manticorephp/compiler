@@ -14,8 +14,8 @@
 #
 # Case shapes:
 #   - cases/<name>.php              → single-file compile
-#   - cases/<name>/                 → directory; compiled from cwd <name>
-#                                     so `.manticore.php` manifests resolve
+#   - cases/<name>/                 → directory; recursive *.php scan
+#                                     (multi-file compile, entry sorts last)
 
 set -euo pipefail
 
@@ -101,12 +101,10 @@ for name in "${cases[@]}"; do
     # regression in the past.
     rm -f "$bin"
 
-    # Compile: single-file vs directory.
+    # Compile: single-file vs directory (recursive *.php scan).
     src="$CASES/$name.php"
     if [[ -d "$CASES/$name" ]]; then
-        # cd into the case dir so .manticore.php / relative paths
-        # resolve as the case author wrote them.
-        (cd "$CASES/$name" && "$MANTICORE" compile $BACKEND_ARGS -o "$bin") > "$stderr_log" 2>&1 || {
+        "$MANTICORE" compile $BACKEND_ARGS "$CASES/$name" -o "$bin" > "$stderr_log" 2>&1 || {
             failed=$((failed + 1))
             failed_names+=("$name")
             printf 'FAIL %s  (compile)\n' "$name"

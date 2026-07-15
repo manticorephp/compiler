@@ -668,11 +668,11 @@ function parse_compile_args(array $args): bool {
  * Resolve the source list for a `compile` / `dump-llvm` invocation:
  *
  *   - explicit files on argv → read each from disk in order
- *   - no files + `.manticore.php` in cwd → discover modules + entry
+ *   - a directory arg → recursive `*.php` scan of it
  *   - otherwise → read stdin
  *
  * Returns the source list (one entry per file, plus discovered
- * module files) or null on IO error.
+ * directory files) or null on IO error.
  *
  * @param string[] $files
  * @return string[]|null
@@ -682,26 +682,10 @@ function resolve_sources(array $files): ?array {
         /** @var string[] $out */
         $out = [];
         foreach ($files as $path) {
-            // Directory arg → look for `.manticore.php` inside it
-            // first (manifest-driven multi-module compile). Falls
-            // back to a recursive *.php scan when the manifest is
-            // absent — preserves the simple `manticore compile src/`
-            // ergonomics for projects without a manifest.
+            // Directory arg → recursive *.php scan (the simple
+            // `manticore compile src/` ergonomics). Multi-target
+            // projects use the `manticore.json` manifest via `build`.
             if (is_directory($path)) {
-                $manifestPath = $path . "/.manticore.php";
-                if (file_exists($manifestPath)) {
-                    $manifestSources = Manifest::loadSources($manifestPath);
-                    if ($manifestSources === null) { return null; }
-                    // Use a distinct loop var so the foreach element
-                    // type (`?string` slot in self-host) doesn't merge
-                    // with the read_file return type below — a single
-                    // shared `$src` triggers the pre-scan i64/ptr merge
-                    // bug.
-                    foreach ($manifestSources as $manifestSrc) {
-                        $out[] = $manifestSrc;
-                    }
-                    continue;
-                }
                 // Inline the recursive enumeration — going through
                 // `directory_php_files()` loses the `string[]` element
                 // type across the call boundary in self-host
@@ -726,12 +710,9 @@ function resolve_sources(array $files): ?array {
         }
         return $out;
     }
-    if (file_exists(".manticore.php")) {
-        return Manifest::loadSources(".manticore.php");
-    }
     $stdin = read_stdin_source();
     if (\strlen($stdin) === 0) {
-        dprint("no input: pass file(s), pipe to stdin, or add .manticore.php");
+        dprint("no input: pass file(s) or a directory, or pipe to stdin");
         return null;
     }
     return [$stdin];
@@ -1255,7 +1236,7 @@ function cmd_dump_ast(array $args): int {
 /**
  * Front-end for `--backend=mir`. Parse every source, merge their
  * top-level statements into one Program (module files first, entry
- * last — the order resolve_sources / Manifest hands us), then run the
+ * last — the order resolve_sources hands us), then run the
  * MIR pipeline once. Class / function decls from all files register in
  * the pre-pass; the entry's top-level code lowers into `__main` last.
  *

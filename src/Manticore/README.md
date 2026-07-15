@@ -10,7 +10,7 @@ The compiler self-builds via `manticore build manticore.json` (a self-contained 
 
 | Command | Purpose |
 |---------|---------|
-| `compile` | Full pipeline → native binary. `-o <out>` (default `a.out`). Source from files, stdin, or `.manticore.php`. |
+| `compile` | Full pipeline → native binary. `-o <out>` (default `a.out`). Source from files, a directory (recursive `*.php` scan), or stdin. |
 | `build [manticore.json]` | Cargo-like manifest build: every library target → `.o` + `.sig`, every application target → executable. |
 | `dump-ast` | Parse first source, print AST (`Parser\Dump`). |
 | `dump-mir` | Parse + run MIR pipeline (sans EmitLlvm), print typed IR. `--prelude` includes the Exception hierarchy, `--effects` annotates inferred memory effects. |
@@ -60,16 +60,10 @@ A user `compile` does NOT merge the stdlib source. Instead:
 
 A distributed compiler ships `bin/` + `lib/` only (no `src/Runtime`); the `.sig` + `.o` carry the full exported table, so bundled-stdlib calls type and link anywhere.
 
-## Manifest loader (`Manifest.php`)
-
-`Manifest::loadSources(string $path): ?string[]` — `.manticore.php` loader (distinct from the JSON `manticore.json` build). A PHP file declaring a `#[Manticore\Attr\Project]` class; `#[Module]` props give source roots, the single `#[Entry]` prop's string default the entry file. Returns sources in compile order: modules first, entry last.
-
 ## Attr (`Manticore\Attr\`)
 
-- `Project(string $name)` — TARGET_CLASS; marks the manifest class.
-- `Module(string $path)` — TARGET_PROPERTY; source-root directory.
-- `Entry` — TARGET_PROPERTY; the property's string default is the entry-file path.
 - `Struct` — TARGET_CLASS; value-type class (no class-id header, static dispatch).
+- `RefOut` — pure-output by-ref param (auto-vivified at the call site; see `docs/attributes.md`).
 
 ## Invariants
 
@@ -84,7 +78,8 @@ A distributed compiler ships `bin/` + `lib/` only (no `src/Runtime`); the `.sig`
 
 ```bash
 manticore compile foo.php -o foo
-manticore compile -o foo                 # reads stdin or .manticore.php
+manticore compile src/ -o foo            # directory: recursive *.php scan
+manticore compile -o foo                 # reads stdin
 manticore compile foo.php -O0            # debuggable codegen
 manticore build manticore.json           # manifest build (self-build path)
 manticore dump-sig src/                   # exported symbol table

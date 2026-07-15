@@ -410,24 +410,17 @@ function getenv(#[Borrow] \Ffi\Ptr $name): \Ffi\Ptr {}
 
 ## Example: full manifest + FFI binding
 
-Project manifest:
+Project manifest (`manticore.json`):
 
-```php
-<?php
-// manifest.php
-use Manticore\Attr\{Project, Module, Entry};
-
-#[Project(name: 'curl-fetch')]
-final class Manifest
+```json
 {
-    #[Module(path: 'src')]
-    public string $src;
-
-    #[Module(path: 'src/Bindings')]
-    public string $bindings;
-
-    #[Entry]
-    public string $main = 'src/main.php';
+  "applications": [{
+    "name": "curl-fetch",
+    "src": "src",
+    "output": "bin/curl-fetch",
+    "entry": "src/main.php",
+    "extensions": ["curl"]
+  }]
 }
 ```
 
