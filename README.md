@@ -322,9 +322,15 @@ catch layout roulette.
 
 - **Integer overflow wraps** (two's-complement) instead of promoting to float
   as PHP does — `PHP_INT_MAX + 1` gives `PHP_INT_MIN`, not a float.
-- **`sprintf`/`printf` gaps** — `%b` (binary), zero-pad width + precision
-  combinations (`%05.2f`), and `%e` exponent formatting are incomplete; the
-  common conversions (`%d`/`%s`/`%f`/`%x`/`%e` mantissa) match.
+- **`sprintf`/`printf`** — `%b` (binary) is unimplemented and `%e` pads the
+  exponent to 2 digits (`e+03`) where PHP uses the minimum (`e+3`); the common
+  conversions and flags (`%d`/`%s`/`%f`/`%x`/`%o`, width/precision, `%+`/`%-`/
+  `%0`) match.
+- **`intval($s, $base)`** ignores the base argument (`intval("FF", 16)` → 0).
+- **Dynamic name resolution** is not yet supported — `new $cls()`, `$cls::m()`,
+  `$o->$m()`, `$o->$prop`, a computed-string `$f()`, `$obj instanceof $cls`, and
+  `ReflectionClass`. (Literal / first-class / `call_user_func($strVar, …)`
+  callables do work.)
 - **`extract()` / `compact()`** are not implemented (they need dynamic
   symbol-table access the typed frame does not model).
 - **`goto` into a loop body** is unsupported (plain forward/backward `goto`
