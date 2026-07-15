@@ -160,6 +160,8 @@ to a dynamic site).
 
 ## Design references (current, keep)
 
+- `docs/generics.md` — the generics user guide (docblock `@template`, bounds,
+  traits, reified `@var C<T>`, monomorphization).
 - `docs/design/monomorphization.md`, `docs/design/monomorphize-callable-dim.md` —
   the generics/erasure engine + the callable dimension.
 - `docs/design/type-system-v2.md`, `docs/design/unknown-cell-soundness.md` —

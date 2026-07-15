@@ -53,6 +53,11 @@ potential for creating a fully self-contained PHP runtime environment.
   by-reference to an **array element / object property** (`f($a[0])`, `f($o->v)`)
   and out-parameter auto-vivification (`preg_match($re, $s, $m)`), reference
   returns (`function &f()`), and file I/O over libc.
+- ✅ **Generics** (docblock-driven, so source stays valid PHP): `@template` with
+  bounds (`T of C`) + defaults (`T = X`), `@extends`/`@implements`, generic
+  **traits** (`@use T<X>`, zero-cost), and **reified** `@var Box<float> = new Box`
+  (a real specialized class, no boxing) — plus implicit **monomorphization** of
+  erased `array` / `callable` params. See [`docs/generics.md`](docs/generics.md).
 
 ## Benchmarks
 
