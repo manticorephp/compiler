@@ -2110,6 +2110,9 @@ trait EmitLlvmBuiltins
         // Translate specifiers + record per-arg conversion kind.
         $trans = '';
         $convs = [];
+        // Set when a `%e`/`%E`/`%g`/`%G` conversion is present: C pads the
+        // exponent to 2 digits, PHP uses the minimum → post-fix the result.
+        $hasExp = false;
         $n = \strlen($fmt);
         $i = 0;
         while ($i < $n) {
@@ -2157,6 +2160,7 @@ trait EmitLlvmBuiltins
             elseif ($conv === 'f' || $conv === 'F' || $conv === 'e' || $conv === 'E'
                 || $conv === 'g' || $conv === 'G') {
                 $trans .= '%' . $prefix . $conv; $convs[] = 'f';
+                if ($conv !== 'f' && $conv !== 'F') { $hasExp = true; }
             } elseif ($conv === 'b') {
                 // PHP `%b` (binary) — C printf has no `%b`. Pre-convert the arg to
                 // a binary string via decbin and emit it through `%s`; width/pad
@@ -2243,7 +2247,8 @@ trait EmitLlvmBuiltins
                 $vararg .= ', i64 ' . $this->lastValue;
             }
         }
-        if ($toStdout) {
+        // Fast path: direct printf to stdout when there is no exponent to fix.
+        if ($toStdout && !$hasExp) {
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $fmtPtr . $vararg . ")\n";
             $r2 = $this->ssa->allocReg();
@@ -2251,6 +2256,7 @@ trait EmitLlvmBuiltins
             $this->lastValue = $r2; $this->lastValueType = 'i64';
             return $out;
         }
+        // Format into a buffer (sprintf; also printf when %e/%g needs fixing).
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
         $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 256)\n";
@@ -2263,6 +2269,38 @@ trait EmitLlvmBuiltins
         $cl = $this->ssa->allocReg();
         $out .= '  ' . $cl . ' = select i1 ' . $ov . ', i64 255, i64 ' . $tl . "\n";
         $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $cl . ")\n";
+        // PHP-style exponent (`e+03` → `e+3`): rewrite via the stdlib helper,
+        // then release the intermediate snprintf buffer. Declare the extern only
+        // when it is not defined in-module (self-contained build embeds it).
+        if ($hasExp) {
+            if (!isset($this->definedFns[$this->mangle('__mc_fix_exp')])) {
+                $this->libcExtra['manticore___mc_fix_exp'] = 'declare i64 @manticore___mc_fix_exp(i64)';
+            }
+            $bi = $this->ssa->allocReg();
+            $out .= '  ' . $bi . ' = ptrtoint ptr ' . $buf . " to i64\n";
+            $fx = $this->ssa->allocReg();
+            $out .= '  ' . $fx . ' = call i64 @manticore___mc_fix_exp(i64 ' . $bi . ")\n";
+            $out .= $this->rcReleaseReg($bi, 'str');
+            $fp = $this->ssa->allocReg();
+            $out .= '  ' . $fp . ' = inttoptr i64 ' . $fx . " to ptr\n";
+            $buf = $fp;
+        }
+        if ($toStdout) {
+            // Print the fixed buffer, then release it (owned intermediate, not
+            // returned). printf("%s", buf) returns the byte count.
+            $pcts = $this->strLitId($this->pool->intern('%s'));
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $pcts . ', ptr ' . $buf . ")\n";
+            if ($hasExp) {
+                $bi2 = $this->ssa->allocReg();
+                $out .= '  ' . $bi2 . ' = ptrtoint ptr ' . $buf . " to i64\n";
+                $out .= $this->rcReleaseReg($bi2, 'str');
+            }
+            $r2 = $this->ssa->allocReg();
+            $out .= '  ' . $r2 . ' = sext i32 ' . $r . " to i64\n";
+            $this->lastValue = $r2; $this->lastValueType = 'i64';
+            return $out;
+        }
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
         return $out;
     }
