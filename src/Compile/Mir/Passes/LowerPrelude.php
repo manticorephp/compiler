@@ -302,6 +302,8 @@ trait LowerPrelude
             'FILE_USE_INCLUDE_PATH' => 1, 'FILE_APPEND' => 8,
             'FILE_IGNORE_NEW_LINES' => 2, 'FILE_SKIP_EMPTY_LINES' => 4, 'FILE_NO_DEFAULT_CONTEXT' => 16,
             'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3,
+            'PATHINFO_DIRNAME' => 1, 'PATHINFO_BASENAME' => 2,
+            'PATHINFO_EXTENSION' => 4, 'PATHINFO_FILENAME' => 8, 'PATHINFO_ALL' => 15,
         ];
         if (isset($ints[$name])) { return new IntConst($ints[$name], Type::int_()); }
 
