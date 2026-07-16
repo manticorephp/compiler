@@ -1355,6 +1355,10 @@ final class EmitLlvm implements EmitVisitor
     {
         $k = $t->kind;
         if ($k === Type::KIND_STRING) { return 'str'; }
+        // A CELL is tag-dispatched by __mir_cell_drop (scalars a no-op). Without
+        // this it fell through to '' — so `unset($r)` on a `Foo|false` local
+        // released NOTHING and its __destruct never ran.
+        if ($k === Type::KIND_CELL) { return 'cell'; }
         if ($k === Type::KIND_OBJ) {
             $cls = $t->class ?? '';
             // `Ffi\Ptr` is a raw foreign address with NO rc header: the word at

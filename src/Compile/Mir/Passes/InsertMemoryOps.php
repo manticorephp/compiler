@@ -130,9 +130,12 @@ final class InsertMemoryOps implements Pass
         foreach ($this->rcObjOrder as $name) {
             if (isset($this->rcObjBlocked[$name])) { continue; }
             $type = $this->rcObjType[$name];
+            // CELL before the 'obj' default: a cell is NaN-boxed, so releasing
+            // it as an obj would inttoptr the tag bits and fault.
             $flavor = $type->kind === Type::KIND_STRING ? 'str'
+                : ($type->kind === Type::KIND_CELL ? 'cell'
                 : ($type->isVec() ? 'vec'
-                : ($type->isAssoc() ? 'assoc' : 'obj'));
+                : ($type->isAssoc() ? 'assoc' : 'obj')));
             $target = new LoadLocal($name, $type);
             $rcReleases[] = new MemoryOp_('rc_release', $flavor, $target, Type::void());
         }
@@ -172,8 +175,17 @@ final class InsertMemoryOps implements Pass
     private function isOwnedObj(Node $value): bool
     {
         $tk = $value->type->kind;
+        // A CELL counts: `f(): Foo|false` boxes a FRESH object into a cell, and
+        // the +1 return convention transfers it to us exactly as for a plain
+        // obj. Excluding it meant a cell local was NEVER released — the object
+        // leaked and its __destruct never ran (`$r = fopen(...)` is precisely
+        // this shape). The producer gate below keeps it symmetric: only a call /
+        // new / clone is owned; a LoadLocal alias or an array read stays
+        // borrowed, so a boxed value read out of a container is not over-
+        // released. The drop itself (__mir_cell_drop) is tag-guarded, so a cell
+        // holding an int/float/null is a no-op.
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY
-            && $tk !== Type::KIND_STRING) { return false; }
+            && $tk !== Type::KIND_STRING && $tk !== Type::KIND_CELL) { return false; }
         // #[Struct] classes have no class_id/rc header (offset 0 is a
         // property) — they must never be rc-managed.
         if ($tk === Type::KIND_OBJ) {
