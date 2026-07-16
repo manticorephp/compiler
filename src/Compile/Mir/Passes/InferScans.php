@@ -374,6 +374,65 @@ trait InferScans
     }
 
     /**
+     * The STATIC-property analogue of {@see scanPropElemFromStores}. A static's
+     * element stores (`B::$xs[] = "a"`) mostly live OUTSIDE the declaring class
+     * — top-level or a free function — so the lowering-time AST scan
+     * ({@see LowerTypes::inferPropElemFromStores}, which only walks `$this->p`
+     * inside `$decl->methods`, and skips statics outright) can never see them.
+     * Refine here instead, keyed by the cell symbol every `StaticProp_` carries.
+     *
+     * Without this a `public static array $xs = []` filled from outside keeps an
+     * erased element and the read guesses a repr: `implode` printed string
+     * elements as `2.1e-314`, `var_dump` as the raw pointer int.
+     */
+    private function scanStaticPropElemFromStores(Module $module): bool
+    {
+        /** @var array<string, Type> */
+        $observed = [];   // global cell symbol → element Type (cell when mixed)
+        $unusable = [];   // global cell symbol → true
+        foreach ($module->functions as $fn) {
+            $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
+        }
+        $changed = false;
+        foreach ($observed as $g => $elem) {
+            if (isset($unusable[$g])) { continue; }
+            $ek = $elem->kind;
+            $ok = $ek === Type::KIND_STRING || $ek === Type::KIND_INT
+                || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
+                || $ek === Type::KIND_CELL
+                || ($ek === Type::KIND_OBJ && $elem->class !== null);
+            if (!$ok) { continue; }
+            foreach ($module->functions as $fn) {
+                if ($this->retypeStaticPropNodes($fn->body, $g, $elem)) { $changed = true; }
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * Retype every `StaticProp_` reading cell `$g` to vec/assoc of `$elem` —
+     * but only where the slot is still ERASED. A default that already fixed a
+     * concrete shape (`public static array $xs = [1,2]` → vec[int]) is left
+     * alone, exactly as the instance-property scan only fills an erased slot.
+     */
+    private function retypeStaticPropNodes(Node $n, string $g, Type $elem): bool
+    {
+        $changed = false;
+        if ($n->kind === Node::KIND_STATIC_PROP && $n->global === $g) {
+            $cur = $n->type;
+            if ($this->isErasedArrayType($cur)) {
+                $keyT = $cur->isArray() ? $cur->key : null;
+                $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
+                $changed = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->retypeStaticPropNodes($c, $g, $elem)) { $changed = true; }
+        }
+        return $changed;
+    }
+
+    /**
      * @param array<string, Type|null> $found
      */
     private function scanAssocPropsNode(Node $n): void
@@ -617,16 +676,51 @@ trait InferScans
     private function scanGlobalTypes(Module $module): bool
     {
         if (\count($module->globalVarNames) === 0) { return false; }
+        foreach ($module->globalVarNames as $gname) { $this->mainGlobalNames[$gname] = true; }
         /** @var array<string, Type> */
         $observed = [];                  // var name → joined Type
+        /** @var array<string, Type> */
+        $elems = [];                     // var name → stored element Type
+        $elemBad = [];                   // var name → element unusable
+        $strKey = [];                    // var name → seen a string-keyed store
         foreach ($module->functions as $fn) {
             $active = [];                // names that are global-backed HERE
             $this->collectGlobalBacked($fn->body, $active);
+            // `__main` binds every `global $x` name to the same `@g_x` cell
+            // without a StaticLocalDecl_ ({@see EmitLlvmModule::emitFunction}),
+            // so the decl walk finds nothing there and the top-level `$g = []`
+            // that establishes the global's shape was invisible to this scan.
+            if ($fn->name === '__main') {
+                foreach ($module->globalVarNames as $gname) { $active[$gname] = true; }
+            }
             if (\count($active) === 0) { continue; }
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed);
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
         }
         $changed = false;
-        foreach ($observed as $name => $t) {
+        // A global reached ONLY by appends (`$g = []` types the empty literal
+        // unknown, so the join above records nothing) still has its element
+        // evidence in $elems — walk both maps, not just $observed.
+        $names = [];
+        foreach ($observed as $name => $t) { $names[$name] = true; }
+        foreach ($elems as $name => $t) { $names[$name] = true; }
+        foreach ($names as $name => $_) {
+            $t = $observed[$name] ?? null;
+            // An array global whose element is still erased takes the element
+            // joined from its appends — the `$g[] = v` shape carries the only
+            // evidence of what the global holds. An append also PROVES the
+            // global is an array, so a still-shapeless global qualifies too.
+            $erasedArray = $t === null || $this->isErasedArrayType($t);
+            if ($erasedArray && isset($elems[$name]) && !isset($elemBad[$name])) {
+                $keyT = isset($strKey[$name])
+                    ? Type::string_()
+                    : (($t !== null && $t->isArray()) ? $t->key : null);
+                $this->globalVarTypes[$name] = $keyT !== null
+                    ? Type::assoc($keyT, $elems[$name])
+                    : Type::vec($elems[$name]);
+                $changed = true;
+                continue;
+            }
+            if ($t === null) { continue; }
             $k = $t->kind;
             if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_INT) { continue; }
             $prev = $this->globalVarTypes[$name] ?? null;

@@ -481,7 +481,11 @@ trait EmitLlvmLocals
         // the root of the enum_backed heisenbug. A property read can't be
         // proven unmutated here, so copy unconditionally (matches PHP, which
         // copies on every array assignment).
-        if ($v->kind === Node::KIND_PROPERTY_ACCESS
+        //
+        // A STATIC property (`$copy = B::$xs`) is the same snapshot through a
+        // different node — without it the local ALIASED the static's buffer and
+        // `$copy[] = v` mutated `B::$xs` too (`1 2` in php, `2 2` here).
+        if (($v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP)
             && $v->type->isVec()) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;

@@ -1,0 +1,21 @@
+array(2) {
+  [0]=>
+  int(7)
+  [1]=>
+  int(8)
+}
+3
+2
+a,b
+string(1) "a"
+array(4) {
+  [0]=>
+  string(1) "s"
+  [1]=>
+  int(1)
+  [2]=>
+  float(2.5)
+  [3]=>
+  bool(true)
+}
+1 2
