@@ -133,7 +133,9 @@ trait EmitLlvmBuiltins
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
-        if ($name === 'array_keys')                   { return $this->biArrayKeys($args); }
+        if ($name === 'array_keys') {
+            return \count($args) >= 2 ? $this->biArrayKeysSearch($args) : $this->biArrayKeys($args);
+        }
         if ($name === 'debug_backtrace')              { return $this->biDebugBacktrace(); }
         if ($name === 'array_first' && \count($args) === 1)     { return $this->biArrayEndpoint($args, false, false); }
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
@@ -1111,6 +1113,47 @@ trait EmitLlvmBuiltins
      * param, so the call site never strips the NaN tag → inttoptr fault).
      * Result type is `vec[cell]` ({@see InferTypes::builtinReturnType}).
      */
+    /**
+     * `array_keys($arr, $search_value, $strict)` — the keys whose value matches.
+     * The all-keys form stays the inline builtin below; this form defers to the
+     * stdlib `__mc_array_keys_search`, which does the element compare in PHP
+     * (and so rides the same juggling table as `==` / `===`). `$strict` is always
+     * passed explicitly, so no default padding is needed here.
+     * @param Node[] $args
+     */
+    private function biArrayKeysSearch(array $args): string
+    {
+        // Declare the extern ONLY when this module does not itself define it (a
+        // self-contained build embeds the define; a second declare is a
+        // redefinition error). Same discipline as the decbin bridge.
+        if (!isset($this->definedFns[$this->mangle('__mc_array_keys_search')])) {
+            $this->libcExtra['manticore___mc_array_keys_search'] =
+                'declare i64 @manticore___mc_array_keys_search(i64, i64, i64)';
+        }
+        $out = $this->emitNode($args[0]);
+        // boxToCell rebuilds a RAW vec (vec[int]) into a cell vec — the callee
+        // walks it as cells, so a raw buffer would be misread element by element.
+        $out .= $this->boxToCell($args[0]->type);
+        $arr = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->boxToCell($args[1]->type);
+        $needle = $this->lastValue;
+        $strict = '0';
+        if (isset($args[2])) {
+            $out .= $this->emitNode($args[2]);
+            $out .= $this->coerceToI64();
+            $strict = $this->lastValue;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_array_keys_search(i64 ' . $arr
+              . ', i64 ' . $needle . ', i64 ' . $strict . ")\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function biArrayKeys(array $args): string
     {
         $this->rt->needsTagged = true;
@@ -1773,6 +1816,100 @@ trait EmitLlvmBuiltins
         // operand, compare as doubles, select the winning boxed cell — the
         // result is a numericCell ({@see builtinReturnType}). All-int / all-cell
         // args keep the unchanged integer-compare path.
+        // Non-numeric operands: PHP orders strings and arrays too, and min/max
+        // must hand back a value of that TYPE. The int path below unboxed an
+        // array POINTER as an int, so `max([1,2],[1,3])` printed a raw address.
+        // Arrays go through the chain-carrying array compare, NOT tagged_compare
+        // — the latter's array arm assumes cell elements, and a `vec[int]` holds
+        // raw ones. {@see InferCalls} min/max return type mirrors these rules.
+        $allStr = true;
+        $allArr = true;
+        foreach ($args as $a) {
+            if ($a->type->kind !== Type::KIND_STRING) { $allStr = false; }
+            if ($a->type->kind !== Type::KIND_ARRAY)  { $allArr = false; }
+        }
+        $count = \count($args);
+        // ONE array argument is the "max of its ELEMENTS" form (`max([1,2,3])`
+        // is 3, not the array). The numeric paths below unboxed the array
+        // POINTER as an int and printed a raw address; defer to the stdlib fold,
+        // which compares the elements with `<` / `>` and so rides the same table.
+        if ($count === 1 && $args[0]->type->kind === Type::KIND_ARRAY) {
+            if (!isset($this->definedFns[$this->mangle('__mc_minmax_of')])) {
+                $this->libcExtra['manticore___mc_minmax_of'] =
+                    'declare i64 @manticore___mc_minmax_of(i64, i64)';
+            }
+            $out = $this->emitNode($args[0]);
+            $out .= $this->boxToCell($args[0]->type);
+            $arr = $this->lastValue;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax_of(i64 ' . $arr
+                  . ', i64 ' . ($pred === 'sgt' ? '1' : '0') . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Two or more operands compare against each other.
+        if ($allArr && $count >= 2) {
+            $chains = [];
+            $chainsOk = true;
+            foreach ($args as $a) {
+                $ch = $this->elemChainOf($a->type->element);
+                if ($ch === self::EK_NONE) { $chainsOk = false; break; }
+                $chains[] = $ch;
+            }
+            if ($chainsOk) {
+                $this->rt->needsTaggedCompare = true;
+                $fpred = $pred === 'sgt' ? 'sgt' : 'slt';
+                $out = $this->emitNode($args[0]);
+                $out .= $this->coerceToPtr();
+                $acc = $this->lastValue;
+                $accChain = $chains[0];
+                for ($i = 1; $i < $count; $i = $i + 1) {
+                    $out .= $this->emitNode($args[$i]);
+                    $out .= $this->coerceToPtr();
+                    $v = $this->lastValue;
+                    $c = $this->ssa->allocReg();
+                    $out .= '  ' . $c . ' = call i64 @__mir_array_compare(ptr ' . $v . ', i64 ' . $chains[$i]
+                          . ', ptr ' . $acc . ', i64 ' . $accChain . ")\n";
+                    $cmp = $this->ssa->allocReg();
+                    $out .= '  ' . $cmp . ' = icmp ' . $fpred . ' i64 ' . $c . ", 0\n";
+                    $sel = $this->ssa->allocReg();
+                    $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', ptr ' . $v . ', ptr ' . $acc . "\n";
+                    $acc = $sel;
+                }
+                $this->lastValue = $acc;
+                $this->lastValueType = 'ptr';
+                return $out;
+            }
+        }
+        if ($allStr && $count >= 2) {
+            $this->rt->needsTaggedCompare = true;
+            $fpred = $pred === 'sgt' ? 'sgt' : 'slt';
+            $out = $this->emitNode($args[0]);
+            $out .= $this->shallowBoxToCell($args[0]->type);
+            $acc = $this->lastValue;
+            for ($i = 1; $i < $count; $i = $i + 1) {
+                $out .= $this->emitNode($args[$i]);
+                $out .= $this->shallowBoxToCell($args[$i]->type);
+                $v = $this->lastValue;
+                $c = $this->ssa->allocReg();
+                $out .= '  ' . $c . ' = call i64 @__manticore_tagged_compare(i64 ' . $v . ', i64 ' . $acc . ")\n";
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = icmp ' . $fpred . ' i64 ' . $c . ", 0\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', i64 ' . $v . ', i64 ' . $acc . "\n";
+                $acc = $sel;
+            }
+            // Unmask the winning cell back to the string pointer it boxes, so
+            // the result stays a `string` rather than leaking a cell.
+            $mp = $this->ssa->allocReg();
+            $out .= '  ' . $mp . ' = and i64 ' . $acc . ", 281474976710655\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $mp . " to ptr\n";
+            $this->lastValue = $pp;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $anyFloat = false;
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) { $anyFloat = true; break; }

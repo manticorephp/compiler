@@ -572,11 +572,14 @@ trait EmitLlvmExpr
         foreach ($this->classes as $cd) {
             $p = $cd->parent;
             $depth = 0;
+            // `isset`, NOT `$pd = … ?? null` + `$pd === null`: a `ClassDef|null`
+            // local types as NON-null and the native self-build leaves its slot
+            // un-zeroed, so the null test reads garbage and `->parent` walks it.
+            // (The compiler SIGSEGV'd on the first class with a parent.)
             while ($p !== '' && $depth < 32) {
                 if ($p === $cls) { return true; }
-                $pd = $this->classes[$p] ?? null;
-                if ($pd === null) { break; }
-                $p = $pd->parent;
+                if (!isset($this->classes[$p])) { break; }
+                $p = $this->classes[$p]->parent;
                 $depth = $depth + 1;
             }
         }

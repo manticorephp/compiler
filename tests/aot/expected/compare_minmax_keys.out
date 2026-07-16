@@ -1,0 +1,72 @@
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(3)
+}
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+}
+string(1) "b"
+string(1) "a"
+string(6) "cherry"
+string(5) "apple"
+int(3)
+int(1)
+string(1) "c"
+string(1) "a"
+float(2.5)
+float(1.5)
+int(2)
+int(1)
+float(2.5)
+float(1.5)
+int(3)
+int(1)
+array(2) {
+  [0]=>
+  int(0)
+  [1]=>
+  int(1)
+}
+array(1) {
+  [0]=>
+  int(0)
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "c"
+}
+array(0) {
+}
+array(2) {
+  [0]=>
+  string(1) "x"
+  [1]=>
+  string(1) "y"
+}
+array(1) {
+  [0]=>
+  int(1)
+}
+array(3) {
+  [0]=>
+  int(0)
+  [1]=>
+  int(1)
+  [2]=>
+  int(2)
+}
