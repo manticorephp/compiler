@@ -361,8 +361,47 @@ with any comparator (int-arith, `<=>`, strcmp) — the `bug1`/`bug3` reproducers
 that lived under `docs/bugs/selfhost/` now pass and were removed. The remaining
 array-consumer sites (append/arith on an erased array read) are the next targets.
 
+## 14. Re-audit + property-element erasure fixed at the SOURCE (2026-07-16)
+
+Re-audited the §4 map against the post-split code (every file:line above is stale —
+`EmitLlvm` is now 14 collaborator traits). State: the §2 hinge is **intact**
+(`boxToCell(unknown)` → int at `EmitLlvmBuiltins.php:315`; `boxRawValue(unknown)` →
+cell at `:953`). A-sites: **A1, A3 fixed**; A2, A4–A11 alive. B-sites: **0/7** — every
+gate is still literally `=== KIND_CELL`. Meaning #3 has NARROWED on its own: user and
+closure untyped params now lower to `cell` (`LowerTypes.php:100-106`,
+`LowerFns.php:314-319`); raw-unknown survives only at the stdlib extern-sig boundary
+(`LowerFns.php:193-205`).
+
+**Structural finding that changes the plan:** essentially NO code says
+`kind === KIND_UNKNOWN ⇒ raw`. Every surviving violation is raw **by fall-through** —
+the guess hides inside `=== KIND_CELL` gates (`tmask` `EmitLlvm.php:284`,
+`cellPropBoxed` `EmitLlvmExpr.php:885`, `$boxVal` `EmitLlvmArrays.php:561`,
+`coerceArithOperand` `EmitLlvmExpr.php:975`) and in `boxToCell`'s unmatched-kind tail.
+So §7 stage 2 is ~5 predicates to widen — but **grepping `KIND_UNKNOWN` will not find
+the violations.**
+
+**Landed here (source-side, not codegen):** `scanPropElemFromStores` only ever saw
+`$this->prop[] = v` — it skipped every non-method function outright and its collector
+matched a `this` receiver only. So a property filled from OUTSIDE its class
+(`$b->xs[] = "a"`) kept an ERASED element and the read guessed a repr. Added
+`propElemStoreOwner()`: resolve the owner from a TYPED receiver (`$o->p[]` where `$o`
+is `obj<D>` → D) as well as `$this`, and scan free functions / top-level main too.
+
+Two live bugs, neither covered by difftest, fell to that one change:
+- `public array $xs = []; $b->xs[] = "a";` → `implode` printed `2.1e-314` garbage
+  (string pointers bitcast to double) — the §4 A5 guess. Now `a,b,c`.
+- `$r = $c->rows; $r[] = 9;` MUTATED the property (`1 2` → php, `2 2` → us): an erased
+  array aliases instead of value-copying. A concrete element type restores COW.
+
+The lesson matches §3's corollary: **the cheapest place to kill a guess is to stop the
+ERASURE, not to teach the consumer to guess better.** Prefer widening an inference scan
+over flipping a codegen A-site — it needs no producer/consumer co-flip, so the self-host
+fixpoint re-converges for free (this landed byte-identical).
+
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
   memory `unknown-receiver-propread-offset16-2026-07-08`.
 - array value-semantics symptoms (clone/COW/bare-append): memory
   `array-value-semantics-cluster-2026-07-08`.
+- why the cell path blocks int-overflow→float, and the VRA parked on top of it:
+  memory `vra-and-cell-soundness-2026-07-16`.
