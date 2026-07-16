@@ -826,6 +826,11 @@ trait EmitLlvmObjects
 
     private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
+        // A UNION receiver has no single layout: dispatch the store on the runtime
+        // class_id to each atom's slot offset (mirrors emitUnionPropertyAccess).
+        if ($n->object->type->kind === Type::KIND_UNION) {
+            return $this->emitUnionStoreProperty($n);
+        }
         // A write to a `readonly` property from OUTSIDE its declaring class scope
         // is a fatal Error (PHP throws a catchable `Error`). Types are resolved
         // by now, so if the receiver's class chain declares this property
@@ -1330,7 +1335,16 @@ trait EmitLlvmObjects
         // truncation, set hooks), falling back to the bag for an undeclared name.
         $cls = $n->object->type->class ?? '';
         if ($cls !== '' && isset($this->classes[$cls])) {
-            return $this->emitStoreDynPropTyped($n, $this->classes[$cls]);
+            $cd = $this->classes[$cls];
+            return $this->emitStoreDynPropDispatch($n, $this->declaredPropTypes($cd), $cd);
+        }
+        // A UNION receiver: match the name against the atoms' declared properties;
+        // each arm's StoreProperty_ dispatches the store on the runtime class_id
+        // (emitUnionStoreProperty). WITHOUT this the classless bag path below reads
+        // a scalar prop slot as a bag pointer → a wild write (segfault).
+        if ($n->object->type->kind === Type::KIND_UNION) {
+            $props = $this->unionPropTypes($n->object->type);
+            if ($props !== []) { return $this->emitStoreDynPropDispatch($n, $props, null); }
         }
         $out = $this->emitNode($n->object);
         if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
@@ -1356,12 +1370,14 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** `$o->$name = v` on a known class: strcmp the runtime name against each
-     *  declared property and reuse the full property-store path (readonly guard,
-     *  rc retain, float truncation, set hooks) for the match; otherwise fall back
-     *  to the dynamic bag. Only one arm runs, so re-emitting object/value per arm
-     *  evaluates each exactly once at runtime. */
-    private function emitStoreDynPropTyped(StoreDynProp_ $n, ClassDef $cd): string
+    /** `$o->$name = v` on a receiver with a known member set (a class or a union):
+     *  strcmp the runtime name against each declared property and reuse the full
+     *  property-store path (readonly guard, rc retain, float truncation, set
+     *  hooks, union class_id dispatch) for the match; otherwise fall back to the
+     *  dynamic bag ($bagCd) or drop. Only one arm runs, so re-emitting object/value
+     *  per arm evaluates each exactly once at runtime.
+     *  @param array<string, Type> $propTypes */
+    private function emitStoreDynPropDispatch(StoreDynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
     {
         $this->rt->needsStrcmp = true;
         $out = $this->emitNode($n->name);
@@ -1371,9 +1387,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynsp.end');
-        foreach ($cd->propertyNames as $p) {
-            if ($cd->propertyOffset($p) < 0) { continue; }
-            $pt = $cd->propertyTypes[$p] ?? Type::cell();
+        foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynsp.hit');
             $nextL = $this->ssa->allocLabel('dynsp.next');
             $cmp = $this->ssa->allocReg();
@@ -1388,11 +1402,11 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
-        if ($cd->usesBag()) {
+        if ($bagCd !== null && $bagCd->usesBag()) {
             $out .= $this->emitNode($n->object);
             $out .= $this->coerceToPtr();
             $objPtr = $this->lastValue;
-            $out .= $this->emitBagPtr($n->object, $objPtr, $cd->bagOffset());
+            $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $bagP = $this->bagPtrReg;
             $bg = $this->bagSlotReg;
             $out .= $this->emitNode($n->value);
@@ -2580,6 +2594,78 @@ trait EmitLlvmObjects
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** `$union->prop = v` — the store analogue of {@see emitUnionPropertyAccess}.
+     *  Writes the value to the correct slot: one offset when every atom agrees,
+     *  else a runtime class_id switch to each atom's offset. The value is co-owned
+     *  (rc retain) once, before the store, since the object now holds a reference. */
+    private function emitUnionStoreProperty(\Compile\Mir\StoreProperty $n): string
+    {
+        $atoms = $n->object->type->atoms;
+        $offByClass = [];
+        $firstOff = -1;
+        $agree = true;
+        foreach ($atoms as $atom) {
+            $ac = $atom->class ?? '';
+            $cd = $this->classes[$ac] ?? null;
+            $o = $cd !== null ? $cd->propertyOffset($n->property) : -1;
+            if ($o < 0) { $o = 16; }
+            $offByClass[$ac] = $o;
+            if ($firstOff === -1) { $firstOff = $o; }
+            elseif ($firstOff !== $o) { $agree = false; }
+        }
+        $out = $this->emitNode($n->object);
+        $out .= $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+        $out .= $this->emitNode($n->value);
+        $out .= $this->coerceToI64();
+        $val = $this->lastValue;
+        $out .= $this->rcRetainByType($n->value, $val, $n->type, 4);
+        if ($agree) {
+            $gep = $this->ssa->allocReg();
+            $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                  . ', i64 ' . (string)$firstOff . "\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $gep . "\n";
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $endL = $this->ssa->allocLabel('us.end');
+        $defL = $this->ssa->allocLabel('us.def');
+        $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
+        $bodies = '';
+        $seen = [];
+        foreach ($atoms as $atom) {
+            $ac = $atom->class ?? '';
+            foreach ($this->selfAndDescendants($ac) as $c) {
+                $cd = $this->classes[$c] ?? null;
+                if ($cd === null || isset($seen[$c])) { continue; }
+                $seen[$c] = true;
+                $caseL = $this->ssa->allocLabel('us.case');
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
+                $g = $this->ssa->allocReg();
+                $bodies .= $caseL . ":\n";
+                $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                         . ', i64 ' . (string)$offByClass[$ac] . "\n";
+                $bodies .= '  store i64 ' . $val . ', ptr ' . $g . "\n";
+                $bodies .= '  br label %' . $endL . "\n";
+            }
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $gd = $this->ssa->allocReg();
+        $out .= $defL . ":\n";
+        $out .= '  ' . $gd . ' = getelementptr inbounds i8, ptr ' . $objPtr
+              . ', i64 ' . (string)$firstOff . "\n";
+        $out .= '  store i64 ' . $val . ', ptr ' . $gd . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->lastValue = $val;
         $this->lastValueType = 'i64';
         return $out;
     }
