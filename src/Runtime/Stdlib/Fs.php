@@ -246,11 +246,19 @@ function ftruncate(\Ffi\Ptr $stream, int $size): bool
 /**
  * Advisory lock. $operation is LOCK_SH (1) / LOCK_EX (2) / LOCK_UN (3),
  * optionally | LOCK_NB (4).
+ *
+ * PHP's LOCK_* constants are PHP's own values and do NOT all match flock(2):
+ * LOCK_UN is 3 in PHP but 8 to the OS, where 3 means LOCK_SH|LOCK_EX and is
+ * rejected with EINVAL. LOCK_SH/LOCK_EX/LOCK_NB coincide numerically on both
+ * Darwin and Linux. Zend performs the same translation.
  * @param resource $stream
  */
 function flock(\Ffi\Ptr $stream, int $operation): bool
 {
-    return \Runtime\Libc\sys_flock(\__mc_fileno($stream), $operation) === 0;
+    $op = $operation & 3;
+    if ($op === 3) { $op = 8; }
+    if (($operation & 4) !== 0) { $op = $op | 4; }
+    return \Runtime\Libc\sys_flock(\__mc_fileno($stream), $op) === 0;
 }
 
 /**
@@ -344,6 +352,35 @@ function readfile(string $filename): int|false
     return \strlen($data);
 }
 
+// fprintf/vfprintf/vsprintf/vprintf are NOT implemented, and cannot be until a
+// RUNTIME format engine exists. sprintf is a codegen builtin that requires a
+// LITERAL format (EmitLlvmBuiltins::biSprintf bails unless arg 0 is a
+// STRING_CONST) and translates it to a C format at COMPILE time, then calls
+// snprintf. An fprintf() written here would have a runtime $format and a
+// runtime $values array — neither survives that design. Writing a PHP-side
+// formatter instead would fork sprintf's semantics into a second
+// implementation, so this waits for a shared runtime formatter.
+
+/**
+ * Copy everything left on $stream to stdout and return the byte count.
+ * Chunked rather than slurped: a passthru of a large file should not need the
+ * whole file resident.
+ * @param resource $stream
+ */
+function fpassthru(\Ffi\Ptr $stream): int
+{
+    $total = 0;
+    while (true) {
+        $chunk = \fread($stream, 8192);
+        if ($chunk === '') {
+            break;
+        }
+        echo $chunk;
+        $total = $total + \strlen($chunk);
+    }
+    return $total;
+}
+
 /**
  * One byte from a stream, or false at EOF.
  * @param resource $stream
@@ -377,4 +414,269 @@ function sys_get_temp_dir(): string
 /** No-op: nothing here caches stat results, so there is nothing to clear. */
 function clearstatcache(bool $clear_realpath_cache = false, string $filename = ''): void
 {
+}
+
+/**
+ * Match $filename against a shell wildcard $pattern.
+ *
+ * $flags go straight to fnmatch(3). php's FNM_* constants ARE the host's header
+ * values — unlike LOCK_*, which php numbers itself — so passing them through
+ * unchanged is the correct behaviour, not an oversight. See the FNM_ block in
+ * LowerPrelude for why the values are resolved at compile time.
+ */
+function fnmatch(string $pattern, string $filename, int $flags = 0): bool
+{
+    return \Runtime\Libc\sys_fnmatch($pattern, $filename, $flags) === 0;
+}
+
+/** Change the current working directory. Returns true on success. */
+function chdir(string $directory): bool
+{
+    return \Runtime\Libc\sys_chdir($directory) === 0;
+}
+
+// glob() is implemented HERE rather than over libc glob(3), for the same reason
+// php stopped using the system one in 8.3: it is not one function, it is a
+// different function per libc. glob_t moves (gl_pathv at 32 on Darwin, 8 on
+// glibc), the flags are renumbered wholesale, the return codes flip sign
+// (Darwin -1/-2/-3, glibc 1/2/3), GLOB_ONLYDIR does not exist on Darwin and is
+// only a hint on glibc — and, decisively, **musl has no GLOB_BRACE at all**, so
+// on Alpine (i.e. most containers) brace expansion would silently do nothing.
+// Four workarounds and still wrong on a mainstream target: the layer is not
+// worth having. fnmatch(3) IS used — it is uniform across all three libcs.
+
+/** Whether a path component contains a glob metacharacter. */
+function __mc_glob_has_magic(string $s): bool
+{
+    $n = \strlen($s);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = $s[$i];
+        if ($c === '*' || $c === '?' || $c === '[') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Expand `{a,b}` alternations, outermost group first, recursively.
+ *
+ * Brace expansion is NOT a match operation — it is textual, happens before any
+ * path is touched, and nests. Commas inside a NESTED brace belong to that inner
+ * group, so the scan tracks depth rather than splitting on every comma.
+ * @return string[]
+ */
+function __mc_glob_expand_braces(string $p): array
+{
+    $n = \strlen($p);
+    $open = -1;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        if ($p[$i] === '{') { $open = $i; break; }
+    }
+    if ($open < 0) {
+        return [$p];
+    }
+    $depth = 0;
+    $close = -1;
+    $parts = [];
+    $cur = '';
+    for ($i = $open; $i < $n; $i = $i + 1) {
+        $c = $p[$i];
+        if ($c === '{') {
+            $depth = $depth + 1;
+            if ($depth === 1) { continue; }
+        } elseif ($c === '}') {
+            $depth = $depth - 1;
+            if ($depth === 0) { $close = $i; break; }
+        } elseif ($c === ',' && $depth === 1) {
+            $parts[] = $cur;
+            $cur = '';
+            continue;
+        }
+        $cur = $cur . $c;
+    }
+    if ($close < 0) {
+        // Unbalanced '{' is a literal, as in the shell.
+        return [$p];
+    }
+    $parts[] = $cur;
+    $pre = \substr($p, 0, $open);
+    $post = \substr($p, $close + 1);
+    $out = [];
+    foreach ($parts as $alt) {
+        foreach (\__mc_glob_expand_braces($pre . $alt . $post) as $e) {
+            $out[] = $e;
+        }
+    }
+    return $out;
+}
+
+/**
+ * fnmatch flags for one glob path component.
+ *
+ * FNM_PERIOD (4) makes a leading dot un-matchable by a wildcard, which is what
+ * makes `glob("*")` skip dotfiles. FNM_NOESCAPE differs by host — 1 on Darwin,
+ * 2 on glibc — and cannot be named here (the stdlib may not reference an FNM_*
+ * constant, or the Zend-seed bootstrap dies), so it is resolved at runtime.
+ */
+function __mc_glob_fnm_flags(int $globFlags): int
+{
+    $f = 4;
+    if (($globFlags & 0x1000) !== 0) {
+        $f = $f | (\__mc_host_is_darwin() ? 1 : 2);
+    }
+    return $f;
+}
+
+/**
+ * Match one component against the entries of $dir, sorted byte-wise.
+ * @return string[]
+ */
+function __mc_glob_children(string $dir, string $pat, int $fnmFlags): array
+{
+    $entries = \scandir($dir === '' ? '.' : $dir, 2);
+    if ($entries === false) {
+        return [];
+    }
+    $out = [];
+    foreach ($entries as $e) {
+        if ($e === '.' || $e === '..') {
+            continue;
+        }
+        // (string) is load-bearing, not decoration: scandir returns
+        // `string[]|false`, so $entries is a CELL and $e comes out NaN-boxed.
+        // Appending it raw would fill an array this function declares `string[]`
+        // with boxed cells — the caller then releases them as string pointers
+        // and faults on the tag. The cast makes the element a real string.
+        $name = (string)$e;
+        if (\fnmatch($pat, $name, $fnmFlags)) {
+            $out[] = $name;
+        }
+    }
+    \usort($out, function (string $a, string $b): int {
+        return \__mc_strcmp_bytes($a, $b);
+    });
+    return $out;
+}
+
+/**
+ * Paths matching a shell pattern.
+ *
+ * Walks the pattern one '/'-separated component at a time: a component with no
+ * metacharacter is joined literally (no directory read), one with a
+ * metacharacter fans out over scandir + fnmatch. Every component but the last
+ * must be a directory to be descended.
+ * @return string[]
+ */
+function glob(string $pattern, int $flags = 0)
+{
+    $onlyDir = ($flags & 0x40000000) !== 0;
+    $mark = ($flags & 0x0008) !== 0;
+    $fnm = \__mc_glob_fnm_flags($flags);
+
+    $pats = ($flags & 0x0080) !== 0
+        ? \__mc_glob_expand_braces($pattern)
+        : [$pattern];
+
+    $out = [];
+    foreach ($pats as $pat) {
+        if ($pat === '') {
+            continue;
+        }
+        $abs = $pat[0] === '/';
+        $segs = \explode('/', $abs ? \substr($pat, 1) : $pat);
+        // Seed: the root for an absolute pattern, cwd-relative otherwise.
+        $cur = [$abs ? '' : ''];
+        $first = true;
+        foreach ($segs as $seg) {
+            if ($seg === '') {
+                continue;
+            }
+            $next = [];
+            foreach ($cur as $base) {
+                $prefix = $first
+                    ? ($abs ? '/' : '')
+                    : $base . '/';
+                if (!\__mc_glob_has_magic($seg)) {
+                    $p = $prefix . $seg;
+                    if (\file_exists($p)) {
+                        $next[] = $p;
+                    }
+                    continue;
+                }
+                $dir = $first ? ($abs ? '/' : '.') : $base;
+                foreach (\__mc_glob_children($dir, $seg, $fnm) as $name) {
+                    $next[] = $prefix . $name;
+                }
+            }
+            $cur = $next;
+            $first = false;
+            if (\count($cur) === 0) {
+                break;
+            }
+        }
+        foreach ($cur as $p) {
+            if ($onlyDir && !\is_dir($p)) {
+                continue;
+            }
+            $out[] = ($mark && \is_dir($p)) ? $p . '/' : $p;
+        }
+    }
+
+    if (\count($out) === 0 && ($flags & 0x0010) !== 0) {
+        // GLOB_NOCHECK: the pattern itself stands in for an empty result.
+        return [$pattern];
+    }
+    if (($flags & 0x0020) === 0) {
+        \usort($out, function (string $a, string $b): int {
+            return \__mc_strcmp_bytes($a, $b);
+        });
+    }
+    return $out;
+}
+
+/**
+ * Open a unique temporary file, removed when closed. Returns a file resource,
+ * or false on failure.
+ * @return resource|false
+ */
+function tmpfile()
+{
+    $f = \Runtime\Libc\sys_tmpfile();
+    if ($f === null) {
+        return false;
+    }
+    return $f;
+}
+
+/**
+ * Create a unique file in $directory and return its path, or false on failure.
+ *
+ * php.net's contract is that the file is CREATED (mode 0600), not merely named,
+ * so this goes through mkstemp(3): composing a name and opening it afterwards
+ * would be a TOCTOU race. mkstemp writes the chosen suffix back into its
+ * template, hence the raw buffer.
+ * @return string|false
+ */
+function tempnam(string $directory, string $prefix)
+{
+    $dir = \rtrim($directory, '/');
+    if ($dir === '') {
+        $dir = '/tmp';
+    }
+    $tmpl = $dir . '/' . $prefix . 'XXXXXX';
+    $buf = \Runtime\Libc\calloc(\strlen($tmpl) + 1, 1);
+    if ($buf === null) {
+        return false;
+    }
+    \Runtime\Libc\strcpy($buf, $tmpl);
+    $fd = \Runtime\Libc\sys_mkstemp($buf);
+    if ($fd < 0) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    \Runtime\Libc\sys_close($fd);
+    $path = \cstr_to_str($buf);
+    \Runtime\Libc\free($buf);
+    return $path;
 }

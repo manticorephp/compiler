@@ -451,6 +451,9 @@ trait EmitLlvmMemory
         // rc word) — never rc-manage them.
         if ($tk === Type::KIND_OBJ) {
             $scls = $cls;
+            // A raw foreign address has no rc header — retaining one writes into
+            // the allocator's metadata. Same guard as rcRetainRawByType.
+            if ($scls === 'Ffi\\Ptr') { return ''; }
             if ($scls !== '' && isset($this->classes[$scls]) && $this->classes[$scls]->isStruct) {
                 return '';
             }

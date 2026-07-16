@@ -209,6 +209,9 @@ function sys_stat(string $path, Ptr $buf): int {}
 #[Library('c'), Symbol('lstat')]
 function sys_lstat(string $path, Ptr $buf): int {}
 
+#[Library('c'), Symbol('fstat')]
+function sys_fstat(#[CType('int')] int $fd, Ptr $buf): int {}
+
 #[Library('c'), Symbol('opendir'), Give]
 function sys_opendir(string $path): Ptr {}
 
@@ -231,6 +234,33 @@ function uname(Ptr $buf): int {}
 
 #[Library('c'), Symbol('unlink')]
 function sys_unlink(string $path): int {}
+
+#[Library('c'), Symbol('chdir')]
+function sys_chdir(string $path): int {}
+
+// glob(3)/globfree(3) are deliberately NOT bound: glob_t, the flag values and
+// even the return codes differ per libc, and musl has no GLOB_BRACE — so
+// glob() is implemented over scandir + fnmatch instead ({@see Stdlib/Fs.php}),
+// the same call php made in 8.3.
+
+// `int fnmatch(const char *pattern, const char *string, int flags)` — 0 on a
+// match, FNM_NOMATCH (1) otherwise. The flag VALUES are host-specific
+// (FNM_PATHNAME and FNM_NOESCAPE are swapped between Darwin and glibc), but php
+// exposes the host's own header values, so callers pass them straight through.
+#[Library('c'), Symbol('fnmatch')]
+function sys_fnmatch(string $pattern, string $string, #[CType('int')] int $flags): int {}
+
+// `FILE *tmpfile(void)` — an unnamed temp file, removed when closed.
+#[Library('c'), Symbol('tmpfile'), Give]
+function sys_tmpfile(): Ptr {}
+
+// `int mkstemp(char *template)` — mutates the template in place (the trailing
+// XXXXXX become the chosen suffix) and returns an open fd, or -1.
+#[Library('c'), Symbol('mkstemp')]
+function sys_mkstemp(Ptr $template): int {}
+
+#[Library('c'), Symbol('close')]
+function sys_close(#[CType('int')] int $fd): int {}
 
 #[Library('c'), Symbol('getcwd'), Give]
 function sys_getcwd(Ptr $buf, #[CType('size_t')] int $size): Ptr {}

@@ -562,6 +562,26 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             $idx = 0;
             foreach ($fn->params as $p) {
+                // A prelude BY-REF array param must not be refined here — the
+                // same premise violation as scanCallSiteRefParams (see the note
+                // there): a prelude fn is emitted linkonce_odr into EVERY module
+                // and coalesced to one copy, so this module's call sites are not
+                // all of them. Refining made `sort(array &$arr)` compile as
+                // vec[string] in one object (rc: __mir_array_alloc + release)
+                // and vec[int] in another (arena: __mir_arena_enter) — one
+                // symbol, 817 differing lines, two incompatible memory models;
+                // whichever the linker kept was wrong for the other caller.
+                // Leaving it erased is also what lets Monomorphize see the
+                // dimension and clone a `$mono$` copy per concrete caller — the
+                // specialization is still wanted, it just needs its own SYMBOL.
+                //
+                // BY-VALUE params are deliberately still refined: the same ODR
+                // hazard exists in principle, but the refinement is load-bearing
+                // for correctness today (`array_sum($g[5])` reads raw ints; an
+                // erased param would read them as cells → garbage), and fixing
+                // that properly means encoding the param types into the prelude
+                // SYMBOL, which is a separate change.
+                if ($fn->isPrelude && $p->byRef) { $idx = $idx + 1; continue; }
                 if (!$p->variadic && $this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
                 } elseif (!$p->variadic && $p->type->isArray()) {

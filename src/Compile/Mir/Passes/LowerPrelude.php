@@ -301,7 +301,18 @@ trait LowerPrelude
             'SEEK_SET' => 0, 'SEEK_CUR' => 1, 'SEEK_END' => 2,
             'FILE_USE_INCLUDE_PATH' => 1, 'FILE_APPEND' => 8,
             'FILE_IGNORE_NEW_LINES' => 2, 'FILE_SKIP_EMPTY_LINES' => 4, 'FILE_NO_DEFAULT_CONTEXT' => 16,
-            'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3,
+            // PHP's LOCK_* are PHP's own values, not the OS's — flock() translates.
+            'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3, 'LOCK_NB' => 4,
+            'SCANDIR_SORT_ASCENDING' => 0, 'SCANDIR_SORT_DESCENDING' => 1,
+            'SCANDIR_SORT_NONE' => 2,
+            // glob: php's OWN values, not the host's (php has carried its own
+            // glob since 8.3) — GLOB_NOESCAPE is 0x1000 where Darwin's header
+            // says 0x2000, and no libc has GLOB_ONLYDIR = 0x40000000. Host
+            // independent, hence a plain entry here and not a host_os() probe.
+            'GLOB_ERR' => 0x0004, 'GLOB_MARK' => 0x0008,
+            'GLOB_NOCHECK' => 0x0010, 'GLOB_NOSORT' => 0x0020,
+            'GLOB_BRACE' => 0x0080, 'GLOB_NOESCAPE' => 0x1000,
+            'GLOB_ONLYDIR' => 0x40000000, 'GLOB_AVAILABLE_FLAGS' => 0x400010bc,
             'PATHINFO_DIRNAME' => 1, 'PATHINFO_BASENAME' => 2,
             'PATHINFO_EXTENSION' => 4, 'PATHINFO_FILENAME' => 8, 'PATHINFO_ALL' => 15,
         ];
@@ -336,6 +347,32 @@ trait LowerPrelude
             $os = \substr($os, 0, 6) === 'Darwin' ? 'Darwin'
                 : (\substr($os, 0, 5) === 'Linux' ? 'Linux' : $os);
             return new StringConst($os, Type::string_());
+        }
+
+        // fnmatch(3) flags. Unlike LOCK_*, php does NOT invent its own values
+        // here — it exposes whatever the host's <fnmatch.h> says, and Darwin and
+        // glibc disagree: FNM_NOESCAPE is 1 / FNM_PATHNAME is 2 on Darwin, and
+        // the two are swapped on glibc. PERIOD/LEADING_DIR/CASEFOLD agree.
+        // So these resolve against the build host, like PHP_OS above, and the
+        // stdlib's fnmatch() passes the flags straight through to libc.
+        //
+        // Resolved HERE rather than in a plain table because host_os() cannot be
+        // called from a path the stdlib itself walks: under the Zend seed the
+        // libc bindings are empty stubs, so a compile-time host probe would kill
+        // the cold bootstrap. Like PHP_OS, this stays safe only as long as no
+        // stdlib source mentions an FNM_* name.
+        if (\substr($name, 0, 4) === 'FNM_') {
+            $isDarwin = \substr(\Manticore\host_os(), 0, 6) === 'Darwin';
+            $fnm = [
+                'FNM_NOESCAPE' => $isDarwin ? 1 : 2,
+                'FNM_PATHNAME' => $isDarwin ? 2 : 1,
+                'FNM_FILE_NAME' => $isDarwin ? 2 : 1,
+                'FNM_PERIOD' => 4,
+                'FNM_LEADING_DIR' => 8,
+                'FNM_CASEFOLD' => 16,
+                'FNM_NOMATCH' => 1,
+            ];
+            if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
         }
 
         return null;

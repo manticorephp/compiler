@@ -1357,6 +1357,14 @@ final class EmitLlvm implements EmitVisitor
         if ($k === Type::KIND_STRING) { return 'str'; }
         if ($k === Type::KIND_OBJ) {
             $cls = $t->class ?? '';
+            // `Ffi\Ptr` is a raw foreign address with NO rc header: the word at
+            // ptr-8 is the allocator's own metadata, not a refcount. Releasing
+            // one decrements that metadata in place and, at zero, hands the
+            // block to the string pool — silently corrupting the heap until a
+            // later free() trips a libmalloc assertion. Mirrors the guard in
+            // rcRetainRawByType; without it a DISCARDED `\Runtime\Libc\memset(...)`
+            // (any Ptr-returning FFI call used as a statement) corrupts the heap.
+            if ($cls === 'Ffi\\Ptr') { return ''; }
             if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
             if ($this->isClosureClass($cls)) { return ''; }
             if ($this->isEnumClass($cls)) { return ''; }
