@@ -223,6 +223,21 @@ trait InferNodes
                 $this->localTypes[$name] = Type::vec(Type::cell());
             }
         }
+        // A store of an already-CELL value into a local array makes its element a
+        // cell — one store is enough, and the pre-inference coarseValueClass scan
+        // above can't see it (the value is a variable read). scanLocalElemFromStores
+        // finds these after a first pass and seeds them here, so the re-infer types
+        // every read of the local as the cell it really holds.
+        foreach ($this->forcedCellElemLocals[$fn->name] ?? [] as $name => $unused) {
+            if (isset($this->recordLocals[$name])) { continue; }
+            $this->cellElemLocals[$name] = true;
+            if (isset($this->assocLocals[$name])) {
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+                $this->localTypes[$name] = Type::assoc($key, Type::cell());
+            } else {
+                $this->localTypes[$name] = Type::vec(Type::cell());
+            }
+        }
         // Nested-subscript mixed array: a local whose element is an inner array
         // built from an empty `[]` (→ vec[unknown]) that then receives a nested
         // SCALAR store (`$a[k][…] = "v"`) — the scalar would be written raw into

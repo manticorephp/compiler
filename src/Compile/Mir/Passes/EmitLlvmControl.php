@@ -618,13 +618,41 @@ trait EmitLlvmControl
                     $v = $this->lastValue;
                     $useStr = ($subjK === Type::KIND_STRING || $vk === Type::KIND_STRING)
                         && $subjStrish && ($vk === Type::KIND_STRING || $vk === Type::KIND_UNKNOWN);
+                    // PHP `switch` matches with `==`, so the same juggling rows
+                    // emitCmp routes apply here: two NUMERIC strings match
+                    // (`case "1e1"` on "10"), and a subject and arm of DIFFERENT
+                    // kinds juggle (`switch ("10") { case 10: }` matched nothing
+                    // — a raw icmp compared a string POINTER against 10).
+                    $jug = [
+                        Type::KIND_INT => true, Type::KIND_FLOAT => true, Type::KIND_STRING => true,
+                        Type::KIND_BOOL => true, Type::KIND_ARRAY => true, Type::KIND_OBJ => true,
+                    ];
+                    $bothStr = $subjK === Type::KIND_STRING && $vk === Type::KIND_STRING;
                     if ($useStr) {
                         $this->rt->needsStrcmp = true;
+                        $eqFn = '@__mir_str_eq';
+                        if ($bothStr) {
+                            $eqFn = '@__mir_str_loose_eq';
+                            $this->rt->needsTaggedEq = true;
+                            $this->rt->needsStrtod = true;
+                        }
                         $sp = $this->ssa->allocReg();
                         $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
                         $vp = $this->ssa->allocReg();
                         $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";
-                        $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $vp . ")\n";
+                        $out .= '  ' . $eq . ' = call i1 ' . $eqFn . '(ptr ' . $sp . ', ptr ' . $vp . ")\n";
+                    } elseif ($subjK !== $vk && isset($jug[$subjK]) && isset($jug[$vk])) {
+                        $this->rt->needsTaggedEq = true;
+                        $this->lastValue = $subj; $this->lastValueType = 'i64';
+                        $out .= $this->shallowBoxToCell($sw->subject->type);
+                        $sc = $this->lastValue;
+                        $this->lastValue = $v; $this->lastValueType = 'i64';
+                        $out .= $this->shallowBoxToCell($arm->value->type);
+                        $ac = $this->lastValue;
+                        $le = $this->ssa->allocReg();
+                        $out .= '  ' . $le . ' = call i64 @__manticore_tagged_loose_eq(i64 '
+                              . $sc . ', i64 ' . $ac . ")\n";
+                        $out .= '  ' . $eq . ' = icmp ne i64 ' . $le . ", 0\n";
                     } else {
                         $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $v . "\n";
                     }

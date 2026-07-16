@@ -140,6 +140,9 @@ final class InferTypes implements Pass
     /** @var array<string,array<string,bool>> per-array-local set of coarse store
      *  value classes, collected pre-inference to detect heterogeneity. */
     private array $assocValClasses = [];
+    /** fn name => [local name => true]: locals a post-inference store scan proved
+     *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
+    private array $forcedCellElemLocals = [];
     /** @var array<string,bool> array locals whose element is an inner array built
      *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
      *  vec[unknown] (raw). Paired with {@see $nestedScalarStoreLocals}. */
@@ -381,6 +384,17 @@ final class InferTypes implements Pass
         // each flip removes the vec base, so it converges in one iteration.
         $guard = 0;
         while ($guard < 4 && $this->hasUntypedAssocKeyStore($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
+        // Element erasure on a LOCAL: `$out = []` whose only clue is a store of an
+        // already-CELL value (`$out[$k] = $v`). The pre-inference scan can't type a
+        // variable, so the local kept vec[unknown] and its reads came back raw.
+        // Bounded — a seed only widens unknown → cell, so it converges at once.
+        $guard = 0;
+        while ($guard < 4 && $this->scanLocalElemFromStores($module)) {
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
             }

@@ -553,6 +553,7 @@ function array_intersect_key(array $arr, array ...$others): array
  */
 function array_unique(array $arr): array
 {
+    /** @var mixed[] $out */
     $out = [];
     foreach ($arr as $k => $v) {
         $dup = false;

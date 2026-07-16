@@ -217,6 +217,22 @@ trait EmitLlvmModule
         // The runtime's own libc demand, plus the per-builtin extras registered
         // in $libcExtra and the FFI externs. Keyed by symbol: declaring one
         // twice is a hard LLVM error, so everything routes through one map.
+        // The compare cluster is mutually recursive: tagged_loose_eq / tagged_
+        // compare route an ARRAY operand to __mir_array_loose_eq / __mir_array_
+        // compare, which recurse back through tagged_* for the elements, and the
+        // bool/null row of PHP's juggling table needs tagged_truthy. Emitting one
+        // half alone leaves an undefined symbol, so any demand pulls the whole
+        // cluster in — ahead of the libc decls below (which derive @strtod from
+        // needsTaggedToFloat) and every runtime gate that its members depend on.
+        if ($this->rt->needsTaggedEq || $this->rt->needsTaggedCompare) {
+            $this->rt->needsTaggedEq      = true;
+            $this->rt->needsTaggedCompare = true;
+            $this->rt->needsTagged        = true;
+            $this->rt->needsTaggedToFloat = true;
+            $this->rt->needsTaggedTruthy  = true;
+            $this->rt->needsStrcmp        = true;
+            $this->rt->needsStrtod        = true;
+        }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
         foreach ($this->libcExtra as $sym => $line) { $decls[$sym] = $line; }
         foreach ($this->rtExterns as $sym => $line) { $decls[$sym] = $line; }
@@ -379,6 +395,7 @@ trait EmitLlvmModule
         }
         if ($this->rt->needsTaggedCompare) {
             $out .= $this->taggedCompareRuntime();
+            $out .= $this->arrayCompareRuntime();
         }
         if ($this->rt->needsTaggedEq) {
             $out .= $this->taggedEqRuntime();
