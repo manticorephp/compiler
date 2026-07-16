@@ -601,6 +601,22 @@ trait EmitLlvmModule
         // a user object link against the prebuilt stdlib.o (which also carries
         // the prelude) without duplicate-symbol errors, and lets the linker
         // drop it when a program references no exceptions. No-op for a lone .o.
+        //
+        // DO NOT change this to `internal` without also making every module emit
+        // its own copy: a program linked against stdlib.o does not always emit
+        // the prelude functions it calls, and relies on coalescing to stdlib.o's
+        // copy. Marking them internal makes the symbol vanish, the stub
+        // generator fills it with `return 0`, and e.g. sort() silently becomes a
+        // no-op — measured, not theoretical.
+        //
+        // linkonce_odr keeps ONE copy, so every copy must be identical. That is
+        // an obligation on the passes, not on this linkage: see
+        // InferScans::scanCallSiteRefParams, which no longer narrows a prelude
+        // param from module-local call sites precisely because doing so gave
+        // sort() an arena body in one object and a refcount body in another,
+        // under this one symbol. Any future pass that specialises a body must
+        // either skip prelude functions or encode the specialisation in the
+        // mangled name, the way Monomorphize does with its $mono$ suffixes.
         $linkage = $fn->isPrelude ? 'linkonce_odr ' : '';
         if ($isClosure) {
             $paramSig = 'ptr %env';
