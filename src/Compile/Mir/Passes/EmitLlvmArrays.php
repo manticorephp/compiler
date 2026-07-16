@@ -537,9 +537,13 @@ trait EmitLlvmArrays
         // clone co-owns every key / value it now shares with the source, so the
         // variant must match the element type exactly the way the release
         // variant does — else the two buffers drop the same refs twice.
+        // A STATIC property is a mutable shared slot exactly like the other two
+        // (and {@see vecWriteBack} already threads the realloced buffer back
+        // into its cell), so it COWs on the same terms.
         $cowFn = $this->cowSymbolFor($se->array->type);
         if ($se->array->kind === Node::KIND_LOAD_LOCAL
-            || $se->array->kind === Node::KIND_PROPERTY_ACCESS) {
+            || $se->array->kind === Node::KIND_PROPERTY_ACCESS
+            || $se->array->kind === Node::KIND_STATIC_PROP) {
             $cow = $this->ssa->allocReg();
             $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $arrPtr . ")\n";
             $out .= $this->vecWriteBack($se->array, $cow, $baseCell);

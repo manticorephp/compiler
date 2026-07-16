@@ -979,6 +979,22 @@ trait EmitLlvmObjects
     }
 
     /**
+     * Whether `$def` renders as a LINK-TIME constant, i.e. whether
+     * {@see globalInit} can express it. Anything else (an array literal
+     * default — `public static array $xs = []` — the only non-constant a
+     * global cell can carry) falls back to `0` there and MUST instead be
+     * built at run time by {@see emitGlobalRuntimeInits}. Without that the
+     * cell stays 0 and the first `Class::$xs[] = v` appends onto a NULL
+     * array pointer (SIGSEGV), while a read renders `int(0)`, not `[]`.
+     */
+    private function globalInitIsConst(Node $def): bool
+    {
+        $k = $def->kind;
+        return $k === Node::KIND_INT_CONST || $k === Node::KIND_BOOL_CONST
+            || $k === Node::KIND_STRING_CONST || $k === Node::KIND_FLOAT_CONST;
+    }
+
+    /**
      * Constant initialiser text for a module global cell. Cells are
      * uniform i64; string defaults become a `ptrtoint` constexpr of
      * an interned `@.str.N`, floats the raw 64-bit pattern.

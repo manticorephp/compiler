@@ -209,6 +209,16 @@ final class InferTypes implements Pass
      *  from here so cross-scope reads carry the real type. */
     private array $globalVarTypes = [];
 
+    /** @var array<string,bool> every `global $x` name in the module. In `__main`
+     *  these are global-backed WITHOUT a decl node ({@see EmitLlvmModule::
+     *  emitFunction}), so a top-level store to one must not undo the unified
+     *  {@see $globalVarTypes}. Meaningless outside `__main` — a same-named local
+     *  in another scope is an ordinary local — hence the {@see $inMainBody} gate. */
+    private array $mainGlobalNames = [];
+
+    /** Whether the function being inferred is `__main`. */
+    private bool $inMainBody = false;
+
     /** @var array<string,bool> functions whose return type was UNDECLARED (unknown
      *  before inference) — their return is re-narrowed from scratch, so the global
      *  re-infer may reset it to unknown to re-adopt a now-string global return. */
@@ -320,6 +330,14 @@ final class InferTypes implements Pass
         // it the property element stays erased and a read-back bitcasts each raw
         // i64 to a garbage double.
         if ($this->scanPropElemFromStores($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
+        // The same, for a STATIC property. Its stores mostly sit outside the
+        // declaring class, so neither the lowering-time AST scan nor the
+        // instance scan above can reach them.
+        if ($this->scanStaticPropElemFromStores($module)) {
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
             }
@@ -480,6 +498,18 @@ final class InferTypes implements Pass
         foreach (Walk::children($n) as $c) { $this->collectPropArrayAssigns($c, $cls, $observed, $unusable); }
     }
 
+    /**
+     * Whether `$t` carries NO element evidence — an `unknown`, or an array whose
+     * element is absent/unknown. The shared test for "this slot still needs an
+     * element scan": a concrete element must never be overwritten by one.
+     */
+    private function isErasedArrayType(Type $t): bool
+    {
+        return $t->kind === Type::KIND_UNKNOWN
+            || ($t->isArray()
+                && ($t->element === null || $t->element->kind === Type::KIND_UNKNOWN));
+    }
+
     /** Whether `$t` is a concrete element a store can box into a cell slot. */
     private function isBoxablePropElem(Type $t): bool
     {
@@ -514,6 +544,34 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $c) { $this->collectPropElemStores($c, $cls, $observed, $unusable); }
+    }
+
+    /**
+     * Element stores into a static property (`B::$xs[] = v`), keyed by the cell
+     * symbol. The counterpart of {@see collectPropElemStores} for statics —
+     * see {@see scanStaticPropElemFromStores}.
+     *
+     * @param array<string, Type> $observed
+     * @param array<string, bool> $unusable
+     */
+    private function collectStaticPropElemStores(Node $n, array &$observed, array &$unusable): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            if ($se->array->kind === Node::KIND_STATIC_PROP) {
+                $key = $se->array->global;
+                $vt = $se->value->type;
+                if (!$this->isBoxablePropElem($vt)) {
+                    $unusable[$key] = true;
+                } elseif (!isset($observed[$key])) {
+                    $observed[$key] = $vt;
+                } elseif ($observed[$key]->kind !== Type::KIND_CELL
+                    && !$this->sameElemShape($observed[$key], $vt)) {
+                    $observed[$key] = Type::cell();
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectStaticPropElemStores($c, $observed, $unusable); }
     }
 
     /**
@@ -809,10 +867,15 @@ final class InferTypes implements Pass
         }
     }
 
-    /** Join the value type of every `StoreLocal` into an active global name.
+    /** Join the value type of every `StoreLocal` into an active global name,
+     *  and the ELEMENT type of every element store (`$g[] = v` / `$g[$k] = v`)
+     *  into `$elems`, with its key shape in `$strKey`.
      *  @param array<string,bool> $active
-     *  @param array<string,Type> $observed */
-    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed): void
+     *  @param array<string,Type> $observed
+     *  @param array<string,Type> $elems
+     *  @param array<string,bool> $elemBad
+     *  @param array<string,bool> $strKey */
+    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
             $s = $n;
@@ -825,9 +888,41 @@ final class InferTypes implements Pass
                         : $t;
                 }
             }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            // `global $g; $g[] = v` is a STORE_ELEMENT, not a StoreLocal, so the
+            // join above never saw it: an array global filled only by element
+            // stores kept an ERASED element and the read guessed a repr (implode
+            // over a string global printed `2.1e-314`). Collect the element here.
+            $se = $n;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL && isset($active[$se->array->name])) {
+                $name = $se->array->name;
+                $vt = $se->value->type;
+                // The KEY decides vec-vs-assoc. A string key makes an
+                // assoc[string,T]; typing it a vec would read each string key as
+                // an int index and render it as its pointer (`4343328072=v`).
+                // A key that is neither a plain append nor a string/int is the
+                // generic dynamic case — leave the whole global to the existing
+                // machinery rather than guess a container shape.
+                $isAppend = $se->index->kind === Node::KIND_NULL_CONST;
+                if (!$isAppend) {
+                    if ($this->isStringKey($se->index)) {
+                        $strKey[$name] = true;
+                    } elseif ($se->index->type->kind !== Type::KIND_INT) {
+                        $elemBad[$name] = true;
+                    }
+                }
+                if (!$this->isBoxablePropElem($vt)) {
+                    $elemBad[$name] = true;
+                } elseif (!isset($elems[$name])) {
+                    $elems[$name] = $vt;
+                } elseif ($elems[$name]->kind !== Type::KIND_CELL
+                    && !$this->sameElemShape($elems[$name], $vt)) {
+                    $elems[$name] = Type::cell();
+                }
+            }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectGlobalStoreTypes($ch, $active, $observed);
+            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey);
         }
     }
 

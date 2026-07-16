@@ -859,9 +859,34 @@ trait EmitLlvmModule
         $header .= "  store ptr %argv, ptr @__manticore_argv\n";
         $body = $this->preallocateLocals($fn->body);
         $body .= $this->initRcObjSlots($fn->body);
+        // A global cell whose default is not a link-time constant (an array
+        // literal on a static property) is built HERE, before any top-level
+        // statement, so the first read/append sees a real array and not 0.
+        $body .= $this->emitGlobalRuntimeInits();
         $body .= $this->emitNode($fn->body);
         $body .= "  ret i32 0\n";
         return $header . $body . "}\n\n";
+    }
+
+    /**
+     * Materialise every global cell whose default {@see globalInit} could not
+     * render as a link-time constant. Only a static property can carry one
+     * (every other `addGlobalCell` caller registers `IntConst(0)`), so this is
+     * the `public static array $xs = [...]` initialiser and nothing else.
+     */
+    private function emitGlobalRuntimeInits(): string
+    {
+        $out = '';
+        $gi = 0;
+        foreach ($this->globalNames as $gname) {
+            $def = $this->globalDefaults[$gi];
+            $gi = $gi + 1;
+            if ($this->globalInitIsConst($def)) { continue; }
+            $out .= $this->emitNode($def);
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $gname . "\n";
+        }
+        return $out;
     }
 
     /**
