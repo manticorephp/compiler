@@ -1110,6 +1110,14 @@ trait EmitLlvmObjects
     /** `$o->$name` — read the boxed value from the bag by runtime key. */
     private function emitDynProp(DynProp_ $n): string
     {
+        // A statically-typed receiver: `$o->$name` reads a DECLARED property when
+        // the runtime name matches one (PHP checks declared slots before the
+        // dynamic bag). Match the name against each declared property's offset,
+        // then fall back to the bag / null.
+        $cls = $n->object->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls])) {
+            return $this->emitDynPropTyped($n, $this->classes[$cls]);
+        }
         $out = $this->emitNode($n->object);
         if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
         else { $out .= $this->coerceToPtr(); }
@@ -1127,9 +1135,68 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** `$o->$name` on a known class: strcmp the runtime name against each declared
+     *  property and reuse the full property-read path (hooks, subclass offsets,
+     *  float/obj coercion) for the match, boxing its result to a cell; otherwise
+     *  fall back to the dynamic bag or null. One arm runs, so re-emitting the
+     *  object per arm evaluates it once at runtime. */
+    private function emitDynPropTyped(DynProp_ $n, ClassDef $cd): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($n->name);
+        $out .= $this->coerceToPtr();
+        $keyP = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynp.end');
+        foreach ($cd->propertyNames as $p) {
+            if ($cd->propertyOffset($p) < 0) { continue; }
+            $pt = $cd->propertyTypes[$p] ?? Type::cell();
+            $hitL = $this->ssa->allocLabel('dynp.hit');
+            $nextL = $this->ssa->allocLabel('dynp.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($p) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $pa = new PropertyAccess_($n->object, $p, $pt);
+            $out .= $this->emitPropertyAccess($pa);
+            $out .= $this->boxToCell($pt);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        if ($cd->usesBag()) {
+            $out .= $this->emitNode($n->object);
+            $out .= $this->coerceToPtr();
+            $objPtr = $this->lastValue;
+            $out .= $this->emitBagPtr($n->object, $objPtr, $cd->bagOffset());
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $this->bagPtrReg
+                  . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+            $out .= '  store i64 ' . $reg . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** `$o->$name = v` — set the boxed value in the bag by runtime key. */
     private function emitStoreDynProp(StoreDynProp_ $n): string
     {
+        // Typed receiver: a runtime name matching a DECLARED property writes that
+        // slot (with the full store semantics — readonly guard, rc retain, float
+        // truncation, set hooks), falling back to the bag for an undeclared name.
+        $cls = $n->object->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls])) {
+            return $this->emitStoreDynPropTyped($n, $this->classes[$cls]);
+        }
         $out = $this->emitNode($n->object);
         if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
         else { $out .= $this->coerceToPtr(); }
@@ -1150,6 +1217,65 @@ trait EmitLlvmObjects
         $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
         $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
         $this->lastValue = $val;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** `$o->$name = v` on a known class: strcmp the runtime name against each
+     *  declared property and reuse the full property-store path (readonly guard,
+     *  rc retain, float truncation, set hooks) for the match; otherwise fall back
+     *  to the dynamic bag. Only one arm runs, so re-emitting object/value per arm
+     *  evaluates each exactly once at runtime. */
+    private function emitStoreDynPropTyped(StoreDynProp_ $n, ClassDef $cd): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($n->name);
+        $out .= $this->coerceToPtr();
+        $keyP = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynsp.end');
+        foreach ($cd->propertyNames as $p) {
+            if ($cd->propertyOffset($p) < 0) { continue; }
+            $pt = $cd->propertyTypes[$p] ?? Type::cell();
+            $hitL = $this->ssa->allocLabel('dynsp.hit');
+            $nextL = $this->ssa->allocLabel('dynsp.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($p) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $sp = new \Compile\Mir\StoreProperty($n->object, $p, $n->value, $pt);
+            $out .= $this->emitStoreProperty($sp);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        if ($cd->usesBag()) {
+            $out .= $this->emitNode($n->object);
+            $out .= $this->coerceToPtr();
+            $objPtr = $this->lastValue;
+            $out .= $this->emitBagPtr($n->object, $objPtr, $cd->bagOffset());
+            $bagP = $this->bagPtrReg;
+            $bg = $this->bagSlotReg;
+            $out .= $this->emitNode($n->value);
+            $out .= $this->boxToCell($n->value->type);
+            $val = $this->lastValue;
+            $nb = $this->ssa->allocReg();
+            $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
+                  . ', ptr ' . $keyP . ', i64 ' . $val . ", i64 0, i64 0)\n";
+            $nbI = $this->ssa->allocReg();
+            $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
+            $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         return $out;
     }
