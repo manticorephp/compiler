@@ -386,3 +386,68 @@ function sys_get_temp_dir(): string
 function clearstatcache(bool $clear_realpath_cache = false, string $filename = ''): void
 {
 }
+
+/**
+ * Match $filename against a shell wildcard $pattern.
+ *
+ * $flags go straight to fnmatch(3). php's FNM_* constants ARE the host's header
+ * values — unlike LOCK_*, which php numbers itself — so passing them through
+ * unchanged is the correct behaviour, not an oversight. See the FNM_ block in
+ * LowerPrelude for why the values are resolved at compile time.
+ */
+function fnmatch(string $pattern, string $filename, int $flags = 0): bool
+{
+    return \Runtime\Libc\sys_fnmatch($pattern, $filename, $flags) === 0;
+}
+
+/** Change the current working directory. Returns true on success. */
+function chdir(string $directory): bool
+{
+    return \Runtime\Libc\sys_chdir($directory) === 0;
+}
+
+/**
+ * Open a unique temporary file, removed when closed. Returns a file resource,
+ * or false on failure.
+ * @return resource|false
+ */
+function tmpfile()
+{
+    $f = \Runtime\Libc\sys_tmpfile();
+    if ($f === null) {
+        return false;
+    }
+    return $f;
+}
+
+/**
+ * Create a unique file in $directory and return its path, or false on failure.
+ *
+ * php.net's contract is that the file is CREATED (mode 0600), not merely named,
+ * so this goes through mkstemp(3): composing a name and opening it afterwards
+ * would be a TOCTOU race. mkstemp writes the chosen suffix back into its
+ * template, hence the raw buffer.
+ * @return string|false
+ */
+function tempnam(string $directory, string $prefix)
+{
+    $dir = \rtrim($directory, '/');
+    if ($dir === '') {
+        $dir = '/tmp';
+    }
+    $tmpl = $dir . '/' . $prefix . 'XXXXXX';
+    $buf = \Runtime\Libc\calloc(\strlen($tmpl) + 1, 1);
+    if ($buf === null) {
+        return false;
+    }
+    \Runtime\Libc\strcpy($buf, $tmpl);
+    $fd = \Runtime\Libc\sys_mkstemp($buf);
+    if ($fd < 0) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    \Runtime\Libc\sys_close($fd);
+    $path = \cstr_to_str($buf);
+    \Runtime\Libc\free($buf);
+    return $path;
+}

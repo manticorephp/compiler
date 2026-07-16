@@ -341,6 +341,32 @@ trait LowerPrelude
             return new StringConst($os, Type::string_());
         }
 
+        // fnmatch(3) flags. Unlike LOCK_*, php does NOT invent its own values
+        // here — it exposes whatever the host's <fnmatch.h> says, and Darwin and
+        // glibc disagree: FNM_NOESCAPE is 1 / FNM_PATHNAME is 2 on Darwin, and
+        // the two are swapped on glibc. PERIOD/LEADING_DIR/CASEFOLD agree.
+        // So these resolve against the build host, like PHP_OS above, and the
+        // stdlib's fnmatch() passes the flags straight through to libc.
+        //
+        // Resolved HERE rather than in a plain table because host_os() cannot be
+        // called from a path the stdlib itself walks: under the Zend seed the
+        // libc bindings are empty stubs, so a compile-time host probe would kill
+        // the cold bootstrap. Like PHP_OS, this stays safe only as long as no
+        // stdlib source mentions an FNM_* name.
+        if (\substr($name, 0, 4) === 'FNM_') {
+            $isDarwin = \substr(\Manticore\host_os(), 0, 6) === 'Darwin';
+            $fnm = [
+                'FNM_NOESCAPE' => $isDarwin ? 1 : 2,
+                'FNM_PATHNAME' => $isDarwin ? 2 : 1,
+                'FNM_FILE_NAME' => $isDarwin ? 2 : 1,
+                'FNM_PERIOD' => 4,
+                'FNM_LEADING_DIR' => 8,
+                'FNM_CASEFOLD' => 16,
+                'FNM_NOMATCH' => 1,
+            ];
+            if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
+        }
+
         return null;
     }
 }
