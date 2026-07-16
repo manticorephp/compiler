@@ -131,6 +131,15 @@ function array_filter(array $arr, ?callable $cb = null): array
  * copy-back lands the result in `$arr` when an odd number of passes ran. Faster
  * than the prior heapsort (sequential access, ~half the comparisons). Inlined
  * per function — only the comparison direction / callback differs.
+ *
+ * `mixed[]` is the CANONICAL element type, matching uasort/uksort. A prelude fn
+ * is emitted linkonce_odr into every module and coalesced to ONE copy, so its
+ * body may not be inferred from the call sites one module happens to see —
+ * that gave sort() a vec[string] body (rc) in one object and a vec[int] one
+ * (arena) in another, under a single symbol. Declaring the erased type here
+ * makes every module compile the SAME body; a concrete caller still gets a fast
+ * vec[T] copy from Monomorphize, under its own `$mono$` symbol.
+ * @param mixed[] $arr
  */
 function usort(array &$arr, callable $cmp): bool
 {
@@ -164,6 +173,11 @@ function usort(array &$arr, callable $cmp): bool
     return true;
 }
 
+/**
+ * Canonical `mixed[]` element — see the note on usort: a linkonce_odr prelude
+ * body must not be specialised from the call sites of one module.
+ * @param mixed[] $arr
+ */
 function sort(array &$arr): bool
 {
     $n = count($arr);
@@ -196,6 +210,10 @@ function sort(array &$arr): bool
     return true;
 }
 
+/**
+ * Canonical `mixed[]` element — see the note on usort.
+ * @param mixed[] $arr
+ */
 function rsort(array &$arr): bool
 {
     $n = count($arr);

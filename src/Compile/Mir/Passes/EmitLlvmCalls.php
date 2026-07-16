@@ -395,6 +395,31 @@ trait EmitLlvmCalls
      * their result (some return borrowed elements), so releasing them
      * could over-release. User methods / static calls always +1.
      */
+    /**
+     * Whether a by-ref arg is a CELL being handed to a param that expects a raw
+     * payload — the case that needs an unbox/re-box around the call.
+     *
+     * The by-VALUE path unboxes (see unboxCellArg), but a by-ref arg passes the
+     * slot ADDRESS, so the callee reads the caller's NaN-boxed bits as a raw
+     * pointer and faults: `$a = file($p); sort($a);` (file returns
+     * `string[]|false` ⇒ a cell) dereferenced the tag.
+     *
+     * An erased param (KIND_UNKNOWN — what a bare `array` hint lowers to, see
+     * LowerTypes) counts: erased still means a RAW array at runtime, the
+     * elements being cells. Gating on KIND_CELL alone would let exactly these
+     * fall through.
+     * @param Type[] $ptypes
+     */
+    private function byRefNeedsCellUnbox(Node $a, array $ptypes, int $ai): bool
+    {
+        if ($a->type->kind !== Type::KIND_CELL) { return false; }
+        $pt = $ptypes[$ai] ?? null;
+        if ($pt === null) { return false; }
+        $pk = $pt->kind;
+        return $pk === Type::KIND_UNKNOWN || $pk === Type::KIND_ARRAY
+            || $pk === Type::KIND_STRING;
+    }
+
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
@@ -475,6 +500,10 @@ trait EmitLlvmCalls
         // callee retains if it keeps it (the +1 convention), so the caller's
         // transient is dead once the call returns.
         $argTemps = [];
+        // Cell lvalues unboxed into a scratch slot for a raw-payload by-ref
+        // param, re-boxed into the caller's slot after the call. Parallel.
+        $reboxSlots = [];
+        $reboxTmps = [];
         // Fresh owned obj/vec/assoc temps passed to a borrow param: same
         // borrow-everything contract as the string temps (a keeping callee
         // retains; see the retain categories) — the caller's transient is
@@ -521,7 +550,30 @@ trait EmitLlvmCalls
             }
             if (!$first) { $argList .= ', '; }
             $first = false;
-            if (($mask[$ai] ?? false) && $this->isByRefAddressable($a)) {
+            if (($mask[$ai] ?? false) && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai)
+            ) {
+                // Cell lvalue → raw-payload by-ref param: hand the callee a
+                // scratch slot holding the UNTAGGED payload, then re-box what it
+                // left back into the caller's slot. Passing the cell slot
+                // directly makes the callee deref the tag bits.
+                $out .= $this->byRefAddrOf($a);
+                $slotAddr = $this->lastValue;
+                $sp = $this->ssa->allocReg();
+                $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+                $cv = $this->ssa->allocReg();
+                $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
+                $raw = $this->ssa->allocReg();
+                $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+                $tmp = $this->ssa->allocReg();
+                $out .= '  ' . $tmp . " = alloca i64\n";
+                $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
+                $taddr = $this->ssa->allocReg();
+                $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                $argList .= 'i64 ' . $taddr;
+                $reboxSlots[] = $slotAddr;
+                $reboxTmps[] = $tmp;
+            } elseif (($mask[$ai] ?? false) && $this->isByRefAddressable($a)) {
                 // By-ref param fed an addressable lvalue (plain local or
                 // `$obj->prop`): pass the address so the callee's writes land
                 // in the caller's slot / the object's field.
@@ -606,6 +658,24 @@ trait EmitLlvmCalls
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
+        // Re-box each unboxed by-ref arg. The value is READ BACK, not assumed
+        // unchanged: sort()/usort() reorder in place but may hand back a
+        // different buffer. Boxed as vec[cell] so boxToCell takes the flat
+        // box_array path — a concrete element type would make it REBUILD the
+        // array, which would silently break the by-ref aliasing the caller
+        // expects.
+        $bi = 0;
+        foreach ($reboxTmps as $rtmp) {
+            $rv = $this->ssa->allocReg();
+            $out .= '  ' . $rv . ' = load i64, ptr ' . $rtmp . "\n";
+            $this->lastValue = $rv;
+            $this->lastValueType = 'i64';
+            $out .= $this->boxToCell(Type::vec(Type::cell()));
+            $rsp = $this->ssa->allocReg();
+            $out .= '  ' . $rsp . ' = inttoptr i64 ' . $reboxSlots[$bi] . " to ptr\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $rsp . "\n";
+            $bi = $bi + 1;
+        }
         // Free fresh string-temp args now the callee has read (and retained
         // if kept) them. Skipped when the call returns one of them by ref.
         if (!($this->sigs->returnsByRef[$c->function] ?? false)) {

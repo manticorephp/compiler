@@ -189,8 +189,15 @@ final class Monomorphize implements Pass
         // win from a SINGLE concrete-closure site. A pure array-dim
         // specialization keeps the conservative >=2-call-sites threshold (a
         // single-type helper stays on the untouched all-agree path — no bloat).
+        //
+        // EXCEPT for a prelude fn: "stays on the untouched all-agree path" is
+        // only true for a symbol this module owns. A prelude body is emitted
+        // linkonce_odr into every module and coalesced to ONE copy, so a
+        // single-site specialization still mutates a SHARED symbol, and another
+        // module's differently-specialized copy can win at link time. Give every
+        // concrete site its own `$mono$` symbol instead.
         $hasCallableDim = $this->hasCallableDim($fn, $dims);
-        if (!$hasCallableDim && \count($calls) < 2) { return []; }
+        if (!$hasCallableDim && !$fn->isPrelude && \count($calls) < 2) { return []; }
 
         // Per call site: a specialization key over the dimension arg types,
         // or '' when the site is not fully concrete (stays on the original).
@@ -207,8 +214,10 @@ final class Monomorphize implements Pass
             }
         }
         // Callable dim: >=1 concrete key specializes (dynamic -> known). Pure
-        // array dim: keep >=2 distinct keys (the genuinely-erased case).
-        $minKeys = $hasCallableDim ? 1 : 2;
+        // array dim: keep >=2 distinct keys (the genuinely-erased case) — but a
+        // prelude fn specializes from ONE key, since its symbol is shared across
+        // objects and cannot carry a module-local body (see above).
+        $minKeys = ($hasCallableDim || $fn->isPrelude) ? 1 : 2;
         if (\count($keyToCall) < $minKeys) { return []; }
 
         // Per-fn specialization cap (code-size / compile-time backstop). On
