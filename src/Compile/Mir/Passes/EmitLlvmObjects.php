@@ -1187,6 +1187,78 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** `$o->$m(args)` on a known-class receiver: strcmp the runtime name against
+     *  each method the class declares/inherits and reuse the full method-call
+     *  path for the match (arg boxing, virtual dispatch, LSB), boxing the result
+     *  to a cell; an undeclared name falls back to __call, else null. One arm
+     *  runs, so re-emitting receiver/args per arm evaluates each once. */
+    private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
+    {
+        $recv = $dp->object;
+        $nameNode = $dp->name;
+        $cls = $recv->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) {
+            // Erased receiver (cell/unknown/union): no static class to enumerate.
+            // Evaluate the name for side effects and yield null (open case).
+            $out = $this->emitNode($nameNode);
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($nameNode);
+        $out .= $this->coerceToPtr();
+        $keyP = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynm.end');
+        $seen = [];
+        $c = $cls;
+        while ($c !== '' && isset($this->classes[$c])) {
+            foreach ($this->classes[$c]->methodNames as $m => $_) {
+                if (isset($seen[$m])) { continue; }
+                $seen[$m] = true;
+                if ($m === '__construct' || $m === '__call') { continue; }
+                $holder = $this->resolveMethodClass($cls, $m);
+                if ($holder === '') { continue; }
+                $retT = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
+                $hitL = $this->ssa->allocLabel('dynm.hit');
+                $nextL = $this->ssa->allocLabel('dynm.next');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($m) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $call = new \Compile\Mir\MethodCall_($recv, $m, $iv->args, $retT);
+                $out .= $this->emitMethodCall($call);
+                $out .= $this->boxToCell($retT);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+            $c = $this->classes[$c]->parent;
+        }
+        // Undeclared method: __call('name', [args]) when the class defines it.
+        if ($this->resolveMethodClass($cls, '__call') !== '') {
+            $elems = [];
+            foreach ($iv->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
+            $call = new \Compile\Mir\MethodCall_($recv, '__call', [$nameNode, $argsArr], Type::cell());
+            $out .= $this->emitMethodCall($call);
+            $out .= $this->boxToCell(Type::cell());
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** `$o->$name = v` — set the boxed value in the bag by runtime key. */
     private function emitStoreDynProp(StoreDynProp_ $n): string
     {

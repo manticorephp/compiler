@@ -23,4 +23,6 @@ final class FunctionSignatures
     public array $paramDefaults = [];
     /** @var array<string, bool> fn name → returns by reference */
     public array $returnsByRef = [];
+    /** @var array<string, Type> fn name → declared return type */
+    public array $returnType = [];
 }

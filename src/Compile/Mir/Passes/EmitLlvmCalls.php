@@ -241,6 +241,16 @@ trait EmitLlvmCalls
     private function emitInvoke(Invoke_ $n): string
     {
         $iv = $n;
+        // `$o->$m(args)` parses as Invoke(DynProp): the callee is not a value to
+        // invoke but a dynamic METHOD reference. Dispatch on the runtime method
+        // name against the receiver class's methods.
+        if ($iv->callee instanceof DynProp_) {
+            // Pass the callee as a DynProp_-typed arg: reading `->object`/`->name`
+            // off the base-Node `$iv->callee` resolves by the WRONG offset under
+            // the native self-build (Node has neither field), so a typed param is
+            // load-bearing here.
+            return $this->emitDynMethodCall($iv->callee, $iv);
+        }
         $fn = $iv->callee->type->class ?? '';
         // An invokable object: `$obj(...)` on a real class with __invoke
         // reroutes to `$obj->__invoke(...)` (closures keep the struct path).

@@ -290,6 +290,7 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->paramTypes[$fn->name] = $ptypes;
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
+            $this->sigs->returnType[$fn->name] = $fn->returnType;
             $this->definedFns[$this->mangle($fn->name)] = true;
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
         }

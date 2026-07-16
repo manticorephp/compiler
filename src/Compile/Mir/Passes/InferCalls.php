@@ -294,6 +294,14 @@ trait InferCalls
     {
         $ct = $this->inferNode($node->callee);
         foreach ($node->args as $a) { $this->inferNode($a); }
+        // `$o->$m(args)` parses as Invoke(DynProp) — a DYNAMIC METHOD call, not a
+        // property-then-invoke. Type it as a cell (the emitter dispatches on the
+        // runtime method name and boxes each arm's result), so echo / var_dump /
+        // string reads see the tagged value instead of a raw pointer.
+        if ($node->callee instanceof DynProp_) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // callee type obj<__closure_N> → that fn's return type.
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];
