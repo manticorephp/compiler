@@ -128,6 +128,9 @@ trait InferNodes
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
+        // Only `__main` binds a `global $x` name implicitly (no decl node) — a
+        // same-named local in any other scope is an ordinary local.
+        $this->inMainBody = $fn->name === '__main';
         $this->localTypes = [];
         $this->kindAliasOf = [];
         $this->currentParamTypes = [];
@@ -493,6 +496,25 @@ trait InferNodes
     private function inferStoreLocal(StoreLocal $node): Type
     {
         $valueType = $this->inferNode($node->value);
+        // `__main` binds every `global $x` name to the `@g_x` cell WITHOUT a
+        // StaticLocalDecl_, so the cross-scope seeding in inferStaticLocalDecl
+        // never runs here. Left alone, the top-level `$g = []` retypes the
+        // global by that EMPTY literal (erased) and undoes the element joined
+        // from the `$g[] = v` appends in other scopes — the read then guessed a
+        // repr (`implode` over a string global printed `2.1e-314`). The unified
+        // type wins over an erased store, and only over an erased one.
+        if ($this->inMainBody
+            && isset($this->mainGlobalNames[$node->name])
+            && isset($this->globalVarTypes[$node->name])
+            && $this->isErasedArrayType($valueType)) {
+            $gt = $this->globalVarTypes[$node->name];
+            if ($gt->isArray() && $gt->element !== null
+                && $gt->element->kind !== Type::KIND_UNKNOWN) {
+                $this->localTypes[$node->name] = $gt;
+                $node->type = $gt;
+                return $node->type;
+            }
+        }
         // Kind-alias tracking: a re-store to $name drops any stale alias; a
         // `$name = $obj->kind` binding records it so a later `$name === KIND_X`
         // narrows $obj. (Object-reassignment is caught downstream: the narrow

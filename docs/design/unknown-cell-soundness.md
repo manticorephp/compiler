@@ -361,7 +361,7 @@ with any comparator (int-arith, `<=>`, strcmp) — the `bug1`/`bug3` reproducers
 that lived under `docs/bugs/selfhost/` now pass and were removed. The remaining
 array-consumer sites (append/arith on an erased array read) are the next targets.
 
-## 14. Re-audit + property-element erasure fixed at the SOURCE (2026-07-16)
+## 15. Re-audit + property-element erasure fixed at the SOURCE (2026-07-16)
 
 Re-audited the §4 map against the post-split code (every file:line above is stale —
 `EmitLlvm` is now 14 collaborator traits). State: the §2 hinge is **intact**
@@ -397,6 +397,60 @@ The lesson matches §3's corollary: **the cheapest place to kill a guess is to s
 ERASURE, not to teach the consumer to guess better.** Prefer widening an inference scan
 over flipping a codegen A-site — it needs no producer/consumer co-flip, so the self-host
 fixpoint re-converges for free (this landed byte-identical).
+
+## 16. The OTHER two array-holding declarations (2026-07-16)
+
+§15 killed the element erasure on an INSTANCE property by widening the store
+scan. Probing the same shape against every other declaration that can hold an
+array found the identical bug twice more — plus a crash that had been hiding
+under it. Same lesson, three declarations:
+
+| decl | before | root |
+|------|--------|------|
+| instance prop `$c->xs[]` | fixed §15 | scan saw only `$this->` |
+| **static prop `B::$xs[]`** | **SIGSEGV** | `[]` default never initialised |
+| **global `global $g; $g[]`** | `2.1e-314` | append is not a `StoreLocal` |
+
+**The crash (worse than the erasure, and it masked it).** `globalInit`
+(`EmitLlvmObjects`) renders int/bool/string/float consts and returns `'0'` for
+everything else — an array literal default silently became a NULL pointer.
+`var_dump(B::$xs)` printed `int(0)` and the first `B::$xs[] = v` appended onto
+NULL. Only a static prop can carry a non-constant default (every other
+`addGlobalCell` caller registers `IntConst(0)`), so `globalInitIsConst` now
+splits them and `emitGlobalRuntimeInits` builds those at `__main` entry, before
+any top-level statement. **Why the suite missed it:** the one existing case
+(`static_array_prop`) only ever STRING-KEYED the static, and `set_str` allocates
+from a null buffer — `__mir_array_append` does not.
+
+**The erasures**, both fixed the §15 way — at the source, by widening a scan:
+- `scanStaticPropElemFromStores` — a static's stores live OUTSIDE the declaring
+  class, so the lowering-time AST scan (`inferPropElemFromStores`, which walks
+  `$this->p` in `$decl->methods` and skips statics outright) could never see
+  them. Keyed by the cell symbol every `StaticProp_` carries.
+- `collectGlobalStoreTypes` — `$g[] = v` is a `STORE_ELEMENT`, not a
+  `StoreLocal`, so the cross-scope join never saw it. Also: `__main` binds a
+  `global $x` name with NO decl node, so its `$g = []` was invisible to the scan
+  AND (once the element was known) would have re-erased the global — hence the
+  `inMainBody` guard in `inferStoreLocal`.
+
+**Two adjacent value-semantics gaps the crash had been hiding** (both surfaced
+only once statics stopped faulting; the instance and global paths already did
+this, only `STATIC_PROP` was missing from each list):
+- `$copy = B::$xs; $copy[] = v` MUTATED the static — `EmitLlvmLocals` copies a
+  vec on a `PROPERTY_ACCESS` read but not a `STATIC_PROP` one.
+- `B::$xs[] = v` emitted no COW at all (`EmitLlvmArrays`'s cow list).
+
+**Method note.** Every fix is inference/lowering-side; no A-site was flipped, so
+no producer/consumer co-flip and the fixpoint re-converges for free. Probing with
+FLOAT and `2^50` was load-bearing — NaN-boxing makes unbox ≈ identity for small
+ints, so an int-only probe would have shown all four bugs as passing.
+
+**Known-unfixed, deliberately (the §2 meaning-#3 wall).** `var_dump` of an
+ERASED bare-`array` renders `int(<ptr>)` instead of `array(…)`. NOT specific to
+statics — a bare-`array` PARAM and an instance property do it too (a bare `array`
+hint has no branch in `lowerTypeHint`, so it falls through to `unknown`). This is
+the blanket `unknown → cell` that §8 measured as BREAKING `cow2`; it belongs to
+the array cluster, not here.
 
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
