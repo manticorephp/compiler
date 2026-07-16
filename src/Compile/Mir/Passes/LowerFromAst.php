@@ -1728,6 +1728,64 @@ final class LowerFromAst implements Pass
     private function declName(\Parser\Ast\ClassDecl $d): string { return $d->name; }
 
     /**
+     * `$cls::CONST` / `$cls::$sp` with a runtime class-name string. Lower to a
+     * ternary chain over every class that actually declares the member —
+     * `$cls === "A" ? A::MEMBER : ($cls === "B" ? … : null)` — reusing the
+     * literal static-access lowering (const inline / static-prop global) for
+     * each arm. The receiver is re-lowered per condition; a plain `$cls`
+     * variable is side-effect-free, so it evaluates identically each time.
+     * (Object receivers `$obj::CONST` never match a name and fold to null.)
+     */
+    private function lowerDynStaticAccess(\Parser\Ast\DynamicStaticAccess $e): Node
+    {
+        $recv = $e->receiver;
+        $nm = $e->name;
+        $span = $e->span;
+        $names = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($this->staticPropRef($cname, $nm) !== null
+                || $this->findClassConst($this->resolveStaticClass($cname), $nm) !== null) {
+                $names[] = $cname;
+            }
+        }
+        $chain = \Parser\Ast\Expr::null($span);
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $cname = $names[$i];
+            $cond = \Parser\Ast\Expr::binary('===', $recv, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $then = \Parser\Ast\Expr::staticAccess($cname, $nm, $span);
+            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        }
+        return $this->lowerExpr($chain);
+    }
+
+    /**
+     * `$cls::method(args)` with a runtime class-name string. Same ternary-chain
+     * idiom over every class declaring/inheriting the method, reusing the
+     * literal static-call lowering per arm. Args are re-lowered per arm but only
+     * the matching arm runs, so they evaluate once at runtime.
+     */
+    private function lowerDynStaticCall(\Parser\Ast\DynamicStaticCall $e): Node
+    {
+        $recv = $e->receiver;
+        $method = $e->method;
+        $args = $e->args;
+        $span = $e->span;
+        $names = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($this->isTypeDef($cname)) { continue; }
+            if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
+        }
+        $chain = \Parser\Ast\Expr::null($span);
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $cname = $names[$i];
+            $cond = \Parser\Ast\Expr::binary('===', $recv, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $then = \Parser\Ast\Expr::staticCall($cname, $method, $args, $span);
+            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        }
+        return $this->lowerExpr($chain);
+    }
+
+    /**
      * Stable, cross-object class identity: same FQN → same id in EVERY compiled
      * object. A per-module sequential class_id collides across the user.o /
      * stdlib.o boundary (id N = a different class in each object), which

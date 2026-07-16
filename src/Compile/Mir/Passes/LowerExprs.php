@@ -202,6 +202,10 @@ trait LowerExprs
             if ($this->dynStaticName($expr) === 'class') {
                 return new ClassName_($this->lowerExpr($this->dynStaticReceiver($expr)), Type::string_());
             }
+            return $this->lowerDynStaticAccess($expr);
+        }
+        if ($expr->kind === 'DynamicStaticCall') {
+            return $this->lowerDynStaticCall($expr);
         }
         if ($expr->kind === 'BinaryOp') {
             return $this->lowerBinary($expr);
