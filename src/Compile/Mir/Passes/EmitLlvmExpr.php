@@ -718,6 +718,10 @@ trait EmitLlvmExpr
 
     private function taggedArithOne(string $name, string $iop, string $fop): string
     {
+        // PHP promotes an int op to float on overflow. The signed-overflow
+        // intrinsic gives {result, overflow-bit}; on overflow re-do the op in
+        // double and box a float cell, mirroring Zend.
+        $intr = $iop === 'add' ? 'sadd' : ($iop === 'sub' ? 'ssub' : 'smul');
         $out  = "\ndefine i64 @__manticore_tagged_" . $name . "(i64 %a, i64 %b) {\n";
         $out .= "entry:\n";
         $out .= "  %aistag = icmp ugt i64 %a, -4503599627370496\n";
@@ -741,9 +745,19 @@ trait EmitLlvmExpr
         $out .= "int:\n";
         $out .= "  %ia = call i64 @__manticore_tagged_to_int(i64 %a)\n";
         $out .= "  %ib = call i64 @__manticore_tagged_to_int(i64 %b)\n";
-        $out .= "  %ir = " . $iop . " i64 %ia, %ib\n";
+        $out .= "  %ovf = call {i64, i1} @llvm." . $intr . ".with.overflow.i64(i64 %ia, i64 %ib)\n";
+        $out .= "  %ir = extractvalue {i64, i1} %ovf, 0\n";
+        $out .= "  %obit = extractvalue {i64, i1} %ovf, 1\n";
+        $out .= "  br i1 %obit, label %promo, label %okint\n";
+        $out .= "okint:\n";
         $out .= "  %iboxed = call i64 @__manticore_box_int(i64 %ir)\n";
         $out .= "  ret i64 %iboxed\n";
+        $out .= "promo:\n";
+        $out .= "  %pa = sitofp i64 %ia to double\n";
+        $out .= "  %pb = sitofp i64 %ib to double\n";
+        $out .= "  %pr = " . $fop . " double %pa, %pb\n";
+        $out .= "  %pboxed = call i64 @__manticore_box_float(double %pr)\n";
+        $out .= "  ret i64 %pboxed\n";
         $out .= "}\n";
         return $out;
     }
@@ -2266,6 +2280,49 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
+        // A NUMERIC cell (int|float) ordered against a RAW int carries either a
+        // boxed int or a raw DOUBLE. The unbox_int below would read a double's
+        // bits as an int and order it wrongly (`f(7.5) < 5` answered TRUE). Box
+        // the raw side and let the tagged runtime order them by tag. (Cell-vs-cell
+        // already returned through the tagged_compare branch above, which is why
+        // only the mixed pairing was broken.)
+        if (!$isEq && !$isNe) {
+            $lNumCell = $c->left->type->isNumericCell();
+            $rNumCell = $c->right->type->isNumericCell();
+            $lRawNum = $lk === Type::KIND_INT || $lk === Type::KIND_FLOAT;
+            $rRawNum = $rk === Type::KIND_INT || $rk === Type::KIND_FLOAT;
+            if (($lNumCell && $rRawNum) || ($rNumCell && $lRawNum)) {
+                $this->rt->needsTaggedCompare = true;
+                $this->rt->needsTagged = true;
+                $this->rt->needsTaggedToFloat = true;
+                $this->rt->needsStrtod = true;
+                $this->rt->needsStrcmp = true;
+                if ($lRawNum) {
+                    $this->lastValue = $l; $this->lastValueType = $lt;
+                    $out .= $this->boxToCell($c->left->type);
+                    $l = $this->lastValue; $lt = 'i64';
+                }
+                if ($rRawNum) {
+                    $this->lastValue = $r; $this->lastValueType = $rt;
+                    $out .= $this->boxToCell($c->right->type);
+                    $r = $this->lastValue; $rt = 'i64';
+                }
+                $li = $l;
+                if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+                $ri = $r;
+                if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
+                $cmpReg = $this->ssa->allocReg();
+                $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
+                $extReg = $this->ssa->allocReg();
+                $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $this->lastValue = $extReg;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
+
         // Float comparison when either side carries a double.
         if ($lt === 'double' || $rt === 'double'
             || $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT) {

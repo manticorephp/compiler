@@ -448,6 +448,28 @@ final class ConstFold implements Pass
 
     // ── Arithmetic ──────────────────────────────────────────────
 
+    // PHP promotes an int op past PHP_INT_MAX/MIN to float. These detect the
+    // overflow WITHOUT relying on wrap-around (the native self-build wraps `+`
+    // — the very bug this fixes — so the check must be pure comparison).
+    private function addOverflows(int $l, int $r): bool
+    {
+        return ($r > 0 && $l > PHP_INT_MAX - $r) || ($r < 0 && $l < PHP_INT_MIN - $r);
+    }
+
+    private function subOverflows(int $l, int $r): bool
+    {
+        return ($r < 0 && $l > PHP_INT_MAX + $r) || ($r > 0 && $l < PHP_INT_MIN + $r);
+    }
+
+    private function mulOverflows(int $l, int $r): bool
+    {
+        if ($l === 0 || $r === 0) { return false; }
+        if ($l > 0) {
+            return $r > 0 ? $l > intdiv(PHP_INT_MAX, $r) : $r < intdiv(PHP_INT_MIN, $l);
+        }
+        return $r > 0 ? $l < intdiv(PHP_INT_MIN, $r) : $r < intdiv(PHP_INT_MAX, $l);
+    }
+
     private function foldAdd(Add $n): Node
     {
         $n->left  = $this->foldNode($n->left);
@@ -455,6 +477,9 @@ final class ConstFold implements Pass
         if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
             $l = $n->left->value;
             $r = $n->right->value;
+            if ($this->addOverflows($l, $r)) {
+                return new FloatConst((float)$l + (float)$r, Type::float_());
+            }
             return new IntConst($l + $r, Type::int_());
         }
         return $n;
@@ -467,6 +492,9 @@ final class ConstFold implements Pass
         if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
             $l = $n->left->value;
             $r = $n->right->value;
+            if ($this->subOverflows($l, $r)) {
+                return new FloatConst((float)$l - (float)$r, Type::float_());
+            }
             return new IntConst($l - $r, Type::int_());
         }
         return $n;
@@ -479,6 +507,9 @@ final class ConstFold implements Pass
         if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
             $l = $n->left->value;
             $r = $n->right->value;
+            if ($this->mulOverflows($l, $r)) {
+                return new FloatConst((float)$l * (float)$r, Type::float_());
+            }
             return new IntConst($l * $r, Type::int_());
         }
         return $n;
@@ -523,6 +554,10 @@ final class ConstFold implements Pass
         $n->operand = $this->foldNode($n->operand);
         if ($n->operand->kind === Node::KIND_INT_CONST) {
             $v = $n->operand->value;
+            // -PHP_INT_MIN overflows the int range → float, like Zend.
+            if ($v === PHP_INT_MIN) {
+                return new FloatConst(-(float)$v, Type::float_());
+            }
             return new IntConst(-$v, Type::int_());
         }
         return $n;
