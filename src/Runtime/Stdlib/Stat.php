@@ -420,6 +420,32 @@ function filetype(string $filename): string|false
 // d_ino, a u64 d_seekoff, u16 d_reclen, u16 d_namlen, u8 d_type) and at 19 on
 // Linux (u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type).
 
+/**
+ * Whether the running host is Darwin, cached.
+ *
+ * The stdlib cannot use the compile-time PHP_OS: it is compiled by the Zend
+ * seed, where the libc bindings are empty stubs, so a compile-time host probe
+ * would kill the cold bootstrap. PHP_OS survives only because it is lazy AND no
+ * stdlib source names it. Hence a runtime uname(2), like __mc_stat_off.
+ */
+function __mc_host_is_darwin(): bool
+{
+    static $ready = 0;
+    static $darwin = 0;
+    if ($ready === 0) {
+        $buf = \Runtime\Libc\calloc(2048, 1);
+        if ($buf === null) {
+            throw new \RuntimeException('host probe: cannot allocate a uname buffer');
+        }
+        \Runtime\Libc\uname($buf);
+        $sys = \cstr_to_str($buf);
+        \Runtime\Libc\free($buf);
+        $darwin = \substr($sys, 0, 6) === 'Darwin' ? 1 : 0;
+        $ready = 1;
+    }
+    return $darwin === 1;
+}
+
 /** Byte offset of dirent.d_name for the running host. */
 function __mc_dirent_name_off(): int
 {
@@ -427,15 +453,7 @@ function __mc_dirent_name_off(): int
     if ($off !== 0) {
         return $off;
     }
-    // Reuse the stat probe: it already resolved and verified the host.
-    $buf = \Runtime\Libc\calloc(2048, 1);
-    if ($buf === null) {
-        throw new \RuntimeException('readdir: cannot allocate a uname buffer');
-    }
-    \Runtime\Libc\uname($buf);
-    $sys = \cstr_to_str($buf);
-    \Runtime\Libc\free($buf);
-    $off = \substr($sys, 0, 6) === 'Darwin' ? 21 : 19;
+    $off = \__mc_host_is_darwin() ? 21 : 19;
     return $off;
 }
 

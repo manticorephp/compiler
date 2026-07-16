@@ -238,6 +238,11 @@ function sys_unlink(string $path): int {}
 #[Library('c'), Symbol('chdir')]
 function sys_chdir(string $path): int {}
 
+// glob(3)/globfree(3) are deliberately NOT bound: glob_t, the flag values and
+// even the return codes differ per libc, and musl has no GLOB_BRACE — so
+// glob() is implemented over scandir + fnmatch instead ({@see Stdlib/Fs.php}),
+// the same call php made in 8.3.
+
 // `int fnmatch(const char *pattern, const char *string, int flags)` — 0 on a
 // match, FNM_NOMATCH (1) otherwise. The flag VALUES are host-specific
 // (FNM_PATHNAME and FNM_NOESCAPE are swapped between Darwin and glibc), but php

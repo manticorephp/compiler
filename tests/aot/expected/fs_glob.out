@@ -1,0 +1,12 @@
+star:    10.txt,9.txt,a.txt,b.txt,c.log,sub
+txt:     10.txt,9.txt,a.txt,b.txt
+log:     c.log
+q:       9.txt,a.txt,b.txt
+brace:   10.txt,9.txt,a.txt,b.txt,c.log
+onlydir: sub
+mark:    sub
+nosort:  6
+nomatch: 0
+nocheck: zzz*
+fullpath: yes
+-- done --

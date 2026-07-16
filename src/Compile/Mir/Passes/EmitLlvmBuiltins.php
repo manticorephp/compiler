@@ -43,6 +43,7 @@ trait EmitLlvmBuiltins
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
         if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
+        if ($name === 'int_to_ptr')                   { return $this->biIntToPtr($args); }
         if ($name === 'peek_i64')                     { return $this->biPeek($args, 64, true); }
         if ($name === 'peek_i32')                     { return $this->biPeek($args, 32, true); }
         if ($name === 'peek_i16')                     { return $this->biPeek($args, 16, true); }
@@ -669,6 +670,26 @@ trait EmitLlvmBuiltins
      * struct member (utsname.machine, dirent.d_name). Unsafe: no bounds check.
      * @param Node[] $args
      */
+    /**
+     * `int_to_ptr(int $addr): \Ffi\Ptr` — a raw address as a Ptr handle.
+     * The inverse of reading `Ffi\Ptr::$address`, for a C struct member that is
+     * ITSELF a pointer: glob_t.gl_pathv is a `char **`, so walking it means
+     * turning two levels of i64 back into handles. ptr_offset cannot do this —
+     * it only moves within a handle you already hold.
+     * A Ptr is an i64 at runtime, so this is a representation-level no-op.
+     * Unsafe: the address is not validated.
+     * @param Node[] $args
+     */
+    private function biIntToPtr(array $args): string
+    {
+        $out = $this->emitIntArg($args[0]);
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function biPtrOffset(array $args): string
     {
         $out = $this->emitNode($args[0]);

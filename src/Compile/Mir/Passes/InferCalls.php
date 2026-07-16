@@ -125,7 +125,8 @@ trait InferCalls
         // FILE*/char* handles (obj<Ffi\Ptr>); the captured argc is a plain int.
         if ($n === '__mir_stdin' || $n === '__mir_stdout'
             || $n === '__mir_stderr' || $n === '__mir_argv_at'
-            || $n === '__mir_env_at' || $n === 'ptr_offset') {
+            || $n === '__mir_env_at' || $n === 'ptr_offset'
+            || $n === 'int_to_ptr') {
             return Type::obj('Ffi\\Ptr');
         }
         if ($n === '__mir_argc' || $n === '__mir_env_count'

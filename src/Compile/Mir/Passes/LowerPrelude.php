@@ -305,6 +305,14 @@ trait LowerPrelude
             'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3, 'LOCK_NB' => 4,
             'SCANDIR_SORT_ASCENDING' => 0, 'SCANDIR_SORT_DESCENDING' => 1,
             'SCANDIR_SORT_NONE' => 2,
+            // glob: php's OWN values, not the host's (php has carried its own
+            // glob since 8.3) — GLOB_NOESCAPE is 0x1000 where Darwin's header
+            // says 0x2000, and no libc has GLOB_ONLYDIR = 0x40000000. Host
+            // independent, hence a plain entry here and not a host_os() probe.
+            'GLOB_ERR' => 0x0004, 'GLOB_MARK' => 0x0008,
+            'GLOB_NOCHECK' => 0x0010, 'GLOB_NOSORT' => 0x0020,
+            'GLOB_BRACE' => 0x0080, 'GLOB_NOESCAPE' => 0x1000,
+            'GLOB_ONLYDIR' => 0x40000000, 'GLOB_AVAILABLE_FLAGS' => 0x400010bc,
             'PATHINFO_DIRNAME' => 1, 'PATHINFO_BASENAME' => 2,
             'PATHINFO_EXTENSION' => 4, 'PATHINFO_FILENAME' => 8, 'PATHINFO_ALL' => 15,
         ];
