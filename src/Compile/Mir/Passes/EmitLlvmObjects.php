@@ -1116,7 +1116,15 @@ trait EmitLlvmObjects
         // then fall back to the bag / null.
         $cls = $n->object->type->class ?? '';
         if ($cls !== '' && isset($this->classes[$cls])) {
-            return $this->emitDynPropTyped($n, $this->classes[$cls]);
+            $cd = $this->classes[$cls];
+            return $this->emitDynPropDispatch($n, $this->declaredPropTypes($cd), $cd);
+        }
+        // A UNION receiver (`new $cls()` over several classes): gather the declared
+        // properties across the atoms; each arm's PropertyAccess_ dispatches on the
+        // runtime class_id (emitUnionPropertyAccess).
+        if ($n->object->type->kind === Type::KIND_UNION) {
+            $props = $this->unionPropTypes($n->object->type);
+            if ($props !== []) { return $this->emitDynPropDispatch($n, $props, null); }
         }
         $out = $this->emitNode($n->object);
         if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
@@ -1135,12 +1143,41 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** `$o->$name` on a known class: strcmp the runtime name against each declared
-     *  property and reuse the full property-read path (hooks, subclass offsets,
-     *  float/obj coercion) for the match, boxing its result to a cell; otherwise
-     *  fall back to the dynamic bag or null. One arm runs, so re-emitting the
-     *  object per arm evaluates it once at runtime. */
-    private function emitDynPropTyped(DynProp_ $n, ClassDef $cd): string
+    /** Declared properties (offset >= 0) of a class as name => Type. */
+    private function declaredPropTypes(ClassDef $cd): array
+    {
+        $out = [];
+        foreach ($cd->propertyNames as $p) {
+            if ($cd->propertyOffset($p) < 0) { continue; }
+            $out[$p] = $cd->propertyTypes[$p] ?? Type::cell();
+        }
+        return $out;
+    }
+
+    /** Declared properties across a union's atoms, name => Type. Atoms that
+     *  disagree on a property's kind collapse it to a cell. */
+    private function unionPropTypes(Type $u): array
+    {
+        $out = [];
+        foreach ($u->atoms as $atom) {
+            $cn = $atom->class ?? '';
+            if ($cn === '' || !isset($this->classes[$cn])) { continue; }
+            foreach ($this->declaredPropTypes($this->classes[$cn]) as $p => $pt) {
+                if (!isset($out[$p])) { $out[$p] = $pt; }
+                elseif ($out[$p]->kind !== $pt->kind) { $out[$p] = Type::cell(); }
+            }
+        }
+        return $out;
+    }
+
+    /** `$o->$name` on a receiver with a known member set (a class or a union):
+     *  strcmp the runtime name against each declared property and reuse the full
+     *  property-read path (hooks, subclass offsets, float/obj coercion, union
+     *  class_id dispatch) for the match, boxing its result to a cell; otherwise
+     *  fall back to the dynamic bag ($bagCd) or null. One arm runs, so re-emitting
+     *  the object per arm evaluates it once at runtime.
+     *  @param array<string, Type> $propTypes */
+    private function emitDynPropDispatch(DynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
     {
         $this->rt->needsStrcmp = true;
         $out = $this->emitNode($n->name);
@@ -1150,9 +1187,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynp.end');
-        foreach ($cd->propertyNames as $p) {
-            if ($cd->propertyOffset($p) < 0) { continue; }
-            $pt = $cd->propertyTypes[$p] ?? Type::cell();
+        foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynp.hit');
             $nextL = $this->ssa->allocLabel('dynp.next');
             $cmp = $this->ssa->allocReg();
@@ -1168,11 +1203,11 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
-        if ($cd->usesBag()) {
+        if ($bagCd !== null && $bagCd->usesBag()) {
             $out .= $this->emitNode($n->object);
             $out .= $this->coerceToPtr();
             $objPtr = $this->lastValue;
-            $out .= $this->emitBagPtr($n->object, $objPtr, $cd->bagOffset());
+            $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $this->bagPtrReg
                   . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
@@ -1192,13 +1227,48 @@ trait EmitLlvmObjects
      *  path for the match (arg boxing, virtual dispatch, LSB), boxing the result
      *  to a cell; an undeclared name falls back to __call, else null. One arm
      *  runs, so re-emitting receiver/args per arm evaluates each once. */
+    /** Method names dispatchable on a receiver type — a single class (self +
+     *  ancestors) or a union (across the atoms) — as name => return Type.
+     *  Atoms disagreeing on a method's return kind collapse it to a cell.
+     *  Null when the receiver has no static class set (cell / unknown). */
+    private function dynMethodCandidates(Type $t): ?array
+    {
+        $roots = [];
+        $single = $t->class ?? '';
+        if ($single !== '' && isset($this->classes[$single])) {
+            $roots = [$single];
+        } elseif ($t->kind === Type::KIND_UNION) {
+            foreach ($t->atoms as $atom) {
+                $cn = $atom->class ?? '';
+                if ($cn !== '' && isset($this->classes[$cn])) { $roots[] = $cn; }
+            }
+        }
+        if ($roots === []) { return null; }
+        $out = [];
+        foreach ($roots as $root) {
+            $c = $root;
+            while ($c !== '' && isset($this->classes[$c])) {
+                foreach ($this->classes[$c]->methodNames as $m => $_) {
+                    if ($m === '__construct' || $m === '__call') { continue; }
+                    $holder = $this->resolveMethodClass($root, $m);
+                    if ($holder === '') { continue; }
+                    $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
+                    if (!isset($out[$m])) { $out[$m] = $rt; }
+                    elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
+                }
+                $c = $this->classes[$c]->parent;
+            }
+        }
+        return $out;
+    }
+
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
         $recv = $dp->object;
         $nameNode = $dp->name;
-        $cls = $recv->type->class ?? '';
-        if ($cls === '' || !isset($this->classes[$cls])) {
-            // Erased receiver (cell/unknown/union): no static class to enumerate.
+        $methods = $this->dynMethodCandidates($recv->type);
+        if ($methods === null) {
+            // Erased receiver (cell/unknown): no static class set to enumerate.
             // Evaluate the name for side effects and yield null (open case).
             $out = $this->emitNode($nameNode);
             $this->lastValue = '0';
@@ -1213,35 +1283,28 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynm.end');
-        $seen = [];
-        $c = $cls;
-        while ($c !== '' && isset($this->classes[$c])) {
-            foreach ($this->classes[$c]->methodNames as $m => $_) {
-                if (isset($seen[$m])) { continue; }
-                $seen[$m] = true;
-                if ($m === '__construct' || $m === '__call') { continue; }
-                $holder = $this->resolveMethodClass($cls, $m);
-                if ($holder === '') { continue; }
-                $retT = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
-                $hitL = $this->ssa->allocLabel('dynm.hit');
-                $nextL = $this->ssa->allocLabel('dynm.next');
-                $cmp = $this->ssa->allocReg();
-                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($m) . ")\n";
-                $eq = $this->ssa->allocReg();
-                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
-                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
-                $out .= $hitL . ":\n";
-                $call = new \Compile\Mir\MethodCall_($recv, $m, $iv->args, $retT);
-                $out .= $this->emitMethodCall($call);
-                $out .= $this->boxToCell($retT);
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-                $out .= '  br label %' . $endL . "\n";
-                $out .= $nextL . ":\n";
-            }
-            $c = $this->classes[$c]->parent;
+        foreach ($methods as $m => $retT) {
+            $hitL = $this->ssa->allocLabel('dynm.hit');
+            $nextL = $this->ssa->allocLabel('dynm.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($m) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            // $recv keeps its type (single class OR union), so emitMethodCall
+            // dispatches monomorphically or via the runtime class_id switch.
+            $call = new \Compile\Mir\MethodCall_($recv, $m, $iv->args, $retT);
+            $out .= $this->emitMethodCall($call);
+            $out .= $this->boxToCell($retT);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
         }
-        // Undeclared method: __call('name', [args]) when the class defines it.
-        if ($this->resolveMethodClass($cls, '__call') !== '') {
+        // Undeclared method: __call('name', [args]) — single-class receiver only.
+        $cls = $recv->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls])
+            && $this->resolveMethodClass($cls, '__call') !== '') {
             $elems = [];
             foreach ($iv->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
             $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
