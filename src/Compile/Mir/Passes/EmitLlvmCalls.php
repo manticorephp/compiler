@@ -238,6 +238,57 @@ trait EmitLlvmCalls
     }
 
     /** `$closure(args)` → load captures from the struct, call __closure_N. */
+    /** `$f(args)` / call_user_func($f, args) with `$f` a runtime function-name
+     *  string. strcmp the name against each arity-compatible FREE user function
+     *  and reuse the normal Call path for the match, boxing the result to a
+     *  cell; an unmatched name yields null. Method keys (`Class__method`) and
+     *  `__main` are excluded (the `__` marker). One arm runs, so re-emitting
+     *  args per arm evaluates them once at runtime. */
+    private function emitDynFnCall(Invoke_ $iv): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($iv->callee);
+        $out .= $this->coerceToPtr();
+        $keyP = $this->lastValue;
+        $argc = \count($iv->args);
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynf.end');
+        foreach ($this->sigs->returnType as $fname => $rt) {
+            if (\strpos($fname, '__') !== false) { continue; }
+            $ptypes = $this->sigs->paramTypes[$fname] ?? [];
+            $pdefs = $this->sigs->paramDefaults[$fname] ?? [];
+            $tot = \count($ptypes);
+            $req = 0;
+            for ($pi = 0; $pi < $tot; $pi = $pi + 1) {
+                if (($pdefs[$pi] ?? null) === null) { $req = $req + 1; }
+            }
+            if ($argc < $req || $argc > $tot) { continue; }
+            $hitL = $this->ssa->allocLabel('dynf.hit');
+            $nextL = $this->ssa->allocLabel('dynf.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($fname) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $call = new \Compile\Mir\Call($fname, $iv->args, $rt);
+            $out .= $this->emitNode($call);
+            $out .= $this->boxToCell($rt);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitInvoke(Invoke_ $n): string
     {
         $iv = $n;
@@ -250,6 +301,12 @@ trait EmitLlvmCalls
             // the native self-build (Node has neither field), so a typed param is
             // load-bearing here.
             return $this->emitDynMethodCall($iv->callee, $iv);
+        }
+        // A string-typed callee names a FREE FUNCTION at runtime (`$f = "strlen";
+        // $f(...)`, or call_user_func with a runtime name). Dispatch on the name
+        // against the module's arity-compatible user functions.
+        if ($iv->callee->type->kind === Type::KIND_STRING) {
+            return $this->emitDynFnCall($iv);
         }
         $fn = $iv->callee->type->class ?? '';
         // An invokable object: `$obj(...)` on a real class with __invoke

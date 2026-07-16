@@ -302,6 +302,13 @@ trait InferCalls
             $node->type = Type::cell();
             return $node->type;
         }
+        // A string-typed callee names a free function at runtime; the emitter
+        // dispatches on the name and boxes each arm's result, so the invoke is a
+        // cell (echo / var_dump read the tag instead of a raw pointer).
+        if ($ct->kind === Type::KIND_STRING) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // callee type obj<__closure_N> → that fn's return type.
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];
