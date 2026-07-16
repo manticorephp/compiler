@@ -1444,14 +1444,19 @@ final class InferTypes implements Pass
     }
 
     /** Return type of `$method` across a union's atoms — the agreed type when
-     *  every atom resolves it to the same kind, else null (unresolved). */
+     *  every atom that HAS the method resolves it to the same kind, else null
+     *  (unresolved). An atom lacking the method is an unreachable arm: calling
+     *  `$x->m()` when the runtime `$x` is that class fatals in PHP, so the only
+     *  non-fatal runtime types are the ones that declare it. This lets a broad
+     *  `new $cls()` union (every ctor-arity match) still type `->m()` from the
+     *  members that actually implement it, instead of erasing to unknown. */
     private function unionMethodReturn(Type $u, string $method): ?Type
     {
         /** @var Type $found */
         $found = null;
         foreach ($u->atoms as $atom) {
             $cls = $this->resolveMethodClass($atom->class ?? '', $method);
-            if ($cls === '') { return null; }
+            if ($cls === '') { continue; }
             $sig = $this->sigs[$cls . '__' . $method] ?? null;
             if ($sig === null) {
                 $sig = $this->concreteOverrideSig($cls, $method);

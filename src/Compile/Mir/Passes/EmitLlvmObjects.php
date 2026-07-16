@@ -2162,7 +2162,14 @@ trait EmitLlvmObjects
         $liveCands = [];
         foreach ($cands as $c) {
             $t = $this->resolveMethodClass($c, $mc->method);
-            if ($t === '') { $t = $fallback; }
+            // A candidate that neither declares nor inherits the method is
+            // unreachable at this call site (calling it when the runtime object
+            // IS that class fatals in PHP), so it gets no switch case. This
+            // arises from a broad `new $cls()` union whose atoms are every
+            // ctor-arity match, most of which lack the invoked method — falling
+            // back to an unrelated impl would emit a call to a `Class__method`
+            // symbol that was never defined.
+            if ($t === '') { continue; }
             $full = $this->lsbTarget($t, $mc->method, $c);
             // A REIFIED specialization reached through its erased origin: this
             // switch only exists because the receiver's static type is a

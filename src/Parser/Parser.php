@@ -1804,6 +1804,14 @@ final class Parser
         if ($this->checkKeyword('instanceof')) {
             $span = $this->span();
             $this->advance();
+            // `$x instanceof $cls` — the RHS names the class through a runtime
+            // value. Lower to `is_a($x, $cls)` (identical semantics for an object
+            // LHS); the is_a builtin resolves the runtime class name against the
+            // module's classes. A written class name keeps the static path.
+            if ($this->check(TokenKind::Variable)) {
+                $classExpr = $this->parsePrimary();
+                return Expr::call('is_a', [$left, $classExpr], $span);
+            }
             $class = $this->parseClassName();
             return Expr::instanceof_($left, $class, $span);
         }

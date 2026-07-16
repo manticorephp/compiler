@@ -2720,13 +2720,125 @@ trait EmitLlvmBuiltins
      *  Reuses the instanceof ancestor+interface walk ({@see classIsA}). */
     private function biIsA(array $args, bool $strict): string
     {
+        $target = $this->reflClassName($args[1]);
+        // A runtime-valued target class (`$obj instanceof $cls`, lowered to is_a):
+        // the name is only known at runtime, so enumerate the module's classes and
+        // match the runtime string against each, testing the operand's class_id
+        // against that class's is-a id set (same idiom as emitNewDynObj).
+        if ($target === '' && $this->classArgIsRuntime($args[1])) {
+            return $this->biIsADynamic($args, $strict);
+        }
         $out = $this->reflEvalArgs($args);
         $sub = $this->reflClassName($args[0]);
-        $target = $this->reflClassName($args[1]);
         $r = $sub !== '' && $target !== ''
             && (!$strict || $sub !== $target)
             && $this->classIsA($sub, $target);
         return $this->biConstBool($out, $r);
+    }
+
+    /** A target-class arg named by a runtime value (string / cell / unknown),
+     *  not a compile-time class name. */
+    private function classArgIsRuntime(Node $arg): bool
+    {
+        $k = $arg->type->kind;
+        return $k === Type::KIND_STRING || $k === Type::KIND_CELL
+            || $k === Type::KIND_UNKNOWN;
+    }
+
+    /** is_a / is_subclass_of with a runtime target class name. Loads the
+     *  operand's class_id once (guarding null / non-object cells / scalars),
+     *  then ORs, over every module class C, `strcmp(name,"C")==0 AND class_id
+     *  in idsOf(C)`. `idsOf` is C's is-a set (descendants + implementers); the
+     *  strict form drops C's own id (proper-subclass only). */
+    private function biIsADynamic(array $args, bool $strict): string
+    {
+        // A scalar operand (string/int/float/bool/null) is an instance of
+        // nothing — the 2-arg is_a never treats a string as a class name.
+        $ok = $args[0]->type->kind;
+        if ($ok === Type::KIND_STRING || $ok === Type::KIND_INT
+            || $ok === Type::KIND_FLOAT || $ok === Type::KIND_BOOL
+            || $ok === Type::KIND_NULL) {
+            $out = $this->reflEvalArgs($args);
+            return $this->biConstBool($out, false);
+        }
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $strP = $this->ssa->allocReg();
+        $out .= '  ' . $strP . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $slot . "\n";
+        $objL = $this->ssa->allocLabel('isa.obj');
+        $doneL = $this->ssa->allocLabel('isa.done');
+
+        if ($ok === Type::KIND_CELL) {
+            $out .= $this->cellTagIr($obj);
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
+            $out .= $objL . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $obj . ", 281474976710655\n";
+            $objp = $this->ssa->allocReg();
+            $out .= '  ' . $objp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+        } else {
+            $isNull = $this->ssa->allocReg();
+            $out .= '  ' . $isNull . ' = icmp eq i64 ' . $obj . ", 0\n";
+            $out .= '  br i1 ' . $isNull . ', label %' . $doneL . ', label %' . $objL . "\n";
+            $out .= $objL . ":\n";
+            $objp = $this->ssa->allocReg();
+            $out .= '  ' . $objp . ' = inttoptr i64 ' . $obj . " to ptr\n";
+        }
+        $out .= $this->emitLoadClassId($objp);
+        $cid = $this->classIdReg;
+        // Candidate target names: every class AND interface — a target may be an
+        // interface or ancestor the operand only is-a transitively (Dog is-a the
+        // Animal interface). Interfaces live outside $this->classes.
+        $targets = \array_keys($this->classes);
+        foreach (\array_keys($this->interfaceNames) as $i) { $targets[] = $i; }
+        $acc = '';
+        foreach ($targets as $name) {
+            $ids = $this->instanceofMatchIds($name);
+            if ($strict) {
+                $ownId = isset($this->classes[$name]) ? $this->classes[$name]->classId : -1;
+                $keep = [];
+                foreach ($ids as $id) { if ($id !== $ownId) { $keep[] = $id; } }
+                $ids = $keep;
+            }
+            if ($ids === []) { continue; }
+            $lit = $this->strLitId($this->pool->intern($name));
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $strP . ', ptr ' . $lit . ")\n";
+            $nameEq = $this->ssa->allocReg();
+            $out .= '  ' . $nameEq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= $this->emitClassIdMatch($cid, $ids);
+            $both = $this->ssa->allocReg();
+            $out .= '  ' . $both . ' = and i1 ' . $nameEq . ', ' . $this->classIdMatchReg . "\n";
+            if ($acc === '') {
+                $acc = $both;
+            } else {
+                $or = $this->ssa->allocReg();
+                $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $both . "\n";
+                $acc = $or;
+            }
+        }
+        if ($acc !== '') {
+            $ext = $this->ssa->allocReg();
+            $out .= '  ' . $ext . ' = zext i1 ' . $acc . " to i64\n";
+            $out .= '  store i64 ' . $ext . ', ptr ' . $slot . "\n";
+        }
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** get_parent_class($obj|'C') — parent name string, or boxed false. */

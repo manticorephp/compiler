@@ -1921,6 +1921,12 @@ final class LowerFromAst implements Pass
             // to nothing. A TypeDef is constructed only where its name is written.
             if ($this->isTypeDef($name)) { continue; }
             $params = $this->resolveMethodParams($name, '__construct');
+            // Exact arity only. Widening to accept defaulted-ctor calls
+            // (`required <= argc <= total`) balloons the candidate union — every
+            // arity-compatible class, not just the intended one — which erases
+            // the union's property/method type resolution (a `$o->name` read then
+            // renders its pointer). Defaulted-ctor `new $cls()` waits on broad-
+            // union inference (the unknown-cell soundness root).
             $need = $params === null ? 0 : \count($params);
             if ($need !== $argc) { continue; }
             $arms[] = Type::obj($name);
