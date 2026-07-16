@@ -53,7 +53,13 @@ function __preg_compile(string $pattern): int
         return $cache[$pattern];
     }
     $close = \__preg_close_delim($pattern[0]);
-    $end = \strrpos($pattern, $close);
+    $endPos = \strrpos($pattern, $close);
+    // strrpos is int|false; a delimiter-less pattern is not a valid PHP regex,
+    // so bail rather than let false coerce into the substr offsets below.
+    if ($endPos === false) {
+        return 0;
+    }
+    $end = $endPos;
     $body = \substr($pattern, 1, $end - 1);
     $mods = \substr($pattern, $end + 1);
     $opt = \__preg_options($mods);

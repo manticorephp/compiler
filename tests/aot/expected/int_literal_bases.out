@@ -1,0 +1,41 @@
+-- legacy octal --
+int(511)
+int(420)
+int(493)
+int(256)
+int(8)
+int(63)
+int(7)
+int(0)
+int(0)
+int(8)
+-- 0o octal (PHP 8.1) --
+int(511)
+int(420)
+int(8)
+-- hex --
+int(31)
+int(255)
+int(57005)
+int(0)
+-- binary --
+int(11)
+int(1)
+int(0)
+-- decimal is untouched --
+int(777)
+int(10)
+int(1000000)
+int(9)
+int(80)
+-- floats with a leading zero stay floats --
+float(0.5)
+float(0)
+float(0)
+-- octal in expressions --
+int(18)
+int(484)
+int(438)
+int(493)
+string(3) "777"
+string(3) "644"

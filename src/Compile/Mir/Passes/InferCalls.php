@@ -125,7 +125,7 @@ trait InferCalls
         // FILE*/char* handles (obj<Ffi\Ptr>); the captured argc is a plain int.
         if ($n === '__mir_stdin' || $n === '__mir_stdout'
             || $n === '__mir_stderr' || $n === '__mir_argv_at'
-            || $n === '__mir_env_at') {
+            || $n === '__mir_env_at' || $n === 'ptr_offset') {
             return Type::obj('Ffi\\Ptr');
         }
         if ($n === '__mir_argc' || $n === '__mir_env_count'
@@ -137,7 +137,11 @@ trait InferCalls
             || $n === 'printf' || $n === 'spl_object_id'
             || $n === 'strcspn'
             || $n === '__float_bits' || $n === '__ryu_msp'
-            || $n === 'peek_i64'
+            || $n === 'peek_i64' || $n === 'peek_i32' || $n === 'peek_i16'
+            || $n === 'peek_i8'
+            || $n === 'peek_u32' || $n === 'peek_u16' || $n === 'peek_u8'
+            || $n === 'poke_i64' || $n === 'poke_i32' || $n === 'poke_i16'
+            || $n === 'poke_i8'
             || $n === 'array_unshift' || $n === '__str_byte_at') {
             return Type::int_();
         }

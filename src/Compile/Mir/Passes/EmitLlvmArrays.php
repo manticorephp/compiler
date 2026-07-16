@@ -197,6 +197,73 @@ trait EmitLlvmArrays
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
             return $this->emitMethodCall($mc);
         }
+        // `$cell[$i]` — a cell subject is string-or-array only at runtime (a
+        // `string|false` from getenv/file_get_contents erases to one), so the
+        // static type cannot pick a path. Branch on the NaN tag: PTR(4) is a
+        // string and indexes a byte; anything else takes the array path.
+        // Without this the cell fell straight through to the array path and
+        // __mir_array_get_int deref'd a string pointer as an array — SIGSEGV.
+        // Only for an int index: a string key on a string subject is a PHP
+        // warning case, and the array path already handles it.
+        $idxIsInt = $aa->index->type->kind === Type::KIND_INT
+            || $aa->index->kind === Node::KIND_INT_CONST;
+        if ($aa->array->type->kind === Type::KIND_CELL && $idxIsInt) {
+            // Both operands are emitted once, before the branch — re-emitting
+            // inside an arm would run their side effects twice.
+            $out = $this->emitNode($aa->array);
+            $out .= $this->coerceToI64();
+            $cv = $this->lastValue;
+            $out .= $this->emitNode($aa->index);
+            $out .= $this->coerceToI64();
+            $idx = $this->lastValue;
+            $out .= $this->cellTagIr($cv);
+            $tag = $this->cellTagReg;
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
+            $lStr = $this->ssa->allocLabel('cellidx.str');
+            $lArr = $this->ssa->allocLabel('cellidx.arr');
+            $lEnd = $this->ssa->allocLabel('cellidx.end');
+            $out .= '  br i1 ' . $isStr . ', label %' . $lStr . ', label %' . $lArr . "\n";
+
+            $out .= $lStr . ":\n";
+            $sm = $this->ssa->allocReg();
+            $out .= '  ' . $sm . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $sm . " to ptr\n";
+            $ch = $this->ssa->allocReg();
+            $out .= '  ' . $ch . ' = call ptr @__mir_str_char_at(ptr ' . $sp
+                  . ', i64 ' . $idx . ")\n";
+            $this->lastValue = $ch;
+            $this->lastValueType = 'ptr';
+            // Re-box: the array arm yields a cell, so both arms must agree.
+            $out .= $this->boxToCell(Type::string_());
+            $strCell = $this->lastValue;
+            $out .= '  br label %' . $lEnd . "\n";
+
+            $out .= $lArr . ":\n";
+            $am = $this->ssa->allocReg();
+            $out .= '  ' . $am . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $ap = $this->ssa->allocReg();
+            $out .= '  ' . $ap . ' = inttoptr i64 ' . $am . " to ptr\n";
+            $av = $this->ssa->allocReg();
+            $out .= '  ' . $av . ' = call i64 @__mir_array_get_int(ptr ' . $ap
+                  . ', i64 ' . $idx . ")\n";
+            $out .= '  br label %' . $lEnd . "\n";
+
+            $out .= $lEnd . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = phi i64 [ ' . $strCell . ', %' . $lStr
+                  . ' ], [ ' . $av . ', %' . $lArr . " ]\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            if ($n->type->kind === Type::KIND_FLOAT) {
+                $rf = $this->ssa->allocReg();
+                $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
+                $this->lastValue = $rf;
+                $this->lastValueType = 'double';
+            }
+            return $out;
+        }
         return $this->emitArrayAccessUnified($n, $aa);
     }
 

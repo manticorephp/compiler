@@ -42,7 +42,18 @@ trait EmitLlvmBuiltins
         if ($name === '__str_byte_at')                { return $this->biStrByteAt($args); }
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
-        if ($name === 'peek_i64')                     { return $this->biPeekI64($args); }
+        if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
+        if ($name === 'peek_i64')                     { return $this->biPeek($args, 64, true); }
+        if ($name === 'peek_i32')                     { return $this->biPeek($args, 32, true); }
+        if ($name === 'peek_i16')                     { return $this->biPeek($args, 16, true); }
+        if ($name === 'peek_i8')                      { return $this->biPeek($args, 8, true); }
+        if ($name === 'peek_u32')                     { return $this->biPeek($args, 32, false); }
+        if ($name === 'peek_u16')                     { return $this->biPeek($args, 16, false); }
+        if ($name === 'peek_u8')                      { return $this->biPeek($args, 8, false); }
+        if ($name === 'poke_i64')                     { return $this->biPoke($args, 64); }
+        if ($name === 'poke_i32')                     { return $this->biPoke($args, 32); }
+        if ($name === 'poke_i16')                     { return $this->biPoke($args, 16); }
+        if ($name === 'poke_i8')                      { return $this->biPoke($args, 8); }
         if ($name === '__mir_stdin')                  { return $this->biStdStream('stdin'); }
         if ($name === '__mir_stdout')                 { return $this->biStdStream('stdout'); }
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
@@ -651,13 +662,14 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * `peek_i64(\Ffi\Ptr $p, int $off): int` — load a native i64 from a raw
-     * address at a byte offset. The read boundary for FFI out-params and
-     * pointer-array results (e.g. a PCRE2 ovector of size_t pairs). Unsafe:
-     * no bounds check. Callers mask/sign-extend a narrower C int themselves.
+     * `ptr_offset(\Ffi\Ptr $p, int $n): \Ffi\Ptr` — the address $n bytes past
+     * $p. The emitter-side counterpart of Ffi\Ptr::offset(): that method lives
+     * in src/Ffi, which is outside the src/Runtime tree the stdlib library is
+     * built from, so stdlib code cannot call it. Needed to reach an interior C
+     * struct member (utsname.machine, dirent.d_name). Unsafe: no bounds check.
      * @param Node[] $args
      */
-    private function biPeekI64(array $args): string
+    private function biPtrOffset(array $args): string
     {
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToPtr();
@@ -666,9 +678,68 @@ trait EmitLlvmBuiltins
         $off = $this->lastValue;
         $gp = $this->ssa->allocReg();
         $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $this->lastValue = $gp;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `peek_iN(\Ffi\Ptr $p, int $off): int` — load a native integer of $bits
+     * width from a raw address at a byte offset, widened to i64 ($signed →
+     * sext, else zext). The read boundary for FFI out-params, pointer-array
+     * results (a PCRE2 ovector of size_t pairs) and C struct fields, whose
+     * widths vary per member and per host (`struct stat`'s st_mode is 2 bytes
+     * on Darwin and 4 on Linux). Unsafe: no bounds check.
+     * @param Node[] $args
+     */
+    private function biPeek(array $args, int $bits, bool $signed): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $ty = 'i' . $bits;
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = load i64, ptr ' . $gp . "\n";
+        $out .= '  ' . $r . ' = load ' . $ty . ', ptr ' . $gp . "\n";
+        if ($bits < 64) {
+            $w = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = ' . ($signed ? 'sext' : 'zext') . ' ' . $ty
+                  . ' ' . $r . " to i64\n";
+            $r = $w;
+        }
         return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `poke_iN(\Ffi\Ptr $p, int $off, int $v): int` — store the low $bits of
+     * $v at a byte offset. The write counterpart of {@see biPeek}: the only
+     * way to build a C struct (timeval, sockaddr, pollfd) for an FFI call,
+     * since the FFI wrapper passes scalars only. Yields 0. Unsafe: no bounds
+     * check.
+     * @param Node[] $args
+     */
+    private function biPoke(array $args, int $bits): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $out .= $this->emitIntArg($args[2]);
+        $v = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $ty = 'i' . $bits;
+        $sv = $v;
+        if ($bits < 64) {
+            $sv = $this->ssa->allocReg();
+            $out .= '  ' . $sv . ' = trunc i64 ' . $v . ' to ' . $ty . "\n";
+        }
+        $out .= '  store ' . $ty . ' ' . $sv . ', ptr ' . $gp . "\n";
+        return $this->finishI64($out, '0');
     }
 
     /**
@@ -2955,7 +3026,39 @@ trait EmitLlvmBuiltins
      * messages. The optional 2nd arg (always `true`) is ignored.
      * @param Node[] $args
      */
+    /**
+     * `var_export($v)` prints and returns null; `var_export($v, true)` returns
+     * the string and prints nothing. Only the second form worked — the $return
+     * argument was ignored and the string was always just handed back, so a
+     * bare `var_export($v);` statement printed nothing at all.
+     *
+     * Echo mode yields "" rather than null, so `echo var_export(1);` still
+     * prints exactly `1` (php.net echoes the null to the same effect).
+     * @param Node[] $args
+     */
     private function biVarExport(array $args): string
+    {
+        $out = $this->varExportStr($args);
+        $wantString = \count($args) >= 2
+            && $args[1]->kind === Node::KIND_BOOL_CONST
+            && (bool)$args[1]->value;
+        if ($wantString) {
+            return $out;
+        }
+        $this->libcExtra['printf'] = 'declare i32 @printf(ptr, ...)';
+        $out .= $this->coerceToPtr();
+        $buf = $this->lastValue;
+        $pcts = $this->strLitId($this->pool->intern('%s'));
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $pcts
+              . ', ptr ' . $buf . ")\n";
+        $this->lastValue = $this->litStr('');
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** @param Node[] $args  The var_export text for $args[0], as a ptr in lastValue. */
+    private function varExportStr(array $args): string
     {
         $this->rt->needsConcat = true;
         $k = $args[0]->type->kind;
@@ -3008,9 +3111,25 @@ trait EmitLlvmBuiltins
             $s = $this->lastValue;
             return $out . $this->wrapOrNull($s, "'", "'", 'NULL');
         }
-        // Non-scalar (unused by the self-host call sites) — a safe marker.
+        // Arrays, `mixed` and unions: the type is only known from the NaN tag at
+        // runtime, so hand off to the stdlib formatter rather than emitting a
+        // recursive walk inline. boxToCell rebuilds a homogeneous array with its
+        // elements boxed, which is exactly what that walk needs to read. Declare
+        // the extern only when it is not defined in-module (a self-contained
+        // build embeds the define; a second declare is a redefinition error).
         $out = $this->emitNode($args[0]);
-        $this->lastValue = $this->litStr('?');
+        $out .= $this->boxToCell($args[0]->type);
+        $cv = $this->lastValue;
+        if (!isset($this->definedFns[$this->mangle('__mc_var_export_cell')])) {
+            $this->libcExtra['manticore___mc_var_export_cell']
+                = 'declare i64 @manticore___mc_var_export_cell(i64, i64)';
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_var_export_cell(i64 '
+              . $cv . ", i64 0)\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+        $this->lastValue = $p;
         $this->lastValueType = 'ptr';
         return $out;
     }

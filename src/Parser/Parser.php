@@ -2488,6 +2488,14 @@ final class Parser
                 if ($second === 111 || $second === 79) {  // 'o' 'O'
                     return $this->parseRadixInt(substr($clean, 2), 8);
                 }
+                // Legacy leading-zero octal (`0777`), still valid in PHP 8
+                // beside `0o777` — and the spelling every file-permission
+                // literal in the wild uses. A following 8/9 makes the literal
+                // invalid in PHP; we fall through to decimal there rather than
+                // fatal, which never mis-reads a *valid* literal.
+                if ($second >= 48 && $second <= 55) {  // '0'..'7'
+                    return $this->parseRadixInt(substr($clean, 1), 8);
+                }
             }
         }
         return (int)$clean;

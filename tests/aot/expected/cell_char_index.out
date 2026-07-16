@@ -1,0 +1,29 @@
+-- string cell, char index --
+int(5)
+string(1) "h"
+string(1) "e"
+string(1) "o"
+string(1) "o"
+-- string cell, negative index --
+string(1) "o"
+string(1) "h"
+-- array cell, int index --
+string(4) "zero"
+string(3) "two"
+string(3) "one"
+-- mixed subject, both shapes --
+string(1) "a"
+string(1) "c"
+int(10)
+int(30)
+-- index expression evaluated once --
+string(1) "e"
+int(1)
+-- statically-typed string still works --
+string(1) "w"
+string(1) "d"
+-- statically-typed array still works --
+int(7)
+int(9)
+-- cell string in a loop --
+string(10) "h.e.l.l.o."

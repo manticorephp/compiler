@@ -1,0 +1,106 @@
+-- flat list --
+array (
+  0 => 1,
+  1 => 2,
+)
+-- assoc --
+array (
+  'a' => 1,
+  'b' => 'x',
+)
+-- nested --
+array (
+  'a' => 
+  array (
+    0 => 1,
+    1 => 2,
+  ),
+  'b' => 
+  array (
+    'c' => true,
+  ),
+)
+-- deep nest --
+array (
+  'x' => 
+  array (
+    'y' => 
+    array (
+      'z' => 1,
+    ),
+  ),
+)
+-- empty --
+array (
+)
+-- mixed value kinds --
+array (
+  0 => 1,
+  1 => 1.5,
+  2 => 's',
+  3 => true,
+  4 => false,
+  5 => NULL,
+)
+-- float keeps .0 --
+array (
+  0 => 100.0,
+  1 => 0.1,
+  2 => -2.5,
+)
+-- quoting --
+array (
+  0 => 'a\'b',
+  1 => 'c\\d',
+  2 => 'both\'\\here',
+)
+-- sparse + mixed keys --
+array (
+  3 => 'a',
+  'k' => 'b',
+  4 => 'c',
+)
+-- return mode --
+array (
+  0 => 1,
+  1 => 
+  array (
+    'x' => 2,
+  ),
+)
+bool(true)
+-- scalars still inline --
+1
+'s'
+NULL
+true
+1.0
+-- from a cell-returning function --
+array (
+  'a' => 'xx',
+  'b' => 'yy',
+)
+'str'
+-- element of a returned array --
+a='xx'
+b='yy'
+-- pathinfo round-trip --
+array (
+  'dirname' => '/www/htdocs/inc',
+  'basename' => 'lib.inc.php',
+  'extension' => 'php',
+  'filename' => 'lib.inc',
+)
+-- int-keyed nested list --
+array (
+  0 => 
+  array (
+    0 => 1,
+    1 => 2,
+  ),
+  1 => 
+  array (
+    0 => 3,
+    1 => 4,
+  ),
+)

@@ -113,19 +113,21 @@ function trim(string $s, string $mask = " \t\n\r\0\x0B"): string
  * the cheap byte path; multi-character needles fall to memcmp.
  */
 /**
- * Index of the last `$needle` occurrence in `$haystack`, or -1 when
- * not found. PHP's official signature returns int|false; we collapse
- * to -1 because the compiler's union-typing for return values is
- * still in flight. Callers that need PHP-strict semantics can wrap.
+ * Index of the last `$needle` occurrence in `$haystack`, or false when
+ * not found — php.net semantics, matching strpos/stripos.
  */
-function strrpos(string $haystack, string $needle, int $offset = 0): int
+function strrpos(string $haystack, string $needle, int $offset = 0): int|false
 {
     $hLen = \strlen($haystack);
     $nLen = \strlen($needle);
-    if ($nLen === 0) { return -1; }
-    if ($nLen > $hLen) { return -1; }
+    // PHP 8 allows an empty needle: it matches at the end of the haystack,
+    // clamped by a negative offset (strrpos('abc', '', -1) === 2).
+    if ($nLen === 0) {
+        return $offset < 0 ? \max(0, $hLen + $offset) : $hLen;
+    }
+    if ($nLen > $hLen) { return false; }
     $start = $hLen - $nLen;
-    if ($offset > 0 && $offset > $start) { return -1; }
+    if ($offset > 0 && $offset > $start) { return false; }
     if ($offset < 0) {
         $start = \max(0, $hLen + $offset - $nLen);
     }
@@ -134,28 +136,37 @@ function strrpos(string $haystack, string $needle, int $offset = 0): int
             return $i;
         }
     }
-    return -1;
+    return false;
 }
 
-/** Same `-1`-for-not-found convention as the inline 2-arg builtin. */
-function strpos(string $haystack, string $needle, int $offset = 0): int
+/**
+ * Offset of the first `$needle` occurrence, or false when not found —
+ * php.net semantics. Direct `strpos(...)` calls are served by the inline
+ * builtin (EmitLlvmBuiltins), which already returns false; this body is the
+ * symbol a callable-string path (`array_map('strpos', ...)`) resolves to, so
+ * it must agree with the builtin rather than carry its own convention.
+ */
+function strpos(string $haystack, string $needle, int $offset = 0): int|false
 {
     // Self-host robustness: the `?string` → `string` coerce sometimes
     // hands us a null ptr that the strict-equal guards upstream
     // miss. Belt-and-braces — treat null haystack/needle as "no
     // match" rather than feeding it to libc strlen.
-    if ($haystack === null || $needle === null) { return -1; }
+    if ($haystack === null || $needle === null) { return false; }
     $hLen = \strlen($haystack);
     $nLen = \strlen($needle);
-    if ($nLen === 0) { return -1; }
-    if ($offset >= $hLen) { return -1; }
+    // PHP 8 allows an empty needle: it matches at the offset itself.
+    if ($nLen === 0) {
+        return $offset < 0 ? \max(0, $hLen + $offset) : \min($offset, $hLen);
+    }
+    if ($offset >= $hLen) { return false; }
     if ($offset < 0) { $offset = \max(0, $hLen + $offset); }
     for ($i = $offset; $i + $nLen <= $hLen; $i = $i + 1) {
         if (\Runtime\Libc\memcmp(\substr($haystack, $i, $nLen), $needle, $nLen) === 0) {
             return $i;
         }
     }
-    return -1;
+    return false;
 }
 
 /**

@@ -1,0 +1,54 @@
+-- int vs bool --
+bool(false)
+bool(true)
+bool(false)
+bool(false)
+bool(false)
+bool(true)
+-- int vs float --
+bool(false)
+bool(false)
+bool(true)
+-- float vs bool --
+bool(false)
+bool(false)
+-- int vs string --
+bool(false)
+-- string vs bool --
+bool(false)
+-- vs null --
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+-- same-type compares still work --
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+-- side effects on a folded compare still happen --
+bool(false)
+int(1)
+int(7)
+-- strrpos/strripos php.net false semantics --
+bool(false)
+bool(true)
+int(0)
+bool(false)
+bool(true)
+int(3)
+bool(false)
+int(3)
+bool(false)
+int(3)
+-- strpos parity (unchanged) --
+bool(false)
+bool(true)
+int(0)
+bool(false)
+bool(false)

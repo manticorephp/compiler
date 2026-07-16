@@ -1946,6 +1946,26 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
+        // `===` / `!==` between two statically-different scalar kinds folds to
+        // false / true: PHP's strict compare demands identical types, and
+        // int/float/bool all ride the same raw i64|double carrier. Without the
+        // fold the generic path compares carriers, so `0 === false`, `1 === true`
+        // and `0 === 0.0` all came out true. Both sides are still emitted — the
+        // operands may have side effects. (string/null carry distinctly and are
+        // handled above; cell/unknown stay runtime-tagged and must not fold.)
+        $lkS = $c->left->type->kind;
+        $rkS = $c->right->type->kind;
+        $rawScalar = [Type::KIND_INT => true, Type::KIND_FLOAT => true, Type::KIND_BOOL => true];
+        if (($op === '===' || $op === '!==')
+            && isset($rawScalar[$lkS]) && isset($rawScalar[$rkS])
+            && $lkS !== $rkS) {
+            $out = $this->emitNode($c->left);
+            $out .= $this->emitNode($c->right);
+            $this->lastValue = ($op === '===') ? '0' : '1';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+
         // `cell === false` / `!== false` (e.g. `strpos(...) === false`).
         // A NaN-boxed `int|false` is false iff its tag is BOOL(2); a
         // boxed int never equals false. Compare the tag, skip payload.

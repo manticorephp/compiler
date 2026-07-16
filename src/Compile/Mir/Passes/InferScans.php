@@ -626,6 +626,17 @@ trait InferScans
         $cand = [];                      // "fn#idx" → true
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
+            // A prelude function is emitted linkonce_odr into EVERY module that
+            // uses it, and the linker keeps one copy — so this module's call
+            // sites are not all of them, and the body it compiles may be the one
+            // another object ends up running. Narrowing on the sites visible here
+            // makes two objects define the same symbol with different bodies
+            // (e.g. sort() over vec[int] takes the arena path while sort() over
+            // vec[string] takes __mir_array_alloc + rc release), and whichever
+            // the linker keeps is wrong for the other caller. The scan's whole
+            // premise — that an unobserved site leaves the param a cell — only
+            // holds for a symbol this module owns outright.
+            if ($fn->isPrelude) { continue; }
             $idx = 0;
             foreach ($fn->params as $p) {
                 if ($p->byRef && !$p->variadic
