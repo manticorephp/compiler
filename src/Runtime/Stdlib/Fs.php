@@ -246,11 +246,19 @@ function ftruncate(\Ffi\Ptr $stream, int $size): bool
 /**
  * Advisory lock. $operation is LOCK_SH (1) / LOCK_EX (2) / LOCK_UN (3),
  * optionally | LOCK_NB (4).
+ *
+ * PHP's LOCK_* constants are PHP's own values and do NOT all match flock(2):
+ * LOCK_UN is 3 in PHP but 8 to the OS, where 3 means LOCK_SH|LOCK_EX and is
+ * rejected with EINVAL. LOCK_SH/LOCK_EX/LOCK_NB coincide numerically on both
+ * Darwin and Linux. Zend performs the same translation.
  * @param resource $stream
  */
 function flock(\Ffi\Ptr $stream, int $operation): bool
 {
-    return \Runtime\Libc\sys_flock(\__mc_fileno($stream), $operation) === 0;
+    $op = $operation & 3;
+    if ($op === 3) { $op = 8; }
+    if (($operation & 4) !== 0) { $op = $op | 4; }
+    return \Runtime\Libc\sys_flock(\__mc_fileno($stream), $op) === 0;
 }
 
 /**

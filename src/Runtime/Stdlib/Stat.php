@@ -20,6 +20,7 @@
  * One `struct stat` field offset for the running host, by index:
  *   0 mode  1 mode_w  2 nlink  3 nlink_w  4 ino  5 uid
  *   6 gid   7 atime   8 mtime  9 ctime   10 size 11 bufsz
+ *  12 dev  13 dev_w  14 rdev  15 rdev_w  16 blksize  17 blksize_w  18 blocks
  * (_w suffixes are the member's width in bytes, not an offset.)
  *
  * The table is deliberately NOT returned as an array. An assoc BUILT INSIDE the
@@ -43,6 +44,13 @@ function __mc_stat_off(int $which): int
     static $ctime = 0;
     static $size = 0;
     static $bufsz = 0;
+    static $dev = 0;
+    static $devW = 0;
+    static $rdev = 0;
+    static $rdevW = 0;
+    static $blksize = 0;
+    static $blksizeW = 0;
+    static $blocks = 0;
 
     if ($ready === 0) {
         // sysname is at offset 0 of struct utsname on both hosts; `machine` is
@@ -63,10 +71,13 @@ function __mc_stat_off(int $which): int
             // Darwin (arm64 and x86_64 share the 64-bit-inode layout):
             // dev@0 mode@4:u16 nlink@6:u16 ino@8 uid@16 gid@20 rdev@24 [pad]
             // atimespec@32 mtimespec@48 ctimespec@64 birthtimespec@80 size@96
+            // blocks@104 blksize@112:u32
             $mode = 4;  $modeW = 2;  $nlink = 6;  $nlinkW = 2;
             $ino = 8;   $uid = 16;  $gid = 20;
             $atime = 32; $mtime = 48; $ctime = 64;
             $size = 96; $bufsz = 144;
+            $dev = 0; $devW = 4; $rdev = 24; $rdevW = 4;
+            $blksize = 112; $blksizeW = 4; $blocks = 104;
         } elseif ($isArm) {
             // Linux/arm64 (asm-generic/stat.h):
             // dev@0 ino@8 mode@16:u32 nlink@20:u32 uid@24 gid@28 rdev@32 pad@40
@@ -75,6 +86,8 @@ function __mc_stat_off(int $which): int
             $ino = 8;   $uid = 24;  $gid = 28;
             $atime = 72; $mtime = 88; $ctime = 104;
             $size = 48; $bufsz = 128;
+            $dev = 0; $devW = 8; $rdev = 32; $rdevW = 8;
+            $blksize = 56; $blksizeW = 4; $blocks = 64;
         } else {
             // Linux/x86_64 (glibc bits/stat.h):
             // dev@0 ino@8 nlink@16 mode@24:u32 uid@28 gid@32 pad@36 rdev@40
@@ -83,6 +96,8 @@ function __mc_stat_off(int $which): int
             $ino = 8;   $uid = 28;  $gid = 32;
             $atime = 72; $mtime = 88; $ctime = 104;
             $size = 48; $bufsz = 144;
+            $dev = 0; $devW = 8; $rdev = 40; $rdevW = 8;
+            $blksize = 56; $blksizeW = 8; $blocks = 64;
         }
 
         // Verify the table CHOICE, not every field: "/" is a directory with at
@@ -122,7 +137,14 @@ function __mc_stat_off(int $which): int
     if ($which === 8)  { return $mtime; }
     if ($which === 9)  { return $ctime; }
     if ($which === 10) { return $size; }
-    return $bufsz;
+    if ($which === 11) { return $bufsz; }
+    if ($which === 12) { return $dev; }
+    if ($which === 13) { return $devW; }
+    if ($which === 14) { return $rdev; }
+    if ($which === 15) { return $rdevW; }
+    if ($which === 16) { return $blksize; }
+    if ($which === 17) { return $blksizeW; }
+    return $blocks;
 }
 
 /**
@@ -178,6 +200,113 @@ function __mc_stat_at(string $path, int $off, int $width = 8): int|false
     $v = $width === 4 ? \peek_u32($buf, $off) : \peek_i64($buf, $off);
     \Runtime\Libc\free($buf);
     return $v;
+}
+
+/**
+ * One `struct stat` member out of an already-filled buffer, honouring the
+ * member's width. A width of 4 must NOT be read as i64 — that would swallow the
+ * next member.
+ */
+function __mc_stat_field(\Ffi\Ptr $buf, int $offIdx, int $widthIdx): int
+{
+    $w = \__mc_stat_off($widthIdx);
+    $off = \__mc_stat_off($offIdx);
+    if ($w === 2) { return \peek_u16($buf, $off); }
+    if ($w === 4) { return \peek_u32($buf, $off); }
+    return \peek_i64($buf, $off);
+}
+
+/**
+ * php.net's stat() array out of a filled buffer: 13 values under numeric keys
+ * 0..12, then the same 13 under their string names.
+ *
+ * Built from ONE filled buffer rather than the per-field __mc_stat_at helpers:
+ * those re-stat on every call, so composing them would cost 13 syscalls and
+ * could tear if the file changed halfway through.
+ * @return array<int|string,int>
+ */
+function __mc_stat_buf_array(\Ffi\Ptr $buf): array
+{
+    $dev     = \__mc_stat_field($buf, 12, 13);
+    $ino     = \peek_i64($buf, \__mc_stat_off(4));
+    $mode    = \__mc_stat_field($buf, 0, 1);
+    $nlink   = \__mc_stat_field($buf, 2, 3);
+    $uid     = \peek_u32($buf, \__mc_stat_off(5));
+    $gid     = \peek_u32($buf, \__mc_stat_off(6));
+    $rdev    = \__mc_stat_field($buf, 14, 15);
+    $size    = \peek_i64($buf, \__mc_stat_off(10));
+    $atime   = \peek_i64($buf, \__mc_stat_off(7));
+    $mtime   = \peek_i64($buf, \__mc_stat_off(8));
+    $ctime   = \peek_i64($buf, \__mc_stat_off(9));
+    $blksize = \__mc_stat_field($buf, 16, 17);
+    $blocks  = \peek_i64($buf, \__mc_stat_off(18));
+    return [
+        0 => $dev, 1 => $ino, 2 => $mode, 3 => $nlink, 4 => $uid,
+        5 => $gid, 6 => $rdev, 7 => $size, 8 => $atime, 9 => $mtime,
+        10 => $ctime, 11 => $blksize, 12 => $blocks,
+        'dev' => $dev, 'ino' => $ino, 'mode' => $mode, 'nlink' => $nlink,
+        'uid' => $uid, 'gid' => $gid, 'rdev' => $rdev, 'size' => $size,
+        'atime' => $atime, 'mtime' => $mtime, 'ctime' => $ctime,
+        'blksize' => $blksize, 'blocks' => $blocks,
+    ];
+}
+
+/**
+ * stat(2) as php.net's 26-entry array, or false on failure.
+ * @return array<int|string,int>|false
+ */
+function stat(string $filename): array|false
+{
+    $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
+    if ($buf === null) {
+        return false;
+    }
+    if (!\__mc_stat_into($filename, $buf, false)) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    $a = \__mc_stat_buf_array($buf);
+    \Runtime\Libc\free($buf);
+    return $a;
+}
+
+/**
+ * lstat(2) — like stat(), but a symlink is described rather than followed.
+ * @return array<int|string,int>|false
+ */
+function lstat(string $filename): array|false
+{
+    $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
+    if ($buf === null) {
+        return false;
+    }
+    if (!\__mc_stat_into($filename, $buf, true)) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    $a = \__mc_stat_buf_array($buf);
+    \Runtime\Libc\free($buf);
+    return $a;
+}
+
+/**
+ * fstat(2) — stat() of an already-open stream.
+ * @param resource $stream
+ * @return array<int|string,int>|false
+ */
+function fstat(\Ffi\Ptr $stream): array|false
+{
+    $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
+    if ($buf === null) {
+        return false;
+    }
+    if (\Runtime\Libc\sys_fstat(\__mc_fileno($stream), $buf) !== 0) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    $a = \__mc_stat_buf_array($buf);
+    \Runtime\Libc\free($buf);
+    return $a;
 }
 
 /** Size of a file in bytes, or false on failure. */
@@ -287,15 +416,9 @@ function filetype(string $filename): string|false
 
 // ── directory iteration ───────────────────────────────────────────────────
 //
-// scandir() is deliberately absent: it needs sort(), and sort() lives in the
-// prelude, which is emitted linkonce_odr into both stdlib.o and the calling
-// program. Those two copies are NOT interchangeable — each is specialised for
-// its own module's memory mode — so the linker keeping one arbitrarily gave
-// scandir the wrong body. Lands once the specialisation is encoded in the
-// mangled name.
-// struct dirent also moves: d_name sits at 21 on Darwin (after a u64 d_ino, a
-// u64 d_seekoff, u16 d_reclen, u16 d_namlen, u8 d_type) and at 19 on Linux
-// (u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type).
+// struct dirent moves between hosts: d_name sits at 21 on Darwin (after a u64
+// d_ino, a u64 d_seekoff, u16 d_reclen, u16 d_namlen, u8 d_type) and at 19 on
+// Linux (u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type).
 
 /** Byte offset of dirent.d_name for the running host. */
 function __mc_dirent_name_off(): int
@@ -361,4 +484,65 @@ function closedir(\Ffi\Ptr $dir_handle): void
 function rewinddir(\Ffi\Ptr $dir_handle): void
 {
     \Runtime\Libc\sys_rewinddir($dir_handle);
+}
+
+/**
+ * Byte-wise comparison of two strings, strcmp(3) semantics.
+ *
+ * scandir orders its entries with strcmp, NOT with sort()'s comparison: PHP
+ * compares two NUMERIC strings numerically, so sort() puts ["10","9"] in that
+ * order as ["9","10"] where scandir gives ["10","9"]. ord() forces an integer
+ * compare — `$a[$i] < $b[$i]` on digit characters would hit the very same
+ * numeric-string rule.
+ */
+function __mc_strcmp_bytes(string $a, string $b): int
+{
+    $la = \strlen($a);
+    $lb = \strlen($b);
+    $n = $la < $lb ? $la : $lb;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $ca = \ord($a[$i]);
+        $cb = \ord($b[$i]);
+        if ($ca !== $cb) {
+            return $ca < $cb ? -1 : 1;
+        }
+    }
+    if ($la === $lb) {
+        return 0;
+    }
+    return $la < $lb ? -1 : 1;
+}
+
+/**
+ * List the entries of a directory (including "." and ".."), or false on
+ * failure. $sorting_order is SCANDIR_SORT_ASCENDING (0) / _DESCENDING (1) /
+ * _NONE (2).
+ * @return string[]|false
+ */
+function scandir(string $directory, int $sorting_order = 0): array|false
+{
+    $d = \Runtime\Libc\sys_opendir($directory);
+    if ($d === null) {
+        return false;
+    }
+    $off = \__mc_dirent_name_off();
+    $out = [];
+    while (true) {
+        $e = \Runtime\Libc\sys_readdir($d);
+        if ($e === null) {
+            break;
+        }
+        $out[] = \cstr_to_str(\ptr_offset($e, $off));
+    }
+    \Runtime\Libc\sys_closedir($d);
+    if ($sorting_order === 0) {
+        \usort($out, function (string $a, string $b): int {
+            return \__mc_strcmp_bytes($a, $b);
+        });
+    } elseif ($sorting_order === 1) {
+        \usort($out, function (string $a, string $b): int {
+            return \__mc_strcmp_bytes($b, $a);
+        });
+    }
+    return $out;
 }

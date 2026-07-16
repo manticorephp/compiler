@@ -209,6 +209,9 @@ function sys_stat(string $path, Ptr $buf): int {}
 #[Library('c'), Symbol('lstat')]
 function sys_lstat(string $path, Ptr $buf): int {}
 
+#[Library('c'), Symbol('fstat')]
+function sys_fstat(#[CType('int')] int $fd, Ptr $buf): int {}
+
 #[Library('c'), Symbol('opendir'), Give]
 function sys_opendir(string $path): Ptr {}
 

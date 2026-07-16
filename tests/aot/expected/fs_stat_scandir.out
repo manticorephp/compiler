@@ -1,0 +1,25 @@
+-- scandir --
+.,..,10,9,a.txt,b.txt,lnk,sub
+sub,lnk,b.txt,a.txt,9,10,..,.
+8
+-- stat --
+26
+2 2
+1
+reg
+dir
+-- lstat --
+link
+reg
+2
+-- fstat --
+2 2
+reg
+-- flock --
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+-- done --

@@ -301,7 +301,10 @@ trait LowerPrelude
             'SEEK_SET' => 0, 'SEEK_CUR' => 1, 'SEEK_END' => 2,
             'FILE_USE_INCLUDE_PATH' => 1, 'FILE_APPEND' => 8,
             'FILE_IGNORE_NEW_LINES' => 2, 'FILE_SKIP_EMPTY_LINES' => 4, 'FILE_NO_DEFAULT_CONTEXT' => 16,
-            'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3,
+            // PHP's LOCK_* are PHP's own values, not the OS's — flock() translates.
+            'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3, 'LOCK_NB' => 4,
+            'SCANDIR_SORT_ASCENDING' => 0, 'SCANDIR_SORT_DESCENDING' => 1,
+            'SCANDIR_SORT_NONE' => 2,
             'PATHINFO_DIRNAME' => 1, 'PATHINFO_BASENAME' => 2,
             'PATHINFO_EXTENSION' => 4, 'PATHINFO_FILENAME' => 8, 'PATHINFO_ALL' => 15,
         ];
