@@ -338,7 +338,10 @@ trait InferScans
                 && $fn->params[0]->type->class !== null) {
                 $cls = $fn->params[0]->type->class;
             }
-            if ($cls === '') { continue; }
+            // A FREE function / top-level main has no `$this`, but it can still
+            // fill another object's property (`$b->xs[] = "a"`) — the collector
+            // resolves those from the receiver's type, so scan it too. `$cls`
+            // stays '' and only gates the `$this->` arm.
             $this->collectPropElemStores($fn->body, $cls, $observed, $unusable);
         }
         $changed = false;

@@ -498,9 +498,9 @@ final class InferTypes implements Pass
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS) {
-                if ($se->array->object->kind === Node::KIND_LOAD_LOCAL
-                    && $se->array->object->name === 'this') {
-                    $key = $cls . '::' . $se->array->property;
+                $owner = $this->propElemStoreOwner($se->array->object, $cls);
+                if ($owner !== '') {
+                    $key = $owner . '::' . $se->array->property;
                     $vt = $se->value->type;
                     if (!$this->isBoxablePropElem($vt)) {
                         $unusable[$key] = true;
@@ -514,6 +514,24 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $c) { $this->collectPropElemStores($c, $cls, $observed, $unusable); }
+    }
+
+    /**
+     * Class whose property an element store targets: `$this->p[] = v` inside a
+     * method of C → C; `$o->p[] = v` through a receiver typed `obj<D>` → D (any
+     * function, including a free one / top-level main).
+     *
+     * Without the typed-receiver arm the scan only ever saw `$this->` stores, so
+     * a property filled from OUTSIDE its class (`$b->xs[] = "a"`) kept an ERASED
+     * element — and the read then guessed a repr, printing string elements as
+     * garbage floats (`implode` → `2.1e-314`).
+     */
+    private function propElemStoreOwner(Node $obj, string $cls): string
+    {
+        if ($obj->kind === Node::KIND_LOAD_LOCAL && $obj->name === 'this') { return $cls; }
+        $t = $obj->type;
+        if ($t->kind === Type::KIND_OBJ && $t->class !== null) { return $t->class; }
+        return '';
     }
 
     private function findPropReturns(Node $n, string $cls, Type $rt): void
