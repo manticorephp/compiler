@@ -1,0 +1,52 @@
+int(-1)
+int(2)
+int(0)
+int(2)
+int(-1)
+int(1)
+int(0)
+int(-1)
+int(1)
+int(0)
+int(-1)
+int(1)
+int(0)
+int(-1)
+int(1)
+int(0)
+int(-1)
+int(1)
+int(1)
+int(0)
+int(0)
+int(-1)
+int(1)
+int(-1)
+int(1)
+int(1)
+int(-1)
+int(-1)
+int(1)
+int(-1)
+int(1)
+int(0)
+int(-1)
+int(0)
+int(1)
+int(-1)
+int(0)
+int(1)
+int(-1)
+int(0)
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)
+Array
+(
+    [0] => img10
+    [1] => img12
+    [2] => img2
+)

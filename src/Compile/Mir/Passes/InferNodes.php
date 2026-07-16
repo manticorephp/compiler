@@ -433,6 +433,7 @@ trait InferNodes
         if ($kind === Node::KIND_TERNARY)     { return $this->inferTernary($node); }
         if ($kind === Node::KIND_CONCAT)      { return $this->inferConcat($node); }
         if ($kind === Node::KIND_CMP)         { return $this->inferCmp($node); }
+        if ($kind === Node::KIND_SPACESHIP)   { return $this->inferSpaceship($node); }
         if ($kind === Node::KIND_ECHO)        { return $this->inferEcho($node); }
         if ($kind === Node::KIND_RETURN)      { return $this->inferReturn($node); }
         if ($kind === Node::KIND_CALL)        { return $this->inferCall($node); }
@@ -805,6 +806,14 @@ trait InferNodes
         $this->inferNode($node->left);
         $this->inferNode($node->right);
         return $node->type; // always string
+    }
+
+    /** `<=>` always yields an int; both operands still need inferring. */
+    private function inferSpaceship(\Compile\Mir\Spaceship $node): Type
+    {
+        $this->inferNode($node->left);
+        $this->inferNode($node->right);
+        return Type::int_();
     }
 
     private function inferCmp(Cmp $node): Type

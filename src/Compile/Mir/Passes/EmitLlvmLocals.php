@@ -174,7 +174,8 @@ trait EmitLlvmLocals
             return $out . $this->preallocateLocals($n->body);
         }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
-            || $k === Node::KIND_MOD || $k === Node::KIND_CMP) {
+            || $k === Node::KIND_MOD || $k === Node::KIND_CMP
+            || $k === Node::KIND_SPACESHIP) {
             return $this->preallocateLocals($this->binLeft($n))
                  . $this->preallocateLocals($this->binRight($n));
         }

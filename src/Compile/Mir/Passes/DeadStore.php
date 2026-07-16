@@ -128,7 +128,7 @@ final class DeadStore implements Pass
         if ($n->kind === Node::KIND_BITOP) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
         if ($n->kind === Node::KIND_BITNOT) { $this->collectUses($n->operand); return; }
         if ($n->kind === Node::KIND_CONCAT) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
-        if ($n->kind === Node::KIND_CMP) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
+        if ($n->kind === Node::KIND_CMP || $n->kind === Node::KIND_SPACESHIP) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
         if ($n->kind === Node::KIND_CAST) { $this->collectUses($n->operand); return; }
         if ($n->kind === Node::KIND_INSTANCEOF) { $this->collectUses($n->operand); return; }
         if ($n->kind === Node::KIND_NULLCOALESCE) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
@@ -380,7 +380,7 @@ final class DeadStore implements Pass
         if ($n->kind === Node::KIND_BITOP) { return $this->isPure($n->left) && $this->isPure($n->right); }
         if ($n->kind === Node::KIND_BITNOT) { return $this->isPure($n->operand); }
         if ($n->kind === Node::KIND_CONCAT) { return $this->isPure($n->left) && $this->isPure($n->right); }
-        if ($n->kind === Node::KIND_CMP) { return $this->isPure($n->left) && $this->isPure($n->right); }
+        if ($n->kind === Node::KIND_CMP || $n->kind === Node::KIND_SPACESHIP) { return $this->isPure($n->left) && $this->isPure($n->right); }
         return false;
     }
 }

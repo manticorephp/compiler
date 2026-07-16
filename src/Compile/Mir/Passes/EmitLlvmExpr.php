@@ -1052,19 +1052,32 @@ trait EmitLlvmExpr
         $out .= "  %anum = call i1 @__mir_cell_numeric(i64 %a)\n";
         $out .= "  %bnum = call i1 @__mir_cell_numeric(i64 %b)\n";
         $out .= "  %bothnum = and i1 %anum, %bnum\n";
-        $out .= "  br i1 %bothnum, label %fcmp, label %scmp\n";
-        $out .= "scmp:\n";
-        $out .= "  %pa = and i64 %a, 281474976710655\n";
-        $out .= "  %ppa = inttoptr i64 %pa to ptr\n";
-        $out .= "  %pb = and i64 %b, 281474976710655\n";
-        $out .= "  %ppb = inttoptr i64 %pb to ptr\n";
+        $out .= "  br i1 %bothnum, label %fcmp, label %strcmp\n";
+        $out .= "strcmp:\n";
+        $out .= "  %ppa = call ptr @__manticore_tagged_to_str(i64 %a)\n";
+        $out .= "  %ppb = call ptr @__manticore_tagged_to_str(i64 %b)\n";
         $out .= "  %sc = call i64 @__mir_str_cmp(ptr %ppa, ptr %ppb)\n";
-        $out .= "  ret i64 %sc\n";
+        // str_cmp hands back the raw byte difference; this function's contract is
+        // -1/0/+1 (a `<=>` result is returned verbatim now, not merely tested
+        // against 0), so normalize the sign.
+        $out .= "  %sclt = icmp slt i64 %sc, 0\n";
+        $out .= "  %scgt = icmp sgt i64 %sc, 0\n";
+        $out .= "  %scsel = select i1 %scgt, i64 1, i64 0\n";
+        $out .= "  %scres = select i1 %sclt, i64 -1, i64 %scsel\n";
+        $out .= "  ret i64 %scres\n";
         $out .= "chkint:\n";
         $out .= "  %ai = icmp eq i64 %ta, 1\n";
         $out .= "  %bi = icmp eq i64 %tb, 1\n";
         $out .= "  %bothint = and i1 %ai, %bi\n";
-        $out .= "  br i1 %bothint, label %icmp, label %fcmp\n";
+        $out .= "  br i1 %bothint, label %icmp, label %chkmix\n";
+        // Exactly one side is a string, and (having missed %chknum) at least one
+        // of the pair is NOT numeric: PHP casts the NUMBER to a string and
+        // compares as strings, so `5 < "abc"` is true ('5' < 'a') and
+        // `"abc" <=> 99999999999` is 1. Comparing the raw carriers instead only
+        // agreed by accident — a string pointer happens to outrank a small int.
+        $out .= "chkmix:\n";
+        $out .= "  %anystr = or i1 %as, %bs\n";
+        $out .= "  br i1 %anystr, label %strcmp, label %fcmp\n";
         $out .= "icmp:\n";
         $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
         $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
@@ -2395,6 +2408,112 @@ trait EmitLlvmExpr
         $out .= '  ' . $reg . ' = call ptr ' . $fn . '(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `$a <=> $b` → i64 -1/0/+1, each operand evaluated ONCE. Mirrors emitCmp's
+     * routing: two typed arrays go to the recursive array compare, raw numbers
+     * keep an inline icmp/fcmp, and everything else boxes and walks PHP's table
+     * through tagged_compare (so a numeric string, a bool or a null operand
+     * juggles). Two arrays whose element representation the runtime can't
+     * normalize keep the old pointer answer rather than guess.
+     */
+    private function emitSpaceship(\Compile\Mir\Spaceship $n): string
+    {
+        $out = $this->emitNode($n->left);
+        $l = $this->lastValue; $lt = $this->lastValueType;
+        $out .= $this->emitNode($n->right);
+        $r = $this->lastValue; $rt = $this->lastValueType;
+        $lk = $n->left->type->kind;
+        $rk = $n->right->type->kind;
+        $bothArr = $lk === Type::KIND_ARRAY && $rk === Type::KIND_ARRAY;
+
+        if ($bothArr) {
+            $eka = $this->elemChainOf($n->left->type->element);
+            $ekb = $this->elemChainOf($n->right->type->element);
+            if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && $this->chainsComparable($eka, $ekb)) {
+                $this->rt->needsTaggedCompare = true;
+                $lp = $l;
+                if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+                $rp = $r;
+                if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = call i64 @__mir_array_compare(ptr ' . $lp . ', i64 ' . $eka
+                      . ', ptr ' . $rp . ', i64 ' . $ekb . ")\n";
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
+        // Raw numbers: an inline compare, no boxing. int/bool ride i64; anything
+        // with a float side goes through doubles.
+        $lRawNum = $lk === Type::KIND_INT || $lk === Type::KIND_BOOL || $lk === Type::KIND_FLOAT;
+        $rRawNum = $rk === Type::KIND_INT || $rk === Type::KIND_BOOL || $rk === Type::KIND_FLOAT;
+        if ($lRawNum && $rRawNum) {
+            $useF = $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT
+                || $lt === 'double' || $rt === 'double';
+            if ($useF) {
+                $ld = $l;
+                if ($lt !== 'double') { $ld = $this->ssa->allocReg(); $out .= '  ' . $ld . ' = sitofp i64 ' . $l . " to double\n"; }
+                $rd = $r;
+                if ($rt !== 'double') { $rd = $this->ssa->allocReg(); $out .= '  ' . $rd . ' = sitofp i64 ' . $r . " to double\n"; }
+                $lt2 = $this->ssa->allocReg();
+                $out .= '  ' . $lt2 . ' = fcmp olt double ' . $ld . ', ' . $rd . "\n";
+                $gt = $this->ssa->allocReg();
+                $out .= '  ' . $gt . ' = fcmp ogt double ' . $ld . ', ' . $rd . "\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 1, i64 0' . "\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = select i1 ' . $lt2 . ', i64 -1, i64 ' . $sel . "\n";
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            $lt2 = $this->ssa->allocReg();
+            $out .= '  ' . $lt2 . ' = icmp slt i64 ' . $l . ', ' . $r . "\n";
+            $gt = $this->ssa->allocReg();
+            $out .= '  ' . $gt . ' = icmp sgt i64 ' . $l . ', ' . $r . "\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 1, i64 0' . "\n";
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = select i1 ' . $lt2 . ', i64 -1, i64 ' . $sel . "\n";
+            $this->lastValue = $res;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Two arrays the chain can't describe (a raw obj element): boxing would
+        // tell the tagged runtime the elements are cells. Keep the old answer.
+        if (!$bothArr) {
+            $this->rt->needsTaggedCompare = true;
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $out .= $this->shallowBoxToCell($n->left->type);
+            $li = $this->lastValue;
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $out .= $this->shallowBoxToCell($n->right->type);
+            $ri = $this->lastValue;
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = call i64 @__manticore_tagged_compare(i64 ' . $li
+                  . ', i64 ' . $ri . ")\n";
+            $this->lastValue = $res;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $li = $l;
+        if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+        $ri = $r;
+        if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+        $ltr = $this->ssa->allocReg();
+        $out .= '  ' . $ltr . ' = icmp ult i64 ' . $li . ', ' . $ri . "\n";
+        $gtr = $this->ssa->allocReg();
+        $out .= '  ' . $gtr . ' = icmp ugt i64 ' . $li . ', ' . $ri . "\n";
+        $sel = $this->ssa->allocReg();
+        $out .= '  ' . $sel . ' = select i1 ' . $gtr . ', i64 1, i64 0' . "\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $ltr . ', i64 -1, i64 ' . $sel . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
         return $out;
     }
 

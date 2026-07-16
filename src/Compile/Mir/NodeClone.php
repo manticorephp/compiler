@@ -49,6 +49,7 @@ final class NodeClone
         if ($k === Node::KIND_MUL) { $x = self::asMul($n); return new Mul(self::node($x->left), self::node($x->right), $n->type); }
         if ($k === Node::KIND_DIV) { $x = self::asDiv($n); return new Div(self::node($x->left), self::node($x->right), $n->type); }
         if ($k === Node::KIND_MOD) { $x = self::asMod($n); return new Mod(self::node($x->left), self::node($x->right), $n->type); }
+        if ($k === Node::KIND_SPACESHIP) { $sp = self::asSpaceship($n); return new \Compile\Mir\Spaceship(self::node($sp->left), self::node($sp->right)); }
         if ($k === Node::KIND_CMP) { $x = self::asCmp($n); return new Cmp(self::node($x->left), self::node($x->right), $x->op); }
         if ($k === Node::KIND_CONCAT) { $x = self::asConcat($n); return new Concat(self::node($x->left), self::node($x->right)); }
         if ($k === Node::KIND_BITOP) { $x = self::asBitOp($n); return new BitOp($x->op, self::node($x->left), self::node($x->right), $n->type); }
@@ -202,6 +203,7 @@ final class NodeClone
     private static function asDiv(Node $n): Div { return $n; }
     private static function asMod(Node $n): Mod { return $n; }
     private static function asCmp(Node $n): Cmp { return $n; }
+    private static function asSpaceship(Node $n): \Compile\Mir\Spaceship { return $n; }
     private static function asConcat(Node $n): Concat { return $n; }
     private static function asBitOp(Node $n): BitOp { return $n; }
     private static function asNeg(Node $n): Neg { return $n; }

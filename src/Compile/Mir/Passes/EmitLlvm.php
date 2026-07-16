@@ -1856,6 +1856,7 @@ final class EmitLlvm implements EmitVisitor
         if ($k === Node::KIND_DIV) { return $n->left; }
         if ($k === Node::KIND_MOD) { return $n->left; }
         if ($k === Node::KIND_CMP) { return $n->left; }
+        if ($k === Node::KIND_SPACESHIP) { return $n->left; }
         throw new \RuntimeException('binLeft: unexpected node kind');
     }
 
@@ -1868,6 +1869,7 @@ final class EmitLlvm implements EmitVisitor
         if ($k === Node::KIND_DIV) { return $n->right; }
         if ($k === Node::KIND_MOD) { return $n->right; }
         if ($k === Node::KIND_CMP) { return $n->right; }
+        if ($k === Node::KIND_SPACESHIP) { return $n->right; }
         throw new \RuntimeException('binRight: unexpected node kind');
     }
 }

@@ -394,6 +394,29 @@ final class Cmp extends Node
     }
 }
 
+/**
+ * `$a <=> $b` → -1 / 0 / +1. A PRIMITIVE, not `($a > $b) - ($a < $b)`: that
+ * expansion evaluated BOTH operands TWICE (a side-effecting operand ran twice,
+ * and a sort comparator paid for two full compares), and it cannot express
+ * PHP's uncomparable answer. Field order matches the other binLeft/binRight
+ * binary nodes so a base-`Node`-typed `->left` read lands on the same slot.
+ */
+final class Spaceship extends Node
+{
+    public function __construct(
+        public Node $left,
+        public Node $right,
+    ) {
+        parent::__construct(Node::KIND_SPACESHIP, Type::int_());
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitSpaceship($this);
+    }
+}
+
+
 // ── Control flow ──────────────────────────────────────────────────
 
 final class If_ extends Node

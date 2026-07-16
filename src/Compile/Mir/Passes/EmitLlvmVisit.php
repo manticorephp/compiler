@@ -226,6 +226,11 @@ trait EmitLlvmVisit
         return $this->emitMemoryOp($n);
     }
 
+    public function visitSpaceship(\Compile\Mir\Spaceship $n): string
+    {
+        return $this->emitSpaceship($n);
+    }
+
     public function visitCmp(Cmp $n): string
     {
         return $this->emitCmp($n);

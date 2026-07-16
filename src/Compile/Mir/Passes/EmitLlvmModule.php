@@ -230,6 +230,9 @@ trait EmitLlvmModule
             $this->rt->needsTagged        = true;
             $this->rt->needsTaggedToFloat = true;
             $this->rt->needsTaggedTruthy  = true;
+            // tagged_compare stringifies a number to compare it against a
+            // NON-numeric string (PHP's `5 < "abc"`).
+            $this->rt->needsTaggedToStr   = true;
             $this->rt->needsStrcmp        = true;
             $this->rt->needsStrtod        = true;
         }

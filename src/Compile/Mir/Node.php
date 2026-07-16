@@ -37,6 +37,7 @@ abstract class Node
     public const KIND_CONCAT = 'concat';
 
     public const KIND_CMP = 'cmp';
+    public const KIND_SPACESHIP = 'spaceship';
     public const KIND_INCDEC  = 'incdec';
     public const KIND_TERNARY = 'ternary';
     public const KIND_CAST    = 'cast';
