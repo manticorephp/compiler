@@ -1,0 +1,18 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn nc(cell %x) -> int {
+  %0 = load_local x : cell
+  nullcoalesce %0 else {
+    %1 = int_const 42 : int
+    -> %1
+  } => %2 : cell
+  return %2
+}
+
+fn __main() -> int {
+  %0 = null_const : null
+  %1 = call nc(%0) : int
+  %2 = int_const 5 : int
+  %3 = call nc(%2) : int
+  echo %1, %3
+}

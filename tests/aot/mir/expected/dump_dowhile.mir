@@ -1,0 +1,25 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn countdown(int %n) -> int {
+  %0 = int_const 0 : int
+  %1 = store_local t <- %0 : int
+  dowhile {
+    %2 = load_local t : int
+    %3 = load_local n : int
+    %4 = add %2, %3 : int
+    %5 = store_local t <- %4 : int
+    %6 = incdec n-- : int
+    %7 = load_local n : int
+    %8 = int_const 0 : int
+    %9 = cmp > %7, %8 : bool
+    check %9
+  }
+  %10 = load_local t : int
+  return %10
+}
+
+fn __main() -> int {
+  %0 = int_const 4 : int
+  %1 = call countdown(%0) : int
+  echo %1
+}
