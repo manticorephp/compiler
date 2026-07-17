@@ -342,6 +342,13 @@ trait EmitLlvmMemory
      *  the exact mirror of {@see rcReleaseReg}. */
     private function rcRetainReg(string $i64reg, string $flavor): string
     {
+        // Mirror of the cell branch in rcReleaseReg: raw i64, tag-dispatched,
+        // never inttoptr'd.
+        if ($flavor === 'cell') {
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            return '  call void @__mir_cell_retain(i64 ' . $i64reg . ")\n";
+        }
         $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
@@ -368,6 +375,17 @@ trait EmitLlvmMemory
         // Every vec/assoc flavor releases through the one __mir_array_release*
         // (mode-driven; drops hashed string keys, and the _obj/_str variants
         // drop element values). str/obj scalars keep their own helpers.
+        // A CELL carries its type in the tag, not in the static type, so it
+        // cannot be inttoptr'd: the payload may be an int/float/null with no
+        // pointer at all. __mir_cell_drop takes the RAW i64 and dispatches on
+        // the tag (str / obj / nested array, scalars a no-op), self-guarding on
+        // payload > 0xFFFF and RC_TAG_MAGIC. Same helper the cell-array element
+        // walker already uses per element.
+        if ($flavor === 'cell') {
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            return '  call void @__mir_cell_drop(i64 ' . $i64reg . ")\n";
+        }
         $fn = '@__mir_array_release';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_release'; }

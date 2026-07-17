@@ -27,6 +27,14 @@ function __mir_var_dump(mixed $v, int $indent): void
         echo 'string(', (string)strlen($sv), ') "', $sv, "\"\n";
         return;
     }
+    // BEFORE is_object: a \Resource IS an object to us (php says it is not), so
+    // the object arm would swallow it and print its guts — including the raw
+    // backing address. php prints `resource(5) of type (stream)`, and a closed
+    // one keeps its id but reports type "Unknown" (close() sets that).
+    if ($v instanceof \Resource) {
+        echo 'resource(', (string)$v->id, ') of type (', $v->type, ")\n";
+        return;
+    }
     if (is_object($v)) { __mir_dump_object($v, $indent); return; }
     echo 'array(', (string)count($v), ") {\n";
     foreach ($v as $k => $val) {

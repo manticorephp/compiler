@@ -15,6 +15,18 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <glob.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/time.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <errno.h>
+/* fcntl.h for O_NONBLOCK/F_GETFL: glibc drags it in transitively, musl does
+ * NOT — alpine caught this and glibc hid it, which is the whole point of the
+ * sweep. */
+#include <fcntl.h>
 
 /* Guarded at the use site by #ifdef: a missing constant is reported, not fatal. */
 #define SHOW(name)      printf("const.%s\t%ld\n", #name, (long)(name))
@@ -164,6 +176,72 @@ int main(void)
     printf("sizeof.glob_t\t%ld\n", (long)sizeof(glob_t));
     printf("offset.glob_t.gl_pathc\t%ld\n", (long)offsetof(glob_t, gl_pathc));
     printf("offset.glob_t.gl_pathv\t%ld\n", (long)offsetof(glob_t, gl_pathv));
+
+    /* ---- struct addrinfo (Ф2 sockets) ----
+     * THE reason this block exists: Darwin orders ai_canonname BEFORE ai_addr,
+     * glibc the other way round. Everything else about the client path is
+     * designed to need no layout knowledge at all, but this table is
+     * unavoidable -- getaddrinfo's result has to be walked. Measure it. */
+    SIZ(addrinfo);
+    OFF(addrinfo, ai_flags);
+    OFF(addrinfo, ai_family);
+    OFF(addrinfo, ai_socktype);
+    OFF(addrinfo, ai_protocol);
+    OFF(addrinfo, ai_addrlen);
+    OFF(addrinfo, ai_addr);
+    OFF(addrinfo, ai_canonname);
+    OFF(addrinfo, ai_next);
+    {
+        struct addrinfo a;
+        printf("width.addrinfo.ai_addrlen\t%ld\n", (long)sizeof(a.ai_addrlen));
+        printf("width.addrinfo.ai_flags\t%ld\n", (long)sizeof(a.ai_flags));
+    }
+
+    /* ---- struct pollfd ---- poll() is the timeout mechanism precisely because
+     * this struct, unlike timeval/SO_RCVTIMEO, does not vary. Verify that. */
+    SIZ(pollfd);
+    OFF(pollfd, fd);
+    OFF(pollfd, events);
+    OFF(pollfd, revents);
+    {
+        struct pollfd pf;
+        printf("width.pollfd.events\t%ld\n", (long)sizeof(pf.events));
+    }
+
+    /* ---- struct timeval ---- not used by the design (poll() instead), probed
+     * to keep the record of WHY: tv_usec is 4 bytes on Darwin, 8 on glibc. */
+    SIZ(timeval);
+    OFF(timeval, tv_sec);
+    OFF(timeval, tv_usec);
+    {
+        struct timeval tv;
+        printf("width.timeval.tv_sec\t%ld\n", (long)sizeof(tv.tv_sec));
+        printf("width.timeval.tv_usec\t%ld\n", (long)sizeof(tv.tv_usec));
+    }
+
+    /* ---- struct sockaddr_in ---- also not needed by the design (getaddrinfo's
+     * ai_addr is passed to connect() opaquely); probed to prove that choice is
+     * worth it -- Darwin has sin_len@0 so sin_family sits at 1, glibc at 0. */
+    SIZ(sockaddr_in);
+    OFF(sockaddr_in, sin_family);
+    OFF(sockaddr_in, sin_port);
+    {
+        struct sockaddr_in si;
+        printf("width.sockaddr_in.sin_family\t%ld\n", (long)sizeof(si.sin_family));
+    }
+
+    /* ---- network constants ---- */
+    SHOW(AF_UNSPEC); SHOW(AF_INET); SHOW(AF_INET6);
+    SHOW(SOCK_STREAM); SHOW(SOCK_DGRAM);
+    SHOW(IPPROTO_TCP); SHOW(IPPROTO_IP);
+    SHOW(SOL_SOCKET); SHOW(TCP_NODELAY);
+    SHOW(SO_ERROR); SHOW(SO_KEEPALIVE); SHOW(SO_REUSEADDR);
+    SHOW(SO_RCVTIMEO); SHOW(SO_SNDTIMEO);
+    SHOW(POLLIN); SHOW(POLLOUT); SHOW(POLLERR); SHOW(POLLHUP); SHOW(POLLNVAL);
+    SHOW(AI_PASSIVE); SHOW(AI_CANONNAME); SHOW(AI_NUMERICHOST);
+    SHOW(EINPROGRESS); SHOW(EAGAIN); SHOW(EWOULDBLOCK); SHOW(EINTR); SHOW(ECONNREFUSED);
+    SHOW(SHUT_RD); SHOW(SHUT_WR); SHOW(SHUT_RDWR);
+    SHOW(O_NONBLOCK); SHOW(F_GETFL); SHOW(F_SETFL);
 
     return 0;
 }

@@ -291,10 +291,10 @@ function lstat(string $filename): array|false
 
 /**
  * fstat(2) — stat() of an already-open stream.
- * @param resource $stream
+ * @param \Resource $stream
  * @return array<int|string,int>|false
  */
-function fstat(\Ffi\Ptr $stream): array|false
+function fstat(\Resource $stream): array|false
 {
     $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
     if ($buf === null) {
@@ -459,7 +459,7 @@ function __mc_dirent_name_off(): int
 
 /**
  * Open a directory handle, or false on failure.
- * @return resource|false
+ * @return \Resource|false
  */
 function opendir(string $directory)
 {
@@ -467,19 +467,20 @@ function opendir(string $directory)
     if ($d === null) {
         return false;
     }
-    return $d;
+    // php reports a DIR as type "stream", not "dir" — verified against php 8.5.
+    return new \Resource(\Resource::KIND_DIR, 'stream', \ptr_to_int($d));
 }
 
 /**
  * Next entry name, or false when the directory is exhausted. Note php.net's
  * quirk: an entry legitimately named "0" is falsy, so callers must compare
  * with `!== false`.
- * @param resource $dir_handle
+ * @param \Resource $dir_handle
  * @return string|false
  */
-function readdir(\Ffi\Ptr $dir_handle)
+function readdir(\Resource $dir_handle)
 {
-    $e = \Runtime\Libc\sys_readdir($dir_handle);
+    $e = \Runtime\Libc\sys_readdir(\int_to_ptr($dir_handle->addr));
     if ($e === null) {
         return false;
     }
@@ -488,20 +489,20 @@ function readdir(\Ffi\Ptr $dir_handle)
 
 /**
  * Close a directory handle.
- * @param resource $dir_handle
+ * @param \Resource $dir_handle
  */
-function closedir(\Ffi\Ptr $dir_handle): void
+function closedir(\Resource $dir_handle): void
 {
-    \Runtime\Libc\sys_closedir($dir_handle);
+    $dir_handle->close();
 }
 
 /**
  * Rewind a directory handle to the start.
- * @param resource $dir_handle
+ * @param \Resource $dir_handle
  */
-function rewinddir(\Ffi\Ptr $dir_handle): void
+function rewinddir(\Resource $dir_handle): void
 {
-    \Runtime\Libc\sys_rewinddir($dir_handle);
+    \Runtime\Libc\sys_rewinddir(\int_to_ptr($dir_handle->addr));
 }
 
 /**

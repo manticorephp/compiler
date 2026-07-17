@@ -219,9 +219,17 @@ trait LowerTypes
         // resolve to obj<Ffi\Ptr> even in a module (the stdlib) that does NOT
         // register the Ffi\Ptr class — otherwise it erases to `unknown`, the
         // .sig drops the type, and a cross-module caller boxes the handle (ABI
-        // mismatch → the FILE* is read from NaN-boxed bits → crash). PHP has no
-        // writable `resource` type, so a `resource` hint is left to the normal
-        // (unknown class) path, matching PHP.
+        // mismatch → the FILE* is read from NaN-boxed bits → crash).
+        //
+        // A bare `resource` hint falls through to the unknown-class path below
+        // and erases to `unknown`. That is NOT "matching PHP", as this comment
+        // used to claim: php has no `resource` type either, so it reads the hint
+        // as a CLASS NAME and raises "must be of type resource, resource given"
+        // at runtime. Our public handle type is the prelude class `\Resource`,
+        // and the lookup is case-SENSITIVE, so `resource` does not reach it
+        // while `\Resource` does — php would match both, being case-insensitive
+        // on class names. A niche divergence, since php code cannot usefully
+        // hint either one.
         if ($low === 'ffi\\ptr') { return Type::obj('Ffi\\Ptr'); }
         // `\Closure` is a header-less closure struct ([fn_ptr, captures...]),
         // never rc-managed. Typing it KIND_CLOSURE (not obj) keeps every rc
@@ -317,8 +325,11 @@ trait LowerTypes
         // a class type carry their class for dispatch + __toString).
         // `Ffi\Ptr` stays obj<Ffi\Ptr> but is treated as an opaque FOREIGN
         // pointer downstream: excluded from rc (InsertMemoryOps) and given
-        // a RUNTIME null-compare (EmitLlvm) since fopen/opendir genuinely
-        // return NULL at runtime.
+        // a RUNTIME null-compare (EmitLlvm) since `Runtime\Libc\fopen` /
+        // `sys_opendir` genuinely return NULL. A Ptr now stops at that FFI
+        // boundary: the PUBLIC handle type is the prelude class `\Resource`,
+        // which owns the address and can carry a destructor — a Ptr is excluded
+        // from rc, so it can own nothing.
         if (isset($this->classTable[$cls]) || isset($this->knownClassNames[$cls])) {
             return Type::obj($cls);
         }

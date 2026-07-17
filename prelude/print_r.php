@@ -25,6 +25,11 @@ function __mir_print_r(mixed $v, int $indent): void
             echo "\n";
         }
         echo $pad, ")\n";
+    } else if ($v instanceof \Resource) {
+        // Before the is_object arm, which is true for a \Resource here (php
+        // disagrees) and would print `Resource Object\n(\n)\n`. php prints
+        // `Resource id #5`, with no trailing newline of its own.
+        echo 'Resource id #', (string)$v->id;
     } else if (is_object($v)) {
         $pad = str_repeat(' ', $indent);
         echo get_class($v), " Object\n", $pad, "(\n", $pad, ")\n";

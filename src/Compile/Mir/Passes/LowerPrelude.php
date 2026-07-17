@@ -110,7 +110,7 @@ trait LowerPrelude
      */
     private function preludeStatements(): array
     {
-        $src = "<?php\n" . $this->exceptionsSrc . $this->backtraceSrc;
+        $src = "<?php\n" . $this->exceptionsSrc . $this->resourceSrc . $this->backtraceSrc;
         if ($this->includeVarDump) {
             $src = $src . $this->varDumpSrc;
         }
@@ -248,11 +248,21 @@ trait LowerPrelude
         if ($name === 'PHP_INT_MIN') { return new IntConst(-9223372036854775807 - 1, Type::int_()); }
         if ($name === 'INF') { return new FloatConst(\INF, Type::float_()); }
         if ($name === 'NAN') { return new FloatConst(\NAN, Type::float_()); }
-        // Standard CLI stream resources (libc FILE*). A codegen builtin loads
-        // the platform global so fwrite(STDOUT, ...) shares echo's buffer.
-        if ($name === 'STDIN')  { return new Call('__mir_stdin',  [], Type::obj('Ffi\\Ptr')); }
-        if ($name === 'STDOUT') { return new Call('__mir_stdout', [], Type::obj('Ffi\\Ptr')); }
-        if ($name === 'STDERR') { return new Call('__mir_stderr', [], Type::obj('Ffi\\Ptr')); }
+        // Standard CLI stream resources. The `__mir_std*` builtins still load the
+        // platform FILE* global (so fwrite(STDOUT, …) shares echo's buffer), but
+        // the CONSTANT is a \Resource like every other handle — the f* family is
+        // typed \Resource and would otherwise reject STDOUT. __mc_std_res caches
+        // one per stream, so `STDOUT === STDOUT` and the ids stay stable.
+        // The FILE* comes from the `__mir_std*` BUILTIN, emitted HERE at the
+        // mention — it must not be called from the stdlib. Resolving those
+        // globals needs host_os() (glibc `stdin` vs Apple `__stdinp`), and the
+        // emitter only runs it when a program uses a stream; the compiler's own
+        // src/ never does, which is what keeps the Zend cold-seed alive (see
+        // EmitLlvmModule's needsStdStreams block). A stdlib fn that mentioned
+        // them would make src/ itself use a stream and kill the bootstrap.
+        if ($name === 'STDIN')  { return new Call('__mc_std_res', [new IntConst(0, Type::int_()), new Call('__mir_stdin',  [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
+        if ($name === 'STDOUT') { return new Call('__mc_std_res', [new IntConst(1, Type::int_()), new Call('__mir_stdout', [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
+        if ($name === 'STDERR') { return new Call('__mc_std_res', [new IntConst(2, Type::int_()), new Call('__mir_stderr', [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
 
         $ints = [
             // string padding

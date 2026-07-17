@@ -1,0 +1,22 @@
+-- union return, unset --
+bool(false)
+close:1
+after unset
+-- union return, false arm --
+bool(true)
+bool(true)
+after unset false
+-- reassignment drops the old one --
+close:2
+after reassign
+close:3
+-- scope exit --
+  using 4
+close:4
+after scope
+-- cell holding a scalar must not be dropped as a pointer --
+int(42)
+bool(false)
+-- cell holding a string --
+hello
+-- done --
