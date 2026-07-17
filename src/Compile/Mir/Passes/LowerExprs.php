@@ -467,9 +467,11 @@ trait LowerExprs
         if ($op === '.') {
             return new Concat($left, $right);
         }
-        // Spaceship: `$a <=> $b` → `($a > $b) - ($a < $b)` ∈ {-1,0,1}.
+        // Spaceship: a primitive that evaluates each operand ONCE. The old
+        // `($a > $b) - ($a < $b)` expansion ran both twice (side effects
+        // included) and could not express PHP's uncomparable answer.
         if ($op === '<=>') {
-            return new Sub(new Cmp($left, $right, '>'), new Cmp($left, $right, '<'), Type::int_());
+            return new \Compile\Mir\Spaceship($left, $right);
         }
         $type = ($left->type->kind === Type::KIND_FLOAT
             || $right->type->kind === Type::KIND_FLOAT)

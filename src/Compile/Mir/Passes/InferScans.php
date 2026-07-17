@@ -763,6 +763,81 @@ trait InferScans
         return $changed;
     }
 
+    /**
+     * A local array whose element erased to UNKNOWN while a store writes an
+     * already-CELL value into it (`$out = []; … $out[$k] = $v;` with `$v` an
+     * erased foreach value). {@see coarseValueClass} can't see this: it is a
+     * PRE-inference scan and `$v` is a variable read, so it classifies nothing
+     * and the ≥2-distinct-kinds rule never fires on the single store. The local
+     * then keeps vec[unknown], so every READ of it (`foreach ($out as $w)`) is a
+     * raw i64 and `$w == $v` compares a boxed int against a boxed string BY BITS
+     * — which is why array_unique stopped de-duplicating `1` against `"1"`.
+     *
+     * Runs after a first inference pass (when `$v` has a type) and records the
+     * local so the next inferFunction seeds it vec[cell]. True when it found
+     * something new — the driver re-infers.
+     */
+    private function scanLocalElemFromStores(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            // A PRELUDE body is emitted linkonce_odr and SHARED with stdlib.o, so
+            // it must never be specialized from module-local information: the
+            // value type of `$out[] = $cb(...)` in array_map depends on THIS
+            // module's callback, so one module would emit a vec[cell] body and
+            // another a vec[string] body under the same symbol — the linker keeps
+            // one and the other module's rc discipline is wrong (libmalloc abort).
+            // A prelude local that needs a cell element says so at the source,
+            // with a `/** @var mixed[] */` on its binding. See the prelude-linkage
+            // note in docs/.
+            if ($fn->isPrelude) { continue; }
+            // A PARAM is the CALLER's array — its elements keep whatever
+            // representation the caller built, and storing a cell into it can't
+            // retroactively make them cells. Forcing vec[cell] on one made the
+            // rc walkers drop raw string elements as cells (libmalloc abort in
+            // stat_functions). Only a locally-CONSTRUCTED `[]` is ours to retype.
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            $found = [];
+            $this->scanLocalElemNode($fn->body, $found);
+            foreach ($found as $name => $unused) {
+                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
+                if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Locals assigned an array LITERAL in this body — the ones whose element
+     *  representation this function itself owns. @param array<string,bool> $out */
+    private function scanArrayLitLocals(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->value->kind === Node::KIND_ARRAY_LIT) {
+            $out[$n->name] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->scanArrayLitLocals($c, $out); }
+    }
+
+    /** @param array<string,bool> $found */
+    private function scanLocalElemNode(Node $n, array &$found): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL
+                && $se->array->type->isArray()
+                && $se->array->type->element !== null
+                && $se->array->type->element->kind === Type::KIND_UNKNOWN
+                && $se->value->type->kind === Type::KIND_CELL) {
+                $found[$se->array->name] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanLocalElemNode($c, $found); }
+    }
+
     private function scanFloatLocals(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {

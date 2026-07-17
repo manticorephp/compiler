@@ -104,6 +104,7 @@ final class Dump
         if ($kind === Node::KIND_BITNOT)       { return $this->emitBitNot($node, $indent); }
         if ($kind === Node::KIND_CONCAT)       { return $this->emitConcat($node, $indent); }
         if ($kind === Node::KIND_CMP)          { return $this->emitCmp($node, $indent); }
+        if ($kind === Node::KIND_SPACESHIP)    { return $this->emitSpaceship($node, $indent); }
         if ($kind === Node::KIND_ECHO)         { return $this->emitEcho($node, $indent); }
         if ($kind === Node::KIND_RETURN)       { return $this->emitReturn($node, $indent); }
         if ($kind === Node::KIND_CALL)         { return $this->emitCall($node, $indent); }
@@ -454,6 +455,17 @@ final class Dump
         $name = $this->allocSlot();
         return $chunk . $indent . $name . ' = bitnot ' . $opName
              . ' : ' . $node->type->toString() . "\n";
+    }
+
+    private function emitSpaceship(\Compile\Mir\Spaceship $node, string $indent): string
+    {
+        $lChunk = $this->emitNode($node->left, $indent);
+        $lName  = $this->lastSlot;
+        $rChunk = $this->emitNode($node->right, $indent);
+        $rName  = $this->lastSlot;
+        $name   = $this->allocSlot();
+        return $lChunk . $rChunk . $indent . $name . ' = spaceship '
+             . $lName . ', ' . $rName . ' : ' . $node->type->toString() . "\n";
     }
 
     private function emitCmp(Cmp $node, string $indent): string

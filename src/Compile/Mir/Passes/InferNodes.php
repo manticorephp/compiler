@@ -223,6 +223,21 @@ trait InferNodes
                 $this->localTypes[$name] = Type::vec(Type::cell());
             }
         }
+        // A store of an already-CELL value into a local array makes its element a
+        // cell — one store is enough, and the pre-inference coarseValueClass scan
+        // above can't see it (the value is a variable read). scanLocalElemFromStores
+        // finds these after a first pass and seeds them here, so the re-infer types
+        // every read of the local as the cell it really holds.
+        foreach ($this->forcedCellElemLocals[$fn->name] ?? [] as $name => $unused) {
+            if (isset($this->recordLocals[$name])) { continue; }
+            $this->cellElemLocals[$name] = true;
+            if (isset($this->assocLocals[$name])) {
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+                $this->localTypes[$name] = Type::assoc($key, Type::cell());
+            } else {
+                $this->localTypes[$name] = Type::vec(Type::cell());
+            }
+        }
         // Nested-subscript mixed array: a local whose element is an inner array
         // built from an empty `[]` (→ vec[unknown]) that then receives a nested
         // SCALAR store (`$a[k][…] = "v"`) — the scalar would be written raw into
@@ -418,6 +433,7 @@ trait InferNodes
         if ($kind === Node::KIND_TERNARY)     { return $this->inferTernary($node); }
         if ($kind === Node::KIND_CONCAT)      { return $this->inferConcat($node); }
         if ($kind === Node::KIND_CMP)         { return $this->inferCmp($node); }
+        if ($kind === Node::KIND_SPACESHIP)   { return $this->inferSpaceship($node); }
         if ($kind === Node::KIND_ECHO)        { return $this->inferEcho($node); }
         if ($kind === Node::KIND_RETURN)      { return $this->inferReturn($node); }
         if ($kind === Node::KIND_CALL)        { return $this->inferCall($node); }
@@ -790,6 +806,14 @@ trait InferNodes
         $this->inferNode($node->left);
         $this->inferNode($node->right);
         return $node->type; // always string
+    }
+
+    /** `<=>` always yields an int; both operands still need inferring. */
+    private function inferSpaceship(\Compile\Mir\Spaceship $node): Type
+    {
+        $this->inferNode($node->left);
+        $this->inferNode($node->right);
+        return Type::int_();
     }
 
     private function inferCmp(Cmp $node): Type

@@ -232,3 +232,60 @@ function array_column(array $array, int|string|null $column_key, int|string|null
     }
     return $out;
 }
+
+/**
+ * The `array_keys($arr, $search_value, $strict)` form — the keys whose value
+ * matches `$search_value`. Split out of the codegen builtin (which only handles
+ * the all-keys form) and called by it with `$strict` always passed explicitly,
+ * so no default-padding is needed at the call site.
+ *
+ * `$arr` is `mixed`, NOT `array`: a foreach over a bare-`array` param leaves the
+ * VALUES raw (only the key is re-tagged), so `$v == $search` would compare a raw
+ * element against a boxed needle by bits. A cell subject yields cell values, and
+ * the builtin boxes the argument (rebuilding a raw vec into a cell vec) for it.
+ * @return mixed[]
+ */
+function __mc_array_keys_search(mixed $arr, mixed $search, bool $strict): array
+{
+    /** @var mixed[] $out */
+    $out = [];
+    foreach ($arr as $k => $v) {
+        if ($strict) {
+            if ($v === $search) { $out[] = $k; }
+        } else {
+            if ($v == $search) { $out[] = $k; }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `min($arr)` / `max($arr)` — the smallest / largest ELEMENT of a single array
+ * argument (PHP's one-arg form; two or more operands compare against each other
+ * in the codegen builtin instead). `$arr` is `mixed` so the foreach yields CELL
+ * values — a bare-`array` param leaves them raw, and the comparison would read a
+ * boxed element by bits. The builtin boxes the argument for it.
+ *
+ * The accumulator is seeded from the first ELEMENT, never from `null`: a
+ * `null|T` local types as NON-null, so the return coercion boxed an
+ * already-boxed cell a second time and var_dump printed the box's own bits.
+ * @return mixed
+ */
+function __mc_minmax_of(mixed $arr, bool $isMax): mixed
+{
+    /** @var mixed[] $vals */
+    $vals = [];
+    foreach ($arr as $v) { $vals[] = $v; }
+    $n = \count($vals);
+    if ($n === 0) { return false; }
+    $acc = $vals[0];
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $v = $vals[$i];
+        if ($isMax) {
+            if ($v > $acc) { $acc = $v; }
+        } else {
+            if ($v < $acc) { $acc = $v; }
+        }
+    }
+    return $acc;
+}

@@ -147,6 +147,7 @@ final class InlineClosures implements Pass
         if ($n->kind === Node::KIND_MUL) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         if ($n->kind === Node::KIND_DIV) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         if ($n->kind === Node::KIND_MOD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_SPACESHIP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         if ($n->kind === Node::KIND_CMP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         if ($n->kind === Node::KIND_CONCAT) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         if ($n->kind === Node::KIND_BITOP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
@@ -492,6 +493,7 @@ final class InlineClosures implements Pass
         if ($n->kind === Node::KIND_MUL) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
         if ($n->kind === Node::KIND_DIV) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
         if ($n->kind === Node::KIND_MOD) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
+        if ($n->kind === Node::KIND_SPACESHIP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
         if ($n->kind === Node::KIND_CMP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
         if ($n->kind === Node::KIND_CONCAT) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
         if ($n->kind === Node::KIND_BITOP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }

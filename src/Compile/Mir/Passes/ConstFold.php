@@ -106,6 +106,7 @@ final class ConstFold implements Pass
         if ($kind === Node::KIND_NOT)         { return $this->foldNot($n); }
         if ($kind === Node::KIND_CONCAT)      { return $this->foldConcat($n); }
         if ($kind === Node::KIND_CMP)         { return $this->foldCmp($n); }
+        if ($kind === Node::KIND_SPACESHIP)   { return $this->foldSpaceship($n); }
         if ($kind === Node::KIND_CAST)        { return $this->foldCast($n); }
         if ($kind === Node::KIND_INSTANCEOF)  { return $this->foldInstanceof($n); }
         if ($kind === Node::KIND_NULLCOALESCE){ return $this->foldNullCoalesce($n); }
@@ -589,6 +590,21 @@ final class ConstFold implements Pass
     }
 
     // ── Comparison ─────────────────────────────────────────────
+
+    private function foldSpaceship(\Compile\Mir\Spaceship $n): Node
+    {
+        $n->left  = $this->foldNode($n->left);
+        $n->right = $this->foldNode($n->right);
+        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+            $l = $n->left->value;
+            $r = $n->right->value;
+            $v = 0;
+            if ($l < $r) { $v = -1; }
+            if ($l > $r) { $v = 1; }
+            return new IntConst($v, Type::int_());
+        }
+        return $n;
+    }
 
     private function foldCmp(Cmp $n): Node
     {

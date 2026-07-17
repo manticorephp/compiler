@@ -563,28 +563,524 @@ trait EmitLlvmExpr
      * erased mixed array, where a raw int compare would order string keys by
      * pointer. Callers do `icmp <pred> result, 0`.
      */
+    /** True when any class in the module extends $cls (transitively). A variable
+     *  typed `C` may then hold a subclass at runtime, whose class identity and
+     *  extra properties the static property unroll can't see — PHP compares the
+     *  RUNTIME classes, so the unroll would be a guess. */
+    private function classHasSubclass(string $cls): bool
+    {
+        foreach ($this->classes as $cd) {
+            $p = $cd->parent;
+            $depth = 0;
+            // `isset`, NOT `$pd = … ?? null` + `$pd === null`: a `ClassDef|null`
+            // local types as NON-null and the native self-build leaves its slot
+            // un-zeroed, so the null test reads garbage and `->parent` walks it.
+            // (The compiler SIGSEGV'd on the first class with a parent.)
+            while ($p !== '' && $depth < 32) {
+                if ($p === $cls) { return true; }
+                if (!isset($this->classes[$p])) { break; }
+                $p = $this->classes[$p]->parent;
+                $depth = $depth + 1;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tag a raw value as a cell WITHOUT rebuilding an array's elements, unlike
+     * boxToCell (which deep-copies a raw vec into a cell vec). Sound only where
+     * the consumer can't inspect the elements — PHP's mixed rows (array vs bool,
+     * array vs scalar) settle on emptiness or on "an array is greater" and never
+     * look inside. `$this->lastValue` carries the operand in / the cell out.
+     */
+    private function shallowBoxToCell(Type $t): string
+    {
+        $this->rt->needsTagged = true;
+        return match ($t->kind) {
+            Type::KIND_CELL, Type::KIND_UNKNOWN => $this->coerceToI64(),
+            Type::KIND_ARRAY  => $this->shallowBoxCall('ptr', '@__manticore_box_array'),
+            Type::KIND_OBJ    => $this->shallowBoxCall('ptr', '@__manticore_box_object'),
+            Type::KIND_STRING => $this->shallowBoxCall('ptr', '@__manticore_box_ptr'),
+            Type::KIND_FLOAT  => $this->shallowBoxCall('double', '@__manticore_box_float'),
+            Type::KIND_BOOL   => $this->shallowBoxCall('i64', '@__manticore_box_bool'),
+            default           => $this->shallowBoxCall('i64', '@__manticore_box_int'),
+        };
+    }
+
+    private function shallowBoxCall(string $argTy, string $fn): string
+    {
+        $out = $argTy === 'ptr' ? $this->coerceToPtr()
+            : ($argTy === 'double' ? $this->coerceTo('double') : $this->coerceToI64());
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argTy . ' ' . $this->lastValue . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Element-kind tags for the array compare runtime. An array's element
+     * REPRESENTATION is a compile-time property (a `vec[int]` holds raw i64s, a
+     * `vec[cell]` holds NaN-boxed cells), and a raw element can NOT be
+     * tag-inspected — a large or negative int masquerades as a boxed pointer
+     * (the same trap __mir_array_copy_cells documents). So each call site passes
+     * the kind of each side's elements and the runtime normalizes to a cell.
+     */
+    private const EK_CELL   = 0;
+    private const EK_INT    = 1;
+    private const EK_FLOAT  = 2;
+    private const EK_STRING = 3;
+    private const EK_BOOL   = 4;
+    /** The element is a RAW nested array; the next nibble up describes ITS
+     *  elements (a `vec[vec[int]]` is 5 | (EK_INT << 4)). A raw inner array
+     *  can't be recovered from a tag, so the chain carries every level. */
+    private const EK_ARRAY  = 5;
+    /** Not a representation the array compare runtime can normalize. */
+    private const EK_NONE   = -1;
+
+    /**
+     * Encode a static element type as a chain of 4-bit {@see EK_CELL} kinds
+     * (LSB = this level) for the array compare runtime, or {@see EK_NONE} when
+     * some level isn't a representation the runtime can normalize (an object
+     * element in a RAW array) — the caller then keeps the old pointer-identity
+     * path. Returns a SENTINEL rather than null on purpose: a `?int` local is
+     * typed `null|int`, and the native self-build leaves that slot un-zeroed, so
+     * a `!== null` test reads garbage — it fired the array path on an `int`
+     * property and handed __mir_array_loose_eq the raw value 1 as a pointer.
+     */
+    private function elemChainOf(?Type $t, int $depth = 0): int
+    {
+        if ($t === null || $depth > 12) {
+            return self::EK_NONE;
+        }
+        if ($t->kind === Type::KIND_ARRAY) {
+            $inner = $this->elemChainOf($t->element, $depth + 1);
+            if ($inner === self::EK_NONE) { return self::EK_NONE; }
+            return self::EK_ARRAY | ($inner << 4);
+        }
+        return match ($t->kind) {
+            Type::KIND_CELL, Type::KIND_UNKNOWN => self::EK_CELL,
+            Type::KIND_INT                      => self::EK_INT,
+            Type::KIND_FLOAT                    => self::EK_FLOAT,
+            Type::KIND_STRING                   => self::EK_STRING,
+            Type::KIND_BOOL                     => self::EK_BOOL,
+            default                             => self::EK_NONE,
+        };
+    }
+
+    /**
+     * Two element chains are comparable only if a RAW nested array on one side
+     * meets a raw nested array on the other. A raw inner array facing a CELL
+     * would be boxed and handed to the tagged comparator, which assumes the
+     * "erased ⟹ cell" invariant and would read the raw side's elements as
+     * cells. Reject that pairing and let the caller fall back.
+     */
+    private function chainsComparable(int $a, int $b): bool
+    {
+        for ($i = 0; $i < 16; $i++) {
+            $na = ($a >> ($i * 4)) & 15;
+            $nb = ($b >> ($i * 4)) & 15;
+            if ($na === 0 && $nb === 0) {
+                return true;
+            }
+            if (($na === self::EK_ARRAY) !== ($nb === self::EK_ARRAY)) {
+                return false;
+            }
+            if ($na !== self::EK_ARRAY) {
+                return true;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * `__mir_elem_to_cell(v, ek) -> i64` — lift a raw array element to a cell so
+     * the tagged comparators can dispatch on it. EK_CELL is the identity; a raw
+     * double's bits are re-boxed through box_float so a signaling NaN can't
+     * collide with the tagged range (0xFFF1..0xFFF8).
+     */
+    private function elemToCellRuntime(): string
+    {
+        $out  = "\ndefine i64 @__mir_elem_to_cell(i64 %v, i64 %ek) {\nentry:\n";
+        $out .= "  %k = and i64 %ek, 15\n";
+        $out .= "  switch i64 %k, label %cell [\n";
+        $out .= "    i64 " . self::EK_INT    . ", label %asint\n";
+        $out .= "    i64 " . self::EK_FLOAT  . ", label %asfloat\n";
+        $out .= "    i64 " . self::EK_STRING . ", label %asstr\n";
+        $out .= "    i64 " . self::EK_BOOL   . ", label %asbool\n";
+        $out .= "    i64 " . self::EK_ARRAY  . ", label %asarr\n";
+        $out .= "  ]\n";
+        $out .= "cell:\n  ret i64 %v\n";
+        $out .= "asarr:\n";
+        $out .= "  %ap = inttoptr i64 %v to ptr\n";
+        $out .= "  %ba = call i64 @__manticore_box_array(ptr %ap)\n  ret i64 %ba\n";
+        $out .= "asint:\n";
+        $out .= "  %bi = call i64 @__manticore_box_int(i64 %v)\n  ret i64 %bi\n";
+        $out .= "asfloat:\n";
+        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= "  %bf = call i64 @__manticore_box_float(double %fd)\n  ret i64 %bf\n";
+        $out .= "asstr:\n";
+        $out .= "  %sp = inttoptr i64 %v to ptr\n";
+        $out .= "  %bs = call i64 @__manticore_box_ptr(ptr %sp)\n  ret i64 %bs\n";
+        $out .= "asbool:\n";
+        $out .= "  %bb = call i64 @__manticore_box_bool(i64 %v)\n  ret i64 %bb\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
+     * The array half of PHP's comparison table, over the unified array layout.
+     *
+     * `__mir_array_loose_eq(a, eka, b, ekb) -> i1` — PHP `==`: same count, and
+     * every key of `a` present in `b` with a loosely-equal value. Key ORDER is
+     * irrelevant (`['x'=>1,'y'=>2] == ['y'=>2,'x'=>1]`), so `b` is probed by key
+     * rather than walked in step.
+     *
+     * `__mir_array_strict_eq(a, eka, b, ekb) -> i1` — PHP `===`: same count,
+     * same key/value pairs in the SAME ORDER, compared strictly. Walks both in
+     * step and compares key i against key i.
+     *
+     * `__mir_array_compare(a, eka, b, ekb) -> i64` — PHP `<`/`>`/`<=>`: fewer
+     * members is smaller; at equal count the first key of `a` missing from `b`
+     * makes them uncomparable (PHP answers 1), else the first non-zero element
+     * comparison wins.
+     *
+     * All three recurse back into the tagged comparators for the elements, so a
+     * nested `[[1,2],[3]]` compares by value at every level.
+     */
+    private function arrayCompareRuntime(): string
+    {
+        $mask = '281474976710655';
+        $out  = $this->elemToCellRuntime();
+
+        // Walk `a`, probing `b` by key. Shared by loose_eq (loose element
+        // compare) and compare (ordering); $mode 'e' or 'c'.
+        $walk = function (string $mode) use ($mask): string {
+            $eq = $mode === 'e';
+            $fn = $eq ? '__mir_array_loose_eq' : '__mir_array_compare';
+            $ret = $eq ? 'i1' : 'i64';
+            $no  = $eq ? 'ret i1 false' : 'ret i64 1';
+            $out  = "\ndefine " . $ret . " @" . $fn . "(ptr %a, i64 %eka, ptr %b, i64 %ekb) {\nentry:\n";
+            $out .= "  %anull = icmp eq ptr %a, null\n";
+            $out .= "  %bnull = icmp eq ptr %b, null\n";
+            $out .= "  %anynull = or i1 %anull, %bnull\n";
+            $out .= "  br i1 %anynull, label %nulls, label %lens\n";
+            $out .= "nulls:\n";
+            $out .= "  %bothnull = and i1 %anull, %bnull\n";
+            $out .= $eq
+                ? "  ret i1 %bothnull\n"
+                : "  %nres = select i1 %bothnull, i64 0, i64 1\n  ret i64 %nres\n";
+            $out .= "lens:\n";
+            $out .= "  %la = load i64, ptr %a\n";
+            $out .= "  %lb = load i64, ptr %b\n";
+            if ($eq) {
+                $out .= "  %leneq = icmp eq i64 %la, %lb\n";
+                $out .= "  br i1 %leneq, label %loop, label %no\n";
+            } else {
+                // PHP: the array with fewer members is the smaller one.
+                $out .= "  %lenlt = icmp slt i64 %la, %lb\n";
+                $out .= "  %lengt = icmp sgt i64 %la, %lb\n";
+                $out .= "  %lendiff = or i1 %lenlt, %lengt\n";
+                $out .= "  br i1 %lendiff, label %bylen, label %loop\n";
+                $out .= "bylen:\n";
+                $out .= "  %lres = select i1 %lenlt, i64 -1, i64 1\n  ret i64 %lres\n";
+            }
+            $out .= "loop:\n";
+            $out .= "  %i = phi i64 [ 0, %lens ], [ %inext, %cont ]\n";
+            $out .= "  %done = icmp sge i64 %i, %la\n";
+            $out .= "  br i1 %done, label %yes, label %body\n";
+            $out .= "body:\n";
+            $out .= "  %k = call i64 @__mir_array_key_cell_at(ptr %a, i64 %i)\n";
+            $out .= "  %rawa = call i64 @__mir_array_value_at(ptr %a, i64 %i)\n";
+            $out .= "  %tk = call i64 @__manticore_tag(i64 %k)\n";
+            $out .= "  %kisstr = icmp eq i64 %tk, 4\n";
+            $out .= "  br i1 %kisstr, label %skey, label %ikey\n";
+            $out .= "skey:\n";
+            $out .= "  %kp = and i64 %k, " . $mask . "\n";
+            $out .= "  %kpp = inttoptr i64 %kp to ptr\n";
+            $out .= "  %hass = call i64 @__mir_array_isset_str(ptr %b, ptr %kpp)\n";
+            $out .= "  %hassb = icmp ne i64 %hass, 0\n";
+            $out .= "  br i1 %hassb, label %sget, label %no\n";
+            $out .= "sget:\n";
+            $out .= "  %rawb1 = call i64 @__mir_array_get_str(ptr %b, ptr %kpp)\n";
+            $out .= "  br label %have\n";
+            $out .= "ikey:\n";
+            $out .= "  %ki = call i64 @__manticore_unbox_int(i64 %k)\n";
+            $out .= "  %hasi = call i64 @__mir_array_isset_int(ptr %b, i64 %ki)\n";
+            $out .= "  %hasib = icmp ne i64 %hasi, 0\n";
+            $out .= "  br i1 %hasib, label %iget, label %no\n";
+            $out .= "iget:\n";
+            $out .= "  %rawb2 = call i64 @__mir_array_get_int(ptr %b, i64 %ki)\n";
+            $out .= "  br label %have\n";
+            // A RAW nested array on BOTH sides recurses one level down the chain
+            // instead of going through the tagged comparator — box_array'ing it
+            // would tell the tagged path the inner elements are cells, and they
+            // are not. emitCmp's chainsComparable() rejects the mixed pairing,
+            // so raw-vs-cell can't reach here.
+            $out .= "have:\n";
+            $out .= "  %rawb = phi i64 [ %rawb1, %sget ], [ %rawb2, %iget ]\n";
+            $out .= "  %eka0 = and i64 %eka, 15\n";
+            $out .= "  %ekb0 = and i64 %ekb, 15\n";
+            $out .= "  %aisarr = icmp eq i64 %eka0, " . self::EK_ARRAY . "\n";
+            $out .= "  %bisarr = icmp eq i64 %ekb0, " . self::EK_ARRAY . "\n";
+            $out .= "  %bothrawarr = and i1 %aisarr, %bisarr\n";
+            $out .= "  br i1 %bothrawarr, label %rec, label %viacell\n";
+            $out .= "rec:\n";
+            $out .= "  %reca = inttoptr i64 %rawa to ptr\n";
+            $out .= "  %recb = inttoptr i64 %rawb to ptr\n";
+            $out .= "  %eka1 = lshr i64 %eka, 4\n";
+            $out .= "  %ekb1 = lshr i64 %ekb, 4\n";
+            if ($eq) {
+                $out .= "  %re = call i1 @" . $fn . "(ptr %reca, i64 %eka1, ptr %recb, i64 %ekb1)\n";
+                $out .= "  br i1 %re, label %cont, label %no\n";
+            } else {
+                $out .= "  %rc = call i64 @" . $fn . "(ptr %reca, i64 %eka1, ptr %recb, i64 %ekb1)\n";
+                $out .= "  %rcz = icmp eq i64 %rc, 0\n";
+                $out .= "  br i1 %rcz, label %cont, label %recdiff\n";
+                $out .= "recdiff:\n  ret i64 %rc\n";
+            }
+            $out .= "viacell:\n";
+            $out .= "  %va = call i64 @__mir_elem_to_cell(i64 %rawa, i64 %eka)\n";
+            $out .= "  %vb = call i64 @__mir_elem_to_cell(i64 %rawb, i64 %ekb)\n";
+            if ($eq) {
+                $out .= "  %e = call i64 @__manticore_tagged_loose_eq(i64 %va, i64 %vb)\n";
+                $out .= "  %eb = icmp ne i64 %e, 0\n";
+                $out .= "  br i1 %eb, label %cont, label %no\n";
+            } else {
+                $out .= "  %c = call i64 @__manticore_tagged_compare(i64 %va, i64 %vb)\n";
+                $out .= "  %cz = icmp eq i64 %c, 0\n";
+                $out .= "  br i1 %cz, label %cont, label %diff\n";
+                $out .= "diff:\n  ret i64 %c\n";
+            }
+            $out .= "cont:\n";
+            $out .= "  %inext = add i64 %i, 1\n";
+            $out .= "  br label %loop\n";
+            $out .= $eq ? "yes:\n  ret i1 true\n" : "yes:\n  ret i64 0\n";
+            $out .= "no:\n  " . $no . "\n";
+            $out .= "}\n";
+            return $out;
+        };
+        $out .= $walk('e');
+        $out .= $walk('c');
+
+        // `===`: same length, same key/value pairs in the same ORDER.
+        $out .= "\ndefine i1 @__mir_array_strict_eq(ptr %a, i64 %eka, ptr %b, i64 %ekb) {\nentry:\n";
+        $out .= "  %anull = icmp eq ptr %a, null\n";
+        $out .= "  %bnull = icmp eq ptr %b, null\n";
+        $out .= "  %anynull = or i1 %anull, %bnull\n";
+        $out .= "  br i1 %anynull, label %nulls, label %lens\n";
+        $out .= "nulls:\n";
+        $out .= "  %bothnull = and i1 %anull, %bnull\n  ret i1 %bothnull\n";
+        $out .= "lens:\n";
+        $out .= "  %la = load i64, ptr %a\n";
+        $out .= "  %lb = load i64, ptr %b\n";
+        $out .= "  %leneq = icmp eq i64 %la, %lb\n";
+        $out .= "  br i1 %leneq, label %loop, label %no\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %lens ], [ %inext, %cont ]\n";
+        $out .= "  %done = icmp sge i64 %i, %la\n";
+        $out .= "  br i1 %done, label %yes, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %ka = call i64 @__mir_array_key_cell_at(ptr %a, i64 %i)\n";
+        $out .= "  %kb = call i64 @__mir_array_key_cell_at(ptr %b, i64 %i)\n";
+        $out .= "  %keq = call i64 @__manticore_tagged_strict_eq(i64 %ka, i64 %kb)\n";
+        $out .= "  %keqb = icmp ne i64 %keq, 0\n";
+        $out .= "  br i1 %keqb, label %vals, label %no\n";
+        $out .= "vals:\n";
+        $out .= "  %rawa = call i64 @__mir_array_value_at(ptr %a, i64 %i)\n";
+        $out .= "  %rawb = call i64 @__mir_array_value_at(ptr %b, i64 %i)\n";
+        $out .= "  %eka0 = and i64 %eka, 15\n";
+        $out .= "  %ekb0 = and i64 %ekb, 15\n";
+        $out .= "  %aisarr = icmp eq i64 %eka0, " . self::EK_ARRAY . "\n";
+        $out .= "  %bisarr = icmp eq i64 %ekb0, " . self::EK_ARRAY . "\n";
+        $out .= "  %bothrawarr = and i1 %aisarr, %bisarr\n";
+        $out .= "  br i1 %bothrawarr, label %rec, label %viacell\n";
+        $out .= "rec:\n";
+        $out .= "  %reca = inttoptr i64 %rawa to ptr\n";
+        $out .= "  %recb = inttoptr i64 %rawb to ptr\n";
+        $out .= "  %eka1 = lshr i64 %eka, 4\n";
+        $out .= "  %ekb1 = lshr i64 %ekb, 4\n";
+        $out .= "  %re = call i1 @__mir_array_strict_eq(ptr %reca, i64 %eka1, ptr %recb, i64 %ekb1)\n";
+        $out .= "  br i1 %re, label %cont, label %no\n";
+        $out .= "viacell:\n";
+        $out .= "  %va = call i64 @__mir_elem_to_cell(i64 %rawa, i64 %eka)\n";
+        $out .= "  %vb = call i64 @__mir_elem_to_cell(i64 %rawb, i64 %ekb)\n";
+        $out .= "  %veq = call i64 @__manticore_tagged_strict_eq(i64 %va, i64 %vb)\n";
+        $out .= "  %veqb = icmp ne i64 %veq, 0\n";
+        $out .= "  br i1 %veqb, label %cont, label %no\n";
+        $out .= "cont:\n";
+        $out .= "  %inext = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "yes:\n  ret i1 true\n";
+        $out .= "no:\n  ret i1 false\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
+     * The shared head of PHP's comparison table, emitted into both
+     * `tagged_loose_eq` ($mode 'e' → i64 0/1) and `tagged_compare` ($mode 'c'
+     * → i64 -1/0/+1). Expects %ta/%tb (the operand tags) live, and falls
+     * through to a `row4:` label the caller defines for the number/string row.
+     * Row order is load-bearing and follows the PHP manual's table top-down:
+     *   1. null <=> string   — NULL becomes "", compare as strings. MUST precede
+     *      the bool row: `null == "0"` is FALSE ("" vs "0"), but the bool row
+     *      would call both falsy and answer TRUE.
+     *   2. bool|null <=> anything — both sides to bool, FALSE < TRUE.
+     *   3. object <=> object, then object <=> anything (object is greater — this
+     *      outranks the array row, so an object beats an array).
+     *   4. array <=> array, then array <=> anything (array is greater).
+     * Everything else falls through to row4 (numbers, strings, numeric strings).
+     */
+    private function juggleRows(string $mode): string
+    {
+        $eq = $mode === 'e';
+        $mask = '281474976710655';
+        // Row 1 — null <=> string.
+        $out  = "  %r1a = icmp eq i64 %ta, 3\n";
+        $out .= "  %r1b = icmp eq i64 %tb, 4\n";
+        $out .= "  %r1ab = and i1 %r1a, %r1b\n";
+        $out .= "  br i1 %r1ab, label %nullstrB, label %chk1b\n";
+        $out .= "chk1b:\n";
+        $out .= "  %r1c = icmp eq i64 %ta, 4\n";
+        $out .= "  %r1d = icmp eq i64 %tb, 3\n";
+        $out .= "  %r1cd = and i1 %r1c, %r1d\n";
+        $out .= "  br i1 %r1cd, label %nullstrA, label %row2\n";
+        $out .= "nullstrB:\n";
+        $out .= "  %nsb = and i64 %b, $mask\n";
+        $out .= "  %nsbp = inttoptr i64 %nsb to ptr\n";
+        $out .= "  %nsbl = call i64 @__mir_strlen(ptr %nsbp)\n";
+        $out .= "  %nsbz = icmp eq i64 %nsbl, 0\n";
+        $out .= $eq
+            ? "  %nsbr = zext i1 %nsbz to i64\n  ret i64 %nsbr\n"
+            : "  %nsbr = select i1 %nsbz, i64 0, i64 -1\n  ret i64 %nsbr\n";
+        $out .= "nullstrA:\n";
+        $out .= "  %nsa = and i64 %a, $mask\n";
+        $out .= "  %nsap = inttoptr i64 %nsa to ptr\n";
+        $out .= "  %nsal = call i64 @__mir_strlen(ptr %nsap)\n";
+        $out .= "  %nsaz = icmp eq i64 %nsal, 0\n";
+        $out .= $eq
+            ? "  %nsar = zext i1 %nsaz to i64\n  ret i64 %nsar\n"
+            : "  %nsar = select i1 %nsaz, i64 0, i64 1\n  ret i64 %nsar\n";
+        // Row 2 — bool|null <=> anything.
+        $out .= "row2:\n";
+        $out .= "  %r2a = icmp eq i64 %ta, 2\n";
+        $out .= "  %r2b = icmp eq i64 %ta, 3\n";
+        $out .= "  %r2c = icmp eq i64 %tb, 2\n";
+        $out .= "  %r2d = icmp eq i64 %tb, 3\n";
+        $out .= "  %r2ab = or i1 %r2a, %r2b\n";
+        $out .= "  %r2cd = or i1 %r2c, %r2d\n";
+        $out .= "  %r2any = or i1 %r2ab, %r2cd\n";
+        $out .= "  br i1 %r2any, label %boolrow, label %rowobj\n";
+        $out .= "boolrow:\n";
+        $out .= "  %tva = call i64 @__manticore_tagged_truthy(i64 %a)\n";
+        $out .= "  %tvb = call i64 @__manticore_tagged_truthy(i64 %b)\n";
+        if ($eq) {
+            $out .= "  %beq = icmp eq i64 %tva, %tvb\n";
+            $out .= "  %bez = zext i1 %beq to i64\n  ret i64 %bez\n";
+        } else {
+            $out .= "  %blt = icmp slt i64 %tva, %tvb\n";
+            $out .= "  %bgt = icmp sgt i64 %tva, %tvb\n";
+            $out .= "  %bsel = select i1 %bgt, i64 1, i64 0\n";
+            $out .= "  %bres = select i1 %blt, i64 -1, i64 %bsel\n  ret i64 %bres\n";
+        }
+        // Row 3 — objects. Ordered ABOVE the array row: PHP ranks an object
+        // greater than everything, an array greater than everything else.
+        $out .= "rowobj:\n";
+        $out .= "  %aobj = icmp eq i64 %ta, 8\n";
+        $out .= "  %bobj = icmp eq i64 %tb, 8\n";
+        $out .= "  %bothobj = and i1 %aobj, %bobj\n";
+        $out .= "  br i1 %bothobj, label %objboth, label %objmix\n";
+        // No runtime property table exists (the descriptor is {class_id,
+        // drop_fn}), so structural == on two objects reached through a CELL is
+        // still a hole — identity is the sound subset. The statically-typed
+        // path unrolls the real property compare in emitCmp.
+        $out .= "objboth:\n";
+        $out .= "  %oeq = icmp eq i64 %a, %b\n";
+        $out .= $eq
+            ? "  %oez = zext i1 %oeq to i64\n  ret i64 %oez\n"
+            : "  %oez = select i1 %oeq, i64 0, i64 1\n  ret i64 %oez\n";
+        $out .= "objmix:\n";
+        $out .= "  %anyobj = or i1 %aobj, %bobj\n";
+        $out .= "  br i1 %anyobj, label %objgreater, label %rowarr\n";
+        $out .= "objgreater:\n";
+        $out .= $eq
+            ? "  ret i64 0\n"
+            : "  %ogr = select i1 %aobj, i64 1, i64 -1\n  ret i64 %ogr\n";
+        // Row 4 — arrays.
+        $out .= "rowarr:\n";
+        $out .= "  %aarr = icmp eq i64 %ta, 7\n";
+        $out .= "  %barr = icmp eq i64 %tb, 7\n";
+        $out .= "  %botharr = and i1 %aarr, %barr\n";
+        $out .= "  br i1 %botharr, label %arrboth, label %arrmix\n";
+        // Both operands arrive through a cell, so the "erased ⟹ cell" invariant
+        // says their elements are boxed: element kind 0 on both sides.
+        $out .= "arrboth:\n";
+        $out .= "  %aap = and i64 %a, $mask\n";
+        $out .= "  %aapp = inttoptr i64 %aap to ptr\n";
+        $out .= "  %bap = and i64 %b, $mask\n";
+        $out .= "  %bapp = inttoptr i64 %bap to ptr\n";
+        if ($eq) {
+            $out .= "  %are = call i1 @__mir_array_loose_eq(ptr %aapp, i64 0, ptr %bapp, i64 0)\n";
+            $out .= "  %arez = zext i1 %are to i64\n  ret i64 %arez\n";
+        } else {
+            $out .= "  %arc = call i64 @__mir_array_compare(ptr %aapp, i64 0, ptr %bapp, i64 0)\n";
+            $out .= "  ret i64 %arc\n";
+        }
+        $out .= "arrmix:\n";
+        $out .= "  %anyarr = or i1 %aarr, %barr\n";
+        $out .= "  br i1 %anyarr, label %arrgreater, label %row4\n";
+        $out .= "arrgreater:\n";
+        $out .= $eq
+            ? "  ret i64 0\n"
+            : "  %agr = select i1 %aarr, i64 1, i64 -1\n  ret i64 %agr\n";
+        return $out;
+    }
+
     private function taggedCompareRuntime(): string
     {
         $out  = "\ndefine i64 @__manticore_tagged_compare(i64 %a, i64 %b) {\n";
         $out .= "entry:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
         $out .= "  %tb = call i64 @__manticore_tag(i64 %b)\n";
+        $out .= $this->juggleRows('c');
+        $out .= "row4:\n";
         $out .= "  %as = icmp eq i64 %ta, 4\n";
         $out .= "  %bs = icmp eq i64 %tb, 4\n";
         $out .= "  %bothstr = and i1 %as, %bs\n";
-        $out .= "  br i1 %bothstr, label %scmp, label %chkint\n";
-        $out .= "scmp:\n";
-        $out .= "  %pa = and i64 %a, 281474976710655\n";
-        $out .= "  %ppa = inttoptr i64 %pa to ptr\n";
-        $out .= "  %pb = and i64 %b, 281474976710655\n";
-        $out .= "  %ppb = inttoptr i64 %pb to ptr\n";
+        $out .= "  br i1 %bothstr, label %chknum, label %chkint\n";
+        // Two strings: PHP compares them NUMERICALLY when both are numeric
+        // ("10" > "9"), byte-wise otherwise ("abc" < "abd").
+        $out .= "chknum:\n";
+        $out .= "  %anum = call i1 @__mir_cell_numeric(i64 %a)\n";
+        $out .= "  %bnum = call i1 @__mir_cell_numeric(i64 %b)\n";
+        $out .= "  %bothnum = and i1 %anum, %bnum\n";
+        $out .= "  br i1 %bothnum, label %fcmp, label %strcmp\n";
+        $out .= "strcmp:\n";
+        $out .= "  %ppa = call ptr @__manticore_tagged_to_str(i64 %a)\n";
+        $out .= "  %ppb = call ptr @__manticore_tagged_to_str(i64 %b)\n";
         $out .= "  %sc = call i64 @__mir_str_cmp(ptr %ppa, ptr %ppb)\n";
-        $out .= "  ret i64 %sc\n";
+        // str_cmp hands back the raw byte difference; this function's contract is
+        // -1/0/+1 (a `<=>` result is returned verbatim now, not merely tested
+        // against 0), so normalize the sign.
+        $out .= "  %sclt = icmp slt i64 %sc, 0\n";
+        $out .= "  %scgt = icmp sgt i64 %sc, 0\n";
+        $out .= "  %scsel = select i1 %scgt, i64 1, i64 0\n";
+        $out .= "  %scres = select i1 %sclt, i64 -1, i64 %scsel\n";
+        $out .= "  ret i64 %scres\n";
         $out .= "chkint:\n";
         $out .= "  %ai = icmp eq i64 %ta, 1\n";
         $out .= "  %bi = icmp eq i64 %tb, 1\n";
         $out .= "  %bothint = and i1 %ai, %bi\n";
-        $out .= "  br i1 %bothint, label %icmp, label %fcmp\n";
+        $out .= "  br i1 %bothint, label %icmp, label %chkmix\n";
+        // Exactly one side is a string, and (having missed %chknum) at least one
+        // of the pair is NOT numeric: PHP casts the NUMBER to a string and
+        // compares as strings, so `5 < "abc"` is true ('5' < 'a') and
+        // `"abc" <=> 99999999999` is 1. Comparing the raw carriers instead only
+        // agreed by accident — a string pointer happens to outrank a small int.
+        $out .= "chkmix:\n";
+        $out .= "  %anystr = or i1 %as, %bs\n";
+        $out .= "  br i1 %anystr, label %strcmp, label %fcmp\n";
         $out .= "icmp:\n";
         $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
         $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
@@ -663,6 +1159,10 @@ trait EmitLlvmExpr
 
         // __manticore_tagged_loose_eq(a,b) -> i64 (0/1)
         $out .= "define i64 @__manticore_tagged_loose_eq(i64 %a, i64 %b) {\nentry:\n";
+        $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
+        $out .= "  %tb = call i64 @__manticore_tag(i64 %b)\n";
+        $out .= $this->juggleRows('e');
+        $out .= "row4:\n";
         $out .= "  %an = call i1 @__mir_cell_numeric(i64 %a)\n";
         $out .= "  %bn = call i1 @__mir_cell_numeric(i64 %b)\n";
         $out .= "  %bothnum = and i1 %an, %bn\n";
@@ -673,7 +1173,6 @@ trait EmitLlvmExpr
         $out .= "  %feq = fcmp oeq double %da, %db\n";
         $out .= "  %fz = zext i1 %feq to i64\n  ret i64 %fz\n";
         $out .= "chkstr:\n";
-        $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n  %tb = call i64 @__manticore_tag(i64 %b)\n";
         $out .= "  %sa = icmp eq i64 %ta, 4\n  %sb = icmp eq i64 %tb, 4\n";
         $out .= "  %bothstr = and i1 %sa, %sb\n";
         $out .= "  br i1 %bothstr, label %scmp, label %raw\n";
@@ -690,6 +1189,19 @@ trait EmitLlvmExpr
         $out .= "  %same = icmp eq i64 %ta, %tb\n";
         $out .= "  br i1 %same, label %chk, label %ne\n";
         $out .= "chk:\n";
+        // Same tag: an ARRAY needs the recursive by-value `===` (same pairs, in
+        // order); an OBJECT stays raw-bit identity, which is what PHP's `===`
+        // means for objects.
+        $out .= "  %isarr = icmp eq i64 %ta, 7\n";
+        $out .= "  br i1 %isarr, label %arrs, label %chkstr2\n";
+        $out .= "arrs:\n";
+        $out .= "  %apa = and i64 %a, 281474976710655\n";
+        $out .= "  %apap = inttoptr i64 %apa to ptr\n";
+        $out .= "  %apb = and i64 %b, 281474976710655\n";
+        $out .= "  %apbp = inttoptr i64 %apb to ptr\n";
+        $out .= "  %ase = call i1 @__mir_array_strict_eq(ptr %apap, i64 0, ptr %apbp, i64 0)\n";
+        $out .= "  %asez = zext i1 %ase to i64\n  ret i64 %asez\n";
+        $out .= "chkstr2:\n";
         $out .= "  %isstr = icmp eq i64 %ta, 4\n";
         $out .= "  br i1 %isstr, label %scmp, label %raw\n";
         $out .= "scmp:\n";
@@ -699,6 +1211,25 @@ trait EmitLlvmExpr
         $out .= "raw:\n";
         $out .= "  %req = icmp eq i64 %a, %b\n  %rz = zext i1 %req to i64\n  ret i64 %rz\n";
         $out .= "ne:\n  ret i64 0\n}\n";
+
+        // __mir_str_loose_eq(a,b) -> i1 — PHP `==` on two strings: equal bytes,
+        // OR both NUMERIC and numerically equal ("1.0" == "1", "1e2" == "100",
+        // " 1" == "1"). Byte equality is tried FIRST so the common case stays a
+        // memcmp and only a mismatch pays for the two strtod probes.
+        $out .= "\ndefine i1 @__mir_str_loose_eq(ptr %a, ptr %b) {\nentry:\n";
+        $out .= "  %be = call i1 @__mir_str_eq(ptr %a, ptr %b)\n";
+        $out .= "  br i1 %be, label %yes, label %chknum\n";
+        $out .= "chknum:\n";
+        $out .= "  %an = call i1 @__mir_is_numeric_str(ptr %a)\n";
+        $out .= "  %bn = call i1 @__mir_is_numeric_str(ptr %b)\n";
+        $out .= "  %both = and i1 %an, %bn\n";
+        $out .= "  br i1 %both, label %num, label %no\n";
+        $out .= "num:\n";
+        $out .= "  %da = call double @strtod(ptr %a, ptr null)\n";
+        $out .= "  %db = call double @strtod(ptr %b, ptr null)\n";
+        $out .= "  %eq = fcmp oeq double %da, %db\n  ret i1 %eq\n";
+        $out .= "yes:\n  ret i1 true\n";
+        $out .= "no:\n  ret i1 false\n}\n";
         return $out;
     }
 
@@ -1883,6 +2414,112 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * `$a <=> $b` → i64 -1/0/+1, each operand evaluated ONCE. Mirrors emitCmp's
+     * routing: two typed arrays go to the recursive array compare, raw numbers
+     * keep an inline icmp/fcmp, and everything else boxes and walks PHP's table
+     * through tagged_compare (so a numeric string, a bool or a null operand
+     * juggles). Two arrays whose element representation the runtime can't
+     * normalize keep the old pointer answer rather than guess.
+     */
+    private function emitSpaceship(\Compile\Mir\Spaceship $n): string
+    {
+        $out = $this->emitNode($n->left);
+        $l = $this->lastValue; $lt = $this->lastValueType;
+        $out .= $this->emitNode($n->right);
+        $r = $this->lastValue; $rt = $this->lastValueType;
+        $lk = $n->left->type->kind;
+        $rk = $n->right->type->kind;
+        $bothArr = $lk === Type::KIND_ARRAY && $rk === Type::KIND_ARRAY;
+
+        if ($bothArr) {
+            $eka = $this->elemChainOf($n->left->type->element);
+            $ekb = $this->elemChainOf($n->right->type->element);
+            if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && $this->chainsComparable($eka, $ekb)) {
+                $this->rt->needsTaggedCompare = true;
+                $lp = $l;
+                if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+                $rp = $r;
+                if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = call i64 @__mir_array_compare(ptr ' . $lp . ', i64 ' . $eka
+                      . ', ptr ' . $rp . ', i64 ' . $ekb . ")\n";
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
+        // Raw numbers: an inline compare, no boxing. int/bool ride i64; anything
+        // with a float side goes through doubles.
+        $lRawNum = $lk === Type::KIND_INT || $lk === Type::KIND_BOOL || $lk === Type::KIND_FLOAT;
+        $rRawNum = $rk === Type::KIND_INT || $rk === Type::KIND_BOOL || $rk === Type::KIND_FLOAT;
+        if ($lRawNum && $rRawNum) {
+            $useF = $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT
+                || $lt === 'double' || $rt === 'double';
+            if ($useF) {
+                $ld = $l;
+                if ($lt !== 'double') { $ld = $this->ssa->allocReg(); $out .= '  ' . $ld . ' = sitofp i64 ' . $l . " to double\n"; }
+                $rd = $r;
+                if ($rt !== 'double') { $rd = $this->ssa->allocReg(); $out .= '  ' . $rd . ' = sitofp i64 ' . $r . " to double\n"; }
+                $lt2 = $this->ssa->allocReg();
+                $out .= '  ' . $lt2 . ' = fcmp olt double ' . $ld . ', ' . $rd . "\n";
+                $gt = $this->ssa->allocReg();
+                $out .= '  ' . $gt . ' = fcmp ogt double ' . $ld . ', ' . $rd . "\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 1, i64 0' . "\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = select i1 ' . $lt2 . ', i64 -1, i64 ' . $sel . "\n";
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            $lt2 = $this->ssa->allocReg();
+            $out .= '  ' . $lt2 . ' = icmp slt i64 ' . $l . ', ' . $r . "\n";
+            $gt = $this->ssa->allocReg();
+            $out .= '  ' . $gt . ' = icmp sgt i64 ' . $l . ', ' . $r . "\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 1, i64 0' . "\n";
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = select i1 ' . $lt2 . ', i64 -1, i64 ' . $sel . "\n";
+            $this->lastValue = $res;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Two arrays the chain can't describe (a raw obj element): boxing would
+        // tell the tagged runtime the elements are cells. Keep the old answer.
+        if (!$bothArr) {
+            $this->rt->needsTaggedCompare = true;
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $out .= $this->shallowBoxToCell($n->left->type);
+            $li = $this->lastValue;
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $out .= $this->shallowBoxToCell($n->right->type);
+            $ri = $this->lastValue;
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = call i64 @__manticore_tagged_compare(i64 ' . $li
+                  . ', i64 ' . $ri . ")\n";
+            $this->lastValue = $res;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $li = $l;
+        if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+        $ri = $r;
+        if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+        $ltr = $this->ssa->allocReg();
+        $out .= '  ' . $ltr . ' = icmp ult i64 ' . $li . ', ' . $ri . "\n";
+        $gtr = $this->ssa->allocReg();
+        $out .= '  ' . $gtr . ' = icmp ugt i64 ' . $li . ', ' . $ri . "\n";
+        $sel = $this->ssa->allocReg();
+        $out .= '  ' . $sel . ' = select i1 ' . $gtr . ', i64 1, i64 0' . "\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $ltr . ', i64 -1, i64 ' . $sel . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
@@ -1895,6 +2532,84 @@ trait EmitLlvmExpr
         $op = $c->op;
         $isEq = ($op === '===' || $op === '==');
         $isNe = ($op === '!==' || $op === '!=');
+        // LOOSE `X == null` does NOT test null-ness — PHP juggles it. Against a
+        // STRING, NULL becomes "" and they compare as strings, so `null == ""`
+        // is true but `null == "0"` is FALSE (the bool row would call "0" falsy
+        // and wrongly answer true). Against anything else both sides go to bool,
+        // so `null == false`, `null == 0` and `null == []` are all true. Folding
+        // this to a constant off the static type (as the strict path below does,
+        // soundly) answered false for every one of them.
+        $looseNullKinds = [
+            Type::KIND_STRING => true, Type::KIND_NULL  => true, Type::KIND_OBJ   => true,
+            Type::KIND_CLOSURE => true, Type::KIND_CELL => true, Type::KIND_UNKNOWN => true,
+            Type::KIND_ARRAY  => true, Type::KIND_FLOAT => true, Type::KIND_INT   => true,
+            Type::KIND_BOOL   => true,
+        ];
+        if (($leftNull || $rightNull) && ($isEq || $isNe)
+            && !($op === '===' || $op === '!==') && !($leftNull && $rightNull)
+            && isset($looseNullKinds[($leftNull ? $c->right : $c->left)->type->kind])) {
+            $other = $leftNull ? $c->right : $c->left;
+            $ok = $other->type->kind;
+            $out = $this->emitNode($other);
+            $res = null;
+            if ($ok === Type::KIND_STRING) {
+                $out .= $this->coerceToPtr();
+                $len = $this->ssa->allocReg();
+                $out .= '  ' . $len . ' = call i64 @__mir_strlen(ptr ' . $this->lastValue . ")\n";
+                $b = $this->ssa->allocReg();
+                $out .= '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $len . ", 0\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+            } elseif ($ok === Type::KIND_NULL) {
+                $res = $isEq ? '1' : '0';
+            } elseif ($ok === Type::KIND_OBJ || $ok === Type::KIND_CLOSURE) {
+                // An object is always truthy, so it is never loosely null.
+                $res = $isEq ? '0' : '1';
+            } elseif ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN) {
+                $this->rt->needsTaggedEq = true;
+                $out .= $this->coerceToI64();
+                $cv = $this->lastValue;
+                $nb = $this->ssa->allocReg();
+                $out .= '  ' . $nb . " = call i64 @__manticore_box_null()\n";
+                $e = $this->ssa->allocReg();
+                $out .= '  ' . $e . ' = call i64 @__manticore_tagged_loose_eq(i64 ' . $nb . ', i64 ' . $cv . ")\n";
+                $res = $e;
+                if ($isNe) {
+                    $res = $this->ssa->allocReg();
+                    $out .= '  ' . $res . ' = xor i64 ' . $e . ", 1\n";
+                }
+            } elseif ($ok === Type::KIND_ARRAY) {
+                $this->rt->needsTagged = true;
+                $this->rt->needsTaggedTruthy = true;
+                $out .= $this->coerceToPtr();
+                $ba = $this->ssa->allocReg();
+                $out .= '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+                $tv = $this->ssa->allocReg();
+                $out .= '  ' . $tv . ' = call i64 @__manticore_tagged_truthy(i64 ' . $ba . ")\n";
+                $b = $this->ssa->allocReg();
+                $out .= '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $tv . ", 0\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+            } elseif ($ok === Type::KIND_FLOAT) {
+                $out .= $this->coerceTo('double');
+                $b = $this->ssa->allocReg();
+                $out .= '  ' . $b . ' = fcmp ' . ($isEq ? 'oeq' : 'une')
+                      . ' double ' . $this->lastValue . ", 0.000000e+00\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+            } elseif ($ok === Type::KIND_INT || $ok === Type::KIND_BOOL) {
+                $out .= $this->coerceToI64();
+                $b = $this->ssa->allocReg();
+                $out .= '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $this->lastValue . ", 0\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+            }
+            if ($res !== null) {
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
         if (($leftNull || $rightNull) && ($isEq || $isNe)) {
             $other = $leftNull ? $c->right : $c->left;
             // Pointer-carried operands (string / obj / vec / assoc / closure)
@@ -2218,8 +2933,20 @@ trait EmitLlvmExpr
                 $jnLbl = $this->ssa->allocLabel('streq.join');
                 $out .= '  br i1 ' . $both . ', label %' . $scLbl . ', label %' . $idLbl . "\n";
                 $out .= $scLbl . ":\n";
+                // Two statically-known strings under LOOSE `==` compare
+                // NUMERICALLY when both are numeric strings, so `"1.0" == "1"`
+                // is true — byte equality alone answered false. An UNKNOWN-typed
+                // (erased) operand keeps the plain byte compare: it may not be a
+                // string at all, and juggling it here would be a guess.
+                $bothKnownStr = $lk === Type::KIND_STRING && $rk === Type::KIND_STRING;
+                $eqFn = '@__mir_str_eq';
+                if (!$strictEq && $bothKnownStr) {
+                    $eqFn = '@__mir_str_loose_eq';
+                    $this->rt->needsTaggedEq = true;
+                    $this->rt->needsStrtod = true;
+                }
                 $eqr = $this->ssa->allocReg();
-                $out .= '  ' . $eqr . ' = call i1 @__mir_str_eq(ptr ' . $lp . ', ptr ' . $rp . ")\n";
+                $out .= '  ' . $eqr . ' = call i1 ' . $eqFn . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
                 $scRes = $eqr;
                 if ($isNe) {
                     $scRes = $this->ssa->allocReg();
@@ -2250,6 +2977,237 @@ trait EmitLlvmExpr
             return $out;
         }
 
+        // Two objects of the same statically-known class under LOOSE `==`: PHP
+        // compares them PROPERTY-BY-PROPERTY (loosely), not by handle, so
+        // `new P(1,"a") == new P(1,"a")` is true and `!=` is its negation (both
+        // came out backwards on the pointer path). Unrolled from the static
+        // layout — there is no runtime property table to walk (the descriptor is
+        // just {class_id, drop_fn}), which is also why an object reached through
+        // a CELL still falls back to identity in the tagged runtime.
+        // Bail to the old identity path when the unroll would be a guess: a
+        // subclassable class (the runtime class may differ from the static one,
+        // and PHP demands equal classes), or an array property whose element
+        // representation isn't one the array runtime can normalize.
+        if (($isEq || $isNe) && !$strictEq
+            && $lk === Type::KIND_OBJ && $rk === Type::KIND_OBJ) {
+            $cls = $c->left->type->class ?? '';
+            $rcls = $c->right->type->class ?? '';
+            if ($cls !== '' && $cls === $rcls
+                && isset($this->classes[$cls]) && !isset($this->enums[$cls])
+                && !$this->classHasSubclass($cls)) {
+                $cd = $this->classes[$cls];
+                $plan = [];
+                $planOk = true;
+                foreach ($cd->propertyNames as $pn) {
+                    if (!isset($cd->propertyTypes[$pn])) { $planOk = false; break; }
+                    $pt = $cd->propertyTypes[$pn];
+                    $isArr = $pt->kind === Type::KIND_ARRAY;
+                    $chain = self::EK_NONE;
+                    if ($isArr) {
+                        $chain = $this->elemChainOf($pt->element);
+                        if ($chain === self::EK_NONE) { $planOk = false; break; }
+                    }
+                    $plan[] = [$pn, $pt, $isArr, $chain];
+                }
+                if ($planOk && \count($plan) > 0) {
+                    $this->rt->needsTaggedEq = true;
+                    $lp = $l;
+                    if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+                    $rp = $r;
+                    if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+                    $yesL  = $this->ssa->allocLabel('objeq.same');
+                    $nullL = $this->ssa->allocLabel('objeq.chknull');
+                    $noL   = $this->ssa->allocLabel('objeq.no');
+                    $propL = $this->ssa->allocLabel('objeq.props');
+                    $joinL = $this->ssa->allocLabel('objeq.join');
+                    $ideq = $this->ssa->allocReg();
+                    $out .= '  ' . $ideq . ' = icmp eq ptr ' . $lp . ', ' . $rp . "\n";
+                    $out .= '  br i1 ' . $ideq . ', label %' . $yesL . ', label %' . $nullL . "\n";
+                    // A `?C` null carrier can't be dereferenced. Both-null already
+                    // went to the identity arm, so either-null here means unequal.
+                    $out .= $nullL . ":\n";
+                    $ln = $this->ssa->allocReg();
+                    $out .= '  ' . $ln . ' = icmp eq ptr ' . $lp . ", null\n";
+                    $rn = $this->ssa->allocReg();
+                    $out .= '  ' . $rn . ' = icmp eq ptr ' . $rp . ", null\n";
+                    $anyn = $this->ssa->allocReg();
+                    $out .= '  ' . $anyn . ' = or i1 ' . $ln . ', ' . $rn . "\n";
+                    $out .= '  br i1 ' . $anyn . ', label %' . $noL . ', label %' . $propL . "\n";
+                    $out .= $propL . ":\n";
+                    $acc = 'true';
+                    foreach ($plan as $p) {
+                        $pn = $p[0]; $pt = $p[1]; $isArr = $p[2]; $chain = $p[3];
+                        $off = (string)$cd->propertyOffset($pn);
+                        $lg = $this->ssa->allocReg();
+                        $out .= '  ' . $lg . ' = getelementptr inbounds i8, ptr ' . $lp . ', i64 ' . $off . "\n";
+                        $lv = $this->ssa->allocReg();
+                        $out .= '  ' . $lv . ' = load i64, ptr ' . $lg . "\n";
+                        $rg = $this->ssa->allocReg();
+                        $out .= '  ' . $rg . ' = getelementptr inbounds i8, ptr ' . $rp . ', i64 ' . $off . "\n";
+                        $rv = $this->ssa->allocReg();
+                        $out .= '  ' . $rv . ' = load i64, ptr ' . $rg . "\n";
+                        $peq = $this->ssa->allocReg();
+                        if ($isArr) {
+                            $lap = $this->ssa->allocReg();
+                            $out .= '  ' . $lap . ' = inttoptr i64 ' . $lv . " to ptr\n";
+                            $rap = $this->ssa->allocReg();
+                            $out .= '  ' . $rap . ' = inttoptr i64 ' . $rv . " to ptr\n";
+                            $out .= '  ' . $peq . ' = call i1 @__mir_array_loose_eq(ptr ' . $lap
+                                  . ', i64 ' . $chain . ', ptr ' . $rap . ', i64 ' . $chain . ")\n";
+                        } else {
+                            $this->lastValue = $lv; $this->lastValueType = 'i64';
+                            $out .= $this->shallowBoxToCell($pt);
+                            $lc2 = $this->lastValue;
+                            $this->lastValue = $rv; $this->lastValueType = 'i64';
+                            $out .= $this->shallowBoxToCell($pt);
+                            $rc2 = $this->lastValue;
+                            $pe = $this->ssa->allocReg();
+                            $out .= '  ' . $pe . ' = call i64 @__manticore_tagged_loose_eq(i64 '
+                                  . $lc2 . ', i64 ' . $rc2 . ")\n";
+                            $out .= '  ' . $peq . ' = icmp ne i64 ' . $pe . ", 0\n";
+                        }
+                        $nacc = $this->ssa->allocReg();
+                        $out .= '  ' . $nacc . ' = and i1 ' . $acc . ', ' . $peq . "\n";
+                        $acc = $nacc;
+                    }
+                    $out .= '  br label %' . $joinL . "\n";
+                    $out .= $yesL . ":\n  br label %" . $joinL . "\n";
+                    $out .= $noL . ":\n  br label %" . $joinL . "\n";
+                    $out .= $joinL . ":\n";
+                    $phi = $this->ssa->allocReg();
+                    $out .= '  ' . $phi . ' = phi i1 [ ' . $acc . ', %' . $propL . ' ], [ true, %'
+                          . $yesL . ' ], [ false, %' . $noL . " ]\n";
+                    $fin = $phi;
+                    if ($isNe) {
+                        $fin = $this->ssa->allocReg();
+                        $out .= '  ' . $fin . ' = xor i1 ' . $phi . ", true\n";
+                    }
+                    $res = $this->ssa->allocReg();
+                    $out .= '  ' . $res . ' = zext i1 ' . $fin . " to i64\n";
+                    $this->lastValue = $res;
+                    $this->lastValueType = 'i64';
+                    return $out;
+                }
+            }
+        }
+        // Statically-typed operand pairs the RAW carrier compare gets wrong under
+        // PHP's LOOSE `==`, routed through the tagged table instead:
+        //   · a BOOL on exactly one side  — the whole compare goes boolean, so
+        //     `"a" == true` and `[] == false` are true (raw: carrier bits).
+        //   · two STRINGS — two NUMERIC strings compare as numbers, so
+        //     `"1.0" == "1"`, `"1e2" == "100"` and `" 1" == "1"` are true
+        //     (raw: byte-wise, all false).
+        //   · an ARRAY on exactly one side — never equal to a non-array.
+        // Elements are never inspected on these rows, so the arrays can be
+        // tagged shallowly rather than rebuilt into cell arrays.
+        if (($isEq || $isNe) && !$strictEq) {
+            $jug = [
+                Type::KIND_INT => true, Type::KIND_FLOAT => true, Type::KIND_STRING => true,
+                Type::KIND_BOOL => true, Type::KIND_ARRAY => true, Type::KIND_OBJ => true,
+            ];
+            $boolMix = ($lk === Type::KIND_BOOL) !== ($rk === Type::KIND_BOOL);
+            $bothStr = $lk === Type::KIND_STRING && $rk === Type::KIND_STRING;
+            $arrMix  = ($lk === Type::KIND_ARRAY) !== ($rk === Type::KIND_ARRAY);
+            if (isset($jug[$lk]) && isset($jug[$rk]) && ($boolMix || $bothStr || $arrMix)) {
+                $this->rt->needsTaggedEq = true;
+                $this->lastValue = $l; $this->lastValueType = $lt;
+                $out .= $this->shallowBoxToCell($c->left->type);
+                $li = $this->lastValue;
+                $this->lastValue = $r; $this->lastValueType = $rt;
+                $out .= $this->shallowBoxToCell($c->right->type);
+                $ri = $this->lastValue;
+                $eqr = $this->ssa->allocReg();
+                $out .= '  ' . $eqr . ' = call i64 @__manticore_tagged_loose_eq(i64 '
+                      . $li . ', i64 ' . $ri . ")\n";
+                $res = $eqr;
+                if ($isNe) {
+                    $res = $this->ssa->allocReg();
+                    $out .= '  ' . $res . ' = xor i64 ' . $eqr . ", 1\n";
+                }
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
+        // A CELL against a statically-typed BOOL or STRING. PHP's table says a
+        // bool on either side makes the whole compare boolean (`"a" == true`),
+        // and null-vs-string compares "" against the string (`o(null) == ""`) —
+        // neither of which the raw-carrier paths below can express. Box the
+        // typed side and let the tagged runtime walk the table. Ints/floats keep
+        // the cheaper numeric paths below; strict string===cell already returned
+        // through its own tag-guarded branch above.
+        if ($isEq || $isNe) {
+            $lJug = $lk === Type::KIND_BOOL || $lk === Type::KIND_STRING;
+            $rJug = $rk === Type::KIND_BOOL || $rk === Type::KIND_STRING;
+            if (($lk === Type::KIND_CELL && $rJug) || ($rk === Type::KIND_CELL && $lJug)) {
+                $this->rt->needsTaggedEq = true;
+                if ($lk !== Type::KIND_CELL) {
+                    $this->lastValue = $l; $this->lastValueType = $lt;
+                    $out .= $this->boxToCell($c->left->type);
+                    $l = $this->lastValue; $lt = 'i64';
+                }
+                if ($rk !== Type::KIND_CELL) {
+                    $this->lastValue = $r; $this->lastValueType = $rt;
+                    $out .= $this->boxToCell($c->right->type);
+                    $r = $this->lastValue; $rt = 'i64';
+                }
+                $li = $l;
+                if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+                $ri = $r;
+                if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+                $fn = $strictEq ? '@__manticore_tagged_strict_eq' : '@__manticore_tagged_loose_eq';
+                $eqr = $this->ssa->allocReg();
+                $out .= '  ' . $eqr . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
+                $res = $eqr;
+                if ($isNe) {
+                    $res = $this->ssa->allocReg();
+                    $out .= '  ' . $res . ' = xor i64 ' . $eqr . ", 1\n";
+                }
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
+        // Two statically-typed ARRAYS compare BY VALUE in PHP, recursively: `==`
+        // is same-count + loosely-equal values per key (order-independent),
+        // `===` adds order and strictness, and ordering goes by count first. The
+        // pointer-identity fallthrough at the bottom of this method answered
+        // `[1,2,3] == [1,2,3]` false and ordered `$a <=> $a` as -1, which also
+        // sank in_array/array_search/sort over array elements.
+        if ($lk === Type::KIND_ARRAY && $rk === Type::KIND_ARRAY) {
+            $eka = $this->elemChainOf($c->left->type->element);
+            $ekb = $this->elemChainOf($c->right->type->element);
+            if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && $this->chainsComparable($eka, $ekb)) {
+                $this->rt->needsTaggedCompare = true;
+                $lp = $l;
+                if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+                $rp = $r;
+                if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+                $args = '(ptr ' . $lp . ', i64 ' . $eka . ', ptr ' . $rp . ', i64 ' . $ekb . ')';
+                $res = $this->ssa->allocReg();
+                if ($isEq || $isNe) {
+                    $fn = $strictEq ? '@__mir_array_strict_eq' : '@__mir_array_loose_eq';
+                    $b1 = $this->ssa->allocReg();
+                    $out .= '  ' . $b1 . ' = call i1 ' . $fn . $args . "\n";
+                    $out .= '  ' . $res . ' = zext i1 ' . $b1 . " to i64\n";
+                    if ($isNe) {
+                        $neg = $this->ssa->allocReg();
+                        $out .= '  ' . $neg . ' = xor i64 ' . $res . ", 1\n";
+                        $res = $neg;
+                    }
+                } else {
+                    $cmp = $this->ssa->allocReg();
+                    $out .= '  ' . $cmp . ' = call i64 @__mir_array_compare' . $args . "\n";
+                    $pr = $this->ssa->allocReg();
+                    $out .= '  ' . $pr . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
+                    $out .= '  ' . $res . ' = zext i1 ' . $pr . " to i64\n";
+                }
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
         // Both operands are statically CELL, EQ/NE — dispatch by tag with PHP
         // juggling at runtime (`5 == "5"`, non-interned `"x" === "x"`). A raw i64
         // compare only accidentally works for canonical-repr ints / interned

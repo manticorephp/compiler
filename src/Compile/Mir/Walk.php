@@ -22,6 +22,7 @@ final class Walk
         $k = $n->kind;
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
             || $k === Node::KIND_DIV || $k === Node::KIND_MOD || $k === Node::KIND_CMP
+            || $k === Node::KIND_SPACESHIP
             || $k === Node::KIND_CONCAT) {
             return [self::binLeft($n), self::binRight($n)];
         }

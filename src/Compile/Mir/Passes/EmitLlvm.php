@@ -1190,8 +1190,14 @@ final class EmitLlvm implements EmitVisitor
         }
         $c = $name;
         while ($c !== '') {
-            $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { return false; }
+            // `isset`, NOT `$cd = … ?? null` + `$cd === null`: a `ClassDef|null`
+            // local types as NON-null, so the native self-build leaves the slot
+            // un-zeroed and the null test reads garbage — then `->interfaces`
+            // walks it. Latent for as long as the stale slot happened to hold
+            // something benign; adding an unrelated stdlib file shifted the
+            // layout and it SIGSEGV'd on `$x instanceof $cls` over an interface.
+            if (!isset($this->classes[$c])) { return false; }
+            $cd = $this->classes[$c];
             if ($c === $target) { return true; }
             if (\in_array($target, $cd->interfaces, true)) { return true; }
             // A REIFIED specialization is-a its ORIGIN, and everything the origin
@@ -1860,6 +1866,7 @@ final class EmitLlvm implements EmitVisitor
         if ($k === Node::KIND_DIV) { return $n->left; }
         if ($k === Node::KIND_MOD) { return $n->left; }
         if ($k === Node::KIND_CMP) { return $n->left; }
+        if ($k === Node::KIND_SPACESHIP) { return $n->left; }
         throw new \RuntimeException('binLeft: unexpected node kind');
     }
 
@@ -1872,6 +1879,7 @@ final class EmitLlvm implements EmitVisitor
         if ($k === Node::KIND_DIV) { return $n->right; }
         if ($k === Node::KIND_MOD) { return $n->right; }
         if ($k === Node::KIND_CMP) { return $n->right; }
+        if ($k === Node::KIND_SPACESHIP) { return $n->right; }
         throw new \RuntimeException('binRight: unexpected node kind');
     }
 }

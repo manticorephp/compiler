@@ -196,6 +196,7 @@ trait EmitLlvmModule
             $out .= "@__mir_jmp_stack = linkonce_odr global [4096 x i8] zeroinitializer\n";
             $out .= "@__mir_jmp_depth = linkonce_odr global i64 0\n";
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
+            $out .= $this->emitJmpSlotGuard();
             // `$gen->throw($e)` pending injection: non-null = throw at the
             // next yield resume point (the suspended `yield` expression raises).
             if ($this->gen->throwUsed) {
@@ -217,6 +218,25 @@ trait EmitLlvmModule
         // The runtime's own libc demand, plus the per-builtin extras registered
         // in $libcExtra and the FFI externs. Keyed by symbol: declaring one
         // twice is a hard LLVM error, so everything routes through one map.
+        // The compare cluster is mutually recursive: tagged_loose_eq / tagged_
+        // compare route an ARRAY operand to __mir_array_loose_eq / __mir_array_
+        // compare, which recurse back through tagged_* for the elements, and the
+        // bool/null row of PHP's juggling table needs tagged_truthy. Emitting one
+        // half alone leaves an undefined symbol, so any demand pulls the whole
+        // cluster in — ahead of the libc decls below (which derive @strtod from
+        // needsTaggedToFloat) and every runtime gate that its members depend on.
+        if ($this->rt->needsTaggedEq || $this->rt->needsTaggedCompare) {
+            $this->rt->needsTaggedEq      = true;
+            $this->rt->needsTaggedCompare = true;
+            $this->rt->needsTagged        = true;
+            $this->rt->needsTaggedToFloat = true;
+            $this->rt->needsTaggedTruthy  = true;
+            // tagged_compare stringifies a number to compare it against a
+            // NON-numeric string (PHP's `5 < "abc"`).
+            $this->rt->needsTaggedToStr   = true;
+            $this->rt->needsStrcmp        = true;
+            $this->rt->needsStrtod        = true;
+        }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
         foreach ($this->libcExtra as $sym => $line) { $decls[$sym] = $line; }
         foreach ($this->rtExterns as $sym => $line) { $decls[$sym] = $line; }
@@ -379,6 +399,7 @@ trait EmitLlvmModule
         }
         if ($this->rt->needsTaggedCompare) {
             $out .= $this->taggedCompareRuntime();
+            $out .= $this->arrayCompareRuntime();
         }
         if ($this->rt->needsTaggedEq) {
             $out .= $this->taggedEqRuntime();
@@ -793,6 +814,40 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /**
+     * `@__mir_jmp_slot` — slot → byte offset into `@__mir_jmp_stack`, fataling
+     * when the slot is out of range instead of returning an offset that setjmp
+     * would write 192 bytes past the end of.
+     *
+     * Linkage is left to {@see EmitLlvm::linkonceRuntime}, which promotes every
+     * `define` in the preamble to linkonce_odr — an explicit `internal` here
+     * would come out as the invalid `define linkonce_odr internal`. Coalescing
+     * is safe: the body is a pure function of its argument and identical in
+     * every module, exactly like the neighbouring runtime helpers.
+     */
+    private function emitJmpSlotGuard(): string
+    {
+        $this->libcExtra['exit'] = 'declare void @exit(i32)';
+        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        $msg = 'PHP Fatal error:  Maximum try nesting level (16) exceeded';
+        $len = \strlen($msg) + 2; // + "\n" + NUL
+        $out = '@.fmt.jmpof = private unnamed_addr constant [' . (string)$len . ' x i8] c"'
+             . $msg . '\0A\00", align 1' . "\n";
+        $out .= "define i64 @__mir_jmp_slot(i64 %s) {\nentry:\n";
+        $out .= "  %lo = icmp slt i64 %s, 0\n";
+        $out .= "  %hi = icmp sge i64 %s, 16\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %oflow, label %ok\n";
+        $out .= "oflow:\n";
+        $out .= "  %p = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.jmpof)\n";
+        $out .= "  call void @exit(i32 255)\n";
+        $out .= "  unreachable\n";
+        $out .= "ok:\n";
+        $out .= "  %o = mul i64 %s, 256\n";
+        $out .= "  ret i64 %o\n}\n";
+        return $out;
+    }
+
     private function emitUncaughtHandler(): string
     {
         $this->libcExtra['exit'] = 'declare void @exit(i32)';
@@ -936,6 +991,12 @@ trait EmitLlvmModule
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
+            // Same slot hand-back as {@see finishReturn} — this branch exits
+            // before it, so a `return` inside a generator's try leaked one slot
+            // per call until the depth hit the 16-slot wall. The reload comes
+            // from the frame: a `yield` in the try means the resume switch
+            // branched past the block that defined the entry reg.
+            $out .= $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
         // Close the frame arena before every exit, so confined values
@@ -1033,7 +1094,12 @@ trait EmitLlvmModule
             }
             $this->cf->restoreFinally($saved);
         }
-        return $out . $leave . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
+        // A `return` out of a try branches past the fall-through pop, so the
+        // try's jmp slot would stay claimed for the rest of the PROCESS (the
+        // depth is a global). Give it back — after the finallys above, which run
+        // inside the try region and manage their own depth.
+        return $out . $leave . $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot())
+             . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 
     /**
