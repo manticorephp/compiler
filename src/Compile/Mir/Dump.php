@@ -4,18 +4,40 @@ namespace Compile\Mir;
 
 /**
  * Pretty-printer for MIR. Emits stable, diff-friendly text. Each
- * `emit*` returns the formatted chunk; callers concat the pieces.
+ * `visit*` returns the formatted chunk; callers concat the pieces.
  *
  * Why no `string &$out` accumulator: self-host pre-scan currently
  * doesn't propagate by-ref string writes back through method calls,
  * so the only reliable accumulator is the return value.
  *
- * Why kind-only dispatch (no `$node instanceof X` guards): self-host
- * mis-resolves bare short class names when they collide across
- * namespaces (e.g. our `Compile\Mir\Block` vs `Codegen\Llvm\Block`).
- * Typed parameter on the per-kind helper does the type-narrowing.
+ * Why {@see EmitVisitor} and not a `kind ===` chain: the chain was a
+ * second, unenforced dispatch table living alongside the visitor, and
+ * it drifted — 31 of the 67 kinds fell through to a `throw`, so
+ * `dump-mir` died on any program containing `&&`, `||` or `?->` (all
+ * three lower to {@see Ternary}). Implementing the interface makes the
+ * compiler reject an unhandled kind at class-load, which is the whole
+ * point of it. Do not reintroduce a `kind ===` dispatch here.
+ *
+ * Two invariants the visitor shape does not enforce — hold them by hand:
+ *
+ * 1. `$lastSlot` is a SINGLE mutable cell, not a per-node map
+ *    (`spl_object_id` isn't stable under self-host yet). So every
+ *    `accept()` must be followed IMMEDIATELY by its `$x = $this->lastSlot`
+ *    read, before any other `accept()` runs. Never collapse the temps
+ *    into one expression. `allocSlot()` clobbers it too, so a visit
+ *    method allocates its own result slot LAST.
+ *
+ * 2. `$indent` is instance state (the interface has no room for a
+ *    parameter). Save it into a local `$outer` before bumping, restore
+ *    before emitting the closer. Recursion supplies the stack.
+ *
+ * The dump prints the TREE — ternary arms, `ref_addr` lvalues and other
+ * conditionally-evaluated or never-loaded operands all appear as ordinary
+ * lines. It does not model evaluation order or reachability. That is
+ * already true of the long-standing kinds (`store_property` emits its
+ * object) and is the right call for a golden snapshot.
  */
-final class Dump
+final class Dump implements EmitVisitor
 {
     public static function module(Module $m, bool $includePrelude = false, bool $showEffects = false): string
     {
@@ -56,13 +78,16 @@ final class Dump
         }
         $printer = new self();
         $printer->showEffects = $showEffects;
+        $printer->indent = '  ';
         $body = $fn->body;
-        $out .= $printer->emitNode($body, '  ');
+        $out .= $body->accept($printer);
         $out .= "}\n";
         return $out;
     }
 
     private bool $showEffects = false;
+
+    private string $indent = '';
 
     /**
      * Per-op effect annotation: `  ; eff: alloc,throw` when effects are
@@ -83,68 +108,26 @@ final class Dump
 
     private int $nextId = 0;
 
-    private function emitNode(Node $node, string $indent): string
+    public function visitIntConst(IntConst $n): string
     {
-        $kind = $node->kind;
-        if ($kind === Node::KIND_INT_CONST)    { return $this->emitIntConst($node, $indent); }
-        if ($kind === Node::KIND_FLOAT_CONST)  { return $this->emitFloatConst($node, $indent); }
-        if ($kind === Node::KIND_STRING_CONST) { return $this->emitStringConst($node, $indent); }
-        if ($kind === Node::KIND_BOOL_CONST)   { return $this->emitBoolConst($node, $indent); }
-        if ($kind === Node::KIND_NULL_CONST)   { return $this->emitNullConst($node, $indent); }
-        if ($kind === Node::KIND_LOAD_LOCAL)   { return $this->emitLoadLocal($node, $indent); }
-        if ($kind === Node::KIND_STORE_LOCAL)  { return $this->emitStoreLocal($node, $indent); }
-        if ($kind === Node::KIND_ADD)          { return $this->emitAdd($node, $indent); }
-        if ($kind === Node::KIND_SUB)          { return $this->emitSub($node, $indent); }
-        if ($kind === Node::KIND_MUL)          { return $this->emitMul($node, $indent); }
-        if ($kind === Node::KIND_DIV)          { return $this->emitDiv($node, $indent); }
-        if ($kind === Node::KIND_MOD)          { return $this->emitMod($node, $indent); }
-        if ($kind === Node::KIND_NEG)          { return $this->emitNeg($node, $indent); }
-        if ($kind === Node::KIND_NOT)          { return $this->emitNot($node, $indent); }
-        if ($kind === Node::KIND_BITOP)        { return $this->emitBitOp($node, $indent); }
-        if ($kind === Node::KIND_BITNOT)       { return $this->emitBitNot($node, $indent); }
-        if ($kind === Node::KIND_CONCAT)       { return $this->emitConcat($node, $indent); }
-        if ($kind === Node::KIND_CMP)          { return $this->emitCmp($node, $indent); }
-        if ($kind === Node::KIND_SPACESHIP)    { return $this->emitSpaceship($node, $indent); }
-        if ($kind === Node::KIND_ECHO)         { return $this->emitEcho($node, $indent); }
-        if ($kind === Node::KIND_RETURN)       { return $this->emitReturn($node, $indent); }
-        if ($kind === Node::KIND_CALL)         { return $this->emitCall($node, $indent); }
-        if ($kind === Node::KIND_IF)           { return $this->emitIf($node, $indent); }
-        if ($kind === Node::KIND_WHILE)        { return $this->emitWhile($node, $indent); }
-        if ($kind === Node::KIND_BREAK)        { return $indent . "break\n"; }
-        if ($kind === Node::KIND_CONTINUE)     { return $indent . "continue\n"; }
-        if ($kind === Node::KIND_ARRAY_LIT)       { return $this->emitArrayLit($node, $indent); }
-        if ($kind === Node::KIND_ARRAY_ACCESS)    { return $this->emitArrayAccess($node, $indent); }
-        if ($kind === Node::KIND_STORE_ELEMENT)   { return $this->emitStoreElement($node, $indent); }
-        if ($kind === Node::KIND_NEW_OBJ)         { return $this->emitNewObj($node, $indent); }
-        if ($kind === Node::KIND_PROPERTY_ACCESS) { return $this->emitPropertyAccess($node, $indent); }
-        if ($kind === Node::KIND_STORE_PROPERTY)  { return $this->emitStoreProperty($node, $indent); }
-        if ($kind === Node::KIND_METHOD_CALL)     { return $this->emitMethodCall($node, $indent); }
-        if ($kind === Node::KIND_STATIC_CALL)     { return $this->emitStaticCall($node, $indent); }
-        if ($kind === Node::KIND_BLOCK)        { return $this->emitBlock($node, $indent); }
-        if ($kind === Node::KIND_MEMORY_OP)    { return $this->emitMemoryOp($node, $indent); }
-        throw new \RuntimeException('MIR.dump: unsupported node kind ' . $kind);
+        $name = $this->allocSlot();
+        return $this->indent . $name . ' = int_const ' . (string)$n->value
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitIntConst(IntConst $node, string $indent): string
+    public function visitFloatConst(FloatConst $n): string
     {
-        $name = $this->slotFor($node);
-        return $indent . $name . ' = int_const ' . (string)$node->value
-             . ' : ' . $node->type->toString() . "\n";
+        $name = $this->allocSlot();
+        return $this->indent . $name . ' = float_const ' . (string)$n->value
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitFloatConst(FloatConst $node, string $indent): string
+    public function visitStringConst(StringConst $n): string
     {
-        $name = $this->slotFor($node);
-        return $indent . $name . ' = float_const ' . (string)$node->value
-             . ' : ' . $node->type->toString() . "\n";
-    }
-
-    private function emitStringConst(StringConst $node, string $indent): string
-    {
-        $name = $this->slotFor($node);
-        $escaped = $this->escapeForDump($node->value);
-        return $indent . $name . ' = string_const "' . $escaped . '"'
-             . ' : ' . $node->type->toString() . "\n";
+        $name = $this->allocSlot();
+        $escaped = $this->escapeForDump($n->value);
+        return $this->indent . $name . ' = string_const "' . $escaped . '"'
+             . ' : ' . $n->type->toString() . "\n";
     }
 
     /**
@@ -173,63 +156,63 @@ final class Dump
         return $out;
     }
 
-    private function emitBoolConst(BoolConst $node, string $indent): string
+    public function visitBoolConst(BoolConst $n): string
     {
-        $name = $this->slotFor($node);
-        $lit = $node->value ? 'true' : 'false';
-        return $indent . $name . ' = bool_const ' . $lit
-             . ' : ' . $node->type->toString() . "\n";
+        $name = $this->allocSlot();
+        $lit = $n->value ? 'true' : 'false';
+        return $this->indent . $name . ' = bool_const ' . $lit
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitNullConst(NullConst $node, string $indent): string
+    public function visitNullConst(NullConst $n): string
     {
-        $name = $this->slotFor($node);
-        return $indent . $name . ' = null_const : ' . $node->type->toString() . "\n";
+        $name = $this->allocSlot();
+        return $this->indent . $name . ' = null_const : ' . $n->type->toString() . "\n";
     }
 
-    private function emitLoadLocal(LoadLocal $node, string $indent): string
+    public function visitLoadLocal(LoadLocal $n): string
     {
-        $name = $this->slotFor($node);
-        return $indent . $name . ' = load_local ' . $node->name
-             . ' : ' . $node->type->toString() . "\n";
+        $name = $this->allocSlot();
+        return $this->indent . $name . ' = load_local ' . $n->name
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitStoreLocal(StoreLocal $node, string $indent): string
+    public function visitStoreLocal(StoreLocal $n): string
     {
-        $value = $node->value;
-        $valChunk = $this->emitNode($value, $indent);
+        $value = $n->value;
+        $valChunk = $value->accept($this);
         $valName = $this->lastSlot;
         $name = $this->allocSlot();
-        return $valChunk . $indent . $name . ' = store_local ' . $node->name
-             . ' <- ' . $valName . ' : ' . $node->type->toString() . "\n";
+        return $valChunk . $this->indent . $name . ' = store_local ' . $n->name
+             . ' <- ' . $valName . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitAdd(Add $node, string $indent): string { return $this->emitBin($node, $node->left, $node->right, $node->type, 'add', $indent); }
-    private function emitSub(Sub $node, string $indent): string { return $this->emitBin($node, $node->left, $node->right, $node->type, 'sub', $indent); }
-    private function emitMul(Mul $node, string $indent): string { return $this->emitBin($node, $node->left, $node->right, $node->type, 'mul', $indent); }
-    private function emitDiv(Div $node, string $indent): string { return $this->emitBin($node, $node->left, $node->right, $node->type, 'div', $indent); }
-    private function emitMod(Mod $node, string $indent): string { return $this->emitBin($node, $node->left, $node->right, $node->type, 'mod', $indent); }
-    private function emitConcat(Concat $node, string $indent): string { return $this->emitBin($node, $node->left, $node->right, $node->type, 'concat', $indent); }
+    public function visitAdd(Add $n): string { return $this->bin($n, $n->left, $n->right, $n->type, 'add'); }
+    public function visitSub(Sub $n): string { return $this->bin($n, $n->left, $n->right, $n->type, 'sub'); }
+    public function visitMul(Mul $n): string { return $this->bin($n, $n->left, $n->right, $n->type, 'mul'); }
+    public function visitDiv(Div $n): string { return $this->bin($n, $n->left, $n->right, $n->type, 'div'); }
+    public function visitMod(Mod $n): string { return $this->bin($n, $n->left, $n->right, $n->type, 'mod'); }
+    public function visitConcat(Concat $n): string { return $this->bin($n, $n->left, $n->right, $n->type, 'concat'); }
 
-    private function emitBin(Node $node, Node $left, Node $right, Type $type, string $op, string $indent): string
+    private function bin(Node $node, Node $left, Node $right, Type $type, string $op): string
     {
-        $lChunk = $this->emitNode($left, $indent);
+        $lChunk = $left->accept($this);
         $lName = $this->lastSlot;
-        $rChunk = $this->emitNode($right, $indent);
+        $rChunk = $right->accept($this);
         $rName = $this->lastSlot;
         $name = $this->allocSlot();
-        return $lChunk . $rChunk . $indent . $name . ' = ' . $op . ' '
+        return $lChunk . $rChunk . $this->indent . $name . ' = ' . $op . ' '
              . $lName . ', ' . $rName . ' : ' . $type->toString()
              . $this->eff($node) . "\n";
     }
 
-    private function emitEcho(Echo_ $node, string $indent): string
+    public function visitEcho(Echo_ $n): string
     {
         $out = '';
-        $line = $indent . 'echo ';
+        $line = $this->indent . 'echo ';
         $first = true;
-        foreach ($node->exprs as $e) {
-            $out .= $this->emitNode($e, $indent);
+        foreach ($n->exprs as $e) {
+            $out .= $e->accept($this);
             if (!$first) { $line .= ', '; }
             $first = false;
             $line .= $this->lastSlot;
@@ -237,50 +220,50 @@ final class Dump
         return $out . $line . "\n";
     }
 
-    private function emitReturn(Return_ $node, string $indent): string
+    public function visitReturn(Return_ $n): string
     {
-        $value = $node->value;
+        $value = $n->value;
         if ($value === null) {
-            return $indent . "return\n";
+            return $this->indent . "return\n";
         }
-        $chunk = $this->emitNode($value, $indent);
-        return $chunk . $indent . 'return ' . $this->lastSlot . $this->eff($node) . "\n";
+        $chunk = $value->accept($this);
+        return $chunk . $this->indent . 'return ' . $this->lastSlot . $this->eff($n) . "\n";
     }
 
-    private function emitCall(Call $node, string $indent): string
+    public function visitCall(Call $n): string
     {
         $out = '';
         $argLine = '';
         $first = true;
-        foreach ($node->args as $a) {
-            $out .= $this->emitNode($a, $indent);
+        foreach ($n->args as $a) {
+            $out .= $a->accept($this);
             if (!$first) { $argLine .= ', '; }
             $first = false;
             $argLine .= $this->lastSlot;
         }
         $name = $this->allocSlot();
-        return $out . $indent . $name . ' = call ' . $node->function
+        return $out . $this->indent . $name . ' = call ' . $n->function
              . '(' . $argLine . ')'
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitBlock(Block $node, string $indent): string
+    public function visitBlock(Block $n): string
     {
         $out = '';
-        foreach ($node->stmts as $s) {
-            $out .= $this->emitNode($s, $indent);
+        foreach ($n->stmts as $s) {
+            $out .= $s->accept($this);
         }
         return $out;
     }
 
-    private function emitMemoryOp(MemoryOp_ $node, string $indent): string
+    public function visitMemoryOp(MemoryOp_ $n): string
     {
         // Whole-frame arena scope carries no flavor / target.
-        $line = $indent . 'mem_' . $node->op;
-        if ($node->flavor !== '') {
-            $line .= ' ' . $node->flavor;
+        $line = $this->indent . 'mem_' . $n->op;
+        if ($n->flavor !== '') {
+            $line .= ' ' . $n->flavor;
         }
-        $target = $node->target;
+        $target = $n->target;
         if ($target !== null && $target->kind === Node::KIND_LOAD_LOCAL) {
             $line .= ' ' . $this->asLoadLocalName($target);
         }
@@ -295,223 +278,279 @@ final class Dump
 
     private function castLoadLocal(Node $n): LoadLocal { return $n; }
 
-    private function emitArrayLit(ArrayLit $node, string $indent): string
+    public function visitArrayLit(ArrayLit $n): string
     {
         $out = '';
         $parts = '';
         $first = true;
-        foreach ($node->elements as $el) {
+        foreach ($n->elements as $el) {
             if ($el->key !== null) {
-                $out .= $this->emitNode($el->key, $indent);
+                $out .= $el->key->accept($this);
                 $kName = $this->lastSlot;
             } else {
                 $kName = '_';
             }
-            $out .= $this->emitNode($el->value, $indent);
+            $out .= $el->value->accept($this);
             $vName = $this->lastSlot;
             if (!$first) { $parts .= ', '; }
             $first = false;
             $parts .= $kName . ' => ' . $vName;
         }
         $name = $this->allocSlot();
-        return $out . $indent . $name . ' = array_lit [' . $parts . ']'
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+        return $out . $this->indent . $name . ' = array_lit [' . $parts . ']'
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitArrayAccess(ArrayAccess_ $node, string $indent): string
+    public function visitArrayAccess(ArrayAccess_ $n): string
     {
-        $aChunk = $this->emitNode($node->array, $indent);
+        $aChunk = $n->array->accept($this);
         $aName  = $this->lastSlot;
-        $iChunk = $this->emitNode($node->index, $indent);
+        $iChunk = $n->index->accept($this);
         $iName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $aChunk . $iChunk . $indent . $name . ' = array_access '
+        return $aChunk . $iChunk . $this->indent . $name . ' = array_access '
              . $aName . '[' . $iName . ']'
-             . ' : ' . $node->type->toString() . "\n";
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitStoreElement(StoreElement $node, string $indent): string
+    public function visitStoreElement(StoreElement $n): string
     {
-        $aChunk = $this->emitNode($node->array, $indent);
+        $aChunk = $n->array->accept($this);
         $aName  = $this->lastSlot;
-        $iChunk = $this->emitNode($node->index, $indent);
+        $iChunk = $n->index->accept($this);
         $iName  = $this->lastSlot;
-        $vChunk = $this->emitNode($node->value, $indent);
+        $vChunk = $n->value->accept($this);
         $vName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $aChunk . $iChunk . $vChunk . $indent . $name . ' = store_element '
+        return $aChunk . $iChunk . $vChunk . $this->indent . $name . ' = store_element '
              . $aName . '[' . $iName . '] <- ' . $vName
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitNewObj(NewObj $node, string $indent): string
+    public function visitNewObj(NewObj $n): string
     {
         $out = '';
         $argLine = '';
         $first = true;
-        foreach ($node->args as $a) {
-            $out .= $this->emitNode($a, $indent);
+        foreach ($n->args as $a) {
+            $out .= $a->accept($this);
             if (!$first) { $argLine .= ', '; }
             $first = false;
             $argLine .= $this->lastSlot;
         }
         $name = $this->allocSlot();
-        return $out . $indent . $name . ' = new ' . $node->class
+        return $out . $this->indent . $name . ' = new ' . $n->class
              . '(' . $argLine . ')'
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitPropertyAccess(PropertyAccess_ $node, string $indent): string
+    public function visitPropertyAccess(PropertyAccess_ $n): string
     {
-        $oChunk = $this->emitNode($node->object, $indent);
+        $oChunk = $n->object->accept($this);
         $oName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $oChunk . $indent . $name . ' = property_access ' . $oName
-             . '->' . $node->property
-             . ' : ' . $node->type->toString() . "\n";
+        return $oChunk . $this->indent . $name . ' = property_access ' . $oName
+             . '->' . $n->property
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitStoreProperty(StoreProperty $node, string $indent): string
+    public function visitStoreProperty(StoreProperty $n): string
     {
-        $oChunk = $this->emitNode($node->object, $indent);
+        $oChunk = $n->object->accept($this);
         $oName  = $this->lastSlot;
-        $vChunk = $this->emitNode($node->value, $indent);
+        $vChunk = $n->value->accept($this);
         $vName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $oChunk . $vChunk . $indent . $name . ' = store_property '
-             . $oName . '->' . $node->property . ' <- ' . $vName
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+        return $oChunk . $vChunk . $this->indent . $name . ' = store_property '
+             . $oName . '->' . $n->property . ' <- ' . $vName
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitMethodCall(MethodCall_ $node, string $indent): string
+    public function visitMethodCall(MethodCall_ $n): string
     {
-        $oChunk = $this->emitNode($node->object, $indent);
+        $oChunk = $n->object->accept($this);
         $oName  = $this->lastSlot;
         $argOut = '';
         $argLine = '';
         $first = true;
-        foreach ($node->args as $a) {
-            $argOut .= $this->emitNode($a, $indent);
+        foreach ($n->args as $a) {
+            $argOut .= $a->accept($this);
             if (!$first) { $argLine .= ', '; }
             $first = false;
             $argLine .= $this->lastSlot;
         }
         $name = $this->allocSlot();
-        return $oChunk . $argOut . $indent . $name . ' = method_call '
-             . $oName . '->' . $node->method . '(' . $argLine . ')'
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+        return $oChunk . $argOut . $this->indent . $name . ' = method_call '
+             . $oName . '->' . $n->method . '(' . $argLine . ')'
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitStaticCall(StaticCall_ $node, string $indent): string
+    public function visitStaticCall(StaticCall_ $n): string
     {
         $argOut = '';
         $argLine = '';
         $first = true;
-        foreach ($node->args as $a) {
-            $argOut .= $this->emitNode($a, $indent);
+        foreach ($n->args as $a) {
+            $argOut .= $a->accept($this);
             if (!$first) { $argLine .= ', '; }
             $first = false;
             $argLine .= $this->lastSlot;
         }
         $name = $this->allocSlot();
-        return $argOut . $indent . $name . ' = static_call '
-             . $node->class . '::' . $node->method . '(' . $argLine . ')'
-             . ' : ' . $node->type->toString() . $this->eff($node) . "\n";
+        return $argOut . $this->indent . $name . ' = static_call '
+             . $n->class . '::' . $n->method . '(' . $argLine . ')'
+             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
-    private function emitNeg(Neg $node, string $indent): string
+    public function visitNeg(Neg $n): string
     {
-        $chunk = $this->emitNode($node->operand, $indent);
+        $chunk = $n->operand->accept($this);
         $opName = $this->lastSlot;
         $name = $this->allocSlot();
-        return $chunk . $indent . $name . ' = neg ' . $opName
-             . ' : ' . $node->type->toString() . "\n";
+        return $chunk . $this->indent . $name . ' = neg ' . $opName
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitNot(Not_ $node, string $indent): string
+    public function visitNot(Not_ $n): string
     {
-        $chunk = $this->emitNode($node->operand, $indent);
+        $chunk = $n->operand->accept($this);
         $opName = $this->lastSlot;
         $name = $this->allocSlot();
-        return $chunk . $indent . $name . ' = not ' . $opName
-             . ' : ' . $node->type->toString() . "\n";
+        return $chunk . $this->indent . $name . ' = not ' . $opName
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitBitOp(BitOp $node, string $indent): string
+    public function visitBitOp(BitOp $n): string
     {
-        $lChunk = $this->emitNode($node->left, $indent);
+        $lChunk = $n->left->accept($this);
         $lName  = $this->lastSlot;
-        $rChunk = $this->emitNode($node->right, $indent);
+        $rChunk = $n->right->accept($this);
         $rName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $lChunk . $rChunk . $indent . $name . ' = ' . $node->op . ' '
-             . $lName . ', ' . $rName . ' : ' . $node->type->toString() . "\n";
+        return $lChunk . $rChunk . $this->indent . $name . ' = ' . $n->op . ' '
+             . $lName . ', ' . $rName . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitBitNot(BitNot_ $node, string $indent): string
+    public function visitBitNot(BitNot_ $n): string
     {
-        $chunk = $this->emitNode($node->operand, $indent);
+        $chunk = $n->operand->accept($this);
         $opName = $this->lastSlot;
         $name = $this->allocSlot();
-        return $chunk . $indent . $name . ' = bitnot ' . $opName
-             . ' : ' . $node->type->toString() . "\n";
+        return $chunk . $this->indent . $name . ' = bitnot ' . $opName
+             . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitSpaceship(\Compile\Mir\Spaceship $node, string $indent): string
+    public function visitSpaceship(\Compile\Mir\Spaceship $n): string
     {
-        $lChunk = $this->emitNode($node->left, $indent);
+        $lChunk = $n->left->accept($this);
         $lName  = $this->lastSlot;
-        $rChunk = $this->emitNode($node->right, $indent);
+        $rChunk = $n->right->accept($this);
         $rName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $lChunk . $rChunk . $indent . $name . ' = spaceship '
-             . $lName . ', ' . $rName . ' : ' . $node->type->toString() . "\n";
+        return $lChunk . $rChunk . $this->indent . $name . ' = spaceship '
+             . $lName . ', ' . $rName . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitCmp(Cmp $node, string $indent): string
+    public function visitCmp(Cmp $n): string
     {
-        $lChunk = $this->emitNode($node->left, $indent);
+        $lChunk = $n->left->accept($this);
         $lName  = $this->lastSlot;
-        $rChunk = $this->emitNode($node->right, $indent);
+        $rChunk = $n->right->accept($this);
         $rName  = $this->lastSlot;
         $name   = $this->allocSlot();
-        return $lChunk . $rChunk . $indent . $name . ' = cmp ' . $node->op . ' '
-             . $lName . ', ' . $rName . ' : ' . $node->type->toString() . "\n";
+        return $lChunk . $rChunk . $this->indent . $name . ' = cmp ' . $n->op . ' '
+             . $lName . ', ' . $rName . ' : ' . $n->type->toString() . "\n";
     }
 
-    private function emitIf(If_ $node, string $indent): string
+    public function visitIf(If_ $n): string
     {
-        $condChunk = $this->emitNode($node->cond, $indent);
+        $condChunk = $n->cond->accept($this);
         $condName  = $this->lastSlot;
-        $inner = $indent . '  ';
-        $out = $condChunk . $indent . 'if ' . $condName . " then {\n";
-        $out .= $this->emitNode($node->then, $inner);
-        $out .= $indent . "}";
-        if ($node->else !== null) {
+        $outer = $this->indent;
+        $out = $condChunk . $outer . 'if ' . $condName . " then {\n";
+        $this->indent = $outer . '  ';
+        $out .= $n->then->accept($this);
+        $this->indent = $outer;
+        $out .= $outer . "}";
+        if ($n->else !== null) {
             $out .= " else {\n";
-            $out .= $this->emitNode($node->else, $inner);
-            $out .= $indent . "}";
+            $this->indent = $outer . '  ';
+            $out .= $n->else->accept($this);
+            $this->indent = $outer;
+            $out .= $outer . "}";
         }
         return $out . "\n";
     }
 
-    private function emitWhile(While_ $node, string $indent): string
+    public function visitWhile(While_ $n): string
     {
-        $inner = $indent . '  ';
-        $condChunk = $this->emitNode($node->cond, $inner);
+        // The condition is loop-carried: it belongs INSIDE the block, at
+        // the inner indent, named by `check`.
+        $outer = $this->indent;
+        $inner = $outer . '  ';
+        $this->indent = $inner;
+        $condChunk = $n->cond->accept($this);
         $condName  = $this->lastSlot;
-        $out = $indent . "while {\n";
+        $out = $outer . "while {\n";
         $out .= $condChunk . $inner . 'check ' . $condName . "\n";
-        $out .= $this->emitNode($node->body, $inner);
-        $out .= $indent . "}\n";
+        $out .= $n->body->accept($this);
+        $this->indent = $outer;
+        $out .= $outer . "}\n";
         return $out;
     }
+
+    public function visitBreak(Break_ $n): string { return $this->indent . "break\n"; }
+
+    public function visitContinue(Continue_ $n): string { return $this->indent . "continue\n"; }
+
+    // ---------------------------------------------------------------
+    // Not yet formatted. These 31 kinds have never been dumpable; the
+    // visitor now names each one explicitly so the gap is a list rather
+    // than a silent fall-through. Formats land next.
+    // ---------------------------------------------------------------
+
+    private function todo(Node $n): string
+    {
+        throw new \RuntimeException('MIR.dump: node kind not yet formatted: ' . $n->kind);
+    }
+
+    public function visitIncDec(IncDec $n): string { return $this->todo($n); }
+    public function visitTernary(Ternary $n): string { return $this->todo($n); }
+    public function visitCast(Cast $n): string { return $this->todo($n); }
+    public function visitInstanceof(Instanceof_ $n): string { return $this->todo($n); }
+    public function visitNullCoalesce(NullCoalesce_ $n): string { return $this->todo($n); }
+    public function visitClosure(Closure_ $n): string { return $this->todo($n); }
+    public function visitInvoke(Invoke_ $n): string { return $this->todo($n); }
+    public function visitStaticProp(StaticProp_ $n): string { return $this->todo($n); }
+    public function visitStoreStaticProp(StoreStaticProp_ $n): string { return $this->todo($n); }
+    public function visitStaticLocalDecl(StaticLocalDecl_ $n): string { return $this->todo($n); }
+    public function visitIsset(Isset_ $n): string { return $this->todo($n); }
+    public function visitUnset(Unset_ $n): string { return $this->todo($n); }
+    public function visitClassName(ClassName_ $n): string { return $this->todo($n); }
+    public function visitRefAlias(RefAlias_ $n): string { return $this->todo($n); }
+    public function visitRefBind(RefBind_ $n): string { return $this->todo($n); }
+    public function visitRefAddr(RefAddr_ $n): string { return $this->todo($n); }
+    public function visitGoto(Goto_ $n): string { return $this->todo($n); }
+    public function visitLabel(Label_ $n): string { return $this->todo($n); }
+    public function visitThrow(Throw_ $n): string { return $this->todo($n); }
+    public function visitTryCatch(TryCatch_ $n): string { return $this->todo($n); }
+    public function visitYield(Yield_ $n): string { return $this->todo($n); }
+    public function visitFor(For_ $n): string { return $this->todo($n); }
+    public function visitDoWhile(DoWhile_ $n): string { return $this->todo($n); }
+    public function visitSwitch(Switch_ $n): string { return $this->todo($n); }
+    public function visitMatch(Match_ $n): string { return $this->todo($n); }
+    public function visitForeach(Foreach_ $n): string { return $this->todo($n); }
+    public function visitSpread(Spread_ $n): string { return $this->todo($n); }
+    public function visitNewDynObj(NewDynObj $n): string { return $this->todo($n); }
+    public function visitClone(Clone_ $n): string { return $this->todo($n); }
+    public function visitDynProp(DynProp_ $n): string { return $this->todo($n); }
+    public function visitStoreDynProp(StoreDynProp_ $n): string { return $this->todo($n); }
 
     private string $lastSlot = '%?';
 
     /**
      * Allocate a fresh slot, cache it as `$lastSlot`, return its
-     * spelling. Each emit* returns its chunk and stashes the
+     * spelling. Each visit* returns its chunk and stashes the
      * produced slot in `$lastSlot` so the parent can reference it
      * without needing a stable object-id keyed lookup (`spl_object_id`
      * is not reliably stable under self-host yet).
@@ -522,13 +561,5 @@ final class Dump
         $this->nextId = $this->nextId + 1;
         $this->lastSlot = $slot;
         return $slot;
-    }
-
-    private function slotFor(Node $node): string
-    {
-        // Retained for emit* helpers that produce a single output slot
-        // tied to the current node — all of them allocate via
-        // {@see allocSlot()} now, so this just forwards.
-        return $this->allocSlot();
     }
 }
