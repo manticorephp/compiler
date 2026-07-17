@@ -136,6 +136,9 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_of')                 { return $this->biMcReflOf($args); }
         if ($name === '__mc_refl_name')               { return $this->biMcReflName($args); }
         if ($name === '__mc_refl_find')               { return $this->biMcReflFind($args); }
+        if ($name === '__mc_refl_member')             { return $this->biMcReflMember($args); }
+        if ($name === '__mc_refl_parent')             { return $this->biMcReflParent($args); }
+        if ($name === '__mc_refl_flags')              { return $this->biMcReflFlags($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
@@ -2659,6 +2662,110 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_find(ptr ' . $sp . ")\n";
         return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_member($h, $name, $wantMethods)` — a member's flags + 1, or 0
+     * when absent. The `+1` keeps one i64 answering both "present?" and "what?"
+     * (a public non-static member's flags are 0).
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflMember(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToPtr();
+        $np = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $w = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_member(i64 ' . $h
+              . ', ptr ' . $np . ', i64 ' . $w . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_flags($h)` — the class flags word (final/abstract/…), 0 for a
+     * null handle.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflFlags(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'rf.ok.' . $lbl;
+        $noL = 'rf.no.' . $lbl;
+        $endL = 'rf.end.' . $lbl;
+        $hz = $this->ssa->allocReg();
+        $out .= '  ' . $hz . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $hz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $hp . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_FLAGS_OFFSET . "\n";
+        $fv = $this->ssa->allocReg();
+        $out .= '  ' . $fv . ' = load i64, ptr ' . $fp . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $fv . ', %' . $okL . ' ], [ 0, %' . $noL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_parent($h)` — the parent's rmeta handle, or 0 at the root.
+     *
+     * Resolved through the NAME (`find(parent_name)`), not the id: the registry
+     * is name-keyed, and the parent's block may live in another object file
+     * where a direct pointer would need a relocation the emitter cannot form.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflParent(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'rp.ok.' . $lbl;
+        $noL = 'rp.no.' . $lbl;
+        $endL = 'rp.end.' . $lbl;
+        $hz = $this->ssa->allocReg();
+        $out .= '  ' . $hz . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $hz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $pnp = $this->ssa->allocReg();
+        $out .= '  ' . $pnp . ' = getelementptr i8, ptr ' . $hp . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_PARENT_NAME_OFFSET . "\n";
+        $pn = $this->ssa->allocReg();
+        $out .= '  ' . $pn . ' = load ptr, ptr ' . $pnp . "\n";
+        $pz = $this->ssa->allocReg();
+        $out .= '  ' . $pz . ' = icmp eq ptr ' . $pn . ", null\n";
+        $findL = 'rp.find.' . $lbl;
+        $out .= '  br i1 ' . $pz . ', label %' . $noL . ', label %' . $findL . "\n";
+        $out .= $findL . ":\n";
+        $fr = $this->ssa->allocReg();
+        $out .= '  ' . $fr . ' = call i64 @__mc_refl_find(ptr ' . $pn . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $fr . ', %' . $findL . ' ], [ 0, %' . $noL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**

@@ -174,14 +174,49 @@ final class MemoryAbi
      */
     public const RMETA_PARENT_ID_OFFSET = 16;
 
-    /** Bytes — the Ф1a width. Grows as tables are appended; readers must use
-     *  the named offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 24;
+    /**
+     * `ptr` — the parent's NAME (an immortal literal), or null for none.
+     *
+     * Carried alongside the id because it is what makes the parent REACHABLE:
+     * the registry is name-keyed, so `getParentClass()` is
+     * `__mc_refl_find(parent_name)` and needs no second lookup structure. The id
+     * stays for cheap identity comparison.
+     */
+    public const RMETA_PARENT_NAME_OFFSET = 24;
+
+    /** `i64` / `ptr` — the method table: count, then `[{ ptr name, i64 flags }]`. */
+    public const RMETA_NMETHODS_OFFSET = 32;
+    public const RMETA_METHODS_OFFSET  = 40;
+
+    /** `i64` / `ptr` — the property table: count, then `[{ ptr name, i64 flags }]`. */
+    public const RMETA_NPROPS_OFFSET = 48;
+    public const RMETA_PROPS_OFFSET  = 56;
+
+    /** Bytes. Grows as tables are appended; readers must use the named
+     *  offsets, never arithmetic on this. */
+    public const RMETA_SIZE = 64;
+
+    /** One row of the method / property tables: `{ ptr name, i64 flags }`. */
+    public const RMETA_ROW_NAME_OFFSET  = 0;
+    public const RMETA_ROW_FLAGS_OFFSET = 8;
+    public const RMETA_ROW_SIZE = 16;
 
     public const RMETA_FLAG_FINAL     = 1;
     public const RMETA_FLAG_ABSTRACT  = 2;
     public const RMETA_FLAG_INTERFACE = 4;
     public const RMETA_FLAG_ENUM      = 8;
+
+    // Member flags — a row's `flags` word. Visibility is an enum, not a
+    // bitfield: PHP has exactly one per member, and three bits that could
+    // disagree would invite a state nothing can mean.
+    public const RMETA_MEM_PUBLIC    = 0;
+    public const RMETA_MEM_PROTECTED = 1;
+    public const RMETA_MEM_PRIVATE   = 2;
+    public const RMETA_MEM_VIS_MASK  = 3;
+    public const RMETA_MEM_STATIC    = 4;
+    public const RMETA_MEM_ABSTRACT  = 8;
+    public const RMETA_MEM_FINAL     = 16;
+    public const RMETA_MEM_READONLY  = 32;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;

@@ -63,7 +63,39 @@ final class RuntimeLibrary
      */
     public static function rmetaType(): string
     {
-        return '{ ptr, i64, i64 }';
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr }';
+    }
+
+    /** One method/property row: `{ ptr name, i64 flags }`. */
+    public static function rmetaRowType(): string
+    {
+        return '{ ptr, i64 }';
+    }
+
+    /**
+     * A method or property table: `[N x { ptr name, i64 flags }]`, plus the
+     * `{ count, ptr }` pair that addresses it.
+     *
+     * An empty table emits no global and yields `{ i64 0, ptr null }` — a reader
+     * must check the count first, never dereference the pointer blind.
+     *
+     * @param array<string,int> $rows name → flags, in declaration order
+     * @param string[] $namesIr index-parallel to $rows: each name's data-ptr IR
+     * @return string[] [globalDef, countAndPtrFields]
+     */
+    public static function rmetaTable(string $sym, array $rows, array $namesIr): array
+    {
+        $n = \count($rows);
+        if ($n === 0) { return ['', 'i64 0, ptr null']; }
+        $items = [];
+        $i = 0;
+        foreach ($rows as $flags) {
+            $items[] = self::rmetaRowType() . ' { ptr ' . $namesIr[$i] . ', i64 ' . (string)$flags . ' }';
+            $i = $i + 1;
+        }
+        $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x ' . self::rmetaRowType()
+             . '] [' . \implode(', ', $items) . "]\n";
+        return [$def, 'i64 ' . (string)$n . ', ptr ' . $sym];
     }
 
     /**
@@ -79,10 +111,18 @@ final class RuntimeLibrary
      * `$parentId` is an id rather than a pointer because the parent's rmeta can
      * live in another object file ({@see \Compile\MemoryAbi::RMETA_PARENT_ID_OFFSET}).
      */
-    public static function rmetaGlobal(int $id, string $nameFld, int $flags, int $parentId): string
-    {
+    public static function rmetaGlobal(
+        int $id,
+        string $nameFld,
+        int $flags,
+        int $parentId,
+        string $parentNameFld = 'ptr null',
+        string $methodsFlds = 'i64 0, ptr null',
+        string $propsFlds = 'i64 0, ptr null'
+    ): string {
         return '@__mc_rmeta_' . (string)$id . ' = linkonce_odr constant ' . self::rmetaType()
-            . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId . " }\n";
+            . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
+            . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds . " }\n";
     }
 
     /** The rmeta pointer field for a descriptor: the class's block, or null
@@ -193,6 +233,64 @@ final class RuntimeLibrary
         $out .= "  %nxp = getelementptr i8, ptr %p, i64 8\n";
         $out .= "  %next = load ptr, ptr %nxp\n";
         $out .= "  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        $out .= self::reflMemberLookup();
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_member(handle, name, wantMethods)` — a member's flags word + 1,
+     * or 0 when absent.
+     *
+     * One walker for both tables: they have identical shape, and two near-copies
+     * of a strcmp loop is two places to fix a bug. The `+1` is what lets a single
+     * i64 answer both "is it there" and "what is it" — flags for a plain public
+     * member are 0, so a raw flags word could not distinguish "public method"
+     * from "no such method".
+     *
+     * A null handle or an empty table answers 0 rather than dereferencing: the
+     * count is checked before the pointer, because an empty table stores `ptr
+     * null` there.
+     */
+    private static function reflMemberLookup(): string
+    {
+        $nm = (string)\Compile\MemoryAbi::RMETA_NMETHODS_OFFSET;
+        $mt = (string)\Compile\MemoryAbi::RMETA_METHODS_OFFSET;
+        $np = (string)\Compile\MemoryAbi::RMETA_NPROPS_OFFSET;
+        $pt = (string)\Compile\MemoryAbi::RMETA_PROPS_OFFSET;
+        $rs = (string)\Compile\MemoryAbi::RMETA_ROW_SIZE;
+        $rf = (string)\Compile\MemoryAbi::RMETA_ROW_FLAGS_OFFSET;
+        $out = "define i64 @__mc_refl_member(i64 %h, ptr %name, i64 %want) {\nentry:\n";
+        $out .= "  %hz = icmp eq i64 %h, 0\n";
+        $out .= "  br i1 %hz, label %miss, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %m = inttoptr i64 %h to ptr\n";
+        $out .= "  %isM = icmp ne i64 %want, 0\n";
+        $out .= '  %cntOff = select i1 %isM, i64 ' . $nm . ', i64 ' . $np . "\n";
+        $out .= '  %tabOff = select i1 %isM, i64 ' . $mt . ', i64 ' . $pt . "\n";
+        $out .= "  %cntP = getelementptr i8, ptr %m, i64 %cntOff\n";
+        $out .= "  %cnt = load i64, ptr %cntP\n";
+        $out .= "  %tabP = getelementptr i8, ptr %m, i64 %tabOff\n";
+        $out .= "  %tab = load ptr, ptr %tabP\n";
+        $out .= "  %empty = icmp eq i64 %cnt, 0\n";
+        $out .= "  br i1 %empty, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %have ], [ %i1, %cont ]\n";
+        $out .= '  %roff = mul i64 %i, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %tab, i64 %roff\n";
+        $out .= "  %rn = load ptr, ptr %row\n";
+        $out .= "  %c = call i32 @strcmp(ptr %rn, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= '  %fp = getelementptr i8, ptr %row, i64 ' . $rf . "\n";
+        $out .= "  %fv = load i64, ptr %fp\n";
+        $out .= "  %r = add i64 %fv, 1\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %loop\n";
         $out .= "miss:\n  ret i64 0\n}\n";
         return $out;
     }

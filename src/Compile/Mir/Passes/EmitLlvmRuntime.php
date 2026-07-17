@@ -724,6 +724,83 @@ trait EmitLlvmRuntime
         // drop_fn INDIRECTLY. linkonce_odr → one descriptor per class across
         // every separately-linked object, so a class only one .o knows still
         // drops correctly (no central id-switch to lose a case).
+        return $this->dropRuntimeBody();
+    }
+
+    /**
+     * The method table for one class: `[{ ptr name, i64 flags }]` in php's
+     * getMethods() order (own → trait → inherited), which is the order
+     * {@see \Compile\Mir\ClassDef::$methodMeta} already carries.
+     *
+     * Only USER-DECLARED methods: `$methodNames` also holds compiler-synthesised
+     * entries (property hooks, the ctor synthesised for defaulted props) that
+     * `$methodMeta` has no declaration for, and php reports none of them. That
+     * asymmetry is deliberate — see the ClassDef docblock.
+     *
+     * @return string[] [globalDef, "i64 n, ptr sym"]
+     */
+    private function rmetaMethodTable(\Compile\Mir\ClassDef $cls, string $id): array
+    {
+        $rows = [];
+        $names = [];
+        $defs = '';
+        $i = 0;
+        foreach ($cls->methodMeta as $mn => $mm) {
+            $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($sym, $mn);
+            $names[] = $this->strSymBytes($sym);
+            $rows[$mn] = $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false);
+            $i = $i + 1;
+        }
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows, $names);
+        return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
+     * The property table for one class. Declared instance properties, in slot
+     * order — `propertyNames` is the layout, so this is also the order php
+     * reports. Static props are a separate list and are not included yet.
+     *
+     * Visibility is not recorded in ClassDef (only readonly is), so every entry
+     * reports PUBLIC for now. That is a KNOWN GAP, not an accident: a serializer
+     * asking `isPrivate()` would be told the wrong thing, so ReflectionProperty
+     * (Ф3) must carry visibility into ClassDef first.
+     *
+     * @return string[] [globalDef, "i64 n, ptr sym"]
+     */
+    private function rmetaPropTable(\Compile\Mir\ClassDef $cls, string $id): array
+    {
+        $rows = [];
+        $names = [];
+        $defs = '';
+        $i = 0;
+        foreach ($cls->propertyNames as $pn) {
+            $sym = '@.rmeta.p.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($sym, $pn);
+            $names[] = $this->strSymBytes($sym);
+            $ro = isset($cls->propertyReadonly[$pn]);
+            $rows[$pn] = $this->memberFlags('public', false, false, false, $ro);
+            $i = $i + 1;
+        }
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows, $names);
+        return [$defs . $pair[0], $pair[1]];
+    }
+
+    /** Pack a member's flags word. Visibility is an enum in the low bits. */
+    private function memberFlags(string $vis, bool $static, bool $abstract, bool $final, bool $readonly): int
+    {
+        $f = \Compile\MemoryAbi::RMETA_MEM_PUBLIC;
+        if ($vis === 'protected') { $f = \Compile\MemoryAbi::RMETA_MEM_PROTECTED; }
+        if ($vis === 'private')   { $f = \Compile\MemoryAbi::RMETA_MEM_PRIVATE; }
+        if ($static)   { $f = $f | \Compile\MemoryAbi::RMETA_MEM_STATIC; }
+        if ($abstract) { $f = $f | \Compile\MemoryAbi::RMETA_MEM_ABSTRACT; }
+        if ($final)    { $f = $f | \Compile\MemoryAbi::RMETA_MEM_FINAL; }
+        if ($readonly) { $f = $f | \Compile\MemoryAbi::RMETA_MEM_READONLY; }
+        return $f;
+    }
+
+    private function dropRuntimeBody(): string
+    {
         $descs = '';
         $defs = '';
         /** @var int[] class ids to register in the name→rmeta registry */
@@ -793,11 +870,27 @@ trait EmitLlvmRuntime
             // names), and an enum only lands here when it declares methods.
             // Filling those needs a source other than $this->classes.
             $parentId = 0;
+            $parentNameFld = 'ptr null';
             if ($cls->parent !== '' && isset($this->classes[$cls->parent])) {
-                $parentId = $this->classes[$cls->parent]->classId;
+                $pcd = $this->classes[$cls->parent];
+                $parentId = $pcd->classId;
+                // The parent's name, so getParentClass() is find(parent_name) —
+                // the registry is name-keyed, and this saves a second lookup
+                // structure keyed by id. Its own symbol for the same reason the
+                // class name has one.
+                $pnSym = '@.rmeta.pname.' . $id;
+                $descs .= $this->strGlobalDef($pnSym, $pcd->display());
+                $parentNameFld = 'ptr ' . $this->strSymBytes($pnSym);
             }
+            $mPair = $this->rmetaMethodTable($cls, $id);
+            $descs .= $mPair[0];
+            $mFlds = $mPair[1];
+            $pPair = $this->rmetaPropTable($cls, $id);
+            $descs .= $pPair[0];
+            $pFlds = $pPair[1];
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
-                (int)$id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId);
+                (int)$id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
+                $parentNameFld, $mFlds, $pFlds);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.
