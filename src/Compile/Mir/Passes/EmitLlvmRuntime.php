@@ -724,8 +724,140 @@ trait EmitLlvmRuntime
         // drop_fn INDIRECTLY. linkonce_odr → one descriptor per class across
         // every separately-linked object, so a class only one .o knows still
         // drops correctly (no central id-switch to lose a case).
+        return $this->dropRuntimeBody();
+    }
+
+    /**
+     * rmeta + registry entries for things with no ClassDef: interfaces, traits,
+     * and enums that declare no methods. Name + flags only.
+     *
+     * @param string[] $reflIds appended to, by reference — the registry array
+     *                          must list every ctor it should run
+     */
+    private function reflNameOnlyEntries(array &$reflIds): string
+    {
+        $out = '';
+        $seen = [];
+        foreach ($this->enums as $ename => $ed) {
+            if (isset($this->classes[$ename])) { continue; }   // already emitted with its ClassDef
+            $out .= $this->reflNameOnly($ename, \Compile\MemoryAbi::RMETA_FLAG_ENUM, $reflIds, $seen);
+        }
+        foreach ($this->interfaceNames as $iname => $_) {
+            $out .= $this->reflNameOnly($iname, \Compile\MemoryAbi::RMETA_FLAG_INTERFACE, $reflIds, $seen);
+        }
+        foreach ($this->traitNames as $tname => $_) {
+            $out .= $this->reflNameOnly($tname, \Compile\MemoryAbi::RMETA_FLAG_TRAIT, $reflIds, $seen);
+        }
+        return $out;
+    }
+
+    /**
+     * One name-keyed rmeta entry. `$seen` guards a name that is somehow in two
+     * tables: one symbol may be defined once.
+     *
+     * @param string[] $reflIds
+     * @param array<string,bool> $seen
+     */
+    private function reflNameOnly(string $name, int $flags, array &$reflIds, array &$seen): string
+    {
+        if (isset($seen[$name])) { return ''; }
+        if (!$this->reflectWants($name)) { return ''; }
+        $seen[$name] = true;
+        $key = 'n_' . $this->mangle($name);
+        $nameSym = '@.rmeta.name.' . $key;
+        $out = $this->strGlobalDef($nameSym, $name);
+        $out .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
+            $key, 'ptr ' . $this->strSymBytes($nameSym), $flags, 0);
+        $out .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($key);
+        $reflIds[] = $key;
+        return $out;
+    }
+
+    /** Does this class need reflection metadata? {@see ReflectAnalysis}. */
+    private function reflectWants(string $name): bool
+    {
+        if ($this->reflectAll) { return true; }
+        return isset($this->reflectNames[$name]);
+    }
+
+    /**
+     * The method table for one class: `[{ ptr name, i64 flags }]` in php's
+     * getMethods() order (own → trait → inherited), which is the order
+     * {@see \Compile\Mir\ClassDef::$methodMeta} already carries.
+     *
+     * Only USER-DECLARED methods: `$methodNames` also holds compiler-synthesised
+     * entries (property hooks, the ctor synthesised for defaulted props) that
+     * `$methodMeta` has no declaration for, and php reports none of them. That
+     * asymmetry is deliberate — see the ClassDef docblock.
+     *
+     * @return string[] [globalDef, "i64 n, ptr sym"]
+     */
+    private function rmetaMethodTable(\Compile\Mir\ClassDef $cls, string $id): array
+    {
+        $rows = [];
+        $names = [];
+        $defs = '';
+        $i = 0;
+        foreach ($cls->methodMeta as $mn => $mm) {
+            $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($sym, $mn);
+            $names[] = $this->strSymBytes($sym);
+            $rows[$mn] = $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false);
+            $i = $i + 1;
+        }
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows, $names);
+        return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
+     * The property table for one class. Declared instance properties, in slot
+     * order — `propertyNames` is the layout, so this is also the order php
+     * reports. Static props are a separate list and are not included yet.
+     *
+     * Visibility is not recorded in ClassDef (only readonly is), so every entry
+     * reports PUBLIC for now. That is a KNOWN GAP, not an accident: a serializer
+     * asking `isPrivate()` would be told the wrong thing, so ReflectionProperty
+     * (Ф3) must carry visibility into ClassDef first.
+     *
+     * @return string[] [globalDef, "i64 n, ptr sym"]
+     */
+    private function rmetaPropTable(\Compile\Mir\ClassDef $cls, string $id): array
+    {
+        $rows = [];
+        $names = [];
+        $defs = '';
+        $i = 0;
+        foreach ($cls->propertyNames as $pn) {
+            $sym = '@.rmeta.p.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($sym, $pn);
+            $names[] = $this->strSymBytes($sym);
+            $ro = isset($cls->propertyReadonly[$pn]);
+            $rows[$pn] = $this->memberFlags('public', false, false, false, $ro);
+            $i = $i + 1;
+        }
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows, $names);
+        return [$defs . $pair[0], $pair[1]];
+    }
+
+    /** Pack a member's flags word. Visibility is an enum in the low bits. */
+    private function memberFlags(string $vis, bool $static, bool $abstract, bool $final, bool $readonly): int
+    {
+        $f = \Compile\MemoryAbi::RMETA_MEM_PUBLIC;
+        if ($vis === 'protected') { $f = \Compile\MemoryAbi::RMETA_MEM_PROTECTED; }
+        if ($vis === 'private')   { $f = \Compile\MemoryAbi::RMETA_MEM_PRIVATE; }
+        if ($static)   { $f = $f | \Compile\MemoryAbi::RMETA_MEM_STATIC; }
+        if ($abstract) { $f = $f | \Compile\MemoryAbi::RMETA_MEM_ABSTRACT; }
+        if ($final)    { $f = $f | \Compile\MemoryAbi::RMETA_MEM_FINAL; }
+        if ($readonly) { $f = $f | \Compile\MemoryAbi::RMETA_MEM_READONLY; }
+        return $f;
+    }
+
+    private function dropRuntimeBody(): string
+    {
         $descs = '';
         $defs = '';
+        /** @var int[] class ids to register in the name→rmeta registry */
+        $reflIds = [];
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             $id = (string)$cls->classId;
@@ -765,9 +897,86 @@ trait EmitLlvmRuntime
                     . $body . "  ret void\n}\n";
                 $dropFld = 'ptr @__mir_drop_' . $id;
             }
-            $descs .= '@__mir_cd_' . $id . ' = linkonce_odr global { i64, ptr } { i64 '
-                . $id . ', ' . $dropFld . " }\n";
+            // Reflection metadata — only for classes reflection can actually
+            // reach ({@see ReflectAnalysis}). A class outside the set keeps
+            // `ptr null` in its descriptor and emits no block, no tables, no
+            // name string and no startup ctor. The analysis fails OPEN, so an
+            // unresolvable name simply puts every class back in.
+            if (!$this->reflectWants($cls->name)) {
+                $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal((int)$id, $dropFld);
+                continue;
+            }
+            // Every field is derived from the class itself, never from anything
+            // module-local, so each module emitting this class emits identical
+            // bytes — what makes the linkonce_odr coalescing sound (the epic's
+            // ODR invariant).
+            //
+            // The name is a HEADERED, immortal (rc -1) string literal, so
+            // __mc_refl_name hands the pointer straight back: no allocation, no
+            // retain/release, and it cannot be freed under a caller.
+            //
+            // Its own symbol, keyed by CLASS ID — deliberately NOT the string
+            // pool's `litStr()`. Pool symbols are `@.str.<n>` where n is a
+            // module-local counter, so `@.str.7` is a different string in every
+            // object: an rmeta referencing one would not be a pure function of
+            // the class, breaking exactly the invariant that lets these
+            // coalesce. (It would also depend on the pool still being open at
+            // emit time.)
+            $nameSym = '@.rmeta.name.' . $id;
+            $descs .= $this->strGlobalDef($nameSym, $cls->display());
+            $flags = 0;
+            if ($cls->isFinal)    { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_FINAL; }
+            if ($cls->isAbstract) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ABSTRACT; }
+            // An enum with methods DOES get a ClassDef and lands here; one
+            // without is registered separately below. php reports an enum as a
+            // class (class_exists('E') is true), so the ENUM bit is additive,
+            // not exclusive.
+            if (isset($this->enums[$cls->name])) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ENUM; }
+            $parentId = 0;
+            $parentNameFld = 'ptr null';
+            if ($cls->parent !== '' && isset($this->classes[$cls->parent])) {
+                $pcd = $this->classes[$cls->parent];
+                $parentId = $pcd->classId;
+                // The parent's name, so getParentClass() is find(parent_name) —
+                // the registry is name-keyed, and this saves a second lookup
+                // structure keyed by id. Its own symbol for the same reason the
+                // class name has one.
+                $pnSym = '@.rmeta.pname.' . $id;
+                $descs .= $this->strGlobalDef($pnSym, $pcd->display());
+                $parentNameFld = 'ptr ' . $this->strSymBytes($pnSym);
+            }
+            $mPair = $this->rmetaMethodTable($cls, $id);
+            $descs .= $mPair[0];
+            $mFlds = $mPair[1];
+            $pPair = $this->rmetaPropTable($cls, $id);
+            $descs .= $pPair[0];
+            $pFlds = $pPair[1];
+            $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
+                $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
+                $parentNameFld, $mFlds, $pFlds);
+            $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
+                (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
+            // Registry entry, so a NAME can find this class at runtime.
+            $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
+            $reflIds[] = $id;
         }
+        // Interfaces, traits, and enums WITHOUT methods never reach the loop
+        // above: an interface has no ClassDef at all (Module::$interfaceNames is
+        // names only), and an enum gets one only when it declares a method. They
+        // still belong in the registry — it is the runtime CLASS TABLE, and
+        // interface_exists($runtimeName) / get_declared_interfaces() have nothing
+        // else to ask.
+        //
+        // They key by NAME, not class id, because they have no id: still a pure
+        // function of the entry's own identity, so the linkonce_odr coalescing
+        // stays sound. They carry no parent/method/property tables — nothing
+        // reads those for a name-existence answer.
+        $descs .= $this->reflNameOnlyEntries($reflIds);
+        // The name→rmeta registry: list head, the global_ctors array that fills
+        // it, and __mc_refl_find. Nothing is emitted for a module with no
+        // classes, so a program that declares none carries no startup cost.
+        $this->rt->needsStrcmp = true;
+        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.

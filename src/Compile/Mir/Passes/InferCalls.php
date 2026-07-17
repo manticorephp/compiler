@@ -138,6 +138,14 @@ trait InferCalls
             || $n === '__mir_clock_ns') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
+        // Reflection Tier-2: an rmeta HANDLE is a raw address carried as an int
+        // (the Ffi\Ptr::$address idiom), never an obj — nothing may retain,
+        // release or drop it. 0 means "no metadata".
+        if ($n === '__mc_refl_of' || $n === '__mc_refl_find'
+            || $n === '__mc_refl_cap' || $n === '__mc_refl_slot'
+            || $n === '__mc_refl_member' || $n === '__mc_refl_parent'
+            || $n === '__mc_refl_flags') { return Type::int_(); }
+        if ($n === '__mc_refl_name') { return Type::string_(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'

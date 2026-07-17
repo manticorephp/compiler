@@ -131,6 +131,17 @@ trait EmitLlvmBuiltins
         if ($name === 'error_log')                    { return $this->biErrorLog($args); }
         if ($name === 'gc_collect_cycles')            { return $this->biGcCollect(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
+        // Reflection Tier-2 metadata reads. Internal (`__mc_` prefix) — the
+        // public surface is prelude/reflection.php, which is generic code over
+        // the data these return.
+        if ($name === '__mc_refl_of')                 { return $this->biMcReflOf($args); }
+        if ($name === '__mc_refl_name')               { return $this->biMcReflName($args); }
+        if ($name === '__mc_refl_find')               { return $this->biMcReflFind($args); }
+        if ($name === '__mc_refl_cap')                { return $this->biMcReflCap($args); }
+        if ($name === '__mc_refl_slot')               { return $this->biMcReflSlot($args); }
+        if ($name === '__mc_refl_member')             { return $this->biMcReflMember($args); }
+        if ($name === '__mc_refl_parent')             { return $this->biMcReflParent($args); }
+        if ($name === '__mc_refl_flags')              { return $this->biMcReflFlags($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
@@ -2669,6 +2680,270 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * `__mc_refl_of($o)` — the object's reflection metadata block as a raw
+     * address, or 0 when the class has none (no reflection reaches it, or it is
+     * a `#[Struct]` with no header at all).
+     *
+     * Object → descriptor (header slot 0) → rmeta (descriptor offset 16). The
+     * same double indirection as {@see EmitLlvm::emitLoadClassId}, one field
+     * further along. Internal: the surface is `prelude/reflection.php`.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflOf(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $objp = $this->lastValue;
+        $descI = $this->ssa->allocReg();
+        $out .= '  ' . $descI . ' = load i64, ptr ' . $objp . "\n";
+        $descP = $this->ssa->allocReg();
+        $out .= '  ' . $descP . ' = inttoptr i64 ' . $descI . " to ptr\n";
+        $mp = $this->ssa->allocReg();
+        $out .= '  ' . $mp . ' = getelementptr i8, ptr ' . $descP
+              . ', i64 ' . (string)\Compile\MemoryAbi::DESCRIPTOR_RMETA_OFFSET . "\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = load ptr, ptr ' . $mp . "\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = ptrtoint ptr ' . $m . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_cap()` — the index table's slot count, after forcing it built.
+     *
+     * With {@see biMcReflSlot}, this is how the prelude ENUMERATES the class
+     * table (get_declared_classes and friends). Iterating the index rather than
+     * the list is deliberate: the table is a flat array, so a walk is
+     * cache-friendly and needs no node-chasing builtins. Empty slots read 0 and
+     * are skipped.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCap(array $args): string
+    {
+        $out = "  call ptr @__mc_refl_index()\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . " = load i64, ptr @__mc_refl_idx_cap\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_slot($i)` — the rmeta handle in index slot `$i`, or 0 if empty.
+     *
+     * No bounds check: the only caller is the prelude's own `0 .. cap-1` loop.
+     * A null table (calloc failed) answers 0 for every slot, so enumeration
+     * degrades to "no classes" rather than dereferencing null.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflSlot(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $i = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'sl.ok.' . $lbl;
+        $noL = 'sl.no.' . $lbl;
+        $endL = 'sl.end.' . $lbl;
+        $tab = $this->ssa->allocReg();
+        $out .= '  ' . $tab . " = load ptr, ptr @__mc_refl_idx\n";
+        $tz = $this->ssa->allocReg();
+        $out .= '  ' . $tz . ' = icmp eq ptr ' . $tab . ", null\n";
+        $out .= '  br i1 ' . $tz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $noL . ":\n  br label %" . $endL . "\n";
+        $out .= $okL . ":\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = getelementptr ptr, ptr ' . $tab . ', i64 ' . $i . "\n";
+        $sv = $this->ssa->allocReg();
+        $out .= '  ' . $sv . ' = load ptr, ptr ' . $sp . "\n";
+        $si = $this->ssa->allocReg();
+        $out .= '  ' . $si . ' = ptrtoint ptr ' . $sv . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ 0, %' . $noL . ' ], [ ' . $si . ', %' . $okL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_find($name)` — an rmeta handle by class name, or 0.
+     *
+     * This is the one lookup a compile-time fold cannot do: the name is a
+     * runtime string. It walks the registry the `@llvm.global_ctors` entries
+     * built, which is what makes reflection work ACROSS separately-linked
+     * objects — user.o and stdlib.o each register their own classes into the
+     * same list, with no central table for anyone to forget to update.
+     *
+     * The arg is a `string`-typed value; its bytes are NUL-terminated, so strcmp
+     * reads them directly. `coerceToPtr` is what makes the operand a `ptr`
+     * whether it arrived as a runtime i64 or as a literal — a string CONSTANT is
+     * already a `getelementptr` constexpr of type ptr, so an unconditional
+     * `inttoptr i64` would be a type mismatch clang rejects.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflFind(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_find(ptr ' . $sp . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_member($h, $name, $wantMethods)` — a member's flags + 1, or 0
+     * when absent. The `+1` keeps one i64 answering both "present?" and "what?"
+     * (a public non-static member's flags are 0).
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflMember(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToPtr();
+        $np = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $w = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_member(i64 ' . $h
+              . ', ptr ' . $np . ', i64 ' . $w . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_flags($h)` — the class flags word (final/abstract/…), 0 for a
+     * null handle.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflFlags(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'rf.ok.' . $lbl;
+        $noL = 'rf.no.' . $lbl;
+        $endL = 'rf.end.' . $lbl;
+        $hz = $this->ssa->allocReg();
+        $out .= '  ' . $hz . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $hz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $hp . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_FLAGS_OFFSET . "\n";
+        $fv = $this->ssa->allocReg();
+        $out .= '  ' . $fv . ' = load i64, ptr ' . $fp . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $fv . ', %' . $okL . ' ], [ 0, %' . $noL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_parent($h)` — the parent's rmeta handle, or 0 at the root.
+     *
+     * Resolved through the NAME (`find(parent_name)`), not the id: the registry
+     * is name-keyed, and the parent's block may live in another object file
+     * where a direct pointer would need a relocation the emitter cannot form.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflParent(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'rp.ok.' . $lbl;
+        $noL = 'rp.no.' . $lbl;
+        $endL = 'rp.end.' . $lbl;
+        $hz = $this->ssa->allocReg();
+        $out .= '  ' . $hz . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $hz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $pnp = $this->ssa->allocReg();
+        $out .= '  ' . $pnp . ' = getelementptr i8, ptr ' . $hp . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_PARENT_NAME_OFFSET . "\n";
+        $pn = $this->ssa->allocReg();
+        $out .= '  ' . $pn . ' = load ptr, ptr ' . $pnp . "\n";
+        $pz = $this->ssa->allocReg();
+        $out .= '  ' . $pz . ' = icmp eq ptr ' . $pn . ", null\n";
+        $findL = 'rp.find.' . $lbl;
+        $out .= '  br i1 ' . $pz . ', label %' . $noL . ', label %' . $findL . "\n";
+        $out .= $findL . ":\n";
+        $fr = $this->ssa->allocReg();
+        $out .= '  ' . $fr . ' = call i64 @__mc_refl_find(ptr ' . $pn . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $fr . ', %' . $findL . ' ], [ 0, %' . $noL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_name($h)` — the class name out of an rmeta handle.
+     *
+     * The stored pointer is an immortal (`rc -1`) headered string literal, so it
+     * is returned as-is: no copy, no retain, and nothing can free it under the
+     * caller. A 0 handle yields an empty string rather than faulting — callers
+     * come from PHP, where a wild read would be unexplainable.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflName(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = (string)$this->ssa->allocReg();
+        $lbl = \str_replace('%', '', $lbl);
+        $okL = 'rn.ok.' . $lbl;
+        $nullL = 'rn.null.' . $lbl;
+        $endL = 'rn.end.' . $lbl;
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $isNull . ', label %' . $nullL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $np = $this->ssa->allocReg();
+        $out .= '  ' . $np . ' = getelementptr i8, ptr ' . $hp
+              . ', i64 ' . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
+        $nv = $this->ssa->allocReg();
+        $out .= '  ' . $nv . ' = load ptr, ptr ' . $np . "\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . ' = ptrtoint ptr ' . $nv . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $nullL . ":\n";
+        $empty = $this->ssa->allocReg();
+        $out .= '  ' . $empty . ' = ptrtoint ptr ' . $this->litStr('') . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $ni . ', %' . $okL . ' ], [ '
+              . $empty . ', %' . $nullL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** @param Node[] $args  spl_object_id($o) — the object pointer as a
      * stable per-object int (unique among live objects). */
     private function biSplObjectId(array $args): string
@@ -2880,19 +3155,117 @@ trait EmitLlvmBuiltins
      *  also matches enums (PHP: an enum IS a class), never interfaces/traits. */
     private function biClassExists(array $args, string $kind): string
     {
-        $out = $this->reflEvalArgs($args);
         $name = $this->reflClassName($args[0]);
-        $exists = false;
-        if ($name !== '') {
-            if ($kind === 'enum') { $exists = isset($this->enums[$name]); }
-            elseif ($kind === 'interface') { $exists = isset($this->interfaceNames[$name]); }
-            elseif ($kind === 'trait') { $exists = isset($this->traitNames[$name]); }
-            else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]); }
+        if ($name === '') {
+            // A name known only at run time. This used to fold FALSE — a silent
+            // WRONG ANSWER (`$n="F"."oo"; class_exists($n)` said false where php
+            // says true), because there was no runtime class table to ask. There
+            // is one now: the registry. ReflectAnalysis makes such a call site a
+            // reflectAll root, so every class is in it.
+            return $this->biExistsDynamic($args[0], $kind);
         }
+        $out = $this->reflEvalArgs($args);
+        $exists = false;
+        if ($kind === 'enum') { $exists = isset($this->enums[$name]); }
+        elseif ($kind === 'interface') { $exists = isset($this->interfaceNames[$name]); }
+        elseif ($kind === 'trait') { $exists = isset($this->traitNames[$name]); }
+        else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]); }
         return $this->biConstBool($out, $exists);
     }
 
+    /**
+     * `class_exists($runtimeName)` and friends — answered from the registry.
+     *
+     * One table serves all four because php's own answers are not uniform and
+     * the flags encode exactly that: an ENUM *is* a class (`class_exists('E')`
+     * is true) while an INTERFACE and a TRAIT are not. So `class_exists` is
+     * "registered AND not interface AND not trait", and each of the others is
+     * its own bit.
+     *
+     * @param Node[] $args
+     */
+    private function biExistsDynamic(Node $arg, string $kind): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($arg);
+        $out .= $this->coerceToPtr();
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = call i64 @__mc_refl_find(ptr ' . $this->lastValue . ")\n";
+        $found = $this->ssa->allocReg();
+        $out .= '  ' . $found . ' = icmp ne i64 ' . $h . ", 0\n";
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'ex.ok.' . $lbl;
+        $noL = 'ex.no.' . $lbl;
+        $endL = 'ex.end.' . $lbl;
+        // An explicit `no` arm: a phi names its PREDECESSOR BLOCK, and the block
+        // we branch from here is whatever the caller was already emitting into —
+        // not something this function can name.
+        $out .= '  br i1 ' . $found . ', label %' . $okL . ', label %' . $noL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $okL . ":\n";
+        // Load the flags inline. `__mc_refl_flags` is a BUILTIN — it emits IR at
+        // a PHP call site — so there is no LLVM function by that name to call.
+        // We are in the non-null arm, so the handle is known good.
+        $hptr = $this->ssa->allocReg();
+        $out .= '  ' . $hptr . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $flp = $this->ssa->allocReg();
+        $out .= '  ' . $flp . ' = getelementptr i8, ptr ' . $hptr . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_FLAGS_OFFSET . "\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $flp . "\n";
+        $want = $this->ssa->allocReg();
+        if ($kind === 'enum') {
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)\Compile\MemoryAbi::RMETA_FLAG_ENUM . "\n";
+        } elseif ($kind === 'interface') {
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)\Compile\MemoryAbi::RMETA_FLAG_INTERFACE . "\n";
+        } elseif ($kind === 'trait') {
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)\Compile\MemoryAbi::RMETA_FLAG_TRAIT . "\n";
+        } else {
+            // A class is anything registered that is neither an interface nor a
+            // trait — enums included, as php has it.
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)(\Compile\MemoryAbi::RMETA_FLAG_INTERFACE
+                             | \Compile\MemoryAbi::RMETA_FLAG_TRAIT) . "\n";
+        }
+        $bit = $this->ssa->allocReg();
+        $cmp = $kind === '' || $kind === 'class' ? 'eq' : 'ne';
+        $out .= '  ' . $bit . ' = icmp ' . $cmp . ' i64 ' . $want . ", 0\n";
+        // i64, not i1: {@see biConstBool} — the static arm of this same builtin —
+        // hands back '1'/'0' as i64, and the consumer boxes an i64.
+        $bit64 = $this->ssa->allocReg();
+        $out .= '  ' . $bit64 . ' = zext i1 ' . $bit . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi i64 [ 0, %' . $noL . ' ], [ ' . $bit64 . ', %' . $okL . " ]\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** is_callable($x) — see {@see emitIsCallable} for the resolved forms. */
+    /**
+     * Is `$class::$method` declared `static`? Reads {@see ClassDef::$methodMeta},
+     * which carries inherited methods, so no parent walk is needed here.
+     *
+     * Fails PERMISSIVE: an unknown class, or a method with no user declaration to
+     * describe (a synthesised ctor, a property hook), answers true. Those entries
+     * are compiler-internal, and folding is_callable to false on one would be a
+     * silent wrong answer — the pre-metadata behavior is the safe floor.
+     */
+    private function methodIsStatic(string $class, string $method): bool
+    {
+        $cd = $this->classes[\ltrim($class, '\\')] ?? null;
+        if ($cd === null) { return true; }
+        $mm = $cd->methodMeta[$method] ?? null;
+        if ($mm === null) { return true; }
+        return $mm->isStatic;
+    }
+
     private function biIsCallable(array $args): string
     {
         // Route through a `Node`-typed helper: reading `$args[0]->type->…` off
@@ -2913,10 +3286,13 @@ trait EmitLlvmBuiltins
      *  function only at runtime needs a runtime function registry we don't keep
      *  → folded false (documented gap; callable literals bound to a `callable`
      *  param are already lowered to closures upstream, so they hit the ptr path).
-     *  The `'C::m'` / `['C', 'm']` class-name forms fold on method EXISTENCE
-     *  only — a non-static method referenced without an instance is reported
-     *  callable though PHP 8 requires one (method static-ness isn't tracked in
-     *  ClassDef). The `[$obj, 'm']` object form has an instance, so it is exact.
+     *  The `'C::m'` / `['C', 'm']` class-name forms require the method to be
+     *  STATIC: PHP 8 needs an instance otherwise. The `[$obj, 'm']` object form
+     *  supplies one, so it folds on existence alone.
+     *  Still folds on VISIBILITY-blind existence: `is_callable('C::privateStatic')`
+     *  from outside C reports true where PHP reports false. Deciding it needs the
+     *  calling scope (inside C the same expression IS true), which this emitter
+     *  does not thread through. Tracked with the reflection epic.
      */
     private function emitIsCallable(Node $a): string
     {
@@ -2929,7 +3305,8 @@ trait EmitLlvmBuiltins
             if ($sep !== false) {
                 $c = \ltrim(\substr($s, 0, $sep), '\\');
                 $m = \substr($s, $sep + 2);
-                $ok = $this->resolveMethodClass($c, $m) !== '';
+                // No instance in a 'C::m' string ⇒ PHP 8 needs a static method.
+                $ok = $this->resolveMethodClass($c, $m) !== '' && $this->methodIsStatic($c, $m);
             } else {
                 $ok = isset($this->sigs->paramTypes[$s]) || isset($this->sigs->paramTypes[\ltrim($s, '\\')]);
             }
@@ -2938,9 +3315,15 @@ trait EmitLlvmBuiltins
         // [recv, "method"] two-element array literal.
         if ($a->kind === Node::KIND_ARRAY_LIT) {
             if (\count($a->elements) === 2) {
-                $cls = $this->reflClassName($a->elements[0]->value);
+                $recv = $a->elements[0]->value;
+                $cls = $this->reflClassName($recv);
                 $m   = $this->reflLitStr($a->elements[1]->value);
                 $ok  = $cls !== '' && $m !== '' && $this->resolveMethodClass($cls, $m) !== '';
+                // ['C', 'm'] names a CLASS — no instance, so PHP 8 needs a static
+                // method. [$obj, 'm'] supplies one and stays existence-only.
+                if ($ok && $recv->kind === Node::KIND_STRING_CONST && !$this->methodIsStatic($cls, $m)) {
+                    $ok = false;
+                }
                 return $this->biConstBool($this->emitNode($a), $ok);
             }
         }

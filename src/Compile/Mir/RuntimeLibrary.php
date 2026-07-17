@@ -16,12 +16,480 @@ final class RuntimeLibrary
 {
     /**
      * i64 operand for an object header slot 0: the address of the class's
-     * `{ class_id, drop_fn }` descriptor, or 0 for an unknown class.
+     * `{ class_id, drop_fn, rmeta }` descriptor, or 0 for an unknown class.
      */
     public function descSlotValue(?\Compile\Mir\ClassDef $cd): string
     {
         if ($cd === null || $cd->isStruct) { return '0'; }
         return 'ptrtoint (ptr @__mir_cd_' . (string)$cd->classId . ' to i64)';
+    }
+
+    /**
+     * The LLVM struct type of a class descriptor. ONE spelling, because
+     * `@__mir_cd_<id>` is `linkonce_odr` and coalesces BY NAME: two emission
+     * sites that disagree on the type define one symbol two ways, and the
+     * linker keeps whichever it saw first — the two-bodies-one-symbol trap.
+     * There are exactly two emitters ({@see Passes\EmitLlvmRuntime} for the
+     * ordinary path, {@see Passes\EmitLlvm} for the enum singleton path) and
+     * both MUST route through here.
+     *
+     * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
+     * rmeta@16.
+     */
+    public static function descriptorType(): string
+    {
+        return '{ i64, ptr, ptr }';
+    }
+
+    /**
+     * The full `@__mir_cd_<id> = linkonce_odr global …` definition.
+     *
+     * `$rmetaFld` is `ptr null` for a class no reflection reaches — the opt-in
+     * gate. The field costs 8 rodata bytes per class either way; appending it
+     * leaves class_id@0 and drop_fn@8 where they were, so no reader moves.
+     */
+    public static function descriptorGlobal(int $id, string $dropFld, string $rmetaFld = 'ptr null'): string
+    {
+        return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
+            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . " }\n";
+    }
+
+    /**
+     * The LLVM struct type of the reflection metadata block. Same
+     * one-spelling rule as {@see descriptorType}: `@__mc_rmeta_<id>` is
+     * `linkonce_odr` and coalesces BY NAME.
+     *
+     * Layout owned by {@see \Compile\MemoryAbi}: name@0, flags@8, parent_id@16.
+     */
+    public static function rmetaType(): string
+    {
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr }';
+    }
+
+    /** One method/property row: `{ ptr name, i64 flags }`. */
+    public static function rmetaRowType(): string
+    {
+        return '{ ptr, i64 }';
+    }
+
+    /**
+     * A method or property table: `[N x { ptr name, i64 flags }]`, plus the
+     * `{ count, ptr }` pair that addresses it.
+     *
+     * An empty table emits no global and yields `{ i64 0, ptr null }` — a reader
+     * must check the count first, never dereference the pointer blind.
+     *
+     * @param array<string,int> $rows name → flags, in declaration order
+     * @param string[] $namesIr index-parallel to $rows: each name's data-ptr IR
+     * @return string[] [globalDef, countAndPtrFields]
+     */
+    public static function rmetaTable(string $sym, array $rows, array $namesIr): array
+    {
+        $n = \count($rows);
+        if ($n === 0) { return ['', 'i64 0, ptr null']; }
+        $items = [];
+        $i = 0;
+        foreach ($rows as $flags) {
+            $items[] = self::rmetaRowType() . ' { ptr ' . $namesIr[$i] . ', i64 ' . (string)$flags . ' }';
+            $i = $i + 1;
+        }
+        $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x ' . self::rmetaRowType()
+             . '] [' . \implode(', ', $items) . "]\n";
+        return [$def, 'i64 ' . (string)$n . ', ptr ' . $sym];
+    }
+
+    /**
+     * The full `@__mc_rmeta_<id> = linkonce_odr constant …` definition.
+     *
+     * `constant`, not `global`: nothing mutates it, so it lands in rodata and
+     * the linker may share it.
+     *
+     * Keyed by class id, and every field is derived from the class itself, so
+     * every module that emits it emits the SAME bytes — the ODR invariant this
+     * epic rests on. Never fill this from module-local information.
+     *
+     * `$parentId` is an id rather than a pointer because the parent's rmeta can
+     * live in another object file ({@see \Compile\MemoryAbi::RMETA_PARENT_ID_OFFSET}).
+     */
+    public static function rmetaGlobal(
+        string $id,
+        string $nameFld,
+        int $flags,
+        int $parentId,
+        string $parentNameFld = 'ptr null',
+        string $methodsFlds = 'i64 0, ptr null',
+        string $propsFlds = 'i64 0, ptr null'
+    ): string {
+        return '@__mc_rmeta_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
+            . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
+            . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds . " }\n";
+    }
+
+    /** The rmeta pointer field for a descriptor: the class's block, or null
+     *  when nothing reflects it (the opt-in gate — Ф1b decides; Ф1a fills all). */
+    public static function rmetaField(int $id): string
+    {
+        return 'ptr @__mc_rmeta_' . (string)$id;
+    }
+
+    /** Registry node: `{ ptr rmeta, ptr next, i64 registered }`. */
+    public static function reflNodeType(): string
+    {
+        return '{ ptr, ptr, i64 }';
+    }
+
+    /**
+     * One class's registry node + its `@llvm.global_ctors` entry function.
+     *
+     * `@llvm.global_ctors` is how a name→rmeta lookup exists at all: there is no
+     * name-addressable table in the binary otherwise, and the prelude cannot
+     * hold a generated one (its bodies are linkonce_odr and shared). It is
+     * chosen over a linker section because its IR is byte-identical on Mach-O
+     * and ELF, so nothing has to detect the OS at emit time — and `host_os()`
+     * rides libc bindings that are empty stubs under the Zend cold seed.
+     *
+     * **The registration MUST be idempotent, and the guard is not belt-and-braces.**
+     * {@see Passes\EmitLlvm::linkonceRuntime} rewrites every preamble `define`
+     * to `linkonce_odr`, so this function coalesces to ONE body across objects —
+     * but `@llvm.global_ctors` is `appending`, so each object still contributes
+     * its own entry pointing at that one body. Two objects ⇒ the ctor runs
+     * TWICE. Unguarded, `node->next = head; head = node` run twice makes the
+     * node its own successor, and `__mc_refl_find` spins forever on the cycle.
+     */
+    public static function reflNodeAndCtor(string $key): string
+    {
+        $sid = $key;
+        $node = '@__mc_refl_node_' . $sid;
+        $t = self::reflNodeType();
+        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_' . $sid
+             . ", ptr null, i64 0 }\n";
+        $out .= 'define void @__mc_refl_reg_' . $sid . "() {\nentry:\n";
+        $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
+        $out .= "  %fv = load i64, ptr %f\n";
+        $out .= "  %done = icmp ne i64 %fv, 0\n";
+        $out .= "  br i1 %done, label %skip, label %reg\n";
+        $out .= "reg:\n";
+        $out .= "  store i64 1, ptr %f\n";
+        $out .= "  %h = load ptr, ptr @__mc_refl_head\n";
+        $out .= '  %np = getelementptr i8, ptr ' . $node . ", i64 8\n";
+        $out .= "  store ptr %h, ptr %np\n";
+        $out .= '  store ptr ' . $node . ", ptr @__mc_refl_head\n";
+        $out .= "  br label %skip\n";
+        $out .= "skip:\n  ret void\n}\n";
+        return $out;
+    }
+
+    /**
+     * The list head + the `@llvm.global_ctors` array + `__mc_refl_find`.
+     *
+     * `$ids` are the classes to register. An EMPTY list still emits the head and
+     * `find` — only the ctors array is skipped. Emitting nothing would leave a
+     * caller's `@__mc_refl_find` undefined, and this toolchain does not fail on
+     * that: the stub generator fills a missing symbol with `return 0`
+     * ({@see \Manticore\build_compile_module}), so reflection would silently
+     * answer "no such class" instead of erroring. That is the failure mode that
+     * once turned `sort()` into a no-op.
+     *
+     * `find` is a linear walk. That is deliberate for now: the list is the
+     * reflectable set, not every class, and a hash index is an optimization
+     * with its own cross-module lifetime questions. Duplicate nodes for one
+     * class are possible and harmless — first hit wins, and every node for a
+     * given class points at the same coalesced rmeta.
+     *
+     * @param string[] $ids symbol suffixes
+     */
+    public static function reflRegistry(array $ids): string
+    {
+        $out = "@__mc_refl_head = linkonce_odr global ptr null\n";
+        $entries = [];
+        foreach ($ids as $id) {
+            $entries[] = '{ i32, ptr, ptr } { i32 65535, ptr @__mc_refl_reg_' . $id . ', ptr null }';
+        }
+        if (\count($entries) > 0) {
+            $out .= '@llvm.global_ctors = appending global [' . (string)\count($entries)
+                  . ' x { i32, ptr, ptr }] [' . \implode(', ', $entries) . "]\n";
+        }
+        $out .= self::reflHash();
+        $out .= self::reflIndex();
+        // Probe the index; fall back to walking the list if it could not be
+        // built (calloc failure). Measured: the walk alone was O(reflectable
+        // classes) — 3.7× slower than php at 500 classes — because php has a
+        // hash table and this did not.
+        $out .= "define i64 @__mc_refl_find(ptr %name) {\nentry:\n";
+        $out .= "  %tab = call ptr @__mc_refl_index()\n";
+        $out .= "  %notab = icmp eq ptr %tab, null\n";
+        $out .= "  br i1 %notab, label %walk, label %hp\n";
+        $out .= "hp:\n";
+        $out .= "  %cap = load i64, ptr @__mc_refl_idx_cap\n";
+        $out .= "  %hmask = sub i64 %cap, 1\n";
+        $out .= "  %nh = call i64 @__mc_refl_hash(ptr %name)\n";
+        $out .= "  %hi0 = and i64 %nh, %hmask\n";
+        $out .= "  br label %hloop\n";
+        $out .= "hloop:\n";
+        $out .= "  %hi = phi i64 [ %hi0, %hp ], [ %hi1, %hnext ]\n";
+        $out .= "  %hsl = getelementptr ptr, ptr %tab, i64 %hi\n";
+        $out .= "  %hv = load ptr, ptr %hsl\n";
+        // An empty slot means absent: the table always has one (cap >= 2*count),
+        // so the probe terminates.
+        $out .= "  %hfree = icmp eq ptr %hv, null\n";
+        $out .= "  br i1 %hfree, label %miss, label %hcheck\n";
+        $out .= "hcheck:\n";
+        $out .= '  %hnmp = getelementptr i8, ptr %hv, i64 '
+              . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
+        $out .= "  %hnm = load ptr, ptr %hnmp\n";
+        // strcmp confirms: a hash match is not a name match.
+        $out .= "  %hc = call i32 @strcmp(ptr %hnm, ptr %name)\n";
+        $out .= "  %heq = icmp eq i32 %hc, 0\n";
+        $out .= "  br i1 %heq, label %hhit, label %hnext\n";
+        $out .= "hhit:\n";
+        $out .= "  %hr = ptrtoint ptr %hv to i64\n";
+        $out .= "  ret i64 %hr\n";
+        $out .= "hnext:\n";
+        $out .= "  %hia = add i64 %hi, 1\n";
+        $out .= "  %hi1 = and i64 %hia, %hmask\n";
+        $out .= "  br label %hloop\n";
+        $out .= "walk:\n";
+        $out .= "  %p0 = load ptr, ptr @__mc_refl_head\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %p = phi ptr [ %p0, %walk ], [ %next, %cont ]\n";
+        $out .= "  %end = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %end, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %m = load ptr, ptr %p\n";
+        $out .= '  %nmp = getelementptr i8, ptr %m, i64 '
+              . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
+        $out .= "  %nm = load ptr, ptr %nmp\n";
+        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %r = ptrtoint ptr %m to i64\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %nxp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %next = load ptr, ptr %nxp\n";
+        $out .= "  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        $out .= self::reflMemberLookup();
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_hash(ptr data) -> i64` — FNV-1a 64 of a MIR string, cached.
+     *
+     * Reads the hash the string header already carries at `data-32`; a literal
+     * has it baked in at compile time ({@see Passes\EmitLlvmBuiltins::strGlobalDef},
+     * bit-matching {@see Passes\EmitLlvm::fnvHash64}), so a `find('Foo')` never
+     * hashes at all. Only a COMPUTED name reaches the loop, and the result is
+     * written back so it hashes once.
+     *
+     * Deliberately NOT `__mir_array_hash_str`, which does the same thing: that
+     * one is emitted by the ARRAY runtime, so a program that reflects but never
+     * touches an assoc would not have it — and a missing symbol here does not
+     * fail the link, it stubs to `return 0` ({@see \Manticore\build_compile_module}).
+     * Every hash would then be 0, every key would collide into one bucket, and
+     * the table would silently degrade to the linear walk it exists to replace.
+     * Correct, and quietly as slow as before — the worst kind of bug.
+     *
+     * 0 doubles as "not computed", exactly as the string runtime treats it. A
+     * genuine FNV of 0 just re-hashes; it costs a hash, never correctness.
+     */
+    private static function reflHash(): string
+    {
+        $ho = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
+        $lo = (string)\Compile\MemoryAbi::STRING_LEN_OFFSET;
+        $out = "define i64 @__mc_refl_hash(ptr %p) {\nentry:\n";
+        $out .= '  %hp = getelementptr i8, ptr %p, i64 ' . $ho . "\n";
+        $out .= "  %hc = load i64, ptr %hp\n";
+        $out .= "  %have = icmp ne i64 %hc, 0\n";
+        $out .= "  br i1 %have, label %cached, label %calc\n";
+        $out .= "cached:\n  ret i64 %hc\n";
+        $out .= "calc:\n";
+        $out .= '  %lp = getelementptr i8, ptr %p, i64 ' . $lo . "\n";
+        $out .= "  %len = load i64, ptr %lp\n";
+        $out .= "  %zero = icmp eq i64 %len, 0\n";
+        $out .= "  br i1 %zero, label %done, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %calc ], [ %i1, %loop ]\n";
+        $out .= "  %h = phi i64 [ -3750763034362895579, %calc ], [ %hm, %loop ]\n";
+        $out .= "  %bp = getelementptr i8, ptr %p, i64 %i\n";
+        $out .= "  %b = load i8, ptr %bp\n";
+        $out .= "  %bz = zext i8 %b to i64\n";
+        $out .= "  %hx = xor i64 %h, %bz\n";
+        $out .= "  %hm = mul i64 %hx, 1099511628211\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %more = icmp ult i64 %i1, %len\n";
+        $out .= "  br i1 %more, label %loop, label %done\n";
+        $out .= "done:\n";
+        $out .= "  %hf = phi i64 [ -3750763034362895579, %calc ], [ %hm, %loop ]\n";
+        $out .= "  store i64 %hf, ptr %hp\n";
+        $out .= "  ret i64 %hf\n}\n";
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_index() -> ptr` — the open-addressed name→rmeta table, built
+     * once on first use.
+     *
+     * Why an index at all, measured rather than assumed: `find` was a linked-list
+     * walk with a strcmp per node, i.e. O(reflectable classes). At 500 classes
+     * that is 356ms per 200k lookups against php's flat 96ms — 3.7× SLOWER, and
+     * a real app has thousands. php has a hash table; this is that.
+     *
+     * Lazy is safe: every `@llvm.global_ctors` entry has already run before
+     * `main`, so the list is complete the first time anything can call `find`.
+     * The list stays the REGISTRATION channel — it is what composes across
+     * separately-linked objects with no central table to forget — and this is a
+     * read cache over it. Nothing is freed: the table lives as long as the
+     * process, like the metadata it points at.
+     *
+     * Capacity is a power of two ≥ 2× the entry count, so the probe always meets
+     * an empty slot and terminates. Duplicate registrations of one class (two
+     * modules) collapse here: same name, same rmeta, first insert wins.
+     */
+    private static function reflIndex(): string
+    {
+        $nameOff = (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET;
+        $out = "@__mc_refl_idx = linkonce_odr global ptr null\n";
+        $out .= "@__mc_refl_idx_cap = linkonce_odr global i64 0\n";
+        $out .= "define ptr @__mc_refl_index() {\nentry:\n";
+        $out .= "  %cur = load ptr, ptr @__mc_refl_idx\n";
+        $out .= "  %built = icmp ne ptr %cur, null\n";
+        $out .= "  br i1 %built, label %ret, label %count\n";
+        $out .= "ret:\n  ret ptr %cur\n";
+        // Count the list.
+        $out .= "count:\n";
+        $out .= "  %h0 = load ptr, ptr @__mc_refl_head\n";
+        $out .= "  br label %cloop\n";
+        $out .= "cloop:\n";
+        $out .= "  %cp = phi ptr [ %h0, %count ], [ %cn, %cnext ]\n";
+        $out .= "  %cc = phi i64 [ 0, %count ], [ %cc1, %cnext ]\n";
+        $out .= "  %cend = icmp eq ptr %cp, null\n";
+        $out .= "  br i1 %cend, label %alloc, label %cnext\n";
+        $out .= "cnext:\n";
+        $out .= "  %cc1 = add i64 %cc, 1\n";
+        $out .= "  %cnp = getelementptr i8, ptr %cp, i64 8\n";
+        $out .= "  %cn = load ptr, ptr %cnp\n";
+        $out .= "  br label %cloop\n";
+        // cap = next pow2 >= 2*count, min 8. ctlz gives the bit width.
+        $out .= "alloc:\n";
+        $out .= "  %n2 = shl i64 %cc, 1\n";
+        $out .= "  %n2m = icmp ult i64 %n2, 8\n";
+        $out .= "  %n2c = select i1 %n2m, i64 8, i64 %n2\n";
+        $out .= "  %nm1 = sub i64 %n2c, 1\n";
+        $out .= "  %lz = call i64 @llvm.ctlz.i64(i64 %nm1, i1 false)\n";
+        $out .= "  %sh = sub i64 64, %lz\n";
+        $out .= "  %cap = shl i64 1, %sh\n";
+        $out .= "  %bytes = shl i64 %cap, 3\n";
+        $out .= "  %tab = call ptr @calloc(i64 %bytes, i64 1)\n";
+        $out .= "  %anull = icmp eq ptr %tab, null\n";
+        // calloc failure: leave the index unbuilt and answer null. find() then
+        // falls back to the list walk — slow, but correct, and not a crash.
+        $out .= "  br i1 %anull, label %fail, label %fill\n";
+        $out .= "fail:\n  ret ptr null\n";
+        $out .= "fill:\n";
+        $out .= "  %mask = sub i64 %cap, 1\n";
+        $out .= "  %f0 = load ptr, ptr @__mc_refl_head\n";
+        $out .= "  br label %floop\n";
+        $out .= "floop:\n";
+        $out .= "  %fp = phi ptr [ %f0, %fill ], [ %fn, %fnext ]\n";
+        $out .= "  %fend = icmp eq ptr %fp, null\n";
+        $out .= "  br i1 %fend, label %store, label %fbody\n";
+        $out .= "fbody:\n";
+        $out .= "  %fm = load ptr, ptr %fp\n";
+        $out .= '  %fnmp = getelementptr i8, ptr %fm, i64 ' . $nameOff . "\n";
+        $out .= "  %fnm = load ptr, ptr %fnmp\n";
+        $out .= "  %fh = call i64 @__mc_refl_hash(ptr %fnm)\n";
+        $out .= "  %fi0 = and i64 %fh, %mask\n";
+        $out .= "  br label %ploop\n";
+        $out .= "ploop:\n";
+        $out .= "  %pi = phi i64 [ %fi0, %fbody ], [ %pi1, %pnext ]\n";
+        $out .= "  %psl = getelementptr ptr, ptr %tab, i64 %pi\n";
+        $out .= "  %pv = load ptr, ptr %psl\n";
+        $out .= "  %pfree = icmp eq ptr %pv, null\n";
+        $out .= "  br i1 %pfree, label %put, label %pdup\n";
+        // An occupied slot holding the SAME name is the two-modules-registered-
+        // one-class case: keep the first, do not insert twice.
+        $out .= "pdup:\n";
+        $out .= '  %dnmp = getelementptr i8, ptr %pv, i64 ' . $nameOff . "\n";
+        $out .= "  %dnm = load ptr, ptr %dnmp\n";
+        $out .= "  %dc = call i32 @strcmp(ptr %dnm, ptr %fnm)\n";
+        $out .= "  %dsame = icmp eq i32 %dc, 0\n";
+        $out .= "  br i1 %dsame, label %fnext, label %pnext\n";
+        $out .= "pnext:\n";
+        $out .= "  %pia = add i64 %pi, 1\n";
+        $out .= "  %pi1 = and i64 %pia, %mask\n";
+        $out .= "  br label %ploop\n";
+        $out .= "put:\n";
+        $out .= "  store ptr %fm, ptr %psl\n";
+        $out .= "  br label %fnext\n";
+        $out .= "fnext:\n";
+        $out .= "  %fnp = getelementptr i8, ptr %fp, i64 8\n";
+        $out .= "  %fn = load ptr, ptr %fnp\n";
+        $out .= "  br label %floop\n";
+        $out .= "store:\n";
+        $out .= "  store i64 %cap, ptr @__mc_refl_idx_cap\n";
+        $out .= "  store ptr %tab, ptr @__mc_refl_idx\n";
+        $out .= "  ret ptr %tab\n}\n";
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_member(handle, name, wantMethods)` — a member's flags word + 1,
+     * or 0 when absent.
+     *
+     * One walker for both tables: they have identical shape, and two near-copies
+     * of a strcmp loop is two places to fix a bug. The `+1` is what lets a single
+     * i64 answer both "is it there" and "what is it" — flags for a plain public
+     * member are 0, so a raw flags word could not distinguish "public method"
+     * from "no such method".
+     *
+     * A null handle or an empty table answers 0 rather than dereferencing: the
+     * count is checked before the pointer, because an empty table stores `ptr
+     * null` there.
+     */
+    private static function reflMemberLookup(): string
+    {
+        $nm = (string)\Compile\MemoryAbi::RMETA_NMETHODS_OFFSET;
+        $mt = (string)\Compile\MemoryAbi::RMETA_METHODS_OFFSET;
+        $np = (string)\Compile\MemoryAbi::RMETA_NPROPS_OFFSET;
+        $pt = (string)\Compile\MemoryAbi::RMETA_PROPS_OFFSET;
+        $rs = (string)\Compile\MemoryAbi::RMETA_ROW_SIZE;
+        $rf = (string)\Compile\MemoryAbi::RMETA_ROW_FLAGS_OFFSET;
+        $out = "define i64 @__mc_refl_member(i64 %h, ptr %name, i64 %want) {\nentry:\n";
+        $out .= "  %hz = icmp eq i64 %h, 0\n";
+        $out .= "  br i1 %hz, label %miss, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %m = inttoptr i64 %h to ptr\n";
+        $out .= "  %isM = icmp ne i64 %want, 0\n";
+        $out .= '  %cntOff = select i1 %isM, i64 ' . $nm . ', i64 ' . $np . "\n";
+        $out .= '  %tabOff = select i1 %isM, i64 ' . $mt . ', i64 ' . $pt . "\n";
+        $out .= "  %cntP = getelementptr i8, ptr %m, i64 %cntOff\n";
+        $out .= "  %cnt = load i64, ptr %cntP\n";
+        $out .= "  %tabP = getelementptr i8, ptr %m, i64 %tabOff\n";
+        $out .= "  %tab = load ptr, ptr %tabP\n";
+        $out .= "  %empty = icmp eq i64 %cnt, 0\n";
+        $out .= "  br i1 %empty, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %have ], [ %i1, %cont ]\n";
+        $out .= '  %roff = mul i64 %i, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %tab, i64 %roff\n";
+        $out .= "  %rn = load ptr, ptr %row\n";
+        $out .= "  %c = call i32 @strcmp(ptr %rn, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= '  %fp = getelementptr i8, ptr %row, i64 ' . $rf . "\n";
+        $out .= "  %fv = load i64, ptr %fp\n";
+        $out .= "  %r = add i64 %fv, 1\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
     }
 
     /**

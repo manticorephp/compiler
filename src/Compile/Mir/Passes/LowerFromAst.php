@@ -299,6 +299,13 @@ final class LowerFromAst implements Pass
     public bool $includeArrayClasses = false;
     /** SPL array-class prelude source, read by Main from `prelude/spl_arrays.php`. */
     public string $arrayClassesSrc = '';
+    /** Inject ReflectionClass / ReflectionException (gated on the program
+     *  MENTIONING one — see Main.php). Decides whether the classes exist, NOT
+     *  which classes carry metadata: that is ReflectAnalysis's job, because
+     *  PreludeDemand cannot see a name hidden in a string literal. */
+    public bool $includeReflection = false;
+    /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
+    public string $reflectionSrc = '';
     /** Inject the callback/element array functions (usort/sort/rsort/array_reduce)
      *  as prelude — compiled WITH the user program so call-site element inference
      *  types their array param and the in-module closure ABI matches (they can't

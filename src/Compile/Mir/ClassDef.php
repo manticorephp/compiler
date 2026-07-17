@@ -48,6 +48,36 @@ final class ClassDef
         public array $propHooks = [],
     ) {}
 
+    /** Declared shape of each method — visibility, static, params, return hint.
+     *  `$methodNames` answers only "does it exist"; this is what tells a static
+     *  method from an instance one, and is the source the reflection metadata
+     *  tables are emitted from.
+     *
+     *  NOT keyed identically to `$methodNames`, in BOTH directions:
+     *   - it carries INHERITED methods, which `$methodNames` does not (that one
+     *     is declared + trait-mixed only);
+     *   - a compiler-synthesised entry (a `__hook_<prop>_get`, or the ctor
+     *     synthesised for defaulted props) appears in `$methodNames` with NO
+     *     entry here, because no user declaration exists to describe.
+     *  So a consumer must treat a missing key as "not user-declared", never as
+     *  an error, and must not assume the two agree on size.
+     *
+     *  Insertion order is own → trait → inherited, matching what PHP's
+     *  `ReflectionClass::getMethods()` reports (verified against php 8.5).
+     *  @var array<string, MethodMeta> */
+    public array $methodMeta = [];
+
+    /** Class-level `#[Attr]` names, verbatim as written (no namespace
+     *  resolution — the compiler's own attribute lookups are raw string
+     *  matches, and this inherits that).
+     *  @var string[] */
+    public array $attributes = [];
+
+    /** `final class` / `abstract class` — PHP reports these, and nothing in MIR
+     *  recorded them because dispatch never needed to ask. */
+    public bool $isFinal = false;
+    public bool $isAbstract = false;
+
     /** Names of properties declared `array` (or a typed array). `clone` must
      *  value-copy their array slot even when a bare `array` hint erased the
      *  element type to unknown (else the clone aliases the original's buffer).

@@ -100,6 +100,68 @@ trait LowerClasses
         return $decl->name;
     }
 
+    /**
+     * The declared shape of one method, straight off the AST. Type hints are kept
+     * as the SOURCE STRING, not a lowered Type — see {@see \Compile\Mir\ParamMeta}.
+     */
+    private function buildMethodMeta(string $declaringClass, \Parser\Ast\MethodDecl $m): \Compile\Mir\MethodMeta
+    {
+        $params = [];
+        foreach ($m->params as $p) {
+            $params[] = new \Compile\Mir\ParamMeta(
+                $p->name,
+                $p->typeHint === null ? '' : $p->typeHint,
+                $p->default !== null,
+                $p->byRef,
+                $p->variadic,
+                $p->promoted,
+                $this->attrNames($p->attributes),
+            );
+        }
+        return new \Compile\Mir\MethodMeta(
+            $m->name,
+            $m->visibility === '' ? 'public' : $m->visibility,
+            $m->isStatic,
+            $m->isAbstract,
+            $m->isFinal,
+            $m->returnType === null ? '' : $m->returnType,
+            $params,
+            $this->attrNames($m->attributes),
+            $declaringClass,
+        );
+    }
+
+    /**
+     * `use T { m as x; }` — the MethodDecl the alias renames. `$a->trait` is
+     * optional in the syntax (`m as x;`), so an empty trait searches every used
+     * trait, first match wins, which is what PHP's own resolution does when the
+     * name is unambiguous.
+     */
+    private function traitAliasSource(\Parser\Ast\ClassDecl $decl, \Parser\Ast\TraitAdaptation $a): ?\Parser\Ast\MethodDecl
+    {
+        foreach ($decl->uses as $traitName) {
+            $tn = \ltrim($traitName, '\\');
+            if ($a->trait !== '' && $tn !== \ltrim($a->trait, '\\')) { continue; }
+            $td = $this->traitTable[$tn] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->methods as $tm) {
+                if ($tm->name === $a->method) { return $tm; }
+            }
+        }
+        return null;
+    }
+
+    /** Attribute NAMES as written. No namespace resolution — the compiler's own
+     *  attribute lookups are raw string matches, and this inherits that.
+     *  @param \Parser\Ast\AttributeNode[] $attrs
+     *  @return string[] */
+    private function attrNames(array $attrs): array
+    {
+        $out = [];
+        foreach ($attrs as $at) { $out[] = $at->name; }
+        return $out;
+    }
+
     private function buildClassDef(\Parser\Ast\ClassDecl $decl, int $classId): ClassDef
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
@@ -248,8 +310,12 @@ trait LowerClasses
             }
             $propHooks[$prop->name] = ['get' => $get, 'set' => $set];
         }
+        $methodMeta = [];
+        $ownMethods = [];
         foreach ($decl->methods as $m) {
             $methodNames[$m->name] = true;
+            $ownMethods[$m->name] = true;
+            $methodMeta[$m->name] = $this->buildMethodMeta($decl->name, $m);
         }
         // Mixed-in trait methods count as the class's own (for dispatch
         // + ctor resolution); the class's own method wins on conflict.
@@ -262,10 +328,37 @@ trait LowerClasses
             foreach ($td->methods as $tm) {
                 if (isset($excluded[$tn . '::' . $tm->name])) { continue; }
                 if (!isset($methodNames[$tm->name])) { $methodNames[$tm->name] = true; }
+                // A trait method mixed in is reported by PHP as declared on the
+                // USING class, not the trait — unlike an inherited one. The
+                // class's own declaration always wins; a trait's beats a parent's.
+                if (!isset($ownMethods[$tm->name])) {
+                    $methodMeta[$tm->name] = $this->buildMethodMeta($decl->name, $tm);
+                }
             }
         }
         foreach ($decl->traitAdaptations as $a) {
-            if ($a->kind === 'as' && $a->alias !== '') { $methodNames[$a->alias] = true; }
+            if ($a->kind === 'as' && $a->alias !== '') {
+                $methodNames[$a->alias] = true;
+                // The alias is the same declaration under a second name.
+                $src = $this->traitAliasSource($decl, $a);
+                if ($src !== null) {
+                    $am = $this->buildMethodMeta($decl->name, $src);
+                    $am->name = $a->alias;
+                    if ($a->visibility !== '') { $am->visibility = $a->visibility; }
+                    $methodMeta[$a->alias] = $am;
+                }
+            }
+        }
+        // Inherited methods LAST, and only where this class did not redeclare
+        // them: PHP's getMethods() reports own-then-trait-then-inherited, and
+        // that order is observable. A non-overridden method keeps its ancestor
+        // as declaringClass; an override was already recorded above with this
+        // class as the declarer.
+        if ($parent !== '' && isset($this->classTable[$parent])) {
+            foreach ($this->classTable[$parent]->methodMeta as $mn => $mm) {
+                if (isset($methodMeta[$mn])) { continue; }
+                $methodMeta[$mn] = $mm;
+            }
         }
         // A class with defaulted properties but no user ctor gets a
         // synthesised one (see lowerClassMethods) — flag it so NewObj
@@ -313,6 +406,10 @@ trait LowerClasses
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
         $cd->propertyReadonly = $roProps;
+        $cd->methodMeta = $methodMeta;
+        $cd->attributes = $this->attrNames($decl->attributes);
+        $cd->isFinal = $decl->isFinal;
+        $cd->isAbstract = $decl->isAbstract;
         // Narrow slots: a property declared as a `#[TypeDef(repr: 'u8')]` occupies
         // ONE byte, not a word. This is where `repr` stops being a validated label
         // and starts costing what it says. In a register a narrow type buys nothing

@@ -118,12 +118,18 @@ final class MemoryAbi
 
     /**
      * `ptr` — the class DESCRIPTOR (`@__mir_cd_<id> = { i64 class_id,
-     * ptr drop_fn }`), NOT the raw id. instanceof / method dispatch /
+     * ptr drop_fn, ptr rmeta }`), NOT the raw id. instanceof / method dispatch /
      * exception catch read `class_id` at descriptor offset 0; object
      * release calls `drop_fn` (descriptor offset 8) INDIRECTLY. The
      * descriptor is `linkonce_odr`, so each class has one across every
      * separately-linked object — drops/dispatch compose without a central
      * id-switch that could lose a case (the residual cross-object drop leak).
+     *
+     * That same property is what makes it the reflection metadata hook: one
+     * descriptor per class, keyed by a globally stable id, reachable from any
+     * object in a single load. New fields APPEND — offsets 0/8 are ABI.
+     * The struct is spelled in exactly one place:
+     * {@see \Compile\Mir\RuntimeLibrary::descriptorType}.
      */
     public const OBJECT_DESCRIPTOR_OFFSET = 0;
 
@@ -132,6 +138,86 @@ final class MemoryAbi
 
     /** `ptr` — class drop function (or null), at descriptor offset 8. */
     public const DESCRIPTOR_DROP_FN_OFFSET = 8;
+
+    /**
+     * `ptr` — reflection metadata (`@__mc_rmeta_<id>`), or null when no
+     * reflection reaches the class. The opt-in gate is what keeps this null:
+     * a binary that never reflects pays 8 rodata bytes per class and nothing
+     * else, because the metadata itself is never emitted and the linker never
+     * sees a reference to keep its methods alive.
+     */
+    public const DESCRIPTOR_RMETA_OFFSET = 16;
+
+    /** Bytes. Nothing allocates a descriptor at runtime — they are static
+     *  globals — so this exists for readers/asserts, not for a malloc. */
+    public const DESCRIPTOR_SIZE = 24;
+
+    // ─── Reflection metadata (`@__mc_rmeta_<id>`) ─────────────────
+
+    /**
+     * `ptr` — the class's FQN as a MIR string, at rmeta offset 0. This is the
+     * DISPLAY name (what `get_class()` reports), so a reified specialization
+     * says `Box$of$float`, matching the rest of the system rather than
+     * inventing a second answer.
+     */
+    public const RMETA_NAME_OFFSET = 0;
+
+    /** `i64` — {@see RMETA_FLAG_FINAL} … packed. */
+    public const RMETA_FLAGS_OFFSET = 8;
+
+    /**
+     * `i64` — the parent's class id, or 0 for none. An ID, not a pointer: the
+     * parent's rmeta may live in a DIFFERENT object file, and a cross-object
+     * pointer would need a relocation the emitter cannot always form. Ids are
+     * FQN hashes ({@see \Compile\Mir\Passes\LowerFromAst::stableClassId}), so
+     * they are stable across modules — resolve through the registry instead.
+     */
+    public const RMETA_PARENT_ID_OFFSET = 16;
+
+    /**
+     * `ptr` — the parent's NAME (an immortal literal), or null for none.
+     *
+     * Carried alongside the id because it is what makes the parent REACHABLE:
+     * the registry is name-keyed, so `getParentClass()` is
+     * `__mc_refl_find(parent_name)` and needs no second lookup structure. The id
+     * stays for cheap identity comparison.
+     */
+    public const RMETA_PARENT_NAME_OFFSET = 24;
+
+    /** `i64` / `ptr` — the method table: count, then `[{ ptr name, i64 flags }]`. */
+    public const RMETA_NMETHODS_OFFSET = 32;
+    public const RMETA_METHODS_OFFSET  = 40;
+
+    /** `i64` / `ptr` — the property table: count, then `[{ ptr name, i64 flags }]`. */
+    public const RMETA_NPROPS_OFFSET = 48;
+    public const RMETA_PROPS_OFFSET  = 56;
+
+    /** Bytes. Grows as tables are appended; readers must use the named
+     *  offsets, never arithmetic on this. */
+    public const RMETA_SIZE = 64;
+
+    /** One row of the method / property tables: `{ ptr name, i64 flags }`. */
+    public const RMETA_ROW_NAME_OFFSET  = 0;
+    public const RMETA_ROW_FLAGS_OFFSET = 8;
+    public const RMETA_ROW_SIZE = 16;
+
+    public const RMETA_FLAG_FINAL     = 1;
+    public const RMETA_FLAG_ABSTRACT  = 2;
+    public const RMETA_FLAG_INTERFACE = 4;
+    public const RMETA_FLAG_ENUM      = 8;
+    public const RMETA_FLAG_TRAIT     = 16;
+
+    // Member flags — a row's `flags` word. Visibility is an enum, not a
+    // bitfield: PHP has exactly one per member, and three bits that could
+    // disagree would invite a state nothing can mean.
+    public const RMETA_MEM_PUBLIC    = 0;
+    public const RMETA_MEM_PROTECTED = 1;
+    public const RMETA_MEM_PRIVATE   = 2;
+    public const RMETA_MEM_VIS_MASK  = 3;
+    public const RMETA_MEM_STATIC    = 4;
+    public const RMETA_MEM_ABSTRACT  = 8;
+    public const RMETA_MEM_FINAL     = 16;
+    public const RMETA_MEM_READONLY  = 32;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;
