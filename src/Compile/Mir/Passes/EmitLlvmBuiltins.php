@@ -135,6 +135,7 @@ trait EmitLlvmBuiltins
         // the data these return.
         if ($name === '__mc_refl_of')                 { return $this->biMcReflOf($args); }
         if ($name === '__mc_refl_name')               { return $this->biMcReflName($args); }
+        if ($name === '__mc_refl_find')               { return $this->biMcReflFind($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
@@ -2630,6 +2631,33 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $m . ' = load ptr, ptr ' . $mp . "\n";
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ptrtoint ptr ' . $m . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_find($name)` — an rmeta handle by class name, or 0.
+     *
+     * This is the one lookup a compile-time fold cannot do: the name is a
+     * runtime string. It walks the registry the `@llvm.global_ctors` entries
+     * built, which is what makes reflection work ACROSS separately-linked
+     * objects — user.o and stdlib.o each register their own classes into the
+     * same list, with no central table for anyone to forget to update.
+     *
+     * The arg is a `string`-typed value; its bytes are NUL-terminated, so strcmp
+     * reads them directly. `coerceToPtr` is what makes the operand a `ptr`
+     * whether it arrived as a runtime i64 or as a literal — a string CONSTANT is
+     * already a `getelementptr` constexpr of type ptr, so an unconditional
+     * `inttoptr i64` would be a type mismatch clang rejects.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflFind(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_find(ptr ' . $sp . ")\n";
         return $this->finishI64($out, $reg);
     }
 

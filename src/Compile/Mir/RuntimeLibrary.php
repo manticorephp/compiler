@@ -92,6 +92,111 @@ final class RuntimeLibrary
         return 'ptr @__mc_rmeta_' . (string)$id;
     }
 
+    /** Registry node: `{ ptr rmeta, ptr next, i64 registered }`. */
+    public static function reflNodeType(): string
+    {
+        return '{ ptr, ptr, i64 }';
+    }
+
+    /**
+     * One class's registry node + its `@llvm.global_ctors` entry function.
+     *
+     * `@llvm.global_ctors` is how a name→rmeta lookup exists at all: there is no
+     * name-addressable table in the binary otherwise, and the prelude cannot
+     * hold a generated one (its bodies are linkonce_odr and shared). It is
+     * chosen over a linker section because its IR is byte-identical on Mach-O
+     * and ELF, so nothing has to detect the OS at emit time — and `host_os()`
+     * rides libc bindings that are empty stubs under the Zend cold seed.
+     *
+     * **The registration MUST be idempotent, and the guard is not belt-and-braces.**
+     * {@see Passes\EmitLlvm::linkonceRuntime} rewrites every preamble `define`
+     * to `linkonce_odr`, so this function coalesces to ONE body across objects —
+     * but `@llvm.global_ctors` is `appending`, so each object still contributes
+     * its own entry pointing at that one body. Two objects ⇒ the ctor runs
+     * TWICE. Unguarded, `node->next = head; head = node` run twice makes the
+     * node its own successor, and `__mc_refl_find` spins forever on the cycle.
+     */
+    public static function reflNodeAndCtor(int $id): string
+    {
+        $sid = (string)$id;
+        $node = '@__mc_refl_node_' . $sid;
+        $t = self::reflNodeType();
+        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_' . $sid
+             . ", ptr null, i64 0 }\n";
+        $out .= 'define void @__mc_refl_reg_' . $sid . "() {\nentry:\n";
+        $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
+        $out .= "  %fv = load i64, ptr %f\n";
+        $out .= "  %done = icmp ne i64 %fv, 0\n";
+        $out .= "  br i1 %done, label %skip, label %reg\n";
+        $out .= "reg:\n";
+        $out .= "  store i64 1, ptr %f\n";
+        $out .= "  %h = load ptr, ptr @__mc_refl_head\n";
+        $out .= '  %np = getelementptr i8, ptr ' . $node . ", i64 8\n";
+        $out .= "  store ptr %h, ptr %np\n";
+        $out .= '  store ptr ' . $node . ", ptr @__mc_refl_head\n";
+        $out .= "  br label %skip\n";
+        $out .= "skip:\n  ret void\n}\n";
+        return $out;
+    }
+
+    /**
+     * The list head + the `@llvm.global_ctors` array + `__mc_refl_find`.
+     *
+     * `$ids` are the classes to register. An EMPTY list still emits the head and
+     * `find` — only the ctors array is skipped. Emitting nothing would leave a
+     * caller's `@__mc_refl_find` undefined, and this toolchain does not fail on
+     * that: the stub generator fills a missing symbol with `return 0`
+     * ({@see \Manticore\build_compile_module}), so reflection would silently
+     * answer "no such class" instead of erroring. That is the failure mode that
+     * once turned `sort()` into a no-op.
+     *
+     * `find` is a linear walk. That is deliberate for now: the list is the
+     * reflectable set, not every class, and a hash index is an optimization
+     * with its own cross-module lifetime questions. Duplicate nodes for one
+     * class are possible and harmless — first hit wins, and every node for a
+     * given class points at the same coalesced rmeta.
+     *
+     * @param int[] $ids
+     */
+    public static function reflRegistry(array $ids): string
+    {
+        $out = "@__mc_refl_head = linkonce_odr global ptr null\n";
+        $entries = [];
+        foreach ($ids as $id) {
+            $entries[] = '{ i32, ptr, ptr } { i32 65535, ptr @__mc_refl_reg_' . (string)$id . ', ptr null }';
+        }
+        if (\count($entries) > 0) {
+            $out .= '@llvm.global_ctors = appending global [' . (string)\count($entries)
+                  . ' x { i32, ptr, ptr }] [' . \implode(', ', $entries) . "]\n";
+        }
+        // Walk the list, strcmp each rmeta's name against the needle. Returns
+        // the rmeta address, or 0 for a name nothing registered.
+        $out .= "define i64 @__mc_refl_find(ptr %name) {\nentry:\n";
+        $out .= "  %p0 = load ptr, ptr @__mc_refl_head\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %p = phi ptr [ %p0, %entry ], [ %next, %cont ]\n";
+        $out .= "  %end = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %end, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %m = load ptr, ptr %p\n";
+        $out .= '  %nmp = getelementptr i8, ptr %m, i64 '
+              . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
+        $out .= "  %nm = load ptr, ptr %nmp\n";
+        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %r = ptrtoint ptr %m to i64\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %nxp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %next = load ptr, ptr %nxp\n";
+        $out .= "  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
+    }
+
     /**
      * Central binary-safe string core (zend_string-style). Every string in
      * the system is a headered value `[cap@-24, len@-16, rc@-8, bytes@0]`;

@@ -726,6 +726,8 @@ trait EmitLlvmRuntime
         // drops correctly (no central id-switch to lose a case).
         $descs = '';
         $defs = '';
+        /** @var int[] class ids to register in the name→rmeta registry */
+        $reflIds = [];
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             $id = (string)$cls->classId;
@@ -798,7 +800,15 @@ trait EmitLlvmRuntime
                 (int)$id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
+            // Registry entry, so a NAME can find this class at runtime.
+            $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor((int)$cls->classId);
+            $reflIds[] = (int)$cls->classId;
         }
+        // The name→rmeta registry: list head, the global_ctors array that fills
+        // it, and __mc_refl_find. Nothing is emitted for a module with no
+        // classes, so a program that declares none carries no startup cost.
+        $this->rt->needsStrcmp = true;
+        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.
