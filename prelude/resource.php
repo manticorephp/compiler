@@ -27,6 +27,34 @@
  * fd. That only works because a `\Resource|false` local IS released — see
  * tests/aot/cases/cell_local_destruct.php; it was not until recently.
  */
+// The PRELUDE MUST NOT DEPEND ON THE STDLIB. It is compiled into every module,
+// including ones built with no stdlib beside them — so it declares the handful of
+// libc entries it needs itself, exactly as `Manticore\Main` does for the compiler.
+//
+// Calling `\Runtime\Libc\fclose()` from here looked fine and was not: those
+// bindings live in the stdlib, reachable only through `lib/manticore_stdlib.o.sig`.
+// When the .sig is absent — a compiler binary relocated away from its `lib/`, which
+// is exactly what `tools/selfhost_stability.sh` builds — the fully-qualified name
+// SILENTLY degrades to the GLOBAL `fclose`, i.e. the stdlib's own
+// `fclose(\Resource)`, and clang then dies on `use of undefined value
+// '@manticore_fclose'`. Compiling ANY program broke, including `<?php echo "x";`.
+//
+// Names are `__mc_libc_*` and not `fclose`: the global namespace already holds the
+// stdlib's `fclose(\Resource $stream)`, and colliding with it is how the bug above
+// looked from the inside. `Symbol()` carries the real C name, so these emit a DIRECT
+// call to libc (`U _fclose` in the binary) and need no stdlib at all.
+// Attributes are fully qualified because the prelude is concatenated into ONE blob:
+// there is nowhere to put a `use`.
+
+#[\Ffi\Library('c'), \Ffi\Symbol('fclose')]
+function __mc_libc_fclose(#[\Ffi\Take] \Ffi\Ptr $stream): int {}
+
+#[\Ffi\Library('c'), \Ffi\Symbol('closedir')]
+function __mc_libc_closedir(#[\Ffi\Take] \Ffi\Ptr $dir): int {}
+
+#[\Ffi\Library('c'), \Ffi\Symbol('close')]
+function __mc_libc_close(#[\Ffi\CType('int')] int $fd): int {}
+
 /**
  * Name for the OBJECT arm of `gettype()` / `get_debug_type()`.
  *
@@ -121,14 +149,14 @@ final class Resource
         }
         $ok = false;
         if ($this->kind === self::KIND_FILE) {
-            $ok = \Runtime\Libc\fclose(\int_to_ptr($this->addr)) === 0;
+            $ok = \__mc_libc_fclose(\int_to_ptr($this->addr)) === 0;
         } elseif ($this->kind === self::KIND_DIR) {
-            $ok = \Runtime\Libc\sys_closedir(\int_to_ptr($this->addr)) === 0;
+            $ok = \__mc_libc_closedir(\int_to_ptr($this->addr)) === 0;
         } elseif ($this->kind === self::KIND_SOCKET) {
             // A socket's $addr is an fd, not a FILE* — close(2), and no
             // int_to_ptr. Passing it to fclose() would treat the small integer
             // as a pointer.
-            $ok = \Runtime\Libc\sys_close($this->addr) === 0;
+            $ok = \__mc_libc_close($this->addr) === 0;
         }
         $this->closed = true;
         $this->addr = 0;
