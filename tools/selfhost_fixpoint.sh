@@ -47,6 +47,19 @@ case "$SUITE" in
     *) echo "SELF-HOST REGRESSION: self-built compiler fails the suite" >&2; exit 1 ;;
 esac
 
+# MIR golden dumps — snapshots the AST->MIR lowering shape. Wired in here so it
+# can never again rot unrun (it was red from v0.1.0 to the dump-mir epic because
+# no gate invoked it). Trust the runner's own exit code rather than parsing its
+# summary — the runner already fails non-zero on a diff, crash or empty dump.
+echo "── MIR golden dumps ──"
+set +e
+bash tests/aot/run_mir_golden.sh > /tmp/mir_golden_gate.out 2>&1
+GRC=$?
+set -e
+tail -1 /tmp/mir_golden_gate.out
+if [[ $GRC -ne 0 ]]; then echo "MIR GOLDEN REGRESSION" >&2; exit 1; fi
+echo "MIR GOLDEN OK"
+
 # Rebuild-stability: the fixpoint above builds ONE stage-2 binary, so a
 # layout-flaky rc/heap bug (crashes ~4/5 rebuilds, survives the lucky one)
 # slips through. Rebuild N times through both front-ends and smoke each.
