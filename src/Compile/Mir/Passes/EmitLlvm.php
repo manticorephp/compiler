@@ -247,6 +247,11 @@ final class EmitLlvm implements EmitVisitor
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */
     private array $globalDefaults = [];
+    /** @var bool[] parallel prelude flags for $globalNames — linkonce_odr when
+     *  true, because the prelude is compiled into every module and external
+     *  linkage would make stdlib.o and user.o define the same cell twice
+     *  ({@see \Compile\Mir\Module::$globalIsPrelude}). */
+    private array $globalIsPrelude = [];
     /** @var string[] names declared `global $x` — __main shares the cell */
     private array $globalVarNames = [];
 
@@ -281,6 +286,7 @@ final class EmitLlvm implements EmitVisitor
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
+        $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalVarNames = $module->globalVarNames;
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->sourceFile = $module->sourceFile;
@@ -1373,6 +1379,10 @@ final class EmitLlvm implements EmitVisitor
     {
         $k = $t->kind;
         if ($k === Type::KIND_STRING) { return 'str'; }
+        // A CELL is tag-dispatched by __mir_cell_drop (scalars a no-op). Without
+        // this it fell through to '' — so `unset($r)` on a `Foo|false` local
+        // released NOTHING and its __destruct never ran.
+        if ($k === Type::KIND_CELL) { return 'cell'; }
         if ($k === Type::KIND_OBJ) {
             $cls = $t->class ?? '';
             // `Ffi\Ptr` is a raw foreign address with NO rc header: the word at

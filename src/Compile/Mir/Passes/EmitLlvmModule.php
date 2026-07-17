@@ -142,8 +142,15 @@ trait EmitLlvmModule
         $gi = 0;
         foreach ($this->globalNames as $gname) {
             $def = $this->globalDefaults[$gi];
+            // A prelude class's static prop is defined by EVERY module (the
+            // prelude is compiled into each), so external linkage is
+            // `ld: duplicate symbols` for any program linking stdlib.o — and if
+            // it did link, two copies would be two independent counters. Same
+            // treatment as every other shared mutable global here
+            // ({@see Module::$globalIsPrelude}).
+            $linkage = ($this->globalIsPrelude[$gi] ?? false) ? 'linkonce_odr ' : '';
             $gi = $gi + 1;
-            $globalCells .= $gname . ' = global i64 ' . $this->globalInit($def) . "\n";
+            $globalCells .= $gname . ' = ' . $linkage . 'global i64 ' . $this->globalInit($def) . "\n";
         }
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a

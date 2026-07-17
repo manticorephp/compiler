@@ -44,6 +44,7 @@ trait EmitLlvmBuiltins
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
         if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
         if ($name === 'int_to_ptr')                   { return $this->biIntToPtr($args); }
+        if ($name === 'ptr_to_int')                   { return $this->biPtrToInt($args); }
         if ($name === 'peek_i64')                     { return $this->biPeek($args, 64, true); }
         if ($name === 'peek_i32')                     { return $this->biPeek($args, 32, true); }
         if ($name === 'peek_i16')                     { return $this->biPeek($args, 16, true); }
@@ -693,6 +694,24 @@ trait EmitLlvmBuiltins
      * Unsafe: the address is not validated.
      * @param Node[] $args
      */
+    /**
+     * `ptr_to_int(\Ffi\Ptr $p): int` — a Ptr's raw address. The mirror of
+     * int_to_ptr, and the reason a `\Resource` can hold its backing handle as a
+     * plain int: `Ffi\Ptr::$address` is not reachable from the stdlib (src/Ffi
+     * is outside the src/Runtime tree the library is built from), and a
+     * Ptr-typed property would drag the foreign-handle rc exclusions into every
+     * path that touches the object.
+     * A Ptr is an i64 at runtime, so this is a representation-level no-op.
+     * @param Node[] $args
+     */
+    private function biPtrToInt(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function biIntToPtr(array $args): string
     {
         $out = $this->emitIntArg($args[0]);
@@ -1780,7 +1799,17 @@ trait EmitLlvmBuiltins
             $e6 = $this->ssa->allocReg(); $out .= '  ' . $e6 . ' = icmp eq i64 ' . $tg . ", 6\n";
             $e7 = $this->ssa->allocReg(); $out .= '  ' . $e7 . ' = icmp eq i64 ' . $tg . ", 7\n";
             $e8 = $this->ssa->allocReg(); $out .= '  ' . $e8 . ' = icmp eq i64 ' . $tg . ", 8\n";
-            $r8 = $this->ssa->allocReg(); $out .= '  ' . $r8 . ' = select i1 ' . $e8 . ', ptr ' . $this->strRef($nObj) . ', ptr ' . $this->strRef($nUnk) . "\n";
+            // The object arm goes through a prelude fn: a \Resource is an object
+            // to us but "resource" to php, and only a runtime CLASS check can
+            // tell them apart — a tag-select chain cannot. Called unconditionally
+            // (select evaluates both arms), which is safe: instanceof on a
+            // non-object cell is false and the answer falls back to "object".
+            $objName = $this->ssa->allocReg();
+            $out .= '  ' . $objName . ' = call i64 @manticore___mir_obj_type_name(i64 '
+                  . $this->lastValue . ', i64 ' . ($debug ? '1' : '0') . ")\n";
+            $objPtr = $this->ssa->allocReg();
+            $out .= '  ' . $objPtr . ' = inttoptr i64 ' . $objName . " to ptr\n";
+            $r8 = $this->ssa->allocReg(); $out .= '  ' . $r8 . ' = select i1 ' . $e8 . ', ptr ' . $objPtr . ', ptr ' . $this->strRef($nUnk) . "\n";
             $r7 = $this->ssa->allocReg(); $out .= '  ' . $r7 . ' = select i1 ' . $e7 . ', ptr ' . $this->strRef($nArr) . ', ptr ' . $r8 . "\n";
             $r6 = $this->ssa->allocReg(); $out .= '  ' . $r6 . ' = select i1 ' . $e6 . ', ptr ' . $this->strRef($nFloat) . ', ptr ' . $r7 . "\n";
             $r4 = $this->ssa->allocReg(); $out .= '  ' . $r4 . ' = select i1 ' . $e4 . ', ptr ' . $this->strRef($nStr) . ', ptr ' . $r6 . "\n";
@@ -1803,6 +1832,16 @@ trait EmitLlvmBuiltins
         // arm keeps the obj type) — runtime-select "NULL" over the object name.
         elseif ($k === Type::KIND_OBJ) {
             $objName = $debug && ($a->type->class ?? '') !== '' ? $a->type->class : $nObj;
+            // A statically-typed \Resource: the class is known here, so fold the
+            // name rather than call the prelude helper — the helper would have to
+            // run unconditionally under the null-select below and would deref a
+            // null receiver. Cost of folding: `closed` is a RUNTIME flag, so a
+            // closed handle reports "resource"/"resource (stream)" where php says
+            // "resource (closed)". The cell path — which is what `fopen(): \Resource|false`
+            // actually produces — reads the flag and gets it exact.
+            if (($a->type->class ?? '') === 'Resource') {
+                $objName = $debug ? 'resource (stream)' : 'resource';
+            }
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $isN = $this->ssa->allocReg();

@@ -264,3 +264,120 @@ function sys_close(#[CType('int')] int $fd): int {}
 
 #[Library('c'), Symbol('getcwd'), Give]
 function sys_getcwd(Ptr $buf, #[CType('size_t')] int $size): Ptr {}
+
+// ── Network ────────────────────────────────────────────────────────────
+//
+// Sockets are libc, so they live here rather than in their own file: this file's
+// axis is one file per LINKED LIBRARY (`Runtime\Pcre` = libpcre2), and splitting
+// by topic would cut the `-lc` unit, which has a single owner.
+//
+// The client path is deliberately designed to need almost NO layout knowledge:
+// `getaddrinfo` hands back a ready `ai_addr` + `ai_addrlen`, which go straight to
+// `connect()` as an opaque blob — so no sockaddr is ever built or parsed here,
+// and Darwin's `sin_len`/`sin_family` shift (and AF_INET6's 30-vs-10) never come
+// up. `struct addrinfo` itself is the one exception: its result list has to be
+// walked, and Darwin orders `ai_canonname` BEFORE `ai_addr` while glibc does the
+// reverse. That table lives in Stdlib/Net.php, measured per host.
+//
+// Timeouts go through `poll()` rather than SO_RCVTIMEO: it takes an int
+// MILLISECONDS argument and no struct, which sidesteps SOL_SOCKET (65535 vs 1),
+// SO_RCVTIMEO (0x1006 vs 20) and `timeval.tv_usec` (4 vs 8 bytes) in one move.
+// `struct pollfd` is identical on both hosts.
+//
+// NOTE there is no errno binding, on purpose: Darwin exports `__error()` and
+// glibc `__errno_location()`, so binding both would leave an undefined symbol on
+// whichever host lacks the other. Connect status comes from getsockopt(SO_ERROR);
+// everything else reads a return code. Same family as the open `stat` vs
+// `__xstat` gap on glibc < 2.33.
+
+// `int getaddrinfo(const char *node, const char *service, const struct addrinfo
+// *hints, struct addrinfo **res)` — 0 on success, else a gai error code (NOT
+// errno). $hints may be a null Ptr (int_to_ptr(0)); $res is a Ptr to an 8-byte
+// out slot that receives the head of the result list.
+#[Library('c'), Symbol('getaddrinfo')]
+function sys_getaddrinfo(string $node, string $service, Ptr $hints, Ptr $res): int {}
+
+// `void freeaddrinfo(struct addrinfo *res)` — frees the whole list.
+#[Library('c'), Symbol('freeaddrinfo')]
+function sys_freeaddrinfo(#[Take] Ptr $res): void {}
+
+// `const char *gai_strerror(int errcode)` — a getaddrinfo code is not errno, so
+// this is the only way to name the failure.
+#[Library('c'), Symbol('gai_strerror')]
+function sys_gai_strerror(#[CType('int')] int $errcode): Ptr {}
+
+// `int socket(int domain, int type, int protocol)` — fd, or -1. The three args
+// come from an addrinfo entry, never from a constant we chose.
+#[Library('c'), Symbol('socket')]
+function sys_socket(#[CType('int')] int $domain, #[CType('int')] int $type,
+                    #[CType('int')] int $protocol): int {}
+
+// `int connect(int fd, const struct sockaddr *addr, socklen_t len)` — 0, or -1.
+// $addr/$len are ai_addr/ai_addrlen, passed through untouched.
+#[Library('c'), Symbol('connect')]
+function sys_connect(#[CType('int')] int $fd, Ptr $addr, #[CType('int')] int $len): int {}
+
+// `ssize_t send(int fd, const void *buf, size_t n, int flags)` — bytes sent, or -1.
+#[Library('c'), Symbol('send')]
+function sys_send(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $n,
+                  #[CType('int')] int $flags): int {}
+
+// Same call, raw buffer — mirrors the fwrite/fwrite_buf split: a PHP string is
+// not a valid source for arbitrary bytes read back out of a socket.
+#[Library('c'), Symbol('send')]
+function sys_send_buf(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
+                      #[CType('int')] int $flags): int {}
+
+// `ssize_t recv(int fd, void *buf, size_t n, int flags)` — bytes read, 0 at the
+// peer's orderly shutdown, -1 on error.
+#[Library('c'), Symbol('recv')]
+function sys_recv(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
+                  #[CType('int')] int $flags): int {}
+
+// `int poll(struct pollfd *fds, nfds_t nfds, int timeout)` — ready count, 0 on
+// timeout, -1 on error. $timeout is MILLISECONDS; -1 blocks. This is the whole
+// timeout mechanism (see the note above).
+#[Library('c'), Symbol('poll')]
+function sys_poll(Ptr $fds, #[CType('size_t')] int $nfds, #[CType('int')] int $timeout): int {}
+
+// `int shutdown(int fd, int how)` — SHUT_RD/WR/RDWR are 0/1/2 on both hosts.
+#[Library('c'), Symbol('shutdown')]
+function sys_shutdown(#[CType('int')] int $fd, #[CType('int')] int $how): int {}
+
+// `int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)`
+// — the errno-free way to read a failed connect's cause, via SO_ERROR.
+#[Library('c'), Symbol('getsockopt')]
+function sys_getsockopt(#[CType('int')] int $fd, #[CType('int')] int $level,
+                        #[CType('int')] int $optname, Ptr $optval, Ptr $optlen): int {}
+
+// `int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)`
+#[Library('c'), Symbol('setsockopt')]
+function sys_setsockopt(#[CType('int')] int $fd, #[CType('int')] int $level,
+                        #[CType('int')] int $optname, Ptr $optval,
+                        #[CType('int')] int $optlen): int {}
+
+// `int bind(int fd, const struct sockaddr *addr, socklen_t len)` — 0, or -1.
+// $addr comes from getaddrinfo(AI_PASSIVE), so the server path builds no
+// sockaddr either.
+#[Library('c'), Symbol('bind')]
+function sys_bind(#[CType('int')] int $fd, Ptr $addr, #[CType('int')] int $len): int {}
+
+// `int listen(int fd, int backlog)` — 0, or -1.
+#[Library('c'), Symbol('listen')]
+function sys_listen(#[CType('int')] int $fd, #[CType('int')] int $backlog): int {}
+
+// `int accept(int fd, struct sockaddr *addr, socklen_t *addrlen)` — a NEW fd for
+// the connection, or -1. Both out-params may be NULL when the peer's address is
+// of no interest, which keeps this off the sockaddr-parsing path entirely.
+#[Library('c'), Symbol('accept')]
+function sys_accept(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
+
+// `int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)` — the
+// address actually bound. The only reason it is here: binding to port 0 lets the
+// OS choose a free one, and this is how we learn which. `sin_port` sits at
+// offset 2 on EVERY probed target — Darwin splits the first two bytes as
+// sin_len(u8)+sin_family(u8) and Linux as sin_family(u16), so the port lands in
+// the same place either way, and reading it needs no host branch. It is in
+// network byte order.
+#[Library('c'), Symbol('getsockname')]
+function sys_getsockname(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}

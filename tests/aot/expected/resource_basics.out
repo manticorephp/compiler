@@ -1,0 +1,27 @@
+bool(true)
+bool(true)
+string(6) "stream"
+string(8) "resource"
+string(17) "resource (stream)"
+bool(true)
+bool(false)
+string(7) "Unknown"
+string(17) "resource (closed)"
+string(17) "resource (closed)"
+line one
+int(9)
+bool(true)
+string(4) "line"
+bool(false)
+int(18)
+string(8) "resource"
+string(17) "resource (stream)"
+NULL
+bool(true)
+string(6) "stream"
+string(8) "resource"
+bool(false)
+bool(true)
+string(6) "stream"
+temp
+done

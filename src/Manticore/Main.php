@@ -1318,9 +1318,19 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     // The Throwable hierarchy is unconditional, and it calls __mir_bt_frames —
     // supplied either by the real frame builder or by the stub, never both.
     $exceptionsSrc = prelude_src_or_empty("exceptions.php");
+    // \Resource is unconditional, like the Throwable hierarchy, and for the same
+    // reason: it must be REGISTERED IN EVERY MODULE. The stdlib .sig carries
+    // functions only — no classes — so a class living in src/Runtime is invisible
+    // to a user program: `$f instanceof Resource` read false while the stdlib's
+    // own is_resource() read true, and STDOUT's properties came back as raw bits
+    // (float(5.0E-324)). Exceptions already prove the prelude route works: a
+    // RuntimeException thrown inside the stdlib is caught by user code.
+    // Not PreludeDemand-gated — a resource can arrive from any stdlib call, and
+    // a demand scan cannot see that.
+    $resourceSrc = prelude_src_or_empty("resource.php");
     $backtraceSrc = prelude_src_or_empty($useBacktrace ? "backtrace.php" : "backtrace_stub.php");
     $varDumpSrc = $useVarDump ? prelude_src_or_empty("var_dump.php") : "";
-    if ($exceptionsSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
+    if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
         return null;
@@ -1346,6 +1356,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
         $lower->exceptionsSrc = $exceptionsSrc;
+        $lower->resourceSrc = $resourceSrc;
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;

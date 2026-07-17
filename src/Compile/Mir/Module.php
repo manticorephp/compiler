@@ -53,6 +53,22 @@ final class Module
     public array $globalNames = [];
     /** @var Node[] */
     public array $globalDefaults = [];
+    /**
+     * Whether each cell belongs to the PRELUDE, parallel to $globalNames.
+     *
+     * The prelude is compiled into EVERY module, so a prelude class's static
+     * prop is DEFINED by both stdlib.o and the user's .o — at default (external)
+     * linkage that is `ld: duplicate symbols`, and every user program linking
+     * the stdlib fails. `linkonce_odr` coalesces the two definitions to one
+     * address, which is also the only way the counter stays SINGLE: two copies
+     * would hand out the same ids from independent sequences.
+     *
+     * Mirrors {@see FunctionDef::$isPrelude}, which already does this for the
+     * bodies. Precedent for the linkage on a mutable global: `@__manticore_argc`
+     * / `@__manticore_argv` ({@see EmitLlvmModule::emitPreamble}).
+     * @var bool[]
+     */
+    public array $globalIsPrelude = [];
 
     /**
      * Names declared `global $x` anywhere — top-level (`__main`) reads
@@ -91,14 +107,15 @@ final class Module
      *  bare `array` erases it (values read back as raw pointer ints). */
     public array $methodDisplay = [];
 
-    /** Register a global cell once (idempotent by name). */
-    public function addGlobalCell(string $name, Node $default): void
+    /** Register a global cell once (idempotent by name). $isPrelude → linkonce_odr. */
+    public function addGlobalCell(string $name, Node $default, bool $isPrelude = false): void
     {
         foreach ($this->globalNames as $existing) {
             if ($existing === $name) { return; }
         }
         $this->globalNames[] = $name;
         $this->globalDefaults[] = $default;
+        $this->globalIsPrelude[] = $isPrelude;
     }
 
     /** Record a `global $name` declaration (idempotent). */

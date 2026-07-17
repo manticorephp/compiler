@@ -390,7 +390,14 @@ trait LowerClasses
             // per specialization is exactly the bug.
             if ($this->isReifiedDecl($decl)) { continue; }
             $def = $prop->default !== null ? $this->lowerExpr($prop->default) : new IntConst(0, Type::int_());
-            $this->module->addGlobalCell('@' . $this->sanitizeSym($decl->name . '__sp_' . $prop->name), $def);
+            // A PRELUDE class's cell must coalesce, not collide: the prelude is
+            // compiled into every module, so stdlib.o and the user's .o both
+            // define this symbol ({@see Module::$globalIsPrelude}).
+            $this->module->addGlobalCell(
+                '@' . $this->sanitizeSym($decl->name . '__sp_' . $prop->name),
+                $def,
+                $this->inPreludeClass,
+            );
         }
         $this->currentLowerClass = $prevLowerClass;
         $isStruct = $this->hasStructAttr($decl->attributes);

@@ -1,0 +1,13 @@
+string(8) "resource"
+string(17) "resource (stream)"
+resource(1) of type (stream)
+Resource id #1
+resource(1) of type (Unknown)
+resource(2) of type (stream)
+resource(2) of type (Unknown)
+bool(true)
+bool(true)
+bool(false)
+string(6) "stream"
+bool(true)
+done
