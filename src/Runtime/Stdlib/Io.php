@@ -112,48 +112,147 @@ function __mc_std_res(int $which, \Ffi\Ptr $handle): \Resource
     return $err;
 }
 
+// ── the one place a stream blocks ──────────────────────────────────────
+//
+// EVERY socket read goes through __mc_stream_fill(). That is a rule, not a
+// convenience: for `Async\run(fn() => file_get_contents(...))` to become
+// non-blocking later WITHOUT rewriting the HTTP layer, there has to be exactly
+// ONE function that decides to wait. Teaching it to suspend (scheduler active ?
+// Io\Poll + suspend : recv) is then a local change; a parser that called recv()
+// itself would have to be rewritten instead.
+
+/** Bytes buffered and not yet consumed. */
+function __mc_buf_len(\Resource $s): int
+{
+    return \strlen($s->rbuf) - $s->rpos;
+}
+
 /**
- * fgets() for a SOCKET: read up to $cap-1 bytes, stopping after a newline.
- * Returns the line (newline included, as php does) or false at EOF.
+ * Drop the consumed prefix. Only when it is worth the copy — compacting on every
+ * read is exactly the quadratic behaviour the cursor exists to avoid.
+ */
+function __mc_buf_compact(\Resource $s): void
+{
+    if ($s->rpos === 0) {
+        return;
+    }
+    if ($s->rpos >= \strlen($s->rbuf)) {
+        $s->rbuf = '';
+        $s->rpos = 0;
+        return;
+    }
+    if ($s->rpos >= 8192) {
+        $s->rbuf = \substr($s->rbuf, $s->rpos);
+        $s->rpos = 0;
+    }
+}
+
+/**
+ * Pull ONE chunk from the socket into the buffer. Returns bytes added; 0 means
+ * the peer closed (recorded as eof — a bare fd has no FILE* to remember it).
  *
- * One byte per recv(2). That is genuinely slow — a header line costs a syscall
- * per character — but it is the only CORRECT thing without a read buffer on the
- * Resource: a socket has no stdio buffer to peek into, and reading ahead in
- * bulk would swallow bytes past the newline that the caller has not asked for
- * yet. Ф3 (HTTP) is where a per-Resource buffer earns its keep; doing it here
- * first would be a buffer with no reader to validate it.
+ * ⚠ THE ONLY BLOCKING CALL in the stream path. See the note above.
+ */
+function __mc_stream_fill(\Resource $s, int $want): int
+{
+    if ($want < 4096) {
+        $want = 4096;   // a syscall costs the same for 1 byte or 4 KiB
+    }
+    $buf = \Runtime\Libc\calloc($want + 1, 1);
+    if ($buf === null) {
+        return 0;
+    }
+    $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
+    if ($got > 0) {
+        __mc_buf_compact($s);
+        $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
+    } elseif ($got === 0) {
+        $s->eof = true;
+    }
+    \Runtime\Libc\free($buf);
+    return $got > 0 ? $got : 0;
+}
+
+/** Read up to $n buffered bytes, filling from the socket only when empty. */
+function __mc_stream_read(\Resource $s, int $n): string
+{
+    if ($n <= 0) {
+        return '';
+    }
+    if (\__mc_buf_len($s) === 0) {
+        if ($s->eof) {
+            return '';
+        }
+        \__mc_stream_fill($s, $n);
+    }
+    $avail = \__mc_buf_len($s);
+    if ($avail === 0) {
+        return '';
+    }
+    if ($n > $avail) {
+        $n = $avail;
+    }
+    $out = \substr($s->rbuf, $s->rpos, $n);
+    $s->rpos = $s->rpos + $n;
+    \__mc_buf_compact($s);
+    return $out;
+}
+
+/**
+ * fgets() for a SOCKET: a line INCLUDING its terminator, or false when nothing
+ * at all could be read.
+ *
+ * Buffered, unlike the byte-at-a-time recv() this replaces: a recv boundary never
+ * lines up with a line boundary, so the bytes past the newline have to be KEPT for
+ * whoever asks next. That is the whole reason the buffer exists — reading one byte
+ * per syscall was the only other way to avoid over-reading, and it cost a syscall
+ * per character.
  *
  * @return string|false
  */
 function __mc_socket_gets(\Resource $stream, int $cap)
 {
-    $out = '';
-    $n = 0;
-    $buf = \Runtime\Libc\calloc(2, 1);
-    if ($buf === null) {
+    $searched = 0;
+    while (true) {
+        $len = \__mc_buf_len($stream);
+        if ($len > 0) {
+            $at = \strpos($stream->rbuf, "\n", $stream->rpos + $searched);
+            if ($at !== false) {
+                $take = ($at - $stream->rpos) + 1;
+                if ($cap > 0 && $take > $cap - 1) {
+                    $take = $cap - 1;
+                }
+                $out = \substr($stream->rbuf, $stream->rpos, $take);
+                $stream->rpos = $stream->rpos + $take;
+                \__mc_buf_compact($stream);
+                return $out;
+            }
+            // php's $length caps the line even with no terminator in sight.
+            if ($cap > 0 && $len >= $cap - 1) {
+                $out = \substr($stream->rbuf, $stream->rpos, $cap - 1);
+                $stream->rpos = $stream->rpos + ($cap - 1);
+                \__mc_buf_compact($stream);
+                return $out;
+            }
+            // Everything buffered is newline-free — do not rescan it next round.
+            $searched = $len;
+        }
+        if ($stream->eof) {
+            break;
+        }
+        if (\__mc_stream_fill($stream, 4096) === 0) {
+            break;
+        }
+    }
+    // Whatever is left with no terminator: php returns it, and false only when
+    // there was nothing at all.
+    $len = \__mc_buf_len($stream);
+    if ($len === 0) {
         return false;
     }
-    while ($n < $cap - 1) {
-        $got = \Runtime\Libc\sys_recv($stream->addr, $buf, 1, 0);
-        if ($got === 0) {
-            $stream->eof = true;
-            break;
-        }
-        if ($got < 0) {
-            break;
-        }
-        $ch = \chr(\peek_u8($buf, 0));
-        $out = $out . $ch;
-        $n = $n + 1;
-        if ($ch === "\n") {
-            break;
-        }
-    }
-    \Runtime\Libc\free($buf);
-    // php's fgets returns false only when nothing at all was read.
-    if ($out === '') {
-        return false;
-    }
+    $out = \substr($stream->rbuf, $stream->rpos, $len);
+    $stream->rpos = $stream->rpos + $len;
+    \__mc_buf_compact($stream);
     return $out;
 }
 
@@ -250,12 +349,13 @@ function fread(\Resource $stream, int $length): string
         return "";
     }
     if ($stream->kind === \Resource::KIND_SOCKET) {
-        $n = \Runtime\Libc\sys_recv($stream->addr, $buf, $length, 0);
-        // 0 is the peer's orderly shutdown. A bare fd has no FILE* to remember
-        // that, so record it — feof() has nowhere else to read it from.
-        if ($n === 0) { $stream->eof = true; }
-        if ($n < 0) { $n = 0; }
-    } else {
+        // MUST go through the buffer, not straight to recv(): fgets() reads ahead
+        // by design, so bytes it already pulled would be invisible to a direct
+        // recv() and the stream would silently skip them.
+        \Runtime\Libc\free($buf);
+        return \__mc_stream_read($stream, $length);
+    }
+    {
         $n = \Runtime\Libc\fread($buf, 1, $length, \int_to_ptr($stream->addr));
         if ($n < 0) {
             $n = 0;
@@ -304,7 +404,9 @@ function fgets(\Resource $stream, ?int $length = null)
 function feof(\Resource $stream): bool
 {
     if ($stream->kind === \Resource::KIND_SOCKET) {
-        return $stream->eof;
+        // Buffered bytes mean NOT eof even after the peer closed: php reports eof
+        // only once a read actually finds nothing left.
+        return $stream->eof && \__mc_buf_len($stream) === 0;
     }
     return \Runtime\Libc\feof(\int_to_ptr($stream->addr)) !== 0;
 }

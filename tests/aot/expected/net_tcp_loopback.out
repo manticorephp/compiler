@@ -8,6 +8,13 @@ bool(true)
 ping
 pong
 string(10) "0123456789"
+string(7) "line-a
+"
+string(7) "TAIL123"
+string(4) "one
+"
+string(4) "two
+"
 bool(false)
 bool(true)
 bool(false)

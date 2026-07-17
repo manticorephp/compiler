@@ -125,6 +125,25 @@ final class Resource
      * Without this, feof() on a socket would answer from a FILE* that is not there.
      */
     public bool $eof = false;
+    /**
+     * SOCKET read buffer — raw bytes plus a cursor. Owned by the stdlib
+     * ({@see __mc_stream_read}); nothing here touches them.
+     *
+     * PLAIN FIELDS, not a `ByteBuffer` object, and that is forced rather than
+     * chosen: the prelude MUST NOT depend on the stdlib (it is compiled into
+     * modules that have no stdlib beside them), and a stdlib CLASS is invisible to
+     * a user module anyway — the `.sig` carries functions only, so an object of one
+     * arrives untyped and reads back as raw bits. Putting a real ByteBuffer here
+     * would mean putting it in the PRELUDE, i.e. paying its IR in every program
+     * that ever says `echo` (\Resource's own three methods already cost 276 lines
+     * of a trivial program's 5220).
+     *
+     * $rpos is not an optimisation: without a cursor every consume is a
+     * `substr($rbuf, $n)` — a full copy of the remainder — which is quadratic over
+     * a response read in chunks.
+     */
+    public string $rbuf = '';
+    public int $rpos = 0;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {

@@ -50,6 +50,21 @@ echo fgets($client);
 fwrite($conn, "0123456789");
 var_dump(fread($client, 10));
 
+// THE read-ahead case — the reason a read buffer exists at all. ONE write carries
+// a complete line AND trailing bytes, so they arrive in a single recv(). fgets()
+// must hand back only the line and KEEP the tail for the next reader; an
+// implementation that recv()s per call swallows "TAIL123" into a buffer it then
+// discards, and fread() below silently returns the wrong thing (or blocks).
+fwrite($conn, "line-a\nTAIL123");
+var_dump(fgets($client));
+var_dump(fread($client, 7));
+
+// Two lines in one write: the second must come from the buffer, with no syscall
+// and no loss.
+fwrite($conn, "one\ntwo\n");
+var_dump(fgets($client));
+var_dump(fgets($client));
+
 // NOT asserted here, on purpose:
 //   ftell($client)  — php returns an int (it counts bytes through its own
 //                     buffer); we return false. A real divergence, recorded at
