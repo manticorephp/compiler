@@ -19,7 +19,11 @@
  */
 function file_get_contents(string $path): string|false
 {
-    $fp = \Runtime\Libc\fopen($path, "rb");
+    // Same seam as fopen(): http:// lands here first when Ф3 wires it up.
+    if (\__mc_scheme_of($path) !== 'file') {
+        return false;
+    }
+    $fp = \Runtime\Libc\fopen(\__mc_file_path($path), "rb");
     if ($fp === null) {
         return false;
     }
@@ -183,6 +187,31 @@ function __mc_stream_read(\Resource $s, int $n): string
         if ($s->eof) {
             return '';
         }
+        // BULK BYPASS: nothing buffered and a big ask ⇒ recv straight into the
+        // result. The buffer exists so fgets() can keep the bytes past a newline;
+        // a large fread() wants none of that, and routing it through the buffer
+        // costs THREE copies of the data (str_from_buffer, the concat into $rbuf,
+        // then the substr back out) plus a malloc — where php does one.
+        // MEASURED, externally with `time`, 16 MiB over loopback:
+        //   before: 0.42s vs php's 0.07s — 6x SLOWER
+        // The threshold is the fill size: below it the buffered path is already
+        // reading a whole chunk anyway, so there is nothing to win and the
+        // read-ahead is worth keeping.
+        if ($n >= 4096) {
+            $buf = \Runtime\Libc\calloc($n + 1, 1);
+            if ($buf === null) {
+                return '';
+            }
+            $got = \Runtime\Libc\sys_recv($s->addr, $buf, $n, 0);
+            if ($got <= 0) {
+                if ($got === 0) { $s->eof = true; }
+                \Runtime\Libc\free($buf);
+                return '';
+            }
+            $out = \str_from_buffer($buf, $got);
+            \Runtime\Libc\free($buf);
+            return $out;
+        }
         \__mc_stream_fill($s, $n);
     }
     $avail = \__mc_buf_len($s);
@@ -283,13 +312,103 @@ function get_resource_id(\Resource $value): int
     return $value->id;
 }
 
+// ── stream wrappers: scheme -> handler ─────────────────────────────────
+//
+// This is the seam, and it is why it is not `if (strpos($p,'http://')===0)`:
+// https:// is the SAME protocol over a different transport, so a hardcoded
+// http check would be torn out again immediately. Every opener funnels through
+// __mc_scheme_of() so a new scheme is one arm, not a new call path.
+//
+// NOT stream_wrapper_register(): a user-registered wrapper dispatches methods on
+// a class known only at runtime, which needs dynamic class resolution — a
+// separate epic. This table is the INTERNAL set.
+
+/**
+ * The scheme of $path, lowercased, or 'file' when it carries none.
+ * Returns '' when a scheme is present but not one we handle — php reports
+ * "Unable to find the wrapper" and the call returns false.
+ *
+ * Rules MEASURED against php 8.5.8, not assumed:
+ *   /tmp/x                     -> file    (no scheme at all)
+ *   file:///tmp/x              -> file
+ *   FILE:///tmp/x              -> file    (scheme is CASE-INSENSITIVE)
+ *   file://localhost/tmp/x     -> file    (a host is allowed, and ignored)
+ *   2bad://x                   -> ''      (a scheme may not START with a digit)
+ *   nosuch://x                 -> ''      (unregistered -> false, not a filename)
+ * A bare `://` at offset 0 is not a scheme either.
+ */
+function __mc_scheme_of(string $path): string
+{
+    $at = \strpos($path, '://');
+    if ($at === false || $at === 0) {
+        return 'file';
+    }
+    $raw = \substr($path, 0, $at);
+    // [A-Za-z][A-Za-z0-9+.-]* — anything else is not a scheme, so php treats the
+    // whole string as a filename rather than a URL. That is why '/tmp/a://b'
+    // opens a FILE and '2bad://x' does not.
+    $n = \strlen($raw);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = $raw[$i];
+        $isAlpha = ($c >= 'a' && $c <= 'z') || ($c >= 'A' && $c <= 'Z');
+        if ($i === 0) {
+            if (!$isAlpha) { return 'file'; }
+            continue;
+        }
+        $ok = $isAlpha || ($c >= '0' && $c <= '9') || $c === '+' || $c === '.' || $c === '-';
+        if (!$ok) { return 'file'; }
+    }
+    $scheme = \strtolower($raw);
+    if ($scheme === 'file') {
+        return 'file';
+    }
+    // Known-but-unimplemented schemes are still NOT files: php would find no
+    // wrapper and fail, and so must we — silently opening `http://x` as a
+    // relative filename would be worse than failing.
+    return '';
+}
+
+/**
+ * The filesystem path inside a `file://` URL. php accepts an (ignored) host, so
+ * `file://localhost/tmp/x` and `file:///tmp/x` are the same file.
+ *
+ * ⚠ Strips ONLY a real `file://` prefix. Containing `://` is not enough: for
+ * `2bad:///tmp/x` the scheme is invalid (a scheme may not start with a digit), so
+ * php treats the WHOLE string as a filename — one that does not exist. Stripping
+ * it anyway turned that into a successful read of /tmp/x: not an error, just the
+ * wrong file. Caught by stream_scheme.php, which is why the case is in it.
+ */
+function __mc_file_path(string $path): string
+{
+    $at = \strpos($path, '://');
+    if ($at === false) {
+        return $path;
+    }
+    // Only a literal `file` scheme is a URL here; anything else (invalid, or
+    // simply a path that happens to contain '://') is a plain filename.
+    if (\strtolower(\substr($path, 0, $at)) !== 'file') {
+        return $path;
+    }
+    $rest = \substr($path, $at + 3, \strlen($path) - ($at + 3));
+    // Everything up to the first '/' is the host component — php ignores it.
+    $slash = \strpos($rest, '/');
+    if ($slash === false) {
+        return $rest;
+    }
+    return \substr($rest, $slash, \strlen($rest) - $slash);
+}
+
 /**
  * Open a file. Returns a file resource, or false on failure.
  * @return \Resource|false
  */
 function fopen(string $filename, string $mode)
 {
-    $fp = \Runtime\Libc\fopen($filename, $mode);
+    $scheme = \__mc_scheme_of($filename);
+    if ($scheme !== 'file') {
+        return false;   // no wrapper for it (yet) — php: "Unable to find the wrapper"
+    }
+    $fp = \Runtime\Libc\fopen(\__mc_file_path($filename), $mode);
     if ($fp === null) {
         return false;
     }
