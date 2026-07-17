@@ -3025,16 +3025,96 @@ trait EmitLlvmBuiltins
      *  also matches enums (PHP: an enum IS a class), never interfaces/traits. */
     private function biClassExists(array $args, string $kind): string
     {
-        $out = $this->reflEvalArgs($args);
         $name = $this->reflClassName($args[0]);
-        $exists = false;
-        if ($name !== '') {
-            if ($kind === 'enum') { $exists = isset($this->enums[$name]); }
-            elseif ($kind === 'interface') { $exists = isset($this->interfaceNames[$name]); }
-            elseif ($kind === 'trait') { $exists = isset($this->traitNames[$name]); }
-            else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]); }
+        if ($name === '') {
+            // A name known only at run time. This used to fold FALSE — a silent
+            // WRONG ANSWER (`$n="F"."oo"; class_exists($n)` said false where php
+            // says true), because there was no runtime class table to ask. There
+            // is one now: the registry. ReflectAnalysis makes such a call site a
+            // reflectAll root, so every class is in it.
+            return $this->biExistsDynamic($args[0], $kind);
         }
+        $out = $this->reflEvalArgs($args);
+        $exists = false;
+        if ($kind === 'enum') { $exists = isset($this->enums[$name]); }
+        elseif ($kind === 'interface') { $exists = isset($this->interfaceNames[$name]); }
+        elseif ($kind === 'trait') { $exists = isset($this->traitNames[$name]); }
+        else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]); }
         return $this->biConstBool($out, $exists);
+    }
+
+    /**
+     * `class_exists($runtimeName)` and friends — answered from the registry.
+     *
+     * One table serves all four because php's own answers are not uniform and
+     * the flags encode exactly that: an ENUM *is* a class (`class_exists('E')`
+     * is true) while an INTERFACE and a TRAIT are not. So `class_exists` is
+     * "registered AND not interface AND not trait", and each of the others is
+     * its own bit.
+     *
+     * @param Node[] $args
+     */
+    private function biExistsDynamic(Node $arg, string $kind): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($arg);
+        $out .= $this->coerceToPtr();
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = call i64 @__mc_refl_find(ptr ' . $this->lastValue . ")\n";
+        $found = $this->ssa->allocReg();
+        $out .= '  ' . $found . ' = icmp ne i64 ' . $h . ", 0\n";
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'ex.ok.' . $lbl;
+        $noL = 'ex.no.' . $lbl;
+        $endL = 'ex.end.' . $lbl;
+        // An explicit `no` arm: a phi names its PREDECESSOR BLOCK, and the block
+        // we branch from here is whatever the caller was already emitting into —
+        // not something this function can name.
+        $out .= '  br i1 ' . $found . ', label %' . $okL . ', label %' . $noL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $okL . ":\n";
+        // Load the flags inline. `__mc_refl_flags` is a BUILTIN — it emits IR at
+        // a PHP call site — so there is no LLVM function by that name to call.
+        // We are in the non-null arm, so the handle is known good.
+        $hptr = $this->ssa->allocReg();
+        $out .= '  ' . $hptr . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $flp = $this->ssa->allocReg();
+        $out .= '  ' . $flp . ' = getelementptr i8, ptr ' . $hptr . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_FLAGS_OFFSET . "\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $flp . "\n";
+        $want = $this->ssa->allocReg();
+        if ($kind === 'enum') {
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)\Compile\MemoryAbi::RMETA_FLAG_ENUM . "\n";
+        } elseif ($kind === 'interface') {
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)\Compile\MemoryAbi::RMETA_FLAG_INTERFACE . "\n";
+        } elseif ($kind === 'trait') {
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)\Compile\MemoryAbi::RMETA_FLAG_TRAIT . "\n";
+        } else {
+            // A class is anything registered that is neither an interface nor a
+            // trait — enums included, as php has it.
+            $out .= '  ' . $want . ' = and i64 ' . $fl . ', '
+                  . (string)(\Compile\MemoryAbi::RMETA_FLAG_INTERFACE
+                             | \Compile\MemoryAbi::RMETA_FLAG_TRAIT) . "\n";
+        }
+        $bit = $this->ssa->allocReg();
+        $cmp = $kind === '' || $kind === 'class' ? 'eq' : 'ne';
+        $out .= '  ' . $bit . ' = icmp ' . $cmp . ' i64 ' . $want . ", 0\n";
+        // i64, not i1: {@see biConstBool} — the static arm of this same builtin —
+        // hands back '1'/'0' as i64, and the consumer boxes an i64.
+        $bit64 = $this->ssa->allocReg();
+        $out .= '  ' . $bit64 . ' = zext i1 ' . $bit . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi i64 [ 0, %' . $noL . ' ], [ ' . $bit64 . ', %' . $okL . " ]\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** is_callable($x) — see {@see emitIsCallable} for the resolved forms. */

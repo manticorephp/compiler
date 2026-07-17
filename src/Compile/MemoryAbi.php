@@ -205,6 +205,7 @@ final class MemoryAbi
     public const RMETA_FLAG_ABSTRACT  = 2;
     public const RMETA_FLAG_INTERFACE = 4;
     public const RMETA_FLAG_ENUM      = 8;
+    public const RMETA_FLAG_TRAIT     = 16;
 
     // Member flags — a row's `flags` word. Visibility is an enum, not a
     // bitfield: PHP has exactly one per member, and three bits that could

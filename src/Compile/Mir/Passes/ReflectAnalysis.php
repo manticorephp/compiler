@@ -99,6 +99,16 @@ final class ReflectAnalysis
             if ($fname === '__mc_refl_of' && \count($n->args) >= 1) {
                 $this->fromReceiver($n->args[0]);
             }
+            // `class_exists($runtimeName)` and friends are answered from the
+            // registry, so a non-literal name means EVERY class must be in it.
+            // Without this the gate would not shrink the binary, it would
+            // manufacture a wrong answer — the one thing it must never do.
+            if ($fname === 'class_exists' || $fname === 'interface_exists'
+                || $fname === 'trait_exists' || $fname === 'enum_exists') {
+                if (\count($n->args) >= 1 && !($n->args[0] instanceof \Compile\Mir\StringConst)) {
+                    $this->all = true;
+                }
+            }
         }
         foreach (Walk::children($n) as $c) {
             $this->scan($c);

@@ -727,6 +727,52 @@ trait EmitLlvmRuntime
         return $this->dropRuntimeBody();
     }
 
+    /**
+     * rmeta + registry entries for things with no ClassDef: interfaces, traits,
+     * and enums that declare no methods. Name + flags only.
+     *
+     * @param string[] $reflIds appended to, by reference — the registry array
+     *                          must list every ctor it should run
+     */
+    private function reflNameOnlyEntries(array &$reflIds): string
+    {
+        $out = '';
+        $seen = [];
+        foreach ($this->enums as $ename => $ed) {
+            if (isset($this->classes[$ename])) { continue; }   // already emitted with its ClassDef
+            $out .= $this->reflNameOnly($ename, \Compile\MemoryAbi::RMETA_FLAG_ENUM, $reflIds, $seen);
+        }
+        foreach ($this->interfaceNames as $iname => $_) {
+            $out .= $this->reflNameOnly($iname, \Compile\MemoryAbi::RMETA_FLAG_INTERFACE, $reflIds, $seen);
+        }
+        foreach ($this->traitNames as $tname => $_) {
+            $out .= $this->reflNameOnly($tname, \Compile\MemoryAbi::RMETA_FLAG_TRAIT, $reflIds, $seen);
+        }
+        return $out;
+    }
+
+    /**
+     * One name-keyed rmeta entry. `$seen` guards a name that is somehow in two
+     * tables: one symbol may be defined once.
+     *
+     * @param string[] $reflIds
+     * @param array<string,bool> $seen
+     */
+    private function reflNameOnly(string $name, int $flags, array &$reflIds, array &$seen): string
+    {
+        if (isset($seen[$name])) { return ''; }
+        if (!$this->reflectWants($name)) { return ''; }
+        $seen[$name] = true;
+        $key = 'n_' . $this->mangle($name);
+        $nameSym = '@.rmeta.name.' . $key;
+        $out = $this->strGlobalDef($nameSym, $name);
+        $out .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
+            $key, 'ptr ' . $this->strSymBytes($nameSym), $flags, 0);
+        $out .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($key);
+        $reflIds[] = $key;
+        return $out;
+    }
+
     /** Does this class need reflection metadata? {@see ReflectAnalysis}. */
     private function reflectWants(string $name): bool
     {
@@ -881,10 +927,11 @@ trait EmitLlvmRuntime
             $flags = 0;
             if ($cls->isFinal)    { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_FINAL; }
             if ($cls->isAbstract) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ABSTRACT; }
-            // INTERFACE/ENUM bits stay 0 for now: an interface never reaches
-            // this loop (it has no ClassDef — Module::$interfaceNames holds only
-            // names), and an enum only lands here when it declares methods.
-            // Filling those needs a source other than $this->classes.
+            // An enum with methods DOES get a ClassDef and lands here; one
+            // without is registered separately below. php reports an enum as a
+            // class (class_exists('E') is true), so the ENUM bit is additive,
+            // not exclusive.
+            if (isset($this->enums[$cls->name])) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ENUM; }
             $parentId = 0;
             $parentNameFld = 'ptr null';
             if ($cls->parent !== '' && isset($this->classes[$cls->parent])) {
@@ -905,14 +952,26 @@ trait EmitLlvmRuntime
             $descs .= $pPair[0];
             $pFlds = $pPair[1];
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
-                (int)$id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
+                $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
                 $parentNameFld, $mFlds, $pFlds);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.
-            $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor((int)$cls->classId);
-            $reflIds[] = (int)$cls->classId;
+            $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
+            $reflIds[] = $id;
         }
+        // Interfaces, traits, and enums WITHOUT methods never reach the loop
+        // above: an interface has no ClassDef at all (Module::$interfaceNames is
+        // names only), and an enum gets one only when it declares a method. They
+        // still belong in the registry — it is the runtime CLASS TABLE, and
+        // interface_exists($runtimeName) / get_declared_interfaces() have nothing
+        // else to ask.
+        //
+        // They key by NAME, not class id, because they have no id: still a pure
+        // function of the entry's own identity, so the linkonce_odr coalescing
+        // stays sound. They carry no parent/method/property tables — nothing
+        // reads those for a name-existence answer.
+        $descs .= $this->reflNameOnlyEntries($reflIds);
         // The name→rmeta registry: list head, the global_ctors array that fills
         // it, and __mc_refl_find. Nothing is emitted for a module with no
         // classes, so a program that declares none carries no startup cost.

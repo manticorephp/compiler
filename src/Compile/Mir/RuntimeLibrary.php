@@ -112,7 +112,7 @@ final class RuntimeLibrary
      * live in another object file ({@see \Compile\MemoryAbi::RMETA_PARENT_ID_OFFSET}).
      */
     public static function rmetaGlobal(
-        int $id,
+        string $id,
         string $nameFld,
         int $flags,
         int $parentId,
@@ -120,7 +120,7 @@ final class RuntimeLibrary
         string $methodsFlds = 'i64 0, ptr null',
         string $propsFlds = 'i64 0, ptr null'
     ): string {
-        return '@__mc_rmeta_' . (string)$id . ' = linkonce_odr constant ' . self::rmetaType()
+        return '@__mc_rmeta_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
             . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds . " }\n";
     }
@@ -156,9 +156,9 @@ final class RuntimeLibrary
      * TWICE. Unguarded, `node->next = head; head = node` run twice makes the
      * node its own successor, and `__mc_refl_find` spins forever on the cycle.
      */
-    public static function reflNodeAndCtor(int $id): string
+    public static function reflNodeAndCtor(string $key): string
     {
-        $sid = (string)$id;
+        $sid = $key;
         $node = '@__mc_refl_node_' . $sid;
         $t = self::reflNodeType();
         $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_' . $sid
@@ -196,14 +196,14 @@ final class RuntimeLibrary
      * class are possible and harmless — first hit wins, and every node for a
      * given class points at the same coalesced rmeta.
      *
-     * @param int[] $ids
+     * @param string[] $ids symbol suffixes
      */
     public static function reflRegistry(array $ids): string
     {
         $out = "@__mc_refl_head = linkonce_odr global ptr null\n";
         $entries = [];
         foreach ($ids as $id) {
-            $entries[] = '{ i32, ptr, ptr } { i32 65535, ptr @__mc_refl_reg_' . (string)$id . ', ptr null }';
+            $entries[] = '{ i32, ptr, ptr } { i32 65535, ptr @__mc_refl_reg_' . $id . ', ptr null }';
         }
         if (\count($entries) > 0) {
             $out .= '@llvm.global_ctors = appending global [' . (string)\count($entries)
