@@ -30,6 +30,16 @@ final class Debug
     public static bool $verify = false;
 
     /**
+     * Report which classes carry reflection metadata, and why the set is what
+     * it is. Reflection trades binary size for a runtime answer, and the gate
+     * that decides it fails OPEN — one unresolvable class name silently puts
+     * every class back in. Without a way to look, that reads as "reflection is
+     * just expensive" rather than "one call site escaped".
+     * `MANTICORE_REFLECT_REPORT=1`.
+     */
+    public static bool $reflectReport = false;
+
+    /**
      * PGO-style metrics. When set, the emitted binary carries thread-local
      * counters incremented at every assoc / obj retain / release / alloc; an
      * `atexit`-registered dump prints the tally to stderr at exit. Answers
@@ -93,6 +103,10 @@ final class Debug
         $env = \getenv('MANTICORE_PROFILE');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$profile = true;
+        }
+        $env = \getenv('MANTICORE_REFLECT_REPORT');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$reflectReport = true;
         }
         $env = \getenv('MANTICORE_MEMORY');
         if ($env !== false && $env !== '') {

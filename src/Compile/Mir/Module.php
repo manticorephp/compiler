@@ -71,6 +71,18 @@ final class Module
     /** Source file path, for exception file() / trace frames. */
     public string $sourceFile = '';
 
+    /** Classes needing reflection metadata, or ALL when
+     *  {@see $reflectAll}. Filled by {@see Passes\ReflectAnalysis}; read by the
+     *  emitter to decide which classes get an rmeta block, tables and a registry
+     *  ctor. A class outside the set keeps `ptr null` in its descriptor.
+     *  @var array<string, bool> */
+    public array $reflectNames = [];
+
+    /** Something reflected on a name the analysis could not resolve, so every
+     *  class needs metadata. Also the state before the pass runs, which keeps
+     *  any path that skips it correct-but-fat rather than silently wrong. */
+    public bool $reflectAll = true;
+
     /** Method FunctionDef name ("Class__method") → backtrace frame display
      *  ("Class->method" / "Class::method"). Built at lowering (stable string
      *  ops); EmitLlvm stamps the correct name at a method's entry, because the

@@ -727,6 +727,13 @@ trait EmitLlvmRuntime
         return $this->dropRuntimeBody();
     }
 
+    /** Does this class need reflection metadata? {@see ReflectAnalysis}. */
+    private function reflectWants(string $name): bool
+    {
+        if ($this->reflectAll) { return true; }
+        return isset($this->reflectNames[$name]);
+    }
+
     /**
      * The method table for one class: `[{ ptr name, i64 flags }]` in php's
      * getMethods() order (own → trait → inherited), which is the order
@@ -844,10 +851,19 @@ trait EmitLlvmRuntime
                     . $body . "  ret void\n}\n";
                 $dropFld = 'ptr @__mir_drop_' . $id;
             }
-            // Reflection metadata. Every field is derived from the class itself,
-            // never from anything module-local, so each module emitting this
-            // class emits identical bytes — what makes the linkonce_odr
-            // coalescing sound (the epic's ODR invariant).
+            // Reflection metadata — only for classes reflection can actually
+            // reach ({@see ReflectAnalysis}). A class outside the set keeps
+            // `ptr null` in its descriptor and emits no block, no tables, no
+            // name string and no startup ctor. The analysis fails OPEN, so an
+            // unresolvable name simply puts every class back in.
+            if (!$this->reflectWants($cls->name)) {
+                $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal((int)$id, $dropFld);
+                continue;
+            }
+            // Every field is derived from the class itself, never from anything
+            // module-local, so each module emitting this class emits identical
+            // bytes — what makes the linkonce_odr coalescing sound (the epic's
+            // ODR invariant).
             //
             // The name is a HEADERED, immortal (rc -1) string literal, so
             // __mc_refl_name hands the pointer straight back: no allocation, no

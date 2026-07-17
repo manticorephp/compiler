@@ -162,6 +162,15 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
 
+    /** Classes needing reflection metadata ({@see ReflectAnalysis}).
+     *  @var array<string, bool> */
+    private array $reflectNames = [];
+
+    /** Every class needs metadata — the analysis could not resolve some name,
+     *  or never ran. Defaults true so a path that skips the pass stays
+     *  correct-but-fat rather than silently answering "class not found". */
+    private bool $reflectAll = true;
+
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
      *  receiver itself and `$byte->method()` into a direct call.
@@ -261,6 +270,8 @@ final class EmitLlvm implements EmitVisitor
         $this->locals = new LocalSlots();
         $this->lib = new RuntimeLibrary();
         $this->classes = $module->classes;
+        $this->reflectNames = $module->reflectNames;
+        $this->reflectAll = $module->reflectAll;
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
