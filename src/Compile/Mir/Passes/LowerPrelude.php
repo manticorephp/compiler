@@ -126,6 +126,11 @@ trait LowerPrelude
         if ($this->includePrintR) {
             $src = $src . $this->printRSrc;
         }
+        if ($this->includeReflection) {
+            // After exceptions.php: ReflectionException extends Exception, and
+            // the sources are concatenated then parsed as one unit.
+            $src = $src . $this->reflectionSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         return $program->statements;
     }

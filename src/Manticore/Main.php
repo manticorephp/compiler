@@ -1280,12 +1280,21 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     $cliSrc = prelude_src_or_empty("cli.php");
     $printRSrc = prelude_src_or_empty("print_r.php");
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
+    $reflectionSrc = prelude_src_or_empty("reflection.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
     $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
+    // Reflection is gated on a MENTION, like the array classes: `new
+    // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
+    // ReflectionException. A program that never reflects carries none of it.
+    // This gate decides whether the CLASSES exist; it cannot decide WHICH
+    // classes get metadata — PreludeDemand deliberately ignores string
+    // literals, so `new ReflectionClass('Foo')` hides Foo from it. That is a
+    // separate analysis (ReflectAnalysis).
+    $useReflection = $demand->mentionsAny(['ReflectionClass', 'ReflectionException']);
     $useVarDump = $demand->calls('var_dump');
     $usePrintR = $demand->calls('print_r');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
@@ -1327,12 +1336,14 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $lower->includeVarDump = $useVarDump;
         $lower->includePrintR = $usePrintR;
         $lower->includeArrayClasses = $useArrayClasses;
+        $lower->includeReflection = $useReflection;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
         $lower->exceptionsSrc = $exceptionsSrc;
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
+        $lower->reflectionSrc = $reflectionSrc;
         $lower->arrayFnsSrc = $arrayFnsSrc;
         $lower->cliSrc = $cliSrc;
         $lower->printRSrc = $printRSrc;
