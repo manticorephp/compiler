@@ -112,6 +112,51 @@ function __mc_std_res(int $which, \Ffi\Ptr $handle): \Resource
     return $err;
 }
 
+/**
+ * fgets() for a SOCKET: read up to $cap-1 bytes, stopping after a newline.
+ * Returns the line (newline included, as php does) or false at EOF.
+ *
+ * One byte per recv(2). That is genuinely slow — a header line costs a syscall
+ * per character — but it is the only CORRECT thing without a read buffer on the
+ * Resource: a socket has no stdio buffer to peek into, and reading ahead in
+ * bulk would swallow bytes past the newline that the caller has not asked for
+ * yet. Ф3 (HTTP) is where a per-Resource buffer earns its keep; doing it here
+ * first would be a buffer with no reader to validate it.
+ *
+ * @return string|false
+ */
+function __mc_socket_gets(\Resource $stream, int $cap)
+{
+    $out = '';
+    $n = 0;
+    $buf = \Runtime\Libc\calloc(2, 1);
+    if ($buf === null) {
+        return false;
+    }
+    while ($n < $cap - 1) {
+        $got = \Runtime\Libc\sys_recv($stream->addr, $buf, 1, 0);
+        if ($got === 0) {
+            $stream->eof = true;
+            break;
+        }
+        if ($got < 0) {
+            break;
+        }
+        $ch = \chr(\peek_u8($buf, 0));
+        $out = $out . $ch;
+        $n = $n + 1;
+        if ($ch === "\n") {
+            break;
+        }
+    }
+    \Runtime\Libc\free($buf);
+    // php's fgets returns false only when nothing at all was read.
+    if ($out === '') {
+        return false;
+    }
+    return $out;
+}
+
 /** Whether $value is an open resource. */
 function is_resource(mixed $value): bool
 {
@@ -172,6 +217,13 @@ function fwrite(\Resource $stream, string $data, ?int $length = null): int
     if ($length !== null && $length >= 0 && $length < $len) {
         $len = $length;
     }
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        // A socket's addr is an fd, so int_to_ptr() would hand fwrite a small
+        // integer as a FILE*. send(2) instead — and a short write is a real
+        // outcome here, not an error, so report what went out.
+        $n = \Runtime\Libc\sys_send($stream->addr, $data, $len, 0);
+        return $n < 0 ? 0 : $n;
+    }
     return \Runtime\Libc\fwrite($data, 1, $len, \int_to_ptr($stream->addr));
 }
 
@@ -197,9 +249,17 @@ function fread(\Resource $stream, int $length): string
     if ($buf === null) {
         return "";
     }
-    $n = \Runtime\Libc\fread($buf, 1, $length, \int_to_ptr($stream->addr));
-    if ($n < 0) {
-        $n = 0;
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        $n = \Runtime\Libc\sys_recv($stream->addr, $buf, $length, 0);
+        // 0 is the peer's orderly shutdown. A bare fd has no FILE* to remember
+        // that, so record it — feof() has nowhere else to read it from.
+        if ($n === 0) { $stream->eof = true; }
+        if ($n < 0) { $n = 0; }
+    } else {
+        $n = \Runtime\Libc\fread($buf, 1, $length, \int_to_ptr($stream->addr));
+        if ($n < 0) {
+            $n = 0;
+        }
     }
     // str_from_buffer, NOT substr: raw \Ffi\Ptr, exactly $n bytes (binary-safe).
     $s = \str_from_buffer($buf, $n);
@@ -220,6 +280,10 @@ function fgets(\Resource $stream, ?int $length = null)
     if ($buf === null) {
         return false;
     }
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        \Runtime\Libc\free($buf);
+        return \__mc_socket_gets($stream, $cap);
+    }
     $r = \Runtime\Libc\fgets($buf, $cap, \int_to_ptr($stream->addr));
     if ($r === null) {
         \Runtime\Libc\free($buf);
@@ -239,6 +303,9 @@ function fgets(\Resource $stream, ?int $length = null)
  */
 function feof(\Resource $stream): bool
 {
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        return $stream->eof;
+    }
     return \Runtime\Libc\feof(\int_to_ptr($stream->addr)) !== 0;
 }
 
@@ -249,6 +316,9 @@ function feof(\Resource $stream): bool
  */
 function fseek(\Resource $stream, int $offset, int $whence = 0): int
 {
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        return -1;   // php: a socket stream is not seekable
+    }
     return \Runtime\Libc\fseek(\int_to_ptr($stream->addr), $offset, $whence);
 }
 
@@ -259,6 +329,16 @@ function fseek(\Resource $stream, int $offset, int $whence = 0): int
  */
 function ftell(\Resource $stream)
 {
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        // KNOWN DIVERGENCE, measured against php 8.5.8: php DOES report a
+        // position on a socket stream (it counts the bytes that passed through
+        // its own buffer) — `ftell()` there returns an int, not false. Matching
+        // it means carrying a byte counter on the Resource and bumping it in
+        // every read/write path; that lands with the Ф3 read buffer, which needs
+        // the same bookkeeping. Until then this reports "no position" rather
+        // than inventing a number that would drift from php's.
+        return false;
+    }
     $p = \Runtime\Libc\ftell(\int_to_ptr($stream->addr));
     if ($p < 0) {
         return false;
@@ -272,6 +352,9 @@ function ftell(\Resource $stream)
  */
 function rewind(\Resource $stream): bool
 {
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        return false;
+    }
     return \Runtime\Libc\fseek(\int_to_ptr($stream->addr), 0, 0) === 0;
 }
 
@@ -281,6 +364,9 @@ function rewind(\Resource $stream): bool
  */
 function fflush(\Resource $stream): bool
 {
+    if ($stream->kind === \Resource::KIND_SOCKET) {
+        return true;   // send(2) is unbuffered — nothing to flush
+    }
     return \Runtime\Libc\fflush(\int_to_ptr($stream->addr)) === 0;
 }
 

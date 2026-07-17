@@ -1,0 +1,14 @@
+bool(true)
+bool(true)
+string(6) "stream"
+bool(true)
+bool(true)
+string(6) "stream"
+bool(true)
+ping
+pong
+string(10) "0123456789"
+bool(false)
+bool(true)
+bool(false)
+done

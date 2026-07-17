@@ -58,9 +58,19 @@ function __mir_obj_type_name(mixed $v, bool $debug): string
 
 final class Resource
 {
-    /** Backend kinds. A file is a libc FILE*; the rest arrive with the socket work. */
+    /**
+     * Backend kinds — they decide what `$addr` MEANS, so every read of it has to
+     * dispatch on this first. FILE and DIR hold a libc `FILE*`/`DIR*`; a SOCKET
+     * holds a raw **fd**, an int, not a pointer.
+     *
+     * That difference is why the socket path does not go through stdio: wrapping
+     * the fd with `fdopen()` would let the whole f* family work unchanged, but
+     * stdio buffering on a socket fights poll() timeouts and non-blocking reads,
+     * and the HTTP layer above would inherit that.
+     */
     public const KIND_FILE = 0;
     public const KIND_DIR = 1;
+    public const KIND_SOCKET = 2;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */
@@ -79,6 +89,14 @@ final class Resource
      * real stdout.
      */
     public bool $persistent;
+    /**
+     * SOCKET only: the peer has closed (recv returned 0).
+     *
+     * A FILE* carries its own EOF flag and feof() reads it; a bare fd does not,
+     * so the one place that can observe the zero-length read has to record it.
+     * Without this, feof() on a socket would answer from a FILE* that is not there.
+     */
+    public bool $eof = false;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {
@@ -106,6 +124,11 @@ final class Resource
             $ok = \Runtime\Libc\fclose(\int_to_ptr($this->addr)) === 0;
         } elseif ($this->kind === self::KIND_DIR) {
             $ok = \Runtime\Libc\sys_closedir(\int_to_ptr($this->addr)) === 0;
+        } elseif ($this->kind === self::KIND_SOCKET) {
+            // A socket's $addr is an fd, not a FILE* — close(2), and no
+            // int_to_ptr. Passing it to fclose() would treat the small integer
+            // as a pointer.
+            $ok = \Runtime\Libc\sys_close($this->addr) === 0;
         }
         $this->closed = true;
         $this->addr = 0;
