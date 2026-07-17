@@ -1294,7 +1294,13 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     // classes get metadata — PreludeDemand deliberately ignores string
     // literals, so `new ReflectionClass('Foo')` hides Foo from it. That is a
     // separate analysis (ReflectAnalysis).
-    $useReflection = $demand->mentionsAny(['ReflectionClass', 'ReflectionException']);
+    $useReflection = $demand->mentionsAny(['ReflectionClass', 'ReflectionException'])
+        // get_declared_* are plain FUNCTIONS living in the same file — a program
+        // may call one without ever naming a Reflection class, and would then
+        // get an undefined symbol (which this toolchain stubs to `return 0`
+        // rather than failing).
+        || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
+                              'get_declared_traits']);
     $useVarDump = $demand->calls('var_dump');
     $usePrintR = $demand->calls('print_r');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it

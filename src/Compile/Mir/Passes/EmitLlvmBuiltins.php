@@ -136,6 +136,8 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_of')                 { return $this->biMcReflOf($args); }
         if ($name === '__mc_refl_name')               { return $this->biMcReflName($args); }
         if ($name === '__mc_refl_find')               { return $this->biMcReflFind($args); }
+        if ($name === '__mc_refl_cap')                { return $this->biMcReflCap($args); }
+        if ($name === '__mc_refl_slot')               { return $this->biMcReflSlot($args); }
         if ($name === '__mc_refl_member')             { return $this->biMcReflMember($args); }
         if ($name === '__mc_refl_parent')             { return $this->biMcReflParent($args); }
         if ($name === '__mc_refl_flags')              { return $this->biMcReflFlags($args); }
@@ -2635,6 +2637,64 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ptrtoint ptr ' . $m . " to i64\n";
         return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_cap()` — the index table's slot count, after forcing it built.
+     *
+     * With {@see biMcReflSlot}, this is how the prelude ENUMERATES the class
+     * table (get_declared_classes and friends). Iterating the index rather than
+     * the list is deliberate: the table is a flat array, so a walk is
+     * cache-friendly and needs no node-chasing builtins. Empty slots read 0 and
+     * are skipped.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCap(array $args): string
+    {
+        $out = "  call ptr @__mc_refl_index()\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . " = load i64, ptr @__mc_refl_idx_cap\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_slot($i)` — the rmeta handle in index slot `$i`, or 0 if empty.
+     *
+     * No bounds check: the only caller is the prelude's own `0 .. cap-1` loop.
+     * A null table (calloc failed) answers 0 for every slot, so enumeration
+     * degrades to "no classes" rather than dereferencing null.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflSlot(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $i = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'sl.ok.' . $lbl;
+        $noL = 'sl.no.' . $lbl;
+        $endL = 'sl.end.' . $lbl;
+        $tab = $this->ssa->allocReg();
+        $out .= '  ' . $tab . " = load ptr, ptr @__mc_refl_idx\n";
+        $tz = $this->ssa->allocReg();
+        $out .= '  ' . $tz . ' = icmp eq ptr ' . $tab . ", null\n";
+        $out .= '  br i1 ' . $tz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $noL . ":\n  br label %" . $endL . "\n";
+        $out .= $okL . ":\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = getelementptr ptr, ptr ' . $tab . ', i64 ' . $i . "\n";
+        $sv = $this->ssa->allocReg();
+        $out .= '  ' . $sv . ' = load ptr, ptr ' . $sp . "\n";
+        $si = $this->ssa->allocReg();
+        $out .= '  ' . $si . ' = ptrtoint ptr ' . $sv . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ 0, %' . $noL . ' ], [ ' . $si . ', %' . $okL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**

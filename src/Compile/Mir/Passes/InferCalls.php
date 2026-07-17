@@ -137,6 +137,7 @@ trait InferCalls
         // (the Ffi\Ptr::$address idiom), never an obj — nothing may retain,
         // release or drop it. 0 means "no metadata".
         if ($n === '__mc_refl_of' || $n === '__mc_refl_find'
+            || $n === '__mc_refl_cap' || $n === '__mc_refl_slot'
             || $n === '__mc_refl_member' || $n === '__mc_refl_parent'
             || $n === '__mc_refl_flags') { return Type::int_(); }
         if ($n === '__mc_refl_name') { return Type::string_(); }

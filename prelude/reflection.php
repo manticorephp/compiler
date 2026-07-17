@@ -35,6 +35,79 @@
  * idiom. It points at immortal rodata, so nothing retains, releases or drops it.
  */
 
+/**
+ * Every registered name whose flags match `$want` under `$mask`.
+ *
+ * Walks the index table's slots (empty ones read 0). The registry is the runtime
+ * CLASS TABLE, so this is where get_declared_* get their answer — there is no
+ * other source: an interface has no ClassDef to enumerate at compile time.
+ *
+ * SORTED, unlike php. Two divergences are unavoidable and one is worth
+ * controlling:
+ *  - php's list also carries ~200 INTERNAL classes; ours carries the prelude's
+ *    plus the program's. The sets simply differ, so exact parity is unreachable
+ *    (the same conclusion the resource epic reached about resource ids).
+ *  - our order is the index's hash order, and global_ctors order across
+ *    separately-linked objects is unspecified anyway. php's is declaration
+ *    order. Since we cannot match it, sorting at least makes OUR answer
+ *    deterministic instead of arbitrary — a caller can diff two runs.
+ * A test must therefore filter to its own classes and sort; it must never print
+ * this list raw.
+ *
+ * @return string[]
+ */
+function __mc_declared(int $mask, int $want): array
+{
+    /** @var string[] $out */
+    $out = [];
+    $cap = __mc_refl_cap();
+    for ($i = 0; $i < $cap; $i = $i + 1) {
+        $h = __mc_refl_slot($i);
+        if ($h === 0) { continue; }
+        if ((__mc_refl_flags($h) & $mask) !== $want) { continue; }
+        $out[] = __mc_refl_name($h);
+    }
+    // Insertion sort, rather than calling \sort(). A prelude file must not
+    // depend on another INDEPENDENTLY GATED one: array_fns.php (which defines
+    // sort) is included only when the USER program calls one of its functions,
+    // but this file is lowered wholesale the moment anything mentions
+    // ReflectionClass — so `\sort()` here emitted a call to a symbol that was
+    // not there, and an undefined symbol does not fail this link, it stubs to
+    // `return 0`. Forcing array_fns in would drag all of it into every
+    // reflecting program instead. The list is one entry per class; n² is fine.
+    $n = \count($out);
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $v = $out[$i];
+        $j = $i - 1;
+        while ($j >= 0 && $out[$j] > $v) {
+            $out[$j + 1] = $out[$j];
+            $j = $j - 1;
+        }
+        $out[$j + 1] = $v;
+    }
+    return $out;
+}
+
+/** @return string[] */
+function get_declared_classes(): array
+{
+    // A class is anything registered that is neither an interface nor a trait —
+    // enums included, exactly as php has it (class_exists('E') is true).
+    return __mc_declared(4 | 16, 0);
+}
+
+/** @return string[] */
+function get_declared_interfaces(): array
+{
+    return __mc_declared(4, 4);
+}
+
+/** @return string[] */
+function get_declared_traits(): array
+{
+    return __mc_declared(16, 16);
+}
+
 class ReflectionException extends Exception {}
 
 class ReflectionClass

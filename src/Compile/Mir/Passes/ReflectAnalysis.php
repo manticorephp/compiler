@@ -103,6 +103,11 @@ final class ReflectAnalysis
             // registry, so a non-literal name means EVERY class must be in it.
             // Without this the gate would not shrink the binary, it would
             // manufacture a wrong answer — the one thing it must never do.
+            // Enumerating the class table means EVERY class must be in it.
+            if ($fname === 'get_declared_classes' || $fname === 'get_declared_interfaces'
+                || $fname === 'get_declared_traits') {
+                $this->all = true;
+            }
             if ($fname === 'class_exists' || $fname === 'interface_exists'
                 || $fname === 'trait_exists' || $fname === 'enum_exists') {
                 if (\count($n->args) >= 1 && !($n->args[0] instanceof \Compile\Mir\StringConst)) {
