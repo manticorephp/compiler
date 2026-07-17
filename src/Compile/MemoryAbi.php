@@ -152,6 +152,37 @@ final class MemoryAbi
      *  globals — so this exists for readers/asserts, not for a malloc. */
     public const DESCRIPTOR_SIZE = 24;
 
+    // ─── Reflection metadata (`@__mc_rmeta_<id>`) ─────────────────
+
+    /**
+     * `ptr` — the class's FQN as a MIR string, at rmeta offset 0. This is the
+     * DISPLAY name (what `get_class()` reports), so a reified specialization
+     * says `Box$of$float`, matching the rest of the system rather than
+     * inventing a second answer.
+     */
+    public const RMETA_NAME_OFFSET = 0;
+
+    /** `i64` — {@see RMETA_FLAG_FINAL} … packed. */
+    public const RMETA_FLAGS_OFFSET = 8;
+
+    /**
+     * `i64` — the parent's class id, or 0 for none. An ID, not a pointer: the
+     * parent's rmeta may live in a DIFFERENT object file, and a cross-object
+     * pointer would need a relocation the emitter cannot always form. Ids are
+     * FQN hashes ({@see \Compile\Mir\Passes\LowerFromAst::stableClassId}), so
+     * they are stable across modules — resolve through the registry instead.
+     */
+    public const RMETA_PARENT_ID_OFFSET = 16;
+
+    /** Bytes — the Ф1a width. Grows as tables are appended; readers must use
+     *  the named offsets, never arithmetic on this. */
+    public const RMETA_SIZE = 24;
+
+    public const RMETA_FLAG_FINAL     = 1;
+    public const RMETA_FLAG_ABSTRACT  = 2;
+    public const RMETA_FLAG_INTERFACE = 4;
+    public const RMETA_FLAG_ENUM      = 8;
+
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;
 

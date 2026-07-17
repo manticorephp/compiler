@@ -765,7 +765,39 @@ trait EmitLlvmRuntime
                     . $body . "  ret void\n}\n";
                 $dropFld = 'ptr @__mir_drop_' . $id;
             }
-            $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal((int)$id, $dropFld);
+            // Reflection metadata. Every field is derived from the class itself,
+            // never from anything module-local, so each module emitting this
+            // class emits identical bytes — what makes the linkonce_odr
+            // coalescing sound (the epic's ODR invariant).
+            //
+            // The name is a HEADERED, immortal (rc -1) string literal, so
+            // __mc_refl_name hands the pointer straight back: no allocation, no
+            // retain/release, and it cannot be freed under a caller.
+            //
+            // Its own symbol, keyed by CLASS ID — deliberately NOT the string
+            // pool's `litStr()`. Pool symbols are `@.str.<n>` where n is a
+            // module-local counter, so `@.str.7` is a different string in every
+            // object: an rmeta referencing one would not be a pure function of
+            // the class, breaking exactly the invariant that lets these
+            // coalesce. (It would also depend on the pool still being open at
+            // emit time.)
+            $nameSym = '@.rmeta.name.' . $id;
+            $descs .= $this->strGlobalDef($nameSym, $cls->display());
+            $flags = 0;
+            if ($cls->isFinal)    { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_FINAL; }
+            if ($cls->isAbstract) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ABSTRACT; }
+            // INTERFACE/ENUM bits stay 0 for now: an interface never reaches
+            // this loop (it has no ClassDef — Module::$interfaceNames holds only
+            // names), and an enum only lands here when it declares methods.
+            // Filling those needs a source other than $this->classes.
+            $parentId = 0;
+            if ($cls->parent !== '' && isset($this->classes[$cls->parent])) {
+                $parentId = $this->classes[$cls->parent]->classId;
+            }
+            $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
+                (int)$id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId);
+            $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
+                (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
         }
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is

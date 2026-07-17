@@ -55,6 +55,44 @@ final class RuntimeLibrary
     }
 
     /**
+     * The LLVM struct type of the reflection metadata block. Same
+     * one-spelling rule as {@see descriptorType}: `@__mc_rmeta_<id>` is
+     * `linkonce_odr` and coalesces BY NAME.
+     *
+     * Layout owned by {@see \Compile\MemoryAbi}: name@0, flags@8, parent_id@16.
+     */
+    public static function rmetaType(): string
+    {
+        return '{ ptr, i64, i64 }';
+    }
+
+    /**
+     * The full `@__mc_rmeta_<id> = linkonce_odr constant …` definition.
+     *
+     * `constant`, not `global`: nothing mutates it, so it lands in rodata and
+     * the linker may share it.
+     *
+     * Keyed by class id, and every field is derived from the class itself, so
+     * every module that emits it emits the SAME bytes — the ODR invariant this
+     * epic rests on. Never fill this from module-local information.
+     *
+     * `$parentId` is an id rather than a pointer because the parent's rmeta can
+     * live in another object file ({@see \Compile\MemoryAbi::RMETA_PARENT_ID_OFFSET}).
+     */
+    public static function rmetaGlobal(int $id, string $nameFld, int $flags, int $parentId): string
+    {
+        return '@__mc_rmeta_' . (string)$id . ' = linkonce_odr constant ' . self::rmetaType()
+            . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId . " }\n";
+    }
+
+    /** The rmeta pointer field for a descriptor: the class's block, or null
+     *  when nothing reflects it (the opt-in gate — Ф1b decides; Ф1a fills all). */
+    public static function rmetaField(int $id): string
+    {
+        return 'ptr @__mc_rmeta_' . (string)$id;
+    }
+
+    /**
      * Central binary-safe string core (zend_string-style). Every string in
      * the system is a headered value `[cap@-24, len@-16, rc@-8, bytes@0]`;
      * `len` is the single source of truth. These are the ONLY primitives that

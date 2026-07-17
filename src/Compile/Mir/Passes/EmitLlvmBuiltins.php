@@ -130,6 +130,11 @@ trait EmitLlvmBuiltins
         if ($name === 'error_log')                    { return $this->biErrorLog($args); }
         if ($name === 'gc_collect_cycles')            { return $this->biGcCollect(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
+        // Reflection Tier-2 metadata reads. Internal (`__mc_` prefix) — the
+        // public surface is prelude/reflection.php, which is generic code over
+        // the data these return.
+        if ($name === '__mc_refl_of')                 { return $this->biMcReflOf($args); }
+        if ($name === '__mc_refl_name')               { return $this->biMcReflName($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
@@ -2595,6 +2600,81 @@ trait EmitLlvmBuiltins
         $out .= $this->freeStrTemp($args[0], $msg);
         // PHP error_log returns true.
         $this->lastValue = '1';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_of($o)` — the object's reflection metadata block as a raw
+     * address, or 0 when the class has none (no reflection reaches it, or it is
+     * a `#[Struct]` with no header at all).
+     *
+     * Object → descriptor (header slot 0) → rmeta (descriptor offset 16). The
+     * same double indirection as {@see EmitLlvm::emitLoadClassId}, one field
+     * further along. Internal: the surface is `prelude/reflection.php`.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflOf(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $objp = $this->lastValue;
+        $descI = $this->ssa->allocReg();
+        $out .= '  ' . $descI . ' = load i64, ptr ' . $objp . "\n";
+        $descP = $this->ssa->allocReg();
+        $out .= '  ' . $descP . ' = inttoptr i64 ' . $descI . " to ptr\n";
+        $mp = $this->ssa->allocReg();
+        $out .= '  ' . $mp . ' = getelementptr i8, ptr ' . $descP
+              . ', i64 ' . (string)\Compile\MemoryAbi::DESCRIPTOR_RMETA_OFFSET . "\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = load ptr, ptr ' . $mp . "\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = ptrtoint ptr ' . $m . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_name($h)` — the class name out of an rmeta handle.
+     *
+     * The stored pointer is an immortal (`rc -1`) headered string literal, so it
+     * is returned as-is: no copy, no retain, and nothing can free it under the
+     * caller. A 0 handle yields an empty string rather than faulting — callers
+     * come from PHP, where a wild read would be unexplainable.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflName(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = (string)$this->ssa->allocReg();
+        $lbl = \str_replace('%', '', $lbl);
+        $okL = 'rn.ok.' . $lbl;
+        $nullL = 'rn.null.' . $lbl;
+        $endL = 'rn.end.' . $lbl;
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $isNull . ', label %' . $nullL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $np = $this->ssa->allocReg();
+        $out .= '  ' . $np . ' = getelementptr i8, ptr ' . $hp
+              . ', i64 ' . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
+        $nv = $this->ssa->allocReg();
+        $out .= '  ' . $nv . ' = load ptr, ptr ' . $np . "\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . ' = ptrtoint ptr ' . $nv . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $nullL . ":\n";
+        $empty = $this->ssa->allocReg();
+        $out .= '  ' . $empty . ' = ptrtoint ptr ' . $this->litStr('') . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $ni . ', %' . $okL . ' ], [ '
+              . $empty . ', %' . $nullL . " ]\n";
+        $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
     }
