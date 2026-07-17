@@ -36,6 +36,34 @@
  */
 
 /**
+ * A leading `\` is not part of the recorded name. Hand-rolled because the
+ * PRELUDE MUST NOT CALL THE STDLIB: this file is compiled into every module,
+ * including ones built with no lib/ beside them, and there `\ltrim` does not
+ * error — it silently degrades to whatever global `ltrim` is in scope, or to an
+ * undefined symbol that stops the compile of ANY program. `substr`/`strlen` are
+ * codegen builtins and always present; `ltrim`/`strrpos` are stdlib and are not.
+ * See the prelude/resource.php fix (eec7e94) — the suite, the fixpoint and
+ * difftest all stay GREEN through this; only selfhost_stability catches it.
+ */
+function __mc_refl_unqualify(string $s): string
+{
+    if ($s === "") { return $s; }
+    if (\substr($s, 0, 1) !== "\\") { return $s; }
+    return \substr($s, 1);
+}
+
+/** Index of the last `\`, or -1. The stdlib's strrpos is unavailable here. */
+function __mc_refl_last_sep(string $s): int
+{
+    $i = \strlen($s) - 1;
+    while ($i >= 0) {
+        if (\substr($s, $i, 1) === "\\") { return $i; }
+        $i = $i - 1;
+    }
+    return -1;
+}
+
+/**
  * Every registered name whose flags match `$want` under `$mask`.
  *
  * Walks the index table's slots (empty ones read 0). The registry is the runtime
@@ -128,7 +156,7 @@ class ReflectionClass
     {
         if (\is_string($objectOrClass)) {
             // A leading `\` is not part of the name the compiler recorded.
-            $n = \ltrim($objectOrClass, "\\");
+            $n = __mc_refl_unqualify($objectOrClass);
             $h = __mc_refl_find($n);
             if ($h === 0) {
                 throw new ReflectionException("Class \"" . $n . "\" does not exist");
@@ -151,22 +179,22 @@ class ReflectionClass
     /** The name without its namespace. */
     public function getShortName(): string
     {
-        $p = \strrpos($this->name, "\\");
-        if ($p === false) { return $this->name; }
+        $p = __mc_refl_last_sep($this->name);
+        if ($p < 0) { return $this->name; }
         return \substr($this->name, $p + 1);
     }
 
     /** The namespace, or "" for a global class. */
     public function getNamespaceName(): string
     {
-        $p = \strrpos($this->name, "\\");
-        if ($p === false) { return ""; }
+        $p = __mc_refl_last_sep($this->name);
+        if ($p < 0) { return ""; }
         return \substr($this->name, 0, $p);
     }
 
     public function inNamespace(): bool
     {
-        return \strrpos($this->name, "\\") !== false;
+        return __mc_refl_last_sep($this->name) >= 0;
     }
 
     public function isFinal(): bool
@@ -220,7 +248,7 @@ class ReflectionClass
     /** Does this class extend `$name`, at any depth? */
     public function isSubclassOf(string $name): bool
     {
-        $want = \ltrim($name, "\\");
+        $want = __mc_refl_unqualify($name);
         $p = __mc_refl_parent($this->h);
         while ($p !== 0) {
             if (__mc_refl_name($p) === $want) { return true; }
