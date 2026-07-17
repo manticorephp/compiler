@@ -1418,11 +1418,26 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
         // never sees the strings that are no longer created.
-        // ReflectAnalysis (the opt-in gate) is written but NOT wired: it
-        // SIGSEGVs the native self-build while walking this MIR, and is green
-        // under Zend — the usual tell for a self-host divergence. Until that is
-        // found, $module->reflectAll stays at its `true` default, so every class
-        // carries metadata exactly as before: fat, never wrong.
+        $refl = new \Compile\Mir\Passes\ReflectAnalysis();
+        $refl->run($module);
+        $module->reflectAll = $refl->all;
+        $module->reflectNames = $refl->names;
+        if (\Compile\Debug::$reflectReport) {
+            // Built with an explicit loop, NOT
+            //   $rnames = $refl->all ? ['<ALL>'] : \array_keys($refl->names);
+            // That ternary unions two array sources; its elements then read back
+            // as raw pointers under the native self-build and implode() SIGSEGVs
+            // the compiler. Green under Zend. See [[reflection-epic]].
+            /** @var string[] $rnames */
+            $rnames = [];
+            if ($refl->all) {
+                $rnames[] = '<ALL — an unresolved name escaped>';
+            } else {
+                foreach ($refl->names as $rn => $rv) { $rnames[] = $rn; }
+            }
+            dprint('reflect: ' . (string)\count($rnames) . ' class(es) carry metadata: '
+                . \implode(', ', $rnames));
+        }
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
