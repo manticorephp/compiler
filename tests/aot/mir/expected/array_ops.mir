@@ -1,6 +1,7 @@
-; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
 
 fn build() -> int {
+  mem_arena_enter
   %0 = int_const 1 : int
   %1 = int_const 2 : int
   %2 = int_const 3 : int
@@ -14,7 +15,7 @@ fn build() -> int {
   %10 = int_const 1 : int
   %11 = array_access %9[%10] : int
   return %11
-  mem_rc_release vec a
+  mem_arena_leave
 }
 
 fn __main() -> int {

@@ -1521,34 +1521,15 @@ function cmd_dump_mir(array $args): int {
     $sources = resolve_sources(CompileArgs::$files);
     if ($sources === null) { return 66; }
     if (\count($sources) === 0) { return 66; }
-    try {
-        $program = Parser::parseSource($sources[0]);
-    } catch (\Throwable $e) {
-        dprint("parse failed: " . $e->getMessage());
-        return 65;
-    }
-    $module = new \Compile\Mir\Module();
-    $lower = new \Compile\Mir\Passes\LowerFromAst($program);
-    $module = $lower->run($module);
-    $fold = new \Compile\Mir\Passes\ConstFold();
-    $module = $fold->run($module);
-    $dse = new \Compile\Mir\Passes\DeadStore();
-    $module = $dse->run($module);
-    $infer = new \Compile\Mir\Passes\InferTypes();
-    $module = $infer->run($module);
-    $mono = new \Compile\Mir\Passes\Monomorphize();
-    $module = $mono->run($module);
-    $narrow = new \Compile\Mir\Passes\NarrowReturns();
-    $module = $narrow->run($module);
-    $module = (new \Compile\Mir\Passes\CheckTypeDefs())->run($module);
-    $effects = new \Compile\Mir\Passes\InferEffects();
-    $module = $effects->run($module);
-    $allocKind = new \Compile\Mir\Passes\InferAllocKind();
-    $module = $allocKind->run($module);
-    $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
-    $module = $memMode->run($module);
-    $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
-    $module = $memOps->run($module);
+    // Share the one pipeline `compile`/`dump-sig` run (lower_module) rather
+    // than a hand-copied subset. The old inlined list skipped InlineClosures,
+    // FuseSplitJoin, DemoteCharLocals, Verify and the pre-mono re-runs, and
+    // it built LowerFromAst with no prelude — so the dump was pre-optimization
+    // IR of a program with no Exception hierarchy, and could never match what
+    // a real compile lowers. It also parsed only $sources[0]; lower_module
+    // loops every file, so multi-file dump-mir now works too.
+    $module = lower_module($sources);
+    if ($module === null) { return 65; }
     puts(\Compile\Mir\Dump::module($module, CompileArgs::$dumpPrelude, CompileArgs::$dumpEffects));
     return 0;
 }

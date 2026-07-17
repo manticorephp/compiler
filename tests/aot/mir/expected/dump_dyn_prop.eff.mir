@@ -1,0 +1,33 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn Bag____construct(obj<Bag> %this) -> void {
+  ; effects: escape,storeHeap
+  %0 = load_local this : obj<Bag>
+  %1 = int_const 1 : int
+  %2 = store_property %0->a <- %1 : int  ; eff: escape,storeHeap
+  %3 = load_local this : obj<Bag>
+  %4 = int_const 2 : int
+  %5 = store_property %3->b <- %4 : int  ; eff: escape,storeHeap
+}
+
+fn pick(obj<Bag> %bag, string %field) -> int {
+  ; effects: alloc,escape,storeHeap
+  mem_arena_enter
+  %0 = load_local bag : obj<Bag>
+  %1 = load_local field : string
+  %2 = int_const 9 : int
+  %3 = store_dyn_prop %0->{%1} <- %2 : int  ; eff: alloc,escape,storeHeap alloc=Arena
+  %4 = load_local bag : obj<Bag>
+  %5 = load_local field : string
+  %6 = dyn_prop %4->{%5} : cell
+  return %6  ; eff: escape
+  mem_arena_leave
+}
+
+fn __main() -> int {
+  ; effects: alloc,throw
+  %0 = new Bag() : obj<Bag>  ; eff: alloc,throw alloc=RcHeap
+  %1 = string_const "a" : string
+  %2 = call pick(%0, %1) : int  ; eff: throw
+  echo %2
+}
