@@ -1,4 +1,4 @@
-; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+; passes: lower-from-ast, const-fold, dead-store, infer-types, monomorphize, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
 
 fn calc(int %a, int %b) -> int {
   ; effects: escape,throw
