@@ -24,17 +24,42 @@ trait EmitLlvmExceptions
     /** @return Node[] */
     private function catchBody(MirCatch $c): array { return $c->body; }
 
-    /** `@__mir_jmp_stack + slot*256` as a ptr SSA. Appends IR to $out-by-return. */
+    /**
+     * `@__mir_jmp_stack + slot*256` as a ptr SSA. Appends IR to $out-by-return.
+     *
+     * The slot→offset step goes through `@__mir_jmp_slot`, which FATALS on an
+     * out-of-range slot rather than letting setjmp scribble past the stack (it
+     * writes 192B, so slot 16 lands on @__mir_jmp_depth / @__mir_thrown /
+     * @__manticore_argc / @__manticore_argv — corruption that surfaces far from
+     * its cause). It is tiny, so -O2 inlines it back to the compare + `mul`
+     * this used to be.
+     */
     private function jmpBufExpr(string $slotReg): string
     {
         $off = $this->ssa->allocReg();
         $this->jmpScratch = $this->ssa->allocReg();
-        $ir = '  ' . $off . ' = mul i64 ' . $slotReg . ", 256\n";
+        $ir = '  ' . $off . ' = call i64 @__mir_jmp_slot(i64 ' . $slotReg . ")\n";
         $ir .= '  ' . $this->jmpScratch . ' = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 ' . $off . "\n";
         return $ir;
     }
     private string $jmpScratch = '';
     private string $tryDepthScratch = '';
+
+    /**
+     * Give a try's jmp slot back before jumping out of it. `$depthReg` is the
+     * pre-try depth ({@see ControlFlow::returnDepthReg}); '' means the jump
+     * crosses no try, so the depth was never bumped and there is nothing to do.
+     *
+     * Routed through {@see tryReloadDepth} for the same reason the fall-through
+     * and catch pops are: inside a generator the entry SSA reg is bypassed by
+     * the resume switch, so the value has to come back from the frame slot.
+     */
+    private function restoreJmpDepth(string $depthReg, int $genSlot): string
+    {
+        if ($depthReg === '') { return ''; }
+        $ir = $this->tryReloadDepth($genSlot, $depthReg);
+        return $ir . '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
+    }
 
     /** Stash a try depth-snapshot into the generator frame slot (no-op outside
      *  a generator / when no slot). The frame survives a yield suspension. */
@@ -136,6 +161,9 @@ trait EmitLlvmExceptions
             $bodyLbl = $this->ssa->allocLabel('try_outerbody');
             $od = $this->ssa->allocReg();
             $out .= '  ' . $od . " = load i64, ptr @__mir_jmp_depth\n";
+            // The finally form burns TWO slots (outer + inner), so $od — not the
+            // inner $idb — is this region's pre-try depth.
+            $this->cf->pushTryDepth($od, $n->genOuterSlot);
             $out .= $this->tryStoreDepth($n->genOuterSlot, $od);
             $out .= $this->jmpBufExpr($od);
             $outerBuf = $this->jmpScratch;
@@ -153,6 +181,7 @@ trait EmitLlvmExceptions
         // Inner buf — try body / catch dispatch.
         $idb = $this->ssa->allocReg();
         $out .= '  ' . $idb . " = load i64, ptr @__mir_jmp_depth\n";
+        if (!$hasFinally) { $this->cf->pushTryDepth($idb, $n->genDepthSlot); }
         $out .= $this->tryStoreDepth($n->genDepthSlot, $idb);
         $out .= $this->jmpBufExpr($idb);
         $innerBuf = $this->jmpScratch;
@@ -275,6 +304,9 @@ trait EmitLlvmExceptions
         }
 
         $out .= $endLbl . ":\n";
+        // Region closed: an escape emitted after this point belongs to an outer
+        // try (or to none), and must not restore to this one's depth.
+        $this->cf->popTryDepth();
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
