@@ -396,8 +396,9 @@ final class EmitLlvm implements EmitVisitor
         // Descriptor — reuse the class descriptor if a method-enum already
         // registered one (dropRuntime emits `@__mir_cd_<id>` for it); else emit.
         if (!isset($this->classes[$name])) {
-            $out .= '@__mir_cd_' . $cid . ' = linkonce_odr global { i64, ptr } { i64 '
-                  . $cid . ", ptr null }\n";
+            // Same spelling as the ordinary path — the symbol coalesces by name,
+            // so a type that disagreed would be one symbol defined two ways.
+            $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal($ed->classId, 'ptr null');
         }
         $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
         $n = \count($ed->caseNames);

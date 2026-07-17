@@ -118,12 +118,18 @@ final class MemoryAbi
 
     /**
      * `ptr` — the class DESCRIPTOR (`@__mir_cd_<id> = { i64 class_id,
-     * ptr drop_fn }`), NOT the raw id. instanceof / method dispatch /
+     * ptr drop_fn, ptr rmeta }`), NOT the raw id. instanceof / method dispatch /
      * exception catch read `class_id` at descriptor offset 0; object
      * release calls `drop_fn` (descriptor offset 8) INDIRECTLY. The
      * descriptor is `linkonce_odr`, so each class has one across every
      * separately-linked object — drops/dispatch compose without a central
      * id-switch that could lose a case (the residual cross-object drop leak).
+     *
+     * That same property is what makes it the reflection metadata hook: one
+     * descriptor per class, keyed by a globally stable id, reachable from any
+     * object in a single load. New fields APPEND — offsets 0/8 are ABI.
+     * The struct is spelled in exactly one place:
+     * {@see \Compile\Mir\RuntimeLibrary::descriptorType}.
      */
     public const OBJECT_DESCRIPTOR_OFFSET = 0;
 
@@ -132,6 +138,19 @@ final class MemoryAbi
 
     /** `ptr` — class drop function (or null), at descriptor offset 8. */
     public const DESCRIPTOR_DROP_FN_OFFSET = 8;
+
+    /**
+     * `ptr` — reflection metadata (`@__mc_rmeta_<id>`), or null when no
+     * reflection reaches the class. The opt-in gate is what keeps this null:
+     * a binary that never reflects pays 8 rodata bytes per class and nothing
+     * else, because the metadata itself is never emitted and the linker never
+     * sees a reference to keep its methods alive.
+     */
+    public const DESCRIPTOR_RMETA_OFFSET = 16;
+
+    /** Bytes. Nothing allocates a descriptor at runtime — they are static
+     *  globals — so this exists for readers/asserts, not for a malloc. */
+    public const DESCRIPTOR_SIZE = 24;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;

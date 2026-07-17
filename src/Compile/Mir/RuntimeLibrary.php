@@ -16,12 +16,42 @@ final class RuntimeLibrary
 {
     /**
      * i64 operand for an object header slot 0: the address of the class's
-     * `{ class_id, drop_fn }` descriptor, or 0 for an unknown class.
+     * `{ class_id, drop_fn, rmeta }` descriptor, or 0 for an unknown class.
      */
     public function descSlotValue(?\Compile\Mir\ClassDef $cd): string
     {
         if ($cd === null || $cd->isStruct) { return '0'; }
         return 'ptrtoint (ptr @__mir_cd_' . (string)$cd->classId . ' to i64)';
+    }
+
+    /**
+     * The LLVM struct type of a class descriptor. ONE spelling, because
+     * `@__mir_cd_<id>` is `linkonce_odr` and coalesces BY NAME: two emission
+     * sites that disagree on the type define one symbol two ways, and the
+     * linker keeps whichever it saw first — the two-bodies-one-symbol trap.
+     * There are exactly two emitters ({@see Passes\EmitLlvmRuntime} for the
+     * ordinary path, {@see Passes\EmitLlvm} for the enum singleton path) and
+     * both MUST route through here.
+     *
+     * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
+     * rmeta@16.
+     */
+    public static function descriptorType(): string
+    {
+        return '{ i64, ptr, ptr }';
+    }
+
+    /**
+     * The full `@__mir_cd_<id> = linkonce_odr global …` definition.
+     *
+     * `$rmetaFld` is `ptr null` for a class no reflection reaches — the opt-in
+     * gate. The field costs 8 rodata bytes per class either way; appending it
+     * leaves class_id@0 and drop_fn@8 where they were, so no reader moves.
+     */
+    public static function descriptorGlobal(int $id, string $dropFld, string $rmetaFld = 'ptr null'): string
+    {
+        return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
+            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . " }\n";
     }
 
     /**

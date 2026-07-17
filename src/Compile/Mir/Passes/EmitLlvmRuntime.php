@@ -765,8 +765,7 @@ trait EmitLlvmRuntime
                     . $body . "  ret void\n}\n";
                 $dropFld = 'ptr @__mir_drop_' . $id;
             }
-            $descs .= '@__mir_cd_' . $id . ' = linkonce_odr global { i64, ptr } { i64 '
-                . $id . ', ' . $dropFld . " }\n";
+            $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal((int)$id, $dropFld);
         }
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
