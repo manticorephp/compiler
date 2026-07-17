@@ -159,6 +159,13 @@ final class RuntimeFeatures
         $decls['strlen']  = "declare i64 @strlen(ptr)";
         $decls['free']    = "declare void @free(ptr)";
         $decls['strcmp']  = "declare i32 @strcmp(ptr, ptr)";
+        // Reflection's name→rmeta index ({@see RuntimeLibrary::reflIndex}):
+        // zeroed table allocation, and ctlz to round the capacity up to a power
+        // of two. Unconditional because the registry always is — and a missing
+        // declare would not fail the link here, it would stub to `return 0`, so
+        // the table would be "allocated" at address 0.
+        $decls['calloc'] = "declare ptr @calloc(i64, i64)";
+        $decls['ctlz']   = "declare i64 @llvm.ctlz.i64(i64, i1)";
         return $decls;
     }
 }
