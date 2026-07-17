@@ -1346,7 +1346,15 @@ final class LowerFromAst implements Pass
     private function synthMethodClosure(Node $recv, string $method): Node
     {
         $cls = $recv->type->class ?? '';
-        $declParams = $cls !== '' ? $this->resolveMethodParams($cls, $method) : null;
+        // An if-guard, NOT `$cls!=='' ? resolveMethodParams(…) : null`: a ternary
+        // pairing an array arm with null lifts to a CELL ({@see InferTypes::
+        // nullableOf} — correct for `is_null`/`gettype` on a local), but this
+        // value goes to `fccParamsAndArgs(?array $p)`, a bare-`array` param that
+        // reads RAW — a cell there faults. The if keeps `$declParams` a raw
+        // `?array`. (The `?array` return-narrowing this pass now does made the
+        // arm concrete, which is what triggers the ternary's cell-lift.)
+        $declParams = null;
+        if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());

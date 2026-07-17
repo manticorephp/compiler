@@ -385,7 +385,7 @@ trait EmitLlvmBuiltins
      * {@see emitVecToCellArrayUnified}; without it a raw-valued assoc reaching
      * a cell consumer (var_dump) mis-dispatches each entry.
      */
-    private function emitAssocToCellArrayUnified(Type $elem): string
+    private function emitAssocToCellArrayUnified(Type $elem, bool $raw = false): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -471,9 +471,40 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
         $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        // A NULL source is a `?array`'s null, not an empty array: the rebuild
+        // above read it through the zero-word and would hand back `array(0) {}`,
+        // which is what php prints for `[]` — not for NULL. Carry the null
+        // through AS a null; `box_array` below already answers `box_null` for
+        // ptr 0. `$isNull` is computed in the entry block, which dominates here,
+        // so the select needs no extra control flow.
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $isNull
+              . ', ptr null, ptr ' . $dst . "\n";
+        if ($raw) {
+            // The cell-element array itself, unboxed: a `vec[cell]` slot is
+            // KIND_ARRAY and travels RAW, so a return/store boundary wants this
+            // pointer, not a cell wrapping it. {@see emitCellifyArrayRaw}
+            $this->lastValue = $res;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $dst . ")\n";
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $res . ")\n";
         return $this->finishI64($out, $r);
+    }
+
+    /**
+     * Cellify a concrete-element array and leave the result RAW — the same
+     * rebuild as {@see emitAssocToCellArrayUnified}, stopping before the box.
+     *
+     * The boundary case: a function whose returns disagree on the element type
+     * (`return [false,'loc']` beside `return ['body','']`) types `vec[cell]`, so
+     * the arm that is still `vec[string]` must be rebuilt with every element
+     * boxed — otherwise the reader unboxes a raw string pointer by tag.
+     */
+    private function emitCellifyArrayRaw(Type $elem): string
+    {
+        return $this->emitAssocToCellArrayUnified($elem, true);
     }
 
     /**
