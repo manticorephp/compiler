@@ -2823,6 +2823,24 @@ trait EmitLlvmBuiltins
     }
 
     /** is_callable($x) — see {@see emitIsCallable} for the resolved forms. */
+    /**
+     * Is `$class::$method` declared `static`? Reads {@see ClassDef::$methodMeta},
+     * which carries inherited methods, so no parent walk is needed here.
+     *
+     * Fails PERMISSIVE: an unknown class, or a method with no user declaration to
+     * describe (a synthesised ctor, a property hook), answers true. Those entries
+     * are compiler-internal, and folding is_callable to false on one would be a
+     * silent wrong answer — the pre-metadata behavior is the safe floor.
+     */
+    private function methodIsStatic(string $class, string $method): bool
+    {
+        $cd = $this->classes[\ltrim($class, '\\')] ?? null;
+        if ($cd === null) { return true; }
+        $mm = $cd->methodMeta[$method] ?? null;
+        if ($mm === null) { return true; }
+        return $mm->isStatic;
+    }
+
     private function biIsCallable(array $args): string
     {
         // Route through a `Node`-typed helper: reading `$args[0]->type->…` off
@@ -2843,10 +2861,13 @@ trait EmitLlvmBuiltins
      *  function only at runtime needs a runtime function registry we don't keep
      *  → folded false (documented gap; callable literals bound to a `callable`
      *  param are already lowered to closures upstream, so they hit the ptr path).
-     *  The `'C::m'` / `['C', 'm']` class-name forms fold on method EXISTENCE
-     *  only — a non-static method referenced without an instance is reported
-     *  callable though PHP 8 requires one (method static-ness isn't tracked in
-     *  ClassDef). The `[$obj, 'm']` object form has an instance, so it is exact.
+     *  The `'C::m'` / `['C', 'm']` class-name forms require the method to be
+     *  STATIC: PHP 8 needs an instance otherwise. The `[$obj, 'm']` object form
+     *  supplies one, so it folds on existence alone.
+     *  Still folds on VISIBILITY-blind existence: `is_callable('C::privateStatic')`
+     *  from outside C reports true where PHP reports false. Deciding it needs the
+     *  calling scope (inside C the same expression IS true), which this emitter
+     *  does not thread through. Tracked with the reflection epic.
      */
     private function emitIsCallable(Node $a): string
     {
@@ -2859,7 +2880,8 @@ trait EmitLlvmBuiltins
             if ($sep !== false) {
                 $c = \ltrim(\substr($s, 0, $sep), '\\');
                 $m = \substr($s, $sep + 2);
-                $ok = $this->resolveMethodClass($c, $m) !== '';
+                // No instance in a 'C::m' string ⇒ PHP 8 needs a static method.
+                $ok = $this->resolveMethodClass($c, $m) !== '' && $this->methodIsStatic($c, $m);
             } else {
                 $ok = isset($this->sigs->paramTypes[$s]) || isset($this->sigs->paramTypes[\ltrim($s, '\\')]);
             }
@@ -2868,9 +2890,15 @@ trait EmitLlvmBuiltins
         // [recv, "method"] two-element array literal.
         if ($a->kind === Node::KIND_ARRAY_LIT) {
             if (\count($a->elements) === 2) {
-                $cls = $this->reflClassName($a->elements[0]->value);
+                $recv = $a->elements[0]->value;
+                $cls = $this->reflClassName($recv);
                 $m   = $this->reflLitStr($a->elements[1]->value);
                 $ok  = $cls !== '' && $m !== '' && $this->resolveMethodClass($cls, $m) !== '';
+                // ['C', 'm'] names a CLASS — no instance, so PHP 8 needs a static
+                // method. [$obj, 'm'] supplies one and stays existence-only.
+                if ($ok && $recv->kind === Node::KIND_STRING_CONST && !$this->methodIsStatic($cls, $m)) {
+                    $ok = false;
+                }
                 return $this->biConstBool($this->emitNode($a), $ok);
             }
         }
