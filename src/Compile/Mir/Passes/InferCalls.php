@@ -121,8 +121,13 @@ trait InferCalls
         // an obj rc-local (→ obj release on a str_alloc buffer → bad-free).
         $bs = \strrpos($n, '\\');
         if ($bs !== false) { $n = \substr($n, $bs + 1); }
-        // CLI / stdio primitives: STDIN/OUT/ERR and a raw argv entry are libc
-        // FILE*/char* handles (obj<Ffi\Ptr>); the captured argc is a plain int.
+        // CLI / stdio primitives: the `__mir_std*` BUILTINS load libc's FILE*
+        // globals and a raw argv entry is a char* — both obj<Ffi\Ptr>; the
+        // captured argc is a plain int. NOTE the STDIN/STDOUT/STDERR CONSTANTS
+        // are no longer these: LowerPrelude lowers them to
+        // `__mc_std_res(N, __mir_std*())`, an obj<Resource> wrapping the FILE*
+        // handed in here — the f* family is typed \Resource and would reject a
+        // bare Ptr.
         if ($n === '__mir_stdin' || $n === '__mir_stdout'
             || $n === '__mir_stderr' || $n === '__mir_argv_at'
             || $n === '__mir_env_at' || $n === 'ptr_offset'
@@ -133,6 +138,8 @@ trait InferCalls
             || $n === '__mir_clock_ns') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
+        // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
+        if ($n === 'ptr_to_int') { return Type::int_(); }
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'

@@ -226,20 +226,20 @@ function is_executable(string $filename): bool
  * Underlying file descriptor of a stream. Internal: php.net has no fileno(),
  * so claiming the global name would collide with a user function rather than
  * add parity.
- * @param resource $stream
+ * @param \Resource $stream
  */
-function __mc_fileno(\Ffi\Ptr $stream): int
+function __mc_fileno(\Resource $stream): int
 {
-    return \Runtime\Libc\sys_fileno($stream);
+    return \Runtime\Libc\sys_fileno(\int_to_ptr($stream->addr));
 }
 
 /**
  * Truncate an open stream to $size bytes.
- * @param resource $stream
+ * @param \Resource $stream
  */
-function ftruncate(\Ffi\Ptr $stream, int $size): bool
+function ftruncate(\Resource $stream, int $size): bool
 {
-    \Runtime\Libc\fflush($stream);
+    \Runtime\Libc\fflush(\int_to_ptr($stream->addr));
     return \Runtime\Libc\sys_ftruncate(\__mc_fileno($stream), $size) === 0;
 }
 
@@ -251,9 +251,9 @@ function ftruncate(\Ffi\Ptr $stream, int $size): bool
  * LOCK_UN is 3 in PHP but 8 to the OS, where 3 means LOCK_SH|LOCK_EX and is
  * rejected with EINVAL. LOCK_SH/LOCK_EX/LOCK_NB coincide numerically on both
  * Darwin and Linux. Zend performs the same translation.
- * @param resource $stream
+ * @param \Resource $stream
  */
-function flock(\Ffi\Ptr $stream, int $operation): bool
+function flock(\Resource $stream, int $operation): bool
 {
     $op = $operation & 3;
     if ($op === 3) { $op = 8; }
@@ -263,20 +263,20 @@ function flock(\Ffi\Ptr $stream, int $operation): bool
 
 /**
  * Flush the OS buffers for a stream to disk.
- * @param resource $stream
+ * @param \Resource $stream
  */
-function fsync(\Ffi\Ptr $stream): bool
+function fsync(\Resource $stream): bool
 {
-    \Runtime\Libc\fflush($stream);
+    \Runtime\Libc\fflush(\int_to_ptr($stream->addr));
     return \Runtime\Libc\sys_fsync(\__mc_fileno($stream)) === 0;
 }
 
 /**
  * fdatasync(2) is not portable to Darwin; fsync is a valid (stronger)
  * substitute, so php.net's contract still holds.
- * @param resource $stream
+ * @param \Resource $stream
  */
-function fdatasync(\Ffi\Ptr $stream): bool
+function fdatasync(\Resource $stream): bool
 {
     return \fsync($stream);
 }
@@ -365,9 +365,9 @@ function readfile(string $filename): int|false
  * Copy everything left on $stream to stdout and return the byte count.
  * Chunked rather than slurped: a passthru of a large file should not need the
  * whole file resident.
- * @param resource $stream
+ * @param \Resource $stream
  */
-function fpassthru(\Ffi\Ptr $stream): int
+function fpassthru(\Resource $stream): int
 {
     $total = 0;
     while (true) {
@@ -383,10 +383,10 @@ function fpassthru(\Ffi\Ptr $stream): int
 
 /**
  * One byte from a stream, or false at EOF.
- * @param resource $stream
+ * @param \Resource $stream
  * @return string|false
  */
-function fgetc(\Ffi\Ptr $stream)
+function fgetc(\Resource $stream)
 {
     $s = \fread($stream, 1);
     if ($s === '') {
@@ -638,7 +638,7 @@ function glob(string $pattern, int $flags = 0)
 /**
  * Open a unique temporary file, removed when closed. Returns a file resource,
  * or false on failure.
- * @return resource|false
+ * @return \Resource|false
  */
 function tmpfile()
 {
@@ -646,7 +646,9 @@ function tmpfile()
     if ($f === null) {
         return false;
     }
-    return $f;
+    // Wrap like fopen()/opendir() do: the raw FILE* must not escape this file,
+    // or it reaches the \Resource-typed f* family as a bare address.
+    return new \Resource(\Resource::KIND_FILE, 'stream', \ptr_to_int($f));
 }
 
 /**

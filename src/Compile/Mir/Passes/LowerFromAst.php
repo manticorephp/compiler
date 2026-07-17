@@ -277,6 +277,13 @@ final class LowerFromAst implements Pass
     /** The Throwable hierarchy, read by Main from `prelude/exceptions.php`.
      *  Unconditional — every program can `throw`. */
     public string $exceptionsSrc = '';
+    /** \Resource — unconditional: the .sig carries no classes, so every module needs its own copy. */
+    public string $resourceSrc = '';
+    /** True while the class-registration loop is inside the prelude window —
+     *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
+     *  emitted linkonce_odr (the prelude lands in EVERY module, so external
+     *  linkage means stdlib.o and user.o both define it → duplicate symbol). */
+    private bool $inPreludeClass = false;
     /** `__mir_bt_frames`: read by Main from `prelude/backtrace.php` when the
      *  program queries a trace, else from the `prelude/backtrace_stub.php`
      *  one-liner. Exactly one of the two, always — `exceptions.php` calls it. */
@@ -451,7 +458,13 @@ final class LowerFromAst implements Pass
         // earlier may already name one in a property or parameter hint, and
         // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
         $this->registerTypeDefs($stmts);
+        // Same [0, $preludeCount) window the method loop below uses for
+        // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
+        // static-prop cells, which are registered inside buildClassDef.
+        $clsIdx = 0;
         foreach ($stmts as $stmt) {
+            $this->inPreludeClass = $clsIdx < $preludeCount;
+            $clsIdx = $clsIdx + 1;
             if ($stmt->kind === 'Class') {
                 $decl = $stmt->decl;
                 $dkind = $decl->kind ?? 'class';

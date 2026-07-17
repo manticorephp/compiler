@@ -238,6 +238,11 @@ final class EmitLlvm implements EmitVisitor
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */
     private array $globalDefaults = [];
+    /** @var bool[] parallel prelude flags for $globalNames — linkonce_odr when
+     *  true, because the prelude is compiled into every module and external
+     *  linkage would make stdlib.o and user.o define the same cell twice
+     *  ({@see \Compile\Mir\Module::$globalIsPrelude}). */
+    private array $globalIsPrelude = [];
     /** @var string[] names declared `global $x` — __main shares the cell */
     private array $globalVarNames = [];
 
@@ -270,6 +275,7 @@ final class EmitLlvm implements EmitVisitor
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
+        $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalVarNames = $module->globalVarNames;
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->sourceFile = $module->sourceFile;
