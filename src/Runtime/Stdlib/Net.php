@@ -442,3 +442,301 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
     }
     return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
 }
+
+// ── HTTP/1.1 client ────────────────────────────────────────────────────
+//
+// Everything below reads through fgets()/fread() on the \Resource, i.e. through
+// __mc_stream_fill() — the ONE blocking call. That is deliberate: when a
+// scheduler arrives, teaching that one function to suspend makes this whole
+// parser non-blocking with no edits here.
+//
+// Behaviour MEASURED against php 8.5.8 rather than assumed:
+//   * the request php sends is minimal — request line, Host, Connection: close.
+//     No User-Agent, no Accept.
+//   * a non-2xx status makes file_get_contents() return FALSE, not the error body.
+//   * Transfer-Encoding: chunked is DECODED by the wrapper.
+//   * $http_response_header is DEPRECATED in 8.5 ("call
+//     http_get_last_response_headers() instead"), so the function is the real API
+//     and the variable is not worth emulating.
+
+/**
+ * Raw header lines of the last HTTP response, status line first — php 8.5's
+ * replacement for the deprecated $http_response_header.
+ * @return string[]|null
+ */
+function http_get_last_response_headers(): ?array
+{
+    $joined = \__mc_http_headers_store(false, '');
+    if ($joined === '') {
+        return null;
+    }
+    // Rebuilt HERE, in the caller's world, rather than parked as an array.
+    return \explode("\n", $joined);
+}
+
+/** php 8.5's companion to the above. */
+function http_clear_last_response_headers(): void
+{
+    \__mc_http_headers_store(true, '');
+}
+
+/**
+ * The last response's headers, kept as ONE newline-joined STRING.
+ *
+ * ⚠ Not a `static array`, and that is not style. An array BUILT INSIDE the stdlib
+ * does not survive being parked in a static and handed to user code later — the
+ * first cut did exactly that and `http_get_last_response_headers()` returned NULL
+ * while the very same static, written AND read from user code, was fine.
+ * {@see __mc_stat_off} carries the same warning for its offset table and dodges it
+ * the same way: hold something that carries no refcount (it uses ints; a header
+ * list is text, so a string), and rebuild the container at the boundary.
+ * A header line cannot contain a newline, so joining on one is lossless.
+ */
+function __mc_http_headers_store(bool $write, string $joined): string
+{
+    static $headers = '';
+    if ($write) {
+        $headers = $joined;
+    }
+    return $headers;
+}
+
+/**
+ * Split a URL into scheme/host/port/path. Returns [] when it is not one.
+ * @return string[]
+ */
+function __mc_url_parts(string $url): array
+{
+    $sep = \strpos($url, '://');
+    if ($sep === false) {
+        return [];
+    }
+    $scheme = \strtolower(\substr($url, 0, $sep));
+    $rest = \substr($url, $sep + 3, \strlen($url) - ($sep + 3));
+    $slash = \strpos($rest, '/');
+    if ($slash === false) {
+        $auth = $rest;
+        $path = '/';
+    } else {
+        $auth = \substr($rest, 0, $slash);
+        $path = \substr($rest, $slash, \strlen($rest) - $slash);
+    }
+    $port = $scheme === 'https' ? '443' : '80';
+    $host = $auth;
+    // Rightmost colon: an IPv6 literal is full of them, which is why php wants
+    // [::1]:80 for that case.
+    $colon = \strrpos($auth, ':');
+    if ($colon !== false) {
+        $maybe = \substr($auth, $colon + 1, \strlen($auth) - ($colon + 1));
+        if ($maybe !== '' && \ctype_digit($maybe)) {
+            $host = \substr($auth, 0, $colon);
+            $port = $maybe;
+        }
+    }
+    if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
+        $host = \substr($host, 1, \strlen($host) - 2);
+    }
+    if ($host === '') {
+        return [];
+    }
+    return [$scheme, $host, $port, $path];
+}
+
+/**
+ * Read a chunked body. Each chunk is a hex length line, the bytes, then CRLF;
+ * a zero length ends it.
+ *
+ * A chunk boundary never lines up with a recv boundary — which is exactly what
+ * the read buffer is for. fread() here serves from it, so a chunk split across
+ * two packets costs nothing.
+ */
+function __mc_http_chunked(\Resource $s): string
+{
+    $body = '';
+    while (true) {
+        $line = \fgets($s);
+        if ($line === false) {
+            break;
+        }
+        $line = \rtrim($line, "\r\n");
+        // A chunk-size line may carry ';ext=...' after the length.
+        $semi = \strpos($line, ';');
+        if ($semi !== false) {
+            $line = \substr($line, 0, $semi);
+        }
+        if ($line === '') {
+            continue;
+        }
+        $n = \intval($line, 16);
+        if ($n <= 0) {
+            break;                      // 0 = last chunk
+        }
+        $left = $n;
+        while ($left > 0) {
+            $part = \fread($s, $left);
+            if ($part === '') {
+                break;
+            }
+            $body = $body . $part;
+            $left = $left - \strlen($part);
+        }
+        \fgets($s);                     // the CRLF that closes the chunk
+    }
+    return $body;
+}
+
+/**
+ * GET $url over HTTP/1.1 and return the body, or false.
+ *
+ * php's own rules, measured: a non-2xx status is FALSE (the error body is NOT
+ * returned), and up to $maxRedirects 3xx hops are followed.
+ * @return string|false
+ */
+function __mc_http_get(string $url, int $maxRedirects = 20)
+{
+    $hops = 0;
+    while (true) {
+        $parts = \__mc_url_parts($url);
+        if ($parts === []) {
+            return false;
+        }
+        $scheme = $parts[0];
+        if ($scheme !== 'http') {
+            return false;               // https:// needs the TLS transport (Ф4)
+        }
+        $host = $parts[1];
+        $port = (int)$parts[2];
+        $path = $parts[3];
+
+        $sock = \__mc_tcp_connect($host, $port);
+        if ($sock === false) {
+            return false;
+        }
+        // Exactly what php sends: no User-Agent, no Accept. `Connection: close`
+        // is what lets the body end at EOF when there is no Content-Length.
+        $req = 'GET ' . $path . " HTTP/1.1\r\n"
+             . 'Host: ' . $host . ($port === 80 ? '' : ':' . (string)$port) . "\r\n"
+             . "Connection: close\r\n\r\n";
+        \fwrite($sock, $req);
+
+        $resp = \__mc_http_read_response($sock, $maxRedirects > 0);
+        \fclose($sock);
+        // [0] = body|false, [1] = redirect target ('' = none)
+        if ($resp[1] !== '' && $hops < $maxRedirects) {
+            $hops = $hops + 1;
+            $location = $resp[1];
+            // A relative Location is resolved against the current origin.
+            if (\strpos($location, '://') === false) {
+                $location = 'http://' . $host . ($port === 80 ? '' : ':' . (string)$port)
+                          . ($location !== '' && $location[0] === '/' ? '' : '/') . $location;
+            }
+            $url = $location;
+            continue;
+        }
+        return $resp[0];
+    }
+}
+
+/**
+ * Parse ONE HTTP response off an already-connected stream: status line, headers,
+ * then the body by Content-Length, chunked, or EOF.
+ *
+ * Split out from __mc_http_get so it can be TESTED. `file_get_contents('http://…')`
+ * cannot be exercised offline in a single process — it blocks waiting for a reply
+ * and there is no fork() (nor system/proc_open) to run an origin beside it. This
+ * function takes a stream we already own, so a test can stand up a loopback pair,
+ * push a canned response into the server end, and parse it from the client end —
+ * offline and deterministic. The transport itself is covered by net_tcp_loopback.
+ *
+ * Returns [body|false, location]. `location` is non-empty only when $followable
+ * and the status is a 3xx carrying one — the caller owns the redirect loop,
+ * because it needs a NEW connection.
+ *
+ * Reads go through fgets()/fread(), i.e. __mc_stream_fill() — the one blocking
+ * call. A chunk boundary never lines up with a recv boundary; the read buffer is
+ * what makes that a non-issue here.
+ *
+ * @return array{0: string|false, 1: string}
+ */
+function __mc_http_read_response(\Resource $sock, bool $followable = false): array
+{
+    {
+        $status = \fgets($sock);
+        if ($status === false) {
+            return [false, ''];
+        }
+        $headers = [];
+        $headers[] = \rtrim($status, "\r\n");
+        $len = -1;
+        $chunked = false;
+        $location = '';
+        while (true) {
+            $line = \fgets($sock);
+            if ($line === false) {
+                break;
+            }
+            $line = \rtrim($line, "\r\n");
+            if ($line === '') {
+                break;                  // end of headers
+            }
+            $headers[] = $line;
+            $colon = \strpos($line, ':');
+            if ($colon === false) {
+                continue;
+            }
+            $name = \strtolower(\rtrim(\substr($line, 0, $colon)));
+            $val = \ltrim(\substr($line, $colon + 1, \strlen($line) - ($colon + 1)));
+            if ($name === 'content-length') {
+                $len = (int)$val;
+            } elseif ($name === 'transfer-encoding' && \strtolower($val) === 'chunked') {
+                $chunked = true;
+            } elseif ($name === 'location') {
+                $location = $val;
+            }
+        }
+        \__mc_http_headers_store(true, \implode("\n", $headers));
+
+        // "HTTP/1.1 200 OK" -> 200
+        $code = 0;
+        $sp = \strpos($headers[0], ' ');
+        if ($sp !== false) {
+            $code = (int)\substr($headers[0], $sp + 1, 3);
+        }
+
+        if ($followable && $code >= 300 && $code < 400 && $location !== '') {
+            return [false, $location];
+        }
+
+        if ($chunked) {
+            $body = \__mc_http_chunked($sock);
+        } elseif ($len >= 0) {
+            $body = '';
+            $left = $len;
+            while ($left > 0) {
+                $part = \fread($sock, $left);
+                if ($part === '') {
+                    break;
+                }
+                $body = $body . $part;
+                $left = $left - \strlen($part);
+            }
+        } else {
+            // No length and not chunked: the body runs to EOF, which is what
+            // `Connection: close` guarantees.
+            $body = '';
+            while (true) {
+                $part = \fread($sock, 65536);
+                if ($part === '') {
+                    break;
+                }
+                $body = $body . $part;
+            }
+        }
+        // php: a non-2xx makes file_get_contents() return false — the error body
+        // is NOT handed back (only ignore_errors in a context changes that).
+        if ($code < 200 || $code >= 300) {
+            return [false, ''];
+        }
+        return [$body, ''];
+    }
+}

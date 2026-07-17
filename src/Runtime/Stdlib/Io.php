@@ -19,8 +19,13 @@
  */
 function file_get_contents(string $path): string|false
 {
-    // Same seam as fopen(): http:// lands here first when Ф3 wires it up.
-    if (\__mc_scheme_of($path) !== 'file') {
+    // The seam. https:// resolves to '' here and fails until Ф4 supplies the
+    // transport — the HTTP layer itself is already transport-agnostic.
+    $scheme = \__mc_scheme_of($path);
+    if ($scheme === 'http') {
+        return \__mc_http_get($path);
+    }
+    if ($scheme !== 'file') {
         return false;
     }
     $fp = \Runtime\Libc\fopen(\__mc_file_path($path), "rb");
@@ -359,12 +364,13 @@ function __mc_scheme_of(string $path): string
         if (!$ok) { return 'file'; }
     }
     $scheme = \strtolower($raw);
-    if ($scheme === 'file') {
-        return 'file';
+    if ($scheme === 'file' || $scheme === 'http') {
+        return $scheme;
     }
     // Known-but-unimplemented schemes are still NOT files: php would find no
-    // wrapper and fail, and so must we — silently opening `http://x` as a
-    // relative filename would be worse than failing.
+    // wrapper and fail, and so must we — silently opening `https://x` as a
+    // relative filename would be worse than failing. (https:// lands here until
+    // the TLS transport exists; the protocol layer above is already written.)
     return '';
 }
 
