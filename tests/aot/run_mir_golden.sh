@@ -65,16 +65,48 @@ for f in "$CASES"/*.php; do
     for variant in plain effects rc; do
         if [[ "$variant" == "plain" ]]; then
             golden="$EXPECTED/$name.mir"
-            actual="$("$MANTICORE" dump-mir "$f" 2>/dev/null || true)"
             tag="$name"
+            flags=()
         elif [[ "$variant" == "effects" ]]; then
             golden="$EXPECTED/$name.eff.mir"
-            actual="$("$MANTICORE" dump-mir --effects "$f" 2>/dev/null || true)"
             tag="$name (effects)"
+            flags=(--effects)
         else
             golden="$EXPECTED/$name.rc.mir"
-            actual="$("$MANTICORE" dump-mir --effects --memory=rc "$f" 2>/dev/null || true)"
             tag="$name (rc)"
+            flags=(--effects --memory=rc)
+        fi
+
+        # A crashing dump must never reach the golden. `$(... || true)`
+        # swallowed both the rc and stderr, so a throw blessed as the
+        # empty string and passed forever — that is how 31 un-dumpable
+        # node kinds stayed invisible. Capture rc, keep stderr.
+        # `${flags[@]+...}` guard: bash 3.2 (macOS) under `set -u` treats an
+        # empty array's expansion as an unbound variable.
+        errf="$(mktemp)"
+        set +e
+        actual="$("$MANTICORE" dump-mir ${flags[@]+"${flags[@]}"} "$f" 2>"$errf")"
+        rc=$?
+        set -e
+
+        if [[ $rc -ne 0 ]]; then
+            echo "CRASH $tag (rc=$rc)"
+            sed 's/^/    /' "$errf"
+            rm -f "$errf"
+            fail=$((fail + 1))
+            failed_names+=("$tag (crash)")
+            continue
+        fi
+        rm -f "$errf"
+
+        # A clean rc with no output means the dump produced nothing for a
+        # non-empty case — suspicious, and indistinguishable from a golden
+        # blessed off a crash. Refuse it.
+        if [[ -z "$actual" ]]; then
+            echo "EMPTY $tag (rc=0 but no output)"
+            fail=$((fail + 1))
+            failed_names+=("$tag (empty)")
+            continue
         fi
 
         if [[ "$BLESS" -eq 1 ]]; then
@@ -106,6 +138,10 @@ done
 
 if [[ "$BLESS" -eq 1 ]]; then
     echo "blessed $blessed golden(s)"
+    if [[ "$fail" -gt 0 ]]; then
+        echo "NOT blessed (crashed/empty): ${failed_names[*]}"
+        exit 1
+    fi
     exit 0
 fi
 

@@ -1,0 +1,37 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn casts(cell %x) -> string {
+  ; effects: alloc,escape
+  mem_arena_enter
+  %0 = load_local x : cell
+  %1 = cast int %0 : int
+  %2 = store_local i <- %1 : int
+  %3 = load_local x : cell
+  %4 = cast float %3 : float
+  %5 = store_local f <- %4 : float
+  %6 = load_local i : int
+  %7 = cast string %6 : string  ; eff: alloc alloc=Arena
+  %8 = store_local s <- %7 : string
+  %9 = load_local x : cell
+  %10 = cast bool %9 : bool
+  %11 = store_local b <- %10 : bool
+  %12 = load_local s : string
+  %13 = load_local b : bool
+  ternary %13 then {
+    %14 = string_const "1" : string
+    -> %14
+  } else {
+    %15 = string_const "0" : string
+    -> %15
+  } => %16 : string
+  %17 = concat %12, %16 : string  ; eff: alloc alloc=RcHeap
+  return %17  ; eff: escape
+  mem_arena_leave
+}
+
+fn __main() -> int {
+  ; effects: throw
+  %0 = string_const "42" : string
+  %1 = call casts(%0) : string  ; eff: throw
+  echo %1
+}

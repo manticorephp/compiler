@@ -1,0 +1,35 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn tri(int %n) -> int {
+  %0 = int_const 0 : int
+  %1 = store_local t <- %0 : int
+  for {
+    init {
+      %2 = int_const 0 : int
+      %3 = store_local i <- %2 : int
+    }
+    cond {
+      %4 = load_local i : int
+      %5 = load_local n : int
+      %6 = cmp < %4, %5 : bool
+      check %6
+    }
+    step {
+      %7 = incdec i++ : int
+    }
+    body {
+      %8 = load_local t : int
+      %9 = load_local i : int
+      %10 = add %8, %9 : int
+      %11 = store_local t <- %10 : int
+    }
+  }
+  %12 = load_local t : int
+  return %12
+}
+
+fn __main() -> int {
+  %0 = int_const 5 : int
+  %1 = call tri(%0) : int
+  echo %1
+}

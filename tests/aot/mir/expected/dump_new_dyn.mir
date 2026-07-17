@@ -1,0 +1,24 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn Red__name(obj<Red> %this) -> string {
+  %0 = string_const "red" : string
+  return %0
+}
+
+fn Blue__name(obj<Blue> %this) -> string {
+  %0 = string_const "blue" : string
+  return %0
+}
+
+fn make(string %cls) -> obj<Red>|obj<Blue>|obj<stdClass> {
+  %0 = load_local cls : unknown
+  %1 = new_dyn %0() : obj<Red>|obj<Blue>|obj<stdClass>
+  return %1
+}
+
+fn __main() -> int {
+  %0 = string_const "Red" : string
+  %1 = call make(%0) : obj<Red>|obj<Blue>|obj<stdClass>
+  %2 = method_call %1->name() : string
+  echo %2
+}

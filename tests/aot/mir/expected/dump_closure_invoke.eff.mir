@@ -1,0 +1,35 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn __closure_0(unknown %n, int %x) -> int {
+  ; effects: escape
+  %0 = load_local x : int
+  %1 = load_local n : int
+  %2 = add %0, %1 : int
+  return %2  ; eff: escape
+}
+
+fn adder(int %n) -> obj<__closure_0> {
+  ; effects: alloc,escape
+  %0 = load_local n : int
+  %1 = closure #0 use (%0) : obj<__closure_0>  ; eff: alloc alloc=RcHeap
+  return %1  ; eff: escape
+}
+
+fn run(int %base, int %arg) -> int {
+  ; effects: escape,throw,callUnknown
+  %0 = load_local base : int
+  %1 = call adder(%0) : obj<__closure_0>  ; eff: throw
+  %2 = store_local f <- %1 : obj<__closure_0>
+  %3 = load_local f : obj<__closure_0>
+  %4 = load_local arg : int
+  %5 = invoke %3(%4) : int  ; eff: throw,callUnknown
+  return %5  ; eff: escape
+}
+
+fn __main() -> int {
+  ; effects: throw
+  %0 = int_const 10 : int
+  %1 = int_const 5 : int
+  %2 = call run(%0, %1) : int  ; eff: throw
+  echo %2
+}

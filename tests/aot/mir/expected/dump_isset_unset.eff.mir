@@ -1,0 +1,32 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn io(assoc[string, int] %a) -> bool {
+  ; effects: escape
+  %0 = load_local a : assoc[string, int]
+  %1 = string_const "k" : string
+  %2 = array_access %0[%1] : int
+  %3 = isset %2 : bool
+  %4 = store_local present <- %3 : bool
+  %5 = load_local a : assoc[string, int]
+  %6 = string_const "k" : string
+  %7 = array_access %5[%6] : int
+  unset %7
+  %8 = load_local present : bool
+  return %8  ; eff: escape
+}
+
+fn __main() -> int {
+  ; effects: alloc,throw
+  %0 = string_const "k" : string
+  %1 = int_const 1 : int
+  %2 = array_lit [%0 => %1] : assoc[string, int]  ; eff: alloc alloc=RcHeap
+  %3 = call io(%2) : bool  ; eff: throw
+  ternary %3 then {
+    %4 = string_const "y" : string
+    -> %4
+  } else {
+    %5 = string_const "n" : string
+    -> %5
+  } => %6 : string
+  echo %6
+}
