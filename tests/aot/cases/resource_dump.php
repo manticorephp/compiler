@@ -5,12 +5,19 @@
 //
 //  1. `\Resource` as a TYPE HINT fatals under php: there is no such class, and a
 //     real resource is not an object, so php raises
-//     "must be of type Resource, resource given". That fatal is what makes
-//     difftest skip the file (it skips on a php fatal, not on a marker).
+//     "must be of type Resource, resource given".
 //  2. The ids differ ON PURPOSE. Ours are a counter from 1; php burns 1-3 on the
 //     std streams and 4 internally, so its first handle is 5. An id is a wrapper
 //     detail, not semantics, so we do not chase it — which is exactly why the
 //     var_dump/print_r arms cannot be pinned in resource_basics.php.
+//
+// ⚠ THE TYPED CALL MUST COME BEFORE ANY OUTPUT, and that is not cosmetic.
+// difftest skips a file only when `(rc != 0 AND stdout is EMPTY)` or when stderr
+// matches Fatal/Uncaught — and it runs php with `-d error_reporting=0
+// -d display_errors=0`, which SILENCES the fatal text, leaving stderr empty. So
+// the ONLY thing that earns the skip is php dying having printed nothing. Put a
+// var_dump above the typed call and this file silently becomes a DIFF instead of
+// a skip. (Measured: it did exactly that.)
 //
 // What IS pinned here: the FORMAT, verified against php 8.5.8 — only the number
 // differs. php prints `resource(5) of type (stream)`, `Resource id #5`, and
@@ -21,19 +28,21 @@ $path = sys_get_temp_dir() . '/mc_resource_dump.txt';
 
 $fh = fopen($path, 'w');
 
+// FIRST, before anything prints: a statically-typed \Resource — a raw obj
+// pointer, not a tagged cell, so a different emitter path than the fopen() union.
+// This is also the line php dies on, and it must die with stdout still empty (see
+// the header) for difftest to skip the file rather than diff it.
+function res_type(\Resource $r): string { return gettype($r); }
+function res_debug(\Resource $r): string { return get_debug_type($r); }
+var_dump(res_type($fh));
+var_dump(res_debug($fh));
+
 // The arm must sit BEFORE is_object in the prelude dumper: a \Resource IS an
 // object to us, so the object arm would otherwise print its properties —
 // leaking the raw backing address into the output.
 var_dump($fh);
 print_r($fh);
 echo "\n";
-
-// A statically-typed \Resource — a raw obj pointer, not a tagged cell, so a
-// different emitter path than the fopen() union above.
-function res_type(\Resource $r): string { return gettype($r); }
-function res_debug(\Resource $r): string { return get_debug_type($r); }
-var_dump(res_type($fh));
-var_dump(res_debug($fh));
 
 // Closed: keeps its id, type flips to "Unknown".
 fclose($fh);
