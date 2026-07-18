@@ -795,17 +795,66 @@ trait EmitLlvmRuntime
     private function rmetaMethodTable(\Compile\Mir\ClassDef $cls, string $id): array
     {
         $rows = [];
-        $names = [];
         $defs = '';
         $i = 0;
         foreach ($cls->methodMeta as $mn => $mm) {
             $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $mn);
-            $names[] = $this->strSymBytes($sym);
-            $rows[$mn] = $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false);
+            $pp = $this->rmetaParamTable($mm, $id, $i);
+            $defs .= $pp[0];
+            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
+                $this->strSymBytes($sym),
+                $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false),
+                $this->methodTrampField($cls, $mm, $mn),
+                $this->methodArity($mm),
+                \count($mm->params),
+                $pp[1]);
             $i = $i + 1;
         }
-        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows, $names);
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
+        return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
+     * A method's parameter table — one `{ ptr name, ptr type, i64 flags }` entry
+     * per declared parameter, in order. `type` is the hint with a leading `?`
+     * stripped (the nullability is a flag); empty ⇒ null + no HAS_TYPE bit.
+     *
+     * @return string[] [globalDef, tableSym|'null'] — both strings (the count is
+     *   `count($mm->params)`, pushed by the caller as an int so every rmetaTable
+     *   column keeps ONE repr across the method + property call sites).
+     */
+    private function rmetaParamTable(\Compile\Mir\MethodMeta $mm, string $id, int $mi): array
+    {
+        $names = [];
+        $types = [];
+        $flags = [];
+        $defs = '';
+        $pi = 0;
+        foreach ($mm->params as $pm) {
+            $nsym = '@.rmeta.pmn.' . $id . '.' . (string)$mi . '.' . (string)$pi;
+            $defs .= $this->strGlobalDef($nsym, $pm->name);
+            $names[] = $this->strSymBytes($nsym);
+            $hint = $pm->typeHint;
+            if ($hint !== '' && $hint[0] === '?') { $hint = \substr($hint, 1); }
+            $f = 0;
+            if ($pm->hasDefault)        { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_DEFAULT; }
+            if ($pm->allowsNull())      { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_ALLOWS_NULL; }
+            if ($pm->variadic)          { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_VARIADIC; }
+            if ($pm->promoted !== '')   { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_PROMOTED; }
+            if ($pm->typeHint !== '') {
+                $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_TYPE;
+                $tsym = '@.rmeta.pmt.' . $id . '.' . (string)$mi . '.' . (string)$pi;
+                $defs .= $this->strGlobalDef($tsym, $hint);
+                $types[] = $this->strSymBytes($tsym);
+            } else {
+                $types[] = 'null';
+            }
+            $flags[] = $f;
+            $pi = $pi + 1;
+        }
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaParamTable(
+            '@.rmeta.parm.' . $id . '.' . (string)$mi, $names, $types, $flags);
         return [$defs . $pair[0], $pair[1]];
     }
 
@@ -824,19 +873,72 @@ trait EmitLlvmRuntime
     private function rmetaPropTable(\Compile\Mir\ClassDef $cls, string $id): array
     {
         $rows = [];
-        $names = [];
         $defs = '';
         $i = 0;
         foreach ($cls->propertyNames as $pn) {
             $sym = '@.rmeta.p.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $pn);
-            $names[] = $this->strSymBytes($sym);
             $ro = isset($cls->propertyReadonly[$pn]);
-            $rows[$pn] = $this->memberFlags('public', false, false, false, $ro);
+            // Properties carry only name + flags; tramp/arity/nparams/params zero.
+            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
+                $this->strSymBytes($sym),
+                $this->memberFlags('public', false, false, false, $ro),
+                'null', 0, 0, 'null');
             $i = $i + 1;
         }
-        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows, $names);
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows);
         return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
+     * The invoke-trampoline symbol field for a method row: `ptr @manticore_…`
+     * when a uniform `(recv, args)` entry was synthesized for it, else `null`.
+     *
+     * Keyed by the DECLARING class (a `Dog` inheriting `Animal::feed` shares
+     * `__mc_rtramp_Animal__feed` — the body's `$t->feed()` still dispatches
+     * virtually to Dog's copy). Not invokable — and so `null` — for an abstract
+     * or interface method, or one with a by-ref parameter (Ф2 does not forward
+     * by-ref through the boxed args array; see the plan).
+     */
+    private function methodTrampField(\Compile\Mir\ClassDef $cls, \Compile\Mir\MethodMeta $mm, string $name): string
+    {
+        if ($mm->isAbstract) { return 'null'; }
+        foreach ($mm->params as $p) {
+            if ($p->byRef || $p->variadic) { return 'null'; }
+        }
+        $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
+        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name);
+        // Only reference a trampoline that was actually synthesized — a data
+        // reference to an undefined symbol is a LINK error (unlike a call, which
+        // the stub generator fills). Synthesis is not gated per class, so any
+        // reflectable class's methods resolve.
+        if (!isset($this->sigs->paramTypes[$tramp])) { return 'null'; }
+        return '@manticore_' . $this->mangle($tramp);
+    }
+
+    /**
+     * The constructor-trampoline field for a class's rmeta: `ptr @manticore_…`
+     * when a ctor trampoline was synthesized (a non-abstract user class), else
+     * `null`. `newInstance()` reads it; `getConstructor()` instead consults the
+     * method table for a user `__construct`, so the two disagree exactly when a
+     * class has no explicit ctor (php: newInstance works, getConstructor null).
+     */
+    private function ctorTrampField(\Compile\Mir\ClassDef $cls): string
+    {
+        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($cls->name, '__construct');
+        if (!isset($this->sigs->paramTypes[$tramp])) { return 'ptr null'; }
+        return 'ptr @manticore_' . $this->mangle($tramp);
+    }
+
+    /** Pack a method's arity word: `required | (total << 8) | (variadic << 16)`. */
+    private function methodArity(\Compile\Mir\MethodMeta $mm): int
+    {
+        $total = \count($mm->params);
+        $variadic = 0;
+        foreach ($mm->params as $p) {
+            if ($p->variadic) { $variadic = 1; }
+        }
+        return $mm->requiredParams() | ($total << 8) | ($variadic << 16);
     }
 
     /** Pack a member's flags word. Visibility is an enum in the low bits. */
@@ -953,7 +1055,7 @@ trait EmitLlvmRuntime
             $pFlds = $pPair[1];
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
-                $parentNameFld, $mFlds, $pFlds);
+                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls));
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.

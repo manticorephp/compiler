@@ -142,6 +142,16 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_member')             { return $this->biMcReflMember($args); }
         if ($name === '__mc_refl_parent')             { return $this->biMcReflParent($args); }
         if ($name === '__mc_refl_flags')              { return $this->biMcReflFlags($args); }
+        if ($name === '__mc_refl_tramp')              { return $this->biMcReflTramp($args); }
+        if ($name === '__mc_refl_ctor')               { return $this->biMcReflCtor($args); }
+        if ($name === '__mc_refl_invoke')             { return $this->biMcReflInvoke($args); }
+        if ($name === '__mc_refl_mrow')               { return $this->biMcReflMrow($args); }
+        if ($name === '__mc_refl_row_nparams')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_NPARAMS_OFFSET, false); }
+        if ($name === '__mc_refl_row_params')         { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_PARAMS_OFFSET, true); }
+        if ($name === '__mc_refl_row_arity')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_ARITY_OFFSET, false); }
+        if ($name === '__mc_refl_param_name')         { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_NAME_OFFSET, true); }
+        if ($name === '__mc_refl_param_type')         { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_TYPE_OFFSET, true); }
+        if ($name === '__mc_refl_param_flags')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_FLAGS_OFFSET, false); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
@@ -2853,6 +2863,189 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `__mc_refl_mrow($h, $name)` — a method row's address (as an int), or 0.
+     * The prelude caches it, then reads nparams / params / arity off it via
+     * {@see emitReflFieldI64}. Ф2d (ReflectionParameter).
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflMrow(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToPtr();
+        $np = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_mrow(i64 ' . $h . ', ptr ' . $np . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * Load an i64 field (or a ptr field, ptrtoint'd) at `$off` from a row/rmeta
+     * handle in `$args[0]`; 0 when the handle is null. The reader half of the
+     * `__mc_refl_row_*` builtins.
+     *
+     * @param Node[] $args
+     */
+    private function emitReflFieldI64(array $args, int $off, bool $isPtr): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'rfl.ok.' . $lbl;
+        $noL = 'rfl.no.' . $lbl;
+        $endL = 'rfl.end.' . $lbl;
+        $hz = $this->ssa->allocReg();
+        $out .= '  ' . $hz . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $hz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $hp . ', i64 ' . (string)$off . "\n";
+        $fv = $this->ssa->allocReg();
+        if ($isPtr) {
+            $pv = $this->ssa->allocReg();
+            $out .= '  ' . $pv . ' = load ptr, ptr ' . $fp . "\n";
+            $out .= '  ' . $fv . ' = ptrtoint ptr ' . $pv . " to i64\n";
+        } else {
+            $out .= '  ' . $fv . ' = load i64, ptr ' . $fp . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n  br label %" . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $fv . ', %' . $okL . ' ], [ 0, %' . $noL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Read a parameter entry's field at `$off`: `params_ptr + i*PARAM_SIZE + off`.
+     * `$args[0]` is the params-table base (from `__mc_refl_row_params`), `$args[1]`
+     * the index. Bounds are the caller's (the prelude's `0..nparams-1` loop). A
+     * ptr field (name / type) is returned as an int the caller reads as a string.
+     *
+     * @param Node[] $args
+     */
+    private function emitReflParamField(array $args, int $off, bool $isPtr): string
+    {
+        $out = $this->emitNode($args[0]);
+        $base = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $idx = $this->lastValue;
+        $bp = $this->ssa->allocReg();
+        $out .= '  ' . $bp . ' = inttoptr i64 ' . $base . " to ptr\n";
+        $eoff = $this->ssa->allocReg();
+        $out .= '  ' . $eoff . ' = mul i64 ' . $idx . ', '
+              . (string)\Compile\MemoryAbi::RMETA_PARAM_SIZE . "\n";
+        $ep = $this->ssa->allocReg();
+        $out .= '  ' . $ep . ' = getelementptr i8, ptr ' . $bp . ', i64 ' . $eoff . "\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $ep . ', i64 ' . (string)$off . "\n";
+        $reg = $this->ssa->allocReg();
+        if ($isPtr) {
+            $pv = $this->ssa->allocReg();
+            $out .= '  ' . $pv . ' = load ptr, ptr ' . $fp . "\n";
+            $out .= '  ' . $reg . ' = ptrtoint ptr ' . $pv . " to i64\n";
+        } else {
+            $out .= '  ' . $reg . ' = load i64, ptr ' . $fp . "\n";
+        }
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_tramp($h, $name)` — a method's invoke-trampoline pointer (as an
+     * int), or 0 when absent / not invokable. The prelude's ReflectionMethod
+     * feeds this to {@see biMcReflInvoke}.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflTramp(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToPtr();
+        $np = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_tramp(i64 ' . $h . ', ptr ' . $np . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_ctor($h)` — the class's constructor-trampoline pointer (as an
+     * int), or 0 when the class is abstract / has no synthesized ctor trampoline.
+     * `newInstance()` calls it via {@see biMcReflInvoke} with a null receiver.
+     * A dedicated rmeta slot ({@see \Compile\MemoryAbi::RMETA_CTOR_TRAMP_OFFSET})
+     * because a class with no user `__construct` still constructs.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCtor(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'rc.ok.' . $lbl;
+        $noL = 'rc.no.' . $lbl;
+        $endL = 'rc.end.' . $lbl;
+        $hz = $this->ssa->allocReg();
+        $out .= '  ' . $hz . ' = icmp eq i64 ' . $h . ", 0\n";
+        $out .= '  br i1 ' . $hz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = getelementptr i8, ptr ' . $hp . ', i64 '
+              . (string)\Compile\MemoryAbi::RMETA_CTOR_TRAMP_OFFSET . "\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = load ptr, ptr ' . $cp . "\n";
+        $ci = $this->ssa->allocReg();
+        $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cv . " to i64\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $ci . ', %' . $okL . ' ], [ 0, %' . $noL . " ]\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_invoke($tramp, $recv, $args)` — call a synthesized trampoline
+     * indirectly: `(i64 recv, ptr args) -> i64 cell`. The trampoline untags the
+     * receiver itself (its `$t` is a typed object), so `$recv` passes through as
+     * the prelude holds it (0 for a static method / constructor). `$args` is the
+     * boxed `mixed[]` argument array. Returns the boxed result cell.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflInvoke(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $tramp = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $recv = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToPtr();
+        $ap = $this->lastValue;
+        $argsI = $this->ssa->allocReg();
+        $out .= '  ' . $argsI . ' = ptrtoint ptr ' . $ap . " to i64\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $tramp . " to ptr\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 ' . $fp . '(i64 ' . $recv . ', i64 ' . $argsI . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
      * `__mc_refl_parent($h)` — the parent's rmeta handle, or 0 at the root.
      *
      * Resolved through the NAME (`find(parent_name)`), not the id: the registry
@@ -3481,33 +3674,22 @@ trait EmitLlvmBuiltins
         // Candidate target names: every class AND interface — a target may be an
         // interface or ancestor the operand only is-a transitively (Dog is-a the
         // Animal interface). Interfaces live outside $this->classes.
-        $targets = \array_keys($this->classes);
-        foreach (\array_keys($this->interfaceNames) as $i) { $targets[] = $i; }
+        //
+        // Iterate each assoc's KEYS DIRECTLY — deliberately not `$t =
+        // array_keys($this->classes); foreach($ifaces) $t[] = $i;`. That
+        // array_keys-plus-append combined list monomorphizes to a repr the
+        // foreach then mis-reads (a garbage `$name` → a wild string-header read
+        // in classIsA), the array-union miscompile family. See the arm helper.
         $acc = '';
-        foreach ($targets as $name) {
-            $ids = $this->instanceofMatchIds($name);
-            if ($strict) {
-                $ownId = isset($this->classes[$name]) ? $this->classes[$name]->classId : -1;
-                $keep = [];
-                foreach ($ids as $id) { if ($id !== $ownId) { $keep[] = $id; } }
-                $ids = $keep;
-            }
-            if ($ids === []) { continue; }
-            $lit = $this->strLitId($this->pool->intern($name));
-            $cmp = $this->ssa->allocReg();
-            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $strP . ', ptr ' . $lit . ")\n";
-            $nameEq = $this->ssa->allocReg();
-            $out .= '  ' . $nameEq . ' = icmp eq i32 ' . $cmp . ", 0\n";
-            $out .= $this->emitClassIdMatch($cid, $ids);
-            $both = $this->ssa->allocReg();
-            $out .= '  ' . $both . ' = and i1 ' . $nameEq . ', ' . $this->classIdMatchReg . "\n";
-            if ($acc === '') {
-                $acc = $both;
-            } else {
-                $or = $this->ssa->allocReg();
-                $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $both . "\n";
-                $acc = $or;
-            }
+        foreach ($this->classes as $name => $cd) {
+            $arm = $this->emitInstanceofArm($name, $strP, $cid, $strict, $acc);
+            $out .= $arm[0];
+            $acc = $arm[1];
+        }
+        foreach ($this->interfaceNames as $name => $ignore) {
+            $arm = $this->emitInstanceofArm($name, $strP, $cid, $strict, $acc);
+            $out .= $arm[0];
+            $acc = $arm[1];
         }
         if ($acc !== '') {
             $ext = $this->ssa->allocReg();
@@ -3521,6 +3703,41 @@ trait EmitLlvmBuiltins
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * One dynamic-instanceof arm for target class/interface `$name`: the whole
+     * is-a is true when the operand's runtime name equals `$name` AND its class
+     * id is one of `$name`'s subtype ids. Returns `[ir, newAcc]` (both strings)
+     * — `$acc` threads the running OR chain. Extracted so
+     * {@see biIsADynamic} can iterate `$this->classes` and `$this->interfaceNames`
+     * KEYS directly instead of building an `array_keys()+append` list that
+     * miscompiles (see the call site).
+     *
+     * @return string[] [irToAppend, newAcc]
+     */
+    private function emitInstanceofArm(string $name, string $strP, string $cid, bool $strict, string $acc): array
+    {
+        $ids = $this->instanceofMatchIds($name);
+        if ($strict) {
+            $ownId = isset($this->classes[$name]) ? $this->classes[$name]->classId : -1;
+            $keep = [];
+            foreach ($ids as $id) { if ($id !== $ownId) { $keep[] = $id; } }
+            $ids = $keep;
+        }
+        if ($ids === []) { return ['', $acc]; }
+        $lit = $this->strLitId($this->pool->intern($name));
+        $cmp = $this->ssa->allocReg();
+        $out = '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $strP . ', ptr ' . $lit . ")\n";
+        $nameEq = $this->ssa->allocReg();
+        $out .= '  ' . $nameEq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+        $out .= $this->emitClassIdMatch($cid, $ids);
+        $both = $this->ssa->allocReg();
+        $out .= '  ' . $both . ' = and i1 ' . $nameEq . ', ' . $this->classIdMatchReg . "\n";
+        if ($acc === '') { return [$out, $both]; }
+        $or = $this->ssa->allocReg();
+        $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $both . "\n";
+        return [$out, $or];
     }
 
     /** get_parent_class($obj|'C') — parent name string, or boxed false. */
