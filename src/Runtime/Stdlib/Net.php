@@ -938,17 +938,7 @@ function gethostbynamel(string $hostname)
     while ($ai !== 0) {
         if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(0)) === 2) {
             $h = \__mc_ai_numeric_host($ai);
-            if ($h !== '') {
-                // Manual dedup, NOT in_array: a stdlib in_array exports the fused
-                // __mc_fuse_inarray_0 helper at EXTERNAL linkage, which then collides
-                // with any USER program's own in_array (a compiler linkage bug —
-                // the fusion helper should be internal/linkonce_odr). Flagged.
-                $seen = false;
-                foreach ($ips as $existing) {
-                    if ($existing === $h) { $seen = true; break; }
-                }
-                if (!$seen) { $ips[] = $h; }
-            }
+            if ($h !== '' && !\in_array($h, $ips, true)) { $ips[] = $h; }
         }
         $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
     }

@@ -666,6 +666,13 @@ trait EmitLlvmModule
         // either skip prelude functions or encode the specialisation in the
         // mangled name, the way Monomorphize does with its $mono$ suffixes.
         $linkage = $fn->isPrelude ? 'linkonce_odr ' : '';
+        // Fused-builtin helpers (`__mc_fuse_inarray_0`, …) are per-module synthetics
+        // monomorphized to THIS module's call-site types — the SAME name carries a
+        // DIFFERENT body in another module, so linkonce_odr (pick-one) would
+        // miscompile and external linkage duplicate-symbols at link. `internal`
+        // (like closures) keeps each module's copy private; the counter makes the
+        // name unique within the module, and Sig never exports it.
+        if (\str_starts_with($fn->name, '__mc_fuse_')) { $linkage = 'internal '; }
         if ($isClosure) {
             $paramSig = 'ptr %env';
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
