@@ -620,6 +620,7 @@ trait EmitLlvmModule
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
         $this->frame->isClosure = false;
+        $this->frame->isTrampoline = \str_contains($fn->name, '__mc_rtramp_');
 
         $isMain = $fn->name === '__main';
         if ($isMain) {
@@ -1061,7 +1062,7 @@ trait EmitLlvmModule
         // (boxToCell would rebuild an array) — they fall through to the normal
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
-        if ($this->frame->isClosure && $this->isCellBoxableArg($v->type)) {
+        if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
             $out .= $this->boxToCell($v->type);
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
@@ -1072,7 +1073,7 @@ trait EmitLlvmModule
         // a 0 header is misread as a double — so box it by its runtime repr.
         // A passthrough `return $x` of a cell param is typed CELL (handled
         // above), never reaches here; arrays/objects travel raw (below).
-        if ($this->frame->isClosure && $v->type->kind === Type::KIND_UNKNOWN) {
+        if (($this->frame->isClosure || $this->frame->isTrampoline) && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
             $out .= $this->boxLastByRepr();
             return $this->finishReturn($out, $this->lastValue, $leave);

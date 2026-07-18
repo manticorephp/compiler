@@ -63,39 +63,80 @@ final class RuntimeLibrary
      */
     public static function rmetaType(): string
     {
-        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr }';
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr }';
     }
 
-    /** One method/property row: `{ ptr name, i64 flags }`. */
+    /** One method/property row:
+     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params }`. */
     public static function rmetaRowType(): string
     {
-        return '{ ptr, i64 }';
+        return '{ ptr, i64, ptr, i64, i64, ptr }';
+    }
+
+    /** One parameter entry: `{ ptr name, ptr type, i64 flags }`. */
+    public static function rmetaParamType(): string
+    {
+        return '{ ptr, ptr, i64 }';
     }
 
     /**
-     * A method or property table: `[N x { ptr name, i64 flags }]`, plus the
-     * `{ count, ptr }` pair that addresses it.
+     * A method's parameter table: `[N x { ptr name, ptr type, i64 flags }]`, plus
+     * the `{ count, ptr }` pair. Empty ⇒ `{ i64 0, ptr null }` (a no-arg method).
+     *
+     * @param string[] $namesIr per param: the name's data-ptr IR
+     * @param string[] $typesIr per param: the type-name data-ptr IR, or 'null'
+     * @param int[]    $flags   per param: the packed RMETA_PARAM_* word
+     * @return string[] [globalDef, tableSym|'null'] — both STRINGS (the count is
+     *   `count($params)`, computed by the caller). A heterogeneous return tuple
+     *   would erase to vec[cell] and mis-decode under the native self-host.
+     */
+    public static function rmetaParamTable(string $sym, array $namesIr, array $typesIr, array $flags): array
+    {
+        $n = \count($flags);
+        if ($n === 0) { return ['', 'null']; }
+        $items = [];
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $items[] = self::rmetaParamType() . ' { ptr ' . $namesIr[$i] . ', ptr ' . $typesIr[$i]
+                 . ', i64 ' . (string)$flags[$i] . ' }';
+        }
+        $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x ' . self::rmetaParamType()
+             . '] [' . \implode(', ', $items) . "]\n";
+        return [$def, $sym];
+    }
+
+    /**
+     * A method or property table: `[N x { ptr name, i64 flags, ptr tramp, i64
+     * arity }]`, plus the `{ count, ptr }` pair that addresses it.
      *
      * An empty table emits no global and yields `{ i64 0, ptr null }` — a reader
      * must check the count first, never dereference the pointer blind.
      *
-     * @param array<string,int> $rows name → flags, in declaration order
-     * @param string[] $namesIr index-parallel to $rows: each name's data-ptr IR
+     * `$rowsIr` are the fully-built `ROWTYPE { … }` bodies, one per row, in order
+     * — the CALLER interpolates each row's fields from its concrete locals.
+     * Deliberate: passing six index-parallel typed arrays here made rmetaTable
+     * read `$nparams[$i]` etc. off ERASED `array` params (a static method is not
+     * monomorphized), which mis-decoded an int element under the native
+     * self-host (an empty `i64 ,` in the emitted row). A single `string[]` of
+     * pre-built rows keeps every field read on the caller's concrete values.
+     *
+     * @param string[] $rowsIr per row: the full `ROWTYPE { … }` body
      * @return string[] [globalDef, countAndPtrFields]
      */
-    public static function rmetaTable(string $sym, array $rows, array $namesIr): array
+    public static function rmetaTable(string $sym, array $rowsIr): array
     {
-        $n = \count($rows);
+        $n = \count($rowsIr);
         if ($n === 0) { return ['', 'i64 0, ptr null']; }
-        $items = [];
-        $i = 0;
-        foreach ($rows as $flags) {
-            $items[] = self::rmetaRowType() . ' { ptr ' . $namesIr[$i] . ', i64 ' . (string)$flags . ' }';
-            $i = $i + 1;
-        }
         $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x ' . self::rmetaRowType()
-             . '] [' . \implode(', ', $items) . "]\n";
+             . '] [' . \implode(', ', $rowsIr) . "]\n";
         return [$def, 'i64 ' . (string)$n . ', ptr ' . $sym];
+    }
+
+    /** One method/property row body, fields interpolated by the caller. */
+    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr): string
+    {
+        return self::rmetaRowType() . ' { ptr ' . $nameIr . ', i64 ' . (string)$flags
+             . ', ptr ' . $tramp . ', i64 ' . (string)$arity
+             . ', i64 ' . (string)$nparams . ', ptr ' . $paramsIr . ' }';
     }
 
     /**
@@ -118,18 +159,23 @@ final class RuntimeLibrary
         int $parentId,
         string $parentNameFld = 'ptr null',
         string $methodsFlds = 'i64 0, ptr null',
-        string $propsFlds = 'i64 0, ptr null'
+        string $propsFlds = 'i64 0, ptr null',
+        string $ctorTrampFld = 'ptr null'
     ): string {
-        return '@__mc_rmeta_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
+        return '@__mc_rmeta_v2_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
-            . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds . " }\n";
+            . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds
+            . ', ' . $ctorTrampFld . " }\n";
     }
 
     /** The rmeta pointer field for a descriptor: the class's block, or null
-     *  when nothing reflects it (the opt-in gate — Ф1b decides; Ф1a fills all). */
+     *  when nothing reflects it (the opt-in gate — Ф1b decides; Ф1a fills all).
+     *  `_v2_` since Ф2 widened the layout (rows gained tramp/arity, the struct
+     *  gained ctor_tramp) — a version bump so a mismatched object is a link
+     *  error, not silent linkonce_odr coalescing onto the wrong shape. */
     public static function rmetaField(int $id): string
     {
-        return 'ptr @__mc_rmeta_' . (string)$id;
+        return 'ptr @__mc_rmeta_v2_' . (string)$id;
     }
 
     /** Registry node: `{ ptr rmeta, ptr next, i64 registered }`. */
@@ -161,7 +207,7 @@ final class RuntimeLibrary
         $sid = $key;
         $node = '@__mc_refl_node_' . $sid;
         $t = self::reflNodeType();
-        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_' . $sid
+        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_v2_' . $sid
              . ", ptr null, i64 0 }\n";
         $out .= 'define void @__mc_refl_reg_' . $sid . "() {\nentry:\n";
         $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
@@ -272,6 +318,8 @@ final class RuntimeLibrary
         $out .= "  br label %loop\n";
         $out .= "miss:\n  ret i64 0\n}\n";
         $out .= self::reflMemberLookup();
+        $out .= self::reflMemberTramp();
+        $out .= self::reflMethodRow();
         return $out;
     }
 
@@ -483,6 +531,93 @@ final class RuntimeLibrary
         $out .= '  %fp = getelementptr i8, ptr %row, i64 ' . $rf . "\n";
         $out .= "  %fv = load i64, ptr %fp\n";
         $out .= "  %r = add i64 %fv, 1\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_tramp(i64 h, ptr name) -> i64` — a METHOD's invoke-trampoline
+     * pointer (as i64), or 0 when the handle is null, the name is absent, or the
+     * method is not invokable (its row's tramp is null). The method table only,
+     * since properties carry no trampoline. Same walk as {@see reflMemberLookup},
+     * returning the row's tramp field ({@see \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET})
+     * instead of flags+1.
+     */
+    private static function reflMemberTramp(): string
+    {
+        $nm = (string)\Compile\MemoryAbi::RMETA_NMETHODS_OFFSET;
+        $mt = (string)\Compile\MemoryAbi::RMETA_METHODS_OFFSET;
+        $rs = (string)\Compile\MemoryAbi::RMETA_ROW_SIZE;
+        $rt = (string)\Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET;
+        $out = "define i64 @__mc_refl_tramp(i64 %h, ptr %name) {\nentry:\n";
+        $out .= "  %hz = icmp eq i64 %h, 0\n";
+        $out .= "  br i1 %hz, label %miss, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %m = inttoptr i64 %h to ptr\n";
+        $out .= '  %cntP = getelementptr i8, ptr %m, i64 ' . $nm . "\n";
+        $out .= "  %cnt = load i64, ptr %cntP\n";
+        $out .= '  %tabP = getelementptr i8, ptr %m, i64 ' . $mt . "\n";
+        $out .= "  %tab = load ptr, ptr %tabP\n";
+        $out .= "  %empty = icmp eq i64 %cnt, 0\n";
+        $out .= "  br i1 %empty, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %have ], [ %i1, %cont ]\n";
+        $out .= '  %roff = mul i64 %i, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %tab, i64 %roff\n";
+        $out .= "  %rn = load ptr, ptr %row\n";
+        $out .= "  %c = call i32 @strcmp(ptr %rn, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= '  %tp = getelementptr i8, ptr %row, i64 ' . $rt . "\n";
+        $out .= "  %tv = load ptr, ptr %tp\n";
+        $out .= "  %r = ptrtoint ptr %tv to i64\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_mrow(i64 h, ptr name) -> i64` — a method row's ADDRESS (as i64),
+     * or 0 when absent. The prelude caches it in a ReflectionMethod, then reads
+     * nparams / params / arity off it (one walk, many field reads). Same method
+     * table walk as {@see reflMemberTramp}, returning the row pointer.
+     */
+    private static function reflMethodRow(): string
+    {
+        $nm = (string)\Compile\MemoryAbi::RMETA_NMETHODS_OFFSET;
+        $mt = (string)\Compile\MemoryAbi::RMETA_METHODS_OFFSET;
+        $rs = (string)\Compile\MemoryAbi::RMETA_ROW_SIZE;
+        $out = "define i64 @__mc_refl_mrow(i64 %h, ptr %name) {\nentry:\n";
+        $out .= "  %hz = icmp eq i64 %h, 0\n";
+        $out .= "  br i1 %hz, label %miss, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %m = inttoptr i64 %h to ptr\n";
+        $out .= '  %cntP = getelementptr i8, ptr %m, i64 ' . $nm . "\n";
+        $out .= "  %cnt = load i64, ptr %cntP\n";
+        $out .= '  %tabP = getelementptr i8, ptr %m, i64 ' . $mt . "\n";
+        $out .= "  %tab = load ptr, ptr %tabP\n";
+        $out .= "  %empty = icmp eq i64 %cnt, 0\n";
+        $out .= "  br i1 %empty, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %have ], [ %i1, %cont ]\n";
+        $out .= '  %roff = mul i64 %i, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %tab, i64 %roff\n";
+        $out .= "  %rn = load ptr, ptr %row\n";
+        $out .= "  %c = call i32 @strcmp(ptr %rn, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %r = ptrtoint ptr %row to i64\n";
         $out .= "  ret i64 %r\n";
         $out .= "cont:\n";
         $out .= "  %i1 = add i64 %i, 1\n";

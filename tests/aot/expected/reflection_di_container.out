@@ -1,0 +1,8 @@
+sqlite::memory:
+[LOG] hi
+3
+2
+db:Db opt=0 promoted=1
+log:Logger opt=0 promoted=1
+retries builtin=1 opt=1
+1

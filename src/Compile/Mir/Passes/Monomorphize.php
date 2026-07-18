@@ -196,8 +196,26 @@ final class Monomorphize implements Pass
         // single-site specialization still mutates a SHARED symbol, and another
         // module's differently-specialized copy can win at link time. Give every
         // concrete site its own `$mono$` symbol instead.
+        //
+        // A CONFLICTED-CONCRETE dim is the third early-specialize case: a body
+        // heuristic concretized the param (e.g. `'x'.$a[0]` guesses vec[string]),
+        // but a call site passes a DIFFERENT concrete element repr (vec[int]).
+        // The single body reads that site's raw int slot as a string ptr →
+        // SIGSEGV. The original type is KNOWN-WRONG for the conflicting site, so
+        // any specialization strictly improves — treat it like the callable dim
+        // (>=1 concrete key, even from a single call site).
+        // A vec[cell] param dimension is the cell-floor case (InferScans resolved
+        // it because a heterogeneous vec[cell] site cannot be specialized): the
+        // original body reads/unboxes cells and serves the cell site, while each
+        // CONCRETE site must clone off it (a raw vec[string] arg fed to the
+        // cell-reading body reads a bare ptr as a boxed cell → garbage). A cell
+        // param always implies >=1 cell site (else it never floored), so its
+        // concrete sites genuinely need their own body — specialize from ONE key.
         $hasCallableDim = $this->hasCallableDim($fn, $dims);
-        if (!$hasCallableDim && !$fn->isPrelude && \count($calls) < 2) { return []; }
+        $hasConflictedConcrete = $this->hasConflictedConcreteDim($fn, $dims, $calls);
+        $hasCellDim = $this->hasCellElemDim($fn, $dims);
+        if (!$hasCallableDim && !$fn->isPrelude && !$hasConflictedConcrete
+            && !$hasCellDim && \count($calls) < 2) { return []; }
 
         // Per call site: a specialization key over the dimension arg types,
         // or '' when the site is not fully concrete (stays on the original).
@@ -216,8 +234,12 @@ final class Monomorphize implements Pass
         // Callable dim: >=1 concrete key specializes (dynamic -> known). Pure
         // array dim: keep >=2 distinct keys (the genuinely-erased case) — but a
         // prelude fn specializes from ONE key, since its symbol is shared across
-        // objects and cannot carry a module-local body (see above).
-        $minKeys = ($hasCallableDim || $fn->isPrelude) ? 1 : 2;
+        // objects and cannot carry a module-local body (see above). A
+        // conflicted-concrete dim also specializes from ONE key: even when every
+        // call site agrees on vec[int] while the body guessed vec[string], the
+        // lone key still needs a clone to correct the repr the original misreads.
+        $minKeys = ($hasCallableDim || $fn->isPrelude || $hasConflictedConcrete
+            || $hasCellDim) ? 1 : 2;
         if (\count($keyToCall) < $minKeys) { return []; }
 
         // Per-fn specialization cap (code-size / compile-time backstop). On
@@ -288,6 +310,14 @@ final class Monomorphize implements Pass
                         break;
                     }
                 }
+            } elseif ($this->isConcreteArray($p->type)
+                && $this->paramConflictsWithArg($p, $idx, $calls)) {
+                // A body heuristic already concretized this param to ONE element
+                // repr, but a call site passes a concrete array with a DIFFERENT
+                // repr. isErasedArrayParam is false (it looks concrete), so the
+                // erased branch above cannot see it — recognise the conflict here
+                // so each concrete site gets its own re-inferred body.
+                $dims[] = $idx;
             } elseif ($this->isCallableParam($p->type)) {
                 foreach ($calls as $call) {
                     if ($idx < \count($call->args)
@@ -299,6 +329,74 @@ final class Monomorphize implements Pass
             }
         }
         return $dims;
+    }
+
+    /**
+     * A concrete-array param whose declared element repr DISAGREES with a
+     * concrete-array argument at >=1 call site. This is the body-heuristic
+     * misfire: `f(array $a){ return 'x'.$a[0]; }` guesses `vec[string]` from the
+     * concat, yet a `f([7])` site passes `vec[int]` (raw int slots). The single
+     * body then `inttoptr`s a bare int as a string pointer → SIGSEGV. Distinct
+     * typeToken is the conflict test: an argument whose token equals the param's
+     * needs no specialization (the body already reads it right).
+     *
+     * @param Call[] $calls
+     */
+    private function paramConflictsWithArg(Param $p, int $idx, array $calls): bool
+    {
+        $paramTok = $this->typeToken($p->type);
+        foreach ($calls as $call) {
+            if ($idx >= \count($call->args)) { continue; }
+            $at = $call->args[$idx]->type;
+            if ($this->isConcreteArray($at) && $this->typeToken($at) !== $paramTok) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when any dimension is a conflicted-concrete array param (added by the
+     * middle branch of {@see dimensions}). Such a dim specializes from a SINGLE
+     * key — the original body is known-wrong for the conflicting site, so even
+     * one clone strictly improves — so it drops `minKeys` to 1 like the callable
+     * and prelude cases.
+     *
+     * @param int[] $dims
+     * @param Call[] $calls
+     */
+    private function hasConflictedConcreteDim(FunctionDef $fn, array $dims, array $calls): bool
+    {
+        foreach ($dims as $di) {
+            $p = $fn->params[$di];
+            if (!$this->isErasedArrayParam($p->type)
+                && !$this->isCallableParam($p->type)
+                && $this->isConcreteArray($p->type)
+                && $this->paramConflictsWithArg($p, $di, $calls)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when any dimension's param is a vec[cell] / assoc[?,cell] array (the
+     * cell-floor case). Its concrete call sites specialize from a SINGLE key —
+     * the original cell body serves the heterogeneous cell site, and every
+     * concrete site clones off it, so {@see specialize} drops minKeys to 1.
+     *
+     * @param int[] $dims
+     */
+    private function hasCellElemDim(FunctionDef $fn, array $dims): bool
+    {
+        foreach ($dims as $di) {
+            $t = $fn->params[$di]->type;
+            if ($t->isArray() && $t->element !== null
+                && $t->element->kind === Type::KIND_CELL) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

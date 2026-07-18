@@ -99,6 +99,35 @@ final class Resource
     public const KIND_FILE = 0;
     public const KIND_DIR = 1;
     public const KIND_SOCKET = 2;
+    /**
+     * A TLS stream: `$addr` is the TCP fd (as for SOCKET), and `$ssl` holds the
+     * OpenSSL `SSL*`. Reads/writes go through SSL_read/SSL_write, not recv/send.
+     *
+     * The prelude MUST NOT depend on OpenSSL — it is compiled into every module,
+     * and referencing SSL_free here would drag libssl into a hello-world. So the
+     * SSL engine is torn down by the stdlib's `fclose()` ({@see \fclose}); the
+     * prelude's own close()/__destruct closes only the fd. A TLS resource dropped
+     * WITHOUT fclose() therefore leaks the SSL* (not the fd) — documented debt,
+     * and not the path file_get_contents/fclose take.
+     */
+    public const KIND_TLS = 3;
+    /**
+     * A stream context (php's `resource(stream-context)`), from
+     * stream_context_create(). It has NO backing handle — `$addr` is 0, so
+     * close()/__destruct are no-ops — and it never does IO. Its serialized options
+     * (http method/header/content, ssl verify flags) are parked in `$rbuf`, the
+     * one string field a context has no other use for. See {@see \stream_context_create}.
+     */
+    public const KIND_CONTEXT = 4;
+    /**
+     * An in-memory read stream: no fd (`$addr` 0), all bytes pre-loaded in `$rbuf`
+     * with `$eof` set true from birth — "the buffer is all there is". fopen() on an
+     * http(s):// URL returns one (the whole body, fetched on open), and the
+     * existing buffered readers (fread/fgets/feof) drain it with no socket fill.
+     * Currently NON-seekable (it backs a network body, which php makes non-seekable);
+     * a future php://memory / php://temp is the same kind made seekable.
+     */
+    public const KIND_MEMORY = 5;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */
@@ -125,6 +154,27 @@ final class Resource
      * Without this, feof() on a socket would answer from a FILE* that is not there.
      */
     public bool $eof = false;
+    /**
+     * SOCKET read buffer — raw bytes plus a cursor. Owned by the stdlib
+     * ({@see __mc_stream_read}); nothing here touches them.
+     *
+     * PLAIN FIELDS, not a `ByteBuffer` object, and that is forced rather than
+     * chosen: the prelude MUST NOT depend on the stdlib (it is compiled into
+     * modules that have no stdlib beside them), and a stdlib CLASS is invisible to
+     * a user module anyway — the `.sig` carries functions only, so an object of one
+     * arrives untyped and reads back as raw bits. Putting a real ByteBuffer here
+     * would mean putting it in the PRELUDE, i.e. paying its IR in every program
+     * that ever says `echo` (\Resource's own three methods already cost 276 lines
+     * of a trivial program's 5220).
+     *
+     * $rpos is not an optimisation: without a cursor every consume is a
+     * `substr($rbuf, $n)` — a full copy of the remainder — which is quadratic over
+     * a response read in chunks.
+     */
+    public string $rbuf = '';
+    public int $rpos = 0;
+    /** KIND_TLS only: the OpenSSL `SSL*`, 0 otherwise. See KIND_TLS. */
+    public int $ssl = 0;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {
@@ -152,10 +202,11 @@ final class Resource
             $ok = \__mc_libc_fclose(\int_to_ptr($this->addr)) === 0;
         } elseif ($this->kind === self::KIND_DIR) {
             $ok = \__mc_libc_closedir(\int_to_ptr($this->addr)) === 0;
-        } elseif ($this->kind === self::KIND_SOCKET) {
+        } elseif ($this->kind === self::KIND_SOCKET || $this->kind === self::KIND_TLS) {
             // A socket's $addr is an fd, not a FILE* — close(2), and no
             // int_to_ptr. Passing it to fclose() would treat the small integer
-            // as a pointer.
+            // as a pointer. For a TLS stream the SSL* is freed by the stdlib's
+            // fclose(); here we only close the fd (see KIND_TLS).
             $ok = \__mc_libc_close($this->addr) === 0;
         }
         $this->closed = true;

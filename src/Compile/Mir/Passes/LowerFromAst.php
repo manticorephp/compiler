@@ -516,6 +516,7 @@ final class LowerFromAst implements Pass
                 }
                 if ($dkind !== 'class') { continue; }
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
+                $cd->isPreludeClass = $this->inPreludeClass;
                 $this->classTable[$cd->name] = $cd;
                 // A `#[TypeDef]` is a VALUE, not an object: it keeps a ClassDef so
                 // its methods and its one property still resolve, but it goes to
@@ -567,6 +568,28 @@ final class LowerFromAst implements Pass
                 $dfn = $this->lowerFunction($dstmt->decl);
                 $dfn->isPrelude = true;
                 $module->addFunction($dfn);
+            }
+        }
+
+        // Reflection Ф2: an invoke trampoline per (user class, method) + ctor,
+        // synthesized from the now-complete class table (same point + pattern as
+        // __mir_dump_object). Gated on the program reflecting at all; a
+        // non-reflecting program synthesizes none. Over-approximates the
+        // reflectable set here (no ClassDef graph closure yet) — the emit gate
+        // ({@see EmitLlvmRuntime::reflectWants}) prunes a non-reflectable class's
+        // trampoline before clang, and dead-strip drops the rest.
+        if ($this->includeReflection) {
+            $trampSrc = '';
+            foreach ($module->classes as $cd) {
+                $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
+            }
+            if ($trampSrc !== '') {
+                $trampProg = \Parser\Parser::parseSource("<?php\n" . $trampSrc);
+                foreach ($trampProg->statements as $tstmt) {
+                    if ($tstmt->kind !== 'Function') { continue; }
+                    $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+                    $module->addFunction($this->lowerFunction($tstmt->decl));
+                }
             }
         }
 
