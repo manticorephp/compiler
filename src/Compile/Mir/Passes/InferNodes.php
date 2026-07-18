@@ -247,6 +247,15 @@ trait InferNodes
         // gate excludes matmul (`$m[0]=[1,2]` — non-empty inner, concrete element).
         foreach ($this->emptyArrValLocals as $name => $unused) {
             if (!isset($this->nestedScalarStoreLocals[$name])) { continue; }
+            // A local that ALSO holds a scalar sibling (`$r["x"]="s"` next to
+            // `$r["arr"][]=…`) is heterogeneous — the ≥2-value-kind pass above
+            // already seeded its element as a plain CELL (scalar OR inner-array-
+            // as-cell). vec[cell] here assumes EVERY element is an inner array;
+            // that demotes the correct cell and the scalar sibling then stores
+            // raw / the nested read `cow_cell`s a raw ptr → SIGSEGV. The nested
+            // append works fine on a plain-cell element (the group idiom proves
+            // it), so leave a heterogeneous local as cell.
+            if (isset($this->cellElemLocals[$name])) { continue; }
             $this->nestedCellVecLocals[$name] = true;
             $val = Type::vec(Type::cell());
             if (isset($this->assocLocals[$name])) {

@@ -494,6 +494,7 @@ trait EmitLlvmCalls
         $first = true;
         $mask = $this->sigs->refParams[$c->function] ?? [];
         $tmask = $this->sigs->taggedParams[$c->function] ?? [];
+        $camask = $this->sigs->cellArgParams[$c->function] ?? [];
         $ptypes = $this->sigs->paramTypes[$c->function] ?? [];
         $ai = 0;
         // Fresh string-temp arg carriers freed after the call: a borrow the
@@ -593,6 +594,21 @@ trait EmitLlvmCalls
                 $addr = $this->ssa->allocReg();
                 $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
                 $argList .= 'i64 ' . $addr;
+            } elseif (($camask[$ai] ?? false)
+                && $a->type->isArray() && $a->type->element !== null
+                && $a->type->element->kind !== Type::KIND_CELL
+                && $a->type->element->kind !== Type::KIND_UNKNOWN) {
+                // A `#[CellArg]` param (element-CONSUMING, e.g. fputcsv's $fields)
+                // fed a concrete-element array: rebuild it with each element boxed
+                // so the once-compiled stdlib callee — which reads element VALUES
+                // as tagged cells — sees a self-describing array instead of raw
+                // slots it would decode as garbage. Gated by the sig flag so
+                // element-PRESERVING passthrough fns (array_merge/combine) keep
+                // the raw repr. cell/unknown elements are already tag-safe.
+                $out .= $this->emitNode($a);
+                $out .= $this->emitCellifyArrayRaw($a->type->element);
+                $out .= $this->coerceToI64();
+                $argList .= 'i64 ' . $this->lastValue;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its
                 // static type so the callee can read its runtime tag.

@@ -17,6 +17,11 @@ final class Param
      *  themselves do not survive the sig round-trip). */
     public bool $refOut = false;
 
+    /** An `array` param marked `#[CellArg]`: the callee consumes element values,
+     *  so a concrete-element array arg is cellified at the call site. Carried
+     *  across the interface `.sig` (param attributes don't survive it). */
+    public bool $cellArg = false;
+
     /**
      * @param AttributeNode[] $attributes
      */

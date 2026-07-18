@@ -320,6 +320,8 @@ trait LowerPrelude
             'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3, 'LOCK_NB' => 4,
             'SCANDIR_SORT_ASCENDING' => 0, 'SCANDIR_SORT_DESCENDING' => 1,
             'SCANDIR_SORT_NONE' => 2,
+            // parse_ini_* scanner modes
+            'INI_SCANNER_NORMAL' => 0, 'INI_SCANNER_RAW' => 1, 'INI_SCANNER_TYPED' => 2,
             // stream_socket_server / _client flags — php's own values. A udp://
             // server passes STREAM_SERVER_BIND alone (listen is stream-only).
             'STREAM_SERVER_BIND' => 4, 'STREAM_SERVER_LISTEN' => 8,

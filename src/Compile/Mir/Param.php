@@ -13,6 +13,11 @@ final class Param
      *  at the caller. Serialized into the interface `.sig`. */
     public bool $refOut = false;
 
+    /** An `array` param marked `#[CellArg]`: the callee consumes element VALUES,
+     *  so a concrete-element array arg must be cellified (each element boxed) at
+     *  the call site. Serialized into the interface `.sig`. */
+    public bool $cellArg = false;
+
     public function __construct(
         public readonly string $name,
         public Type $type,

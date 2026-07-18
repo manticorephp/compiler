@@ -1692,9 +1692,29 @@ trait EmitLlvmBuiltins
     private function biFloatval(array $args): string
     {
         $out = $this->emitNode($args[0]);
-        if ($args[0]->type->kind === Type::KIND_FLOAT) {
+        $ak = $args[0]->type->kind;
+        if ($ak === Type::KIND_FLOAT) {
             $out .= $this->coerceTo('double');
             $this->lastValueType = 'double';
+            return $out;
+        }
+        // A STRING parses via strtod (`floatval("1.5")` → 1.5) — sitofp of the
+        // raw string POINTER would hand back garbage. A CELL/UNKNOWN routes
+        // through the tagged decoder (which itself strtod's a string cell).
+        if ($ak === Type::KIND_STRING) {
+            $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+            $out .= $this->coerceToPtr();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ", ptr null)\n";
+            $this->lastValue = $reg; $this->lastValueType = 'double';
+            return $out;
+        }
+        if ($ak === Type::KIND_CELL || $ak === Type::KIND_UNKNOWN) {
+            $this->rt->needsTaggedToFloat = true;
+            $out .= $this->coerceToI64();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
         }
         $out .= $this->coerceToI64();
