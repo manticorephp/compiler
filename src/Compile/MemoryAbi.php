@@ -20,7 +20,7 @@ final class MemoryAbi
      * `bin/manticore version` output so vendored artefacts can
      * detect mismatches against a fresh build.
      */
-    public const VERSION = 5;
+    public const VERSION = 6;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -188,18 +188,55 @@ final class MemoryAbi
     public const RMETA_NMETHODS_OFFSET = 32;
     public const RMETA_METHODS_OFFSET  = 40;
 
-    /** `i64` / `ptr` — the property table: count, then `[{ ptr name, i64 flags }]`. */
+    /** `i64` / `ptr` — the property table: count, then `[{ ptr name, i64 flags, ptr, i64 }]`. */
     public const RMETA_NPROPS_OFFSET = 48;
     public const RMETA_PROPS_OFFSET  = 56;
 
-    /** Bytes. Grows as tables are appended; readers must use the named
-     *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 64;
+    /**
+     * `ptr` — the CONSTRUCTOR trampoline `@manticore___mc_rtramp_<C>____construct`,
+     * or null when the class is not instantiable / no reflection reaches it.
+     * A dedicated slot rather than a method-table row because `newInstance()`
+     * must work even for a class with NO user `__construct` (php still
+     * constructs it), while `getConstructor()` reports null there — the two ask
+     * different questions, so they read different places. Ф2 (instance
+     * trampolines): the `(i64 recv, ptr args) -> i64 cell` uniform entry, called
+     * with recv 0 (a ctor has no receiver).
+     */
+    public const RMETA_CTOR_TRAMP_OFFSET = 64;
 
-    /** One row of the method / property tables: `{ ptr name, i64 flags }`. */
-    public const RMETA_ROW_NAME_OFFSET  = 0;
-    public const RMETA_ROW_FLAGS_OFFSET = 8;
-    public const RMETA_ROW_SIZE = 16;
+    /** Bytes. Grows as fields are appended; readers must use the named
+     *  offsets, never arithmetic on this. */
+    public const RMETA_SIZE = 72;
+
+    /** One row of the method / property tables:
+     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params }`.
+     *  `tramp` is the method's uniform `(i64 recv, ptr args) -> i64 cell` entry
+     *  (null = not invokable: abstract / interface / a by-ref param); `arity`
+     *  packs `required | (total << 8) | (variadic << 16)`; `params` points at a
+     *  `[nparams x PARAM]` table (Ф2d — ReflectionParameter). Property rows keep
+     *  the method-only fields zero. */
+    public const RMETA_ROW_NAME_OFFSET   = 0;
+    public const RMETA_ROW_FLAGS_OFFSET  = 8;
+    public const RMETA_ROW_TRAMP_OFFSET  = 16;
+    public const RMETA_ROW_ARITY_OFFSET  = 24;
+    public const RMETA_ROW_NPARAMS_OFFSET = 32;
+    public const RMETA_ROW_PARAMS_OFFSET  = 40;
+    public const RMETA_ROW_SIZE = 48;
+
+    /** One parameter entry of a method's param table:
+     *  `{ ptr name, ptr type, i64 flags }`. `type` is the declared type name with
+     *  a leading `?` / `...` stripped (empty when untyped); `flags` packs the
+     *  RMETA_PARAM_* bits. Feeds ReflectionParameter / ReflectionNamedType. */
+    public const RMETA_PARAM_NAME_OFFSET  = 0;
+    public const RMETA_PARAM_TYPE_OFFSET  = 8;
+    public const RMETA_PARAM_FLAGS_OFFSET = 16;
+    public const RMETA_PARAM_SIZE = 24;
+
+    public const RMETA_PARAM_HAS_DEFAULT = 1;
+    public const RMETA_PARAM_ALLOWS_NULL = 2;
+    public const RMETA_PARAM_VARIADIC    = 4;
+    public const RMETA_PARAM_PROMOTED    = 8;
+    public const RMETA_PARAM_HAS_TYPE    = 16;
 
     public const RMETA_FLAG_FINAL     = 1;
     public const RMETA_FLAG_ABSTRACT  = 2;

@@ -257,9 +257,309 @@ class ReflectionClass
         return false;
     }
 
+    /**
+     * A new instance, constructor arguments forwarded. Uses the class's
+     * constructor trampoline (works even with no user `__construct`); throws for
+     * an abstract class / interface, matching php.
+     */
+    public function newInstance(mixed ...$args): object
+    {
+        $t = __mc_refl_ctor($this->h);
+        if ($t === 0) {
+            throw new ReflectionException("Cannot instantiate " . $this->name);
+        }
+        return __mc_refl_invoke($t, 0, $args);
+    }
+
+    /**
+     * A new instance, constructor arguments from an array. The `mixed[]` hint
+     * boxes a concrete-element array to the `vec[cell]` the ctor trampoline
+     * expects.
+     *
+     * @param mixed[] $args
+     */
+    public function newInstanceArgs(array $args = []): object
+    {
+        $t = __mc_refl_ctor($this->h);
+        if ($t === 0) {
+            throw new ReflectionException("Cannot instantiate " . $this->name);
+        }
+        return __mc_refl_invoke($t, 0, $args);
+    }
+
+    /** The constructor as a ReflectionMethod, or null when none is declared. */
+    public function getConstructor(): ReflectionMethod|null
+    {
+        if (__mc_refl_member($this->h, "__construct", 1) === 0) { return null; }
+        return new ReflectionMethod($this->name, "__construct");
+    }
+
+    /** A method by name; throws when the class has no such method. */
+    public function getMethod(string $name): ReflectionMethod
+    {
+        if (__mc_refl_member($this->h, $name, 1) === 0) {
+            throw new ReflectionException("Method " . $name . " does not exist");
+        }
+        return new ReflectionMethod($this->name, $name);
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
         return $this->h;
+    }
+}
+
+/**
+ * A method handle. Ф2: `invoke()` calls the method's uniform trampoline
+ * indirectly. The `mixed ...$args` form packs a `vec[cell]` the trampoline
+ * unboxes per parameter; `invokeArgs(array)` (an already-built array) waits on
+ * call-site element boxing (Ф2b).
+ */
+class ReflectionMethod
+{
+    public string $name = "";
+    public string $class = "";
+
+    /** The owning class's rmeta handle, the method's trampoline (0 = not
+     *  invokable), and its method-row address (for the parameter table). Raw
+     *  addresses carried as ints — nothing retains them. */
+    private int $h = 0;
+    private int $tramp = 0;
+    private int $row = 0;
+
+    /** `new ReflectionMethod('Class', 'method')` or `(…, $obj, 'method')`. */
+    public function __construct(object|string $objectOrClass, string $method)
+    {
+        if (\is_string($objectOrClass)) {
+            $cls = __mc_refl_unqualify($objectOrClass);
+            $h = __mc_refl_find($cls);
+        } else {
+            $h = __mc_refl_of($objectOrClass);
+            $cls = __mc_refl_name($h);
+        }
+        if ($h === 0) {
+            throw new ReflectionException("Class does not exist");
+        }
+        if (__mc_refl_member($h, $method, 1) === 0) {
+            throw new ReflectionException("Method " . $method . " does not exist");
+        }
+        $this->h = $h;
+        $this->class = $cls;
+        $this->name = $method;
+        $this->tramp = __mc_refl_tramp($h, $method);
+        $this->row = __mc_refl_mrow($h, $method);
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    /**
+     * The method's parameters, in declaration order.
+     * @return ReflectionParameter[]
+     */
+    public function getParameters(): array
+    {
+        $base = __mc_refl_row_params($this->row);
+        $n = __mc_refl_row_nparams($this->row);
+        $out = [];
+        $i = 0;
+        while ($i < $n) {
+            $out[] = new ReflectionParameter($base, $i);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    public function getNumberOfParameters(): int
+    {
+        return __mc_refl_row_nparams($this->row);
+    }
+
+    /** Required = the low byte of the packed arity word. */
+    public function getNumberOfRequiredParameters(): int
+    {
+        return __mc_refl_row_arity($this->row) & 255;
+    }
+
+    /**
+     * Call the method. `$object` is the receiver for an instance method and is
+     * ignored for a static one (php passes null there). A non-invokable method
+     * (abstract / by-ref / variadic parameter — no trampoline) throws.
+     */
+    public function invoke(?object $object, mixed ...$args): mixed
+    {
+        if ($this->tramp === 0) {
+            throw new ReflectionException("Method " . $this->name . " is not invokable");
+        }
+        return __mc_refl_invoke($this->tramp, $object, $args);
+    }
+
+    /**
+     * Like invoke(), but the arguments arrive as an array. The `mixed[]` hint
+     * makes the caller box a concrete-element array to `vec[cell]` (the repr the
+     * trampoline's args param requires) — a plain `array` would pass raw slots.
+     *
+     * @param mixed[] $args
+     */
+    public function invokeArgs(?object $object, array $args): mixed
+    {
+        if ($this->tramp === 0) {
+            throw new ReflectionException("Method " . $this->name . " is not invokable");
+        }
+        return __mc_refl_invoke($this->tramp, $object, $args);
+    }
+
+    private function flags(): int
+    {
+        return __mc_refl_member($this->h, $this->name, 1) - 1;
+    }
+
+    public function isStatic(): bool
+    {
+        return ($this->flags() & 4) !== 0;
+    }
+
+    public function isAbstract(): bool
+    {
+        return ($this->flags() & 8) !== 0;
+    }
+
+    public function isFinal(): bool
+    {
+        return ($this->flags() & 16) !== 0;
+    }
+
+    public function isPublic(): bool
+    {
+        return ($this->flags() & 3) === 0;
+    }
+
+    public function isPrivate(): bool
+    {
+        return ($this->flags() & 3) === 2;
+    }
+
+    public function isProtected(): bool
+    {
+        return ($this->flags() & 3) === 1;
+    }
+}
+
+/**
+ * One parameter of a method. Reads a `{ name, type, flags }` entry off the
+ * method's parameter table by index — the raw base address + position carried
+ * as ints. Ф2d: the shape a DI container walks to autowire a constructor.
+ */
+class ReflectionParameter
+{
+    public string $name = "";
+
+    private int $base = 0;
+    private int $pos = 0;
+    private int $flags = 0;
+
+    public function __construct(int $base, int $pos)
+    {
+        $this->base = $base;
+        $this->pos = $pos;
+        $this->name = __mc_refl_param_name($base, $pos);
+        $this->flags = __mc_refl_param_flags($base, $pos);
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    public function getPosition(): int
+    {
+        return $this->pos;
+    }
+
+    public function hasType(): bool
+    {
+        return ($this->flags & 16) !== 0;
+    }
+
+    /** The declared type as a ReflectionNamedType, or null when untyped. */
+    public function getType(): ReflectionNamedType|null
+    {
+        if (($this->flags & 16) === 0) { return null; }
+        $t = __mc_refl_param_type($this->base, $this->pos);
+        return new ReflectionNamedType($t, ($this->flags & 2) !== 0);
+    }
+
+    public function isOptional(): bool
+    {
+        return ($this->flags & 1) !== 0;
+    }
+
+    public function isDefaultValueAvailable(): bool
+    {
+        return ($this->flags & 1) !== 0;
+    }
+
+    public function isVariadic(): bool
+    {
+        return ($this->flags & 4) !== 0;
+    }
+
+    public function isPromoted(): bool
+    {
+        return ($this->flags & 8) !== 0;
+    }
+
+    public function allowsNull(): bool
+    {
+        return ($this->flags & 2) !== 0;
+    }
+}
+
+/**
+ * A single named type (`int`, `?App\Foo`). Unions/intersections are Ф3. The
+ * name is stored WITHOUT a leading `?`; nullability is a separate flag.
+ */
+class ReflectionNamedType
+{
+    private string $name = "";
+    private bool $nullable = false;
+
+    public function __construct(string $name, bool $nullable)
+    {
+        $this->name = $name;
+        $this->nullable = $nullable;
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    public function allowsNull(): bool
+    {
+        return $this->nullable;
+    }
+
+    /** A built-in (scalar / pseudo) type rather than a class name. */
+    public function isBuiltin(): bool
+    {
+        $n = \strtolower($this->name);
+        if ($n === "int" || $n === "float" || $n === "string" || $n === "bool") { return true; }
+        if ($n === "array" || $n === "object" || $n === "callable" || $n === "iterable") { return true; }
+        if ($n === "mixed" || $n === "void" || $n === "null" || $n === "never") { return true; }
+        if ($n === "false" || $n === "true" || $n === "self" || $n === "static" || $n === "parent") { return true; }
+        return false;
+    }
+
+    public function __toString(): string
+    {
+        $n = \strtolower($this->name);
+        if ($this->nullable && $n !== "mixed" && $n !== "null") {
+            return "?" . $this->name;
+        }
+        return $this->name;
     }
 }

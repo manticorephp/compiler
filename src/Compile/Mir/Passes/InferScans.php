@@ -602,8 +602,9 @@ trait InferScans
         /** @var array<string, Type> */
         $assocKey = [];                  // "fn#idx" → key Type (assoc-shaped arg)
         $shape = [];                     // "fn#idx" → 'v' (vec) | 'a' (assoc)
+        $sawCell = [];                   // "fn#idx" → true (a vec[cell] arg seen)
         foreach ($module->functions as $fn) {
-            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape);
+            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape, $sawCell);
         }
         $changed = false;
         foreach ($module->functions as $fn) {
@@ -613,6 +614,25 @@ trait InferScans
                 $key = $fn->name . '#' . (string)$idx;
                 $idx = $idx + 1;
                 if (!isset($cand[$key])) { continue; }
+                // A heterogeneous vec[cell] site cannot be specialized per-repr,
+                // so cell is the param's floor: resolve to vec[cell] even when a
+                // differing concrete site marked $conflict (which unset $observed
+                // and would otherwise leave a wrong body guess in place). The
+                // cell site then reads cells directly and Monomorphize clones
+                // each CONCRETE site off this erased-cell param (m8). Idempotent:
+                // skip when the param already carries a cell element.
+                if (isset($sawCell[$key])) {
+                    $cur = $p->type;
+                    $already = $cur->isArray() && $cur->element !== null
+                        && $cur->element->kind === Type::KIND_CELL;
+                    if (!$already) {
+                        $p->type = isset($assocKey[$key])
+                            ? Type::assoc($assocKey[$key], Type::cell())
+                            : Type::vec(Type::cell());
+                        $changed = true;
+                    }
+                    continue;
+                }
                 if (isset($conflict[$key]) || !isset($observed[$key])) { continue; }
                 // An already-refined param is only overridden by a NESTED-array
                 // or a CELL observation — never fight a legitimate vec[string]

@@ -214,6 +214,15 @@ final class ClassDef
      *  @var array<string, bool> */
     public array $propertyFloat32 = [];
 
+    /** True when declared inside the injected prelude (the `[0, $preludeCount)`
+     *  statement window). Reflection Ф2 uses it to decide a synthesized invoke
+     *  trampoline's linkage. DELIBERATELY LAST: adding a field mid-struct shifts
+     *  the offsets of `originClass` / `interfaces` etc., which re-triggers the
+     *  latent `ClassDef|null`-typed-non-null SIGSEGV in {@see
+     *  Passes\EmitLlvm::classIsA} (a layout-shift landmine that comment documents).
+     *  Keeping it at the end leaves every existing field's offset untouched. */
+    public bool $isPreludeClass = false;
+
     /**
      * Width in bytes of `$prop`'s slot: 8 unless the property is declared as a
      * `#[TypeDef]` whose `repr` is narrower.

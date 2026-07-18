@@ -22,6 +22,11 @@ final class FunctionEmitFrame
     /** The fn is a closure — uniform ABI: scalar params/returns travel as
      *  tagged cells. */
     public bool $isClosure = false;
+    /** The fn is a reflection invoke trampoline (`__mc_rtramp_*`), reached only
+     *  through the indirect `__mc_refl_invoke` builtin — same uniform ABI as a
+     *  closure for the RETURN: a scalar result must be boxed to a tagged cell,
+     *  else the indirect caller reads a raw int as a cell. */
+    public bool $isTrampoline = false;
     /** The fn opened an arena scope: every `ret` must `@__mir_arena_leave` first. */
     public bool $hasArena = false;
     /** @var array<string, bool> param names — transfer skips params, which are
