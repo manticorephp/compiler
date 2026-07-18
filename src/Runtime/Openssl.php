@@ -32,6 +32,26 @@ function ctxNew(int $method): int {}
 #[Library('ssl'), Symbol('TLS_client_method')]
 function clientMethod(): int {}
 
+// const SSL_METHOD *TLS_server_method(void) — the server side of the above, for a
+// TLS listener that accepts and handshakes incoming connections.
+#[Library('ssl'), Symbol('TLS_server_method')]
+function serverMethod(): int {}
+
+// int SSL_CTX_use_certificate_chain_file(SSL_CTX *ctx, const char *file) — load the
+// server's leaf cert (plus any intermediates) from a PEM file, 1 on success.
+#[Library('ssl'), Symbol('SSL_CTX_use_certificate_chain_file')]
+function ctxUseCertChainFile(int $ctx, string $file): int {}
+
+// int SSL_CTX_use_PrivateKey_file(SSL_CTX *ctx, const char *file, int type) — load
+// the matching private key; type SSL_FILETYPE_PEM (1). 1 on success.
+#[Library('ssl'), Symbol('SSL_CTX_use_PrivateKey_file')]
+function ctxUsePrivateKeyFile(int $ctx, string $file, #[CType('int')] int $type): int {}
+
+// int SSL_accept(SSL *ssl) — the server-side handshake on an accepted fd, 1 on
+// success, <=0 on error.
+#[Library('ssl'), Symbol('SSL_accept')]
+function accept(int $ssl): int {}
+
 // void SSL_CTX_free(SSL_CTX *ctx) — SSL_new takes a ref on the ctx, so the ctx may
 // be freed right after and lives until the last SSL is freed.
 #[Library('ssl'), Symbol('SSL_CTX_free')]

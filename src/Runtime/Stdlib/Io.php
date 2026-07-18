@@ -475,9 +475,9 @@ function __mc_ctx_pack(string $s): string
 }
 
 /**
- * Unpack the KIND_CONTEXT blob into [method, header, content, verifyPeer,
- * verifyName]. The two flags are '1'/'0' strings so the result is a homogeneous
- * string array (no cell), which the caller turns back into bools.
+ * Unpack the KIND_CONTEXT blob into [method, header, content, localCert, localPk,
+ * verifyPeer, verifyName]. The two flags are '1'/'0' strings so the result is a
+ * homogeneous string array (no cell), which callers turn back into bools.
  * @return string[]
  */
 function __mc_ctx_unpack(string $blob): array
@@ -486,9 +486,9 @@ function __mc_ctx_unpack(string $blob): array
     $n = \strlen($blob);
     /** @var string[] $out */
     $out = [];
-    // Three length-prefixed strings: method, header, content.
+    // Five length-prefixed strings: method, header, content, local_cert, local_pk.
     $i = 0;
-    while ($i < 3) {
+    while ($i < 5) {
         $bar = \strpos($blob, '|', $pos);
         if ($bar === false) {
             $out[] = '';
@@ -547,6 +547,8 @@ function stream_context_create(?array $options = null, ?array $params = null): \
     $method = 'GET';
     $header = '';
     $content = '';
+    $localCert = '';
+    $localPk = '';
     $verifyPeer = '1';
     $verifyName = '1';
     if ($options !== null) {
@@ -561,9 +563,15 @@ function stream_context_create(?array $options = null, ?array $params = null): \
             // Only an explicit `false` turns verification off; the default is on.
             if (isset($s['verify_peer']) && $s['verify_peer'] === false) { $verifyPeer = '0'; }
             if (isset($s['verify_peer_name']) && $s['verify_peer_name'] === false) { $verifyName = '0'; }
+            // Server certificate/key (a TLS listener). local_pk defaults to
+            // local_cert — a combined cert+key PEM, which php also accepts.
+            if (isset($s['local_cert'])) { $localCert = (string)$s['local_cert']; }
+            $localPk = $localCert;
+            if (isset($s['local_pk'])) { $localPk = (string)$s['local_pk']; }
         }
     }
     $blob = \__mc_ctx_pack($method) . \__mc_ctx_pack($header) . \__mc_ctx_pack($content)
+          . \__mc_ctx_pack($localCert) . \__mc_ctx_pack($localPk)
           . $verifyPeer . $verifyName;
     $r = new \Resource(\Resource::KIND_CONTEXT, 'stream-context', 0);
     $r->rbuf = $blob;
@@ -582,7 +590,24 @@ function __mc_http_get_with_context(string $path, \Resource $context)
         return \__mc_http_get($path);
     }
     $o = \__mc_ctx_unpack($context->rbuf);
-    return \__mc_http_get($path, 20, $o[0], $o[1], $o[2], $o[3] === '1', $o[4] === '1');
+    // [0]=method [1]=header [2]=content, [3]=local_cert [4]=local_pk (server-only),
+    // [5]=verify_peer [6]=verify_peer_name.
+    return \__mc_http_get($path, 20, $o[0], $o[1], $o[2], $o[5] === '1', $o[6] === '1');
+}
+
+/**
+ * A stream context's server cert + private key paths (ssl.local_cert /
+ * ssl.local_pk), for a TLS listener. Empty strings when absent. $context is
+ * \Resource-typed on purpose (a cell would deref the boxed handle).
+ * @return string[]
+ */
+function __mc_ctx_server_certs(\Resource $context): array
+{
+    if ($context->kind !== \Resource::KIND_CONTEXT) {
+        return ['', ''];
+    }
+    $o = \__mc_ctx_unpack($context->rbuf);
+    return [$o[3], $o[4]];
 }
 
 /**
@@ -633,6 +658,12 @@ function fclose(\Resource $stream): bool
     if ($stream->kind === \Resource::KIND_TLS && $stream->ssl !== 0 && !$stream->closed) {
         \Runtime\Openssl\shutdown($stream->ssl);
         \Runtime\Openssl\sslFree($stream->ssl);
+        $stream->ssl = 0;
+    }
+    // A KIND_SOCKET with $ssl set is a TLS LISTENER: $ssl is the shared server
+    // SSL_CTX (not a connection), so free the ctx, not an SSL.
+    if ($stream->kind === \Resource::KIND_SOCKET && $stream->ssl !== 0 && !$stream->closed) {
+        \Runtime\Openssl\ctxFree($stream->ssl);
         $stream->ssl = 0;
     }
     return $stream->close();

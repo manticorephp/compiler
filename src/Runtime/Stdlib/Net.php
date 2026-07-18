@@ -317,6 +317,65 @@ function __mc_transport_connect(string $scheme, string $host, int $port)
 }
 
 /**
+ * Build a server SSL_CTX from a PEM cert (+ chain) and private key, or 0 on
+ * failure. Reused across every accepted connection (SSL_new refs it), so it is
+ * built once at listen time and lives until the listener is closed. $pk may equal
+ * $cert (a combined cert+key PEM).
+ */
+function __mc_tls_server_ctx(string $cert, string $pk): int
+{
+    $method = \Runtime\Openssl\serverMethod();
+    if ($method === 0) {
+        return 0;
+    }
+    $ctx = \Runtime\Openssl\ctxNew($method);
+    if ($ctx === 0) {
+        return 0;
+    }
+    // 1 = SSL_FILETYPE_PEM. use_certificate_chain_file also picks up intermediates.
+    if (\Runtime\Openssl\ctxUseCertChainFile($ctx, $cert) !== 1
+        || \Runtime\Openssl\ctxUsePrivateKeyFile($ctx, $pk, 1) !== 1) {
+        \Runtime\Openssl\ctxFree($ctx);
+        return 0;
+    }
+    return $ctx;
+}
+
+/**
+ * Mark $listener as a TLS server by parking its server SSL_CTX in $ssl — a
+ * non-zero $ssl on a LISTENING socket means "SSL_accept every client with this
+ * ctx". $listener is \Resource-typed so the write does not deref a boxed handle
+ * (the __mc_tcp_listen result is a \Resource|false cell — the Ф4 trap).
+ */
+function __mc_mark_tls_listener(\Resource $listener, int $ctx): void
+{
+    $listener->ssl = $ctx;
+}
+
+/**
+ * Server-side TLS handshake on a freshly accept(2)ed fd, using the listener's
+ * shared server ctx. Returns a KIND_TLS \Resource, or false (fd closed).
+ * @return \Resource|false
+ */
+function __mc_tls_accept(int $serverCtx, int $fd)
+{
+    $ssl = \Runtime\Openssl\sslNew($serverCtx);   // refs the ctx; freed with the SSL
+    if ($ssl === 0) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    if (\Runtime\Openssl\setFd($ssl, $fd) !== 1
+        || \Runtime\Openssl\accept($ssl) !== 1) {
+        \Runtime\Openssl\sslFree($ssl);
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    $r = new \Resource(\Resource::KIND_TLS, 'stream', $fd);
+    $r->ssl = $ssl;
+    return $r;
+}
+
+/**
  * Open a TCP connection. php.net's signature, including the by-ref diagnostics.
  *
  * $timeout is accepted and currently IGNORED: the connect is blocking, so the
@@ -496,12 +555,16 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
 }
 
 /**
- * php.net's stream_socket_server, tcp:// only.
+ * php.net's stream_socket_server. Accepts tcp://, ssl:// or tls:// (and a bare
+ * host:port = tcp). An ssl:// / tls:// listener needs a $context carrying
+ * ssl.local_cert (and optionally ssl.local_pk); each accepted connection is then
+ * handshaken server-side. udp:// / unix:// are not implemented.
+ *
  * @param int $error_code
  * @param string $error_message
  * @return \Resource|false
  */
-function stream_socket_server(string $address, &$error_code = 0, &$error_message = '')
+function stream_socket_server(string $address, &$error_code = 0, &$error_message = '', ?\Resource $context = null)
 {
     $error_code = 0;
     $error_message = '';
@@ -509,10 +572,10 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
     $scheme = 'tcp';
     $sep = \strpos($addr, '://');
     if ($sep !== false) {
-        $scheme = \substr($addr, 0, $sep);
+        $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp') {
+    if ($scheme !== 'tcp' && $scheme !== 'ssl' && $scheme !== 'tls') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
@@ -528,11 +591,42 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
     }
+    $secure = ($scheme === 'ssl' || $scheme === 'tls');
+    // Resolve the server cert BEFORE binding, so a misconfigured TLS server fails
+    // fast without leaving a socket open.
+    $cert = '';
+    $pk = '';
+    if ($secure) {
+        if ($context === null) {
+            $error_code = -1;
+            $error_message = 'tls server needs a context with ssl.local_cert';
+            return false;
+        }
+        $certs = \__mc_ctx_server_certs($context);
+        $cert = $certs[0];
+        $pk = $certs[1];
+        if ($cert === '') {
+            $error_code = -1;
+            $error_message = 'tls server needs ssl.local_cert in the context';
+            return false;
+        }
+    }
     $s = \__mc_tcp_listen($host, $port);
     if ($s === false) {
         $error_code = -1;
         $error_message = 'cannot listen on ' . $address;
         return false;
+    }
+    if ($secure) {
+        $ctx = \__mc_tls_server_ctx($cert, $pk);
+        if ($ctx === 0) {
+            $error_code = -1;
+            $error_message = 'cannot load cert/key for ' . $address;
+            \fclose($s);
+            return false;
+        }
+        // $s is \Resource|false (a CELL) — write ssl through a typed helper.
+        \__mc_mark_tls_listener($s, $ctx);
     }
     return $s;
 }
@@ -557,6 +651,11 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
     $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
     if ($fd < 0) {
         return false;
+    }
+    // A TLS listener parks its server ctx in $ssl (see __mc_mark_tls_listener):
+    // handshake the accepted fd server-side and hand back a TLS stream.
+    if ($server->ssl !== 0) {
+        return \__mc_tls_accept($server->ssl, $fd);
     }
     return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
 }
