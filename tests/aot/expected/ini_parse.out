@@ -1,0 +1,52 @@
+--- NORMAL, no sections ---
+Array
+(
+    [port] => 8080
+    [host] => local host
+    [debug] => 1
+    [quiet] => 
+    [name] => app
+    [flag] => 
+    [arr] => Array
+        (
+            [0] => x
+            [1] => y
+        )
+
+)
+--- NORMAL, sections ---
+Array
+(
+    [port] => 8080
+    [host] => local host
+    [debug] => 1
+    [quiet] => 
+    [db] => Array
+        (
+            [name] => app
+            [flag] => 
+            [arr] => Array
+                (
+                    [0] => x
+                    [1] => y
+                )
+
+        )
+
+)
+--- TYPED, sections ---
+Array
+(
+    [n] => 42
+    [f] => 1.5
+    [b] => 1
+    [x] => 
+    [s] => hello
+)
+--- RAW ---
+Array
+(
+    [a] => true
+    [b] => x y
+    [c] => d
+)

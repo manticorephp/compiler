@@ -1058,6 +1058,36 @@ final class LowerFromAst implements Pass
         return false;
     }
 
+    /** Function-level `#[CellArg('a','b')]` → names of element-consuming array
+     *  params (the portable form; a param attribute alone doesn't survive .sig). */
+    private function cellArgParamNames(array $attributes): array
+    {
+        $out = [];
+        foreach ($attributes as $attr) {
+            $name = \ltrim($this->attrName($attr), '\\');
+            if ($name !== 'CellArg' && $name !== 'Attr\\CellArg'
+                && $name !== 'Manticore\\Attr\\CellArg') { continue; }
+            foreach ($this->attrArgs($attr) as $arg) {
+                if ($arg->kind === 'StringLiteral') { $out[$this->strLitValue($arg)] = true; }
+            }
+        }
+        return $out;
+    }
+
+    /** A param-position `#[CellArg]` (no arg — marks THIS param). */
+    private function paramHasCellArgAttr(\Parser\Ast\Param $p): bool
+    {
+        foreach ($p->attributes as $attr) {
+            $name = \ltrim($this->attrName($attr), '\\');
+            if ($name === 'CellArg' || $name === 'Attr\\CellArg'
+                || $name === 'Manticore\\Attr\\CellArg') { return true; }
+        }
+        return false;
+    }
+
+    /** Param->cellArg via a typed param (self-host offset), for the .sig-carried flag. */
+    private function paramCellArg(\Parser\Ast\Param $p): bool { return $p->cellArg; }
+
     private function ffiSymbolOf(array $attributes): ?string
     {
         foreach ($attributes as $attr) {

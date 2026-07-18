@@ -97,6 +97,7 @@ trait LowerFns
         // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side
         // equivalent.
         $refOutNames = $this->refOutParamNames($decl->attributes);
+        $cellArgNames = $this->cellArgParamNames($decl->attributes);
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
@@ -119,6 +120,7 @@ trait LowerFns
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
             $fp->refOut = $outType !== null || isset($refOutNames[$p->name])
                 || $this->paramHasRefOutAttr($p);
+            $fp->cellArg = isset($cellArgNames[$p->name]) || $this->paramHasCellArgAttr($p);
             $params[] = $fp;
         }
         $this->currentLowerClass = '';
@@ -188,6 +190,7 @@ trait LowerFns
         // params (survives the .sig + self-host parse; a param-position marker
         // does not). `@param-out T $x` is the PHPStan-compatible equivalent.
         $refOutNames = $this->refOutParamNames($decl->attributes);
+        $cellArgNames = $this->cellArgParamNames($decl->attributes);
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
@@ -217,6 +220,10 @@ trait LowerFns
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fnp->refOut = $outType !== null || isset($refOutNames[$p->name]);
+            // The `.sig`-carried CellArg flag (declsFromJson set $p->cellArg) is
+            // the cross-module signal: a consumer sees only the interface, so this
+            // is how fputcsv's element-consuming `$fields` reaches the caller.
+            $fnp->cellArg = $this->paramCellArg($p) || isset($cellArgNames[$p->name]);
             $params[] = $fnp;
         }
         return new FunctionDef(

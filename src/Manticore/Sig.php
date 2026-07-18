@@ -80,6 +80,7 @@ final class Sig
                 . ",\"type\":" . self::jsonStr(self::encodeType($p->type))
                 . ",\"byref\":" . ($p->byRef ? "true" : "false")
                 . ",\"refout\":" . ($p->refOut ? "true" : "false")
+                . ",\"cellarg\":" . ($p->cellArg ? "true" : "false")
                 . ",\"variadic\":" . ($p->variadic ? "true" : "false");
             $def = self::encodeDefault($p->default);
             if ($def !== "") { $out = $out . ",\"default\":" . $def; }
@@ -191,6 +192,7 @@ final class Sig
                 $pType = (string)$p["type"];
                 $byref = self::truthy($p["byref"] ?? false);
                 $refout = self::truthy($p["refout"] ?? false);
+                $cellarg = self::truthy($p["cellarg"] ?? false);
                 $variadic = self::truthy($p["variadic"] ?? false);
                 $default = self::decodeDefault($p, $span);
                 $ap = new AstParam(
@@ -205,6 +207,7 @@ final class Sig
                     span: $span,
                 );
                 $ap->refOut = $refout;
+                $ap->cellArg = $cellarg;
                 $params[] = $ap;
             }
             $decls[] = new FunctionDecl(

@@ -17,6 +17,9 @@ final class FunctionSignatures
     public array $refParams = [];
     /** @var array<string, bool[]> fn name → which params are tagged (cell) */
     public array $taggedParams = [];
+    /** @var array<string, bool[]> fn name → which array params are `#[CellArg]`
+     *  (element-consuming): a concrete-element array arg is cellified here. */
+    public array $cellArgParams = [];
     /** @var array<string, Type[]> fn name → per-param declared type */
     public array $paramTypes = [];
     /** @var array<string, array<int, ?Node>> fn name → per-param default node */

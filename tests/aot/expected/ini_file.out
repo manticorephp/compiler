@@ -1,0 +1,16 @@
+Array
+(
+    [title] => Example
+    [server] => Array
+        (
+            [host] => localhost
+            [port] => 8080
+            [aliases] => Array
+                (
+                    [0] => a
+                    [1] => b
+                )
+
+        )
+
+)

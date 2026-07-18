@@ -834,6 +834,20 @@ trait InferScans
                 && $se->value->type->kind === Type::KIND_CELL) {
                 $found[$se->array->name] = true;
             }
+            // Nested store `$a[k][...] = v` (any depth): the base is a chain of
+            // ArrayAccess rooted at a local, so that local holds ARRAYS
+            // (containers) — its element is a cell. Without this the local's
+            // element stays UNKNOWN and the nested write-back stores the inner
+            // array ptr RAW ({@see EmitLlvmBuiltins::vecWriteBack}) while var_dump
+            // reads it back as a cell → garbage float. `$a[k][j]=v` auto-vivifies
+            // `$a[k]=[]`.
+            if ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
+                $root = $se->array->array;
+                while ($root->kind === Node::KIND_ARRAY_ACCESS) { $root = $root->array; }
+                if ($root->kind === Node::KIND_LOAD_LOCAL && $root->type->isArray()) {
+                    $found[$root->name] = true;
+                }
+            }
         }
         foreach (Walk::children($n) as $c) { $this->scanLocalElemNode($c, $found); }
     }

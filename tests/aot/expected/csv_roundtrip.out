@@ -1,0 +1,14 @@
+--- raw file ---
+name,note,n
+bob,"hi, there",1
+ann,"she said ""hi""",2
+cy,"multi
+line",3
+nums,42,3.5
+--- parsed back ---
+name|note|n
+bob|hi, there|1
+ann|she said "hi"|2
+cy|multi
+line|3
+nums|42|3.5

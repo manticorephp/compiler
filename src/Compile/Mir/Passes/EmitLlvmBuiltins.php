@@ -1636,9 +1636,29 @@ trait EmitLlvmBuiltins
     private function biFloatval(array $args): string
     {
         $out = $this->emitNode($args[0]);
-        if ($args[0]->type->kind === Type::KIND_FLOAT) {
+        $ak = $args[0]->type->kind;
+        if ($ak === Type::KIND_FLOAT) {
             $out .= $this->coerceTo('double');
             $this->lastValueType = 'double';
+            return $out;
+        }
+        // A STRING parses via strtod (`floatval("1.5")` → 1.5) — sitofp of the
+        // raw string POINTER would hand back garbage. A CELL/UNKNOWN routes
+        // through the tagged decoder (which itself strtod's a string cell).
+        if ($ak === Type::KIND_STRING) {
+            $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+            $out .= $this->coerceToPtr();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ", ptr null)\n";
+            $this->lastValue = $reg; $this->lastValueType = 'double';
+            return $out;
+        }
+        if ($ak === Type::KIND_CELL || $ak === Type::KIND_UNKNOWN) {
+            $this->rt->needsTaggedToFloat = true;
+            $out .= $this->coerceToI64();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
         }
         $out .= $this->coerceToI64();
@@ -3929,9 +3949,15 @@ trait EmitLlvmBuiltins
             $out .= $parentCell ? $this->cellToPtr() : $this->coerceToPtr();
             $parentPtr = $this->lastValue;
             // The inner array is stored back as the parent's element; box it
-            // when the parent holds cells (mixed/cell element type).
-            $innerCell = $arrNode->array->type->element !== null
-                && $arrNode->array->type->element->kind === Type::KIND_CELL;
+            // when the parent holds cells (mixed/cell element type). A parent
+            // that is ITSELF a cell (a heterogeneous sub-array reached through
+            // one unbox — `$r["db"]["arr"][]=…` where `$r["db"]` mixes a scalar
+            // and this inner array) holds cell elements too; the read side
+            // unmasks it as a cell, so the write-back must box or the reader
+            // decodes a raw ptr as a tagged cell → garbage float.
+            $innerCell = $parentCell
+                || ($arrNode->array->type->element !== null
+                    && $arrNode->array->type->element->kind === Type::KIND_CELL);
             $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
             $keyIsCell = $arrNode->index->type->kind === Type::KIND_CELL;

@@ -1097,6 +1097,17 @@ trait EmitLlvmModule
         if ($this->frame->returnType !== null
             && $this->frame->returnType->kind === Type::KIND_CELL
             && $v->type->kind !== Type::KIND_CELL) {
+            // +1 the payload of a BORROWED value before it is boxed into the
+            // returned cell — the caller (its array slot / local) co-owns it by
+            // pointer, exactly like a store into a cell array ({@see
+            // retainCellPayload}). Without this a `: mixed`/union fn returning a
+            // string PARAM (`__mc_ini_value` → `$v`) hands back a cell over a
+            // buffer the caller's arg temp then frees → the assoc scramble /
+            // borrowed-buffer UAF. Gated by isBorrowedObjReturn so owned
+            // producers (call/new/concat/owned-local) keep their fresh +1.
+            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+                $out .= $this->retainCellPayload($v);
+            }
             $out .= $this->boxToCell($v->type);
         } else {
             // A cell value returned where the declared type is concrete

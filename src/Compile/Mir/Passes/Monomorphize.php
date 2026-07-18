@@ -343,6 +343,7 @@ final class Monomorphize implements Pass
             }
             $np = new Param($p->name, $t, $p->byRef, $p->variadic, $p->default);
             $np->refOut = $p->refOut;
+            $np->cellArg = $p->cellArg;
             $np->arrayHinted = $p->arrayHinted;
             $newParams[] = $np;
         }
