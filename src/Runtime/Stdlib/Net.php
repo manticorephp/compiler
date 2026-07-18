@@ -164,14 +164,18 @@ function __mc_sock_error(int $fd): int
  *
  * @return \Resource|false
  */
-function __mc_tcp_connect(string $host, int $port)
+function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
 {
+    // $wantType is the socket type to select from the resolver's list: 1
+    // SOCK_STREAM (tcp), 2 SOCK_DGRAM (udp) — both values are the same on every
+    // target. A DGRAM connect() sets the default peer, so send()/recv() then work
+    // without naming the address each call.
     $res = \Runtime\Libc\calloc(8, 1);
     if ($res === null) {
         return false;
     }
     // hints = NULL: see the file header. The result list then also carries
-    // DGRAM/RAW entries, which the ai_socktype filter below drops.
+    // the OTHER socktypes, which the ai_socktype filter below drops.
     $rc = \Runtime\Libc\sys_getaddrinfo($host, (string)$port, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
@@ -187,7 +191,7 @@ function __mc_tcp_connect(string $host, int $port)
     $ai = $head;
     while ($ai !== 0) {
         $sockType = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(1));
-        if ($sockType === \__mc_net_const(0)) {
+        if ($sockType === $wantType) {
             $family = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(0));
             $proto = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(2));
             $cand = \Runtime\Libc\sys_socket($family, $sockType, $proto);
@@ -313,7 +317,87 @@ function __mc_transport_connect(string $scheme, string $host, int $port)
     if ($scheme === 'tcp' || $scheme === '') {
         return \__mc_tcp_connect($host, $port);
     }
+    if ($scheme === 'udp') {
+        return \__mc_tcp_connect($host, $port, 2);   // 2 = SOCK_DGRAM
+    }
+    if ($scheme === 'unix') {
+        return \__mc_unix_connect($host);            // $host carries the path
+    }
     return false;
+}
+
+/**
+ * Fill a zeroed >=128-byte buffer as a sockaddr_un for $path and return its
+ * addrlen. AF_UNIX is 1 and sun_path sits at offset 2 on BOTH hosts — the only
+ * divergence is the family field: Darwin splits offset 0 into sun_len(u8) +
+ * sun_family(u8)@1, glibc/musl use a u16 sun_family@0. (This is the one place net
+ * builds a sockaddr by hand — getaddrinfo does not do AF_UNIX.)
+ */
+function __mc_unix_fill(\Ffi\Ptr $buf, string $path): int
+{
+    $plen = \strlen($path);
+    if (\__mc_host_is_darwin()) {
+        \poke_i8($buf, 0, 2 + $plen + 1);   // sun_len
+        \poke_i8($buf, 1, 1);               // sun_family = AF_UNIX
+    } else {
+        \poke_i16($buf, 0, 1);              // sun_family = AF_UNIX (u16)
+    }
+    for ($i = 0; $i < $plen; $i = $i + 1) {
+        \poke_i8($buf, 2 + $i, \ord($path[$i]));   // sun_path (buffer pre-zeroed ⇒ NUL-terminated)
+    }
+    return 2 + $plen + 1;                   // offsetof(sun_path) + strlen + NUL
+}
+
+/**
+ * Connect a Unix-domain stream socket to the filesystem $path, or false.
+ * @return \Resource|false
+ */
+function __mc_unix_connect(string $path)
+{
+    $fd = \Runtime\Libc\sys_socket(1, 1, 0);   // AF_UNIX(1), SOCK_STREAM(1), proto 0
+    if ($fd < 0) {
+        return false;
+    }
+    $buf = \Runtime\Libc\calloc(128, 1);
+    if ($buf === null) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    $len = \__mc_unix_fill($buf, $path);
+    $rc = \Runtime\Libc\sys_connect($fd, $buf, $len);
+    \Runtime\Libc\free($buf);
+    if ($rc !== 0) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+}
+
+/**
+ * Bind + listen a Unix-domain stream socket at $path, or false. Like php, a stale
+ * socket file is NOT auto-removed — bind fails (EADDRINUSE) if $path exists.
+ * @return \Resource|false
+ */
+function __mc_unix_listen(string $path, int $backlog = 16)
+{
+    $fd = \Runtime\Libc\sys_socket(1, 1, 0);
+    if ($fd < 0) {
+        return false;
+    }
+    $buf = \Runtime\Libc\calloc(128, 1);
+    if ($buf === null) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    $len = \__mc_unix_fill($buf, $path);
+    $ok = \Runtime\Libc\sys_bind($fd, $buf, $len) === 0
+        && \Runtime\Libc\sys_listen($fd, $backlog) === 0;
+    \Runtime\Libc\free($buf);
+    if (!$ok) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
 }
 
 /**
@@ -402,7 +486,8 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
         $scheme = \strtolower(\substr($hostname, 0, $sep));
         $host = \substr($hostname, $sep + 3, \strlen($hostname) - ($sep + 3));
     }
-    if ($port < 0) {
+    // unix:// carries a path, not a port — the port check does not apply.
+    if ($port < 0 && $scheme !== 'unix') {
         $error_code = -1;
         $error_message = 'no port specified';
         return false;
@@ -438,10 +523,19 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
         $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp' && $scheme !== 'ssl' && $scheme !== 'tls') {
+    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls' && $scheme !== 'unix') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
+    }
+    // unix:// carries a filesystem path, not host:port — connect straight to it.
+    if ($scheme === 'unix') {
+        $sock = \__mc_unix_connect($addr);
+        if ($sock === false) {
+            $error_code = -1;
+            $error_message = 'cannot connect to ' . $address;
+        }
+        return $sock;
     }
     // Rightmost colon: an IPv6 literal is full of them, and php accepts
     // `[::1]:80` for exactly that reason.
@@ -509,7 +603,7 @@ function __mc_sock_port(int $fd): int
  *
  * @return \Resource|false
  */
-function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
+function __mc_tcp_listen(string $host, int $port, int $backlog = 16, int $wantType = 1)
 {
     $res = \Runtime\Libc\calloc(8, 1);
     if ($res === null) {
@@ -526,18 +620,21 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
         return false;
     }
 
+    // A datagram server binds but does NOT listen() (listen is stream-only, and
+    // fails ENOTSUP on a DGRAM socket) — it recvfrom()s straight off the bound fd.
+    $isDgram = ($wantType === 2);
     $fd = -1;
     $ai = $head;
     while ($ai !== 0) {
-        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(1)) === \__mc_net_const(0)) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(1)) === $wantType) {
             $family = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(0));
             $proto = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(2));
-            $cand = \Runtime\Libc\sys_socket($family, \__mc_net_const(0), $proto);
+            $cand = \Runtime\Libc\sys_socket($family, $wantType, $proto);
             if ($cand >= 0) {
                 $a = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
                 if (\Runtime\Libc\sys_bind($cand, \int_to_ptr($a), $alen) === 0
-                    && \Runtime\Libc\sys_listen($cand, $backlog) === 0) {
+                    && ($isDgram || \Runtime\Libc\sys_listen($cand, $backlog) === 0)) {
                     $fd = $cand;
                     break;
                 }
@@ -555,16 +652,17 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
 }
 
 /**
- * php.net's stream_socket_server. Accepts tcp://, ssl:// or tls:// (and a bare
- * host:port = tcp). An ssl:// / tls:// listener needs a $context carrying
- * ssl.local_cert (and optionally ssl.local_pk); each accepted connection is then
- * handshaken server-side. udp:// / unix:// are not implemented.
+ * php.net's stream_socket_server. Accepts tcp://, udp://, ssl:// or tls:// (and a
+ * bare host:port = tcp). $flags matches php (STREAM_SERVER_BIND | _LISTEN by
+ * default); a udp:// server passes STREAM_SERVER_BIND alone. An ssl:// / tls://
+ * listener needs a $context carrying ssl.local_cert (and optionally ssl.local_pk);
+ * each accepted connection is then handshaken server-side. unix:// unimplemented.
  *
  * @param int $error_code
  * @param string $error_message
  * @return \Resource|false
  */
-function stream_socket_server(string $address, &$error_code = 0, &$error_message = '', ?\Resource $context = null)
+function stream_socket_server(string $address, &$error_code = 0, &$error_message = '', int $flags = 12, ?\Resource $context = null)
 {
     $error_code = 0;
     $error_message = '';
@@ -575,10 +673,19 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
         $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp' && $scheme !== 'ssl' && $scheme !== 'tls') {
+    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls' && $scheme !== 'unix') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
+    }
+    // unix:// carries a filesystem path — bind + listen straight on it.
+    if ($scheme === 'unix') {
+        $u = \__mc_unix_listen($addr);
+        if ($u === false) {
+            $error_code = -1;
+            $error_message = 'cannot bind ' . $address;
+        }
+        return $u;
     }
     $colon = \strrpos($addr, ':');
     if ($colon === false) {
@@ -590,6 +697,16 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
     $port = (int)\substr($addr, $colon + 1, \strlen($addr) - ($colon + 1));
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
+    }
+    // A udp:// server binds a datagram socket (no listen/accept); reads come
+    // straight off it with recvfrom via the normal fread/fgets path.
+    if ($scheme === 'udp') {
+        $u = \__mc_tcp_listen($host, $port, 16, 2);
+        if ($u === false) {
+            $error_code = -1;
+            $error_message = 'cannot bind ' . $address;
+        }
+        return $u;
     }
     $secure = ($scheme === 'ssl' || $scheme === 'tls');
     // Resolve the server cert BEFORE binding, so a misconfigured TLS server fails
@@ -846,9 +963,10 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
 
         $resp = \__mc_http_read_response($sock, $maxRedirects > 0);
         \fclose($sock);
-        // [0] = body|false, [1] = redirect target ('' = none)
+        // [0] = body|false, [1] = redirect target ('' = none), [2] = status code
         if ($resp[1] !== '' && $hops < $maxRedirects) {
             $hops = $hops + 1;
+            $code = (int)$resp[2];
             $location = $resp[1];
             // A relative Location is resolved against the current origin — same
             // scheme, so an https redirect stays on TLS.
@@ -857,10 +975,13 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
                           . ($location !== '' && $location[0] === '/' ? '' : '/') . $location;
             }
             $url = $location;
-            // A followed 301/302/303 becomes a bodyless GET (php's default). 307/308
-            // method preservation is debt; extra headers and verify flags persist.
-            $method = 'GET';
-            $body = '';
+            // 307/308 preserve the method AND body (RFC 7538/7231); 301/302/303
+            // are followed as a bodyless GET, which is php's — and every browser's —
+            // behaviour. Extra headers and verify flags persist across every hop.
+            if ($code !== 307 && $code !== 308) {
+                $method = 'GET';
+                $body = '';
+            }
             continue;
         }
         return $resp[0];
@@ -893,7 +1014,7 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
     {
         $status = \fgets($sock);
         if ($status === false) {
-            return [false, ''];
+            return [false, '', 0];
         }
         $headers = [];
         $headers[] = \rtrim($status, "\r\n");
@@ -934,7 +1055,9 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
         }
 
         if ($followable && $code >= 300 && $code < 400 && $location !== '') {
-            return [false, $location];
+            // [2] = the 3xx code so the caller can preserve the method+body on a
+            // 307/308 and downgrade to GET on a 301/302/303.
+            return [false, $location, $code];
         }
 
         if ($chunked) {
@@ -965,8 +1088,8 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
         // php: a non-2xx makes file_get_contents() return false — the error body
         // is NOT handed back (only ignore_errors in a context changes that).
         if ($code < 200 || $code >= 300) {
-            return [false, ''];
+            return [false, '', $code];
         }
-        return [$body, ''];
+        return [$body, '', $code];
     }
 }

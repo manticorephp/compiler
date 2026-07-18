@@ -322,6 +322,11 @@ trait LowerPrelude
             'SCANDIR_SORT_NONE' => 2,
             // parse_ini_* scanner modes
             'INI_SCANNER_NORMAL' => 0, 'INI_SCANNER_RAW' => 1, 'INI_SCANNER_TYPED' => 2,
+            // stream_socket_server / _client flags — php's own values. A udp://
+            // server passes STREAM_SERVER_BIND alone (listen is stream-only).
+            'STREAM_SERVER_BIND' => 4, 'STREAM_SERVER_LISTEN' => 8,
+            'STREAM_CLIENT_CONNECT' => 4, 'STREAM_CLIENT_ASYNC_CONNECT' => 2,
+            'STREAM_CLIENT_PERSISTENT' => 1,
             // glob: php's OWN values, not the host's (php has carried its own
             // glob since 8.3) — GLOB_NOESCAPE is 0x1000 where Darwin's header
             // says 0x2000, and no libc has GLOB_ONLYDIR = 0x40000000. Host
