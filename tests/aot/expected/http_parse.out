@@ -1,0 +1,58 @@
+string(10) "hello-body"
+string(0) ""
+array(3) {
+  [0]=>
+  string(15) "HTTP/1.1 200 OK"
+  [1]=>
+  string(24) "Content-Type: text/plain"
+  [2]=>
+  string(18) "Content-Length: 10"
+}
+string(9) "Wikipedia"
+string(3) "abc"
+string(10) "to-the-end"
+bool(false)
+array(2) {
+  [0]=>
+  string(22) "HTTP/1.1 404 Not Found"
+  [1]=>
+  string(17) "Content-Length: 3"
+}
+bool(false)
+string(5) "/next"
+bool(false)
+string(0) ""
+array(4) {
+  [0]=>
+  string(4) "http"
+  [1]=>
+  string(11) "example.com"
+  [2]=>
+  string(2) "80"
+  [3]=>
+  string(8) "/a/b?q=1"
+}
+array(4) {
+  [0]=>
+  string(4) "http"
+  [1]=>
+  string(11) "example.com"
+  [2]=>
+  string(4) "8080"
+  [3]=>
+  string(1) "/"
+}
+array(4) {
+  [0]=>
+  string(4) "http"
+  [1]=>
+  string(11) "example.com"
+  [2]=>
+  string(2) "80"
+  [3]=>
+  string(1) "/"
+}
+array(0) {
+}
+NULL
+done
