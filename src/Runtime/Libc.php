@@ -43,6 +43,11 @@ function strlen(string $s): int {}
 #[Library('c'), Symbol('strcmp')]
 function strcmp(string $a, string $b): int {}
 
+// `char *strerror(int errnum)` — the message for an errno. The returned buffer is
+// libc's own (static/thread-local), so it is COPIED (cstr_to_str) and never freed.
+#[Library('c'), Symbol('strerror')]
+function strerror(#[CType('int')] int $errnum): Ptr {}
+
 #[Library('c'), Symbol('strncmp')]
 function strncmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 

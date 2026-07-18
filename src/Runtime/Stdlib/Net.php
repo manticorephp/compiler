@@ -170,6 +170,7 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     // SOCK_STREAM (tcp), 2 SOCK_DGRAM (udp) — both values are the same on every
     // target. A DGRAM connect() sets the default peer, so send()/recv() then work
     // without naming the address each call.
+    \__mc_net_errno(true, 0);   // clear stale errno; the walk records the real one
     $res = \Runtime\Libc\calloc(8, 1);
     if ($res === null) {
         return false;
@@ -206,6 +207,7 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
                     $fd = $cand;
                     break;
                 }
+                \__mc_net_errno(true, \__mc_errno());   // capture BEFORE close clobbers errno
                 \Runtime\Libc\sys_close($cand);
             }
         }
@@ -475,6 +477,28 @@ function __mc_tls_accept(int $serverCtx, int $fd)
  * @param string $error_message
  * @return \Resource|false
  */
+/**
+ * The last socket errno captured at a failing syscall, kept in a static so the
+ * connect walk can record it BEFORE sys_close (which would clobber errno) and the
+ * openers report a real code/message. Int static, never an array (the array-in-
+ * static boundary trap — {@see __mc_http_headers_store}).
+ */
+function __mc_net_errno(bool $write, int $val): int
+{
+    static $e = 0;
+    if ($write) { $e = $val; }
+    return $e;
+}
+
+/** strerror($errno) as an owned string ('' for 0). */
+function __mc_errno_msg(int $errno): string
+{
+    if ($errno === 0) {
+        return '';
+    }
+    return \cstr_to_str(\Runtime\Libc\strerror($errno));
+}
+
 function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_message = '', ?float $timeout = null)
 {
     $error_code = 0;
@@ -494,10 +518,14 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
     }
     $sock = \__mc_transport_connect($scheme, $host, $port);
     if ($sock === false) {
-        // php reports errno here. We have none (see the header), so report the
-        // stage that failed rather than inventing a number.
-        $error_code = -1;
-        $error_message = 'connection to ' . $host . ':' . (string)$port . ' failed';
+        // Report the real errno + strerror, as php does — a closed port gives
+        // ECONNREFUSED / "Connection refused". Falls back to a generic message
+        // when nothing set errno (e.g. name resolution failed, which is not errno).
+        $e = \__mc_net_errno(false, 0);
+        $error_code = $e;
+        $error_message = $e !== 0
+            ? \__mc_errno_msg($e)
+            : ('connection to ' . $host . ':' . (string)$port . ' failed');
         return false;
     }
     return $sock;
@@ -552,8 +580,11 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     }
     $sock = \__mc_transport_connect($scheme, $host, $port);
     if ($sock === false) {
-        $error_code = -1;
-        $error_message = 'connection to ' . $host . ':' . (string)$port . ' failed';
+        $e = \__mc_net_errno(false, 0);
+        $error_code = $e;
+        $error_message = $e !== 0
+            ? \__mc_errno_msg($e)
+            : ('connection to ' . $host . ':' . (string)$port . ' failed');
         return false;
     }
     return $sock;

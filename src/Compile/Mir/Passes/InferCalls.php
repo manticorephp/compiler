@@ -135,7 +135,7 @@ trait InferCalls
             return Type::obj('Ffi\\Ptr');
         }
         if ($n === '__mir_argc' || $n === '__mir_env_count'
-            || $n === '__mir_clock_ns') { return Type::int_(); }
+            || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         // Reflection Tier-2: an rmeta HANDLE is a raw address carried as an int

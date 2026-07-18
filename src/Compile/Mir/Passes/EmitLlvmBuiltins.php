@@ -56,6 +56,7 @@ trait EmitLlvmBuiltins
         if ($name === 'poke_i32')                     { return $this->biPoke($args, 32); }
         if ($name === 'poke_i16')                     { return $this->biPoke($args, 16); }
         if ($name === 'poke_i8')                      { return $this->biPoke($args, 8); }
+        if ($name === '__mc_errno')                   { return $this->biErrno(); }
         if ($name === '__mir_stdin')                  { return $this->biStdStream('stdin'); }
         if ($name === '__mir_stdout')                 { return $this->biStdStream('stdout'); }
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
@@ -866,6 +867,51 @@ trait EmitLlvmBuiltins
         $out = '  ' . $r . ' = call ptr @manticore_' . $stream . "()\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mc_errno()` → the current thread's errno as an int.
+     *
+     * errno is not a symbol — it is `*<accessor>()`, and the accessor is named per
+     * host: Darwin `__error()`, glibc/musl `__errno_location()`, both `int*`.
+     * Binding both by name fails AT LINK on whichever host lacks the other, so the
+     * choice moves to runtime via `extern_weak`: declare BOTH (an absent one's
+     * address is null in the loaded image), null-test `@__error`, and call whichever
+     * is present. One binary, both hosts, no per-target build and no C shim — the
+     * mechanism that also closes the stat/__xstat gap on glibc < 2.33.
+     */
+    private function biErrno(): string
+    {
+        $this->libcExtra['__error'] = 'declare extern_weak ptr @__error()';
+        $this->libcExtra['__errno_location'] = 'declare extern_weak ptr @__errno_location()';
+        $slot = $this->ssa->allocReg();
+        $out = '  ' . $slot . " = alloca ptr\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . " = icmp ne ptr @__error, null\n";
+        $dar = $this->ssa->allocLabel('errno.darwin');
+        $gli = $this->ssa->allocLabel('errno.glibc');
+        $done = $this->ssa->allocLabel('errno.done');
+        $out .= '  br i1 ' . $has . ', label %' . $dar . ', label %' . $gli . "\n";
+        $out .= $dar . ":\n";
+        $p1 = $this->ssa->allocReg();
+        $out .= '  ' . $p1 . " = call ptr @__error()\n";
+        $out .= '  store ptr ' . $p1 . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $gli . ":\n";
+        $p2 = $this->ssa->allocReg();
+        $out .= '  ' . $p2 . " = call ptr @__errno_location()\n";
+        $out .= '  store ptr ' . $p2 . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
+        $ep = $this->ssa->allocReg();
+        $out .= '  ' . $ep . ' = load ptr, ptr ' . $slot . "\n";
+        $ev = $this->ssa->allocReg();
+        $out .= '  ' . $ev . ' = load i32, ptr ' . $ep . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = sext i32 ' . $ev . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
