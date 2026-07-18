@@ -32,6 +32,23 @@ function microtime(bool $as_float = false): mixed
 }
 
 /**
+ * `microtime(true)` (literal) lowers to this so the result is a concrete `float`,
+ * not the `mixed` cell the general microtime returns — otherwise
+ * `microtime(true) - microtime(true)` is cell−cell, which the arithmetic path
+ * treats as int and truncates both floats (→ int(0)). See InlineClosures.
+ */
+function __mc_microtime_f(): float
+{
+    return (float)__mir_clock_ns(0) / 1000000000.0;
+}
+
+/** `hrtime(true)` (literal) lowers here — a concrete int (nanoseconds). */
+function __mc_hrtime_i(): int
+{
+    return __mir_clock_ns(1);
+}
+
+/**
  * The MONOTONIC clock — the one to measure an elapsed interval with (the wall
  * clock can step). `hrtime(true)` is nanoseconds as an int; the default is
  * PHP's [seconds, nanoseconds] pair.

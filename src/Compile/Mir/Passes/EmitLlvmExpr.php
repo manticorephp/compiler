@@ -1463,7 +1463,8 @@ trait EmitLlvmExpr
         // runtime tag decides — so route to __manticore_tagged_<op>: box both
         // operands, the helper promotes to float iff either is float and
         // re-boxes a cell. Only a NUMERIC cell (Type::isNumericCell, from an
-        // int|float union); a plain mixed cell never reaches here.
+        // int|float union); a plain mixed cell falls through to the integer path,
+        // which the compiler's own untyped-param arithmetic relies on.
         if ($self->type->isNumericCell()) {
             return $this->emitTaggedArith($left, $right, $intOp);
         }

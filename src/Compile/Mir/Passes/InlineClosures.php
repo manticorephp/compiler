@@ -590,6 +590,20 @@ final class InlineClosures implements Pass
         if ($fn === 'array_search' && (\count($args) === 2 || \count($args) === 3)) {
             return $this->lowerArrayQuery($args, false);
         }
+        // microtime(true) / hrtime(true) with a LITERAL true → a concrete
+        // float / int helper. The general functions return `mixed`, and
+        // `microtime(true) - microtime(true)` would then be cell−cell, which the
+        // arithmetic path treats as int and truncates both floats (→ int(0)). A
+        // concrete-typed result makes the subtraction a real float op.
+        if (($fn === 'microtime' || $fn === 'hrtime') && \count($args) === 1) {
+            $a0 = $this->node($args[0]);
+            if ($a0->kind === Node::KIND_BOOL_CONST && $a0->value === true) {
+                if ($fn === 'microtime') {
+                    return new Call('__mc_microtime_f', [], Type::float_());
+                }
+                return new Call('__mc_hrtime_i', [], Type::int_());
+            }
+        }
         return null;
     }
 
