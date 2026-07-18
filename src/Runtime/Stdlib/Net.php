@@ -132,6 +132,40 @@ function __mc_poll_one(int $fd, bool $forWrite, int $timeoutMs): int
 }
 
 /**
+ * php.net's stream_set_timeout: bound how long a read on $stream waits for data.
+ * 0/0 keeps the default (php's default_socket_timeout, 60s); a positive value caps
+ * each read at that long, after which the read returns empty and
+ * stream_get_meta_data()['timed_out'] is true.
+ */
+function stream_set_timeout(\Resource $stream, int $seconds, int $microseconds = 0): bool
+{
+    $ms = $seconds * 1000 + \intdiv($microseconds, 1000);
+    $stream->rtimeoutMs = $ms > 0 ? $ms : 0;
+    return true;
+}
+
+/**
+ * Wait up to $timeoutMs for $fd to be readable, for a bounded blocking read.
+ * Returns >0 (proceed to recv — data, or a POLLHUP whose recv drains the tail and
+ * then reports EOF), 0 (timed out), <0 (poll error — the caller proceeds to recv
+ * and lets it report). Unlike __mc_poll_one this does NOT fold POLLHUP into an
+ * error: at EOF the last bytes must still be read.
+ */
+function __mc_poll_readable(int $fd, int $timeoutMs): int
+{
+    $pfd = \Runtime\Libc\calloc(8, 1);
+    if ($pfd === null) {
+        return 1;   // cannot poll ⇒ do not turn a read into a hang; just recv
+    }
+    \poke_i32($pfd, 0, $fd);
+    \poke_i16($pfd, 4, \__mc_net_const(1));   // POLLIN
+    \poke_i16($pfd, 6, 0);
+    $rc = \Runtime\Libc\sys_poll($pfd, 1, $timeoutMs);
+    \Runtime\Libc\free($pfd);
+    return $rc;
+}
+
+/**
  * The pending error on a socket, via getsockopt(SO_ERROR) — 0 when there is
  * none. This is the errno-free way to learn WHY a connect failed: there is no
  * errno binding (Darwin exports `__error()`, glibc `__errno_location()`, so

@@ -212,8 +212,28 @@ function __mc_transport_send(\Resource $s, string $data, int $n): int
 }
 
 /**
+ * Wait (bounded) for a network stream to be readable before a blocking recv, so a
+ * hung peer cannot block forever. Returns 1 to proceed, 0 on timeout (records
+ * $timedOut). For TLS, buffered plaintext (SSL_pending) counts as readable — the
+ * fd may be idle while the engine already holds data.
+ */
+function __mc_wait_read(\Resource $s): int
+{
+    if ($s->kind === \Resource::KIND_TLS && \Runtime\Openssl\pending($s->ssl) > 0) {
+        return 1;
+    }
+    $to = $s->rtimeoutMs > 0 ? $s->rtimeoutMs : 60000;   // php's default_socket_timeout
+    if (\__mc_poll_readable($s->addr, $to) === 0) {
+        $s->timedOut = true;
+        return 0;
+    }
+    return 1;   // readable, POLLHUP (recv drains + reports EOF), or poll error
+}
+
+/**
  * Pull ONE chunk from the socket into the buffer. Returns bytes added; 0 means
- * the peer closed (recorded as eof — a bare fd has no FILE* to remember it).
+ * the peer closed OR the read timed out (both stop the reader; feof vs timed_out
+ * distinguishes them).
  *
  * ⚠ THE ONLY BLOCKING CALL in the stream path. See the note above.
  */
@@ -221,6 +241,9 @@ function __mc_stream_fill(\Resource $s, int $want): int
 {
     if ($want < 4096) {
         $want = 4096;   // a syscall costs the same for 1 byte or 4 KiB
+    }
+    if (\__mc_wait_read($s) === 0) {
+        return 0;   // timed out — do not block on recv
     }
     $buf = \Runtime\Libc\calloc($want + 1, 1);
     if ($buf === null) {
@@ -258,6 +281,9 @@ function __mc_stream_read(\Resource $s, int $n): string
         // reading a whole chunk anyway, so there is nothing to win and the
         // read-ahead is worth keeping.
         if ($n >= 4096) {
+            if (\__mc_wait_read($s) === 0) {
+                return '';   // timed out
+            }
             $buf = \Runtime\Libc\calloc($n + 1, 1);
             if ($buf === null) {
                 return '';
@@ -370,6 +396,27 @@ function get_resource_type(mixed $value)
 function get_resource_id(\Resource $value): int
 {
     return $value->id;
+}
+
+/**
+ * php.net's stream_get_meta_data — the subset that is knowable here. `timed_out`
+ * is the important one (whether the last read hit stream_set_timeout's deadline);
+ * `eof`, `blocked`, `unread_bytes`, `seekable`, `stream_type` follow. php returns
+ * a few more keys (mode, wrapper_type, uri) that carry no useful value for our
+ * streams, so they are omitted rather than faked.
+ * @return array<string,mixed>
+ */
+function stream_get_meta_data(\Resource $stream): array
+{
+    $net = \__mc_stream_is_buffered($stream);
+    return [
+        'timed_out' => $stream->timedOut,
+        'blocked' => true,
+        'eof' => $net ? ($stream->eof && \__mc_buf_len($stream) === 0) : false,
+        'unread_bytes' => $net ? \__mc_buf_len($stream) : 0,
+        'stream_type' => $net ? 'tcp_socket/ssl' : 'STDIO',
+        'seekable' => !$net,
+    ];
 }
 
 // ── stream wrappers: scheme -> handler ─────────────────────────────────

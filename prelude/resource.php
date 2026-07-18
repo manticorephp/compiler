@@ -175,6 +175,14 @@ final class Resource
     public int $rpos = 0;
     /** KIND_TLS only: the OpenSSL `SSL*`, 0 otherwise. See KIND_TLS. */
     public int $ssl = 0;
+    /**
+     * SOCKET/TLS read timeout in ms; 0 = the default (php's default_socket_timeout,
+     * 60s). A hung peer must not block a read forever — every fill waits at most
+     * this long. Set via stream_set_timeout(). `$timedOut` records that the last
+     * read hit the deadline (surfaced by stream_get_meta_data()).
+     */
+    public int $rtimeoutMs = 0;
+    public bool $timedOut = false;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {
