@@ -128,6 +128,14 @@ final class Resource
      * a future php://memory / php://temp is the same kind made seekable.
      */
     public const KIND_MEMORY = 5;
+    /**
+     * php://memory / php://temp — a read-WRITE, SEEKABLE in-memory file. Unlike
+     * KIND_MEMORY (a read-only network body that drains and compacts), the bytes
+     * live in `$rbuf` in full and `$rpos` is a real seek cursor: fwrite overwrites/
+     * extends at the cursor, fseek moves it, and nothing is ever compacted away (a
+     * seek-back must find the earlier bytes). `$addr` is 0 (no handle).
+     */
+    public const KIND_MEMFILE = 6;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */

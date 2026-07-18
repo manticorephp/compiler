@@ -419,6 +419,84 @@ function stream_get_meta_data(\Resource $stream): array
     ];
 }
 
+/**
+ * Read the rest of $stream (or $maxlen bytes), optionally seeking to $offset
+ * first (>= 0). Returns the bytes read.
+ */
+function stream_get_contents(\Resource $stream, int $maxlen = -1, int $offset = -1): string
+{
+    if ($offset >= 0) {
+        \fseek($stream, $offset);
+    }
+    $out = '';
+    if ($maxlen < 0) {
+        while (true) {
+            $chunk = \fread($stream, 8192);
+            if ($chunk === '') { break; }
+            $out = $out . $chunk;
+        }
+    } else {
+        while (\strlen($out) < $maxlen) {
+            $chunk = \fread($stream, $maxlen - \strlen($out));
+            if ($chunk === '') { break; }
+            $out = $out . $chunk;
+        }
+    }
+    return $out;
+}
+
+/**
+ * Read a line up to $length bytes, stopping at $ending (which is CONSUMED but not
+ * returned — unlike fgets which keeps the newline). $ending '' reads to $length or
+ * EOF. Returns the line, or false at EOF with nothing read.
+ * @return string|false
+ */
+function stream_get_line(\Resource $stream, int $length, string $ending = "")
+{
+    $out = '';
+    $elen = \strlen($ending);
+    while ($length <= 0 || \strlen($out) < $length) {
+        $c = \fread($stream, 1);
+        if ($c === '') {
+            break;   // EOF
+        }
+        $out = $out . $c;
+        if ($elen > 0) {
+            $olen = \strlen($out);
+            if ($olen >= $elen && \substr($out, $olen - $elen, $elen) === $ending) {
+                return \substr($out, 0, $olen - $elen);   // strip the delimiter
+            }
+        }
+    }
+    return $out === '' ? false : $out;
+}
+
+/**
+ * Copy up to $maxlen bytes (all when -1) from $from to $to, optionally seeking
+ * $from to $offset (> 0) first. Returns the number of bytes copied.
+ */
+function stream_copy_to_stream(\Resource $from, \Resource $to, int $maxlen = -1, int $offset = -1): int
+{
+    if ($offset > 0) {
+        \fseek($from, $offset);
+    }
+    $copied = 0;
+    while ($maxlen < 0 || $copied < $maxlen) {
+        $want = 8192;
+        if ($maxlen >= 0) {
+            $rem = $maxlen - $copied;
+            if ($rem < $want) { $want = $rem; }
+        }
+        $chunk = \fread($from, $want);
+        if ($chunk === '') {
+            break;
+        }
+        \fwrite($to, $chunk);
+        $copied = $copied + \strlen($chunk);
+    }
+    return $copied;
+}
+
 // ── stream wrappers: scheme -> handler ─────────────────────────────────
 //
 // This is the seam, and it is why it is not `if (strpos($p,'http://')===0)`:
@@ -466,7 +544,8 @@ function __mc_scheme_of(string $path): string
         if (!$ok) { return 'file'; }
     }
     $scheme = \strtolower($raw);
-    if ($scheme === 'file' || $scheme === 'http' || $scheme === 'https') {
+    if ($scheme === 'file' || $scheme === 'http' || $scheme === 'https'
+        || $scheme === 'php') {
         return $scheme;
     }
     // Known-but-unimplemented schemes are still NOT files: php would find no
@@ -664,6 +743,19 @@ function __mc_ctx_server_certs(\Resource $context): array
 function fopen(string $filename, string $mode)
 {
     $scheme = \__mc_scheme_of($filename);
+    if ($scheme === 'php') {
+        // php://memory and php://temp are both an in-memory read-write file here
+        // (php://temp spills to disk past 2 MB; we keep it in memory — behaviour is
+        // identical up to that size). ⚠ php://stdin/out/err are NOT handled here:
+        // a stdlib fn that mentions STDIN/STDOUT/STDERR makes the compiler's own
+        // src/ emit the __mir_std* builtin (host_os() in the emitter → libc stub
+        // under the Zend seed), which kills the cold bootstrap — see __mc_std_res.
+        $lower = \strtolower($filename);
+        if ($lower === 'php://memory' || \strpos($lower, 'php://temp') === 0) {
+            return new \Resource(\Resource::KIND_MEMFILE, 'stream', 0);
+        }
+        return false;
+    }
     if ($scheme === 'http' || $scheme === 'https') {
         // php's http(s):// fopen streams the response body. We fetch it whole on
         // open into a KIND_MEMORY stream — correct fread/fgets/feof semantics, and
@@ -727,10 +819,26 @@ function fwrite(\Resource $stream, string $data, ?int $length = null): int
     if ($length !== null && $length >= 0 && $length < $len) {
         $len = $length;
     }
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        // php://memory: overwrite $len bytes at the cursor, extending past the end;
+        // the tail after the written span is preserved.
+        // (int)$len: $len derives from the ?int $length param, so it types as a
+        // cell; bare arithmetic (rpos = pos+len) would box the result and store
+        // garbage into the int field. The socket/file paths never hit this because
+        // they only pass $len across a coercing call boundary.
+        $wl = (int)$len;
+        $pos = $stream->rpos;
+        $blen = \strlen($stream->rbuf);
+        $before = $pos > 0 ? \substr($stream->rbuf, 0, $pos) : '';
+        $after = ($pos + $wl < $blen) ? \substr($stream->rbuf, $pos + $wl, $blen - ($pos + $wl)) : '';
+        $newBuf = $before . \substr($data, 0, $wl) . $after;
+        $stream->rpos = $pos + $wl;
+        $stream->rbuf = $newBuf;
+        return $wl;
+    }
     if ($stream->kind === \Resource::KIND_MEMORY) {
         // php's http(s):// stream accepts a write and reports the byte count even
-        // though the body is not resent — the data is discarded here. (A future
-        // php://memory would actually append.)
+        // though the body is not resent — the data is discarded here.
         return $len;
     }
     if (\__mc_stream_is_net($stream)) {
@@ -760,6 +868,18 @@ function fread(\Resource $stream, int $length): string
 {
     if ($length <= 0) {
         return "";
+    }
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        // Read from the seek cursor WITHOUT compacting — a seek-back must still
+        // find the earlier bytes.
+        $avail = \strlen($stream->rbuf) - $stream->rpos;
+        if ($avail <= 0) {
+            return "";
+        }
+        $take = $length < $avail ? $length : $avail;
+        $out = \substr($stream->rbuf, $stream->rpos, $take);
+        $stream->rpos = $stream->rpos + $take;
+        return $out;
     }
     $buf = \Runtime\Libc\calloc($length + 1, 1);
     if ($buf === null) {
@@ -793,6 +913,21 @@ function fread(\Resource $stream, int $length): string
 function fgets(\Resource $stream, ?int $length = null)
 {
     $cap = ($length !== null && $length > 1) ? $length : 8192;
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        // A line from the cursor, terminator included, capped at $cap-1 like php.
+        $blen = \strlen($stream->rbuf);
+        if ($stream->rpos >= $blen) {
+            return false;
+        }
+        $at = \strpos($stream->rbuf, "\n", $stream->rpos);
+        $end = $at === false ? $blen : $at + 1;
+        if ($length !== null && $length > 1 && $end - $stream->rpos > $cap - 1) {
+            $end = $stream->rpos + ($cap - 1);
+        }
+        $out = \substr($stream->rbuf, $stream->rpos, $end - $stream->rpos);
+        $stream->rpos = $end;
+        return $out;
+    }
     $buf = \Runtime\Libc\calloc($cap + 1, 1);
     if ($buf === null) {
         return false;
@@ -820,6 +955,9 @@ function fgets(\Resource $stream, ?int $length = null)
  */
 function feof(\Resource $stream): bool
 {
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        return $stream->rpos >= \strlen($stream->rbuf);
+    }
     if (\__mc_stream_is_buffered($stream)) {
         // Buffered bytes mean NOT eof even after the peer closed: php reports eof
         // only once a read actually finds nothing left.
@@ -835,6 +973,18 @@ function feof(\Resource $stream): bool
  */
 function fseek(\Resource $stream, int $offset, int $whence = 0): int
 {
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        $blen = \strlen($stream->rbuf);
+        if ($whence === 1) { $new = $stream->rpos + $offset; }   // SEEK_CUR
+        elseif ($whence === 2) { $new = $blen + $offset; }       // SEEK_END
+        else { $new = $offset; }                                  // SEEK_SET
+        if ($new < 0) {
+            return -1;
+        }
+        if ($new > $blen) { $new = $blen; }   // no sparse writes here
+        $stream->rpos = $new;
+        return 0;
+    }
     if (\__mc_stream_is_buffered($stream)) {
         return -1;   // php: a socket/http stream is not seekable
     }
@@ -848,6 +998,9 @@ function fseek(\Resource $stream, int $offset, int $whence = 0): int
  */
 function ftell(\Resource $stream)
 {
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        return $stream->rpos;
+    }
     if (\__mc_stream_is_buffered($stream)) {
         // KNOWN DIVERGENCE, measured against php 8.5.8: php DOES report a
         // position on a socket stream (it counts the bytes that passed through
@@ -871,6 +1024,10 @@ function ftell(\Resource $stream)
  */
 function rewind(\Resource $stream): bool
 {
+    if ($stream->kind === \Resource::KIND_MEMFILE) {
+        $stream->rpos = 0;
+        return true;
+    }
     if (\__mc_stream_is_buffered($stream)) {
         return false;
     }
