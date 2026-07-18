@@ -87,6 +87,7 @@ final class Builtins
             '__mc_refl_of', '__mc_refl_name', '__mc_refl_find', '__mc_refl_cap',
             '__mc_refl_slot', '__mc_refl_member', '__mc_refl_parent', '__mc_refl_flags',
             '__mc_json_escape', '__mir_str_replace_one', '__mir_float_repr', 'strncmp', 'strcmp',
+            '__mc_errno', '__mc_fmt_int', '__mc_fmt_float', '__mc_fmt_str',
             'isset', 'empty', 'unset', 'list', 'compact', 'define', 'defined',
             'constant', 'function_exists', 'call_user_func', 'call_user_func_array',
         ];
