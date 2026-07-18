@@ -119,6 +119,15 @@ final class Resource
      * one string field a context has no other use for. See {@see \stream_context_create}.
      */
     public const KIND_CONTEXT = 4;
+    /**
+     * An in-memory read stream: no fd (`$addr` 0), all bytes pre-loaded in `$rbuf`
+     * with `$eof` set true from birth — "the buffer is all there is". fopen() on an
+     * http(s):// URL returns one (the whole body, fetched on open), and the
+     * existing buffered readers (fread/fgets/feof) drain it with no socket fill.
+     * Currently NON-seekable (it backs a network body, which php makes non-seekable);
+     * a future php://memory / php://temp is the same kind made seekable.
+     */
+    public const KIND_MEMORY = 5;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */

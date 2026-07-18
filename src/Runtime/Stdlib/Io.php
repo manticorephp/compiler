@@ -175,6 +175,18 @@ function __mc_stream_is_net(\Resource $s): bool
 }
 
 /**
+ * Whether $s reads through the rbuf/rpos buffer rather than a FILE*: a network
+ * stream OR an in-memory one. A KIND_MEMORY stream has $eof set, so the same
+ * readers drain it and never attempt a socket fill. Used by the read/eof/seek
+ * dispatch; only fwrite distinguishes further (a memory stream is read-only).
+ */
+function __mc_stream_is_buffered(\Resource $s): bool
+{
+    return $s->kind === \Resource::KIND_SOCKET || $s->kind === \Resource::KIND_TLS
+        || $s->kind === \Resource::KIND_MEMORY;
+}
+
+/**
  * Read up to $n bytes off the transport into $buf. For a TLS stream this is
  * SSL_read (which handles the record layer); for a plain socket, recv(2).
  * Returns the byte count, <=0 on close/error.
@@ -580,6 +592,24 @@ function __mc_http_get_with_context(string $path, \Resource $context)
 function fopen(string $filename, string $mode)
 {
     $scheme = \__mc_scheme_of($filename);
+    if ($scheme === 'http' || $scheme === 'https') {
+        // php's http(s):// fopen streams the response body. We fetch it whole on
+        // open into a KIND_MEMORY stream — correct fread/fgets/feof semantics, and
+        // the chunked/Content-Length decoding is the client's, not re-done here.
+        // (True incremental streaming would need on-the-fly dechunking in fread.)
+        $body = \__mc_http_get($filename);
+        if ($body === false) {
+            return false;
+        }
+        $r = new \Resource(\Resource::KIND_MEMORY, 'stream', 0);
+        // (string) forces the unbox: __mc_http_get returns string|false (a CELL),
+        // and storing the boxed value straight into the string field $rbuf would
+        // leave later strpos/substr derefing a NaN-boxed value. Same erasure class
+        // as the Ф4 field-write trap, on the store side.
+        $r->rbuf = (string)$body;
+        $r->eof = true;   // the buffer is all there is — see KIND_MEMORY
+        return $r;
+    }
     if ($scheme !== 'file') {
         return false;   // no wrapper for it (yet) — php: "Unable to find the wrapper"
     }
@@ -619,6 +649,12 @@ function fwrite(\Resource $stream, string $data, ?int $length = null): int
     if ($length !== null && $length >= 0 && $length < $len) {
         $len = $length;
     }
+    if ($stream->kind === \Resource::KIND_MEMORY) {
+        // php's http(s):// stream accepts a write and reports the byte count even
+        // though the body is not resent — the data is discarded here. (A future
+        // php://memory would actually append.)
+        return $len;
+    }
     if (\__mc_stream_is_net($stream)) {
         // A socket's addr is an fd, so int_to_ptr() would hand fwrite a small
         // integer as a FILE*. send(2) — or SSL_write for TLS — instead, and a
@@ -651,7 +687,7 @@ function fread(\Resource $stream, int $length): string
     if ($buf === null) {
         return "";
     }
-    if (\__mc_stream_is_net($stream)) {
+    if (\__mc_stream_is_buffered($stream)) {
         // MUST go through the buffer, not straight to recv(): fgets() reads ahead
         // by design, so bytes it already pulled would be invisible to a direct
         // recv() and the stream would silently skip them.
@@ -683,7 +719,7 @@ function fgets(\Resource $stream, ?int $length = null)
     if ($buf === null) {
         return false;
     }
-    if (\__mc_stream_is_net($stream)) {
+    if (\__mc_stream_is_buffered($stream)) {
         \Runtime\Libc\free($buf);
         return \__mc_socket_gets($stream, $cap);
     }
@@ -706,7 +742,7 @@ function fgets(\Resource $stream, ?int $length = null)
  */
 function feof(\Resource $stream): bool
 {
-    if (\__mc_stream_is_net($stream)) {
+    if (\__mc_stream_is_buffered($stream)) {
         // Buffered bytes mean NOT eof even after the peer closed: php reports eof
         // only once a read actually finds nothing left.
         return $stream->eof && \__mc_buf_len($stream) === 0;
@@ -721,8 +757,8 @@ function feof(\Resource $stream): bool
  */
 function fseek(\Resource $stream, int $offset, int $whence = 0): int
 {
-    if (\__mc_stream_is_net($stream)) {
-        return -1;   // php: a socket stream is not seekable
+    if (\__mc_stream_is_buffered($stream)) {
+        return -1;   // php: a socket/http stream is not seekable
     }
     return \Runtime\Libc\fseek(\int_to_ptr($stream->addr), $offset, $whence);
 }
@@ -734,7 +770,7 @@ function fseek(\Resource $stream, int $offset, int $whence = 0): int
  */
 function ftell(\Resource $stream)
 {
-    if (\__mc_stream_is_net($stream)) {
+    if (\__mc_stream_is_buffered($stream)) {
         // KNOWN DIVERGENCE, measured against php 8.5.8: php DOES report a
         // position on a socket stream (it counts the bytes that passed through
         // its own buffer) — `ftell()` there returns an int, not false. Matching
@@ -757,7 +793,7 @@ function ftell(\Resource $stream)
  */
 function rewind(\Resource $stream): bool
 {
-    if (\__mc_stream_is_net($stream)) {
+    if (\__mc_stream_is_buffered($stream)) {
         return false;
     }
     return \Runtime\Libc\fseek(\int_to_ptr($stream->addr), 0, 0) === 0;
@@ -769,8 +805,8 @@ function rewind(\Resource $stream): bool
  */
 function fflush(\Resource $stream): bool
 {
-    if (\__mc_stream_is_net($stream)) {
-        return true;   // send(2) is unbuffered — nothing to flush
+    if (\__mc_stream_is_buffered($stream)) {
+        return true;   // send(2)/memory is unbuffered — nothing to flush
     }
     return \Runtime\Libc\fflush(\int_to_ptr($stream->addr)) === 0;
 }
