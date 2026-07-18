@@ -84,6 +84,20 @@ final class Debug
      */
     public static array $arenaScopedFns = [];
 
+    /**
+     * Route every non-arena empty `[]` literal to ONE immortal `linkonce_odr`
+     * singleton instead of a fresh `__mir_array_alloc(0)`. The singleton carries
+     * a saturated refcount (`1 << 62`) so COW always clones on the first mutation
+     * and release never frees it. In-place mutators (promote / grow / unshift)
+     * DON'T check rc — they would free/realloc the static singleton and abort in
+     * libmalloc — so {@see \Compile\Runtime\UnifiedArrayRuntime::emitDeimmortal}
+     * swaps it for a fresh rc=1 empty at the entry of set_int / set_str / unshift.
+     * DEFAULT ON (measured: kills 60.3% of ALL array mallocs during self-build;
+     * gated: fixpoint byte-identical, AOT 514/0, difftest 500/0). Disable with
+     * `MANTICORE_EMPTY_SINGLETON=0`.
+     */
+    public static bool $emptyArraySingleton = true;
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {
@@ -117,6 +131,12 @@ final class Debug
             self::$arenaArrays = false;
         } elseif ($env !== false && $env !== '') {
             self::$arenaArrays = true;
+        }
+        $env = \getenv('MANTICORE_EMPTY_SINGLETON');
+        if ($env === '0') {
+            self::$emptyArraySingleton = false;
+        } elseif ($env !== false && $env !== '') {
+            self::$emptyArraySingleton = true;
         }
     }
 }

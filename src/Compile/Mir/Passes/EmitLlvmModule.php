@@ -124,6 +124,17 @@ trait EmitLlvmModule
         // must carry a valid len. Use {@see strSymBytes} for the data pointer.
         $out .= "@.cstr.empty = private unnamed_addr constant { i64, i64, i64, i64, [1 x i8] } { i64 "
             . (string)$this->fnvHash64('') . ", i64 0, i64 0, i64 -1, [1 x i8] c\"\\00\" }, align 8\n";
+        // Immortal empty-array singleton: an 8-byte ARRAY_TAG_MAGIC sentinel
+        // followed by the 56-byte packed header (len0/cap0/next0/rc=1<<62/flags0/
+        // nbuckets0/buckets-null). WRITABLE `global` (not `constant`): array
+        // retain/release store rc±1 unconditionally, so a .rodata singleton would
+        // segfault on the first bump. `linkonce_odr` coalesces user.o + stdlib.o
+        // to one symbol. Data ptr = base+8 ({@see emptyArraySingletonPtr}).
+        if (\Compile\Debug::$emptyArraySingleton) {
+            $out .= "@__mir_empty_array = linkonce_odr global { i64, i64, i64, i64, i64, i64, i64, ptr } { i64 "
+                . (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC . ", i64 0, i64 0, i64 0, i64 "
+                . (string)\Compile\MemoryAbi::IMMORTAL_ARRAY_RC . ", i64 0, i64 0, ptr null }, align 8\n";
+        }
         $out .= "@.fmt.pg = private unnamed_addr constant [6 x i8] c\"%.14g\\00\", align 1\n";
         $out .= "@.fmt.x = private unnamed_addr constant [5 x i8] c\"%llx\\00\", align 1\n";
         // var_dump of a typed float: shortest round-trip (`%.*g` probed) wrapped
@@ -243,6 +254,14 @@ trait EmitLlvmModule
             $this->rt->needsTaggedToStr   = true;
             $this->rt->needsStrcmp        = true;
             $this->rt->needsStrtod        = true;
+        }
+        // Profile mode's dump needs atexit/dprintf; route them through the
+        // deduped map so they don't collide with the uncaught handler's own
+        // dprintf declare (a raw redeclare is a hard LLVM error — it made
+        // MANTICORE_PROFILE unusable on any module with exceptions).
+        if (\Compile\Debug::$profile) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
         }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
         foreach ($this->libcExtra as $sym => $line) { $decls[$sym] = $line; }
@@ -783,15 +802,19 @@ trait EmitLlvmModule
     private function profileRuntime(): string
     {
         if (!\Compile\Debug::$profile) { return ''; }
-        $out  = "@__prof = linkonce_odr global [14 x i64] zeroinitializer\n";
-        $out .= "declare i32 @atexit(ptr)\n";
-        $out .= "declare i32 @dprintf(i32, ptr, ...)\n";
+        $out  = "@__prof = linkonce_odr global [16 x i64] zeroinitializer\n";
+        // atexit/dprintf are declared once via libcExtra (see the preamble) so
+        // they don't collide with the uncaught handler's dprintf.
         // 0-6: per-flavor alloc/retain/release. 7-13: retain by SOURCE category
         // (which call-site emitted it) so the over-retain can be targeted.
+        // 14-15: array-alloc traffic — total (all __mir_alloc_array_tagged, incl.
+        // cow clones / unshift reallocs) and the empty-`[]` share (cap==0), the
+        // ceiling for the immortal-empty-array singleton.
         $names = ['str_alloc', 'str_retain', 'str_release', 'rc_retain',
                   'rc_release', 'assoc_retain', 'assoc_release',
                   'retain_alias', 'retain_capture', 'retain_element',
-                  'retain_assoc', 'retain_prop', 'retain_static', 'retain_return'];
+                  'retain_assoc', 'retain_prop', 'retain_static', 'retain_return',
+                  'arr_alloc_total', 'arr_alloc_empty'];
         $i = 0;
         foreach ($names as $nm) {
             // Each escape (`\0A` newline, `\00` NUL) is one byte in the
@@ -804,13 +827,13 @@ trait EmitLlvmModule
             $i = $i + 1;
         }
         $out .= "define void @__prof_bump(i64 %i) {\nentry:\n";
-        $out .= "  %p = getelementptr inbounds [14 x i64], ptr @__prof, i64 0, i64 %i\n";
+        $out .= "  %p = getelementptr inbounds [16 x i64], ptr @__prof, i64 0, i64 %i\n";
         $out .= "  %v = load i64, ptr %p\n";
         $out .= "  %v1 = add i64 %v, 1\n";
         $out .= "  store i64 %v1, ptr %p\n";
         $out .= "  ret void\n}\n";
         $out .= "define void @__manticore_profile_dump() {\nentry:\n";
-        for ($j = 0; $j < 14; $j = $j + 1) {
+        for ($j = 0; $j < 16; $j = $j + 1) {
             $out .= '  %p' . (string)$j . ' = getelementptr inbounds [14 x i64], ptr @__prof, i64 0, i64 '
                   . (string)$j . "\n";
             $out .= '  %v' . (string)$j . ' = load i64, ptr %p' . (string)$j . "\n";
