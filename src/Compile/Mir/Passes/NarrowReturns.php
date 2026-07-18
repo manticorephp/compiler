@@ -104,6 +104,13 @@ final class NarrowReturns implements Pass
     /** Returns true if the function's return type was narrowed. */
     private function narrowFunction(FunctionDef $fn): bool
     {
+        // A reflection invoke trampoline (__mc_rtramp_*) has NO direct MIR caller
+        // — it is reached only through the indirect `__mc_refl_invoke` builtin,
+        // whose ABI fixes the return as a boxed cell. Narrowing its `mixed`
+        // return to a concrete scalar would drop the box, so the indirect caller
+        // reads a raw int as a cell (`invoke(sum())` → 3.45e-323 not 7). Its
+        // return type is a hard contract, not an inferred convenience.
+        if (\str_contains($fn->name, '__mc_rtramp_')) { return false; }
         // Only un-resolved returns (bare `array` / no hint) are candidates.
         if ($fn->returnType->kind !== Type::KIND_UNKNOWN) { return false; }
         // Early (concreteOnly) pass: a function with an ERASED param (bare

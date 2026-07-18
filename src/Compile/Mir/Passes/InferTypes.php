@@ -785,7 +785,7 @@ final class InferTypes implements Pass
      * @param array<string,Type> $assocKey
      * @param array<string,string> $shape
      */
-    private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape): void
+    private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell): void
     {
         // Resolve the target function name + a param-index base for each call
         // flavor. A free/static call's arg `i` maps to param `i`; an INSTANCE
@@ -869,12 +869,20 @@ final class InferTypes implements Pass
                     || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
                     || $ek === Type::KIND_CELL || $nested;
                 if (!$refinable) { $conflict[$key] = true; continue; }
+                // A heterogeneous vec[cell] arg (element boxed by nature) records
+                // that this param has a CELL floor — even if a differing concrete
+                // observation later marks $conflict and unsets $observed. cell is
+                // the join of every element repr, so the refiner resolves such a
+                // param to vec[cell] (the cell site reads cells; Monomorphize
+                // clones each concrete site off it) rather than keeping a body
+                // guess that misreads the boxed slots as raw pointers (m8).
+                if ($ek === Type::KIND_CELL) { $sawCell[$key] = true; }
                 if (!isset($observed[$key])) { $observed[$key] = $elem; }
                 elseif (!$this->sameElemShape($observed[$key], $elem)) { unset($observed[$key]); $conflict[$key] = true; }
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape);
+            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape, $sawCell);
         }
     }
 

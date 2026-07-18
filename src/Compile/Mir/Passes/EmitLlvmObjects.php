@@ -2120,6 +2120,21 @@ trait EmitLlvmObjects
     }
 
     /**
+     * A concrete-element array argument bound to a cell-element array param
+     * (`mixed[]`) — the boundary that needs each element boxed. False for a
+     * cell/unknown-element arg (already boxed / erased) or a non-array param.
+     */
+    private function cellArrayParamNeedsBoxing(?Type $param, Type $arg): bool
+    {
+        if ($param === null || !$param->isArray()) { return false; }
+        $pe = $param->element;
+        if ($pe === null || $pe->kind !== Type::KIND_CELL) { return false; }
+        if (!$arg->isArray()) { return false; }
+        $ae = $arg->element;
+        return $ae !== null && $ae->kind !== Type::KIND_CELL && $ae->kind !== Type::KIND_UNKNOWN;
+    }
+
+    /**
      * The entry point of `$class::$method` a caller that knows only the erased
      * origin must use. For a reified specialization that is its erased thunk
      * (raw double in, tagged cell out); for every other class, the symbol it was
@@ -2383,6 +2398,21 @@ trait EmitLlvmObjects
                 $out .= $this->emitNode($a);
                 $out .= $this->boxToCell($a->type);
                 $argList .= ', i64 ' . $this->lastValue;
+            } elseif ($this->cellArrayParamNeedsBoxing($ptypes[$ai + 1] ?? null, $a->type)) {
+                // A concrete-element array (vec[int] …) passed to a cell-element
+                // array param (`mixed[]`): rebuild it with each element boxed,
+                // then untag the resulting array cell back to the raw vec[cell]
+                // pointer the param ABI expects. This is the reflection
+                // invokeArgs / newInstanceArgs path — the only way a runtime
+                // array reaches a trampoline's `vec[cell]` args param, and it
+                // cannot go through Monomorphize (a method param is never
+                // specialized; the indirect trampoline call is invisible anyway).
+                $out .= $this->emitNode($a);
+                $out .= $this->boxToCell($a->type);
+                $raw = $this->ssa->allocReg();
+                $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue
+                      . ", 281474976710655\n";   // PAYLOAD_MASK: array cell → raw ptr
+                $argList .= ', i64 ' . $raw;
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
