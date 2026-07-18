@@ -175,6 +175,10 @@ function sys_ftruncate(#[CType('int')] int $fd, #[CType('long')] int $length): i
 #[Library('c'), Symbol('fileno')]
 function sys_fileno(Ptr $stream): int {}
 
+// `int isatty(int fd)` — 1 when fd is a terminal, 0 otherwise.
+#[Library('c'), Symbol('isatty')]
+function sys_isatty(#[CType('int')] int $fd): int {}
+
 #[Library('c'), Symbol('flock')]
 function sys_flock(#[CType('int')] int $fd, #[CType('int')] int $op): int {}
 

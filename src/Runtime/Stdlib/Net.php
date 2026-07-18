@@ -938,7 +938,17 @@ function gethostbynamel(string $hostname)
     while ($ai !== 0) {
         if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(0)) === 2) {
             $h = \__mc_ai_numeric_host($ai);
-            if ($h !== '' && !\in_array($h, $ips, true)) { $ips[] = $h; }
+            if ($h !== '') {
+                // Manual dedup, NOT in_array: a stdlib in_array exports the fused
+                // __mc_fuse_inarray_0 helper at EXTERNAL linkage, which then collides
+                // with any USER program's own in_array (a compiler linkage bug —
+                // the fusion helper should be internal/linkonce_odr). Flagged.
+                $seen = false;
+                foreach ($ips as $existing) {
+                    if ($existing === $h) { $seen = true; break; }
+                }
+                if (!$seen) { $ips[] = $h; }
+            }
         }
         $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
     }
@@ -1019,6 +1029,73 @@ function inet_ntop(string $in_addr)
     \Runtime\Libc\free($src);
     \Runtime\Libc\free($dst);
     return $out;
+}
+
+/**
+ * Reverse DNS: the host name for $ip, or $ip unchanged when it has no PTR, or
+ * false on a malformed address — php's contract. IPv4 for now (builds a
+ * sockaddr_in by hand, like unix://, then getnameinfo resolves it).
+ * @return string|false
+ */
+function gethostbyaddr(string $ip)
+{
+    $packed = \inet_pton($ip);
+    if ($packed === false || \strlen($packed) !== 4) {
+        return false;
+    }
+    $sa = \Runtime\Libc\calloc(16, 1);   // sizeof(sockaddr_in)
+    if ($sa === null) {
+        return false;
+    }
+    // AF_INET (2): Darwin sin_len@0 + sin_family@1; glibc/musl sin_family@0 (u16).
+    if (\__mc_host_is_darwin()) {
+        \poke_i8($sa, 0, 16);
+        \poke_i8($sa, 1, 2);
+    } else {
+        \poke_i16($sa, 0, 2);
+    }
+    for ($i = 0; $i < 4; $i = $i + 1) {   // sin_addr @4
+        \poke_i8($sa, 4 + $i, \ord($packed[$i]));
+    }
+    $host = \Runtime\Libc\calloc(256, 1);
+    if ($host === null) {
+        \Runtime\Libc\free($sa);
+        return false;
+    }
+    // flags 0 (no NI_NAMEREQD): a missing PTR gives the numeric IP back, rc 0 —
+    // exactly php's "returns the address unchanged".
+    $rc = \Runtime\Libc\sys_getnameinfo($sa, 16, $host, 256, \int_to_ptr(0), 0, 0);
+    $out = $rc === 0 ? \cstr_to_str($host) : $ip;
+    \Runtime\Libc\free($sa);
+    \Runtime\Libc\free($host);
+    return $out;
+}
+
+// ── stream/socket helpers ──────────────────────────────────────────────
+
+/** Persistent-connection fsockopen. We keep no pool yet, so it just connects. */
+function pfsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_message = '', ?float $timeout = null)
+{
+    return \fsockopen($hostname, $port, $error_code, $error_message, $timeout);
+}
+
+/**
+ * Shut down part of a full-duplex socket. $how is STREAM_SHUT_RD (0) /
+ * STREAM_SHUT_WR (1) / STREAM_SHUT_RDWR (2), which equal SHUT_RD/WR/RDWR on both
+ * hosts. Only meaningful for a socket/TLS stream.
+ */
+function stream_socket_shutdown(\Resource $stream, int $how): bool
+{
+    if (!\__mc_stream_is_net($stream)) {
+        return false;
+    }
+    return \Runtime\Libc\sys_shutdown($stream->addr, $how) === 0;
+}
+
+/** The transports stream_socket_client/server understand here. */
+function stream_get_transports(): array
+{
+    return ['tcp', 'udp', 'unix', 'ssl', 'tls'];
 }
 
 // ── HTTP/1.1 client ────────────────────────────────────────────────────

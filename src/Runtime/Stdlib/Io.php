@@ -419,6 +419,23 @@ function stream_get_meta_data(\Resource $stream): array
     ];
 }
 
+/** The stream wrappers (schemes) fopen/file_get_contents understand here. */
+function stream_get_wrappers(): array
+{
+    return ['php', 'file', 'http', 'https'];
+}
+
+/** Whether $stream is connected to a terminal. */
+function stream_isatty(\Resource $stream): bool
+{
+    // Only a FILE-backed stream (stdio) has a tty behind it; a socket/TLS/memory/
+    // context stream never does, and has no FILE* to hand fileno().
+    if ($stream->kind !== \Resource::KIND_FILE) {
+        return false;
+    }
+    return \Runtime\Libc\sys_isatty(\__mc_fileno($stream)) === 1;
+}
+
 /**
  * Read the rest of $stream (or $maxlen bytes), optionally seeking to $offset
  * first (>= 0). Returns the bytes read.
