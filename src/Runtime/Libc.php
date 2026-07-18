@@ -101,6 +101,15 @@ function fopen(string $path, string $mode): Ptr {}
 #[Library('c'), Symbol('fclose')]
 function fclose(#[Take] Ptr $stream): int {}
 
+// `FILE *popen(const char *command, const char *type)` — spawn a shell pipe.
+// Owns a FILE* like fopen; MUST be closed with pclose (not fclose) so the child
+// is reaped and its exit status returned.
+#[Library('c'), Symbol('popen'), Give]
+function popen(string $command, string $type): Ptr {}
+
+#[Library('c'), Symbol('pclose')]
+function pclose(#[Take] Ptr $stream): int {}
+
 #[Library('c'), Symbol('fread')]
 function fread(Ptr $buf, #[CType('size_t')] int $size, #[CType('size_t')] int $count, Ptr $stream): int {}
 
@@ -153,6 +162,11 @@ function sys_chmod(string $path, #[CType('int')] int $mode): int {}
 
 #[Library('c'), Symbol('chown')]
 function sys_chown(string $path, #[CType('int')] int $owner, #[CType('int')] int $group): int {}
+
+// `int lchown(const char *, uid_t, gid_t)` — chown a symlink ITSELF, not its
+// target (the l* variant, like lstat vs stat).
+#[Library('c'), Symbol('lchown')]
+function sys_lchown(string $path, #[CType('int')] int $owner, #[CType('int')] int $group): int {}
 
 #[Library('c'), Symbol('symlink')]
 function sys_symlink(string $target, string $link): int {}
@@ -214,6 +228,12 @@ function sys_utimes(string $path, Ptr $times): int {}
 
 #[Library('c'), Symbol('stat')]
 function sys_stat(string $path, Ptr $buf): int {}
+
+// `int statvfs(const char *, struct statvfs *)` — filesystem stats for
+// disk_free_space / disk_total_space. The struct layout differs per host
+// (Darwin's block counts are 32-bit, glibc's 64-bit), read at runtime offsets.
+#[Library('c'), Symbol('statvfs')]
+function sys_statvfs(string $path, Ptr $buf): int {}
 
 #[Library('c'), Symbol('lstat')]
 function sys_lstat(string $path, Ptr $buf): int {}

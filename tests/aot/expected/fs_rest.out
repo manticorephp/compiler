@@ -1,0 +1,13 @@
+hello world
+exit=0
+via popen pipe
+bool(true)
+array(0) {
+}
+int(0)
+int(-1)
+buffered
+bool(true)
+bool(true)
+bool(true)
+bool(true)
