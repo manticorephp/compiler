@@ -1,0 +1,6 @@
+tests/analyze/cases/undefined_member/main.php:5:3: error: unknown method Box->close()
+tests/analyze/cases/undefined_member/main.php:6:11: error: argument 1 of Box->width(): string given, int expected
+tests/analyze/cases/undefined_member/main.php:8:6: error: unknown constant Box::WEIGHT
+tests/analyze/cases/undefined_member/main.php:10:3: error: unknown method Box::ghost()
+
+Found 4 error(s), 0 warning(s).

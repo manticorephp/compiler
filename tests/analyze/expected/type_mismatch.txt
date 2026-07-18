@@ -1,0 +1,9 @@
+tests/analyze/cases/type_mismatch.php:6:29: error: badReturn(): returns string, declared int
+tests/analyze/cases/type_mismatch.php:15:10: error: arithmetic (`-`) on a string operand — cast explicitly ((int)/(float)) to compute on it
+tests/analyze/cases/type_mismatch.php:19:10: error: argument 1 of takesInt(): string given, int expected
+tests/analyze/cases/type_mismatch.php:20:10: error: argument 1 of takesInt(): float given, int expected
+tests/analyze/cases/type_mismatch.php:22:10: error: argument 1 of takesInt(): null given, int expected
+tests/analyze/cases/type_mismatch.php:25:14: error: argument 2 of new Point: string given, int expected
+tests/analyze/cases/type_mismatch.php:29:28: error: badVoid(): declared void but returns a value
+
+Found 7 error(s), 0 warning(s).
