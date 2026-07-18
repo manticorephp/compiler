@@ -298,12 +298,35 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
 }
 
 /**
+ * Open a stream for a transport scheme: tcp:// (or bare) → plain socket, ssl:// /
+ * tls:// → TLS. Shared by fsockopen and stream_socket_client so both grew TLS at
+ * once. udp:// / unix:// are not implemented (false). TLS verifies by default,
+ * matching php's stream defaults since 5.6; a per-socket verify toggle needs the
+ * context threaded here (debt — only file_get_contents honours a context today).
+ * @return \Resource|false
+ */
+function __mc_transport_connect(string $scheme, string $host, int $port)
+{
+    if ($scheme === 'ssl' || $scheme === 'tls') {
+        return \__mc_tls_connect($host, $port);
+    }
+    if ($scheme === 'tcp' || $scheme === '') {
+        return \__mc_tcp_connect($host, $port);
+    }
+    return false;
+}
+
+/**
  * Open a TCP connection. php.net's signature, including the by-ref diagnostics.
  *
  * $timeout is accepted and currently IGNORED: the connect is blocking, so the
  * OS's own connect timeout applies. Honouring it needs O_NONBLOCK + poll(POLLOUT)
  * + getsockopt(SO_ERROR), which is the natural first step of the Fibers work
  * rather than a bolt-on here.
+ *
+ * A transport prefix on $hostname is honoured, as php's fsockopen does:
+ * `ssl://host` / `tls://host` open a TLS stream, `tcp://host` (or none) a plain
+ * one. TLS here verifies by default (no context path through fsockopen).
  *
  * @param int $error_code
  * @param string $error_message
@@ -313,26 +336,33 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
 {
     $error_code = 0;
     $error_message = '';
+    $scheme = 'tcp';
+    $host = $hostname;
+    $sep = \strpos($hostname, '://');
+    if ($sep !== false) {
+        $scheme = \strtolower(\substr($hostname, 0, $sep));
+        $host = \substr($hostname, $sep + 3, \strlen($hostname) - ($sep + 3));
+    }
     if ($port < 0) {
         $error_code = -1;
         $error_message = 'no port specified';
         return false;
     }
-    $sock = \__mc_tcp_connect($hostname, $port);
+    $sock = \__mc_transport_connect($scheme, $host, $port);
     if ($sock === false) {
         // php reports errno here. We have none (see the header), so report the
         // stage that failed rather than inventing a number.
         $error_code = -1;
-        $error_message = 'connection to ' . $hostname . ':' . (string)$port . ' failed';
+        $error_message = 'connection to ' . $host . ':' . (string)$port . ' failed';
         return false;
     }
     return $sock;
 }
 
 /**
- * php.net's stream_socket_client. Accepts `tcp://host:port` or a bare
- * `host:port`; other transports (udp://, unix://, ssl://) are not implemented
- * yet — ssl:// arrives with the openssl extension.
+ * php.net's stream_socket_client. Accepts `tcp://host:port`, `ssl://host:port`,
+ * `tls://host:port`, or a bare `host:port` (tcp). ssl:// / tls:// negotiate TLS
+ * (verify on by default). udp:// / unix:// are not implemented yet.
  *
  * @param int $error_code
  * @param string $error_message
@@ -346,10 +376,10 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     $scheme = 'tcp';
     $sep = \strpos($addr, '://');
     if ($sep !== false) {
-        $scheme = \substr($addr, 0, $sep);
+        $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp') {
+    if ($scheme !== 'tcp' && $scheme !== 'ssl' && $scheme !== 'tls') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
@@ -367,7 +397,13 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
     }
-    return \fsockopen($host, $port, $error_code, $error_message, $timeout);
+    $sock = \__mc_transport_connect($scheme, $host, $port);
+    if ($sock === false) {
+        $error_code = -1;
+        $error_message = 'connection to ' . $host . ':' . (string)$port . ' failed';
+        return false;
+    }
+    return $sock;
 }
 
 /**
