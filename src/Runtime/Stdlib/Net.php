@@ -83,14 +83,16 @@ function __mc_net_const(int $which): int
     static $soError = 0;
     static $niNumericHost = 0;
     static $afInet6 = 0;
+    static $niNumericServ = 0;
 
     if ($ready === 0) {
         // MEASURED: Darwin SOL_SOCKET 65535 / SO_ERROR 0x1007 / NI_NUMERICHOST 2 /
-        // AF_INET6 30; Linux 1 / 4 / 1 / 10.
+        // NI_NUMERICSERV 8 / AF_INET6 30; Linux 1 / 4 / 1 / 2 / 10.
         $isDarwin = \__mc_host_is_darwin();
         $solSocket = $isDarwin ? 65535 : 1;
         $soError = $isDarwin ? 4103 : 4;
         $niNumericHost = $isDarwin ? 2 : 1;
+        $niNumericServ = $isDarwin ? 8 : 2;
         $afInet6 = $isDarwin ? 30 : 10;
         $ready = 1;
     }
@@ -104,6 +106,7 @@ function __mc_net_const(int $which): int
     if ($which === 6) { return $soError; }
     if ($which === 8) { return $niNumericHost; }
     if ($which === 9) { return $afInet6; }
+    if ($which === 10) { return $niNumericServ; }
     return 2;                            // SHUT_RDWR — 0/1/2 everywhere
 }
 
@@ -1021,6 +1024,73 @@ function inet_ntop(string $in_addr)
     return $out;
 }
 
+/** The port for a service/protocol (getservbyname('http','tcp') = 80), or false. */
+function getservbyname(string $service, string $protocol)
+{
+    $sv = \Runtime\Libc\sys_getservbyname($service, $protocol);
+    if ($sv === null) {
+        return false;
+    }
+    // s_port @16, in network byte order (big-endian) in the low 16 bits.
+    return (\peek_u8($sv, 16) << 8) | \peek_u8($sv, 17);
+}
+
+/** The service name for a port/protocol (getservbyport(80,'tcp') = 'http'), or false. */
+function getservbyport(int $port, string $protocol)
+{
+    // getservbyport takes the port in network byte order.
+    $netport = (($port & 255) << 8) | (($port >> 8) & 255);
+    $sv = \Runtime\Libc\sys_getservbyport($netport, $protocol);
+    if ($sv === null) {
+        return false;
+    }
+    return \cstr_to_str(\int_to_ptr(\peek_i64($sv, 0)));   // s_name @0
+}
+
+/** The protocol number for a name (getprotobyname('tcp') = 6), or false. */
+function getprotobyname(string $name)
+{
+    $pe = \Runtime\Libc\sys_getprotobyname($name);
+    if ($pe === null) {
+        return false;
+    }
+    return \peek_i32($pe, 16);   // p_proto @16 (host order)
+}
+
+/** The protocol name for a number (getprotobynumber(6) = 'tcp'), or false. */
+function getprotobynumber(int $protocol)
+{
+    $pe = \Runtime\Libc\sys_getprotobynumber($protocol);
+    if ($pe === null) {
+        return false;
+    }
+    return \cstr_to_str(\int_to_ptr(\peek_i64($pe, 0)));   // p_name @0
+}
+
+/** Open a connection to the system logger. */
+function openlog(string $prefix, int $flags, int $facility): bool
+{
+    \Runtime\Libc\sys_openlog($prefix, $flags, $facility);
+    return true;
+}
+
+/**
+ * Send a message to the system logger. % is escaped: the libc syslog treats its
+ * message as a printf FORMAT, so a raw % would read a missing vararg.
+ */
+function syslog(int $priority, string $message): bool
+{
+    \Runtime\Libc\sys_syslog($priority, \str_replace('%', '%%', $message));
+    return true;
+}
+
+/** Close the system logger connection. */
+function closelog(): bool
+{
+    \Runtime\Libc\sys_closelog();
+    return true;
+}
+
 /**
  * Reverse DNS: the host name for $ip, or $ip unchanged when it has no PTR, or
  * false on a malformed address — php's contract. IPv4 for now (builds a
@@ -1070,6 +1140,37 @@ function pfsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_
 }
 
 /**
+ * STARTTLS: upgrade a connected plain socket to TLS in place. $enable=true does
+ * the handshake; $crypto_method's bit 0 selects client (1) vs server (0), default
+ * STREAM_CRYPTO_METHOD_TLS_CLIENT. Returns true on success, false otherwise.
+ *
+ * ⚠ Client-side only for now, and WITHOUT hostname verification: enable_crypto's
+ * stream carries no host name (it was consumed at connect time), so there is no
+ * SNI and no cert-hostname check here — the peer chain is not enforced. A verifying
+ * STARTTLS path needs the host threaded onto the resource; server STARTTLS needs a
+ * cert context. Both are debt.
+ *
+ * @param mixed $session_stream
+ * @return bool
+ */
+function stream_socket_enable_crypto(\Resource $stream, bool $enable, ?int $crypto_method = null, $session_stream = null): bool
+{
+    if (!$enable) {
+        return false;   // disabling crypto on a live stream is not supported
+    }
+    if ($stream->kind !== \Resource::KIND_SOCKET) {
+        return false;   // not a plain socket (already TLS, or a file/memory stream)
+    }
+    $method = $crypto_method ?? 121;   // STREAM_CRYPTO_METHOD_TLS_CLIENT
+    if (($method & 1) === 0) {
+        return false;   // server-side STARTTLS needs a cert context — not yet
+    }
+    // host '' ⇒ no SNI; verify off (no host to check against). Mutates $stream to
+    // KIND_TLS on success — $stream is already \Resource-typed here.
+    return \__mc_tls_handshake($stream, '', false, false);
+}
+
+/**
  * Shut down part of a full-duplex socket. $how is STREAM_SHUT_RD (0) /
  * STREAM_SHUT_WR (1) / STREAM_SHUT_RDWR (2), which equal SHUT_RD/WR/RDWR on both
  * hosts. Only meaningful for a socket/TLS stream.
@@ -1086,6 +1187,135 @@ function stream_socket_shutdown(\Resource $stream, int $how): bool
 function stream_get_transports(): array
 {
     return ['tcp', 'udp', 'unix', 'ssl', 'tls'];
+}
+
+/** "host:port" for a sockaddr via getnameinfo (numeric host + serv); '' on error. */
+function __mc_sockaddr_name(\Ffi\Ptr $sa, int $alen): string
+{
+    $host = \Runtime\Libc\calloc(128, 1);
+    $serv = \Runtime\Libc\calloc(32, 1);
+    if ($host === null || $serv === null) {
+        if ($host !== null) { \Runtime\Libc\free($host); }
+        if ($serv !== null) { \Runtime\Libc\free($serv); }
+        return '';
+    }
+    $flags = \__mc_net_const(8) | \__mc_net_const(10);   // NI_NUMERICHOST | NI_NUMERICSERV
+    $rc = \Runtime\Libc\sys_getnameinfo($sa, $alen, $host, 128, $serv, 32, $flags);
+    $out = $rc === 0 ? (\cstr_to_str($host) . ':' . \cstr_to_str($serv)) : '';
+    \Runtime\Libc\free($host);
+    \Runtime\Libc\free($serv);
+    return $out;
+}
+
+/**
+ * The local ("host:port") name of a socket, or the peer's when $want_peer.
+ * @return string|false
+ */
+function stream_socket_get_name(\Resource $handle, bool $want_peer)
+{
+    if (!\__mc_stream_is_net($handle)) {
+        return false;
+    }
+    $sa = \Runtime\Libc\calloc(128, 1);   // sockaddr_storage
+    $len = \Runtime\Libc\calloc(4, 1);
+    if ($sa === null || $len === null) {
+        if ($sa !== null) { \Runtime\Libc\free($sa); }
+        if ($len !== null) { \Runtime\Libc\free($len); }
+        return false;
+    }
+    \poke_i32($len, 0, 128);
+    $rc = $want_peer
+        ? \Runtime\Libc\sys_getpeername($handle->addr, $sa, $len)
+        : \Runtime\Libc\sys_getsockname($handle->addr, $sa, $len);
+    $name = $rc === 0 ? \__mc_sockaddr_name($sa, \peek_i32($len, 0)) : '';
+    \Runtime\Libc\free($sa);
+    \Runtime\Libc\free($len);
+    return $name === '' ? false : $name;
+}
+
+/**
+ * Receive up to $length bytes from a (datagram) socket, filling &$address with the
+ * sender's "host:port". Returns the bytes, or false.
+ * @param string $address
+ * @return string|false
+ */
+function stream_socket_recvfrom(\Resource $handle, int $length, int $flags = 0, &$address = '')
+{
+    $address = '';
+    if (!\__mc_stream_is_net($handle) || $length <= 0) {
+        return false;
+    }
+    $buf = \Runtime\Libc\calloc($length + 1, 1);
+    $sa = \Runtime\Libc\calloc(128, 1);
+    $slen = \Runtime\Libc\calloc(4, 1);
+    if ($buf === null || $sa === null || $slen === null) {
+        if ($buf !== null) { \Runtime\Libc\free($buf); }
+        if ($sa !== null) { \Runtime\Libc\free($sa); }
+        if ($slen !== null) { \Runtime\Libc\free($slen); }
+        return false;
+    }
+    \poke_i32($slen, 0, 128);
+    $got = \Runtime\Libc\sys_recvfrom($handle->addr, $buf, $length, $flags, $sa, $slen);
+    if ($got >= 0) {
+        $address = \__mc_sockaddr_name($sa, \peek_i32($slen, 0));
+    }
+    $out = $got < 0 ? false : \str_from_buffer($buf, $got);
+    \Runtime\Libc\free($buf);
+    \Runtime\Libc\free($sa);
+    \Runtime\Libc\free($slen);
+    return $out;
+}
+
+/**
+ * Send $data on a (datagram) socket. With $address ("host:port") it is resolved
+ * and sent there; empty $address sends on a connected socket. Returns the byte
+ * count, or -1.
+ */
+function stream_socket_sendto(\Resource $handle, string $data, int $flags = 0, string $address = ''): int
+{
+    if (!\__mc_stream_is_net($handle)) {
+        return -1;
+    }
+    $len = \strlen($data);
+    if ($address === '') {
+        $n = \Runtime\Libc\sys_send($handle->addr, $data, $len, $flags);
+        return $n < 0 ? -1 : $n;
+    }
+    $colon = \strrpos($address, ':');
+    if ($colon === false) {
+        return -1;
+    }
+    $host = \substr($address, 0, $colon);
+    $port = \substr($address, $colon + 1, \strlen($address) - ($colon + 1));
+    if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
+        $host = \substr($host, 1, \strlen($host) - 2);
+    }
+    $res = \Runtime\Libc\calloc(8, 1);
+    if ($res === null) {
+        return -1;
+    }
+    if (\Runtime\Libc\sys_getaddrinfo($host, $port, \int_to_ptr(0), $res) !== 0) {
+        \Runtime\Libc\free($res);
+        return -1;
+    }
+    $head = \peek_i64($res, 0);
+    \Runtime\Libc\free($res);
+    if ($head === 0) {
+        return -1;
+    }
+    $n = -1;
+    $ai = $head;
+    while ($ai !== 0) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(1)) === 2) {   // SOCK_DGRAM
+            $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
+            $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
+            $r = \Runtime\Libc\sys_sendto($handle->addr, $data, $len, $flags, \int_to_ptr($addr), $alen);
+            if ($r >= 0) { $n = $r; break; }
+        }
+        $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
+    }
+    \Runtime\Libc\sys_freeaddrinfo(\int_to_ptr($head));
+    return $n;
 }
 
 // ── HTTP/1.1 client ────────────────────────────────────────────────────

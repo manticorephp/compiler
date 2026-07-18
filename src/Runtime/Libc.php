@@ -343,6 +343,24 @@ function sys_send_buf(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int 
 function sys_recv(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
                   #[CType('int')] int $flags): int {}
 
+// `ssize_t recvfrom(int fd, void *buf, size_t n, int flags, sockaddr *src,
+//  socklen_t *addrlen)` — like recv, but also fills the sender's address (for a
+// datagram socket). $src/$addrlen may be NULL to ignore it.
+#[Library('c'), Symbol('recvfrom')]
+function sys_recvfrom(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
+                      #[CType('int')] int $flags, Ptr $src, Ptr $addrlen): int {}
+
+// `ssize_t sendto(int fd, const void *buf, size_t n, int flags,
+//  const sockaddr *dst, socklen_t addrlen)` — send a datagram to a specific peer.
+#[Library('c'), Symbol('sendto')]
+function sys_sendto(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $n,
+                    #[CType('int')] int $flags, Ptr $dst, #[CType('int')] int $addrlen): int {}
+
+// `int getpeername(int fd, sockaddr *addr, socklen_t *addrlen)` — the address of
+// the connected peer (the mirror of getsockname).
+#[Library('c'), Symbol('getpeername')]
+function sys_getpeername(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
+
 // `int poll(struct pollfd *fds, nfds_t nfds, int timeout)` — ready count, 0 on
 // timeout, -1 on error. $timeout is MILLISECONDS; -1 blocks. This is the whole
 // timeout mechanism (see the note above).
@@ -408,6 +426,27 @@ function sys_getnameinfo(Ptr $addr, #[CType('int')] int $addrlen, Ptr $host,
 // packed bytes (4 for AF_INET, 16 for AF_INET6). 1 on success, 0 on a bad address.
 #[Library('c'), Symbol('inet_pton')]
 function sys_inet_pton(#[CType('int')] int $af, string $src, Ptr $dst): int {}
+
+// service/protocol DB lookups → struct servent* / protoent* (LP64 layout, same on
+// both hosts): servent { s_name@0, s_aliases@8, s_port@16 (net order), s_proto@24 };
+// protoent { p_name@0, p_aliases@8, p_proto@16 }. NULL when not found.
+#[Library('c'), Symbol('getservbyname')]
+function sys_getservbyname(string $name, string $proto): Ptr {}
+#[Library('c'), Symbol('getservbyport')]
+function sys_getservbyport(#[CType('int')] int $port, string $proto): Ptr {}
+#[Library('c'), Symbol('getprotobyname')]
+function sys_getprotobyname(string $name): Ptr {}
+#[Library('c'), Symbol('getprotobynumber')]
+function sys_getprotobynumber(#[CType('int')] int $proto): Ptr {}
+
+// `void openlog(const char *ident, int option, int facility)` /
+// `void syslog(int priority, const char *message)` / `void closelog(void)`.
+#[Library('c'), Symbol('openlog')]
+function sys_openlog(string $ident, #[CType('int')] int $option, #[CType('int')] int $facility): void {}
+#[Library('c'), Symbol('syslog')]
+function sys_syslog(#[CType('int')] int $priority, string $message): void {}
+#[Library('c'), Symbol('closelog')]
+function sys_closelog(): void {}
 
 // `const char *inet_ntop(int af, const void *src, char *dst, socklen_t size)` — the
 // reverse: packed bytes to a printable string in $dst (NULL on failure).

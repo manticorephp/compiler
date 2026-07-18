@@ -425,6 +425,35 @@ function stream_get_wrappers(): array
     return ['php', 'file', 'http', 'https'];
 }
 
+/** Whether $stream is a LOCAL stream (a file/memory resource), not a network one. */
+function stream_is_local(\Resource $stream): bool
+{
+    $k = $stream->kind;
+    return $k === \Resource::KIND_FILE || $k === \Resource::KIND_DIR
+        || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY;
+}
+
+/** Whether $stream supports flock() — only a FILE-backed stream does. */
+function stream_supports_lock(\Resource $stream): bool
+{
+    return $stream->kind === \Resource::KIND_FILE;
+}
+
+/**
+ * Set the read buffer size. A tuning hint with no effect here (our reads are
+ * already buffered by the rbuf/rpos machinery); 0 = success, as in php.
+ */
+function stream_set_read_buffer(\Resource $stream, int $size): int
+{
+    return 0;
+}
+
+/** Set the write buffer size. A no-op tuning hint; 0 = success. */
+function stream_set_write_buffer(\Resource $stream, int $size): int
+{
+    return 0;
+}
+
 /** Whether $stream is connected to a terminal. */
 function stream_isatty(\Resource $stream): bool
 {

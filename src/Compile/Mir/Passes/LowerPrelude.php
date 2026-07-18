@@ -327,6 +327,13 @@ trait LowerPrelude
             'STREAM_SERVER_BIND' => 4, 'STREAM_SERVER_LISTEN' => 8,
             'STREAM_CLIENT_CONNECT' => 4, 'STREAM_CLIENT_ASYNC_CONNECT' => 2,
             'STREAM_CLIENT_PERSISTENT' => 1,
+            // stream_socket_enable_crypto methods — php's values; bit 0 selects
+            // CLIENT (1) vs SERVER (0). TLS_* is the version-agnostic combination.
+            'STREAM_CRYPTO_METHOD_ANY_CLIENT' => 127, 'STREAM_CRYPTO_METHOD_ANY_SERVER' => 126,
+            'STREAM_CRYPTO_METHOD_TLS_CLIENT' => 121, 'STREAM_CRYPTO_METHOD_TLS_SERVER' => 120,
+            'STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT' => 33, 'STREAM_CRYPTO_METHOD_TLSv1_2_SERVER' => 32,
+            'STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT' => 65, 'STREAM_CRYPTO_METHOD_TLSv1_3_SERVER' => 64,
+            'STREAM_CRYPTO_PROTO_TLSv1_2' => 16, 'STREAM_CRYPTO_PROTO_TLSv1_3' => 32,
             // glob: php's OWN values, not the host's (php has carried its own
             // glob since 8.3) — GLOB_NOESCAPE is 0x1000 where Darwin's header
             // says 0x2000, and no libc has GLOB_ONLYDIR = 0x40000000. Host
