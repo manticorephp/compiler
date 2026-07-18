@@ -51,6 +51,17 @@ final class CheckTypeDefs
 {
     public const NAME = 'check-typedefs';
 
+    /**
+     * Analysis mode: when true, a violation is COLLECTED into {@see $errors}
+     * instead of thrown, so the analyzer's repr-soundness family can drive this
+     * pass read-only and report every finding rather than aborting on the first.
+     * Off for a normal compile (throw → fatal).
+     */
+    public bool $collectMode = false;
+
+    /** @var string[] collected violation messages (analysis mode) */
+    public array $errors = [];
+
     /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
     private array $paramsByFn = [];
 
@@ -248,6 +259,10 @@ final class CheckTypeDefs
 
     private function fail(string $cls, string $why): void
     {
+        if ($this->collectMode) {
+            $this->errors[] = '#[TypeDef] ' . $cls . ': ' . $why;
+            return;
+        }
         throw new \RuntimeException('#[TypeDef] ' . $cls . ': ' . $why);
     }
 }

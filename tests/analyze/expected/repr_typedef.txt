@@ -1,0 +1,3 @@
+tests/analyze/cases/repr_typedef.php:0:0: error: #[TypeDef] U8: `===` compares object IDENTITY in PHP, and an erased value has none — compare the values: `$a->value === $b->value`
+
+Found 1 error(s), 0 warning(s).

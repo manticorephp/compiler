@@ -1,0 +1,7 @@
+tests/analyze/cases/missing_array_type.php:6:22: warning: unannotated(): parameter $xs is typed bare `array` — annotate its element type (`@param T[] $xs`)
+tests/analyze/cases/missing_array_type.php:11:1: warning: unannotatedReturn(): return type is bare `array` — annotate its element type (`@return T[]`)
+tests/analyze/cases/missing_array_type.php:13:18: warning: generic(): parameter $xs is typed bare `array` — annotate its element type (`@param T[] $xs`)
+tests/analyze/cases/missing_array_type.php:21:5: warning: property Bag::$bad is typed bare `array` — annotate its element type (`@var T[]`)
+tests/analyze/cases/missing_array_type.php:23:26: warning: Bag::take(): parameter $items is typed bare `array` — annotate its element type (`@param T[] $items`)
+
+Found 0 error(s), 5 warning(s).

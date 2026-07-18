@@ -1,0 +1,7 @@
+tests/analyze/cases/flow_depth.php:12:18: error: argument 1 of takesInt(): string given, int expected
+tests/analyze/cases/flow_depth.php:13:23: error: argument 2 of Calc->add(): string given, int expected
+tests/analyze/cases/flow_depth.php:14:21: error: arithmetic (`-`) on a string operand — cast explicitly ((int)/(float)) to compute on it
+tests/analyze/cases/flow_depth.php:19:10: error: argument 1 of takesInt(): string given, int expected
+tests/analyze/cases/flow_depth.php:27:9: error: argument 1 of Calc->add(): string given, int expected
+
+Found 5 error(s), 0 warning(s).

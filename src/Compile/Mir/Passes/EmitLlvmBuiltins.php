@@ -128,6 +128,9 @@ trait EmitLlvmBuiltins
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
         if ($name === 'printf')                       { return $this->biSprintf($args, true); }
+        if ($name === '__mc_fmt_int')                 { return $this->biFmt1($args, 'i'); }
+        if ($name === '__mc_fmt_float')               { return $this->biFmt1($args, 'f'); }
+        if ($name === '__mc_fmt_str')                 { return $this->biFmt1($args, 's'); }
         if ($name === 'exit' || $name === 'die')      { return $this->biExit($args); }
         if ($name === 'error_log')                    { return $this->biErrorLog($args); }
         if ($name === 'gc_collect_cycles')            { return $this->biGcCollect(); }
@@ -2491,7 +2494,11 @@ trait EmitLlvmBuiltins
     private function biSprintf(array $args, bool $toStdout): ?string
     {
         $a0 = $args[0];
-        if ($a0->kind !== Node::KIND_STRING_CONST) { return null; }
+        // A RUNTIME (non-literal) format can't be translated at compile time —
+        // pack the args and drive the runtime {@see \__mc_format} engine.
+        if ($a0->kind !== Node::KIND_STRING_CONST) {
+            return $this->biFormatRuntime($args, $toStdout);
+        }
         $fmt = $a0->value;
         // Translate specifiers + record per-arg conversion kind.
         $trans = '';
@@ -2558,12 +2565,19 @@ trait EmitLlvmBuiltins
             }
             $i = $j;
         }
+        $argN = \count($convs);
+        // A positional `%n$` spec or fewer args than conversions needs the
+        // runtime {@see \__mc_format} engine (arg reordering / a missing arg is
+        // "" in PHP) — the inline path can do neither, and would crash on an
+        // out-of-range `$args[$a + 1]`.
+        if (\count($args) < $argN + 1 || \strpos($fmt, '$') !== false) {
+            return $this->biFormatRuntime($args, $toStdout);
+        }
         $fmtId = $this->pool->intern($trans);
         $fmtPtr = $this->strLitId($fmtId);
         // Evaluate + coerce each consumed arg in order.
         $out = '';
         $vararg = '';
-        $argN = \count($convs);
         for ($a = 0; $a < $argN; $a = $a + 1) {
             $argNode = $args[$a + 1];
             $out .= $this->emitNode($argNode);
@@ -2688,6 +2702,169 @@ trait EmitLlvmBuiltins
             return $out;
         }
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * Runtime single-conversion formatter: `__mc_fmt_int/float/str($cfmt, $val)`
+     * → snprintf the ONE value through the already-C-translated spec `$cfmt`
+     * (e.g. `%+08lld`, `%-10.3f`, `%.5s`) into a fresh string. The runtime
+     * `sprintf`/`vsprintf`/`fprintf` engine ({@see \__mc_format}) parses the PHP
+     * format itself and drives one of these per conversion — the moving-format
+     * analogue of {@see biSprintf}'s compile-time inline. `$kind` picks the C
+     * vararg type: i=i64, f=double, s=char*. snprintf is declared ONCE as
+     * variadic so all three calls share a compatible `@snprintf`.
+     */
+    private function biFmt1(array $args, string $kind): ?string
+    {
+        if (\count($args) !== 2) { return null; }
+        $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $fmtPtr = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $vk = $args[1]->type->kind;
+        // The engine passes the RAW arg (a mixed/nullable element of `...$args`);
+        // a tagged value (cell / erased unknown) is NaN-boxed and must be unboxed
+        // BY TAG (never sitofp'd), so coerce to the i64 carrier first (ptr→i64)
+        // then run the tagged decoder. A statically-concrete scalar coerces plain.
+        $tagged = ($vk === Type::KIND_CELL || $vk === Type::KIND_UNKNOWN);
+        if ($kind === 'f') {
+            if ($tagged) {
+                $this->rt->needsTaggedToFloat = true;
+                $out .= $this->coerceToI64();
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
+                $this->lastValue = $d; $this->lastValueType = 'double';
+            } else {
+                $out .= $this->coerceTo('double');
+            }
+            $vtype = 'double';
+        } elseif ($kind === 's') {
+            if ($tagged) {
+                $this->rt->needsTaggedToStr = true;
+                $out .= $this->coerceToI64();
+                $s = $this->ssa->allocReg();
+                $out .= '  ' . $s . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
+                $this->lastValue = $s; $this->lastValueType = 'ptr';
+            } else {
+                $out .= $this->coerceToPtr();
+            }
+            $vtype = 'ptr';
+        } else {
+            if ($tagged) {
+                $this->rt->needsTaggedToInt = true;
+                $this->rt->needsStrtol = true; // tagged_to_int parses a string cell via strtol
+                $out .= $this->coerceToI64();
+                $iv = $this->ssa->allocReg();
+                $out .= '  ' . $iv . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+                $this->lastValue = $iv; $this->lastValueType = 'i64';
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $vtype = 'i64';
+        }
+        $val = $this->lastValue;
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 256)\n";
+        $tmp = $this->ssa->allocReg();
+        $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf
+              . ', i64 256, ptr ' . $fmtPtr . ', ' . $vtype . ' ' . $val . ")\n";
+        $tl = $this->ssa->allocReg();
+        $out .= '  ' . $tl . ' = sext i32 ' . $tmp . " to i64\n";
+        // snprintf returns the length it WOULD have written; clamp to the 255-byte
+        // buffer so a huge width doesn't set a length past the allocation.
+        $ov = $this->ssa->allocReg();
+        $out .= '  ' . $ov . ' = icmp sgt i64 ' . $tl . ", 255\n";
+        $cl = $this->ssa->allocReg();
+        $out .= '  ' . $cl . ' = select i1 ' . $ov . ', i64 255, i64 ' . $tl . "\n";
+        $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $cl . ")\n";
+        $this->lastValue = $buf; $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * Runtime `sprintf`/`printf` whose format the compiler cannot translate at
+     * compile time (variable format, positional `%n$`, or fewer args than
+     * conversions): pack the individual arg nodes into a packed cell array and
+     * drive the stdlib {@see \__mc_format} engine. `sprintf($f, ...$arr)` passes
+     * the spread's array straight through. printf echoes the result.
+     */
+    private function biFormatRuntime(array $args, bool $toStdout): string
+    {
+        // Spread `...$arr`: the array IS the argument list — hand it over as-is.
+        if (\count($args) === 2 && $args[1]->kind === Node::KIND_SPREAD) {
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToPtr();
+            $fmtI = $this->ssa->allocReg();
+            $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $out .= $this->emitNode($args[1]->operand);
+            $out .= $this->coerceToPtr();
+            $arrI = $this->ssa->allocReg();
+            $out .= '  ' . $arrI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            return $this->formatCallAndFinish($out, $fmtI, $arrI, $toStdout, false);
+        }
+        $hdr = \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
+        $esz = \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
+        $count = \count($args) - 1;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $fmtI = $this->ssa->allocReg();
+        $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        // Pack args[1..] into a packed CELL array (mirrors emitArrayLitDirect).
+        $arr = $this->ssa->allocReg();
+        $out .= '  ' . $arr . ' = call ptr @__mir_array_alloc(i64 ' . (string)$count . ")\n";
+        for ($k = 1; $k <= $count; $k = $k + 1) {
+            $el = $args[$k];
+            $out .= $this->emitNode($el);
+            $out .= $this->retainCellPayload($el);
+            $out .= $this->boxToCell($el->type);
+            $val = $this->lastValue;
+            $off = $hdr + ($k - 1) * $esz;
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . (string)$off . "\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
+        }
+        $out .= '  store i64 ' . (string)$count . ', ptr ' . $arr . "\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 '
+              . (string)\Compile\MemoryAbi::ARRAY_NEXT_INT_OFFSET . "\n";
+        $out .= '  store i64 ' . (string)$count . ', ptr ' . $ni . "\n";
+        $arrI = $this->ssa->allocReg();
+        $out .= '  ' . $arrI . ' = ptrtoint ptr ' . $arr . " to i64\n";
+        return $this->formatCallAndFinish($out, $fmtI, $arrI, $toStdout, true);
+    }
+
+    /** Emit the `__mc_format` call + printf/return tail shared by biFormatRuntime. */
+    private function formatCallAndFinish(string $out, string $fmtI, string $arrI, bool $toStdout, bool $releaseArr): string
+    {
+        if (!isset($this->definedFns[$this->mangle('__mc_format')])) {
+            $this->libcExtra['manticore___mc_format'] = 'declare i64 @manticore___mc_format(i64, i64)';
+        }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = call i64 @manticore___mc_format(i64 ' . $fmtI . ', i64 ' . $arrI . ")\n";
+        if ($releaseArr) {
+            // The packed temp co-owned each boxed arg (retainCellPayload); dropping
+            // it releases them, balancing the retain.
+            $ap = $this->ssa->allocReg();
+            $out .= '  ' . $ap . ' = inttoptr i64 ' . $arrI . " to ptr\n";
+            $out .= '  call void @__mir_array_release_cell(ptr ' . $ap . ")\n";
+        }
+        if ($toStdout) {
+            $rp = $this->ssa->allocReg();
+            $out .= '  ' . $rp . ' = inttoptr i64 ' . $res . " to ptr\n";
+            $pcts = $this->strLitId($this->pool->intern('%s'));
+            $pr = $this->ssa->allocReg();
+            $out .= '  ' . $pr . ' = call i32 (ptr, ...) @printf(ptr ' . $pcts . ', ptr ' . $rp . ")\n";
+            $out .= $this->rcReleaseReg($res, 'str');
+            $len = $this->ssa->allocReg();
+            $out .= '  ' . $len . ' = sext i32 ' . $pr . " to i64\n";
+            $this->lastValue = $len; $this->lastValueType = 'i64';
+            return $out;
+        }
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $res . " to ptr\n";
+        $this->lastValue = $rp; $this->lastValueType = 'ptr';
         return $out;
     }
 

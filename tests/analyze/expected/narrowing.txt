@@ -1,0 +1,4 @@
+tests/analyze/cases/narrowing.php:14:21: error: argument 1 of needsSquare(): Circle given, Square expected
+tests/analyze/cases/narrowing.php:34:17: error: arithmetic (`-`) on a string operand — cast explicitly ((int)/(float)) to compute on it
+
+Found 2 error(s), 0 warning(s).

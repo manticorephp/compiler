@@ -1,0 +1,13 @@
+42|   42|42   |00042|+42
+ff FF 377 A
+hi|        hi|hi        |hel
+3.14     3.14 00003.14 +3.14
+1.234568e+4 1.235e+4 0.0001
+********42 k-42
+vprintf 7 z
+10/run/2.5
+runtime printf 00007 ff
+1-two-3.0
+key=9
+fprintf 3 a 1.50
+vfprintf ff 101

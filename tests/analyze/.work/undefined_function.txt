@@ -1,0 +1,4 @@
+tests/analyze/cases/undefined_function/main.php:6:1: error: unknown function ghostFn()
+tests/analyze/cases/undefined_function/main.php:8:1: error: unknown function notAThing()
+
+Found 2 error(s), 0 warning(s).
