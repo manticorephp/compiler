@@ -104,6 +104,12 @@ function write(int $ssl, string $buf, #[CType('int')] int $num): int {}
 #[Library('ssl'), Symbol('SSL_get_error')]
 function getError(int $ssl, #[CType('int')] int $ret): int {}
 
+// int SSL_pending(const SSL *ssl) — decrypted bytes already buffered in the SSL
+// engine. When >0, SSL_read returns them WITHOUT the socket fd being readable, so
+// a read-timeout must not poll the fd first (it would stall on data we already hold).
+#[Library('ssl'), Symbol('SSL_pending')]
+function pending(int $ssl): int {}
+
 // int SSL_shutdown(SSL *ssl) — send close_notify. One call is enough for our
 // short-lived request; we do not wait for the peer's reply.
 #[Library('ssl'), Symbol('SSL_shutdown')]

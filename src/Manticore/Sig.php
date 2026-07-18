@@ -64,6 +64,12 @@ final class Sig
         // Closures (per-module `__closure_N`) are internal, never linked by
         // name across a unit.
         if (isset($module->closureCaptures[$fn->name])) { return false; }
+        // Fused-builtin helpers (`__mc_fuse_inarray_0`, …) are per-module synthetics,
+        // monomorphized to THIS module's call-site types — a different body per
+        // module behind the same name. Exporting one would make a dependent import it
+        // AND emit its own (invalid redefinition), and two objects would duplicate the
+        // symbol at link. They are emitted `internal` (see EmitLlvm) and never public.
+        if (\str_starts_with($fn->name, '__mc_fuse_')) { return false; }
         return true;
     }
 

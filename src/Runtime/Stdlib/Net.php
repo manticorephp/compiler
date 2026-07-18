@@ -81,12 +81,17 @@ function __mc_net_const(int $which): int
     static $ready = 0;
     static $solSocket = 0;
     static $soError = 0;
+    static $niNumericHost = 0;
+    static $afInet6 = 0;
 
     if ($ready === 0) {
-        // MEASURED: Darwin SOL_SOCKET 65535 / SO_ERROR 0x1007; Linux 1 / 4.
+        // MEASURED: Darwin SOL_SOCKET 65535 / SO_ERROR 0x1007 / NI_NUMERICHOST 2 /
+        // AF_INET6 30; Linux 1 / 4 / 1 / 10.
         $isDarwin = \__mc_host_is_darwin();
         $solSocket = $isDarwin ? 65535 : 1;
         $soError = $isDarwin ? 4103 : 4;
+        $niNumericHost = $isDarwin ? 2 : 1;
+        $afInet6 = $isDarwin ? 30 : 10;
         $ready = 1;
     }
 
@@ -97,6 +102,8 @@ function __mc_net_const(int $which): int
     if ($which === 4) { return 16; }     // POLLHUP
     if ($which === 5) { return $solSocket; }
     if ($which === 6) { return $soError; }
+    if ($which === 8) { return $niNumericHost; }
+    if ($which === 9) { return $afInet6; }
     return 2;                            // SHUT_RDWR — 0/1/2 everywhere
 }
 
@@ -127,6 +134,40 @@ function __mc_poll_one(int $fd, bool $forWrite, int $timeoutMs): int
             $rc = -1;
         }
     }
+    \Runtime\Libc\free($pfd);
+    return $rc;
+}
+
+/**
+ * php.net's stream_set_timeout: bound how long a read on $stream waits for data.
+ * 0/0 keeps the default (php's default_socket_timeout, 60s); a positive value caps
+ * each read at that long, after which the read returns empty and
+ * stream_get_meta_data()['timed_out'] is true.
+ */
+function stream_set_timeout(\Resource $stream, int $seconds, int $microseconds = 0): bool
+{
+    $ms = $seconds * 1000 + \intdiv($microseconds, 1000);
+    $stream->rtimeoutMs = $ms > 0 ? $ms : 0;
+    return true;
+}
+
+/**
+ * Wait up to $timeoutMs for $fd to be readable, for a bounded blocking read.
+ * Returns >0 (proceed to recv — data, or a POLLHUP whose recv drains the tail and
+ * then reports EOF), 0 (timed out), <0 (poll error — the caller proceeds to recv
+ * and lets it report). Unlike __mc_poll_one this does NOT fold POLLHUP into an
+ * error: at EOF the last bytes must still be read.
+ */
+function __mc_poll_readable(int $fd, int $timeoutMs): int
+{
+    $pfd = \Runtime\Libc\calloc(8, 1);
+    if ($pfd === null) {
+        return 1;   // cannot poll ⇒ do not turn a read into a hang; just recv
+    }
+    \poke_i32($pfd, 0, $fd);
+    \poke_i16($pfd, 4, \__mc_net_const(1));   // POLLIN
+    \poke_i16($pfd, 6, 0);
+    $rc = \Runtime\Libc\sys_poll($pfd, 1, $timeoutMs);
     \Runtime\Libc\free($pfd);
     return $rc;
 }
@@ -170,6 +211,7 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     // SOCK_STREAM (tcp), 2 SOCK_DGRAM (udp) — both values are the same on every
     // target. A DGRAM connect() sets the default peer, so send()/recv() then work
     // without naming the address each call.
+    \__mc_net_errno(true, 0);   // clear stale errno; the walk records the real one
     $res = \Runtime\Libc\calloc(8, 1);
     if ($res === null) {
         return false;
@@ -206,6 +248,7 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
                     $fd = $cand;
                     break;
                 }
+                \__mc_net_errno(true, \__mc_errno());   // capture BEFORE close clobbers errno
                 \Runtime\Libc\sys_close($cand);
             }
         }
@@ -475,6 +518,28 @@ function __mc_tls_accept(int $serverCtx, int $fd)
  * @param string $error_message
  * @return \Resource|false
  */
+/**
+ * The last socket errno captured at a failing syscall, kept in a static so the
+ * connect walk can record it BEFORE sys_close (which would clobber errno) and the
+ * openers report a real code/message. Int static, never an array (the array-in-
+ * static boundary trap — {@see __mc_http_headers_store}).
+ */
+function __mc_net_errno(bool $write, int $val): int
+{
+    static $e = 0;
+    if ($write) { $e = $val; }
+    return $e;
+}
+
+/** strerror($errno) as an owned string ('' for 0). */
+function __mc_errno_msg(int $errno): string
+{
+    if ($errno === 0) {
+        return '';
+    }
+    return \cstr_to_str(\Runtime\Libc\strerror($errno));
+}
+
 function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_message = '', ?float $timeout = null)
 {
     $error_code = 0;
@@ -494,10 +559,14 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
     }
     $sock = \__mc_transport_connect($scheme, $host, $port);
     if ($sock === false) {
-        // php reports errno here. We have none (see the header), so report the
-        // stage that failed rather than inventing a number.
-        $error_code = -1;
-        $error_message = 'connection to ' . $host . ':' . (string)$port . ' failed';
+        // Report the real errno + strerror, as php does — a closed port gives
+        // ECONNREFUSED / "Connection refused". Falls back to a generic message
+        // when nothing set errno (e.g. name resolution failed, which is not errno).
+        $e = \__mc_net_errno(false, 0);
+        $error_code = $e;
+        $error_message = $e !== 0
+            ? \__mc_errno_msg($e)
+            : ('connection to ' . $host . ':' . (string)$port . ' failed');
         return false;
     }
     return $sock;
@@ -552,8 +621,11 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     }
     $sock = \__mc_transport_connect($scheme, $host, $port);
     if ($sock === false) {
-        $error_code = -1;
-        $error_message = 'connection to ' . $host . ':' . (string)$port . ' failed';
+        $e = \__mc_net_errno(false, 0);
+        $error_code = $e;
+        $error_message = $e !== 0
+            ? \__mc_errno_msg($e)
+            : ('connection to ' . $host . ':' . (string)$port . ' failed');
         return false;
     }
     return $sock;
@@ -775,6 +847,245 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
         return \__mc_tls_accept($server->ssl, $fd);
     }
     return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+}
+
+// ── DNS / address functions ────────────────────────────────────────────
+//
+// The resolving ones ride on getaddrinfo + getnameinfo (already the socket path's
+// resolver), so they build no sockaddr and add no host-specific struct parsing —
+// getnameinfo(NI_NUMERICHOST) stringifies whatever the resolver chose.
+
+/** The numeric IP of one getaddrinfo result, via getnameinfo. '' on failure. */
+function __mc_ai_numeric_host(int $ai): string
+{
+    $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));   // ai_addr
+    $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));   // ai_addrlen
+    $host = \Runtime\Libc\calloc(128, 1);
+    if ($host === null) {
+        return '';
+    }
+    $rc = \Runtime\Libc\sys_getnameinfo(\int_to_ptr($addr), $alen, $host, 128,
+                                        \int_to_ptr(0), 0, \__mc_net_const(8));   // NI_NUMERICHOST
+    $out = $rc === 0 ? \cstr_to_str($host) : '';
+    \Runtime\Libc\free($host);
+    return $out;
+}
+
+/** This machine's host name, or false. */
+function gethostname()
+{
+    $buf = \Runtime\Libc\calloc(256, 1);
+    if ($buf === null) {
+        return false;
+    }
+    $rc = \Runtime\Libc\sys_gethostname($buf, 256);
+    $out = $rc === 0 ? \cstr_to_str($buf) : false;
+    \Runtime\Libc\free($buf);
+    return $out;
+}
+
+/**
+ * The first IPv4 address of $hostname, or — as php does — $hostname unchanged when
+ * it does not resolve.
+ */
+function gethostbyname(string $hostname): string
+{
+    $res = \Runtime\Libc\calloc(8, 1);
+    if ($res === null) {
+        return $hostname;
+    }
+    if (\Runtime\Libc\sys_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
+        \Runtime\Libc\free($res);
+        return $hostname;
+    }
+    $head = \peek_i64($res, 0);
+    \Runtime\Libc\free($res);
+    $ip = $hostname;
+    $ai = $head;
+    while ($ai !== 0) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(0)) === 2) {   // AF_INET
+            $h = \__mc_ai_numeric_host($ai);
+            if ($h !== '') { $ip = $h; break; }
+        }
+        $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
+    }
+    if ($head !== 0) {
+        \Runtime\Libc\sys_freeaddrinfo(\int_to_ptr($head));
+    }
+    return $ip;
+}
+
+/**
+ * Every IPv4 address of $hostname (deduped — getaddrinfo repeats each per
+ * socktype), or false when it does not resolve.
+ * @return string[]|false
+ */
+function gethostbynamel(string $hostname)
+{
+    $res = \Runtime\Libc\calloc(8, 1);
+    if ($res === null) {
+        return false;
+    }
+    if (\Runtime\Libc\sys_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
+        \Runtime\Libc\free($res);
+        return false;
+    }
+    $head = \peek_i64($res, 0);
+    \Runtime\Libc\free($res);
+    /** @var string[] $ips */
+    $ips = [];
+    $ai = $head;
+    while ($ai !== 0) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(0)) === 2) {
+            $h = \__mc_ai_numeric_host($ai);
+            if ($h !== '' && !\in_array($h, $ips, true)) { $ips[] = $h; }
+        }
+        $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
+    }
+    if ($head !== 0) {
+        \Runtime\Libc\sys_freeaddrinfo(\int_to_ptr($head));
+    }
+    return $ips;
+}
+
+/** Dotted-quad IPv4 string to its 32-bit int, or false on a malformed address. */
+function ip2long(string $ip)
+{
+    $parts = \explode('.', $ip);
+    if (\count($parts) !== 4) {
+        return false;
+    }
+    $n = 0;
+    foreach ($parts as $p) {
+        $len = \strlen($p);
+        if ($len === 0 || $len > 3 || !\ctype_digit($p)) {
+            return false;
+        }
+        $v = (int)$p;
+        if ($v > 255) {
+            return false;
+        }
+        $n = ($n * 256) + $v;   // *256 keeps it a positive int (0..4294967295)
+    }
+    return $n;
+}
+
+/** A 32-bit int to its dotted-quad IPv4 string (masked to 32 bits, as php does). */
+function long2ip(int $ip): string
+{
+    $ip = $ip & 4294967295;
+    return (string)(($ip >> 24) & 255) . '.' . (string)(($ip >> 16) & 255) . '.'
+         . (string)(($ip >> 8) & 255) . '.' . (string)($ip & 255);
+}
+
+/** A printable IP (v4 or v6) to its packed in_addr/in6_addr bytes, or false. */
+function inet_pton(string $address)
+{
+    $af = \strpos($address, ':') !== false ? \__mc_net_const(9) : 2;   // AF_INET6 / AF_INET
+    $sz = $af === 2 ? 4 : 16;
+    $dst = \Runtime\Libc\calloc(16, 1);
+    if ($dst === null) {
+        return false;
+    }
+    $rc = \Runtime\Libc\sys_inet_pton($af, $address, $dst);
+    $out = $rc === 1 ? \str_from_buffer($dst, $sz) : false;
+    \Runtime\Libc\free($dst);
+    return $out;
+}
+
+/** Packed in_addr/in6_addr bytes (4 or 16) to a printable IP string, or false. */
+function inet_ntop(string $in_addr)
+{
+    $len = \strlen($in_addr);
+    if ($len === 4) {
+        $af = 2;
+    } elseif ($len === 16) {
+        $af = \__mc_net_const(9);
+    } else {
+        return false;
+    }
+    $src = \Runtime\Libc\calloc(16, 1);
+    $dst = \Runtime\Libc\calloc(64, 1);
+    if ($src === null || $dst === null) {
+        if ($src !== null) { \Runtime\Libc\free($src); }
+        if ($dst !== null) { \Runtime\Libc\free($dst); }
+        return false;
+    }
+    for ($i = 0; $i < $len; $i = $i + 1) {
+        \poke_i8($src, $i, \ord($in_addr[$i]));
+    }
+    $r = \Runtime\Libc\sys_inet_ntop($af, $src, $dst, 64);
+    $out = $r === null ? false : \cstr_to_str($dst);
+    \Runtime\Libc\free($src);
+    \Runtime\Libc\free($dst);
+    return $out;
+}
+
+/**
+ * Reverse DNS: the host name for $ip, or $ip unchanged when it has no PTR, or
+ * false on a malformed address — php's contract. IPv4 for now (builds a
+ * sockaddr_in by hand, like unix://, then getnameinfo resolves it).
+ * @return string|false
+ */
+function gethostbyaddr(string $ip)
+{
+    $packed = \inet_pton($ip);
+    if ($packed === false || \strlen($packed) !== 4) {
+        return false;
+    }
+    $sa = \Runtime\Libc\calloc(16, 1);   // sizeof(sockaddr_in)
+    if ($sa === null) {
+        return false;
+    }
+    // AF_INET (2): Darwin sin_len@0 + sin_family@1; glibc/musl sin_family@0 (u16).
+    if (\__mc_host_is_darwin()) {
+        \poke_i8($sa, 0, 16);
+        \poke_i8($sa, 1, 2);
+    } else {
+        \poke_i16($sa, 0, 2);
+    }
+    for ($i = 0; $i < 4; $i = $i + 1) {   // sin_addr @4
+        \poke_i8($sa, 4 + $i, \ord($packed[$i]));
+    }
+    $host = \Runtime\Libc\calloc(256, 1);
+    if ($host === null) {
+        \Runtime\Libc\free($sa);
+        return false;
+    }
+    // flags 0 (no NI_NAMEREQD): a missing PTR gives the numeric IP back, rc 0 —
+    // exactly php's "returns the address unchanged".
+    $rc = \Runtime\Libc\sys_getnameinfo($sa, 16, $host, 256, \int_to_ptr(0), 0, 0);
+    $out = $rc === 0 ? \cstr_to_str($host) : $ip;
+    \Runtime\Libc\free($sa);
+    \Runtime\Libc\free($host);
+    return $out;
+}
+
+// ── stream/socket helpers ──────────────────────────────────────────────
+
+/** Persistent-connection fsockopen. We keep no pool yet, so it just connects. */
+function pfsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_message = '', ?float $timeout = null)
+{
+    return \fsockopen($hostname, $port, $error_code, $error_message, $timeout);
+}
+
+/**
+ * Shut down part of a full-duplex socket. $how is STREAM_SHUT_RD (0) /
+ * STREAM_SHUT_WR (1) / STREAM_SHUT_RDWR (2), which equal SHUT_RD/WR/RDWR on both
+ * hosts. Only meaningful for a socket/TLS stream.
+ */
+function stream_socket_shutdown(\Resource $stream, int $how): bool
+{
+    if (!\__mc_stream_is_net($stream)) {
+        return false;
+    }
+    return \Runtime\Libc\sys_shutdown($stream->addr, $how) === 0;
+}
+
+/** The transports stream_socket_client/server understand here. */
+function stream_get_transports(): array
+{
+    return ['tcp', 'udp', 'unix', 'ssl', 'tls'];
 }
 
 // ── HTTP/1.1 client ────────────────────────────────────────────────────

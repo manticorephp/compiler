@@ -1,0 +1,15 @@
+int(12)
+string(5) "Hello"
+int(5)
+string(5) "World"
+bool(true)
+string(12) "Jello, World"
+string(12) "Jello, World"
+string(5) "World"
+string(5) "line1"
+string(5) "line2"
+string(5) "line3"
+bool(false)
+int(8)
+string(8) "copydata"
+string(4) "temp"

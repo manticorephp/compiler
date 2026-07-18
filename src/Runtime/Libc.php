@@ -43,6 +43,11 @@ function strlen(string $s): int {}
 #[Library('c'), Symbol('strcmp')]
 function strcmp(string $a, string $b): int {}
 
+// `char *strerror(int errnum)` — the message for an errno. The returned buffer is
+// libc's own (static/thread-local), so it is COPIED (cstr_to_str) and never freed.
+#[Library('c'), Symbol('strerror')]
+function strerror(#[CType('int')] int $errnum): Ptr {}
+
 #[Library('c'), Symbol('strncmp')]
 function strncmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
@@ -169,6 +174,10 @@ function sys_ftruncate(#[CType('int')] int $fd, #[CType('long')] int $length): i
 
 #[Library('c'), Symbol('fileno')]
 function sys_fileno(Ptr $stream): int {}
+
+// `int isatty(int fd)` — 1 when fd is a terminal, 0 otherwise.
+#[Library('c'), Symbol('isatty')]
+function sys_isatty(#[CType('int')] int $fd): int {}
 
 #[Library('c'), Symbol('flock')]
 function sys_flock(#[CType('int')] int $fd, #[CType('int')] int $op): int {}
@@ -381,3 +390,26 @@ function sys_accept(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 // network byte order.
 #[Library('c'), Symbol('getsockname')]
 function sys_getsockname(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
+
+// `int gethostname(char *name, size_t len)` — the local host's name into $name.
+#[Library('c'), Symbol('gethostname')]
+function sys_gethostname(Ptr $name, #[CType('size_t')] int $len): int {}
+
+// `int getnameinfo(const sockaddr *addr, socklen_t addrlen, char *host,
+//  socklen_t hostlen, char *serv, socklen_t servlen, int flags)` — the reverse of
+// getaddrinfo. With NI_NUMERICHOST it stringifies a sockaddr to its numeric IP
+// without ANY sockaddr parsing on our side (getnameinfo owns the family details).
+#[Library('c'), Symbol('getnameinfo')]
+function sys_getnameinfo(Ptr $addr, #[CType('int')] int $addrlen, Ptr $host,
+                        #[CType('int')] int $hostlen, Ptr $serv,
+                        #[CType('int')] int $servlen, #[CType('int')] int $flags): int {}
+
+// `int inet_pton(int af, const char *src, void *dst)` — a printable address to its
+// packed bytes (4 for AF_INET, 16 for AF_INET6). 1 on success, 0 on a bad address.
+#[Library('c'), Symbol('inet_pton')]
+function sys_inet_pton(#[CType('int')] int $af, string $src, Ptr $dst): int {}
+
+// `const char *inet_ntop(int af, const void *src, char *dst, socklen_t size)` — the
+// reverse: packed bytes to a printable string in $dst (NULL on failure).
+#[Library('c'), Symbol('inet_ntop')]
+function sys_inet_ntop(#[CType('int')] int $af, Ptr $src, Ptr $dst, #[CType('int')] int $size): Ptr {}

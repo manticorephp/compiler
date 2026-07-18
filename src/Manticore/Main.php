@@ -858,8 +858,14 @@ function cmd_compile(array $args): int {
     // paired with the `-ffunction-sections` above). `-dead_strip_dylibs` /
     // `--as-needed` drop a linked-but-unreferenced dylib (e.g. libpcre2 in a
     // program that uses the stdlib but no preg_*).
+    //
+    // errno's per-host accessor (__mc_errno) declares BOTH __error and
+    // __errno_location extern_weak; on Darwin the latter is a weak-undefined that
+    // ld64 still errors on unless allowed. `-U ___errno_location` permits exactly
+    // that one symbol undefined (it binds to 0, and the null-test branches away
+    // from it). GNU ld auto-binds weak-undefined to 0, so Linux needs no flag.
     $gc = \substr(host_os(), 0, 6) === "Darwin"
-        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs"
+        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
         : " -Wl,--gc-sections -Wl,--as-needed";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
