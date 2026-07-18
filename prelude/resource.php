@@ -99,6 +99,18 @@ final class Resource
     public const KIND_FILE = 0;
     public const KIND_DIR = 1;
     public const KIND_SOCKET = 2;
+    /**
+     * A TLS stream: `$addr` is the TCP fd (as for SOCKET), and `$ssl` holds the
+     * OpenSSL `SSL*`. Reads/writes go through SSL_read/SSL_write, not recv/send.
+     *
+     * The prelude MUST NOT depend on OpenSSL — it is compiled into every module,
+     * and referencing SSL_free here would drag libssl into a hello-world. So the
+     * SSL engine is torn down by the stdlib's `fclose()` ({@see \fclose}); the
+     * prelude's own close()/__destruct closes only the fd. A TLS resource dropped
+     * WITHOUT fclose() therefore leaks the SSL* (not the fd) — documented debt,
+     * and not the path file_get_contents/fclose take.
+     */
+    public const KIND_TLS = 3;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */
@@ -144,6 +156,8 @@ final class Resource
      */
     public string $rbuf = '';
     public int $rpos = 0;
+    /** KIND_TLS only: the OpenSSL `SSL*`, 0 otherwise. See KIND_TLS. */
+    public int $ssl = 0;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {
@@ -171,10 +185,11 @@ final class Resource
             $ok = \__mc_libc_fclose(\int_to_ptr($this->addr)) === 0;
         } elseif ($this->kind === self::KIND_DIR) {
             $ok = \__mc_libc_closedir(\int_to_ptr($this->addr)) === 0;
-        } elseif ($this->kind === self::KIND_SOCKET) {
+        } elseif ($this->kind === self::KIND_SOCKET || $this->kind === self::KIND_TLS) {
             // A socket's $addr is an fd, not a FILE* — close(2), and no
             // int_to_ptr. Passing it to fclose() would treat the small integer
-            // as a pointer.
+            // as a pointer. For a TLS stream the SSL* is freed by the stdlib's
+            // fclose(); here we only close the fd (see KIND_TLS).
             $ok = \__mc_libc_close($this->addr) === 0;
         }
         $this->closed = true;

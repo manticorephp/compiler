@@ -216,6 +216,84 @@ function __mc_tcp_connect(string $host, int $port)
 }
 
 /**
+ * Open a TLS-over-TCP connection to $host:$port and return a KIND_TLS resource,
+ * or false. The TCP walk is __mc_tcp_connect's; this wraps the fd in an OpenSSL
+ * engine and drives the handshake. The read buffer, fgets, chunked decoding and
+ * the whole HTTP layer above are transport-agnostic — they see a stream, not a
+ * socket vs a TLS session (dispatch is in __mc_transport_recv/_send).
+ *
+ * Security is ON by default, matching php's stream defaults: the peer chain is
+ * verified against the host trust store AND the leaf cert must match $host. A
+ * self-signed or wrong-host cert therefore fails the handshake — the same result
+ * php gives without verify_peer=false (which needs stream_context_create, not
+ * yet wired).
+ *
+ * @return \Resource|false
+ */
+function __mc_tls_connect(string $host, int $port)
+{
+    $sock = \__mc_tcp_connect($host, $port);
+    if ($sock === false) {
+        return false;
+    }
+    // ⚠ $sock is typed \Resource|false here, i.e. a CELL — writing $sock->ssl on
+    // it would deref the NaN-boxed handle as a raw pointer and SIGSEGV. The
+    // handshake (which mutates the resource) MUST run through a \Resource-typed
+    // parameter so codegen unboxes to a real object handle. Same funnel Ф3 uses
+    // for __mc_http_read_response.
+    if (!\__mc_tls_handshake($sock, $host)) {
+        \fclose($sock);
+        return false;
+    }
+    return $sock;
+}
+
+/**
+ * Wrap an already-connected TCP resource in an OpenSSL engine and drive the
+ * handshake, mutating $sock to KIND_TLS in place on success. Returns false on any
+ * failure (the caller closes the fd). $sock is \Resource-typed on purpose — see
+ * the warning in __mc_tls_connect.
+ */
+function __mc_tls_handshake(\Resource $sock, string $host): bool
+{
+    $method = \Runtime\Openssl\clientMethod();   // highest TLS the peer offers
+    if ($method === 0) {
+        return false;
+    }
+    $ctx = \Runtime\Openssl\ctxNew($method);
+    if ($ctx === 0) {
+        return false;
+    }
+    // Trust store + SSL_VERIFY_PEER (1) so SSL_connect fails a bad chain rather
+    // than completing an unauthenticated session.
+    \Runtime\Openssl\ctxSetDefaultVerifyPaths($ctx);
+    \Runtime\Openssl\ctxSetVerify($ctx, 1, \int_to_ptr(0));
+    $ssl = \Runtime\Openssl\sslNew($ctx);
+    // SSL_new took a ref on the ctx, so it lives until SSL_free — drop ours now.
+    \Runtime\Openssl\ctxFree($ctx);
+    if ($ssl === 0) {
+        return false;
+    }
+    // SNI (SSL_set_tlsext_host_name via SSL_ctrl): a name-based vhost serves the
+    // right cert only when told which host. 55 = SSL_CTRL_SET_TLSEXT_HOSTNAME,
+    // 0 = TLSEXT_NAMETYPE_host_name.
+    \Runtime\Openssl\ctrl($ssl, 55, 0, $host);
+    // The hostname the leaf cert must match — without it a valid chain issued for
+    // a DIFFERENT host would pass.
+    \Runtime\Openssl\set1Host($ssl, $host);
+    if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1
+        || \Runtime\Openssl\connect($ssl) !== 1) {
+        \Runtime\Openssl\sslFree($ssl);   // does not touch the fd
+        return false;
+    }
+    // Upgrade the TCP resource in place: same fd, now with a TLS engine over it.
+    $sock->kind = \Resource::KIND_TLS;
+    $sock->type = 'stream';
+    $sock->ssl = $ssl;
+    return true;
+}
+
+/**
  * Open a TCP connection. php.net's signature, including the by-ref diagnostics.
  *
  * $timeout is accepted and currently IGNORED: the connect is blocking, so the
@@ -601,21 +679,25 @@ function __mc_http_get(string $url, int $maxRedirects = 20)
             return false;
         }
         $scheme = $parts[0];
-        if ($scheme !== 'http') {
-            return false;               // https:// needs the TLS transport (Ф4)
+        $secure = ($scheme === 'https');
+        if ($scheme !== 'http' && !$secure) {
+            return false;               // only http:// and https://
         }
         $host = $parts[1];
         $port = (int)$parts[2];
         $path = $parts[3];
+        // The Host header (and a reconstructed redirect origin) omit the port
+        // only when it is the scheme's default — 443 for https, 80 for http.
+        $defPort = $secure ? 443 : 80;
 
-        $sock = \__mc_tcp_connect($host, $port);
+        $sock = $secure ? \__mc_tls_connect($host, $port) : \__mc_tcp_connect($host, $port);
         if ($sock === false) {
             return false;
         }
         // Exactly what php sends: no User-Agent, no Accept. `Connection: close`
         // is what lets the body end at EOF when there is no Content-Length.
         $req = 'GET ' . $path . " HTTP/1.1\r\n"
-             . 'Host: ' . $host . ($port === 80 ? '' : ':' . (string)$port) . "\r\n"
+             . 'Host: ' . $host . ($port === $defPort ? '' : ':' . (string)$port) . "\r\n"
              . "Connection: close\r\n\r\n";
         \fwrite($sock, $req);
 
@@ -625,9 +707,10 @@ function __mc_http_get(string $url, int $maxRedirects = 20)
         if ($resp[1] !== '' && $hops < $maxRedirects) {
             $hops = $hops + 1;
             $location = $resp[1];
-            // A relative Location is resolved against the current origin.
+            // A relative Location is resolved against the current origin — same
+            // scheme, so an https redirect stays on TLS.
             if (\strpos($location, '://') === false) {
-                $location = 'http://' . $host . ($port === 80 ? '' : ':' . (string)$port)
+                $location = $scheme . '://' . $host . ($port === $defPort ? '' : ':' . (string)$port)
                           . ($location !== '' && $location[0] === '/' ? '' : '/') . $location;
             }
             $url = $location;

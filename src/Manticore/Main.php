@@ -296,6 +296,26 @@ function pcre2_link_flags(): string {
 }
 
 /**
+ * Linker flags for the host OpenSSL (libssl + libcrypto), via `pkg-config`
+ * so the -L path is right on any host (Homebrew keeps openssl@3 off the default
+ * search path). Falls back to bare `-lssl -lcrypto`. Used by the TLS transport
+ * under `https://`; dead-strip drops it for a program that never opens a TLS
+ * stream, exactly as pcre2 is dropped when regex is unused.
+ */
+function openssl_link_flags(): string {
+    $listPath = "/tmp/manticore_openssl_" . (string)getpid() . ".txt";
+    $rc = system("pkg-config --libs openssl > " . $listPath . " 2>/dev/null");
+    if ($rc === 0) {
+        $c = read_file($listPath);
+        if ($c !== null) {
+            $t = \trim($c);
+            if ($t !== "") { return $t; }
+        }
+    }
+    return "-lssl -lcrypto";
+}
+
+/**
  * Parse the bundled stdlib sources and collect every GLOBAL-namespace
  * function declaration, for signature-only extern injection (so user code
  * can call `str_starts_with`, `ctype_*`, `file_get_contents`, … with the
@@ -825,6 +845,11 @@ function cmd_compile(array $args): int {
         // preg_* function, so this is harmless when regex is unused.
         $pcre = pcre2_link_flags();
         if ($pcre !== "") { $linkExtra .= " " . $pcre; }
+        // The bundled stdlib carries the TLS transport (https://), which references
+        // the host libssl/libcrypto. Dead-strip + --as-needed drop them for a
+        // program that opens no TLS stream, same as pcre2 above.
+        $ssl = openssl_link_flags();
+        if ($ssl !== "") { $linkExtra .= " " . $ssl; }
     }
     // Dead-strip unreferenced functions at link time — the prebuilt stdlib.o
     // is one object (linked wholesale), so without this a tiny program carries
@@ -984,6 +1009,13 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     if ($withStdlib && CompileArgs::$linkStdlib) {
         $stdObj = find_stdlib_object();
         if ($stdObj !== "") { $linkExtra = $linkExtra . " " . $stdObj; }
+        // Same host libs the single-file `compile` path links: the bundled stdlib
+        // references libpcre2 (preg_*) and libssl/libcrypto (https://). Dead-strip
+        // + --as-needed drop whichever the program never reaches.
+        $pcre = pcre2_link_flags();
+        if ($pcre !== "") { $linkExtra = $linkExtra . " " . $pcre; }
+        $ssl = openssl_link_flags();
+        if ($ssl !== "") { $linkExtra = $linkExtra . " " . $ssl; }
     }
     // Link via the stub-generating tail: the no-Rust bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to

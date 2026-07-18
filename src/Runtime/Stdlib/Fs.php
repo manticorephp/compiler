@@ -230,9 +230,9 @@ function is_executable(string $filename): bool
  */
 function __mc_fileno(\Resource $stream): int
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
-        // Already an fd. Routing it through fileno() would int_to_ptr a small
-        // integer and hand libc a bogus FILE*.
+    if (\__mc_stream_is_net($stream)) {
+        // Already an fd (a TLS stream's addr is the fd too). Routing it through
+        // fileno() would int_to_ptr a small integer and hand libc a bogus FILE*.
         return $stream->addr;
     }
     return \Runtime\Libc\sys_fileno(\int_to_ptr($stream->addr));
@@ -244,8 +244,8 @@ function __mc_fileno(\Resource $stream): int
  */
 function ftruncate(\Resource $stream, int $size): bool
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
-        return false;   // php: cannot truncate a socket stream
+    if (\__mc_stream_is_net($stream)) {
+        return false;   // php: cannot truncate a socket/TLS stream
     }
     \Runtime\Libc\fflush(\int_to_ptr($stream->addr));
     return \Runtime\Libc\sys_ftruncate(\__mc_fileno($stream), $size) === 0;
@@ -275,7 +275,7 @@ function flock(\Resource $stream, int $operation): bool
  */
 function fsync(\Resource $stream): bool
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         return false;   // nothing buffered, nothing to sync
     }
     \Runtime\Libc\fflush(\int_to_ptr($stream->addr));

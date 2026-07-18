@@ -19,10 +19,10 @@
  */
 function file_get_contents(string $path): string|false
 {
-    // The seam. https:// resolves to '' here and fails until Ф4 supplies the
-    // transport — the HTTP layer itself is already transport-agnostic.
+    // The seam. http:// and https:// share the HTTP layer; the only difference is
+    // the transport __mc_http_get opens (plain socket vs TLS), so both route here.
     $scheme = \__mc_scheme_of($path);
-    if ($scheme === 'http') {
+    if ($scheme === 'http' || $scheme === 'https') {
         return \__mc_http_get($path);
     }
     if ($scheme !== 'file') {
@@ -157,6 +157,43 @@ function __mc_buf_compact(\Resource $s): void
 }
 
 /**
+ * Whether $s is a network stream — a plain SOCKET or a TLS stream. Both are
+ * non-seekable, buffer their reads, and carry their own eof; the ONLY thing that
+ * differs is the byte primitive (recv/send vs SSL_read/SSL_write), funnelled
+ * through __mc_transport_recv/_send. Every f*-family dispatch that used to test
+ * `=== KIND_SOCKET` tests this instead, so TLS inherits the whole socket path.
+ */
+function __mc_stream_is_net(\Resource $s): bool
+{
+    return $s->kind === \Resource::KIND_SOCKET || $s->kind === \Resource::KIND_TLS;
+}
+
+/**
+ * Read up to $n bytes off the transport into $buf. For a TLS stream this is
+ * SSL_read (which handles the record layer); for a plain socket, recv(2).
+ * Returns the byte count, <=0 on close/error.
+ */
+function __mc_transport_recv(\Resource $s, \Ffi\Ptr $buf, int $n): int
+{
+    if ($s->kind === \Resource::KIND_TLS) {
+        return \Runtime\Openssl\read($s->ssl, $buf, $n);
+    }
+    return \Runtime\Libc\sys_recv($s->addr, $buf, $n, 0);
+}
+
+/**
+ * Write $n bytes of $data to the transport — SSL_write for TLS, send(2) for a
+ * plain socket. Returns the byte count, <=0 on error.
+ */
+function __mc_transport_send(\Resource $s, string $data, int $n): int
+{
+    if ($s->kind === \Resource::KIND_TLS) {
+        return \Runtime\Openssl\write($s->ssl, $data, $n);
+    }
+    return \Runtime\Libc\sys_send($s->addr, $data, $n, 0);
+}
+
+/**
  * Pull ONE chunk from the socket into the buffer. Returns bytes added; 0 means
  * the peer closed (recorded as eof — a bare fd has no FILE* to remember it).
  *
@@ -171,7 +208,7 @@ function __mc_stream_fill(\Resource $s, int $want): int
     if ($buf === null) {
         return 0;
     }
-    $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
+    $got = __mc_transport_recv($s, $buf, $want);
     if ($got > 0) {
         __mc_buf_compact($s);
         $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
@@ -207,7 +244,7 @@ function __mc_stream_read(\Resource $s, int $n): string
             if ($buf === null) {
                 return '';
             }
-            $got = \Runtime\Libc\sys_recv($s->addr, $buf, $n, 0);
+            $got = __mc_transport_recv($s, $buf, $n);
             if ($got <= 0) {
                 if ($got === 0) { $s->eof = true; }
                 \Runtime\Libc\free($buf);
@@ -364,13 +401,12 @@ function __mc_scheme_of(string $path): string
         if (!$ok) { return 'file'; }
     }
     $scheme = \strtolower($raw);
-    if ($scheme === 'file' || $scheme === 'http') {
+    if ($scheme === 'file' || $scheme === 'http' || $scheme === 'https') {
         return $scheme;
     }
     // Known-but-unimplemented schemes are still NOT files: php would find no
-    // wrapper and fail, and so must we — silently opening `https://x` as a
-    // relative filename would be worse than failing. (https:// lands here until
-    // the TLS transport exists; the protocol layer above is already written.)
+    // wrapper and fail, and so must we — silently opening an unknown scheme as a
+    // relative filename would be worse than failing.
     return '';
 }
 
@@ -427,6 +463,15 @@ function fopen(string $filename, string $mode)
  */
 function fclose(\Resource $stream): bool
 {
+    // TLS teardown lives here, not in Resource::close(): the prelude must not
+    // reference OpenSSL (see \Resource::KIND_TLS). Send close_notify and free the
+    // SSL engine BEFORE close() drops the fd; guard on $ssl so a double fclose is
+    // a no-op. SSL_free does not close the fd — Resource::close() still does.
+    if ($stream->kind === \Resource::KIND_TLS && $stream->ssl !== 0 && !$stream->closed) {
+        \Runtime\Openssl\shutdown($stream->ssl);
+        \Runtime\Openssl\sslFree($stream->ssl);
+        $stream->ssl = 0;
+    }
     return $stream->close();
 }
 
@@ -441,11 +486,11 @@ function fwrite(\Resource $stream, string $data, ?int $length = null): int
     if ($length !== null && $length >= 0 && $length < $len) {
         $len = $length;
     }
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         // A socket's addr is an fd, so int_to_ptr() would hand fwrite a small
-        // integer as a FILE*. send(2) instead — and a short write is a real
-        // outcome here, not an error, so report what went out.
-        $n = \Runtime\Libc\sys_send($stream->addr, $data, $len, 0);
+        // integer as a FILE*. send(2) — or SSL_write for TLS — instead, and a
+        // short write is a real outcome here, not an error, so report what went out.
+        $n = \__mc_transport_send($stream, $data, $len);
         return $n < 0 ? 0 : $n;
     }
     return \Runtime\Libc\fwrite($data, 1, $len, \int_to_ptr($stream->addr));
@@ -473,7 +518,7 @@ function fread(\Resource $stream, int $length): string
     if ($buf === null) {
         return "";
     }
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         // MUST go through the buffer, not straight to recv(): fgets() reads ahead
         // by design, so bytes it already pulled would be invisible to a direct
         // recv() and the stream would silently skip them.
@@ -505,7 +550,7 @@ function fgets(\Resource $stream, ?int $length = null)
     if ($buf === null) {
         return false;
     }
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         \Runtime\Libc\free($buf);
         return \__mc_socket_gets($stream, $cap);
     }
@@ -528,7 +573,7 @@ function fgets(\Resource $stream, ?int $length = null)
  */
 function feof(\Resource $stream): bool
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         // Buffered bytes mean NOT eof even after the peer closed: php reports eof
         // only once a read actually finds nothing left.
         return $stream->eof && \__mc_buf_len($stream) === 0;
@@ -543,7 +588,7 @@ function feof(\Resource $stream): bool
  */
 function fseek(\Resource $stream, int $offset, int $whence = 0): int
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         return -1;   // php: a socket stream is not seekable
     }
     return \Runtime\Libc\fseek(\int_to_ptr($stream->addr), $offset, $whence);
@@ -556,7 +601,7 @@ function fseek(\Resource $stream, int $offset, int $whence = 0): int
  */
 function ftell(\Resource $stream)
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         // KNOWN DIVERGENCE, measured against php 8.5.8: php DOES report a
         // position on a socket stream (it counts the bytes that passed through
         // its own buffer) — `ftell()` there returns an int, not false. Matching
@@ -579,7 +624,7 @@ function ftell(\Resource $stream)
  */
 function rewind(\Resource $stream): bool
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         return false;
     }
     return \Runtime\Libc\fseek(\int_to_ptr($stream->addr), 0, 0) === 0;
@@ -591,7 +636,7 @@ function rewind(\Resource $stream): bool
  */
 function fflush(\Resource $stream): bool
 {
-    if ($stream->kind === \Resource::KIND_SOCKET) {
+    if (\__mc_stream_is_net($stream)) {
         return true;   // send(2) is unbuffered — nothing to flush
     }
     return \Runtime\Libc\fflush(\int_to_ptr($stream->addr)) === 0;
