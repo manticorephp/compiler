@@ -153,12 +153,25 @@ function fgetcsv(\Resource $stream, ?int $length = null, string $separator = ','
     $buf = (string)$line;
     $enc = ($enclosure === '') ? '"' : $enclosure[0];
     $esc = ($escape === '') ? '' : $escape[0];
-    while (\__mc_csv_open_quote($buf, $enc, $esc)) {
-        $next = \fgets($stream, $length);
-        if ($next === false) {
-            break;
+    // Single-line record (the common case): parse straight from the borrowed
+    // read. A quoted field spanning newlines needs more input — accumulate the
+    // raw lines in an ARRAY (which owns each `string|false` cell) and rebuild an
+    // OWNED buffer with implode. Reassigning `$buf .= (string)$next` instead
+    // would release the payload the `(string)$line` unbox only BORROWED from its
+    // cell → a double free ({@see unboxing a cell hands the buffer back borrowed}).
+    if (\__mc_csv_open_quote($buf, $enc, $esc)) {
+        $parts = [$line];
+        while (true) {
+            $next = \fgets($stream, $length);
+            if ($next === false) {
+                break;
+            }
+            $parts[] = $next;
+            if (!\__mc_csv_open_quote(\implode('', $parts), $enc, $esc)) {
+                break;
+            }
         }
-        $buf .= (string)$next;
+        return \str_getcsv(\implode('', $parts), $separator, $enclosure, $escape);
     }
     return \str_getcsv($buf, $separator, $enclosure, $escape);
 }
