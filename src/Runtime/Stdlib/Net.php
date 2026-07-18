@@ -164,14 +164,18 @@ function __mc_sock_error(int $fd): int
  *
  * @return \Resource|false
  */
-function __mc_tcp_connect(string $host, int $port)
+function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
 {
+    // $wantType is the socket type to select from the resolver's list: 1
+    // SOCK_STREAM (tcp), 2 SOCK_DGRAM (udp) — both values are the same on every
+    // target. A DGRAM connect() sets the default peer, so send()/recv() then work
+    // without naming the address each call.
     $res = \Runtime\Libc\calloc(8, 1);
     if ($res === null) {
         return false;
     }
     // hints = NULL: see the file header. The result list then also carries
-    // DGRAM/RAW entries, which the ai_socktype filter below drops.
+    // the OTHER socktypes, which the ai_socktype filter below drops.
     $rc = \Runtime\Libc\sys_getaddrinfo($host, (string)$port, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
@@ -187,7 +191,7 @@ function __mc_tcp_connect(string $host, int $port)
     $ai = $head;
     while ($ai !== 0) {
         $sockType = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(1));
-        if ($sockType === \__mc_net_const(0)) {
+        if ($sockType === $wantType) {
             $family = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(0));
             $proto = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(2));
             $cand = \Runtime\Libc\sys_socket($family, $sockType, $proto);
@@ -312,6 +316,9 @@ function __mc_transport_connect(string $scheme, string $host, int $port)
     }
     if ($scheme === 'tcp' || $scheme === '') {
         return \__mc_tcp_connect($host, $port);
+    }
+    if ($scheme === 'udp') {
+        return \__mc_tcp_connect($host, $port, 2);   // 2 = SOCK_DGRAM
     }
     return false;
 }
@@ -438,7 +445,7 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
         $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp' && $scheme !== 'ssl' && $scheme !== 'tls') {
+    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
@@ -509,7 +516,7 @@ function __mc_sock_port(int $fd): int
  *
  * @return \Resource|false
  */
-function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
+function __mc_tcp_listen(string $host, int $port, int $backlog = 16, int $wantType = 1)
 {
     $res = \Runtime\Libc\calloc(8, 1);
     if ($res === null) {
@@ -526,18 +533,21 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
         return false;
     }
 
+    // A datagram server binds but does NOT listen() (listen is stream-only, and
+    // fails ENOTSUP on a DGRAM socket) — it recvfrom()s straight off the bound fd.
+    $isDgram = ($wantType === 2);
     $fd = -1;
     $ai = $head;
     while ($ai !== 0) {
-        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(1)) === \__mc_net_const(0)) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(1)) === $wantType) {
             $family = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(0));
             $proto = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(2));
-            $cand = \Runtime\Libc\sys_socket($family, \__mc_net_const(0), $proto);
+            $cand = \Runtime\Libc\sys_socket($family, $wantType, $proto);
             if ($cand >= 0) {
                 $a = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
                 if (\Runtime\Libc\sys_bind($cand, \int_to_ptr($a), $alen) === 0
-                    && \Runtime\Libc\sys_listen($cand, $backlog) === 0) {
+                    && ($isDgram || \Runtime\Libc\sys_listen($cand, $backlog) === 0)) {
                     $fd = $cand;
                     break;
                 }
@@ -555,16 +565,17 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16)
 }
 
 /**
- * php.net's stream_socket_server. Accepts tcp://, ssl:// or tls:// (and a bare
- * host:port = tcp). An ssl:// / tls:// listener needs a $context carrying
- * ssl.local_cert (and optionally ssl.local_pk); each accepted connection is then
- * handshaken server-side. udp:// / unix:// are not implemented.
+ * php.net's stream_socket_server. Accepts tcp://, udp://, ssl:// or tls:// (and a
+ * bare host:port = tcp). $flags matches php (STREAM_SERVER_BIND | _LISTEN by
+ * default); a udp:// server passes STREAM_SERVER_BIND alone. An ssl:// / tls://
+ * listener needs a $context carrying ssl.local_cert (and optionally ssl.local_pk);
+ * each accepted connection is then handshaken server-side. unix:// unimplemented.
  *
  * @param int $error_code
  * @param string $error_message
  * @return \Resource|false
  */
-function stream_socket_server(string $address, &$error_code = 0, &$error_message = '', ?\Resource $context = null)
+function stream_socket_server(string $address, &$error_code = 0, &$error_message = '', int $flags = 12, ?\Resource $context = null)
 {
     $error_code = 0;
     $error_message = '';
@@ -575,7 +586,7 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
         $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp' && $scheme !== 'ssl' && $scheme !== 'tls') {
+    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
@@ -590,6 +601,16 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
     $port = (int)\substr($addr, $colon + 1, \strlen($addr) - ($colon + 1));
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
+    }
+    // A udp:// server binds a datagram socket (no listen/accept); reads come
+    // straight off it with recvfrom via the normal fread/fgets path.
+    if ($scheme === 'udp') {
+        $u = \__mc_tcp_listen($host, $port, 16, 2);
+        if ($u === false) {
+            $error_code = -1;
+            $error_message = 'cannot bind ' . $address;
+        }
+        return $u;
     }
     $secure = ($scheme === 'ssl' || $scheme === 'tls');
     // Resolve the server cert BEFORE binding, so a misconfigured TLS server fails
