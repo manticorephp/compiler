@@ -1,0 +1,39 @@
+array(1) {
+  ["a"]=>
+  array(2) {
+    ["b"]=>
+    array(2) {
+      ["c"]=>
+      int(42)
+      ["d"]=>
+      int(43)
+    }
+    ["e"]=>
+    int(7)
+  }
+}
+array(1) {
+  [1]=>
+  array(1) {
+    [2]=>
+    array(2) {
+      [3]=>
+      string(4) "deep"
+      [4]=>
+      string(5) "deep2"
+    }
+  }
+}
+array(1) {
+  ["p"]=>
+  array(1) {
+    ["q"]=>
+    array(1) {
+      ["r"]=>
+      array(1) {
+        ["s"]=>
+        int(99)
+      }
+    }
+  }
+}
