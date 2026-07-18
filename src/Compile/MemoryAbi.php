@@ -368,6 +368,17 @@ final class MemoryAbi
     public const ARRAY_RC_OFFSET = 24;
 
     /**
+     * Saturated refcount baked into the immortal empty-array singleton
+     * ({@see \Compile\Debug::$emptyArraySingleton}). Chosen so that COW's
+     * `sle rc, 1` is always false (first mutation clones) and release's
+     * `sle rc, 0` is always false (never freed), with enough headroom that a
+     * program's retain/release drift never approaches 0 or 1. NOT -1: the
+     * string immortal encoding would make COW `keep` (mutate the shared
+     * singleton) and release free it — `__mir_array_cow` never reads the tag.
+     */
+    public const IMMORTAL_ARRAY_RC = 1 << 62;
+
+    /**
      * `i64` — mode/flags word. Bit 0 ({@see ARRAY_FLAG_HASHED}) = the
      * buffer is in HASHED mode (24-byte entries); cleared = PACKED mode
      * (contiguous i64 values, implicit int keys). Higher bits reserved.

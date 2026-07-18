@@ -305,6 +305,17 @@ trait EmitLlvmArrays
         return $this->emitStoreElementUnified($se);
     }
 
+    /**
+     * Constant-expr data pointer of the immortal empty-array singleton — the
+     * 56-byte header at `@__mir_empty_array + 8` (field 1, past the 8-byte tag),
+     * mirroring `__mir_alloc_array_tagged`'s `base + 8`.
+     */
+    private function emptyArraySingletonPtr(): string
+    {
+        return 'getelementptr inbounds ({ i64, i64, i64, i64, i64, i64, i64, ptr }, '
+             . 'ptr @__mir_empty_array, i64 0, i32 1)';
+    }
+
     private function emitArrayLitUnified(ArrayLit $al): string
     {
         $cellVals = $al->type->element !== null
@@ -316,6 +327,15 @@ trait EmitLlvmArrays
         // promote / index ops self-route via the ARRAY_TAG_ARENA tag, and its
         // retain/release bail on that tag, so nothing else in codegen changes.
         $arena = $al->allocKind === \Compile\Mir\AllocationKind::ARENA;
+        // An empty non-arena `[]` is the immortal singleton: no alloc, hand back
+        // the one shared data ptr. First mutation COWs it (rc=1<<62 > 1 always
+        // clones); release never frees it. Arena empties are grown in place under
+        // their own tag, so they must NOT alias the shared heap singleton.
+        if ($count === 0 && !$arena && \Compile\Debug::$emptyArraySingleton) {
+            $this->lastValue = $this->emptyArraySingletonPtr();
+            $this->lastValueType = 'ptr';
+            return '';
+        }
         $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
         if ($arena) { $this->rt->needsArena = true; $this->arena->vecAllocated = true; }
         // A literal that carries a string key is hashed the moment its first

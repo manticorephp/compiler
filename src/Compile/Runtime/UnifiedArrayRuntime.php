@@ -62,6 +62,7 @@ final class UnifiedArrayRuntime
         $this->emitIsHashed();
         $this->emitGetInt();
         $this->emitGetStr();
+        if (Debug::$emptyArraySingleton) { $this->emitDeimmortal(); }
         $this->emitPromote();
         $this->emitSetInt();
         $this->emitSetStr();
@@ -717,6 +718,9 @@ final class UnifiedArrayRuntime
         $total = $b->add($size, Value::int(Type::i64(), 8));
         $base = $b->call('malloc', Type::ptr(), [$total]);
         $b->store(Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_MAGIC), $base);
+        if (Debug::$profile) {
+            $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 14)]);
+        }
         $data = $b->gep(Type::i8(), $base, [Value::int(Type::i64(), 8)]);
         $b->ret($data);
     }
@@ -734,6 +738,15 @@ final class UnifiedArrayRuntime
         $b = $fn->block('entry');
         $neg = $b->icmp('slt', $capIn, Value::int(Type::i64(), 0));
         $cap = $b->select($neg, Value::int(Type::i64(), 0), $capIn);
+        if (Debug::$profile) {
+            $isEmpty = $b->icmp('eq', $capIn, Value::int(Type::i64(), 0));
+            $bump = $fn->block('prof_empty');
+            $cont = $fn->block('prof_cont');
+            $b->brIf($isEmpty, $bump, $cont);
+            $bump->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 15)]);
+            $bump->br($cont);
+            $b = $cont;
+        }
         $bytes = $b->add(
             $b->mul($cap, Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)),
             Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
@@ -1366,6 +1379,38 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_array_deimmortal(arr) -> ptr` — the immortal empty-array singleton
+     * (rc saturated to {@see MemoryAbi::IMMORTAL_ARRAY_RC}) is never malloc'd, so
+     * any in-place mutator that frees / reallocs / promotes it would corrupt a
+     * value shared by every empty `[]` in the program (or abort in libmalloc).
+     * The singleton is the ONLY immortal array and is ALWAYS empty, so
+     * "separating" it is just a fresh `alloc(0)`. Called at the entry of every
+     * in-place mutator ({@see emitSetInt} / {@see emitSetStr} / {@see emitUnshift})
+     * so their result — which the caller stores back into the slot — is a private
+     * rc=1 buffer while the singleton stays pristine. Real arrays (rc far below
+     * the sentinel) pass straight through. Emitted only under
+     * {@see \Compile\Debug::$emptyArraySingleton}.
+     */
+    private function emitDeimmortal(): void
+    {
+        $fn = $this->module->func('__mir_array_deimmortal', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $fresh = $fn->block('fresh');
+        $keep = $fn->block('keep');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $keep, $chk);
+        $rc = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+        $chk->brIf(
+            $chk->icmp('sgt', $rc, Value::int(Type::i64(), 1 << 61)),
+            $fresh,
+            $keep,
+        );
+        $fresh->ret($fresh->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]));
+        $keep->ret($arr);
+    }
+
+    /**
      * `__mir_array_set_int(arr, idx, val) -> ptr`. PACKED: in-bounds
      * overwrite, or append-at-len with grow, or (sparse idx > len)
      * promote to HASHED then int-insert. HASHED: int-keyed insert.
@@ -1388,6 +1433,7 @@ final class UnifiedArrayRuntime
         $hashed = $fn->block('hashed');
 
         $arrSlot = $e->alloca(Type::ptr(), 'arr_slot');
+        if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $e->store($arr, $arrSlot);
         // A set may append a new entry → invalidate the bucket index (rebuilt
         // lazily on the next large-map lookup).
@@ -1537,6 +1583,7 @@ final class UnifiedArrayRuntime
         $arrSlot = $e->alloca(Type::ptr(), 'arr_slot');
         $iSlot = $e->alloca(Type::i64(), 'i');
         $rSlot = $e->alloca(Type::i64(), 'r');
+        if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $e->store($arr, $arrSlot);
         $e->store(Value::int(Type::i64(), 0), $iSlot);
         // NULL-safe: a null arr (lazy dynprop bag) allocates a fresh packed
@@ -2044,6 +2091,7 @@ final class UnifiedArrayRuntime
         $arr = $fn->param(Type::ptr(), 'arr');
         $val = $fn->param(Type::i64(), 'val');
         $b = $fn->block('entry');
+        if (Debug::$emptyArraySingleton) { $arr = $b->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $b->call('__mir_array_index_drop', Type::void(), [$arr]);
         $len = $b->load(Type::i64(), $arr);
         $newlen = $b->add($len, Value::int(Type::i64(), 1));
