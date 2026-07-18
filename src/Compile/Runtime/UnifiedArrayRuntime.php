@@ -1390,6 +1390,11 @@ final class UnifiedArrayRuntime
      * rc=1 buffer while the singleton stays pristine. Real arrays (rc far below
      * the sentinel) pass straight through. Emitted only under
      * {@see \Compile\Debug::$emptyArraySingleton}.
+     *
+     * A NULL arr also returns a fresh `alloc(0)` — an int-keyed nested auto-viv
+     * `$a[0][1]=v` reads the missing `$a[0]` as null, and set_int would else
+     * dereference null (crash at flags@32). set_str already auto-allocates from
+     * null; this gives set_int / unshift the same null-safety.
      */
     private function emitDeimmortal(): void
     {
@@ -1399,7 +1404,7 @@ final class UnifiedArrayRuntime
         $chk = $fn->block('chk');
         $fresh = $fn->block('fresh');
         $keep = $fn->block('keep');
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $keep, $chk);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $fresh, $chk);
         $rc = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_RC_OFFSET));
         $chk->brIf(
             $chk->icmp('sgt', $rc, Value::int(Type::i64(), 1 << 61)),
@@ -1677,6 +1682,10 @@ final class UnifiedArrayRuntime
         $e = $fn->block('entry');
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
+        // Null-safe (and singleton-safe) like set_int/set_str: a nested append
+        // `$a[k][] = v` reads the missing `$a[k]` as null, and the flags load
+        // below would dereference it. deimmortal(null) returns a fresh empty.
+        if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
         $len = $packed->load(Type::i64(), $arr);

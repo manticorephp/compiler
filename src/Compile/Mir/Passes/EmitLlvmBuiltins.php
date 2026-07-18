@@ -3929,9 +3929,14 @@ trait EmitLlvmBuiltins
             $out .= $parentCell ? $this->cellToPtr() : $this->coerceToPtr();
             $parentPtr = $this->lastValue;
             // The inner array is stored back as the parent's element; box it
-            // when the parent holds cells (mixed/cell element type).
-            $innerCell = $arrNode->array->type->element !== null
-                && $arrNode->array->type->element->kind === Type::KIND_CELL;
+            // when the parent holds cells (mixed/cell element type). A parent
+            // that is ITSELF a cell (`$g[a][b][c]`: the middle `$g[a]` reads out
+            // of a cell array as a bare cell — {@see InferNodes::inferArrayAccess})
+            // is a mixed container whose elements are cells, so box there too,
+            // else the deeper level stores the middle array RAW → var_dump garbage.
+            $innerCell = $parentCell
+                || ($arrNode->array->type->element !== null
+                    && $arrNode->array->type->element->kind === Type::KIND_CELL);
             $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
             $keyIsCell = $arrNode->index->type->kind === Type::KIND_CELL;

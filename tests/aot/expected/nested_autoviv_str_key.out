@@ -1,0 +1,14 @@
+array(2) {
+  ["outer"]=>
+  array(2) {
+    ["inner"]=>
+    bool(true)
+    ["second"]=>
+    int(5)
+  }
+  ["x"]=>
+  array(1) {
+    ["y"]=>
+    string(2) "hi"
+  }
+}
