@@ -867,9 +867,10 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
 
         $resp = \__mc_http_read_response($sock, $maxRedirects > 0);
         \fclose($sock);
-        // [0] = body|false, [1] = redirect target ('' = none)
+        // [0] = body|false, [1] = redirect target ('' = none), [2] = status code
         if ($resp[1] !== '' && $hops < $maxRedirects) {
             $hops = $hops + 1;
+            $code = (int)$resp[2];
             $location = $resp[1];
             // A relative Location is resolved against the current origin — same
             // scheme, so an https redirect stays on TLS.
@@ -878,10 +879,13 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
                           . ($location !== '' && $location[0] === '/' ? '' : '/') . $location;
             }
             $url = $location;
-            // A followed 301/302/303 becomes a bodyless GET (php's default). 307/308
-            // method preservation is debt; extra headers and verify flags persist.
-            $method = 'GET';
-            $body = '';
+            // 307/308 preserve the method AND body (RFC 7538/7231); 301/302/303
+            // are followed as a bodyless GET, which is php's — and every browser's —
+            // behaviour. Extra headers and verify flags persist across every hop.
+            if ($code !== 307 && $code !== 308) {
+                $method = 'GET';
+                $body = '';
+            }
             continue;
         }
         return $resp[0];
@@ -914,7 +918,7 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
     {
         $status = \fgets($sock);
         if ($status === false) {
-            return [false, ''];
+            return [false, '', 0];
         }
         $headers = [];
         $headers[] = \rtrim($status, "\r\n");
@@ -955,7 +959,9 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
         }
 
         if ($followable && $code >= 300 && $code < 400 && $location !== '') {
-            return [false, $location];
+            // [2] = the 3xx code so the caller can preserve the method+body on a
+            // 307/308 and downgrade to GET on a 301/302/303.
+            return [false, $location, $code];
         }
 
         if ($chunked) {
@@ -986,8 +992,8 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
         // php: a non-2xx makes file_get_contents() return false — the error body
         // is NOT handed back (only ignore_errors in a context changes that).
         if ($code < 200 || $code >= 300) {
-            return [false, ''];
+            return [false, '', $code];
         }
-        return [$body, ''];
+        return [$body, '', $code];
     }
 }
