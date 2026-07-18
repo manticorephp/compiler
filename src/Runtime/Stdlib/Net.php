@@ -81,12 +81,17 @@ function __mc_net_const(int $which): int
     static $ready = 0;
     static $solSocket = 0;
     static $soError = 0;
+    static $niNumericHost = 0;
+    static $afInet6 = 0;
 
     if ($ready === 0) {
-        // MEASURED: Darwin SOL_SOCKET 65535 / SO_ERROR 0x1007; Linux 1 / 4.
+        // MEASURED: Darwin SOL_SOCKET 65535 / SO_ERROR 0x1007 / NI_NUMERICHOST 2 /
+        // AF_INET6 30; Linux 1 / 4 / 1 / 10.
         $isDarwin = \__mc_host_is_darwin();
         $solSocket = $isDarwin ? 65535 : 1;
         $soError = $isDarwin ? 4103 : 4;
+        $niNumericHost = $isDarwin ? 2 : 1;
+        $afInet6 = $isDarwin ? 30 : 10;
         $ready = 1;
     }
 
@@ -97,6 +102,8 @@ function __mc_net_const(int $which): int
     if ($which === 4) { return 16; }     // POLLHUP
     if ($which === 5) { return $solSocket; }
     if ($which === 6) { return $soError; }
+    if ($which === 8) { return $niNumericHost; }
+    if ($which === 9) { return $afInet6; }
     return 2;                            // SHUT_RDWR — 0/1/2 everywhere
 }
 
@@ -840,6 +847,178 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
         return \__mc_tls_accept($server->ssl, $fd);
     }
     return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+}
+
+// ── DNS / address functions ────────────────────────────────────────────
+//
+// The resolving ones ride on getaddrinfo + getnameinfo (already the socket path's
+// resolver), so they build no sockaddr and add no host-specific struct parsing —
+// getnameinfo(NI_NUMERICHOST) stringifies whatever the resolver chose.
+
+/** The numeric IP of one getaddrinfo result, via getnameinfo. '' on failure. */
+function __mc_ai_numeric_host(int $ai): string
+{
+    $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));   // ai_addr
+    $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));   // ai_addrlen
+    $host = \Runtime\Libc\calloc(128, 1);
+    if ($host === null) {
+        return '';
+    }
+    $rc = \Runtime\Libc\sys_getnameinfo(\int_to_ptr($addr), $alen, $host, 128,
+                                        \int_to_ptr(0), 0, \__mc_net_const(8));   // NI_NUMERICHOST
+    $out = $rc === 0 ? \cstr_to_str($host) : '';
+    \Runtime\Libc\free($host);
+    return $out;
+}
+
+/** This machine's host name, or false. */
+function gethostname()
+{
+    $buf = \Runtime\Libc\calloc(256, 1);
+    if ($buf === null) {
+        return false;
+    }
+    $rc = \Runtime\Libc\sys_gethostname($buf, 256);
+    $out = $rc === 0 ? \cstr_to_str($buf) : false;
+    \Runtime\Libc\free($buf);
+    return $out;
+}
+
+/**
+ * The first IPv4 address of $hostname, or — as php does — $hostname unchanged when
+ * it does not resolve.
+ */
+function gethostbyname(string $hostname): string
+{
+    $res = \Runtime\Libc\calloc(8, 1);
+    if ($res === null) {
+        return $hostname;
+    }
+    if (\Runtime\Libc\sys_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
+        \Runtime\Libc\free($res);
+        return $hostname;
+    }
+    $head = \peek_i64($res, 0);
+    \Runtime\Libc\free($res);
+    $ip = $hostname;
+    $ai = $head;
+    while ($ai !== 0) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(0)) === 2) {   // AF_INET
+            $h = \__mc_ai_numeric_host($ai);
+            if ($h !== '') { $ip = $h; break; }
+        }
+        $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
+    }
+    if ($head !== 0) {
+        \Runtime\Libc\sys_freeaddrinfo(\int_to_ptr($head));
+    }
+    return $ip;
+}
+
+/**
+ * Every IPv4 address of $hostname (deduped — getaddrinfo repeats each per
+ * socktype), or false when it does not resolve.
+ * @return string[]|false
+ */
+function gethostbynamel(string $hostname)
+{
+    $res = \Runtime\Libc\calloc(8, 1);
+    if ($res === null) {
+        return false;
+    }
+    if (\Runtime\Libc\sys_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
+        \Runtime\Libc\free($res);
+        return false;
+    }
+    $head = \peek_i64($res, 0);
+    \Runtime\Libc\free($res);
+    /** @var string[] $ips */
+    $ips = [];
+    $ai = $head;
+    while ($ai !== 0) {
+        if (\peek_i32(\int_to_ptr($ai), \__mc_ai_off(0)) === 2) {
+            $h = \__mc_ai_numeric_host($ai);
+            if ($h !== '' && !\in_array($h, $ips, true)) { $ips[] = $h; }
+        }
+        $ai = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(5));
+    }
+    if ($head !== 0) {
+        \Runtime\Libc\sys_freeaddrinfo(\int_to_ptr($head));
+    }
+    return $ips;
+}
+
+/** Dotted-quad IPv4 string to its 32-bit int, or false on a malformed address. */
+function ip2long(string $ip)
+{
+    $parts = \explode('.', $ip);
+    if (\count($parts) !== 4) {
+        return false;
+    }
+    $n = 0;
+    foreach ($parts as $p) {
+        $len = \strlen($p);
+        if ($len === 0 || $len > 3 || !\ctype_digit($p)) {
+            return false;
+        }
+        $v = (int)$p;
+        if ($v > 255) {
+            return false;
+        }
+        $n = ($n * 256) + $v;   // *256 keeps it a positive int (0..4294967295)
+    }
+    return $n;
+}
+
+/** A 32-bit int to its dotted-quad IPv4 string (masked to 32 bits, as php does). */
+function long2ip(int $ip): string
+{
+    $ip = $ip & 4294967295;
+    return (string)(($ip >> 24) & 255) . '.' . (string)(($ip >> 16) & 255) . '.'
+         . (string)(($ip >> 8) & 255) . '.' . (string)($ip & 255);
+}
+
+/** A printable IP (v4 or v6) to its packed in_addr/in6_addr bytes, or false. */
+function inet_pton(string $address)
+{
+    $af = \strpos($address, ':') !== false ? \__mc_net_const(9) : 2;   // AF_INET6 / AF_INET
+    $sz = $af === 2 ? 4 : 16;
+    $dst = \Runtime\Libc\calloc(16, 1);
+    if ($dst === null) {
+        return false;
+    }
+    $rc = \Runtime\Libc\sys_inet_pton($af, $address, $dst);
+    $out = $rc === 1 ? \str_from_buffer($dst, $sz) : false;
+    \Runtime\Libc\free($dst);
+    return $out;
+}
+
+/** Packed in_addr/in6_addr bytes (4 or 16) to a printable IP string, or false. */
+function inet_ntop(string $in_addr)
+{
+    $len = \strlen($in_addr);
+    if ($len === 4) {
+        $af = 2;
+    } elseif ($len === 16) {
+        $af = \__mc_net_const(9);
+    } else {
+        return false;
+    }
+    $src = \Runtime\Libc\calloc(16, 1);
+    $dst = \Runtime\Libc\calloc(64, 1);
+    if ($src === null || $dst === null) {
+        if ($src !== null) { \Runtime\Libc\free($src); }
+        if ($dst !== null) { \Runtime\Libc\free($dst); }
+        return false;
+    }
+    for ($i = 0; $i < $len; $i = $i + 1) {
+        \poke_i8($src, $i, \ord($in_addr[$i]));
+    }
+    $r = \Runtime\Libc\sys_inet_ntop($af, $src, $dst, 64);
+    $out = $r === null ? false : \cstr_to_str($dst);
+    \Runtime\Libc\free($src);
+    \Runtime\Libc\free($dst);
+    return $out;
 }
 
 // ── HTTP/1.1 client ────────────────────────────────────────────────────

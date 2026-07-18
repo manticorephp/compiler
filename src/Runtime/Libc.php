@@ -386,3 +386,26 @@ function sys_accept(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 // network byte order.
 #[Library('c'), Symbol('getsockname')]
 function sys_getsockname(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
+
+// `int gethostname(char *name, size_t len)` — the local host's name into $name.
+#[Library('c'), Symbol('gethostname')]
+function sys_gethostname(Ptr $name, #[CType('size_t')] int $len): int {}
+
+// `int getnameinfo(const sockaddr *addr, socklen_t addrlen, char *host,
+//  socklen_t hostlen, char *serv, socklen_t servlen, int flags)` — the reverse of
+// getaddrinfo. With NI_NUMERICHOST it stringifies a sockaddr to its numeric IP
+// without ANY sockaddr parsing on our side (getnameinfo owns the family details).
+#[Library('c'), Symbol('getnameinfo')]
+function sys_getnameinfo(Ptr $addr, #[CType('int')] int $addrlen, Ptr $host,
+                        #[CType('int')] int $hostlen, Ptr $serv,
+                        #[CType('int')] int $servlen, #[CType('int')] int $flags): int {}
+
+// `int inet_pton(int af, const char *src, void *dst)` — a printable address to its
+// packed bytes (4 for AF_INET, 16 for AF_INET6). 1 on success, 0 on a bad address.
+#[Library('c'), Symbol('inet_pton')]
+function sys_inet_pton(#[CType('int')] int $af, string $src, Ptr $dst): int {}
+
+// `const char *inet_ntop(int af, const void *src, char *dst, socklen_t size)` — the
+// reverse: packed bytes to a printable string in $dst (NULL on failure).
+#[Library('c'), Symbol('inet_ntop')]
+function sys_inet_ntop(#[CType('int')] int $af, Ptr $src, Ptr $dst, #[CType('int')] int $size): Ptr {}
