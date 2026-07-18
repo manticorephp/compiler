@@ -1140,6 +1140,37 @@ function pfsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_
 }
 
 /**
+ * STARTTLS: upgrade a connected plain socket to TLS in place. $enable=true does
+ * the handshake; $crypto_method's bit 0 selects client (1) vs server (0), default
+ * STREAM_CRYPTO_METHOD_TLS_CLIENT. Returns true on success, false otherwise.
+ *
+ * ⚠ Client-side only for now, and WITHOUT hostname verification: enable_crypto's
+ * stream carries no host name (it was consumed at connect time), so there is no
+ * SNI and no cert-hostname check here — the peer chain is not enforced. A verifying
+ * STARTTLS path needs the host threaded onto the resource; server STARTTLS needs a
+ * cert context. Both are debt.
+ *
+ * @param mixed $session_stream
+ * @return bool
+ */
+function stream_socket_enable_crypto(\Resource $stream, bool $enable, ?int $crypto_method = null, $session_stream = null): bool
+{
+    if (!$enable) {
+        return false;   // disabling crypto on a live stream is not supported
+    }
+    if ($stream->kind !== \Resource::KIND_SOCKET) {
+        return false;   // not a plain socket (already TLS, or a file/memory stream)
+    }
+    $method = $crypto_method ?? 121;   // STREAM_CRYPTO_METHOD_TLS_CLIENT
+    if (($method & 1) === 0) {
+        return false;   // server-side STARTTLS needs a cert context — not yet
+    }
+    // host '' ⇒ no SNI; verify off (no host to check against). Mutates $stream to
+    // KIND_TLS on success — $stream is already \Resource-typed here.
+    return \__mc_tls_handshake($stream, '', false, false);
+}
+
+/**
  * Shut down part of a full-duplex socket. $how is STREAM_SHUT_RD (0) /
  * STREAM_SHUT_WR (1) / STREAM_SHUT_RDWR (2), which equal SHUT_RD/WR/RDWR on both
  * hosts. Only meaningful for a socket/TLS stream.
