@@ -343,6 +343,24 @@ function sys_send_buf(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int 
 function sys_recv(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
                   #[CType('int')] int $flags): int {}
 
+// `ssize_t recvfrom(int fd, void *buf, size_t n, int flags, sockaddr *src,
+//  socklen_t *addrlen)` — like recv, but also fills the sender's address (for a
+// datagram socket). $src/$addrlen may be NULL to ignore it.
+#[Library('c'), Symbol('recvfrom')]
+function sys_recvfrom(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
+                      #[CType('int')] int $flags, Ptr $src, Ptr $addrlen): int {}
+
+// `ssize_t sendto(int fd, const void *buf, size_t n, int flags,
+//  const sockaddr *dst, socklen_t addrlen)` — send a datagram to a specific peer.
+#[Library('c'), Symbol('sendto')]
+function sys_sendto(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $n,
+                    #[CType('int')] int $flags, Ptr $dst, #[CType('int')] int $addrlen): int {}
+
+// `int getpeername(int fd, sockaddr *addr, socklen_t *addrlen)` — the address of
+// the connected peer (the mirror of getsockname).
+#[Library('c'), Symbol('getpeername')]
+function sys_getpeername(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
+
 // `int poll(struct pollfd *fds, nfds_t nfds, int timeout)` — ready count, 0 on
 // timeout, -1 on error. $timeout is MILLISECONDS; -1 blocks. This is the whole
 // timeout mechanism (see the note above).
