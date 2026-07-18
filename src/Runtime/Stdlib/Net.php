@@ -1024,6 +1024,73 @@ function inet_ntop(string $in_addr)
     return $out;
 }
 
+/** The port for a service/protocol (getservbyname('http','tcp') = 80), or false. */
+function getservbyname(string $service, string $protocol)
+{
+    $sv = \Runtime\Libc\sys_getservbyname($service, $protocol);
+    if ($sv === null) {
+        return false;
+    }
+    // s_port @16, in network byte order (big-endian) in the low 16 bits.
+    return (\peek_u8($sv, 16) << 8) | \peek_u8($sv, 17);
+}
+
+/** The service name for a port/protocol (getservbyport(80,'tcp') = 'http'), or false. */
+function getservbyport(int $port, string $protocol)
+{
+    // getservbyport takes the port in network byte order.
+    $netport = (($port & 255) << 8) | (($port >> 8) & 255);
+    $sv = \Runtime\Libc\sys_getservbyport($netport, $protocol);
+    if ($sv === null) {
+        return false;
+    }
+    return \cstr_to_str(\int_to_ptr(\peek_i64($sv, 0)));   // s_name @0
+}
+
+/** The protocol number for a name (getprotobyname('tcp') = 6), or false. */
+function getprotobyname(string $name)
+{
+    $pe = \Runtime\Libc\sys_getprotobyname($name);
+    if ($pe === null) {
+        return false;
+    }
+    return \peek_i32($pe, 16);   // p_proto @16 (host order)
+}
+
+/** The protocol name for a number (getprotobynumber(6) = 'tcp'), or false. */
+function getprotobynumber(int $protocol)
+{
+    $pe = \Runtime\Libc\sys_getprotobynumber($protocol);
+    if ($pe === null) {
+        return false;
+    }
+    return \cstr_to_str(\int_to_ptr(\peek_i64($pe, 0)));   // p_name @0
+}
+
+/** Open a connection to the system logger. */
+function openlog(string $prefix, int $flags, int $facility): bool
+{
+    \Runtime\Libc\sys_openlog($prefix, $flags, $facility);
+    return true;
+}
+
+/**
+ * Send a message to the system logger. % is escaped: the libc syslog treats its
+ * message as a printf FORMAT, so a raw % would read a missing vararg.
+ */
+function syslog(int $priority, string $message): bool
+{
+    \Runtime\Libc\sys_syslog($priority, \str_replace('%', '%%', $message));
+    return true;
+}
+
+/** Close the system logger connection. */
+function closelog(): bool
+{
+    \Runtime\Libc\sys_closelog();
+    return true;
+}
+
 /**
  * Reverse DNS: the host name for $ip, or $ip unchanged when it has no PTR, or
  * false on a malformed address — php's contract. IPv4 for now (builds a

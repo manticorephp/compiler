@@ -427,6 +427,27 @@ function sys_getnameinfo(Ptr $addr, #[CType('int')] int $addrlen, Ptr $host,
 #[Library('c'), Symbol('inet_pton')]
 function sys_inet_pton(#[CType('int')] int $af, string $src, Ptr $dst): int {}
 
+// service/protocol DB lookups → struct servent* / protoent* (LP64 layout, same on
+// both hosts): servent { s_name@0, s_aliases@8, s_port@16 (net order), s_proto@24 };
+// protoent { p_name@0, p_aliases@8, p_proto@16 }. NULL when not found.
+#[Library('c'), Symbol('getservbyname')]
+function sys_getservbyname(string $name, string $proto): Ptr {}
+#[Library('c'), Symbol('getservbyport')]
+function sys_getservbyport(#[CType('int')] int $port, string $proto): Ptr {}
+#[Library('c'), Symbol('getprotobyname')]
+function sys_getprotobyname(string $name): Ptr {}
+#[Library('c'), Symbol('getprotobynumber')]
+function sys_getprotobynumber(#[CType('int')] int $proto): Ptr {}
+
+// `void openlog(const char *ident, int option, int facility)` /
+// `void syslog(int priority, const char *message)` / `void closelog(void)`.
+#[Library('c'), Symbol('openlog')]
+function sys_openlog(string $ident, #[CType('int')] int $option, #[CType('int')] int $facility): void {}
+#[Library('c'), Symbol('syslog')]
+function sys_syslog(#[CType('int')] int $priority, string $message): void {}
+#[Library('c'), Symbol('closelog')]
+function sys_closelog(): void {}
+
 // `const char *inet_ntop(int af, const void *src, char *dst, socklen_t size)` — the
 // reverse: packed bytes to a printable string in $dst (NULL on failure).
 #[Library('c'), Symbol('inet_ntop')]
