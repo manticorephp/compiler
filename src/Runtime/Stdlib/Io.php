@@ -17,12 +17,18 @@
 /**
  * Read an entire file into a string, or false on failure.
  */
-function file_get_contents(string $path): string|false
+function file_get_contents(string $path, bool $use_include_path = false, ?\Resource $context = null): string|false
 {
     // The seam. http:// and https:// share the HTTP layer; the only difference is
     // the transport __mc_http_get opens (plain socket vs TLS), so both route here.
+    // A stream context (POST body, extra headers, ssl verify flags) is threaded
+    // through a \Resource-typed helper so the (nullable, hence cell) $context is
+    // unboxed before its fields are read.
     $scheme = \__mc_scheme_of($path);
     if ($scheme === 'http' || $scheme === 'https') {
+        if ($context !== null) {
+            return \__mc_http_get_with_context($path, $context);
+        }
         return \__mc_http_get($path);
     }
     if ($scheme !== 'file') {
@@ -438,6 +444,133 @@ function __mc_file_path(string $path): string
         return $rest;
     }
     return \substr($rest, $slash, \strlen($rest) - $slash);
+}
+
+// ── stream context ─────────────────────────────────────────────────────
+//
+// stream_context_create() returns a php `resource(stream-context)` — a
+// KIND_CONTEXT \Resource with no backing handle. Its options are serialised into
+// the resource's `$rbuf` string rather than parked as a nested array: an array
+// built in the stdlib and handed back to user code (or reread later) does not
+// survive the boundary — the same reason http_get_last_response_headers keeps a
+// STRING. A length-prefixed encoding (`<len>|<bytes>`) is binary-safe, so a
+// request body with embedded NULs/newlines round-trips intact.
+
+/** `<decimal length>|<bytes>` — length-prefixed so any byte string is safe. */
+function __mc_ctx_pack(string $s): string
+{
+    return (string)\strlen($s) . '|' . $s;
+}
+
+/**
+ * Unpack the KIND_CONTEXT blob into [method, header, content, verifyPeer,
+ * verifyName]. The two flags are '1'/'0' strings so the result is a homogeneous
+ * string array (no cell), which the caller turns back into bools.
+ * @return string[]
+ */
+function __mc_ctx_unpack(string $blob): array
+{
+    $pos = 0;
+    $n = \strlen($blob);
+    /** @var string[] $out */
+    $out = [];
+    // Three length-prefixed strings: method, header, content.
+    $i = 0;
+    while ($i < 3) {
+        $bar = \strpos($blob, '|', $pos);
+        if ($bar === false) {
+            $out[] = '';
+            $i = $i + 1;
+            continue;
+        }
+        $len = (int)\substr($blob, $pos, $bar - $pos);
+        $out[] = \substr($blob, $bar + 1, $len);
+        $pos = $bar + 1 + $len;
+        $i = $i + 1;
+    }
+    // Two trailing flag chars.
+    $out[] = ($pos < $n) ? $blob[$pos] : '1';
+    $out[] = ($pos + 1 < $n) ? $blob[$pos + 1] : '1';
+    return $out;
+}
+
+/**
+ * Normalise a context 'header' option to a header block where each line ends
+ * with CRLF. php accepts a string ("A: b\r\nC: d") or a string[] (["A: b", …]).
+ * @param mixed $h
+ */
+function __mc_ctx_header_block($h): string
+{
+    if (\is_array($h)) {
+        $block = '';
+        foreach ($h as $line) {
+            $l = (string)$line;
+            if ($l !== '') { $block = $block . $l . "\r\n"; }
+        }
+        return $block;
+    }
+    $s = (string)$h;
+    if ($s === '') {
+        return '';
+    }
+    // A single string may already carry its own CRLFs; add a trailing one only
+    // when it is missing so the request builder can just splice it in.
+    if (\substr($s, \strlen($s) - 2, 2) === "\r\n") {
+        return $s;
+    }
+    return $s . "\r\n";
+}
+
+/**
+ * php's stream_context_create(). Only the option subset the HTTP/TLS client
+ * honours is stored: http.method / http.header / http.content and
+ * ssl.verify_peer / ssl.verify_peer_name. Everything else is accepted and
+ * ignored (php does the same for options a wrapper does not implement).
+ *
+ * @param array<string,mixed>|null $options
+ * @param array<string,mixed>|null $params
+ */
+function stream_context_create(?array $options = null, ?array $params = null): \Resource
+{
+    $method = 'GET';
+    $header = '';
+    $content = '';
+    $verifyPeer = '1';
+    $verifyName = '1';
+    if ($options !== null) {
+        if (isset($options['http']) && \is_array($options['http'])) {
+            $h = $options['http'];
+            if (isset($h['method'])) { $method = (string)$h['method']; }
+            if (isset($h['header'])) { $header = \__mc_ctx_header_block($h['header']); }
+            if (isset($h['content'])) { $content = (string)$h['content']; }
+        }
+        if (isset($options['ssl']) && \is_array($options['ssl'])) {
+            $s = $options['ssl'];
+            // Only an explicit `false` turns verification off; the default is on.
+            if (isset($s['verify_peer']) && $s['verify_peer'] === false) { $verifyPeer = '0'; }
+            if (isset($s['verify_peer_name']) && $s['verify_peer_name'] === false) { $verifyName = '0'; }
+        }
+    }
+    $blob = \__mc_ctx_pack($method) . \__mc_ctx_pack($header) . \__mc_ctx_pack($content)
+          . $verifyPeer . $verifyName;
+    $r = new \Resource(\Resource::KIND_CONTEXT, 'stream-context', 0);
+    $r->rbuf = $blob;
+    return $r;
+}
+
+/**
+ * The context-aware HTTP fetch. $context is \Resource-typed (unboxed) on purpose:
+ * a `?\Resource` cell would deref the boxed handle when read. A non-context
+ * resource is ignored, matching php's tolerance.
+ * @return string|false
+ */
+function __mc_http_get_with_context(string $path, \Resource $context)
+{
+    if ($context->kind !== \Resource::KIND_CONTEXT) {
+        return \__mc_http_get($path);
+    }
+    $o = \__mc_ctx_unpack($context->rbuf);
+    return \__mc_http_get($path, 20, $o[0], $o[1], $o[2], $o[3] === '1', $o[4] === '1');
 }
 
 /**

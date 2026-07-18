@@ -230,7 +230,7 @@ function __mc_tcp_connect(string $host, int $port)
  *
  * @return \Resource|false
  */
-function __mc_tls_connect(string $host, int $port)
+function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool $verifyName = true)
 {
     $sock = \__mc_tcp_connect($host, $port);
     if ($sock === false) {
@@ -241,7 +241,7 @@ function __mc_tls_connect(string $host, int $port)
     // handshake (which mutates the resource) MUST run through a \Resource-typed
     // parameter so codegen unboxes to a real object handle. Same funnel Ф3 uses
     // for __mc_http_read_response.
-    if (!\__mc_tls_handshake($sock, $host)) {
+    if (!\__mc_tls_handshake($sock, $host, $verifyPeer, $verifyName)) {
         \fclose($sock);
         return false;
     }
@@ -254,7 +254,7 @@ function __mc_tls_connect(string $host, int $port)
  * failure (the caller closes the fd). $sock is \Resource-typed on purpose — see
  * the warning in __mc_tls_connect.
  */
-function __mc_tls_handshake(\Resource $sock, string $host): bool
+function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = true, bool $verifyName = true): bool
 {
     $method = \Runtime\Openssl\clientMethod();   // highest TLS the peer offers
     if ($method === 0) {
@@ -265,9 +265,11 @@ function __mc_tls_handshake(\Resource $sock, string $host): bool
         return false;
     }
     // Trust store + SSL_VERIFY_PEER (1) so SSL_connect fails a bad chain rather
-    // than completing an unauthenticated session.
+    // than completing an unauthenticated session. A context with
+    // verify_peer=false requests SSL_VERIFY_NONE (0) — the handshake then
+    // completes for a self-signed or otherwise untrusted cert, matching php.
     \Runtime\Openssl\ctxSetDefaultVerifyPaths($ctx);
-    \Runtime\Openssl\ctxSetVerify($ctx, 1, \int_to_ptr(0));
+    \Runtime\Openssl\ctxSetVerify($ctx, $verifyPeer ? 1 : 0, \int_to_ptr(0));
     $ssl = \Runtime\Openssl\sslNew($ctx);
     // SSL_new took a ref on the ctx, so it lives until SSL_free — drop ours now.
     \Runtime\Openssl\ctxFree($ctx);
@@ -279,8 +281,10 @@ function __mc_tls_handshake(\Resource $sock, string $host): bool
     // 0 = TLSEXT_NAMETYPE_host_name.
     \Runtime\Openssl\ctrl($ssl, 55, 0, $host);
     // The hostname the leaf cert must match — without it a valid chain issued for
-    // a DIFFERENT host would pass.
-    \Runtime\Openssl\set1Host($ssl, $host);
+    // a DIFFERENT host would pass. Skipped when verify_peer_name is off.
+    if ($verifyName) {
+        \Runtime\Openssl\set1Host($ssl, $host);
+    }
     if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1
         || \Runtime\Openssl\connect($ssl) !== 1) {
         \Runtime\Openssl\sslFree($ssl);   // does not touch the fd
@@ -670,7 +674,7 @@ function __mc_http_chunked(\Resource $s): string
  * returned), and up to $maxRedirects 3xx hops are followed.
  * @return string|false
  */
-function __mc_http_get(string $url, int $maxRedirects = 20)
+function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GET', string $extraHeaders = '', string $body = '', bool $verifyPeer = true, bool $verifyName = true)
 {
     $hops = 0;
     while (true) {
@@ -690,15 +694,19 @@ function __mc_http_get(string $url, int $maxRedirects = 20)
         // only when it is the scheme's default — 443 for https, 80 for http.
         $defPort = $secure ? 443 : 80;
 
-        $sock = $secure ? \__mc_tls_connect($host, $port) : \__mc_tcp_connect($host, $port);
+        $sock = $secure ? \__mc_tls_connect($host, $port, $verifyPeer, $verifyName) : \__mc_tcp_connect($host, $port);
         if ($sock === false) {
             return false;
         }
-        // Exactly what php sends: no User-Agent, no Accept. `Connection: close`
-        // is what lets the body end at EOF when there is no Content-Length.
-        $req = 'GET ' . $path . " HTTP/1.1\r\n"
+        // Default request mirrors php: no User-Agent, no Accept. `Connection: close`
+        // ends the body at EOF when there is no Content-Length. Context adds the
+        // method, extra headers, and a body (with its Content-Length) when given.
+        $req = $method . ' ' . $path . " HTTP/1.1\r\n"
              . 'Host: ' . $host . ($port === $defPort ? '' : ':' . (string)$port) . "\r\n"
-             . "Connection: close\r\n\r\n";
+             . $extraHeaders
+             . ($body !== '' ? 'Content-Length: ' . (string)\strlen($body) . "\r\n" : '')
+             . "Connection: close\r\n\r\n"
+             . $body;
         \fwrite($sock, $req);
 
         $resp = \__mc_http_read_response($sock, $maxRedirects > 0);
@@ -714,6 +722,10 @@ function __mc_http_get(string $url, int $maxRedirects = 20)
                           . ($location !== '' && $location[0] === '/' ? '' : '/') . $location;
             }
             $url = $location;
+            // A followed 301/302/303 becomes a bodyless GET (php's default). 307/308
+            // method preservation is debt; extra headers and verify flags persist.
+            $method = 'GET';
+            $body = '';
             continue;
         }
         return $resp[0];

@@ -111,6 +111,14 @@ final class Resource
      * and not the path file_get_contents/fclose take.
      */
     public const KIND_TLS = 3;
+    /**
+     * A stream context (php's `resource(stream-context)`), from
+     * stream_context_create(). It has NO backing handle — `$addr` is 0, so
+     * close()/__destruct are no-ops — and it never does IO. Its serialized options
+     * (http method/header/content, ssl verify flags) are parked in `$rbuf`, the
+     * one string field a context has no other use for. See {@see \stream_context_create}.
+     */
+    public const KIND_CONTEXT = 4;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */
