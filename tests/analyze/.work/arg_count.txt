@@ -1,0 +1,7 @@
+tests/analyze/cases/arg_count.php:23:6: error: too few arguments to greet(): 0 passed, at least 1 expected
+tests/analyze/cases/arg_count.php:24:6: warning: too many arguments to greet(): 3 passed, at most 2 expected
+tests/analyze/cases/arg_count.php:26:6: error: too few arguments to new Box: 1 passed, at least 2 expected
+tests/analyze/cases/arg_count.php:27:6: warning: too many arguments to new Box: 3 passed, at most 2 expected
+tests/analyze/cases/arg_count.php:28:6: error: too few arguments to Box::make(): 0 passed, at least 1 expected
+
+Found 3 error(s), 2 warning(s).

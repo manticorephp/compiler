@@ -1,0 +1,6 @@
+tests/analyze/cases/undefined_class/main.php:4:1: error: unknown class Missing
+tests/analyze/cases/undefined_class/main.php:7:6: error: unknown class Ghost
+tests/analyze/cases/undefined_class/main.php:9:1: error: unknown class Nope
+tests/analyze/cases/undefined_class/main.php:17:8: error: unknown class Phantom
+
+Found 4 error(s), 0 warning(s).

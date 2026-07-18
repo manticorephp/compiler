@@ -580,81 +580,44 @@ final class CompileArgs
  *
  * @param string[] $args
  */
-function parse_compile_args(array $args): bool {
-    $output = "a.out";
-    $memory = "";
-    $backend = "";
-    $optLevel = "2";
-    $dumpPrelude = false;
-    $dumpEffects = false;
-    /** @var string[] $files */
-    $files = [];
-    $i = 0;
-    $count = \count($args);
-    while ($i < $count) {
-        $a = $args[$i];
-        if ($a === "-o" && $i + 1 < $count) {
-            $output = $args[$i + 1];
-            $i = $i + 2;
-            continue;
-        }
-        // --memory=<rc|arena|hybrid> — global memory routing (#99).
-        if (\strlen($a) > 9 && \substr($a, 0, 9) === "--memory=") {
-            $memory = \substr($a, 9);
-            $i = $i + 1;
-            continue;
-        }
-        // --backend=<mir|ast>. Default (unset) is mir.
-        if (\strlen($a) > 10 && \substr($a, 0, 10) === "--backend=") {
-            $backend = \substr($a, 10);
-            $i = $i + 1;
-            continue;
-        }
-        // -O<level> — clang optimization level for the output binary
-        // (0 1 2 3 s z). Default -O2. Use -O0 for debuggable codegen.
-        if (\strlen($a) === 3 && \substr($a, 0, 2) === "-O") {
-            $lvl = \substr($a, 2);
-            if ($lvl !== "0" && $lvl !== "1" && $lvl !== "2" && $lvl !== "3"
-                && $lvl !== "s" && $lvl !== "z") {
-                dprint("unknown -O level: " . $lvl . " (expected 0|1|2|3|s|z)");
-                return false;
-            }
-            $optLevel = $lvl;
-            $i = $i + 1;
-            continue;
-        }
-        // --prelude — dump-mir: include built-in Exception hierarchy.
-        if ($a === "--prelude") {
-            $dumpPrelude = true;
-            $i = $i + 1;
-            continue;
-        }
-        // --effects — dump-mir: annotate ops with inferred memory effects.
-        if ($a === "--effects") {
-            $dumpEffects = true;
-            $i = $i + 1;
-            continue;
-        }
-        // --emit-library — build a standalone stdlib .o (no @main, no link).
-        if ($a === "--emit-library") {
-            CompileArgs::$emitLibrary = true;
-            $i = $i + 1;
-            continue;
-        }
-        if (\strlen($a) > 0 && $a[0] === '-') {
-            dprint("unknown flag: " . $a);
-            return false;
-        }
-        $files[] = $a;
-        $i = $i + 1;
+/**
+ * The compile/dump option spec, shared by every command that takes them:
+ *   -o <out> · --memory=<rc|arena|hybrid> · --backend=<mir|ast> · -O<level>
+ *   --prelude · --effects · --emit-library
+ * All value forms (`-o out`, `-O2`, `--memory=rc`, `--memory rc`) are accepted;
+ * positionals (files) may appear in any position.
+ *
+ * @return array<string, string>
+ */
+function compile_arg_spec(): array {
+    return [
+        "o" => \Cli\ArgParse::VALUE,
+        "memory" => \Cli\ArgParse::VALUE,
+        "backend" => \Cli\ArgParse::VALUE,
+        "O" => \Cli\ArgParse::VALUE,
+        "prelude" => \Cli\ArgParse::FLAG,
+        "effects" => \Cli\ArgParse::FLAG,
+        "emit-library" => \Cli\ArgParse::FLAG,
+    ];
+}
+
+/** Apply a parsed compile option set onto {@see CompileArgs}. false on a bad value. */
+function apply_compile_args(\Cli\ParsedArgs $p): bool {
+    $optLevel = $p->value("O", "2");
+    if ($optLevel !== "0" && $optLevel !== "1" && $optLevel !== "2" && $optLevel !== "3"
+        && $optLevel !== "s" && $optLevel !== "z") {
+        dprint("unknown -O level: " . $optLevel . " (expected 0|1|2|3|s|z)");
+        return false;
     }
-    CompileArgs::$output = $output;
-    CompileArgs::$files  = $files;
+    $memory = $p->value("memory", "");
+    CompileArgs::$output = $p->value("o", "a.out");
+    CompileArgs::$files = $p->positional;
     CompileArgs::$memory = $memory;
-    CompileArgs::$backend = $backend;
+    CompileArgs::$backend = $p->value("backend", "");
     CompileArgs::$optLevel = $optLevel;
-    CompileArgs::$dumpPrelude = $dumpPrelude;
-    CompileArgs::$dumpEffects = $dumpEffects;
+    CompileArgs::$dumpPrelude = $p->flag("prelude");
+    CompileArgs::$dumpEffects = $p->flag("effects");
+    if ($p->flag("emit-library")) { CompileArgs::$emitLibrary = true; }
     if (\strlen($memory) > 0) {
         if (!\Compile\Debug::applyMemoryMode($memory)) {
             dprint("unknown --memory value: " . $memory . " (expected rc|arena|hybrid)");
@@ -662,6 +625,12 @@ function parse_compile_args(array $args): bool {
         }
     }
     return true;
+}
+
+function parse_compile_args(array $args): bool {
+    $p = \Cli\ArgParse::parse($args, compile_arg_spec());
+    if ($p->error !== null) { dprint($p->error); return false; }
+    return apply_compile_args($p);
 }
 
 /**
@@ -719,6 +688,51 @@ function resolve_sources(array $files): ?array {
 }
 
 /**
+ * Like {@see resolve_sources}, but keeps each file's PATH alongside its
+ * contents so a diagnostic can point at the file the user actually named.
+ * Returns a `SourceFile[]` (a typed-field object per file — an
+ * `array<path,contents>` loses its element types across the self-host
+ * boundary, same reason `resolve_sources` returns a flat `string[]`). null on
+ * an IO error, `[]` when nothing was read.
+ *
+ * @param string[] $files
+ * @return \Analyze\SourceFile[]|null
+ */
+function resolve_source_files(array $files): ?array {
+    /** @var \Analyze\SourceFile[] $out */
+    $out = [];
+    if (\count($files) > 0) {
+        foreach ($files as $path) {
+            if (is_directory($path)) {
+                $listPath = "/tmp/manticore_afiles_" . (string)getpid() . ".txt";
+                system("find " . $path . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
+                $listContents = read_file($listPath);
+                if ($listContents !== null) {
+                    foreach (\explode("\n", $listContents) as $file) {
+                        if (\strlen($file) === 0) { continue; }
+                        $fileSrc = read_file($file);
+                        if ($fileSrc === null) { return null; }
+                        $out[] = new \Analyze\SourceFile($file, $fileSrc);
+                    }
+                }
+                continue;
+            }
+            $src = read_file($path);
+            if ($src === null) { return null; }
+            $out[] = new \Analyze\SourceFile($path, $src);
+        }
+        return $out;
+    }
+    $stdin = read_stdin_source();
+    if (\strlen($stdin) === 0) {
+        dprint("no input: pass file(s) or a directory, or pipe to stdin");
+        return null;
+    }
+    $out[] = new \Analyze\SourceFile("<stdin>", $stdin);
+    return $out;
+}
+
+/**
  * Full compile-to-binary pipeline. Writes IR to a per-pid temp file,
  * shells out to clang for IR→object, then cc for object→executable.
  * Default output is `a.out` in the cwd (mirrors `cc` defaults).
@@ -738,10 +752,25 @@ function compile_with_backend(array $sources): ?string {
 }
 
 function cmd_compile(array $args): int {
-    if (!parse_compile_args($args)) {
+    // The static analyzer runs by DEFAULT over the sources and prints its
+    // diagnostics to stderr — advisory, NEVER fatal (the build proceeds
+    // regardless). `--no-analyze` turns it off; `--analyze` is the (now default)
+    // explicit opt-in. Uses the fast AST engine, not the heavy `--deep` lowering.
+    $spec = compile_arg_spec();
+    $spec["analyze"] = \Cli\ArgParse::FLAG;
+    $spec["no-analyze"] = \Cli\ArgParse::FLAG;
+    $spec["analyze-strict"] = \Cli\ArgParse::FLAG;
+    $p = \Cli\ArgParse::parse($args, $spec);
+    if ($p->error !== null) {
+        dprint("compile: " . $p->error . " (rc=64)");
+        return 64;
+    }
+    if (!apply_compile_args($p)) {
         dprint("compile: failed to parse args (rc=64)");
         return 64;
     }
+    $analyze = !$p->flag("no-analyze");
+    $strict = $p->flag("analyze-strict");
     $output = CompileArgs::$output;
 
     $sources = resolve_sources(CompileArgs::$files);
@@ -752,6 +781,32 @@ function cmd_compile(array $args): int {
     if (\count($sources) === 0) {
         dprint("compile: source list is empty (rc=66)");
         return 66;
+    }
+
+    if ($analyze) {
+        // Advisory by default: any failure inside the analyzer is swallowed so it
+        // can NEVER break a build. `--no-analyze` is the escape hatch. With
+        // `--analyze-strict`, error-severity findings instead FAIL the compile
+        // (rc=65, before codegen) — a lint gate for CI.
+        try {
+            $afiles = resolve_source_files(CompileArgs::$files);
+            if ($afiles !== null && \count($afiles) > 0) {
+                $adiags = perform_analysis($afiles, CompileArgs::$files, false);
+                if (\count($adiags) > 0) { \error_log("\n" . \Analyze\Report::human($adiags)); }
+                if ($strict) {
+                    $errs = 0;
+                    foreach ($adiags as $d) {
+                        if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) { $errs = $errs + 1; }
+                    }
+                    if ($errs > 0) {
+                        dprint("compile: analysis found " . (string)$errs . " error(s) (--analyze-strict, rc=65)");
+                        return 65;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            dprint("analyze: skipped (internal error: " . $e->getMessage() . ")");
+        }
     }
     // Collect bundled-stdlib signatures here (native path: the libc file
     // bindings resolve to real syscalls). compile_via_mir consumes them via
@@ -1250,7 +1305,7 @@ function cmd_dump_ast(array $args): int {
  *
  * @param string[] $sources
  */
-function lower_module(array $sources): ?\Compile\Mir\Module {
+function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
     $docs = [];
@@ -1414,11 +1469,16 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // `line N: error: …` diagnostics (string arithmetic, array-ness arg /
         // return mismatches) when enabled. Any reported error is fatal — a clean
         // diagnostic beats a downstream clang failure or wrong codegen.
+        // ANALYSIS MODE ($collect set): run the checker unconditionally and
+        // COLLECT its findings for the `analyze` command instead of aborting.
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
-        if (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0") {
+        $tcOn = $collect !== null || (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0");
+        if ($tcOn) {
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $module = $tc->run($module);
-            if (\count($tc->errors) > 0) {
+            if ($collect !== null) {
+                foreach ($tc->errors as $te) { $collect->lines[] = $te; }
+            } elseif (\count($tc->errors) > 0) {
                 foreach ($tc->errors as $te) { dprint($te); }
                 return null;
             }
@@ -1430,7 +1490,15 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // `mixed` slot). Runs once types are final and before any memory pass —
         // a boxed cell downstream has already lost the marker. Throws; the catch
         // below turns it into a compile error.
-        $module = (new \Compile\Mir\Passes\CheckTypeDefs())->run($module);
+        $checkTypeDefs = new \Compile\Mir\Passes\CheckTypeDefs();
+        if ($collect !== null) { $checkTypeDefs->collectMode = true; }
+        $module = $checkTypeDefs->run($module);
+        if ($collect !== null) {
+            foreach ($checkTypeDefs->errors as $te) { $collect->lines[] = $te; }
+            // Analysis needs nothing past the type checks; the memory passes are
+            // codegen-only and can crash on the very unsoundness just collected.
+            return $module;
+        }
         // `$s[$i]` mints a fresh 1-char string — a malloc per character read.
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
@@ -1516,6 +1584,202 @@ function cmd_dump_sig(array $args): int {
     return 0;
 }
 
+/**
+ * Static analysis: parse the source set, run the analyzer's rule battery, and
+ * print `path:line:col: severity: message` diagnostics. Read-only — no lowering,
+ * no codegen, and NOT wired into the compile pipeline, so it can never perturb
+ * the self-host build (the reason a strict analyzer lives here as its own
+ * command rather than an on-by-default pass).
+ *
+ * Exit: 0 when clean, 1 when any error-severity diagnostic is reported, 64 on
+ * bad args, 66 when no input is read. A parse failure becomes a diagnostic
+ * (collected across every file) rather than aborting the run.
+ *
+ * @param string[] $args
+ */
+/**
+ * Parse the prelude sources into the analyzer's symbol universe so its built-in
+ * classes (the Throwable/Exception/Error hierarchy, Resource, Reflection) and
+ * functions are KNOWN — otherwise the closed-world undefined-symbol rules would
+ * flag every `catch (Exception)` / `new RuntimeException`. Resolved the same way
+ * the compiler resolves the prelude (`prelude_src_or_empty`). Best-effort: a
+ * missing / unparseable prelude file is skipped, not fatal.
+ *
+ * @return \Analyze\ParsedFile[]
+ */
+function analyze_prelude_files(): array {
+    // The prelude file set (stable). Class-defining files matter most for the
+    // undefined-class rule; loading all also seeds prelude functions.
+    $names = [
+        "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
+        "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
+    ];
+    /** @var \Analyze\ParsedFile[] $out */
+    $out = [];
+    foreach ($names as $name) {
+        $src = prelude_src_or_empty($name);
+        if ($src === "") { continue; }
+        // `prelude_src_or_empty` strips the opening `<?php` (it is built to append
+        // after a prelude header); re-add it so this parses as a standalone file.
+        try {
+            $program = \Parser\Parser::parseSource("<?php\n" . $src);
+            $out[] = new \Analyze\ParsedFile("prelude/" . $name, $program);
+        } catch (\Throwable $e) {
+            // A prelude file that does not parse standalone is simply skipped.
+        }
+    }
+    return $out;
+}
+
+/**
+ * Map one raw MIR-pass finding (`line N: error: …` from TypeCheck, or a
+ * `#[TypeDef] …` from CheckTypeDefs) to an analyzer diagnostic. MIR carries only
+ * a line, so the column is 0 and the file is the caller-supplied label.
+ */
+function mir_line_to_diag(string $line, string $fileLabel): \Analyze\Diagnostic {
+    $ln = 0;
+    if (\str_starts_with($line, "line ")) {
+        $rest = \substr($line, 5, \strlen($line) - 5);
+        $colon = \strpos($rest, ":");
+        if ($colon !== false) { $ln = (int)\substr($rest, 0, $colon); }
+    }
+    $msg = $line;
+    $ep = \strpos($line, "error: ");
+    if ($ep !== false) { $msg = \substr($line, $ep + 7, \strlen($line) - ($ep + 7)); }
+    $code = \str_starts_with($line, "#[TypeDef]") ? "repr.typedef" : "repr.type";
+    return \Analyze\Diagnostic::error($fileLabel, $ln, 0, $code, $msg);
+}
+
+/**
+ * Global-namespace stdlib function names from the bundled `.o.sig`, lowercased —
+ * the analyzer's known-callable set for its undefined-function rule. Namespaced
+ * internals (`Runtime\…`, `__mc_…`) are filtered: user code never names them.
+ *
+ * @return string[]
+ */
+function analyze_stdlib_fn_names(): array {
+    $path = find_stdlib_sig();
+    if ($path === "") { return []; }
+    $json = read_file($path);
+    if ($json === null) { return []; }
+    /** @var string[] $out */
+    $out = [];
+    try {
+        foreach (Sig::declsFromJson($json) as $decl) {
+            if (\strpos($decl->name, "\\") !== false) { continue; }
+            $out[] = \strtolower($decl->name);
+        }
+    } catch (\Throwable $e) {
+        // A malformed sig just yields no stdlib names (rule stays conservative).
+    }
+    return $out;
+}
+
+/**
+ * Run the analyzer over a resolved source-file set and return the sorted
+ * diagnostics. Shared by the `analyze` command and `compile --analyze`.
+ *
+ * @param \Analyze\SourceFile[] $files
+ * @param string[] $argPaths  the original CLI paths (to detect directory input)
+ * @return \Analyze\Diagnostic[]
+ */
+function perform_analysis(array $files, array $argPaths, bool $deep): array {
+    // Undefined-symbol rules are closed-world: only sound when the whole project
+    // is present. Enable for a directory argument or a multi-file run, not for a
+    // single file (whose cross-file references would be mis-flagged).
+    $checkUndefined = \count($files) > 1;
+    foreach ($argPaths as $argPath) {
+        if (is_directory($argPath)) { $checkUndefined = true; }
+    }
+
+    /** @var \Analyze\Diagnostic[] $diags */
+    $diags = [];
+    /** @var \Analyze\ParsedFile[] $parsed */
+    $parsed = [];
+    foreach ($files as $sf) {
+        try {
+            $program = \Parser\Parser::parseSource($sf->contents);
+            $parsed[] = new \Analyze\ParsedFile($sf->path, $program);
+        } catch (\Parser\ParseError $pe) {
+            // ParseError appends ` at line N, column C`; the diagnostic already
+            // prints that location, so strip the redundant tail.
+            $msg = $pe->getMessage();
+            $suffix = ' at line ' . (string)$pe->errLine . ', column ' . (string)$pe->column;
+            if (\str_ends_with($msg, $suffix)) {
+                $msg = \substr($msg, 0, \strlen($msg) - \strlen($suffix));
+            }
+            $diags[] = \Analyze\Diagnostic::error($sf->path, $pe->errLine, $pe->column, 'parse.error', $msg);
+        } catch (\Throwable $e) {
+            $diags[] = \Analyze\Diagnostic::error($sf->path, 0, 0, 'parse.error', $e->getMessage());
+        }
+    }
+
+    /** @var \Analyze\ParsedFile[] $libFiles  prelude — known symbols, never reported */
+    $libFiles = analyze_prelude_files();
+    $stdlibFns = $checkUndefined ? analyze_stdlib_fn_names() : [];
+    $analyzer = new \Analyze\Analyzer();
+    foreach ($analyzer->run($parsed, $libFiles, $checkUndefined, $stdlibFns) as $d) { $diags[] = $d; }
+
+    // Deep pass: drive the compiler's OWN MIR type checks (no duplicated logic).
+    if ($deep) {
+        /** @var string[] $raw */
+        $raw = [];
+        foreach ($files as $sf) { $raw[] = $sf->contents; }
+        $collect = new \Analyze\MirDiags();
+        lower_module($raw, $collect);
+        $fileLabel = \count($files) === 1 ? $files[0]->path : "(project)";
+        foreach ($collect->lines as $mline) { $diags[] = mir_line_to_diag($mline, $fileLabel); }
+    }
+
+    return \Analyze\Report::sortDiags($diags);
+}
+
+function cmd_analyze(array $args): int {
+    // `--deep` also runs the compiler's own MIR type passes (repr-soundness) via
+    // lower_module in analysis mode — heavier (it lowers the code), so opt-in.
+    // `--json` prints machine-readable output for editors / CI.
+    $spec = compile_arg_spec();
+    $spec["deep"] = \Cli\ArgParse::FLAG;
+    $spec["json"] = \Cli\ArgParse::FLAG;
+    $spec["baseline"] = \Cli\ArgParse::VALUE;
+    $spec["generate-baseline"] = \Cli\ArgParse::VALUE;
+    $p = \Cli\ArgParse::parse($args, $spec);
+    if ($p->error !== null) { dprint($p->error); return 64; }
+    if (!apply_compile_args($p)) { return 64; }
+    $deep = $p->flag("deep");
+    $json = $p->flag("json");
+    $baselinePath = $p->value("baseline", "");
+    $genBaseline = $p->value("generate-baseline", "");
+
+    $files = resolve_source_files(CompileArgs::$files);
+    if ($files === null) { return 66; }
+    if (\count($files) === 0) { return 66; }
+
+    $diags = perform_analysis($files, CompileArgs::$files, $deep);
+
+    // Generate a baseline: snapshot every current finding and report nothing.
+    if ($genBaseline !== "") {
+        if (!write_file($genBaseline, \Analyze\Baseline::generate($diags))) {
+            dprint("analyze: could not write baseline to " . $genBaseline);
+            return 73;
+        }
+        dprint("analyze: wrote baseline (" . (string)\count($diags) . " entries) to " . $genBaseline);
+        return 0;
+    }
+    // Apply a baseline: drop known findings.
+    if ($baselinePath !== "") {
+        $bl = read_file($baselinePath);
+        if ($bl !== null) { $diags = \Analyze\Baseline::filter($diags, $bl); }
+    }
+
+    echo $json ? \Analyze\Report::json($diags) : \Analyze\Report::human($diags);
+
+    foreach ($diags as $d) {
+        if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) { return 1; }
+    }
+    return 0;
+}
+
 function cmd_dump_mir(array $args): int {
     if (!parse_compile_args($args)) { return 64; }
     $sources = resolve_sources(CompileArgs::$files);
@@ -1537,7 +1801,7 @@ function cmd_dump_mir(array $args): int {
 function main_driver(): int {
     \Compile\Debug::initFromEnvironment();
     $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');
-    $cli->command('compile', 'Read PHP source from stdin, link a native binary (-o <out>)')
+    $cli->command('compile', 'Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)')
         ->run(fn (array $args) => cmd_compile($args));
     $cli->command('build', 'Build all targets from a manticore.json manifest (libraries + applications)')
         ->run(fn (array $args) => cmd_build($args));
@@ -1545,6 +1809,8 @@ function main_driver(): int {
         ->run(fn (array $args) => cmd_dump_llvm($args));
     $cli->command('dump-ast', 'Parse PHP source and print the resulting AST')
         ->run(fn (array $args) => cmd_dump_ast($args));
+    $cli->command('analyze', 'Static type analysis; report diagnostics, no codegen')
+        ->run(fn (array $args) => cmd_analyze($args));
     $cli->command('dump-mir', 'Parse PHP, lower to MIR, print the typed IR')
         ->run(fn (array $args) => cmd_dump_mir($args));
     $cli->command('dump-llvm-mir', 'Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR')
