@@ -320,7 +320,84 @@ function __mc_transport_connect(string $scheme, string $host, int $port)
     if ($scheme === 'udp') {
         return \__mc_tcp_connect($host, $port, 2);   // 2 = SOCK_DGRAM
     }
+    if ($scheme === 'unix') {
+        return \__mc_unix_connect($host);            // $host carries the path
+    }
     return false;
+}
+
+/**
+ * Fill a zeroed >=128-byte buffer as a sockaddr_un for $path and return its
+ * addrlen. AF_UNIX is 1 and sun_path sits at offset 2 on BOTH hosts — the only
+ * divergence is the family field: Darwin splits offset 0 into sun_len(u8) +
+ * sun_family(u8)@1, glibc/musl use a u16 sun_family@0. (This is the one place net
+ * builds a sockaddr by hand — getaddrinfo does not do AF_UNIX.)
+ */
+function __mc_unix_fill(\Ffi\Ptr $buf, string $path): int
+{
+    $plen = \strlen($path);
+    if (\__mc_host_is_darwin()) {
+        \poke_i8($buf, 0, 2 + $plen + 1);   // sun_len
+        \poke_i8($buf, 1, 1);               // sun_family = AF_UNIX
+    } else {
+        \poke_i16($buf, 0, 1);              // sun_family = AF_UNIX (u16)
+    }
+    for ($i = 0; $i < $plen; $i = $i + 1) {
+        \poke_i8($buf, 2 + $i, \ord($path[$i]));   // sun_path (buffer pre-zeroed ⇒ NUL-terminated)
+    }
+    return 2 + $plen + 1;                   // offsetof(sun_path) + strlen + NUL
+}
+
+/**
+ * Connect a Unix-domain stream socket to the filesystem $path, or false.
+ * @return \Resource|false
+ */
+function __mc_unix_connect(string $path)
+{
+    $fd = \Runtime\Libc\sys_socket(1, 1, 0);   // AF_UNIX(1), SOCK_STREAM(1), proto 0
+    if ($fd < 0) {
+        return false;
+    }
+    $buf = \Runtime\Libc\calloc(128, 1);
+    if ($buf === null) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    $len = \__mc_unix_fill($buf, $path);
+    $rc = \Runtime\Libc\sys_connect($fd, $buf, $len);
+    \Runtime\Libc\free($buf);
+    if ($rc !== 0) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+}
+
+/**
+ * Bind + listen a Unix-domain stream socket at $path, or false. Like php, a stale
+ * socket file is NOT auto-removed — bind fails (EADDRINUSE) if $path exists.
+ * @return \Resource|false
+ */
+function __mc_unix_listen(string $path, int $backlog = 16)
+{
+    $fd = \Runtime\Libc\sys_socket(1, 1, 0);
+    if ($fd < 0) {
+        return false;
+    }
+    $buf = \Runtime\Libc\calloc(128, 1);
+    if ($buf === null) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    $len = \__mc_unix_fill($buf, $path);
+    $ok = \Runtime\Libc\sys_bind($fd, $buf, $len) === 0
+        && \Runtime\Libc\sys_listen($fd, $backlog) === 0;
+    \Runtime\Libc\free($buf);
+    if (!$ok) {
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
+    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
 }
 
 /**
@@ -409,7 +486,8 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
         $scheme = \strtolower(\substr($hostname, 0, $sep));
         $host = \substr($hostname, $sep + 3, \strlen($hostname) - ($sep + 3));
     }
-    if ($port < 0) {
+    // unix:// carries a path, not a port — the port check does not apply.
+    if ($port < 0 && $scheme !== 'unix') {
         $error_code = -1;
         $error_message = 'no port specified';
         return false;
@@ -445,10 +523,19 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
         $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls') {
+    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls' && $scheme !== 'unix') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
+    }
+    // unix:// carries a filesystem path, not host:port — connect straight to it.
+    if ($scheme === 'unix') {
+        $sock = \__mc_unix_connect($addr);
+        if ($sock === false) {
+            $error_code = -1;
+            $error_message = 'cannot connect to ' . $address;
+        }
+        return $sock;
     }
     // Rightmost colon: an IPv6 literal is full of them, and php accepts
     // `[::1]:80` for exactly that reason.
@@ -586,10 +673,19 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
         $scheme = \strtolower(\substr($addr, 0, $sep));
         $addr = \substr($addr, $sep + 3, \strlen($addr) - ($sep + 3));
     }
-    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls') {
+    if ($scheme !== 'tcp' && $scheme !== 'udp' && $scheme !== 'ssl' && $scheme !== 'tls' && $scheme !== 'unix') {
         $error_code = -1;
         $error_message = 'unsupported transport: ' . $scheme;
         return false;
+    }
+    // unix:// carries a filesystem path — bind + listen straight on it.
+    if ($scheme === 'unix') {
+        $u = \__mc_unix_listen($addr);
+        if ($u === false) {
+            $error_code = -1;
+            $error_message = 'cannot bind ' . $address;
+        }
+        return $u;
     }
     $colon = \strrpos($addr, ':');
     if ($colon === false) {
