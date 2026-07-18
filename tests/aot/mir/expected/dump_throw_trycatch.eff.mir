@@ -1,0 +1,31 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn guarded(bool %fail) -> string {
+  ; effects: alloc,escape,throw,callUnknown
+  try {
+    %0 = load_local fail : bool
+    if %0 then {
+      %1 = string_const "boom" : string
+      %2 = int_const 0 : int
+      %3 = null_const : null
+      %4 = new RuntimeException(%1, %2, %3) : obj<RuntimeException>  ; eff: alloc,throw alloc=RcHeap
+      throw %4  ; eff: escape,throw
+    }
+    %5 = string_const "ok" : string
+    return %5  ; eff: escape
+  } catch (RuntimeException e) {
+    %6 = load_local e : obj<RuntimeException>
+    %7 = method_call %6->getMessage() : string  ; eff: throw,callUnknown
+    return %7  ; eff: escape
+  } finally {
+    %8 = string_const "[done]" : string
+    echo %8
+  }
+}
+
+fn __main() -> int {
+  ; effects: throw
+  %0 = bool_const true : bool
+  %1 = call guarded(%0) : string  ; eff: throw
+  echo %1
+}

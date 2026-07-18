@@ -121,6 +121,14 @@ final class NarrowReturns implements Pass
         // assoc). A bare `array` hint lowers to `unknown`, so without this
         // the caller types the result `unknown` and reads `$r["k"]` as a
         // vec index (the key pointer as an i64 offset) → wild read.
+        // A `?array` fn returns null on some path. Skip the null arms when
+        // picking the shape and when joining: a null rides an array slot raw as
+        // ptr 0 (an allocated `[]` is a real pointer, so they never collide), so
+        // the array type is still the honest one. Without this a single
+        // `return null;` left the whole fn `unknown` and the caller rendered the
+        // returned array's pointer as `int(<ptr>)`.
+        $returns = $this->nonNullReturns($returns);
+        if (\count($returns) === 0) { return false; }
         $first = $returns[0]->value->type;
         // An OBJECT return. This pass was built for bare-`array` erasure, so it
         // only ever narrowed arrays — a function returning an object, or a union
@@ -143,7 +151,7 @@ final class NarrowReturns implements Pass
             // All returns must agree on the array shape (vec vs assoc).
             if (!$t->isArray() || $t->isAssoc() !== $isAssoc) { return false; }
             $e = $t->element ?? Type::unknown();
-            $elem = $elem === null ? $e : $elem->unionWith($e);
+            $elem = $elem === null ? $e : $this->joinElem($elem, $e);
             if ($isAssoc) {
                 $k = $t->key ?? Type::unknown();
                 $key = $key === null ? $k : $key->unionWith($k);
@@ -190,6 +198,56 @@ final class NarrowReturns implements Pass
         }
         $fn->returnType = $result;
         return true;
+    }
+
+    /**
+     * Join two element types for a return join. `Type::unionWith` answers
+     * `unknown` for ANY kind mismatch, which is a LIE about a heterogeneous
+     * element: `vec[cell]` (a `[false,'loc']` literal, already repaired by
+     * {@see InferNodes::inferArrayLit}) joined with `vec[string]` came back
+     * `vec[unknown]`, and the reader then rendered a boxed `false` as a raw
+     * pointer. A value pair that disagrees is a CELL — it carries its own tag.
+     *
+     * Mirrors {@see InferTypes::unifyToCell}/`isValueKind`, which this pass
+     * cannot reach (it is a Pass class, not the InferTypes trait host); the
+     * same duplication `InferTypes::arrayElemMerge` already lives with.
+     */
+    private function joinElem(Type $a, Type $b): Type
+    {
+        $j = $a->unionWith($b);
+        if ($j->kind !== Type::KIND_UNKNOWN) { return $j; }
+        if ($a->kind === Type::KIND_CELL || $b->kind === Type::KIND_CELL
+            || ($this->isValueKind($a) && $this->isValueKind($b))) {
+            return Type::cell();
+        }
+        return $j;
+    }
+
+    /** A concrete value-carrying kind, boxable into a cell. Mirror of
+     *  {@see InferTypes::isValueKind}. */
+    private function isValueKind(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL
+            || $k === Type::KIND_ARRAY || $k === Type::KIND_OBJ;
+    }
+
+    /**
+     * The value-returns that are not a bare `null` ({@see narrowFunction}).
+     * Kept on `$this`-free plain locals — a `Return_[]` in, a `Return_[]` out.
+     *
+     * @param \Compile\Mir\Return_[] $returns
+     * @return \Compile\Mir\Return_[]
+     */
+    private function nonNullReturns(array $returns): array
+    {
+        $out = [];
+        foreach ($returns as $ret) {
+            if ($ret->value->type->kind === Type::KIND_NULL) { continue; }
+            $out[] = $ret;
+        }
+        return $out;
     }
 
     /** An object, or a static union of object classes. */

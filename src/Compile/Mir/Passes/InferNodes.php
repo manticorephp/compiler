@@ -83,6 +83,7 @@ trait InferNodes
     {
         $this->cellLoopLocals = [];
         $this->floatLoopLocals = [];
+        $this->nullLoopLocals = [];
         $rounds = 0;
         while (true) {
             $this->loopPromoGrew = false;
@@ -295,6 +296,15 @@ trait InferNodes
             if ($this->isParamName($fn, $cln)) { continue; }
             $this->localTypes[$cln] = Type::cell();
         }
+        // Same discipline for a `null`-seeded accumulator a loop assigns an
+        // object ({@see loopMerge}): the name is that object type from ENTRY, so
+        // the body's `$acc === null` compares a pointer to 0 instead of folding
+        // to a constant TRUE. A param is excluded for the same reason as above —
+        // it arrives raw, and a `?C` param is already typed by its hint.
+        foreach ($this->nullLoopLocals as $nln => $nty) {
+            if ($this->isParamName($fn, $nln)) { continue; }
+            $this->localTypes[$nln] = $nty;
+        }
         $this->inferNode($fn->body);
         // A function returning a CLOSURE loses the concrete `obj<__closure_N>`
         // class otherwise — an undeclared return is `unknown`, a declared
@@ -366,13 +376,28 @@ trait InferNodes
             $fn->returnType = Type::cell();
             $this->sigs[$fn->name] = Type::cell();
         }
-        // A declared NUMERIC cell return (`int|float`) whose body agrees on ONE
-        // concrete numeric kind — e.g. array_sum's float specialization always
-        // returns float — narrows to that scalar so `return $sum` does NOT box
-        // the value (box_float truncates the mantissa → 0.6 → 0.5999…). A
-        // null-returning path would have collapsed $u to unknown above (not
-        // adopted), so a `?int` stays a cell; numeric union only.
-        if ($rk === Type::KIND_CELL && $fn->returnType->isNumericCell() && $u !== null
+        // A declared CELL return whose body agrees on ONE concrete numeric kind
+        // — `int|float`'s array_sum float specialization, and equally a `mixed`
+        // that only ever returns float — narrows to that scalar so `return $sum`
+        // does NOT box the value (box_float truncates the mantissa → 0.6 →
+        // 0.5999…), and so `f() - g()` subtracts DOUBLES instead of unboxing two
+        // NaN-boxed payloads as ints (which yields int(0), not float).
+        //
+        // Not restricted to a NUMERIC cell: a plain `mixed` is the same KIND_CELL
+        // and the `$u` guard below does the real work — an all-int or all-float
+        // body is exactly as narrowable either way. Anything genuinely mixed
+        // (int+float, or a null arm) collapses `$u` to a cell/unknown above and
+        // is not adopted, so `?int` and a real `mixed` still stay cells.
+        //
+        // EXCEPT an erased generics thunk (`Spec__m$erased`): its cell return is
+        // a FIXED ABI — the dispatch switch calls it FOR an erased receiver and
+        // unboxes the result as a cell. Its body is `return $spec->m(…)`, a raw
+        // int/float from the specialized method, so `$u` looks narrowable — but
+        // narrowing makes it return that raw value, and the erased caller then
+        // unboxes a raw 2^50 as a cell → 0 (MEASURED: generics_reified). The
+        // suffix is LowerReify's stable reification marker.
+        if ($rk === Type::KIND_CELL && $u !== null
+            && !\str_contains($fn->name, '$erased')
             && ($u->kind === Type::KIND_INT || $u->kind === Type::KIND_FLOAT)) {
             $fn->returnType = $u;
             $this->sigs[$fn->name] = $u;
@@ -553,6 +578,17 @@ trait InferNodes
         if (isset($this->cellLoopLocals[$node->name])) {
             $this->localTypes[$node->name] = Type::cell();
             $node->type = Type::cell();
+            return $node->type;
+        }
+        // A null-seeded accumulator a loop assigns an object ({@see loopMerge}):
+        // the slot IS that object type, so the `$acc = null;` seed store must not
+        // retype it back to KIND_NULL — the next read would fold `=== null` to a
+        // constant again. The null itself stores raw as ptr 0, which is what the
+        // pointer slot expects.
+        if (isset($this->nullLoopLocals[$node->name])) {
+            $nty = $this->nullLoopLocals[$node->name];
+            $this->localTypes[$node->name] = $nty;
+            $node->type = $nty;
             return $node->type;
         }
         if (isset($this->incStrLocals[$node->name])) {
@@ -852,6 +888,29 @@ trait InferNodes
                     // All-numeric returns (int|float) → a numeric cell so the
                     // caller can arith-promote; else a plain mixed cell.
                     $merged = $this->unifyToCell($this->fnReturnUnion, $rt);
+                }
+                // A NULL arm paired with a concrete value — `return null;` beside
+                // `return explode(…)`, i.e. every `?array`/`?string` function.
+                // KIND_NULL is not a value kind and unionWith has no rule for it,
+                // so the merge above leaves `unknown` and the caller renders the
+                // raw pointer as `int(<ptr>)`. Pair them the way inferTernary
+                // already does ({@see nullableOf}): a tagged cell, so the null
+                // renders NULL and the value keeps its own type by tag.
+                //
+                // An ARRAY arm keeps its ARRAY type — it does NOT become a cell.
+                // A null rides an array slot RAW as ptr 0 and an allocated `[]`
+                // is a real pointer, so the two never collide; every array
+                // consumer (count / foreach / `[]` / `=== null`) already reads
+                // it raw. Cellifying instead hands a tagged value to a bare
+                // `array` param — which lowers to a RAW pointer — and faults:
+                // MEASURED, it SIGSEGVs the self-build in `defaultFillArgs`
+                // (`$params` from a `?array` fn, deref'd as 0xfff7…).
+                if ($merged->kind === Type::KIND_UNKNOWN) {
+                    if ($this->fnReturnUnion->kind === Type::KIND_NULL && $rt->isArray()) {
+                        $merged = $rt;
+                    } elseif ($rt->kind === Type::KIND_NULL && $this->fnReturnUnion->isArray()) {
+                        $merged = $this->fnReturnUnion;
+                    }
                 }
                 $this->fnReturnUnion = $merged;
             }

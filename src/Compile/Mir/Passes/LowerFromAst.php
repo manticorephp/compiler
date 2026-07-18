@@ -299,6 +299,13 @@ final class LowerFromAst implements Pass
     public bool $includeArrayClasses = false;
     /** SPL array-class prelude source, read by Main from `prelude/spl_arrays.php`. */
     public string $arrayClassesSrc = '';
+    /** Inject ReflectionClass / ReflectionException (gated on the program
+     *  MENTIONING one — see Main.php). Decides whether the classes exist, NOT
+     *  which classes carry metadata: that is ReflectAnalysis's job, because
+     *  PreludeDemand cannot see a name hidden in a string literal. */
+    public bool $includeReflection = false;
+    /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
+    public string $reflectionSrc = '';
     /** Inject the callback/element array functions (usort/sort/rsort/array_reduce)
      *  as prelude — compiled WITH the user program so call-site element inference
      *  types their array param and the in-module closure ABI matches (they can't
@@ -1346,7 +1353,15 @@ final class LowerFromAst implements Pass
     private function synthMethodClosure(Node $recv, string $method): Node
     {
         $cls = $recv->type->class ?? '';
-        $declParams = $cls !== '' ? $this->resolveMethodParams($cls, $method) : null;
+        // An if-guard, NOT `$cls!=='' ? resolveMethodParams(…) : null`: a ternary
+        // pairing an array arm with null lifts to a CELL ({@see InferTypes::
+        // nullableOf} — correct for `is_null`/`gettype` on a local), but this
+        // value goes to `fccParamsAndArgs(?array $p)`, a bare-`array` param that
+        // reads RAW — a cell there faults. The if keeps `$declParams` a raw
+        // `?array`. (The `?array` return-narrowing this pass now does made the
+        // arm concrete, which is what triggers the ternary's cell-lift.)
+        $declParams = null;
+        if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());

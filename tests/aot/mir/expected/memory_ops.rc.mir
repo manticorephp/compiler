@@ -1,4 +1,4 @@
-; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
 
 fn frees(int %n, string %borrowed) -> void {
   ; effects: alloc
@@ -8,7 +8,7 @@ fn frees(int %n, string %borrowed) -> void {
   %3 = store_local s <- %2 : string
   %4 = load_local n : int
   %5 = load_local n : int
-  %6 = array_lit [_ => %4, _ => %5] : vec[int]  ; eff: alloc alloc=RcHeap
+  %6 = array_lit [_ => %4, _ => %5] : vec[int]  ; eff: alloc alloc=NoRefcount
   %7 = store_local a <- %6 : vec[int]
   %8 = load_local borrowed : string
   %9 = store_local b <- %8 : string
@@ -20,8 +20,8 @@ fn frees(int %n, string %borrowed) -> void {
   echo %13
   %14 = load_local b : string
   echo %14
-  mem_rc_release vec a
   mem_release string s
+  mem_release vec a
 }
 
 fn __main() -> int {

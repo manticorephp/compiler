@@ -1,0 +1,15 @@
+Array
+(
+    [0] => MyBase
+    [1] => MyChild
+    [2] => MyEnum
+)
+Array
+(
+    [0] => MyIface
+    [1] => MyOther
+)
+Array
+(
+    [0] => MyTrait
+)

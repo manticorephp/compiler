@@ -195,6 +195,16 @@ final class InferTypes implements Pass
      *  not a cell, so the pre-loop int store rides a sitofp ({@see floatLocals},
      *  which the syntactic scan only fills for a self-referential `$s += 1.5`). */
     private array $floatLoopLocals = [];
+    /** @var array<string,Type> locals seeded `null` before a loop that the body
+     *  assigns a POINTER value (`$acc = null; foreach (…) { $acc = $acc === null
+     *  ? $x : $acc->merge($x); }` — the accumulator idiom). At loop entry the
+     *  name is KIND_NULL, so the body's own `$acc === null` folds to a constant
+     *  TRUE and the merge arm is never taken: the accumulator silently keeps the
+     *  LAST item. Unlike the cell case the answer is not a cell — {@see
+     *  Type::unionWith} already rules `null ∪ obj` = obj (PHP `?C`), and a null
+     *  rides that slot raw as ptr 0 — so pin the name to the BODY type for the
+     *  whole function and re-infer. Value is that type, not a bool. */
+    private array $nullLoopLocals = [];
     /** Set when a loop promoted a NEW name this round (re-infer needed). */
     private bool $loopPromoGrew = false;
     /** @var array<string,bool> "fn|param" already boxed at entry — a promoted
@@ -1195,6 +1205,24 @@ final class InferTypes implements Pass
             || $k === Type::KIND_CELL;
     }
 
+    /** A type whose null rides the slot RAW as ptr 0 ({@see LowerTypes::
+     *  lowerTypeHint}'s nullable-POINTER note), so a `null`-seeded slot can take
+     *  it and still answer `=== null` at runtime instead of folding statically.
+     *
+     *  INT/FLOAT/BOOL are excluded deliberately: their null is NOT ptr 0 — it
+     *  would collide with `0`/`0.0`/`false` — so a numeric accumulator needs the
+     *  tagged-cell promotion below, not this. UNKNOWN is included because it is
+     *  the erased-pointer case this fires on in practice: the body's own
+     *  `$acc->m()` types unknown precisely BECAUSE the entry says null, so
+     *  keying on a concrete body type would never converge. */
+    private function isPointerKind(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_OBJ || $k === Type::KIND_UNION
+            || $k === Type::KIND_UNKNOWN || $k === Type::KIND_ARRAY
+            || $k === Type::KIND_STRING || $k === Type::KIND_CLOSURE;
+    }
+
     private function markKeyLocal(Node $idx): void
     {
         if ($idx->kind === Node::KIND_LOAD_LOCAL) {
@@ -1273,8 +1301,16 @@ final class InferTypes implements Pass
 
     /** Pair a concrete branch type with a NULL sibling: a tagged cell so null is
      *  representable and renders as NULL. A numeric scalar → numeric cell (arith
-     *  still promotes); a pointer/other value → a plain cell. null / unknown /
-     *  an already-cell type are returned unchanged. */
+     *  still promotes); a string/object/ARRAY → a plain cell. null / unknown /
+     *  an already-cell type are returned unchanged.
+     *
+     *  An ARRAY arm lifts to a cell here (a TERNARY / local context) so
+     *  `is_null`/`gettype`/`=== null` dispatch on the runtime tag — a raw vec
+     *  has no null representation a static consumer would test (`ternary_null_
+     *  arm_objarray` asserts exactly this). This is the OPPOSITE of a `?array`
+     *  RETURN, which stays raw ({@see InferNodes::inferReturn}): a return flows
+     *  to callers reading a bare-`array` param raw, and cellifying it faults
+     *  (`fccParamsAndArgs`). The two are genuinely different consumers. */
     private function nullableOf(Type $t): Type
     {
         $k = $t->kind;
@@ -1362,6 +1398,18 @@ final class InferTypes implements Pass
             // pointer). Promote the NAME to a cell — it carries its own tag —
             // and re-run the function so EVERY store to it boxes.
             if ($st->kind === $bt->kind) { continue; }
+            // A `null` slot the body assigns a POINTER: keep the body's type for
+            // the whole function ({@see $nullLoopLocals}). Must precede the
+            // scalar gate below — an obj/array/string body type is not a scalar,
+            // so it would `continue` and leave the body reading the entry NULL.
+            if ($st->kind === Type::KIND_NULL && $this->isPointerKind($bt)) {
+                $out[$name] = $bt;
+                if (!isset($this->nullLoopLocals[$name])) {
+                    $this->nullLoopLocals[$name] = $bt;
+                    $this->loopPromoGrew = true;
+                }
+                continue;
+            }
             if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
             if (isset($this->keyUsedLocals[$name])) { continue; }
             $out[$name] = Type::cell();

@@ -1,0 +1,60 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn pick(int %x) -> int {
+  %0 = load_local x : int
+  %1 = int_const 0 : int
+  %2 = cmp > %0, %1 : bool
+  ternary %2 then {
+    %3 = load_local x : int
+    -> %3
+  } else {
+    %4 = load_local x : int
+    %5 = neg %4 : int
+    -> %5
+  } => %6 : int
+  return %6
+}
+
+fn shortt(cell %x) -> int {
+  %0 = load_local x : cell
+  ternary %0 ?: else {
+    %1 = int_const 7 : int
+    -> %1
+  } => %2 : cell
+  return %2
+}
+
+fn andor(bool %a, bool %b) -> bool {
+  %0 = load_local a : bool
+  ternary %0 then {
+    %1 = load_local b : bool
+    %2 = not %1 : bool
+    %3 = not %2 : bool
+    -> %3
+  } else {
+    %4 = bool_const false : bool
+    -> %4
+  } => %5 : bool
+  ternary %5 then {
+    %6 = bool_const true : bool
+    -> %6
+  } else {
+    %7 = load_local a : bool
+    %8 = not %7 : bool
+    %9 = not %8 : bool
+    %10 = not %9 : bool
+    -> %10
+  } => %11 : bool
+  return %11
+}
+
+fn __main() -> int {
+  %0 = int_const -3 : int
+  %1 = call pick(%0) : int
+  %2 = int_const 0 : int
+  %3 = call shortt(%2) : int
+  %4 = bool_const true : bool
+  %5 = bool_const false : bool
+  %6 = call andor(%4, %5) : bool
+  echo %1, %3, %6
+}

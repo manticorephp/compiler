@@ -1,0 +1,18 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn id() -> int {
+  ; effects: escape
+  %0 = int_const 0 : int
+  %1 = store_local x <- %0 : int
+  %2 = incdec x++ : int
+  %3 = incdec ++x : int
+  %4 = incdec x-- : int
+  %5 = load_local x : int
+  return %5  ; eff: escape
+}
+
+fn __main() -> int {
+  ; effects: throw
+  %0 = call id() : int  ; eff: throw
+  echo %0
+}

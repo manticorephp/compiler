@@ -1,0 +1,15 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn cn(obj<Widget> %o) -> string {
+  ; effects: escape
+  %0 = load_local o : obj<Widget>
+  %1 = class_name %0 : string
+  return %1  ; eff: escape
+}
+
+fn __main() -> int {
+  ; effects: alloc,throw
+  %0 = new Widget() : obj<Widget>  ; eff: alloc,throw alloc=RcHeap
+  %1 = call cn(%0) : string  ; eff: throw
+  echo %1
+}

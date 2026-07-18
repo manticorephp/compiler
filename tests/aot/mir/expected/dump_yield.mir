@@ -1,0 +1,41 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn gen() -> obj<Generator> {
+  mem_arena_enter
+  %0 = int_const 1 : int
+  %1 = yield %0 : cell
+  %2 = string_const "k" : string
+  %3 = int_const 2 : int
+  %4 = yield %2 => %3 : cell
+  %5 = int_const 3 : int
+  %6 = int_const 4 : int
+  %7 = array_lit [_ => %5, _ => %6] : vec[int]
+  foreach %7 as __yf_k0 => __yf_v0 {
+    %8 = load_local __yf_k0 : int
+    %9 = load_local __yf_v0 : int
+    %10 = yield %8 => %9 : cell
+  }
+  mem_arena_leave
+}
+
+fn drain() -> int {
+  %0 = int_const 0 : int
+  %1 = store_local t <- %0 : int
+  %2 = call gen() : obj<Generator>
+  %3 = store_local __fe_subj_0 <- %2 : obj<Generator>
+  %4 = load_local __fe_subj_0 : obj<Generator>
+  foreach %4 as v {
+    %5 = load_local t : int
+    %6 = load_local v : int
+    %7 = add %5, %6 : int
+    %8 = store_local t <- %7 : int
+  }
+  %9 = load_local t : int
+  return %9
+  mem_rc_release obj __fe_subj_0
+}
+
+fn __main() -> int {
+  %0 = call drain() : int
+  echo %0
+}

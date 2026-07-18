@@ -1280,12 +1280,27 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
     $cliSrc = prelude_src_or_empty("cli.php");
     $printRSrc = prelude_src_or_empty("print_r.php");
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
+    $reflectionSrc = prelude_src_or_empty("reflection.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
     $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
+    // Reflection is gated on a MENTION, like the array classes: `new
+    // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
+    // ReflectionException. A program that never reflects carries none of it.
+    // This gate decides whether the CLASSES exist; it cannot decide WHICH
+    // classes get metadata — PreludeDemand deliberately ignores string
+    // literals, so `new ReflectionClass('Foo')` hides Foo from it. That is a
+    // separate analysis (ReflectAnalysis).
+    $useReflection = $demand->mentionsAny(['ReflectionClass', 'ReflectionException'])
+        // get_declared_* are plain FUNCTIONS living in the same file — a program
+        // may call one without ever naming a Reflection class, and would then
+        // get an undefined symbol (which this toolchain stubs to `return 0`
+        // rather than failing).
+        || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
+                              'get_declared_traits']);
     $useVarDump = $demand->calls('var_dump');
     $usePrintR = $demand->calls('print_r');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
@@ -1337,6 +1352,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $lower->includeVarDump = $useVarDump;
         $lower->includePrintR = $usePrintR;
         $lower->includeArrayClasses = $useArrayClasses;
+        $lower->includeReflection = $useReflection;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
         $lower->exceptionsSrc = $exceptionsSrc;
@@ -1344,6 +1360,7 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
+        $lower->reflectionSrc = $reflectionSrc;
         $lower->arrayFnsSrc = $arrayFnsSrc;
         $lower->cliSrc = $cliSrc;
         $lower->printRSrc = $printRSrc;
@@ -1418,6 +1435,26 @@ function lower_module(array $sources): ?\Compile\Mir\Module {
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
         // never sees the strings that are no longer created.
+        $refl = new \Compile\Mir\Passes\ReflectAnalysis();
+        $refl->run($module);
+        $module->reflectAll = $refl->all;
+        $module->reflectNames = $refl->names;
+        if (\Compile\Debug::$reflectReport) {
+            // Built with an explicit loop, NOT
+            //   $rnames = $refl->all ? ['<ALL>'] : \array_keys($refl->names);
+            // That ternary unions two array sources; its elements then read back
+            // as raw pointers under the native self-build and implode() SIGSEGVs
+            // the compiler. Green under Zend. See [[reflection-epic]].
+            /** @var string[] $rnames */
+            $rnames = [];
+            if ($refl->all) {
+                $rnames[] = '<ALL — an unresolved name escaped>';
+            } else {
+                foreach ($refl->names as $rn => $rv) { $rnames[] = $rn; }
+            }
+            dprint('reflect: ' . (string)\count($rnames) . ' class(es) carry metadata: '
+                . \implode(', ', $rnames));
+        }
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
@@ -1484,34 +1521,15 @@ function cmd_dump_mir(array $args): int {
     $sources = resolve_sources(CompileArgs::$files);
     if ($sources === null) { return 66; }
     if (\count($sources) === 0) { return 66; }
-    try {
-        $program = Parser::parseSource($sources[0]);
-    } catch (\Throwable $e) {
-        dprint("parse failed: " . $e->getMessage());
-        return 65;
-    }
-    $module = new \Compile\Mir\Module();
-    $lower = new \Compile\Mir\Passes\LowerFromAst($program);
-    $module = $lower->run($module);
-    $fold = new \Compile\Mir\Passes\ConstFold();
-    $module = $fold->run($module);
-    $dse = new \Compile\Mir\Passes\DeadStore();
-    $module = $dse->run($module);
-    $infer = new \Compile\Mir\Passes\InferTypes();
-    $module = $infer->run($module);
-    $mono = new \Compile\Mir\Passes\Monomorphize();
-    $module = $mono->run($module);
-    $narrow = new \Compile\Mir\Passes\NarrowReturns();
-    $module = $narrow->run($module);
-    $module = (new \Compile\Mir\Passes\CheckTypeDefs())->run($module);
-    $effects = new \Compile\Mir\Passes\InferEffects();
-    $module = $effects->run($module);
-    $allocKind = new \Compile\Mir\Passes\InferAllocKind();
-    $module = $allocKind->run($module);
-    $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
-    $module = $memMode->run($module);
-    $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
-    $module = $memOps->run($module);
+    // Share the one pipeline `compile`/`dump-sig` run (lower_module) rather
+    // than a hand-copied subset. The old inlined list skipped InlineClosures,
+    // FuseSplitJoin, DemoteCharLocals, Verify and the pre-mono re-runs, and
+    // it built LowerFromAst with no prelude — so the dump was pre-optimization
+    // IR of a program with no Exception hierarchy, and could never match what
+    // a real compile lowers. It also parsed only $sources[0]; lower_module
+    // loops every file, so multi-file dump-mir now works too.
+    $module = lower_module($sources);
+    if ($module === null) { return 65; }
     puts(\Compile\Mir\Dump::module($module, CompileArgs::$dumpPrelude, CompileArgs::$dumpEffects));
     return 0;
 }

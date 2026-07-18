@@ -1054,6 +1054,21 @@ trait EmitLlvmModule
             $out .= $this->boxLastByRepr();
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
+        // The declared return is a CELL-element array but this arm still holds a
+        // CONCRETE-element one: the arms disagreed (`return [false,'loc']` beside
+        // `return ['body','']`), so {@see NarrowReturns::joinElem} typed the fn
+        // `vec[cell]` and every arm must actually BE cell-element — otherwise the
+        // reader unboxes this arm's raw string pointers by tag. Rebuild it with
+        // each element boxed, left raw (an array slot travels raw).
+        if ($this->needsCellify($this->frame->returnType, $v->type)) {
+            $out .= $this->emitCellifyArrayRaw($v->type->element);
+            // The rebuild is a FRESH array (+1, owned by the caller — no retain,
+            // unlike a borrowed passthrough), but it leaves a raw `ptr`: the ABI
+            // returns a uniform i64, so it rides the carrier like every other
+            // pointer return.
+            $out .= $this->coerceToI64();
+            return $this->finishReturn($out, $this->lastValue, $leave);
+        }
         // A `mixed` / union (cell) return boxes the value to a tagged
         // cell unless it already is one.
         if ($this->frame->returnType !== null
@@ -1126,6 +1141,30 @@ trait EmitLlvmModule
         if ($tk !== Type::KIND_UNKNOWN && $tk !== Type::KIND_CELL) { return $v->type; }
         if ($this->frame->returnType === null) { return $v->type; }
         return $this->frame->returnType;
+    }
+
+    /**
+     * A CELL-element array slot receiving a CONCRETE-element array value — the
+     * cellify boundary ({@see EmitLlvmBuiltins::emitCellifyArrayRaw}). The exact
+     * mirror of the de-cellify direction {@see EmitLlvmBuiltins::needsDeCellify}
+     * plants at a store.
+     *
+     * Both sides must be arrays of the SAME shape (vec/vec, assoc/assoc): the
+     * rebuild walks keys, so a vec↔assoc pair is not a repr change but a shape
+     * change, which no arm of a return join produces. An `unknown` element is
+     * NOT cellified — nothing is known to box, and an erased array must stay raw
+     * (the `cow2` carve-out).
+     */
+    private function needsCellify(?Type $slot, ?Type $val): bool
+    {
+        if ($slot === null || $val === null) { return false; }
+        if (!$slot->isArray() || !$val->isArray()) { return false; }
+        if ($slot->isAssoc() !== $val->isAssoc()) { return false; }
+        $se = $slot->element;
+        $ve = $val->element;
+        if ($se === null || $ve === null) { return false; }
+        if ($se->kind !== Type::KIND_CELL) { return false; }
+        return $ve->kind !== Type::KIND_CELL && $ve->kind !== Type::KIND_UNKNOWN;
     }
 
     /** Whether an obj/vec return value is a borrowed reference (needs +1). */
