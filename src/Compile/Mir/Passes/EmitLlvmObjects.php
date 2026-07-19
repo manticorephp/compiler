@@ -1439,25 +1439,21 @@ trait EmitLlvmObjects
     }
 
     /** Methods dispatchable on a CLASSLESS (cell / unknown) receiver: every
-     *  method across all classes whose return kind AGREES across every declarer,
-     *  as name => agreed return Type. A method whose implementers disagree on the
-     *  return kind is OMITTED — the emit-side classless method dispatch merges the
-     *  per-candidate RAW results without boxing, so a mixed-repr merge would
-     *  mis-read; such a name falls to the null / __call tail instead. (Lifting
-     *  this to include disagreeing methods needs the per-arm-boxing dispatch —
-     *  Ф4.) */
+     *  method across all classes, as name => return Type. Implementers that
+     *  disagree on the return kind collapse to a cell — the emit-side dispatch
+     *  boxes each arm's return by its own type (emitMethodCall's per-arm boxing
+     *  when the result is cell), so the merged value is a uniform cell. */
     private function classlessMethodCandidates(): array
     {
         $out = [];
-        $bad = [];
         foreach ($this->classes as $cd) {
             foreach ($cd->methodNames as $m => $_) {
-                if ($m === '__construct' || $m === '__call' || isset($bad[$m])) { continue; }
+                if ($m === '__construct' || $m === '__call') { continue; }
                 $holder = $this->resolveMethodClass($cd->name, $m);
                 if ($holder === '') { continue; }
                 $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
                 if (!isset($out[$m])) { $out[$m] = $rt; }
-                elseif ($out[$m]->kind !== $rt->kind) { unset($out[$m]); $bad[$m] = true; }
+                elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
             }
         }
         return $out;
@@ -2245,7 +2241,7 @@ trait EmitLlvmObjects
      * @param string[]              $cands
      * @param array<string, string> $targets candidate class → declaring class
      */
-    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method): string
+    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = []): string
     {
         $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
@@ -2266,6 +2262,17 @@ trait EmitLlvmObjects
             $bodies .= $caseLabel . ":\n";
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
                      . '(' . $argList . ")\n";
+            // Cell-typed result over candidates whose declared returns DISAGREE:
+            // box each arm's raw return by its OWN return type so the merged value
+            // is a uniform, self-describing cell (a mixed-repr raw merge would read
+            // e.g. one arm's string pointer as an int). A candidate already
+            // returning a cell passes through.
+            if ($boxCell && !isset($erasedSyms[$targets[$c]])) {
+                $rc = $this->resolveMethodClass($c, $method);
+                $rt = ($rc !== '' ? ($this->sigs->returnType[$rc . '__' . $method] ?? null) : null);
+                $bodies .= $this->boxRawValue($r, $rt);
+                $r = $this->lastValue;
+            }
             $bodies .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endLabel . "\n";
         }
@@ -2275,6 +2282,10 @@ trait EmitLlvmObjects
         $out .= $defLabel . ":\n";
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $argList . ")\n";
+        if ($boxCell) {
+            $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
+            $rd = $this->lastValue;
+        }
         $out .= '  store i64 ' . $rd . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
@@ -2646,6 +2657,10 @@ trait EmitLlvmObjects
         $targets = [];
         $distinct = [];
         $liveCands = [];
+        // Symbols that are ERASED THUNKS (erasedEntry rewrote them): a thunk
+        // already boxes its result to a cell, so the per-arm cell-boxing below
+        // must NOT box it again (double-box → a raw int read as a NaN cell).
+        $erasedSyms = [];
         foreach ($cands as $c) {
             $t = $this->resolveMethodClass($c, $mc->method);
             // A candidate that neither declares nor inherits the method is
@@ -2664,7 +2679,9 @@ trait EmitLlvmObjects
             // here). The site therefore reads the result — and passes its args —
             // in the ORIGIN's erased representation, which the spec's raw entry
             // does not speak. Call its erased thunk instead (see LowerReify).
+            $fullPre = $full;
             $full = $this->erasedEntry($c, $static, $mc->method, $full);
+            if ($full !== $fullPre) { $erasedSyms[$full] = true; }
             // An ABSTRACT method (declared, no emitted body) has no function —
             // an abstract class is never instantiated, so its switch case is
             // dead and would reference an undefined symbol. Drop the candidate.
@@ -2687,12 +2704,22 @@ trait EmitLlvmObjects
             $btName = $mc->method;
             $out .= $this->btPush($btName, $n->line);
         }
+        // A CELL result over candidates whose declared returns disagree: each
+        // dispatch arm boxes its raw return by its own type (a mixed-repr raw
+        // merge would mis-read). The result is then a uniform self-describing cell.
+        $boxCell = $n->type->kind === Type::KIND_CELL;
         if (\count($distinct) <= 1) {
+            $sym = $distinct[0] ?? $fallbackFull;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($distinct[0] ?? $fallbackFull)
+            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
                   . '(' . $argList . ")\n";
+            // An erased thunk already returns a cell; boxing it again double-boxes.
+            if ($boxCell && !isset($erasedSyms[$sym])) {
+                $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
+                $reg = $this->lastValue;
+            }
         } else {
-            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method);
+            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms);
             $reg = $this->vdResult;
         }
         if ($btName !== '') { $out .= $this->btPop(); }

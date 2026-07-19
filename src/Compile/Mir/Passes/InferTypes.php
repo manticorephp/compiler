@@ -1646,14 +1646,16 @@ final class InferTypes implements Pass
             }
             if ($sig === null) { return null; }
             if ($found === null) { $found = $sig; }
-            elseif ($found->kind !== $sig->kind) { return null; }
+            elseif ($found->kind !== $sig->kind) { return Type::cell(); }
         }
         return $found;
     }
 
     /** Return type of `$method` when every class declaring it agrees on the
-     *  kind — usable for a cell receiver whose runtime class is unknown. Null
-     *  when the method is absent or implementers disagree. */
+     *  kind — usable for a cell receiver whose runtime class is unknown. A CELL
+     *  when implementers disagree (the dispatch boxes each arm's return by its own
+     *  type — emitMethodCall's per-arm boxing — so a cell-typed consumer reads a
+     *  self-describing value, not a raw pointer). Null when the method is absent. */
     private function cellMethodReturn(string $method): ?Type
     {
         /** @var Type $found */
@@ -1663,7 +1665,7 @@ final class InferTypes implements Pass
             $sig = $this->sigs[$cd->name . '__' . $method] ?? null;
             if ($sig === null) { continue; }
             if ($found === null) { $found = $sig; }
-            elseif ($found->kind !== $sig->kind) { return null; }
+            elseif ($found->kind !== $sig->kind) { return Type::cell(); }
         }
         return $found;
     }
