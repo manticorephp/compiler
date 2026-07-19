@@ -149,7 +149,10 @@ trait EmitLlvmObjects
                 $need = \count($ptypes) - 1;
                 if ($need < 0) { $need = 0; }
             }
-            if ($need !== $argc) { continue; }
+            // Accept a defaulted constructor (argc <= total): the trailing
+            // optional params are default-filled below. Exact-arity sites are
+            // unchanged (no padding). Matches lowerNewDynExpr's relaxed set.
+            if ($argc > $need) { continue; }
 
             $hitL = $this->ssa->allocLabel('newdyn.hit');
             $nextL = $this->ssa->allocLabel('newdyn.next');
@@ -179,6 +182,10 @@ trait EmitLlvmObjects
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
                 }
+                // Default-fill the trailing optional ctor params (param 0 is
+                // `$this`, provided args cover [1 .. argc]).
+                $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
+                $argList .= $this->lastPadArgs;
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))

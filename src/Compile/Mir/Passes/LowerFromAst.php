@@ -2071,26 +2071,45 @@ final class LowerFromAst implements Pass
         // call on the result resolve: the union dispatches on the runtime class_id
         // and its return type comes from the atoms. An `unknown` receiver resolves
         // nothing, so `$obj->speak()` rendered its string result as a raw pointer.
-        $arms = [];
+        // Two candidate sets: EXACT arity (total === argc — the historical set) and
+        // the RELAXED set that also accepts a defaulted / variadic constructor
+        // (required <= argc, argc <= total or variadic). The exact set keeps its
+        // precise obj / union type (byte-identical to before — no regression). When
+        // relaxation brings in MORE classes (a `new $cls()` that relies on ctor
+        // defaults), the candidate set is broad and its members' prop/method reprs
+        // may disagree, so the result is a plain CELL: reads/stores route through
+        // the already-boxing cell primitives (emitCellPropertyRead /
+        // emitCellStoreProperty) and method calls through the class_id dispatch,
+        // all keyed on the object's runtime class_id. A wide UNION would instead
+        // erase to `unknown` (raw pointer reads) — the broad-union soundness root.
+        $exactArms = [];
+        $relaxed = [];
         foreach ($this->classTable as $name => $cd) {
             // A `#[TypeDef]` is not a candidate for a DYNAMIC `new $cls(…)`: the
             // class has no runtime form to select, and obj<U8> would be a pointer
             // to nothing. A TypeDef is constructed only where its name is written.
             if ($this->isTypeDef($name)) { continue; }
             $params = $this->resolveMethodParams($name, '__construct');
-            // Exact arity only. Widening to accept defaulted-ctor calls
-            // (`required <= argc <= total`) balloons the candidate union — every
-            // arity-compatible class, not just the intended one — which erases
-            // the union's property/method type resolution (a `$o->name` read then
-            // renders its pointer). Defaulted-ctor `new $cls()` waits on broad-
-            // union inference (the unknown-cell soundness root).
-            $need = $params === null ? 0 : \count($params);
-            if ($need !== $argc) { continue; }
-            $arms[] = Type::obj($name);
+            $total = $params === null ? 0 : \count($params);
+            $required = 0;
+            $variadic = false;
+            if ($params !== null) {
+                foreach ($params as $p) {
+                    if ($p->variadic) { $variadic = true; continue; }
+                    if ($p->default === null) { $required = $required + 1; }
+                }
+            }
+            if ($total === $argc) { $exactArms[] = Type::obj($name); }
+            if ($argc >= $required && ($variadic || $argc <= $total)) { $relaxed[] = $name; }
+        }
+        if (\count($relaxed) > \count($exactArms)) {
+            // Broad (defaulted-ctor) case → boxed object, runtime class_id dispatch.
+            $t = \count($relaxed) === 1 ? Type::obj($relaxed[0]) : Type::cell();
+            return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
         }
         $t = Type::unknown();
-        if (\count($arms) === 1) { $t = $arms[0]; }
-        elseif (\count($arms) > 1) { $t = Type::union($arms); }
+        if (\count($exactArms) === 1) { $t = $exactArms[0]; }
+        elseif (\count($exactArms) > 1) { $t = Type::union($exactArms); }
         return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
     }
 
