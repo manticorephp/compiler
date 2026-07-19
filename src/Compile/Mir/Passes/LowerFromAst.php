@@ -1813,9 +1813,11 @@ final class LowerFromAst implements Pass
      * ternary chain over every class that actually declares the member —
      * `$cls === "A" ? A::MEMBER : ($cls === "B" ? … : null)` — reusing the
      * literal static-access lowering (const inline / static-prop global) for
-     * each arm. The receiver is re-lowered per condition; a plain `$cls`
-     * variable is side-effect-free, so it evaluates identically each time.
-     * (Object receivers `$obj::CONST` never match a name and fold to null.)
+     * each arm. The receiver is normalised to a class-NAME string first —
+     * `is_object($cls) ? get_class($cls) : $cls` — so an object receiver
+     * (`$obj::CONST`) resolves through the same name-ternary as a string one.
+     * The name expression is re-lowered per condition; a plain `$cls` variable is
+     * side-effect-free, so it evaluates identically each time.
      */
     private function lowerDynStaticAccess(\Parser\Ast\DynamicStaticAccess $e): Node
     {
@@ -1829,10 +1831,16 @@ final class LowerFromAst implements Pass
                 $names[] = $cname;
             }
         }
+        $nameExpr = \Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_object', [$recv], $span),
+            \Parser\Ast\Expr::call('get_class', [$recv], $span),
+            $recv,
+            $span,
+        );
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $recv, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticAccess($cname, $nm, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
@@ -1840,10 +1848,14 @@ final class LowerFromAst implements Pass
     }
 
     /**
-     * `$cls::method(args)` with a runtime class-name string. Same ternary-chain
-     * idiom over every class declaring/inheriting the method, reusing the
-     * literal static-call lowering per arm. Args are re-lowered per arm but only
-     * the matching arm runs, so they evaluate once at runtime.
+     * `$cls::method(args)` with a runtime receiver. Normalise the receiver to a
+     * class-NAME string first — `is_object($cls) ? get_class($cls) : $cls` — so an
+     * OBJECT receiver (`$obj::method()`, calling a static method on the object's
+     * own class) resolves through the SAME name-ternary as a string receiver. Every
+     * arm stays a literal static call, so the result keeps a consistent repr (a
+     * cell-typed `$obj->method()` arm would push the ternary join to a cell and
+     * leave the string arms unboxed → the erased-return miscompile). Args and the
+     * name expression are re-lowered per arm but only the matching arm runs.
      */
     private function lowerDynStaticCall(\Parser\Ast\DynamicStaticCall $e): Node
     {
@@ -1856,10 +1868,16 @@ final class LowerFromAst implements Pass
             if ($this->isTypeDef($cname)) { continue; }
             if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
         }
+        $nameExpr = \Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_object', [$recv], $span),
+            \Parser\Ast\Expr::call('get_class', [$recv], $span),
+            $recv,
+            $span,
+        );
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $recv, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticCall($cname, $method, $args, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
