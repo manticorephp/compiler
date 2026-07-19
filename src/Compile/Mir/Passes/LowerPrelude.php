@@ -344,6 +344,22 @@ trait LowerPrelude
             'GLOB_ONLYDIR' => 0x40000000, 'GLOB_AVAILABLE_FLAGS' => 0x400010bc,
             'PATHINFO_DIRNAME' => 1, 'PATHINFO_BASENAME' => 2,
             'PATHINFO_EXTENSION' => 4, 'PATHINFO_FILENAME' => 8, 'PATHINFO_ALL' => 15,
+            // ext/sockets — host-INVARIANT constants (MEASURED identical on Darwin
+            // and Linux, tools/docker/probe.c). The host-DIVERGENT ones
+            // (AF_INET6, SOL_SOCKET, SO_*, the split MSG_*, SOCKET_E*) resolve
+            // against the build host in the fold below, like PHP_OS/FNM_*.
+            'AF_UNSPEC' => 0, 'AF_INET' => 2, 'AF_UNIX' => 1, 'PF_INET' => 2,
+            'PF_UNIX' => 1, 'PF_UNSPEC' => 0,
+            'SOCK_STREAM' => 1, 'SOCK_DGRAM' => 2, 'SOCK_RAW' => 3,
+            'SOCK_SEQPACKET' => 5, 'SOCK_RDM' => 4,
+            'IPPROTO_IP' => 0, 'IPPROTO_ICMP' => 1, 'IPPROTO_TCP' => 6,
+            'IPPROTO_UDP' => 17, 'IPPROTO_IPV6' => 41, 'IPPROTO_RAW' => 255,
+            'SOL_TCP' => 6, 'SOL_UDP' => 17,
+            'TCP_NODELAY' => 1, 'SOMAXCONN' => 128,
+            'SHUT_RD' => 0, 'SHUT_WR' => 1, 'SHUT_RDWR' => 2,
+            'MSG_OOB' => 1, 'MSG_PEEK' => 2, 'MSG_DONTROUTE' => 4, 'MSG_EOR' => 8,
+            'PHP_NORMAL_READ' => 1, 'PHP_BINARY_READ' => 2,
+            'AI_PASSIVE' => 1, 'AI_CANONNAME' => 2, 'AI_NUMERICHOST' => 4,
         ];
         if (isset($ints[$name])) { return new IntConst($ints[$name], Type::int_()); }
 
@@ -402,6 +418,69 @@ trait LowerPrelude
                 'FNM_NOMATCH' => 1,
             ];
             if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
+        }
+
+        // ext/sockets — host-DIVERGENT constants. php exposes the host's own
+        // <sys/socket.h> / errno values, and Darwin and Linux disagree on nearly
+        // every one. Resolved against the build host like PHP_OS / FNM_* above,
+        // and kept OUT of the plain table for the same reason: host_os() must not
+        // be reachable from a path the stdlib itself walks (under the Zend seed the
+        // libc bindings are empty stubs, so a compile-time host probe would kill the
+        // cold bootstrap). So NO stdlib source may name these — Stdlib/Sockets.php
+        // uses the numeric __mc_sock_const() runtime selector instead.
+        // Values MEASURED: Darwin arm64 <sys/socket.h>/<sys/errno.h> vs Linux
+        // asm-generic (glibc/musl, x86_64 + arm64 agree).
+        if ($name === 'AF_INET6' || $name === 'PF_INET6' || $name === 'SOL_SOCKET'
+            || \substr($name, 0, 3) === 'SO_' || \substr($name, 0, 4) === 'MSG_'
+            || \substr($name, 0, 8) === 'SOCKET_E') {
+            $isDarwin = \substr(\Manticore\host_os(), 0, 6) === 'Darwin';
+            $sock = [
+                'AF_INET6' => $isDarwin ? 30 : 10,
+                'PF_INET6' => $isDarwin ? 30 : 10,
+                'SOL_SOCKET' => $isDarwin ? 65535 : 1,
+                'SO_DEBUG' => 1,
+                'SO_REUSEADDR' => $isDarwin ? 4 : 2,
+                'SO_REUSEPORT' => $isDarwin ? 512 : 15,
+                'SO_TYPE' => $isDarwin ? 4104 : 3,
+                'SO_ERROR' => $isDarwin ? 4103 : 4,
+                'SO_DONTROUTE' => $isDarwin ? 16 : 5,
+                'SO_BROADCAST' => $isDarwin ? 32 : 6,
+                'SO_SNDBUF' => $isDarwin ? 4097 : 7,
+                'SO_RCVBUF' => $isDarwin ? 4098 : 8,
+                'SO_KEEPALIVE' => $isDarwin ? 8 : 9,
+                'SO_OOBINLINE' => $isDarwin ? 256 : 10,
+                'SO_LINGER' => $isDarwin ? 128 : 13,
+                'SO_RCVLOWAT' => $isDarwin ? 4100 : 18,
+                'SO_SNDLOWAT' => $isDarwin ? 4099 : 19,
+                'SO_RCVTIMEO' => $isDarwin ? 4102 : 20,
+                'SO_SNDTIMEO' => $isDarwin ? 4101 : 21,
+                'SO_ACCEPTCONN' => $isDarwin ? 2 : 30,
+                // MSG_* that diverge (the invariant MSG_OOB/PEEK/DONTROUTE/EOR are
+                // in the plain table above).
+                'MSG_TRUNC' => $isDarwin ? 16 : 32,
+                'MSG_CTRUNC' => $isDarwin ? 32 : 8,
+                'MSG_WAITALL' => $isDarwin ? 64 : 256,
+                'MSG_DONTWAIT' => $isDarwin ? 128 : 64,
+                // errno names ext/sockets exposes with a SOCKET_ prefix.
+                'SOCKET_EAGAIN' => $isDarwin ? 35 : 11,
+                'SOCKET_EWOULDBLOCK' => $isDarwin ? 35 : 11,
+                'SOCKET_EINPROGRESS' => $isDarwin ? 36 : 115,
+                'SOCKET_EINTR' => 4,
+                'SOCKET_EPIPE' => 32,
+                'SOCKET_ECONNREFUSED' => $isDarwin ? 61 : 111,
+                'SOCKET_ECONNRESET' => $isDarwin ? 54 : 104,
+                'SOCKET_ECONNABORTED' => $isDarwin ? 53 : 103,
+                'SOCKET_EADDRINUSE' => $isDarwin ? 48 : 98,
+                'SOCKET_EADDRNOTAVAIL' => $isDarwin ? 49 : 99,
+                'SOCKET_ETIMEDOUT' => $isDarwin ? 60 : 110,
+                'SOCKET_EHOSTUNREACH' => $isDarwin ? 65 : 113,
+                'SOCKET_ENOTCONN' => $isDarwin ? 57 : 107,
+                'SOCKET_EBADF' => 9,
+                'SOCKET_EINVAL' => $isDarwin ? 22 : 22,
+                'SOCKET_EMFILE' => $isDarwin ? 24 : 24,
+                'SOCKET_EACCES' => $isDarwin ? 13 : 13,
+            ];
+            if (isset($sock[$name])) { return new IntConst($sock[$name], Type::int_()); }
         }
 
         return null;

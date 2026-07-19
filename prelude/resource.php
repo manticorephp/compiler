@@ -81,6 +81,22 @@ function __mir_obj_type_name(mixed $v, bool $debug): string
         }
         return 'resource';
     }
+    // get_debug_type() of an object is its class name. A statically-typed object
+    // gets the name folded in biGettype, but a Socket/AddressInfo arriving as a
+    // CELL (the `socket_create(): \Socket|false` union) has no static class here,
+    // and get_class() on a mixed value reads the STATIC type (empty) — so the
+    // runtime class must be recovered by an instanceof probe, the same way
+    // \Resource is above. (A fully general cell→class-name needs a runtime
+    // class-id→name table the runtime does not carry; that is a pre-existing gap
+    // for any object in a union, not specific to sockets.)
+    if ($debug) {
+        if ($v instanceof \Socket) {
+            return 'Socket';
+        }
+        if ($v instanceof \AddressInfo) {
+            return 'AddressInfo';
+        }
+    }
     return 'object';
 }
 
@@ -239,5 +255,109 @@ final class Resource
         if (!$this->closed && !$this->persistent && $this->addr !== 0) {
             $this->close();
         }
+    }
+}
+
+/**
+ * The handle ext/sockets hands back — php 8's opaque `Socket` OBJECT, not a
+ * `resource`. It is a distinct class from {@see Resource} on purpose: php migrated
+ * ext/sockets off resources onto this class, so `is_resource($s)` is false,
+ * `gettype($s)` is "object" and `get_debug_type($s)` is "Socket". Modelling it as a
+ * \Resource would report all three the resource way and break difftest parity.
+ *
+ * It lives in the PRELUDE for the same reason \Resource does: the stdlib `.sig`
+ * carries functions only, so a class defined in src/Runtime is invisible to user
+ * code (`instanceof` false, fields read back as raw bits). Compiled into every
+ * module.
+ *
+ * `$fd` is a raw int fd (never a pointer), PUBLIC so the stdlib's `__mc_sock_fd()`
+ * funnel can read it off a plainly-typed \Socket param — a global function cannot
+ * touch a private, and reading a field off a `\Socket|false` cell would deref the
+ * NaN box (the recurring cell-erasure trap), so every field access goes through a
+ * \Socket-typed parameter. Unlike \Resource there is no stream read-buffer: the
+ * socket_* API reads/writes the fd DIRECTLY (recv/send), so none of the buffered
+ * f*-family machinery applies.
+ *
+ * KNOWN divergence (documented debt): php's Socket exposes ZERO php-visible
+ * properties, so `var_dump($s)` prints `object(Socket)#N (0) {}`. Ours shows `$fd`
+ * (a global function needs it public). Unavoidable — php's is a true internal
+ * opaque class. Every other introspection is byte-identical.
+ */
+final class Socket
+{
+    public int $fd;
+    public bool $closed = false;
+    /**
+     * The address family / type / protocol the socket was created with. php's
+     * internal Socket tracks these; socket_bind/connect/sendto need the family to
+     * pick sockaddr_in vs in6 vs un, and socket_accept inherits them.
+     */
+    public int $family = 0;
+    public int $type = 0;
+    public int $proto = 0;
+    /**
+     * The last errno seen on THIS socket — socket_last_error($sock) reports it,
+     * socket_clear_error($sock) zeroes it (php tracks a per-socket error as well
+     * as a global one).
+     */
+    public int $lastErr = 0;
+
+    public function __construct(int $fd, int $family = 0, int $type = 0, int $proto = 0)
+    {
+        $this->fd = $fd;
+        $this->family = $family;
+        $this->type = $type;
+        $this->proto = $proto;
+    }
+
+    /**
+     * Idempotent close, as php's socket_close / Socket destructor. A socket fd is
+     * closed with close(2) — never fclose(), which would treat the small int as a
+     * FILE*.
+     */
+    public function close(): bool
+    {
+        if ($this->closed || $this->fd < 0) {
+            return false;
+        }
+        $ok = \__mc_libc_close($this->fd) === 0;
+        $this->closed = true;
+        $this->fd = -1;
+        return $ok;
+    }
+
+    /** RAII: php 8 closes a Socket when it is destroyed. */
+    public function __destruct()
+    {
+        if (!$this->closed && $this->fd >= 0) {
+            $this->close();
+        }
+    }
+}
+
+/**
+ * The handle `socket_addrinfo_lookup()` returns and the *_connect/_bind/_explain
+ * calls consume — php 8's opaque `AddressInfo` object. It holds one resolved
+ * `struct addrinfo` entry flattened into fields plus the raw sockaddr bytes, so
+ * *_connect/_bind can build a socket and connect/bind without re-resolving, and
+ * *_explain can hand back the php-shaped array. Prelude-resident for the same
+ * reason as \Socket.
+ */
+final class AddressInfo
+{
+    public int $family;
+    public int $socktype;
+    public int $protocol;
+    /** Raw sockaddr bytes (binary-safe string) + its length. */
+    public string $addr;
+    public int $addrlen;
+
+    public function __construct(int $family, int $socktype, int $protocol, string $addr, int $addrlen)
+    {
+        $this->family = $family;
+        $this->socktype = $socktype;
+        $this->protocol = $protocol;
+        $this->addr = $addr;
+        $this->addrlen = $addrlen;
     }
 }

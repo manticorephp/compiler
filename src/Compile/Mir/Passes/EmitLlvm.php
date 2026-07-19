@@ -948,6 +948,18 @@ final class EmitLlvm implements EmitVisitor
             $mo = $n;
             if ($mo->op === 'rc_release' && $mo->target !== null
                 && $mo->target->kind === Node::KIND_LOAD_LOCAL) {
+                // A BY-REF param's slot holds the caller's ADDRESS, not the
+                // value — the caller owns the lifetime, the callee co-owns
+                // nothing. Registering it as an owned rc local emits a
+                // scope-exit release that runs `rc_release(load slot)` =
+                // release of the ADDRESS, which decrements the word at
+                // (addr-8) — the caller's ADJACENT stack slot. Concretely
+                // `f(string &$a, int &$p){ $p=N; $a=g(); }` came back with
+                // $p == N-1: the string store to `$a` released `&$a`, and
+                // `&$a - 8` was `&$p`. initRcObjSlots already skips the
+                // paired retain-on-entry for the same reason; excluding the
+                // param here kills the release too, keeping them balanced.
+                if (isset($this->locals->refLocals[$mo->target->name])) { return; }
                 // Store the MemoryOp node, not its flavor string — the
                 // self-host backend corrupts a short string round-tripped
                 // through an assoc value (a `'str'` read back mis-compares),

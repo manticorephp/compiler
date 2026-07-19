@@ -8,6 +8,7 @@ use Ffi\Library;
 use Ffi\Ptr;
 use Ffi\Symbol;
 use Ffi\Take;
+use Ffi\Variadic;
 
 // ── Memory ─────────────────────────────────────────────────────────────
 
@@ -472,3 +473,35 @@ function sys_closelog(): void {}
 // reverse: packed bytes to a printable string in $dst (NULL on failure).
 #[Library('c'), Symbol('inet_ntop')]
 function sys_inet_ntop(#[CType('int')] int $af, Ptr $src, Ptr $dst, #[CType('int')] int $size): Ptr {}
+
+// ── ext/sockets extras ─────────────────────────────────────────────────
+// The socket_* surface (Stdlib/Sockets.php) rides the syscalls already bound
+// above; these two are the only additions it needs.
+
+// `int fcntl(int fd, int cmd, ... /* int arg */)` — read/set the fd flags for
+// socket_set_block / socket_set_nonblock (F_GETFL then F_SETFL with O_NONBLOCK
+// toggled). fcntl is VARIADIC (the third arg is the vararg): #[Variadic(2)]
+// marks fd+cmd as the two NAMED params so the wrapper emits a variadic call —
+// without it the arg is passed in a register and Darwin arm64's variadic ABI
+// (varargs on the stack) reads garbage where the callee does va_arg.
+#[Library('c'), Symbol('fcntl'), Variadic(2)]
+function sys_fcntl(#[CType('int')] int $fd, #[CType('int')] int $cmd, #[CType('int')] int $arg): int {}
+
+// `int socketpair(int domain, int type, int protocol, int sv[2])` — a connected
+// pair of fds for socket_create_pair. $sv is an 8-byte out buffer receiving two
+// int fds (peek_i32 @0 and @4).
+#[Library('c'), Symbol('socketpair')]
+function sys_socketpair(#[CType('int')] int $domain, #[CType('int')] int $type,
+                        #[CType('int')] int $protocol, Ptr $sv): int {}
+
+// `int sockatmark(int fd)` — 1 if the read pointer is at the OOB mark, 0 if not,
+// -1 on error. Backs socket_atmark.
+#[Library('c'), Symbol('sockatmark')]
+function sys_sockatmark(#[CType('int')] int $fd): int {}
+
+// `int dup(int fd)` — a NEW fd referring to the same open file/socket, or -1.
+// Used to duplicate a fd for socket_import_stream / socket_export_stream. dup(2)
+// is non-variadic, unlike fcntl(F_DUPFD) whose vararg arg breaks the Darwin arm64
+// variadic ABI when called through the fixed-arity FFI wrapper.
+#[Library('c'), Symbol('dup')]
+function sys_dup(#[CType('int')] int $fd): int {}

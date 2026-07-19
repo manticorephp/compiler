@@ -142,20 +142,49 @@ trait EmitLlvmCalls
             }
             $idx = $idx + 1;
         }
+        // A VARIADIC C function: declare and CALL with an explicit variadic
+        // function type — `ret (t0, …, ...)` — so the target ABI places the
+        // variadic args correctly (Darwin arm64 puts them on the stack, not in
+        // registers; a plain fixed-arity call hands the callee register garbage
+        // where it does va_arg). The value is the count of NAMED params (before
+        // the `...`). Keyed by C symbol rather than carried on FunctionDef: a new
+        // FunctionDef field mistyped every FFI wrapper's return-type read under
+        // the self-built compiler, so the small, controlled set of variadic libc
+        // symbols we bind is listed here instead.
+        // The type token between `call` and the callee, and the declare's param
+        // list. For a NON-variadic symbol these are just `$ret` and the plain
+        // param types (unchanged from the original path). For a variadic C
+        // function they become the FULL function type `ret (t0, …, ...)` and a
+        // `..."-terminated param list, so LLVM binds the extra args as varargs and
+        // applies the target's variadic ABI (Darwin arm64 puts varargs on the
+        // stack; a plain fixed-arity call hands the callee register garbage where
+        // it does va_arg). Both branches assign PLAIN STRINGS — a `?string`
+        // (null-initialised then maybe-set) local read as garbage under the
+        // self-built compiler (the string was read as a raw pointer in `call
+        // <ptr> @fclose`). $variadicFixed = named-param count, or -1.
+        $variadicFixed = $this->ffiVariadicFixed($cSym);
+        $callTypeTok = $ret;
+        $declParams = \implode(', ', $fn->ffiParamCTypes);
+        if ($variadicFixed >= 0) {
+            $named = \array_slice($fn->ffiParamCTypes, 0, $variadicFixed);
+            $sig = \implode(', ', $named) . ($named === [] ? '' : ', ') . '...';
+            $callTypeTok = $ret . ' (' . $sig . ')';
+            $declParams = $sig;
+        }
         // cli_argc/argv are DEFINED in the preamble (they read the argc/argv
         // captured by main), so don't also declare them — a declare + define
         // of one symbol is an LLVM redefinition error.
         if ($cSym !== 'manticore_cli_argc' && $cSym !== 'manticore_cli_argv') {
             $this->libcExtra[$cSym] = 'declare ' . $ret . ' @' . $cSym
-                . '(' . \implode(', ', $fn->ffiParamCTypes) . ')';
+                . '(' . $declParams . ')';
         }
         $callArgs = \implode(', ', $cargs);
         if ($ret === 'void') {
-            $out .= '  call void @' . $cSym . '(' . $callArgs . ")\n";
+            $out .= '  call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
             $out .= "  ret i64 0\n";
         } else {
             $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = call ' . $ret . ' @' . $cSym . '(' . $callArgs . ")\n";
+            $out .= '  ' . $r . ' = call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
             if ($ret === 'ptr') {
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
@@ -174,6 +203,20 @@ trait EmitLlvmCalls
         }
         $out .= "}\n\n";
         return $out;
+    }
+
+    /**
+     * The NAMED-param count for a variadic libc symbol (the count before the C
+     * `...`), or -1 when the symbol is not variadic. Drives the variadic call
+     * type in {@see emitFfiWrapper}. Keyed by C symbol because a FunctionDef
+     * field for this mistyped every wrapper's return-type read under the
+     * self-built compiler. The set of variadic C functions the FFI layer binds
+     * is small and controlled (all in Runtime\Libc), so it lives here.
+     */
+    private function ffiVariadicFixed(string $cSym): int
+    {
+        if ($cSym === 'fcntl') { return 2; }   // int fcntl(int fd, int cmd, ...)
+        return -1;
     }
 
     /**
