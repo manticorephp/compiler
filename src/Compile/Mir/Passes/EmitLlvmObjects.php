@@ -1295,21 +1295,14 @@ trait EmitLlvmObjects
             $props = $this->unionPropTypes($n->object->type);
             if ($props !== []) { return $this->emitDynPropDispatch($n, $props, null); }
         }
-        $out = $this->emitNode($n->object);
-        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
-        else { $out .= $this->coerceToPtr(); }
-        $objPtr = $this->lastValue;
-        $out .= $this->emitBagPtr($n->object, $objPtr, $this->bagOffsetOf($n->object));
-        $bagP = $this->bagPtrReg;
-        $out .= $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
-        $keyP = $this->lastValue;
-        $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
-              . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
-        $this->lastValue = $reg;
-        $this->lastValueType = 'i64';
-        return $out;
+        // Classless / erased receiver: match the runtime name against EVERY class's
+        // declared properties; each arm's PropertyAccess_ dispatches on the object's
+        // class_id (emitCellPropertyRead / emitRawPropByClassId, both boxing to a
+        // cell), with a stdClass bag fallback for an undeclared name. Replaces the
+        // old blind by-name bag read, which rendered a fixed-slot property's raw
+        // pointer as an int.
+        $bagCd = $this->classes['stdClass'] ?? null;
+        return $this->emitDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
     }
 
     /** Declared properties (offset >= 0) of a class as name => Type. */
@@ -1367,7 +1360,14 @@ trait EmitLlvmObjects
             $out .= $hitL . ":\n";
             $pa = new PropertyAccess_($n->object, $p, $pt);
             $out .= $this->emitPropertyAccess($pa);
-            $out .= $this->boxToCell($pt);
+            // A CELL / UNKNOWN receiver's read (emitCellPropertyRead /
+            // emitRawPropByClassId) ALREADY yields a boxed cell; a typed or union
+            // receiver's read yields the raw slot value that must be boxed here.
+            // Boxing an already-boxed cell double-boxes (an int cell re-read raw).
+            $rk = $n->object->type->kind;
+            if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN) {
+                $out .= $this->boxToCell($pt);
+            }
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
@@ -1412,7 +1412,7 @@ trait EmitLlvmObjects
                 if ($cn !== '' && isset($this->classes[$cn])) { $roots[] = $cn; }
             }
         }
-        if ($roots === []) { return null; }
+        if ($roots === []) { return $this->classlessMethodCandidates(); }
         $out = [];
         foreach ($roots as $root) {
             $c = $root;
@@ -1426,6 +1426,31 @@ trait EmitLlvmObjects
                     elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
                 }
                 $c = $this->classes[$c]->parent;
+            }
+        }
+        return $out;
+    }
+
+    /** Methods dispatchable on a CLASSLESS (cell / unknown) receiver: every
+     *  method across all classes whose return kind AGREES across every declarer,
+     *  as name => agreed return Type. A method whose implementers disagree on the
+     *  return kind is OMITTED — the emit-side classless method dispatch merges the
+     *  per-candidate RAW results without boxing, so a mixed-repr merge would
+     *  mis-read; such a name falls to the null / __call tail instead. (Lifting
+     *  this to include disagreeing methods needs the per-arm-boxing dispatch —
+     *  Ф4.) */
+    private function classlessMethodCandidates(): array
+    {
+        $out = [];
+        $bad = [];
+        foreach ($this->classes as $cd) {
+            foreach ($cd->methodNames as $m => $_) {
+                if ($m === '__construct' || $m === '__call' || isset($bad[$m])) { continue; }
+                $holder = $this->resolveMethodClass($cd->name, $m);
+                if ($holder === '') { continue; }
+                $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
+                if (!isset($out[$m])) { $out[$m] = $rt; }
+                elseif ($out[$m]->kind !== $rt->kind) { unset($out[$m]); $bad[$m] = true; }
             }
         }
         return $out;
