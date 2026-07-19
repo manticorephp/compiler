@@ -149,7 +149,10 @@ trait EmitLlvmObjects
                 $need = \count($ptypes) - 1;
                 if ($need < 0) { $need = 0; }
             }
-            if ($need !== $argc) { continue; }
+            // Accept a defaulted constructor (argc <= total): the trailing
+            // optional params are default-filled below. Exact-arity sites are
+            // unchanged (no padding). Matches lowerNewDynExpr's relaxed set.
+            if ($argc > $need) { continue; }
 
             $hitL = $this->ssa->allocLabel('newdyn.hit');
             $nextL = $this->ssa->allocLabel('newdyn.next');
@@ -179,6 +182,10 @@ trait EmitLlvmObjects
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
                 }
+                // Default-fill the trailing optional ctor params (param 0 is
+                // `$this`, provided args cover [1 .. argc]).
+                $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
+                $argList .= $this->lastPadArgs;
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
@@ -700,6 +707,140 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `$cell->prop = v` on a receiver whose static class is erased (a `mixed`
+     * value, a `new $cls()` result, a classless dynamic-name store). Store mirror
+     * of {@see emitCellPropertyRead}: recover the runtime class from the object's
+     * class_id and write `$prop`'s REAL per-holder slot in that slot's declared
+     * repr. Replaces the old blind offset-16 store — writing a scalar slot as a
+     * bag pointer, a wild write / SIGSEGV. A class_id matching no fixed holder
+     * falls back to the dynamic bag (stdClass) or a no-op — never slot 16.
+     */
+    private function emitCellStoreProperty(\Compile\Mir\StoreProperty $n): string
+    {
+        $prop = $n->property;
+        $fixed = [];
+        $hasBag = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+            if ($cd->usesBag()) { $hasBag = true; }
+        }
+        $out = $this->emitNode($n->object);
+        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
+        else { $out .= $this->coerceToPtr(); }
+        $objPtr = $this->lastValue;
+        // Evaluate the RHS once; keep both a boxed-cell form (for cell slots) and
+        // the payload retained once (the object takes an owning reference — only
+        // one arm runs at runtime, so a single retain is correct).
+        $out .= $this->emitNode($n->value);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->rcRetainByType($n->value, $raw, $n->value->type, 4);
+        $this->lastValue = $raw;
+        $this->lastValueType = 'i64';
+        $out .= $this->boxToCell($n->value->type);
+        $cellVal = $this->lastValue;
+        // No known holder → bag store (stdClass) or drop; never offset-16.
+        if (\count($fixed) === 0) {
+            if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
+            $this->lastValue = $cellVal;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Single holder and no bag anywhere → the cell can only be that class.
+        if (\count($fixed) === 1 && !$hasBag) {
+            $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
+            $this->lastValue = $cellVal;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Runtime dispatch on the object's class_id — each holder stores its slot.
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('cs.end');
+        $def = $this->ssa->allocLabel('cs.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        $seen = [];
+        foreach ($fixed as $cd) {
+            if (isset($seen[$cd->name])) { continue; }
+            $seen[$cd->name] = true;
+            $lbl = $this->ssa->allocLabel('cs.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $out .= $def . ":\n";
+        if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Store the already-boxed `$cellVal` into `$cd`'s fixed `$prop` slot, in the
+     *  slot's declared repr: a cell-boxed slot keeps the cell; a raw slot unboxes
+     *  it (int/bool/string/obj/array/enum), a float slot to its bit pattern. */
+    private function emitCellSlotStore(string $objPtr, ClassDef $cd, string $prop, string $cellVal): string
+    {
+        $pt = $cd->propertyTypes[$prop] ?? Type::cell();
+        $off = $cd->propertyOffset($prop);
+        $gep = $this->ssa->allocReg();
+        $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+             . ', i64 ' . (string)$off . "\n";
+        if ($this->cellPropBoxed($pt, $prop)) {
+            return $out . $this->emitSlotStore($gep, $cd, $prop, $cellVal);
+        }
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        $out .= $this->unboxCellToType($pt);
+        $val = $this->lastValue;
+        if ($this->lastValueType === 'double') {
+            $bits = $this->ssa->allocReg();
+            $out .= '  ' . $bits . ' = bitcast double ' . $val . " to i64\n";
+            $val = $bits;
+        }
+        return $out . $this->emitSlotStore($gep, $cd, $prop, $val);
+    }
+
+    /** Default-arm dynamic-bag store (`__mir_array_set_str` by the static prop
+     *  name) for a classless receiver whose runtime class is a bag object. */
+    private function emitCellBagStore(\Compile\Mir\StoreProperty $n, string $objPtr, string $cellVal): string
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $bagOff = $std === null ? 16 : $std->bagOffset();
+        $out = $this->emitBagPtr($n->object, $objPtr, $bagOff);
+        $bagP = $this->bagPtrReg;
+        $bg = $this->bagSlotReg;
+        $kid = $this->pool->intern($n->property);
+        $nb = $this->ssa->allocReg();
+        $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
+              . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+        $nbI = $this->ssa->allocReg();
+        $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
+        $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+        return $out;
+    }
+
+    /** All declared (fixed-slot) properties across every class, name => Type,
+     *  collapsing a kind-disagreement across holders to a cell. The candidate
+     *  map for a classless dynamic-name store/read. */
+    private function allDeclaredPropTypes(): array
+    {
+        $out = [];
+        foreach ($this->classes as $cd) {
+            foreach ($this->declaredPropTypes($cd) as $p => $pt) {
+                if (!isset($out[$p])) { $out[$p] = $pt; }
+                elseif ($out[$p]->kind !== $pt->kind) { $out[$p] = Type::cell(); }
+            }
+        }
+        return $out;
+    }
+
     /** True while emitting `$prop`'s own get/set hook — its `$this->$prop`
      *  accesses read/write the backing slot directly (no hook re-entry). */
     private function insideOwnHook(array $hk): bool
@@ -830,6 +971,20 @@ trait EmitLlvmObjects
         // class_id to each atom's slot offset (mirrors emitUnionPropertyAccess).
         if ($n->object->type->kind === Type::KIND_UNION) {
             return $this->emitUnionStoreProperty($n);
+        }
+        // A classless receiver (an erased `mixed` / `object` value with no static
+        // class) has no static slot offset: recover the runtime class from the
+        // object header and store its REAL slot. The old fall-through blind-wrote
+        // slot 16 as a bag pointer → a wild write / SIGSEGV. Gate on "not a KNOWN
+        // class" via isset (NOT `class === ''`): a null class field reads back as
+        // garbage under the native self-build, so `=== ''` is false there while
+        // `isset($this->classes[garbage])` is reliably false.
+        $scls = $n->object->type->class ?? '';
+        if (!($scls !== '' && isset($this->classes[$scls]))
+            && ($n->object->type->kind === Type::KIND_CELL
+                || $n->object->type->kind === Type::KIND_UNKNOWN
+                || $n->object->type->kind === Type::KIND_OBJ)) {
+            return $this->emitCellStoreProperty($n);
         }
         // A write to a `readonly` property from OUTSIDE its declaring class scope
         // is a fatal Error (PHP throws a catchable `Error`). Types are resolved
@@ -1147,21 +1302,14 @@ trait EmitLlvmObjects
             $props = $this->unionPropTypes($n->object->type);
             if ($props !== []) { return $this->emitDynPropDispatch($n, $props, null); }
         }
-        $out = $this->emitNode($n->object);
-        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
-        else { $out .= $this->coerceToPtr(); }
-        $objPtr = $this->lastValue;
-        $out .= $this->emitBagPtr($n->object, $objPtr, $this->bagOffsetOf($n->object));
-        $bagP = $this->bagPtrReg;
-        $out .= $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
-        $keyP = $this->lastValue;
-        $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
-              . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
-        $this->lastValue = $reg;
-        $this->lastValueType = 'i64';
-        return $out;
+        // Classless / erased receiver: match the runtime name against EVERY class's
+        // declared properties; each arm's PropertyAccess_ dispatches on the object's
+        // class_id (emitCellPropertyRead / emitRawPropByClassId, both boxing to a
+        // cell), with a stdClass bag fallback for an undeclared name. Replaces the
+        // old blind by-name bag read, which rendered a fixed-slot property's raw
+        // pointer as an int.
+        $bagCd = $this->classes['stdClass'] ?? null;
+        return $this->emitDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
     }
 
     /** Declared properties (offset >= 0) of a class as name => Type. */
@@ -1219,7 +1367,14 @@ trait EmitLlvmObjects
             $out .= $hitL . ":\n";
             $pa = new PropertyAccess_($n->object, $p, $pt);
             $out .= $this->emitPropertyAccess($pa);
-            $out .= $this->boxToCell($pt);
+            // A CELL / UNKNOWN receiver's read (emitCellPropertyRead /
+            // emitRawPropByClassId) ALREADY yields a boxed cell; a typed or union
+            // receiver's read yields the raw slot value that must be boxed here.
+            // Boxing an already-boxed cell double-boxes (an int cell re-read raw).
+            $rk = $n->object->type->kind;
+            if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN) {
+                $out .= $this->boxToCell($pt);
+            }
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
@@ -1264,7 +1419,7 @@ trait EmitLlvmObjects
                 if ($cn !== '' && isset($this->classes[$cn])) { $roots[] = $cn; }
             }
         }
-        if ($roots === []) { return null; }
+        if ($roots === []) { return $this->classlessMethodCandidates(); }
         $out = [];
         foreach ($roots as $root) {
             $c = $root;
@@ -1278,6 +1433,27 @@ trait EmitLlvmObjects
                     elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
                 }
                 $c = $this->classes[$c]->parent;
+            }
+        }
+        return $out;
+    }
+
+    /** Methods dispatchable on a CLASSLESS (cell / unknown) receiver: every
+     *  method across all classes, as name => return Type. Implementers that
+     *  disagree on the return kind collapse to a cell — the emit-side dispatch
+     *  boxes each arm's return by its own type (emitMethodCall's per-arm boxing
+     *  when the result is cell), so the merged value is a uniform cell. */
+    private function classlessMethodCandidates(): array
+    {
+        $out = [];
+        foreach ($this->classes as $cd) {
+            foreach ($cd->methodNames as $m => $_) {
+                if ($m === '__construct' || $m === '__call') { continue; }
+                $holder = $this->resolveMethodClass($cd->name, $m);
+                if ($holder === '') { continue; }
+                $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
+                if (!isset($out[$m])) { $out[$m] = $rt; }
+                elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
             }
         }
         return $out;
@@ -1362,28 +1538,13 @@ trait EmitLlvmObjects
             $props = $this->unionPropTypes($n->object->type);
             if ($props !== []) { return $this->emitStoreDynPropDispatch($n, $props, null); }
         }
-        $out = $this->emitNode($n->object);
-        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
-        else { $out .= $this->coerceToPtr(); }
-        $objPtr = $this->lastValue;
-        $out .= $this->emitBagPtr($n->object, $objPtr, $this->bagOffsetOf($n->object));
-        $bagP = $this->bagPtrReg;
-        $bg = $this->bagSlotReg;
-        $out .= $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
-        $keyP = $this->lastValue;
-        $out .= $this->emitNode($n->value);
-        $out .= $this->boxToCell($n->value->type);
-        $val = $this->lastValue;
-        $nb = $this->ssa->allocReg();
-                $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
-              . ', ptr ' . $keyP . ', i64 ' . $val . ", i64 0, i64 0)\n";
-        $nbI = $this->ssa->allocReg();
-        $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
-        $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
-        $this->lastValue = $val;
-        $this->lastValueType = 'i64';
-        return $out;
+        // Classless / erased receiver: match the runtime name against EVERY class's
+        // declared properties; each arm's StoreProperty dispatches on the object's
+        // class_id (emitCellStoreProperty) to the real slot, with a stdClass bag
+        // fallback for an undeclared name. WITHOUT this the removed bag path below
+        // wrote slot 16 as a bag pointer on a fixed-slot object → a wild write.
+        $bagCd = $this->classes['stdClass'] ?? null;
+        return $this->emitStoreDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
     }
 
     /** `$o->$name = v` on a receiver with a known member set (a class or a union):
@@ -2080,7 +2241,7 @@ trait EmitLlvmObjects
      * @param string[]              $cands
      * @param array<string, string> $targets candidate class → declaring class
      */
-    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method): string
+    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = []): string
     {
         $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
@@ -2101,6 +2262,17 @@ trait EmitLlvmObjects
             $bodies .= $caseLabel . ":\n";
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
                      . '(' . $argList . ")\n";
+            // Cell-typed result over candidates whose declared returns DISAGREE:
+            // box each arm's raw return by its OWN return type so the merged value
+            // is a uniform, self-describing cell (a mixed-repr raw merge would read
+            // e.g. one arm's string pointer as an int). A candidate already
+            // returning a cell passes through.
+            if ($boxCell && !isset($erasedSyms[$targets[$c]])) {
+                $rc = $this->resolveMethodClass($c, $method);
+                $rt = ($rc !== '' ? ($this->sigs->returnType[$rc . '__' . $method] ?? null) : null);
+                $bodies .= $this->boxRawValue($r, $rt);
+                $r = $this->lastValue;
+            }
             $bodies .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endLabel . "\n";
         }
@@ -2110,6 +2282,10 @@ trait EmitLlvmObjects
         $out .= $defLabel . ":\n";
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $argList . ")\n";
+        if ($boxCell) {
+            $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
+            $rd = $this->lastValue;
+        }
         $out .= '  store i64 ' . $rd . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
@@ -2481,6 +2657,10 @@ trait EmitLlvmObjects
         $targets = [];
         $distinct = [];
         $liveCands = [];
+        // Symbols that are ERASED THUNKS (erasedEntry rewrote them): a thunk
+        // already boxes its result to a cell, so the per-arm cell-boxing below
+        // must NOT box it again (double-box → a raw int read as a NaN cell).
+        $erasedSyms = [];
         foreach ($cands as $c) {
             $t = $this->resolveMethodClass($c, $mc->method);
             // A candidate that neither declares nor inherits the method is
@@ -2499,7 +2679,9 @@ trait EmitLlvmObjects
             // here). The site therefore reads the result — and passes its args —
             // in the ORIGIN's erased representation, which the spec's raw entry
             // does not speak. Call its erased thunk instead (see LowerReify).
+            $fullPre = $full;
             $full = $this->erasedEntry($c, $static, $mc->method, $full);
+            if ($full !== $fullPre) { $erasedSyms[$full] = true; }
             // An ABSTRACT method (declared, no emitted body) has no function —
             // an abstract class is never instantiated, so its switch case is
             // dead and would reference an undefined symbol. Drop the candidate.
@@ -2522,12 +2704,22 @@ trait EmitLlvmObjects
             $btName = $mc->method;
             $out .= $this->btPush($btName, $n->line);
         }
+        // A CELL result over candidates whose declared returns disagree: each
+        // dispatch arm boxes its raw return by its own type (a mixed-repr raw
+        // merge would mis-read). The result is then a uniform self-describing cell.
+        $boxCell = $n->type->kind === Type::KIND_CELL;
         if (\count($distinct) <= 1) {
+            $sym = $distinct[0] ?? $fallbackFull;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($distinct[0] ?? $fallbackFull)
+            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
                   . '(' . $argList . ")\n";
+            // An erased thunk already returns a cell; boxing it again double-boxes.
+            if ($boxCell && !isset($erasedSyms[$sym])) {
+                $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
+                $reg = $this->lastValue;
+            }
         } else {
-            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method);
+            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms);
             $reg = $this->vdResult;
         }
         if ($btName !== '') { $out .= $this->btPop(); }

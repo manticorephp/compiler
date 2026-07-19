@@ -1813,9 +1813,11 @@ final class LowerFromAst implements Pass
      * ternary chain over every class that actually declares the member —
      * `$cls === "A" ? A::MEMBER : ($cls === "B" ? … : null)` — reusing the
      * literal static-access lowering (const inline / static-prop global) for
-     * each arm. The receiver is re-lowered per condition; a plain `$cls`
-     * variable is side-effect-free, so it evaluates identically each time.
-     * (Object receivers `$obj::CONST` never match a name and fold to null.)
+     * each arm. The receiver is normalised to a class-NAME string first —
+     * `is_object($cls) ? get_class($cls) : $cls` — so an object receiver
+     * (`$obj::CONST`) resolves through the same name-ternary as a string one.
+     * The name expression is re-lowered per condition; a plain `$cls` variable is
+     * side-effect-free, so it evaluates identically each time.
      */
     private function lowerDynStaticAccess(\Parser\Ast\DynamicStaticAccess $e): Node
     {
@@ -1829,10 +1831,16 @@ final class LowerFromAst implements Pass
                 $names[] = $cname;
             }
         }
+        $nameExpr = \Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_object', [$recv], $span),
+            \Parser\Ast\Expr::call('get_class', [$recv], $span),
+            $recv,
+            $span,
+        );
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $recv, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticAccess($cname, $nm, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
@@ -1840,10 +1848,14 @@ final class LowerFromAst implements Pass
     }
 
     /**
-     * `$cls::method(args)` with a runtime class-name string. Same ternary-chain
-     * idiom over every class declaring/inheriting the method, reusing the
-     * literal static-call lowering per arm. Args are re-lowered per arm but only
-     * the matching arm runs, so they evaluate once at runtime.
+     * `$cls::method(args)` with a runtime receiver. Normalise the receiver to a
+     * class-NAME string first — `is_object($cls) ? get_class($cls) : $cls` — so an
+     * OBJECT receiver (`$obj::method()`, calling a static method on the object's
+     * own class) resolves through the SAME name-ternary as a string receiver. Every
+     * arm stays a literal static call, so the result keeps a consistent repr (a
+     * cell-typed `$obj->method()` arm would push the ternary join to a cell and
+     * leave the string arms unboxed → the erased-return miscompile). Args and the
+     * name expression are re-lowered per arm but only the matching arm runs.
      */
     private function lowerDynStaticCall(\Parser\Ast\DynamicStaticCall $e): Node
     {
@@ -1856,10 +1868,16 @@ final class LowerFromAst implements Pass
             if ($this->isTypeDef($cname)) { continue; }
             if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
         }
+        $nameExpr = \Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_object', [$recv], $span),
+            \Parser\Ast\Expr::call('get_class', [$recv], $span),
+            $recv,
+            $span,
+        );
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $recv, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticCall($cname, $method, $args, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
@@ -2053,26 +2071,45 @@ final class LowerFromAst implements Pass
         // call on the result resolve: the union dispatches on the runtime class_id
         // and its return type comes from the atoms. An `unknown` receiver resolves
         // nothing, so `$obj->speak()` rendered its string result as a raw pointer.
-        $arms = [];
+        // Two candidate sets: EXACT arity (total === argc — the historical set) and
+        // the RELAXED set that also accepts a defaulted / variadic constructor
+        // (required <= argc, argc <= total or variadic). The exact set keeps its
+        // precise obj / union type (byte-identical to before — no regression). When
+        // relaxation brings in MORE classes (a `new $cls()` that relies on ctor
+        // defaults), the candidate set is broad and its members' prop/method reprs
+        // may disagree, so the result is a plain CELL: reads/stores route through
+        // the already-boxing cell primitives (emitCellPropertyRead /
+        // emitCellStoreProperty) and method calls through the class_id dispatch,
+        // all keyed on the object's runtime class_id. A wide UNION would instead
+        // erase to `unknown` (raw pointer reads) — the broad-union soundness root.
+        $exactArms = [];
+        $relaxed = [];
         foreach ($this->classTable as $name => $cd) {
             // A `#[TypeDef]` is not a candidate for a DYNAMIC `new $cls(…)`: the
             // class has no runtime form to select, and obj<U8> would be a pointer
             // to nothing. A TypeDef is constructed only where its name is written.
             if ($this->isTypeDef($name)) { continue; }
             $params = $this->resolveMethodParams($name, '__construct');
-            // Exact arity only. Widening to accept defaulted-ctor calls
-            // (`required <= argc <= total`) balloons the candidate union — every
-            // arity-compatible class, not just the intended one — which erases
-            // the union's property/method type resolution (a `$o->name` read then
-            // renders its pointer). Defaulted-ctor `new $cls()` waits on broad-
-            // union inference (the unknown-cell soundness root).
-            $need = $params === null ? 0 : \count($params);
-            if ($need !== $argc) { continue; }
-            $arms[] = Type::obj($name);
+            $total = $params === null ? 0 : \count($params);
+            $required = 0;
+            $variadic = false;
+            if ($params !== null) {
+                foreach ($params as $p) {
+                    if ($p->variadic) { $variadic = true; continue; }
+                    if ($p->default === null) { $required = $required + 1; }
+                }
+            }
+            if ($total === $argc) { $exactArms[] = Type::obj($name); }
+            if ($argc >= $required && ($variadic || $argc <= $total)) { $relaxed[] = $name; }
+        }
+        if (\count($relaxed) > \count($exactArms)) {
+            // Broad (defaulted-ctor) case → boxed object, runtime class_id dispatch.
+            $t = \count($relaxed) === 1 ? Type::obj($relaxed[0]) : Type::cell();
+            return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
         }
         $t = Type::unknown();
-        if (\count($arms) === 1) { $t = $arms[0]; }
-        elseif (\count($arms) > 1) { $t = Type::union($arms); }
+        if (\count($exactArms) === 1) { $t = $exactArms[0]; }
+        elseif (\count($exactArms) > 1) { $t = Type::union($exactArms); }
         return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
     }
 

@@ -10,15 +10,15 @@ fn Blue__name(obj<Blue> %this) -> string {
   return %0
 }
 
-fn make(string %cls) -> obj<Red>|obj<Blue>|obj<stdClass> {
+fn make(string %cls) -> cell {
   %0 = load_local cls : unknown
-  %1 = new_dyn %0() : obj<Red>|obj<Blue>|obj<stdClass>
+  %1 = new_dyn %0() : cell
   return %1
 }
 
 fn __main() -> int {
   %0 = string_const "Red" : string
-  %1 = call make(%0) : obj<Red>|obj<Blue>|obj<stdClass>
+  %1 = call make(%0) : cell
   %2 = method_call %1->name() : string
   echo %2
 }
