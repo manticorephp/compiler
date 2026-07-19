@@ -700,6 +700,140 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `$cell->prop = v` on a receiver whose static class is erased (a `mixed`
+     * value, a `new $cls()` result, a classless dynamic-name store). Store mirror
+     * of {@see emitCellPropertyRead}: recover the runtime class from the object's
+     * class_id and write `$prop`'s REAL per-holder slot in that slot's declared
+     * repr. Replaces the old blind offset-16 store — writing a scalar slot as a
+     * bag pointer, a wild write / SIGSEGV. A class_id matching no fixed holder
+     * falls back to the dynamic bag (stdClass) or a no-op — never slot 16.
+     */
+    private function emitCellStoreProperty(\Compile\Mir\StoreProperty $n): string
+    {
+        $prop = $n->property;
+        $fixed = [];
+        $hasBag = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+            if ($cd->usesBag()) { $hasBag = true; }
+        }
+        $out = $this->emitNode($n->object);
+        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
+        else { $out .= $this->coerceToPtr(); }
+        $objPtr = $this->lastValue;
+        // Evaluate the RHS once; keep both a boxed-cell form (for cell slots) and
+        // the payload retained once (the object takes an owning reference — only
+        // one arm runs at runtime, so a single retain is correct).
+        $out .= $this->emitNode($n->value);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->rcRetainByType($n->value, $raw, $n->value->type, 4);
+        $this->lastValue = $raw;
+        $this->lastValueType = 'i64';
+        $out .= $this->boxToCell($n->value->type);
+        $cellVal = $this->lastValue;
+        // No known holder → bag store (stdClass) or drop; never offset-16.
+        if (\count($fixed) === 0) {
+            if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
+            $this->lastValue = $cellVal;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Single holder and no bag anywhere → the cell can only be that class.
+        if (\count($fixed) === 1 && !$hasBag) {
+            $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
+            $this->lastValue = $cellVal;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Runtime dispatch on the object's class_id — each holder stores its slot.
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('cs.end');
+        $def = $this->ssa->allocLabel('cs.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        $seen = [];
+        foreach ($fixed as $cd) {
+            if (isset($seen[$cd->name])) { continue; }
+            $seen[$cd->name] = true;
+            $lbl = $this->ssa->allocLabel('cs.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $out .= $def . ":\n";
+        if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Store the already-boxed `$cellVal` into `$cd`'s fixed `$prop` slot, in the
+     *  slot's declared repr: a cell-boxed slot keeps the cell; a raw slot unboxes
+     *  it (int/bool/string/obj/array/enum), a float slot to its bit pattern. */
+    private function emitCellSlotStore(string $objPtr, ClassDef $cd, string $prop, string $cellVal): string
+    {
+        $pt = $cd->propertyTypes[$prop] ?? Type::cell();
+        $off = $cd->propertyOffset($prop);
+        $gep = $this->ssa->allocReg();
+        $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+             . ', i64 ' . (string)$off . "\n";
+        if ($this->cellPropBoxed($pt, $prop)) {
+            return $out . $this->emitSlotStore($gep, $cd, $prop, $cellVal);
+        }
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        $out .= $this->unboxCellToType($pt);
+        $val = $this->lastValue;
+        if ($this->lastValueType === 'double') {
+            $bits = $this->ssa->allocReg();
+            $out .= '  ' . $bits . ' = bitcast double ' . $val . " to i64\n";
+            $val = $bits;
+        }
+        return $out . $this->emitSlotStore($gep, $cd, $prop, $val);
+    }
+
+    /** Default-arm dynamic-bag store (`__mir_array_set_str` by the static prop
+     *  name) for a classless receiver whose runtime class is a bag object. */
+    private function emitCellBagStore(\Compile\Mir\StoreProperty $n, string $objPtr, string $cellVal): string
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $bagOff = $std === null ? 16 : $std->bagOffset();
+        $out = $this->emitBagPtr($n->object, $objPtr, $bagOff);
+        $bagP = $this->bagPtrReg;
+        $bg = $this->bagSlotReg;
+        $kid = $this->pool->intern($n->property);
+        $nb = $this->ssa->allocReg();
+        $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
+              . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+        $nbI = $this->ssa->allocReg();
+        $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
+        $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+        return $out;
+    }
+
+    /** All declared (fixed-slot) properties across every class, name => Type,
+     *  collapsing a kind-disagreement across holders to a cell. The candidate
+     *  map for a classless dynamic-name store/read. */
+    private function allDeclaredPropTypes(): array
+    {
+        $out = [];
+        foreach ($this->classes as $cd) {
+            foreach ($this->declaredPropTypes($cd) as $p => $pt) {
+                if (!isset($out[$p])) { $out[$p] = $pt; }
+                elseif ($out[$p]->kind !== $pt->kind) { $out[$p] = Type::cell(); }
+            }
+        }
+        return $out;
+    }
+
     /** True while emitting `$prop`'s own get/set hook — its `$this->$prop`
      *  accesses read/write the backing slot directly (no hook re-entry). */
     private function insideOwnHook(array $hk): bool
@@ -830,6 +964,20 @@ trait EmitLlvmObjects
         // class_id to each atom's slot offset (mirrors emitUnionPropertyAccess).
         if ($n->object->type->kind === Type::KIND_UNION) {
             return $this->emitUnionStoreProperty($n);
+        }
+        // A classless receiver (an erased `mixed` / `object` value with no static
+        // class) has no static slot offset: recover the runtime class from the
+        // object header and store its REAL slot. The old fall-through blind-wrote
+        // slot 16 as a bag pointer → a wild write / SIGSEGV. Gate on "not a KNOWN
+        // class" via isset (NOT `class === ''`): a null class field reads back as
+        // garbage under the native self-build, so `=== ''` is false there while
+        // `isset($this->classes[garbage])` is reliably false.
+        $scls = $n->object->type->class ?? '';
+        if (!($scls !== '' && isset($this->classes[$scls]))
+            && ($n->object->type->kind === Type::KIND_CELL
+                || $n->object->type->kind === Type::KIND_UNKNOWN
+                || $n->object->type->kind === Type::KIND_OBJ)) {
+            return $this->emitCellStoreProperty($n);
         }
         // A write to a `readonly` property from OUTSIDE its declaring class scope
         // is a fatal Error (PHP throws a catchable `Error`). Types are resolved
@@ -1362,28 +1510,13 @@ trait EmitLlvmObjects
             $props = $this->unionPropTypes($n->object->type);
             if ($props !== []) { return $this->emitStoreDynPropDispatch($n, $props, null); }
         }
-        $out = $this->emitNode($n->object);
-        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
-        else { $out .= $this->coerceToPtr(); }
-        $objPtr = $this->lastValue;
-        $out .= $this->emitBagPtr($n->object, $objPtr, $this->bagOffsetOf($n->object));
-        $bagP = $this->bagPtrReg;
-        $bg = $this->bagSlotReg;
-        $out .= $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
-        $keyP = $this->lastValue;
-        $out .= $this->emitNode($n->value);
-        $out .= $this->boxToCell($n->value->type);
-        $val = $this->lastValue;
-        $nb = $this->ssa->allocReg();
-                $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
-              . ', ptr ' . $keyP . ', i64 ' . $val . ", i64 0, i64 0)\n";
-        $nbI = $this->ssa->allocReg();
-        $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
-        $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
-        $this->lastValue = $val;
-        $this->lastValueType = 'i64';
-        return $out;
+        // Classless / erased receiver: match the runtime name against EVERY class's
+        // declared properties; each arm's StoreProperty dispatches on the object's
+        // class_id (emitCellStoreProperty) to the real slot, with a stdClass bag
+        // fallback for an undeclared name. WITHOUT this the removed bag path below
+        // wrote slot 16 as a bag pointer on a fixed-slot object → a wild write.
+        $bagCd = $this->classes['stdClass'] ?? null;
+        return $this->emitStoreDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
     }
 
     /** `$o->$name = v` on a receiver with a known member set (a class or a union):
