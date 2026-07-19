@@ -706,7 +706,16 @@ trait InferScans
                 $t = $observed[$key];
                 if ($t->kind === Type::KIND_STRING || $t->isArray()
                     || $t->kind === Type::KIND_OBJ) {
-                    $fn->params[$idx - 1]->type = $t;
+                    // Read the Param handle into a local BEFORE mutating it: a
+                    // nested write `$fn->params[$i]->type = …` is rejected by Zend
+                    // as an indirect modification of the readonly `$params` array
+                    // (a plain read + index is fine). The self-built compiler does
+                    // not enforce readonly, so this fired only under the Zend cold
+                    // seed — and only once a stdlib fn first triggered a refinement
+                    // (a recursive `array &$p` observed concrete). Param is shared
+                    // by handle, so this still updates the entry in place.
+                    $param = $fn->params[$idx - 1];
+                    $param->type = $t;
                     $changed = true;
                 }
             }

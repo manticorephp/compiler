@@ -505,3 +505,11 @@ function sys_sockatmark(#[CType('int')] int $fd): int {}
 // variadic ABI when called through the fixed-arity FFI wrapper.
 #[Library('c'), Symbol('dup')]
 function sys_dup(#[CType('int')] int $fd): int {}
+
+// ── Randomness ─────────────────────────────────────────────────────────
+// `int getentropy(void *buf, size_t buflen)` — fill $buf with $buflen (<= 256)
+// cryptographically-secure random bytes; 0 on success, -1 on error. Present on
+// both Darwin and glibc (>= 2.25), non-variadic — the cross-host choice for
+// random_bytes/random_int (getrandom is Linux-only, arc4random_buf BSD-only).
+#[Library('c'), Symbol('getentropy')]
+function sys_getentropy(Ptr $buf, #[CType('size_t')] int $buflen): int {}

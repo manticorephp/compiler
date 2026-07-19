@@ -1,0 +1,9 @@
+int(1)
+int(16)
+int(300)
+bool(true)
+int(5)
+bool(true)
+bool(true)
+bool(true)
+string(10) "ValueError"

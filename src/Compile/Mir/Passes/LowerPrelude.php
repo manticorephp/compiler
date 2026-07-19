@@ -344,6 +344,11 @@ trait LowerPrelude
             'GLOB_ONLYDIR' => 0x40000000, 'GLOB_AVAILABLE_FLAGS' => 0x400010bc,
             'PATHINFO_DIRNAME' => 1, 'PATHINFO_BASENAME' => 2,
             'PATHINFO_EXTENSION' => 4, 'PATHINFO_FILENAME' => 8, 'PATHINFO_ALL' => 15,
+            // parse_url() component selectors + http_build_query() encodings.
+            'PHP_URL_SCHEME' => 0, 'PHP_URL_HOST' => 1, 'PHP_URL_PORT' => 2,
+            'PHP_URL_USER' => 3, 'PHP_URL_PASS' => 4, 'PHP_URL_PATH' => 5,
+            'PHP_URL_QUERY' => 6, 'PHP_URL_FRAGMENT' => 7,
+            'PHP_QUERY_RFC1738' => 1, 'PHP_QUERY_RFC3986' => 2,
             // ext/sockets — host-INVARIANT constants (MEASURED identical on Darwin
             // and Linux, tools/docker/probe.c). The host-DIVERGENT ones
             // (AF_INET6, SOL_SOCKET, SO_*, the split MSG_*, SOCKET_E*) resolve
