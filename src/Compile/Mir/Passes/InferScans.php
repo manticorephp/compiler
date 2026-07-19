@@ -842,6 +842,20 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->scanArrayLitLocals($c, $out); }
     }
 
+    /** A `vec[vec[scalar]]` — element is a concrete inner array whose own leaf is
+     *  a concrete value kind (int/float/string/bool). Such a nested array reads and
+     *  writes raw at every level; a nested element write needs no cell demotion. */
+    private function isHomogeneousNestedScalarArray(Type $t): bool
+    {
+        $el = $t->element;
+        if ($el === null || !$el->isArray()) { return false; }
+        $leaf = $el->element;
+        if ($leaf === null) { return false; }
+        $k = $leaf->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_STRING || $k === Type::KIND_BOOL;
+    }
+
     /** @param array<string,bool> $found */
     private function scanLocalElemNode(Node $n, array &$found): void
     {
@@ -864,7 +878,16 @@ trait InferScans
             if ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
                 $root = $se->array->array;
                 while ($root->kind === Node::KIND_ARRAY_ACCESS) { $root = $root->array; }
-                if ($root->kind === Node::KIND_LOAD_LOCAL && $root->type->isArray()) {
+                // A HOMOGENEOUS nested array of a concrete scalar (`vec[vec[float]]`)
+                // needs no cell demotion: every element is itself an inner array
+                // (raw ptr) and every leaf a concrete scalar, so nested reads/writes,
+                // var_dump AND a bare-`array` callee all agree on the raw repr.
+                // Demoting it to vec[cell] boxes the inner arrays, which then fault
+                // when passed to a bare-array param that reads elements raw (a
+                // repr-conflict Monomorphize can't see). Only a heterogeneous or
+                // auto-vivified (`[]` → unknown-element) container needs the cell.
+                if ($root->kind === Node::KIND_LOAD_LOCAL && $root->type->isArray()
+                    && !$this->isHomogeneousNestedScalarArray($root->type)) {
                     $found[$root->name] = true;
                 }
             }
