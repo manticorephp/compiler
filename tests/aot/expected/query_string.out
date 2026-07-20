@@ -1,0 +1,70 @@
+array(2) {
+  ["a"]=>
+  string(1) "1"
+  ["b"]=>
+  string(5) "hello"
+}
+array(2) {
+  ["name"]=>
+  string(8) "John Doe"
+  ["city"]=>
+  string(8) "New York"
+}
+array(1) {
+  ["a"]=>
+  array(2) {
+    ["b"]=>
+    string(1) "x"
+    ["c"]=>
+    string(1) "y"
+  }
+}
+array(1) {
+  ["list"]=>
+  array(2) {
+    [0]=>
+    string(1) "p"
+    [1]=>
+    string(1) "q"
+  }
+}
+array(1) {
+  ["deep"]=>
+  array(1) {
+    ["a"]=>
+    array(1) {
+      ["b"]=>
+      string(1) "z"
+    }
+  }
+}
+array(2) {
+  ["novalue"]=>
+  string(0) ""
+  ["k"]=>
+  string(1) "v"
+}
+array(0) {
+}
+a=1&b=hello
+name=John+Doe&city=New+York
+a%5Bb%5D=x&a%5Bc%5D=y
+t=1&f=0
+0=x&1=y
+5=v&k=w
+p_5=v&k=w
+a=1;b=2
+f=1.5&i=-7
+
+user=a+b&tags%5B0%5D=x&tags%5B1%5D=y
+array(2) {
+  ["user"]=>
+  string(3) "a b"
+  ["tags"]=>
+  array(2) {
+    [0]=>
+    string(1) "x"
+    [1]=>
+    string(1) "y"
+  }
+}

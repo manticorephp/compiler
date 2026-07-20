@@ -36,8 +36,4 @@ var_dump(parse_url('http://host:90/p', PHP_URL_PORT));
 var_dump(parse_url('/just/a/path?q=1', PHP_URL_PATH));
 var_dump(parse_url('mailto:a@b.com', PHP_URL_SCHEME));
 
-// NOTE: parse_str() and http_build_query() are implemented but NOT asserted
-// here. Both read array element VALUES across the stdlib boundary
-// (parse_str's `&$result`, http_build_query's `$data`) — those come back UNBOXED
-// (garbage) until the separate repr-consistency epic (by-ref / cell-element
-// boxing) merges. They start passing once it does.
+// parse_str() / http_build_query() are asserted in `query_string`.
