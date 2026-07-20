@@ -455,6 +455,19 @@ final class Type
                 && ($this->kind === self::KIND_OBJ || $this->kind === self::KIND_UNION)) {
                 return $this;
             }
+            // A NULL arm joined with a POINTER scalar (string) keeps that type —
+            // its null rides the slot RAW as ptr 0, so the merged value stays
+            // self-describing (`$x = null; if ($c) $x = "s";` is a `?string`, read
+            // as a string, `=== null` = ptr==0) instead of erasing to unknown and
+            // being mis-read by a type-directed consumer. Same rationale as the
+            // `?C` obj rule above. INT/FLOAT/BOOL are NOT pointer kinds (null would
+            // collide with 0/0.0/false) and take the tagged-cell merge shadow.
+            if ($this->kind === self::KIND_NULL && $other->kind === self::KIND_STRING) {
+                return $other;
+            }
+            if ($other->kind === self::KIND_NULL && $this->kind === self::KIND_STRING) {
+                return $this;
+            }
             return self::unknown();
         }
         if ($this->kind === self::KIND_OBJ) {

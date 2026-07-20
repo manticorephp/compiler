@@ -1,0 +1,8 @@
+count 2
+is_object[0] true
+is_object[1] true
+instanceof[0] true
+instanceof[1] true
+gettype[0] object
+type[0] Socket
+done

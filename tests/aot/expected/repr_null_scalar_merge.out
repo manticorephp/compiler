@@ -1,0 +1,21 @@
+string 'hi' null=false
+truthy:hi
+concat:v=hi
+integer 7 null=false
+arith:17
+double 1.5
+boolean true
+string 'yes'
+integer 42
+NULL NULL null=true
+falsy
+concat:v=?
+NULL NULL null=true
+arith:10
+NULL NULL
+NULL NULL
+NULL NULL
+NULL NULL
+doc a=alpha
+doc b=beta
+2

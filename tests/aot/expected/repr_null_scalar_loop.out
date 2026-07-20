@@ -1,0 +1,8 @@
+string 'a,b,c'
+NULL NULL
+double 4.0
+NULL NULL
+integer 10
+NULL NULL
+boolean false
+NULL NULL

@@ -609,6 +609,36 @@ trait EmitLlvmArrays
         return $el;
     }
 
+    /**
+     * The element type a CELL value must be UNBOXED to before it lands in a
+     * CONCRETE-element array — the per-ELEMENT analogue of the whole-array
+     * {@see needsDeCellify} reabstraction.
+     *
+     * Without it the tagged bits are stored raw into a slot whose retain /
+     * release / read all treat them as that raw type, and a later
+     * `__mir_array_retain_str` DEREFERENCES a NaN-boxed cell (a `?string`
+     * ternary — `isset($a[$k]) ? $a[$k] : null`, which `nullableOf` lifts to a
+     * cell — stored into a declared `array<string,string>`; it SIGSEGV'd the
+     * self-host in `ClassDecl::__construct`). Once unboxed the payload is a bare
+     * pointer, so the caller retains per THIS type instead of
+     * {@see storeRetainFallback}'s null (which is right only for a value that
+     * stays boxed — rc-bumping tagged bits would corrupt them).
+     *
+     * Null when nothing to do: a non-cell value, or a cell/unknown destination
+     * element (which legitimately stores the value boxed).
+     */
+    private function storeElemDeCellifyType(StoreElement $se): ?Type
+    {
+        if ($se->value->type->kind !== Type::KIND_CELL) { return null; }
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
+        $el = $at->element;
+        if ($el === null) { return null; }
+        $ek = $el->kind;
+        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { return null; }
+        return $el;
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -666,7 +696,7 @@ trait EmitLlvmArrays
                 $out .= $this->boxToCell($se->value->type);
                 $val = $this->lastValue;
             }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
+            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
         } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
@@ -684,7 +714,7 @@ trait EmitLlvmArrays
                 $out .= $this->boxToCell($se->value->type);
                 $val = $this->lastValue;
             }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
+            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
         } elseif ($keyIsString) {
             $out .= $this->emitNode($se->index);
@@ -701,7 +731,7 @@ trait EmitLlvmArrays
                 $out .= $this->boxToCell($se->value->type);
                 $val = $this->lastValue;
             }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
+            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
             // set_str RETAINS the stored key (append) — release our own +1 on a
             // fresh key temp (`$m["k".$i]`), or it leaks (borrowed locals/literals
@@ -723,7 +753,7 @@ trait EmitLlvmArrays
                 $out .= $this->boxToCell($se->value->type);
                 $val = $this->lastValue;
             }
-            else { $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $this->storeRetainFallback($se), 3); }
+            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
         }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);

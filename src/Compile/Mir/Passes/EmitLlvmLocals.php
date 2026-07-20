@@ -448,6 +448,32 @@ trait EmitLlvmLocals
             $this->lastValueType = 'i64';
             return $out;
         }
+        // Forward-cellify a concrete OBJECT-element array written through a BY-REF
+        // out-param. The element type is ERASED across the `.sig` (a bare `array &`
+        // param encodes no element repr — {@see \Manticore\Sig::encodeType}), so
+        // the CALLER reads the slot as an unknown-element array and needs
+        // self-describing CELL elements: a raw object pointer reads back as a
+        // NaN-double (`instanceof` false, `gettype` "double" — socket_create_pair's
+        // `$pair`). Box each element, mirroring the RETURN path's needsCellify /
+        // {@see emitCellifyArrayRaw}. Scalar by-ref arrays (`sort(array &$a)` of
+        // ints) are deliberately untouched — their elements round-trip raw and the
+        // caller reads them raw.
+        if (isset($this->locals->refLocals[$sl->name])
+            && isset($this->locals->slots[$sl->name])
+            && $this->needsRefOutCellify($sl->value->type)) {
+            $out = $this->emitNode($sl->value);
+            $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
+            $out .= $this->coerceToI64();
+            $dv = $this->lastValue;
+            $addr = $this->ssa->allocReg();
+            $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
         // The value just emitted an arena vec → this local owns it, so
