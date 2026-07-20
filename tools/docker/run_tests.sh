@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tier 2: build manticore from source in a Linux container and run the WHOLE
+# Build manticore from source in a Linux container and run the WHOLE
 # AOT suite there. Both arches; arm64 is native on an Apple Silicon host,
 # amd64 runs under qemu (slow but it works).
 #
@@ -80,7 +80,7 @@ for platform in "${PLATFORMS[@]}"; do
     image="$IMAGE_BASE:$arch"
     echo "############ $platform ############" >&2
     # The root Dockerfile's `toolchain` target — the same image an end user
-    # builds. Its `build` target is deliberately NOT used here: this tier runs
+    # builds. Its `build` target is deliberately NOT used here: this harness runs
     # bin/compile against a bind-mounted working tree, not a baked-in copy.
     docker build --platform "$platform" --target toolchain -t "$image" \
         -f "$ROOT/Dockerfile" "$ROOT" >&2

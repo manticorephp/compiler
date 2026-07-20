@@ -16,5 +16,3 @@ tests/aot/tmp/
 .fuzz-findings/
 graphify-out/
 **/.DS_Store
-
-tools/docker/probe-raw/

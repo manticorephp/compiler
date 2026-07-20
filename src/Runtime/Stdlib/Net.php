@@ -21,7 +21,7 @@
 //
 // What could NOT be squeezed out is the `struct addrinfo` walk — and that is
 // exactly where the trap lives, so it is MEASURED, not remembered:
-// tools/docker/probe.c across 5 distros × 2 arches (tools/docker/PROBE_RESULTS.md).
+// measured across 5 distros × 2 arches (tools/docker/PROBE_RESULTS.md).
 
 /**
  * `struct addrinfo` field offsets. $which: 0=ai_family 1=ai_socktype
@@ -42,7 +42,7 @@ function __mc_ai_off(int $which): int
     static $next = 0;
 
     if ($ready === 0) {
-        // MEASURED (tools/docker/probe.c), identical on glibc 2.31/2.35/2.36/2.39
+        // MEASURED (tools/docker/PROBE_RESULTS.md), identical on glibc 2.31/2.35/2.36/2.39
         // AND musl, arm64 + x86_64 — the split is Darwin vs Linux, not per-arch
         // and not per-libc:
         //   both:   sizeof 48, ai_flags@0 ai_family@4 ai_socktype@8

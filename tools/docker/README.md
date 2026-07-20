@@ -1,39 +1,21 @@
 # Docker test setup
 
-Two tiers. Tier 1 asks what the libc under manticore actually looks like on
-Linux. Tier 2 tries to build the compiler there and run the whole AOT suite.
+Builds the compiler on Linux and runs the whole AOT suite there. Re-runnable,
+and writes nothing to the host checkout.
 
-Everything here is re-runnable and writes nothing to the host checkout.
+## libc findings -- `PROBE_RESULTS.md`
 
-## Tier 1 -- libc probe
+`PROBE_RESULTS.md` is a **committed record of a one-off measurement**: what the
+libc under manticore actually looks like on ubuntu:20.04 / 22.04 / 24.04,
+debian:12 and alpine:3.20 (musl), across arm64 and x86_64. For each symbol
+`src/Runtime/Libc.php` binds by name it records whether that libc exports it,
+plus the real constants and `struct stat` / `struct dirent` / `glob_t` layout
+read out of the container's own headers.
 
-```bash
-bash tools/docker/probe_libc.sh              # arm64 (native on Apple Silicon)
-bash tools/docker/probe_libc.sh --amd64      # arm64 + amd64 (amd64 via qemu)
-bash tools/docker/probe_libc.sh --amd64-only
-```
-
-Covers ubuntu:20.04 / 22.04 / 24.04, debian:12 and alpine:3.20 (musl). Per
-image it reports, for the symbols `src/Runtime/Libc.php` binds by name, whether
-each is an exported dynamic symbol (`readelf --dyn-syms` on the libc object),
-then compiles and RUNS `probe.c` in the container to read the real constants and
-`struct stat` / `struct dirent` / `glob_t` layout out of that libc's headers.
-
-Results land in **`PROBE_RESULTS.md`** (committed). Raw per-image dumps go to
-`probe-raw/` (gitignored). Raw output accumulates across runs keyed by
-image+arch, so an amd64 sweep does not discard an earlier arm64 one -- the
-rendered table wants both.
-
-Re-render without re-probing:
-
-```bash
-php tools/docker/render_results.php tools/docker/probe-raw > tools/docker/PROBE_RESULTS.md
-```
-
-`render_results.php` also VALIDATES the hard-coded ABI table in
-`src/Runtime/Stdlib/Stat.php` against the measured layout, per target. If that
-table ever drifts from a real libc, the "Answers" section says so instead of
-printing MATCH.
+It is kept because **`src/` hard-codes those numbers** (`Net.php`, `Stat.php`,
+`Fs.php`, `LowerPrelude.php` all cite it). The rig that generated it was removed
+once it had done its job -- recover it from git history if you need to
+re-measure, e.g. before changing one of those ABI tables.
 
 ### Headline findings
 
@@ -45,7 +27,7 @@ printing MATCH.
 - The `struct stat` layout is a kernel/arch ABI: identical across every glibc
   version probed and musl. Both Linux branches of `Stat.php` match.
 
-## Tier 2 -- build + run the suite
+## Build + run the suite
 
 ```bash
 bash tools/docker/run_tests.sh            # arm64
@@ -139,16 +121,8 @@ AOT suite has not yet run on Linux.
 
 | file | role |
 |---|---|
-| `probe_libc.sh` | Tier 1 driver: runs the containers, renders the report |
-| `probe_in_container.sh` | Tier 1 in-container half (`/bin/sh`, dependency-free) |
-| `probe.c` | prints constants + struct layout from the container's own headers |
-| `render_results.php` | raw dumps -> `PROBE_RESULTS.md`, validates `Stat.php` |
-| `PROBE_RESULTS.md` | generated report (committed) |
-| `run_tests.sh` | Tier 2 driver: build in container, run the full AOT suite |
+| `run_tests.sh` | driver: build in a container, run the full AOT suite |
+| `PROBE_RESULTS.md` | committed libc measurements that `src/` hard-codes from |
 
-The Tier 2 image is the root `Dockerfile` (`--target toolchain`), not a file
-here -- one image definition serves both users and this harness.
-
-The only scripting languages here are bash, php and C -- no python, matching the
-rest of the repo. Tier 1 renders on the host's `php`; the Tier 2 patch runs on
-the container's php 8.5.
+The image is the root `Dockerfile` (`--target toolchain`), not a file here --
+one image definition serves both users and this harness.
