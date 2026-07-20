@@ -749,6 +749,13 @@ final class LowerFromAst implements Pass
         $backing = $backing === null ? '' : \strtolower(\ltrim($backing, '?\\'));
         $names = [];
         $ints = [];
+        // DECLARED, not cast: `$case->value->value` is a POLYMORPHIC AST field
+        // (int for one node subclass, string for another) and infers int here,
+        // which disagrees with EnumDef::$strValues. A `(string)` cast would be
+        // compiled against that WRONG static type and really convert a string
+        // POINTER as an int; the annotation fixes the type without emitting a
+        // conversion.
+        /** @var string[] $strs */
         $strs = [];
         foreach ($decl->cases as $case) {
             $names[] = $case->name;

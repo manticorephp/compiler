@@ -1516,17 +1516,17 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // hit means the callee walks the buffer at the wrong type — the silent
         // SIGSEGV that `array<string,V>` fed an int-keyed array produces.
         //
-        // It is NOT fatal-by-default YET, for the same reason the rest of this
-        // pass is gated: measured on the self-host build it still reports 2 hits
-        // in the compiler's own source (EmitLlvm->emitVirtualDispatch arg 8,
-        // assoc[string,bool] into vec[bool]; EnumDef::__construct arg 5,
-        // vec[int] into vec[string]). It is clean across all 571 AOT cases.
-        // Fix those two at source, then flip this to always-on — that is the
-        // staged path to making the trap impossible.
+        // It is therefore FATAL BY DEFAULT — the one rule here that is. The
+        // self-host source was made honest first: the `name => Type` maps and
+        // the set-shaped params now carry `array<string, …>` docblocks instead
+        // of a bare `array` that inference guessed `vec` for. Compiler and all
+        // 573 AOT cases report zero hits, so a NEW conflict is a compile error
+        // instead of a SIGSEGV at run time.
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
         $tcOn = $collect !== null || (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0");
-        if ($tcOn) {
+        {
             $tc = new \Compile\Mir\Passes\TypeCheck();
+            $tc->reprOnly = !$tcOn;
             $module = $tc->run($module);
             if ($collect !== null) {
                 foreach ($tc->errors as $te) { $collect->lines[] = $te; }

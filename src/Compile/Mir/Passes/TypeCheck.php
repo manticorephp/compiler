@@ -40,8 +40,8 @@ final class TypeCheck
      * That check is exempt from the "off by default" reasoning that gates the
      * rest of this pass: it mirrors the codegen's own key-reader choice, so a
      * hit is not a style opinion but a buffer read at the wrong type — a silent
-     * SIGSEGV. Measured at ZERO hits across the whole 571-case AOT corpus and
-     * the self-host build, so it costs the existing corpus nothing.
+     * SIGSEGV. The driver runs the pass in this mode UNCONDITIONALLY and treats
+     * a hit as fatal; the self-host source and all 573 AOT cases are clean.
      */
     public bool $reprOnly = false;
 

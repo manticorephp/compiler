@@ -105,6 +105,8 @@ trait EmitLlvmMemory
      * for the current function and null-init their slots, so a release on
      * a path where the local was never assigned is a no-op rather than a
      * read of garbage.
+     *
+     * @param array<string, bool> $paramNames param name => is-a-param (a SET)
      */
     private function initRcObjSlots(Node $body, array $paramNames = []): string
     {
