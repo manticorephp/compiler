@@ -43,6 +43,25 @@ function __mc_dt_us(int $op, int $v): int
     return $u;
 }
 
+/**
+ * The RAW absolute fields of the most recent successful parse — what the input
+ * actually said, BEFORE any base timestamp filled the gaps. date_parse reports
+ * exactly this, with an unset field as `false`, so the values are stored here
+ * (still carrying the -99999 sentinel) rather than after the fill.
+ *
+ * $idx: 0 y, 1 month, 2 day, 3 hour, 4 minute, 5 second, 6 microsecond,
+ *       7 zone offset, 8 "a zone was given".  $op 1 writes, 0 reads.
+ */
+function __mc_dt_slot(int $op, int $idx, int $v): int
+{
+    static $s = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    if ($op === 1) {
+        $s[$idx] = $v;
+        return $v;
+    }
+    return $s[$idx];
+}
+
 /** Month number for a full or 3+ letter English name, else 0. */
 function __mc_dt_month(string $w): int
 {
@@ -260,7 +279,7 @@ function __mc_strtotime_core(string $str, int $base, int $zid): int
     $relWd = 0; $relWdBehavior = 0; $haveRelWd = 0;
     $firstLast = 0;
     $zOff = 0; $haveZone = 0; $useZid = $zid;
-    $haveDate = 0; $haveTime = 0; $matched = 0; $ago = 0;
+    $haveDate = 0; $haveTime = 0; $matched = 0; $ago = 0; $isEpoch = 0;
     $pendingOrd = $UN;
 
     $pos = 0;
@@ -295,6 +314,7 @@ function __mc_strtotime_core(string $str, int $base, int $zid): int
                 $us = (int)\substr($m[2] . '000000', 0, 6);
             }
             $haveZone = 1; $zOff = 0; $haveDate = 1; $haveTime = 1; $matched = 1;
+            $isEpoch = 1;
             $pos = $pos + \strlen($m[0]);
             continue;
         }
@@ -546,6 +566,22 @@ function __mc_strtotime_core(string $str, int $base, int $zid): int
     if ($matched === 0) {
         return \__mc_dt_fail();
     }
+
+    // Publish the RAW fields before the base fills them in — date_parse needs
+    // to distinguish "the input said 2017" from "the base supplied 2017".
+    // An "@epoch" is a RELATIVE offset from the epoch as far as php's
+    // date_parse is concerned: it reports 1970-01-01 00:00:00 and carries the
+    // seconds separately. This decomposes the instant directly (same result for
+    // strtotime), so the published fields are corrected back to the epoch base.
+    \__mc_dt_slot(1, 0, $isEpoch === 1 ? 1970 : $y);
+    \__mc_dt_slot(1, 1, $isEpoch === 1 ? 1 : $mo);
+    \__mc_dt_slot(1, 2, $isEpoch === 1 ? 1 : $d);
+    \__mc_dt_slot(1, 3, $isEpoch === 1 ? 0 : $h);
+    \__mc_dt_slot(1, 4, $isEpoch === 1 ? 0 : $mi);
+    \__mc_dt_slot(1, 5, $isEpoch === 1 ? 0 : $sec);
+    \__mc_dt_slot(1, 6, $us);
+    \__mc_dt_slot(1, 7, $zOff);
+    \__mc_dt_slot(1, 8, $haveZone);
 
     // Fill the unset fields from the base instant, in the zone that applies.
     $bl = $base + ($haveZone === 1 ? $zOff : \__mc_tz_offset($useZid, $base));

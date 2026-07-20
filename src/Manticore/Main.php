@@ -1415,7 +1415,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
                               'date_date_set', 'date_time_set', 'date_isodate_set',
                               'date_interval_format', 'date_interval_create_from_date_string',
                               'timezone_open', 'timezone_name_get', 'timezone_offset_get',
-                              'timezone_transitions_get', 'timezone_location_get']);
+                              'timezone_transitions_get', 'timezone_location_get',
+                              'date_parse', 'date_parse_from_format']);
     $useVarDump = $demand->calls('var_dump');
     $usePrintR = $demand->calls('print_r');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it

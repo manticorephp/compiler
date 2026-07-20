@@ -932,3 +932,72 @@ function timezone_location_get(DateTimeZone $object): array|false
 {
     return $object->getLocation();
 }
+
+/**
+ * The row date_parse() and date_parse_from_format() both return.
+ *
+ * Built HERE, in the prelude, for the same reason getTransitions' rows are: the
+ * values are heterogeneous (int|false, float|false, bool, nested arrays), so
+ * the array must be a genuine cell-element one that the caller reads back by
+ * tag. A stdlib function could not return this shape — the parser rejects a
+ * generic in a return position, so the .sig would carry a bare `array` and the
+ * inner elements would erase.
+ *
+ * An unset field is `false`, exactly as php reports it.
+ *
+ * @return array<string, mixed>
+ */
+function __mc_date_parse_row(bool $ok): array
+{
+    $UN = -99999;
+    if (!$ok) {
+        return ['year' => false, 'month' => false, 'day' => false,
+            'hour' => false, 'minute' => false, 'second' => false, 'fraction' => false,
+            'warning_count' => 0, 'warnings' => [], 'error_count' => 1, 'errors' => [],
+            'is_localtime' => false];
+    }
+    $y = \__mc_dt_slot(0, 0, 0);
+    $mo = \__mc_dt_slot(0, 1, 0);
+    $d = \__mc_dt_slot(0, 2, 0);
+    $h = \__mc_dt_slot(0, 3, 0);
+    $mi = \__mc_dt_slot(0, 4, 0);
+    $s = \__mc_dt_slot(0, 5, 0);
+    $us = \__mc_dt_slot(0, 6, 0);
+    return [
+        'year' => $y === $UN ? false : $y,
+        'month' => $mo === $UN ? false : $mo,
+        'day' => $d === $UN ? false : $d,
+        'hour' => $h === $UN ? false : $h,
+        'minute' => $mi === $UN ? false : $mi,
+        'second' => $s === $UN ? false : $s,
+        'fraction' => $h === $UN ? false : (float)$us / 1000000.0,
+        'warning_count' => 0,
+        'warnings' => [],
+        'error_count' => 0,
+        'errors' => [],
+        'is_localtime' => \__mc_dt_slot(0, 8, 0) === 1,
+    ];
+}
+
+/**
+ * Parse a datetime string into its components, without applying them to any
+ * base instant.
+ *
+ * @return array<string, mixed>
+ */
+function date_parse(string $datetime): array
+{
+    $t = \__mc_strtotime_core($datetime, 0, \__mc_tz_open('UTC'));
+    return \__mc_date_parse_row($t !== \__mc_dt_fail());
+}
+
+/**
+ * Parse a datetime string according to an explicit format.
+ *
+ * @return array<string, mixed>
+ */
+function date_parse_from_format(string $format, string $datetime): array
+{
+    $t = \__mc_dt_from_format($format, $datetime);
+    return \__mc_date_parse_row($t !== \__mc_dt_fail());
+}

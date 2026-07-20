@@ -287,6 +287,17 @@ function __mc_dt_from_format(string $format, string $value): int
         }
         $vp = $vp + 1;
     }
+    // Publish the raw fields for date_parse_from_format, before any default
+    // fills them in.
+    \__mc_dt_slot(1, 0, $y);
+    \__mc_dt_slot(1, 1, $mo);
+    \__mc_dt_slot(1, 2, $d);
+    \__mc_dt_slot(1, 3, $h);
+    \__mc_dt_slot(1, 4, $mi);
+    \__mc_dt_slot(1, 5, $sec);
+    \__mc_dt_slot(1, 6, $us);
+    \__mc_dt_slot(1, 7, $zoff);
+    \__mc_dt_slot(1, 8, $haveZone);
     if ($epoch !== -99999) {
         \__mc_dt_us(1, $us);
         return $epoch;
