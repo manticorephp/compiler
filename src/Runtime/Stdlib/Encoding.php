@@ -345,6 +345,8 @@ function __mc_all_digits_until_slash(string $s): bool
  * parse_str($string, &$result). Decodes an application/x-www-form-urlencoded
  * query into $result, honouring `a[b]` / `a[]` nesting and urldecoding keys and
  * values (form decoding: '+' -> space).
+ *
+ * @param-out array<string,mixed> $result
  */
 function parse_str(string $string, #[\Manticore\Attr\RefOut] array &$result = []): void
 {
@@ -367,19 +369,27 @@ function parse_str(string $string, #[\Manticore\Attr\RefOut] array &$result = []
     }
 }
 
-/** Assign one decoded value into $arr under a possibly-bracketed key. */
+/**
+ * Assign one decoded value into $arr under a possibly-bracketed key.
+ *
+ * @param array<string,mixed> $arr
+ */
 function __mc_parse_str_assign(array &$arr, string $rawKey, string $val): void
 {
-    $bpos = \strpos($rawKey, '[');
+    // php urldecodes the WHOLE key FIRST and only then splits on brackets, so
+    // `tags%5B0%5D` nests exactly like `tags[0]`. Decoding per-segment instead
+    // would leave the encoded form as one flat key.
+    $key = \urldecode($rawKey);
+    $bpos = \strpos($key, '[');
     if ($bpos === false) {
-        $arr[\urldecode($rawKey)] = $val;
+        $arr[$key] = $val;
         return;
     }
-    $base = \urldecode(\substr($rawKey, 0, $bpos));
+    $base = \substr($key, 0, $bpos);
     // Collect the bracketed segments in order.
     /** @var string[] $segs */
     $segs = [];
-    $s = \substr($rawKey, $bpos);
+    $s = \substr($key, $bpos);
     $n = \strlen($s);
     $i = 0;
     while ($i < $n) {
@@ -398,8 +408,32 @@ function __mc_parse_str_assign(array &$arr, string $rawKey, string $val): void
     \__mc_nested_assign($arr[$base], $segs, 0, $val);
 }
 
-/** Walk/create nested arrays for the bracket segments, then set $val. An empty
- *  segment ("[]") appends. */
+/**
+ * True for a string php would normalise to an INT array key: "0", or a
+ * digit run with no leading zero, optionally negated ("-0" excluded).
+ */
+function __mc_canonical_int_key(string $s): bool
+{
+    $n = \strlen($s);
+    if ($n === 0) { return false; }
+    $i = $s[0] === '-' ? 1 : 0;
+    if ($i >= $n) { return false; }
+    if ($s[$i] === '0') { return $n - $i === 1 && $i === 0; }
+    for ($j = $i; $j < $n; $j = $j + 1) {
+        $c = \ord($s[$j]);
+        if ($c < 48 || $c > 57) { return false; }
+    }
+    // Out-of-range stays a string key (php keeps it as written).
+    return $n - $i <= 18;
+}
+
+/**
+ * Walk/create nested arrays for the bracket segments, then set $val. An empty
+ * segment ("[]") appends.
+ *
+ * @param array<string,mixed> $node
+ * @param string[]            $segs
+ */
 function __mc_nested_assign(array &$node, array $segs, int $idx, string $val): void
 {
     $seg = $segs[$idx];
@@ -413,6 +447,21 @@ function __mc_nested_assign(array &$node, array $segs, int $idx, string $val): v
             \__mc_nested_assign($child, $segs, $idx + 1, $val);
             $node[] = $child;
         }
+        return;
+    }
+    // php stores a canonical decimal-int segment under an INT key (`a[0]` is
+    // key 0, not "0"). That is the generic array-key rule, which manticore does
+    // not yet apply to string keys, so spell it out here.
+    if (\__mc_canonical_int_key($seg)) {
+        $ik = (int)$seg;
+        if ($last) {
+            $node[$ik] = $val;
+            return;
+        }
+        if (!isset($node[$ik]) || !\is_array($node[$ik])) {
+            $node[$ik] = [];
+        }
+        \__mc_nested_assign($node[$ik], $segs, $idx + 1, $val);
         return;
     }
     if ($last) {
@@ -429,10 +478,11 @@ function __mc_nested_assign(array &$node, array $segs, int $idx, string $val): v
  * http_build_query($data, ...). Flattens an assoc/list into a form-encoded query,
  * urlencoding keys and values and using `key[sub]` for nested arrays.
  *
- * NOTE: reading the element VALUES of the incoming array back as their real type
- * across the stdlib boundary needs the by-ref/cell-element boxing that the
- * separate repr-consistency epic supplies — until that merges the values read as
- * raw pointers. Implemented; starts producing correct output once repr lands.
+ * `#[CellArg]` makes the CALL SITE box the elements; the `array<string,mixed>`
+ * docblock is what makes this body read them back boxed. A bare `array` hint
+ * lowers to unknown-with-no-element, so the foreach value would ride raw.
+ *
+ * @param array<mixed,mixed> $data
  */
 function http_build_query(#[\Manticore\Attr\CellArg] array $data, string $numeric_prefix = '', string $arg_separator = '&'): string
 {
@@ -443,10 +493,15 @@ function http_build_query(#[\Manticore\Attr\CellArg] array $data, string $numeri
     return \implode($sep, $parts);
 }
 
-/** @param string[] $parts */
+/**
+ * @param array<mixed,mixed> $data
+ * @param string[]            $parts
+ */
 function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix, string $numPrefix, array &$parts): void
 {
     foreach ($data as $k => $v) {
+        // php DROPS null entries entirely (they are not emitted as `k=`).
+        if ($v === null) { continue; }
         $key = (string)$k;
         if ($prefix === '' && $numPrefix !== '' && \__mc_all_digits($key)) {
             $key = $numPrefix . $key;
@@ -465,6 +520,5 @@ function __mc_scalar_str(mixed $v): string
 {
     if ($v === true) { return '1'; }
     if ($v === false) { return '0'; }
-    if ($v === null) { return ''; }
     return (string)$v;
 }
