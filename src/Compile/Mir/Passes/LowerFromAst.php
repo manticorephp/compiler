@@ -306,6 +306,12 @@ final class LowerFromAst implements Pass
     public bool $includeReflection = false;
     /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
     public string $reflectionSrc = '';
+    /** Inject the DateTime class family (gated on the program MENTIONING one —
+     *  see Main.php). Gating is possible only because no stdlib signature names
+     *  a DateTime* class: the family talks to the stdlib through scalars. */
+    public bool $includeDateTime = false;
+    /** DateTime prelude source, read by Main from `prelude/datetime.php`. */
+    public string $dateTimeSrc = '';
     /** Inject the callback/element array functions (usort/sort/rsort/array_reduce)
      *  as prelude — compiled WITH the user program so call-site element inference
      *  types their array param and the in-module closure ABI matches (they can't

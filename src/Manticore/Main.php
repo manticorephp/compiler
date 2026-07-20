@@ -1374,6 +1374,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $printRSrc = prelude_src_or_empty("print_r.php");
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
     $reflectionSrc = prelude_src_or_empty("reflection.php");
+    $dateTimeSrc = prelude_src_or_empty("datetime.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1395,6 +1396,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // rather than failing).
         || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
                               'get_declared_traits']);
+    // The DateTime family gates on a MENTION, like the array and Reflection
+    // classes. It can be gated at all only because NO stdlib signature names a
+    // DateTime* class — the whole family talks to the stdlib through scalars —
+    // so a program that only calls date()/strtotime() carries none of it.
+    $useDateTime = $demand->mentionsAny(['DateTime', 'DateTimeImmutable', 'DateTimeZone',
+                                         'DateInterval', 'DatePeriod', 'DateTimeInterface',
+                                         'DateError', 'DateException',
+                                         'DateMalformedStringException',
+                                         'DateInvalidTimeZoneException']);
     $useVarDump = $demand->calls('var_dump');
     $usePrintR = $demand->calls('print_r');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
@@ -1433,6 +1443,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         dprint("compile failed: prelude: cannot read spl_arrays.php");
         return null;
     }
+    if ($useDateTime && $dateTimeSrc === "") {
+        dprint("compile failed: prelude: cannot read datetime.php");
+        return null;
+    }
     $program = new \Parser\Ast\Program($stmts, '', $aliases, $docs);
     // The pipeline throws RuntimeException on an unsupported construct.
     // Catch it so the compiler reports cleanly (and, in the self-hosted
@@ -1447,6 +1461,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->includePrintR = $usePrintR;
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeReflection = $useReflection;
+        $lower->includeDateTime = $useDateTime;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeCli = $useCli;
         $lower->exceptionsSrc = $exceptionsSrc;
@@ -1455,6 +1470,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
         $lower->reflectionSrc = $reflectionSrc;
+        $lower->dateTimeSrc = $dateTimeSrc;
         $lower->arrayFnsSrc = $arrayFnsSrc;
         $lower->cliSrc = $cliSrc;
         $lower->printRSrc = $printRSrc;
@@ -1665,6 +1681,7 @@ function analyze_prelude_files(): array {
     $names = [
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
+        "datetime.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

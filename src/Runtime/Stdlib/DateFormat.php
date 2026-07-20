@@ -117,7 +117,9 @@ function __mc_date_fmt(string $fmt, int $ts, int $us, int $zid, string $zname, i
     } else {
         $off = $zoff;
         $isdst = 0;
-        $abbr = $ztype === 2 ? $zname : \__mc_offstr($zoff, ':', false);
+        // A FIXED-offset zone has no abbreviation of its own, so php renders
+        // 'T' as GMT+hhmm while 'e' still shows the +hh:mm identifier.
+        $abbr = $ztype === 2 ? $zname : 'GMT' . \__mc_offstr($zoff, '', false);
     }
 
     $local = $ts + $off;

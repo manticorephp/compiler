@@ -29,6 +29,20 @@ function __mc_dt_fail(): int
     return -9223372036854775807;
 }
 
+/**
+ * Microseconds carried out of the most recent successful parse. A separate
+ * slot rather than a second return value, because the boundary here is one
+ * scalar per call — and two functions cannot share a `static`.
+ */
+function __mc_dt_us(int $op, int $v): int
+{
+    static $u = 0;
+    if ($op === 1) {
+        $u = $v;
+    }
+    return $u;
+}
+
 /** Month number for a full or 3+ letter English name, else 0. */
 function __mc_dt_month(string $w): int
 {
@@ -550,6 +564,7 @@ function __mc_strtotime_core(string $str, int $base, int $zid): int
     if ($mi === $UN) { $mi = 0; }
     if ($sec === $UN) { $sec = 0; }
 
+    \__mc_dt_us(1, $us);
     return \__mc_dt_build($y, $mo, $d, $h, $mi, $sec, $us,
         $relY, $relM, $relD, $relH, $relI, $relS,
         $relWd, $relWdBehavior, $haveRelWd, $firstLast,
