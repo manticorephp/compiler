@@ -307,56 +307,103 @@ function __mc_dt_from_format(string $format, string $value): int
 }
 
 /**
- * Every zone name in the database, sorted. The element type is declared so the
- * caller reads real strings rather than tagged bits.
+ * Every CANONICAL zone name, sorted.
+ *
+ * Read from `zone.tab` rather than by walking the directory: the tree also
+ * holds backward-compatibility LINKS (Africa/Bamako -> Africa/Abidjan), and a
+ * walk returned 597 names where php reports 419. zone.tab lists exactly the
+ * canonical set, and UTC — which has no country and so no row — is added.
+ *
+ * The element type is declared so the caller reads real strings, not tagged
+ * bits.
  *
  * @return string[]
  */
 function timezone_identifiers_list(int $timezoneGroup = 2047, ?string $countryCode = null): array
 {
+    /** @var string[] $out */
     $out = [];
-    $root = \__mc_tzdir();
-    \__mc_tz_walk($root, '', $out);
+    $raw = \file_get_contents(\__mc_tzdir() . '/zone.tab');
+    if ($raw === false) {
+        return $out;
+    }
+    $lines = \explode("\n", $raw);
+    foreach ($lines as $line) {
+        if ($line === '' || $line[0] === '#') {
+            continue;
+        }
+        // country \t coordinates \t name [\t comments]
+        $cols = \explode("\t", $line);
+        if (\count($cols) < 3) {
+            continue;
+        }
+        if ($countryCode !== null && $countryCode !== '' && $cols[0] !== $countryCode) {
+            continue;
+        }
+        $out[] = \trim($cols[2]);
+    }
+    if ($countryCode === null || $countryCode === '') {
+        $out[] = 'UTC';
+    }
     \sort($out);
     return $out;
 }
 
 /**
- * Recursive directory walk collecting zone names. $out is string-element so the
- * names travel raw.
+ * Country and coordinates for a zone, from zone.tab, or an empty result when
+ * the zone has no row (UTC and the like).
  *
- * @param string[] $out
- * @param-out string[] $out
+ * @return array<string, mixed>
  */
-function __mc_tz_walk(string $root, string $prefix, array<int, string> &$out): void
+function __mc_tz_location(string $name): array
 {
-    $dir = $prefix === '' ? $root : $root . '/' . $prefix;
-    $entries = \scandir($dir);
-    if ($entries === false) {
-        return;
+    $out = ['country_code' => '??', 'latitude' => 0.0, 'longitude' => 0.0, 'comments' => ''];
+    $raw = \file_get_contents(\__mc_tzdir() . '/zone.tab');
+    if ($raw === false) {
+        return $out;
     }
-    foreach ($entries as $e) {
-        if ($e === '.' || $e === '..') {
+    foreach (\explode("\n", $raw) as $line) {
+        if ($line === '' || $line[0] === '#') {
             continue;
         }
-        // Files that are not zones: all-caps tables and the posix/right trees.
-        if ($e === 'posix' || $e === 'right' || $e === 'Factory') {
+        $cols = \explode("\t", $line);
+        if (\count($cols) < 3 || \trim($cols[2]) !== $name) {
             continue;
         }
-        $c0 = \ord($e[0]);
-        if ($c0 < 65 || $c0 > 90) {
-            continue;
+        $out['country_code'] = $cols[0];
+        // ISO 6709: +DDMM(SS)+DDDMM(SS)
+        $c = $cols[1];
+        $split = 1;
+        $n = \strlen($c);
+        for ($i = 1; $i < $n; $i++) {
+            if ($c[$i] === '+' || $c[$i] === '-') {
+                $split = $i;
+                break;
+            }
         }
-        $rel = $prefix === '' ? $e : $prefix . '/' . $e;
-        $full = $root . '/' . $rel;
-        if (\is_dir($full)) {
-            \__mc_tz_walk($root, $rel, $out);
-            continue;
-        }
-        if (\__mc_tz_open($rel) >= 0) {
-            $out[] = $rel;
-        }
+        $out['latitude'] = \__mc_iso6709(\substr($c, 0, $split));
+        $out['longitude'] = \__mc_iso6709(\substr($c, $split));
+        $out['comments'] = \count($cols) > 3 ? \trim($cols[3]) : '';
+        return $out;
     }
+    return $out;
+}
+
+/** One ISO 6709 coordinate (+DDMM[SS] or +DDDMM[SS]) to signed degrees. */
+function __mc_iso6709(string $s): float
+{
+    if (\strlen($s) < 5) {
+        return 0.0;
+    }
+    $sign = $s[0] === '-' ? -1.0 : 1.0;
+    $body = \substr($s, 1);
+    // Degrees take 2 digits for a latitude, 3 for a longitude; the rest is
+    // MM or MMSS.
+    $degLen = \strlen($body) === 4 || \strlen($body) === 6 ? 2 : 3;
+    $deg = (float)\substr($body, 0, $degLen);
+    $min = (float)\substr($body, $degLen, 2);
+    $sec = \strlen($body) > $degLen + 2 ? (float)\substr($body, $degLen + 2, 2) : 0.0;
+    return $sign * ($deg + $min / 60.0 + $sec / 3600.0);
 }
 
 // NOTE: the procedural aliases that take a DateTimeZone / DateTimeInterface

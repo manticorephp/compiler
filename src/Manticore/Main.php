@@ -1404,7 +1404,18 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
                                          'DateInterval', 'DatePeriod', 'DateTimeInterface',
                                          'DateError', 'DateException',
                                          'DateMalformedStringException',
-                                         'DateInvalidTimeZoneException']);
+                                         'DateInvalidTimeZoneException'])
+        // The procedural aliases (date_create / date_diff / timezone_open / …)
+        // live in the same file because they NAME those classes; a program may
+        // call one without ever writing a class name.
+        || $demand->callsAny(['date_create', 'date_create_immutable', 'date_create_from_format',
+                              'date_format', 'date_timestamp_get', 'date_timestamp_set',
+                              'date_offset_get', 'date_timezone_get', 'date_timezone_set',
+                              'date_modify', 'date_add', 'date_sub', 'date_diff',
+                              'date_date_set', 'date_time_set', 'date_isodate_set',
+                              'date_interval_format', 'date_interval_create_from_date_string',
+                              'timezone_open', 'timezone_name_get', 'timezone_offset_get',
+                              'timezone_transitions_get', 'timezone_location_get']);
     $useVarDump = $demand->calls('var_dump');
     $usePrintR = $demand->calls('print_r');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it

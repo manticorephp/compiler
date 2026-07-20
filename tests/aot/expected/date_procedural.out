@@ -1,0 +1,29 @@
+2017-07-14 16:01:07 UTC
+1500048067
+0
+UTC
+modify 2017-07-15
+add 2017-08-15
+sub 2016-08-15
+dateset 2020-02-29
+timeset 01:02:03
+isoset 2017-07-14
+tsset 2017-07-14 02:40:00
+diff 1 2 14 + days=438
+immutable 2017-07-14
+fromformat 2017-07-14
+offset 10800
+identifiers 419
+first Africa/Abidjan
+  has Europe/Kyiv yes
+  has America/New_York yes
+  has UTC yes
+  has Asia/Tokyo yes
+transitions 3
+  1483228800 7200 EET 0
+  1490490000 10800 EEST 1
+  1509238800 7200 EET 0
+country UA
+comments most of Ukraine
+fromdatestring d=2
+fmt 1-2-3 4:5:6

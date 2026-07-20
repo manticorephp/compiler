@@ -112,22 +112,40 @@ class DateTimeZone
     }
 
     /**
-     * Every DST transition recorded for this zone. The rows are assembled HERE,
-     * in the prelude, from int-returning registry ops — the whole reason the
-     * registry speaks scalars.
+     * Every DST transition recorded for this zone, preceded by the state in
+     * force AT $timestampBegin (php emits that leading pseudo-transition, which
+     * is why its count is one higher than the number of real switches).
      *
-     * @return array<int, array{ts:int, time:string, offset:int, isdst:bool, abbr:string}>
+     * The rows are assembled HERE, in the prelude, from int-returning registry
+     * ops — the whole reason the registry speaks scalars.
+     *
+     * The return type is spelled `array<int, array<string, mixed>>` rather than
+     * a bare `array`: the row values are heterogeneous, so the inner element
+     * must be a genuine CELL for the caller's `$t['ts']` to read back by tag.
+     * A bare `array` erases the inner element and the reads come back as raw
+     * tag bits.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function getTransitions(int $timestampBegin = -2145916800, int $timestampEnd = 2145916800): array
     {
+        /** @var array<int, array<string, mixed>> $out */
         $out = [];
         if ($this->tztype !== 3) {
             return $out;
         }
+        $ty0 = \__mc_tz(8, $this->tzid, $timestampBegin);
+        $out[] = [
+            'ts' => $timestampBegin,
+            'time' => \gmdate('Y-m-d\TH:i:sP', $timestampBegin),
+            'offset' => \__mc_tz(4, $this->tzid, $ty0),
+            'isdst' => \__mc_tz(5, $this->tzid, $ty0) === 1,
+            'abbr' => \__mc_tz_unpackabbr(\__mc_tz(6, $this->tzid, $ty0)),
+        ];
         $n = \__mc_tz(1, $this->tzid, 0);
         for ($i = 0; $i < $n; $i++) {
             $at = \__mc_tz(2, $this->tzid, $i);
-            if ($at < $timestampBegin || $at > $timestampEnd) {
+            if ($at <= $timestampBegin || $at > $timestampEnd) {
                 continue;
             }
             $ty = \__mc_tz(3, $this->tzid, $i);
@@ -140,6 +158,19 @@ class DateTimeZone
             ];
         }
         return $out;
+    }
+
+    /**
+     * Country and coordinates, or false for a zone with no zone.tab row.
+     *
+     * @return array<string, mixed>|false
+     */
+    public function getLocation(): array|false
+    {
+        if ($this->tztype !== 3) {
+            return false;
+        }
+        return \__mc_tz_location($this->tzname);
     }
 
     /** @return string[] */
@@ -775,4 +806,129 @@ class DatePeriod implements Iterator
         $this->advance();
         $this->idx = $this->idx + 1;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Procedural aliases.
+//
+// These live in the PRELUDE, beside the classes, and NOT in the stdlib: a
+// stdlib signature naming DateTimeZone / DateTimeInterface would pull the class
+// into the .sig, and a class in the .sig has to be registered in every module —
+// exactly what forces \Resource to be unconditional. Main.php's gate therefore
+// also fires on a CALL to any of these, not only on a class MENTION.
+// ---------------------------------------------------------------------------
+
+function date_create(string $datetime = 'now', ?DateTimeZone $timezone = null): DateTime|false
+{
+    return new DateTime($datetime, $timezone);
+}
+
+function date_create_immutable(string $datetime = 'now', ?DateTimeZone $timezone = null): DateTimeImmutable|false
+{
+    return new DateTimeImmutable($datetime, $timezone);
+}
+
+function date_create_from_format(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false
+{
+    return DateTime::createFromFormat($format, $datetime, $timezone);
+}
+
+function date_format(DateTimeInterface $object, string $format): string
+{
+    return $object->format($format);
+}
+
+function date_timestamp_get(DateTimeInterface $object): int
+{
+    return $object->getTimestamp();
+}
+
+function date_timestamp_set(DateTime $object, int $timestamp): DateTime
+{
+    return $object->setTimestamp($timestamp);
+}
+
+function date_offset_get(DateTimeInterface $object): int
+{
+    return $object->getOffset();
+}
+
+function date_timezone_get(DateTimeInterface $object): DateTimeZone
+{
+    return $object->getTimezone();
+}
+
+function date_timezone_set(DateTime $object, DateTimeZone $timezone): DateTime
+{
+    return $object->setTimezone($timezone);
+}
+
+function date_modify(DateTime $object, string $modifier): DateTime
+{
+    return $object->modify($modifier);
+}
+
+function date_add(DateTime $object, DateInterval $interval): DateTime
+{
+    return $object->add($interval);
+}
+
+function date_sub(DateTime $object, DateInterval $interval): DateTime
+{
+    return $object->sub($interval);
+}
+
+function date_diff(DateTimeInterface $baseObject, DateTimeInterface $targetObject, bool $absolute = false): DateInterval
+{
+    return $baseObject->diff($targetObject, $absolute);
+}
+
+function date_date_set(DateTime $object, int $year, int $month, int $day): DateTime
+{
+    return $object->setDate($year, $month, $day);
+}
+
+function date_time_set(DateTime $object, int $hour, int $minute, int $second = 0, int $microsecond = 0): DateTime
+{
+    return $object->setTime($hour, $minute, $second, $microsecond);
+}
+
+function date_isodate_set(DateTime $object, int $year, int $week, int $dayOfWeek = 1): DateTime
+{
+    return $object->setISODate($year, $week, $dayOfWeek);
+}
+
+function date_interval_format(DateInterval $object, string $format): string
+{
+    return $object->format($format);
+}
+
+function date_interval_create_from_date_string(string $datetime): DateInterval
+{
+    return DateInterval::createFromDateString($datetime);
+}
+
+function timezone_open(string $timezone): DateTimeZone|false
+{
+    return new DateTimeZone($timezone);
+}
+
+function timezone_name_get(DateTimeZone $object): string
+{
+    return $object->getName();
+}
+
+function timezone_offset_get(DateTimeZone $object, DateTimeInterface $datetime): int
+{
+    return $object->getOffset($datetime);
+}
+
+function timezone_transitions_get(DateTimeZone $object, int $timestampBegin = -2145916800, int $timestampEnd = 2145916800): array
+{
+    return $object->getTransitions($timestampBegin, $timestampEnd);
+}
+
+function timezone_location_get(DateTimeZone $object): array|false
+{
+    return $object->getLocation();
 }
