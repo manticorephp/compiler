@@ -33,8 +33,7 @@ SEED_DIR="$(mktemp -d)"
 SEED="$SEED_DIR/manticore_seed"
 LL="$SEED_DIR/seed.ll"
 OBJ="$SEED_DIR/seed.o"
-STUBS_C="$SEED_DIR/seed_stubs.c"
-STUBS_O="$SEED_DIR/seed_stubs.o"
+STUBS_PREFIX="$SEED_DIR/seed"
 
 echo "[1/5] Zend bootstrap: src/ -> seed IR"
 # `find | sort` puts zzz_entry.php (the top-level driver) last so every class /
@@ -44,23 +43,12 @@ find src -name "*.php" | sort | xargs php -d memory_limit=2048M tools/compile_fi
 echo "[2/5] assemble seed -> $OBJ"
 clang -c "$LL" -o "$OBJ" -Wno-override-module
 
-echo "[3/5] stub undefined symbols -> $STUBS_C"
+echo "[3/5+4/5] stub undefined symbols, link seed -> $SEED"
 # Probe the linker without the runtime lib — every symbol it still can't find
-# gets a void* fallback. macOS underscores names in errors; strip it defensively.
-set +e
-LINK_ERR="$(cc "$OBJ" -o /dev/null 2>&1)"
-set -e
-echo "$LINK_ERR" \
-    | grep '^  "_' \
-    | awk -F'"' '{print $2}' \
-    | sort -u \
-    | grep -vE '^_(main|manticore_cli_argc|manticore_cli_argv)$' \
-    | awk '{name=$1; sub(/^_/, "", name); print "void* "name"() { return 0; }"}' > "$STUBS_C" \
-    || true
-clang -c "$STUBS_C" -o "$STUBS_O"
-
-echo "[4/5] link seed -> $SEED"
-cc "$OBJ" "$STUBS_O" -o "$SEED"
+# gets a void* fallback, then link. Shared with tools/selfhost.sh: the symbol
+# extraction has to understand Apple ld, GNU ld and lld, and one copy of that
+# is enough (it was three, all Apple-only — issue #1).
+STUBS_PREFIX="$STUBS_PREFIX" bash tools/link_stubs.sh "$SEED" "$OBJ"
 
 # Install the prelude beside the shipped stdlib object: `lib/prelude/` is one of
 # find_prelude_src's argv0-relative candidates, so a distribution is binary + lib/

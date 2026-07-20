@@ -1,0 +1,20 @@
+# A stale HOST bin/manticore + lib/*.o in the build context is the "stale .o
+# fakes a pass" trap, and on a macOS host they are Mach-O — they would be linked
+# into an ELF build. Keep build outputs out entirely; the image rebuilds them.
+bin/manticore
+bin/manticore_self
+lib/
+**/*.o
+**/*.sig
+tests/aot/tmp/
+
+.git/
+.gitignore
+.claude/
+.idea/
+.manticore/
+.fuzz-findings/
+graphify-out/
+**/.DS_Store
+
+tools/docker/probe-raw/

@@ -35,8 +35,7 @@ mkdir -p "$OUT_DIR"
 
 LL="$OUT_DIR/${OUT_BASE}.ll"
 OBJ="$OUT_DIR/${OUT_BASE}.o"
-STUBS_C="$OUT_DIR/${OUT_BASE}_stubs.c"
-STUBS_O="$OUT_DIR/${OUT_BASE}_stubs.o"
+STUBS_PREFIX="$OUT_DIR/${OUT_BASE}"
 
 if [[ ! -x "$MANTICORE" ]]; then
     echo "fatal: $MANTICORE not executable; run bin/compile first" >&2
@@ -49,20 +48,7 @@ echo "[1/4] $MANTICORE dump-llvm-mir src -> $LL"
 echo "[2/4] assemble $LL -> $OBJ"
 clang -c -x ir "$LL" -o "$OBJ" -Wno-override-module
 
-echo "[3/4] generate stubs for undefined symbols -> $STUBS_C"
-set +e
-LINK_ERR="$(cc "$OBJ" -o /dev/null 2>&1)"
-set -e
-echo "$LINK_ERR" \
-    | grep '^  "_' \
-    | awk -F'"' '{print $2}' \
-    | sort -u \
-    | grep -vE '^_(main|manticore_cli_argc|manticore_cli_argv)$' \
-    | awk '{name=$1; sub(/^_/, "", name); print "void* "name"() { return 0; }"}' > "$STUBS_C" \
-    || true
-clang -c "$STUBS_C" -o "$STUBS_O"
-
-echo "[4/4] link -> $OUT"
-cc "$OBJ" "$STUBS_O" -o "$OUT"
+echo "[3/4+4/4] stub undefined symbols, link -> $OUT"
+STUBS_PREFIX="$STUBS_PREFIX" bash tools/link_stubs.sh "$OUT" "$OBJ"
 
 echo "ok: $OUT ($(stat -f%z "$OUT" 2>/dev/null || stat -c%s "$OUT") bytes)"

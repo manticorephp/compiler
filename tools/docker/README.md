@@ -54,9 +54,10 @@ bash tools/docker/run_tests.sh --both
 bash tools/docker/run_tests.sh --shell    # interactive container
 ```
 
-`Dockerfile.debian` carries **PHP 8.5** (sury.org) and the **latest stable
-clang** (apt.llvm.org, currently 21) on board, deliberately -- Debian bookworm's
-stock php 8.2 and clang 14 are both unusable here:
+The image is the **root `Dockerfile`'s `toolchain` target** -- the same one an
+end user builds (see `docs/install.md`). It carries **PHP 8.5** (sury.org) and
+the **latest stable clang** (apt.llvm.org, currently 21) on board, deliberately
+-- Debian bookworm's stock php 8.2 and clang 14 are both unusable here:
 
 - PHP 8.5 is manticore's target language, so the Zend seed must be 8.5.
 - clang 14 predates LLVM 15's opaque pointers and **rejects the IR manticore
@@ -73,31 +74,36 @@ would report `tail`'s exit code and hide a failed build.
 
 ### Current state: the build does NOT complete on Linux
 
-Two blockers, in order.
+There were two blockers. The first is **fixed**; the second is not.
 
-**(a) `bin/compile` stage [3/5] is macOS-only.** It stubs undefined symbols by
-scraping the linker's error text with `grep '^  "_'`, which matches Apple ld's
-format only:
+**(a) `bin/compile` stage [3/5] was macOS-only -- FIXED (issue #1).** It stubbed
+undefined symbols by scraping the linker's error text with `grep '^  "_'`, which
+matches Apple ld's format only:
 
 ```
   "_pcre2_compile_8", referenced from:
 ```
 
-GNU ld reports the same condition as:
+GNU ld reports the same condition differently, and *in the user's language*:
 
 ```
 mir:(.text+0x31cb64): undefined reference to `pcre2_compile_8'
+mir:(.text+0x31cb64): référence indéfinie vers « pcre2_compile_8 »   # fr_FR
 ```
 
-so on Linux `stubs.c` comes out EMPTY and stage [4/5] fails with the seven
-`pcre2_*_8` references it was supposed to stub. `patch_compile_for_gnu_ld.php`
-fixes the extraction to accept both linkers; `run_tests.sh` applies it **to the
-container's copy only** (`PATCH_LD=0` to see the unpatched failure). The real
-fix belongs in `bin/compile` and is not applied here -- this tree only touches
-`tools/docker/`.
+so on Linux `stubs.c` came out EMPTY and stage [4/5] failed with the seven
+`pcre2_*_8` references it was supposed to stub. The same broken snippet was
+copy-pasted into `bin/compile`, `tools/selfhost.sh` and `tools/link_stubs.sh`.
 
-**(b) With (a) patched, the seed SIGSEGVs building the stdlib.** Stages 1-4
-pass, then stage [5/5] crashes:
+Now there is **one** implementation, `tools/link_stubs.sh`, which the other two
+call. It probes the linker under `LC_ALL=C` (killing the localized-message class
+of failure at the source rather than matching translations), understands Apple
+ld / GNU ld / lld, and **fails loudly** if the linker reported errors but no
+symbols were extracted -- the silent-empty-`stubs.c` mode is what made this bug
+surface one stage later than its cause.
+
+**(b) The seed SIGSEGVs building the stdlib.** Stages 1-4 now pass, then stage
+[5/5] crashes:
 
 ```
 build: library 'stdlib' (src/Runtime -> lib/manticore_stdlib.o)
@@ -138,9 +144,10 @@ AOT suite has not yet run on Linux.
 | `probe.c` | prints constants + struct layout from the container's own headers |
 | `render_results.php` | raw dumps -> `PROBE_RESULTS.md`, validates `Stat.php` |
 | `PROBE_RESULTS.md` | generated report (committed) |
-| `Dockerfile.debian` | Tier 2 image: php 8.5 + latest clang + libpcre2-dev |
 | `run_tests.sh` | Tier 2 driver: build in container, run the full AOT suite |
-| `patch_compile_for_gnu_ld.php` | diagnostic patch for blocker (a), container copy only |
+
+The Tier 2 image is the root `Dockerfile` (`--target toolchain`), not a file
+here -- one image definition serves both users and this harness.
 
 The only scripting languages here are bash, php and C -- no python, matching the
 rest of the repo. Tier 1 renders on the host's `php`; the Tier 2 patch runs on

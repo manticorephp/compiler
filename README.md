@@ -125,10 +125,21 @@ string builders (`$s = $s . …`) append in place, not the former O(n²) copy.
 
 ## Requirements
 
-- **PHP 8.1+** — only for the cold bootstrap (Zend runs the compiler source once
+Emitted binaries are fully static and depend on nothing but libc. The
+*compiler* needs a real toolchain on the host:
+
+- **`clang`** and **`cc`** on `PATH`, with **LLVM ≥ 15** — Manticore emits
+  opaque-pointer IR, which clang 14 rejects.
+- **PHP 8.5** — only for the cold bootstrap (Zend runs the compiler source once
   to seed the first native binary; emitted binaries make no PHP-runtime calls).
-- **`clang`** and **`cc`** on `PATH` (Xcode CLT on macOS, `build-essential` on
-  Debian/Ubuntu).
+- **libpcre2** (`preg_*`) and **OpenSSL 3** (TLS, `hash`/`hmac`) development
+  packages, plus `pcre2-config` / `pkg-config` to locate them.
+
+macOS arm64/x86_64 is the supported platform. On Linux the toolchain works but
+the full build is blocked by a known compiler bug — details below.
+
+**Per-OS package lists, Docker images and troubleshooting:
+[`docs/install.md`](docs/install.md).**
 
 ## Quick start
 
@@ -320,6 +331,12 @@ catch layout roulette.
 
 ## Known limitations
 
+- **Linux builds do not complete yet.** The toolchain, the Zend seed and the
+  seed link all work (the Apple-`ld`-only symbol scraper that used to break the
+  link was [issue #1], fixed), but `bin/compile` stage [5/5] segfaults in
+  `EmitLlvm::unboxCellToType` while building the stdlib. A compiler bug, scoped
+  and reproducible — see [`tools/docker/README.md`](tools/docker/README.md).
+  macOS is unaffected.
 - **Integer overflow wraps** (two's-complement) instead of promoting to float
   as PHP does — `PHP_INT_MAX + 1` gives `PHP_INT_MIN`, not a float.
 - **Dynamic name resolution** is not yet supported — `new $cls()`, `$cls::m()`,
@@ -366,3 +383,5 @@ catch layout roulette.
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+[issue #1]: https://github.com/manticorephp/compiler/issues/1
