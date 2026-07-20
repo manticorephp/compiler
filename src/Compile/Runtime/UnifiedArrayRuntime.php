@@ -89,6 +89,7 @@ final class UnifiedArrayRuntime
         $this->emitCopyDeep();
         $this->emitCopyCells();
         $this->emitHashStr();
+        $this->emitStrCanonInt();
         $this->emitIndexDrop();
         $this->emitIndexBuild();
         $this->emitIndexFind();
@@ -103,6 +104,131 @@ final class UnifiedArrayRuntime
      * LLVM: FNV needs a WRAPPING `mul`, but the structured builder forces
      * `mul nsw` (overflow UB).
      */
+    /**
+     * `__mir_str_canon_int(key, out) -> i64`. 1 (and *out = the value) when the
+     * key is a string php would normalise to an INT array key, else 0.
+     *
+     * php's rule, exactly: an optional '-', then either a lone "0" (never
+     * "-0") or a digit run with no leading zero, and the whole thing must fit
+     * in an int64. "01", "1.0", " 1", "+1", "1e2" and an out-of-range run all
+     * stay string keys. The common case (a key whose first byte is not a digit
+     * or '-') bails after one load.
+     */
+    private function emitStrCanonInt(): void
+    {
+        $ro = (string)MemoryAbi::STRING_RC_OFFSET;
+        $lo = (string)MemoryAbi::STRING_LEN_OFFSET;
+        $co = (string)MemoryAbi::STRING_CAP_OFFSET;
+        $fn = $this->module->func('__mir_str_canon_int', Type::i64());
+        $key = $fn->param(Type::ptr(), 'key');
+        $out = $fn->param(Type::ptr(), 'out');
+        $k = $key->operand;
+        $o = $out->operand;
+
+        $e = $fn->block('entry');
+        $e->raw('  %isn = icmp eq ptr ' . $k . ', null');
+        $e->raw('  br i1 %isn, label %z, label %hdrchk');
+        // Same header heuristic __mir_array_hash_str uses: a RAW headerless key
+        // must not have -16 read off it.
+        $hc = $fn->block('hdrchk');
+        $hc->raw('  %rcp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $ro);
+        $hc->raw('  %rc = load i64, ptr %rcp');
+        $hc->raw('  %lp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $lo);
+        $hc->raw('  %hlen = load i64, ptr %lp');
+        $hc->raw('  %cp = getelementptr inbounds i8, ptr ' . $k . ', i64 ' . $co);
+        $hc->raw('  %cap = load i64, ptr %cp');
+        $hc->raw('  %rlo = icmp slt i64 %rc, -1');
+        $hc->raw('  %rhi = icmp sgt i64 %rc, 268435456');
+        $hc->raw('  %llo = icmp slt i64 %hlen, 0');
+        $hc->raw('  %lhi = icmp sgt i64 %hlen, %cap');
+        $hc->raw('  %b1 = or i1 %rlo, %rhi');
+        $hc->raw('  %b2 = or i1 %llo, %lhi');
+        $hc->raw('  %bad = or i1 %b1, %b2');
+        $hc->raw('  br i1 %bad, label %rawlen, label %hdrlen');
+        $hl = $fn->block('hdrlen');
+        $hl->raw('  br label %len');
+        $rl = $fn->block('rawlen');
+        $rl->raw('  %rawn = call i64 @strlen(ptr ' . $k . ')');
+        $rl->raw('  br label %len');
+        $len = $fn->block('len');
+        $len->raw('  %n = phi i64 [ %hlen, %hdrlen ], [ %rawn, %rawlen ]');
+        $len->raw('  %isempty = icmp sle i64 %n, 0');
+        $len->raw('  br i1 %isempty, label %z, label %start');
+        // Optional leading '-'; "-" alone is not a key.
+        $st = $fn->block('start');
+        $st->raw('  %c0 = load i8, ptr ' . $k);
+        $st->raw('  %isneg = icmp eq i8 %c0, 45');
+        $st->raw('  %i0 = select i1 %isneg, i64 1, i64 0');
+        $st->raw('  %nodig = icmp sge i64 %i0, %n');
+        $st->raw('  br i1 %nodig, label %z, label %firstdig');
+        $fd = $fn->block('firstdig');
+        $fd->raw('  %fp = getelementptr inbounds i8, ptr ' . $k . ', i64 %i0');
+        $fd->raw('  %f = load i8, ptr %fp');
+        $fd->raw('  %iszero = icmp eq i8 %f, 48');
+        $fd->raw('  br i1 %iszero, label %zerocase, label %digits');
+        // A leading zero is canonical only as the whole key "0" (not "-0").
+        $zc = $fn->block('zerocase');
+        $zc->raw('  %isone = icmp eq i64 %n, 1');
+        $zc->raw('  %notneg = xor i1 %isneg, true');
+        $zc->raw('  %ok0 = and i1 %isone, %notneg');
+        $zc->raw('  br i1 %ok0, label %retzero, label %z');
+        $rz = $fn->block('retzero');
+        $rz->raw('  store i64 0, ptr ' . $o);
+        $rz->raw('  ret i64 1');
+        $dg = $fn->block('digits');
+        $dg->raw('  %flo = icmp ult i8 %f, 49');
+        $dg->raw('  %fhi = icmp ugt i8 %f, 57');
+        $dg->raw('  %fbad = or i1 %flo, %fhi');
+        $dg->raw('  br i1 %fbad, label %z, label %loopinit');
+        $li = $fn->block('loopinit');
+        $li->raw('  %acc.addr = alloca i64');
+        $li->raw('  store i64 0, ptr %acc.addr');
+        $li->raw('  %i.addr = alloca i64');
+        $li->raw('  store i64 %i0, ptr %i.addr');
+        $li->raw('  br label %loop');
+        $lp = $fn->block('loop');
+        $lp->raw('  %i = load i64, ptr %i.addr');
+        $lp->raw('  %atend = icmp sge i64 %i, %n');
+        $lp->raw('  br i1 %atend, label %fin, label %body');
+        $bd = $fn->block('body');
+        $bd->raw('  %bp = getelementptr inbounds i8, ptr ' . $k . ', i64 %i');
+        $bd->raw('  %b = load i8, ptr %bp');
+        $bd->raw('  %blo = icmp ult i8 %b, 48');
+        $bd->raw('  %bhi = icmp ugt i8 %b, 57');
+        $bd->raw('  %bbad = or i1 %blo, %bhi');
+        $bd->raw('  br i1 %bbad, label %z, label %accum');
+        // Overflow gate: 922337203685477580 is (2^63-1)/10; the last digit may
+        // reach 8 only when negative, which lands exactly on PHP_INT_MIN.
+        $ac = $fn->block('accum');
+        $ac->raw('  %d8 = sub i8 %b, 48');
+        $ac->raw('  %d = zext i8 %d8 to i64');
+        $ac->raw('  %a = load i64, ptr %acc.addr');
+        $ac->raw('  %ovf = icmp ugt i64 %a, 922337203685477580');
+        $ac->raw('  br i1 %ovf, label %z, label %ovfchk');
+        $oc = $fn->block('ovfchk');
+        $oc->raw('  %ateq = icmp eq i64 %a, 922337203685477580');
+        $oc->raw('  %lim = select i1 %isneg, i64 8, i64 7');
+        $oc->raw('  %dhi = icmp ugt i64 %d, %lim');
+        $oc->raw('  %bad2 = and i1 %ateq, %dhi');
+        $oc->raw('  br i1 %bad2, label %z, label %step');
+        $sp = $fn->block('step');
+        $sp->raw('  %a10 = mul i64 %a, 10');
+        $sp->raw('  %an = add i64 %a10, %d');
+        $sp->raw('  store i64 %an, ptr %acc.addr');
+        $sp->raw('  %inext = add i64 %i, 1');
+        $sp->raw('  store i64 %inext, ptr %i.addr');
+        $sp->raw('  br label %loop');
+        // Negating the unsigned accumulator is what makes PHP_INT_MIN work.
+        $fin = $fn->block('fin');
+        $fin->raw('  %af = load i64, ptr %acc.addr');
+        $fin->raw('  %negv = sub i64 0, %af');
+        $fin->raw('  %vf = select i1 %isneg, i64 %negv, i64 %af');
+        $fin->raw('  store i64 %vf, ptr ' . $o);
+        $fin->raw('  ret i64 1');
+        $z = $fn->block('z');
+        $z->raw('  ret i64 0');
+    }
+
     private function emitHashStr(): void
     {
         // FNV-1a over the content, with a per-string hash CACHE at

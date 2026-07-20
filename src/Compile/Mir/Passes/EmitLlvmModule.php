@@ -166,8 +166,8 @@ trait EmitLlvmModule
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
         // literal share one layout so retain/release work on either.
-        foreach ($this->pool->all() as $value => $id) {
-            $out .= $this->strGlobalDef('@.str.' . (string)$id, (string)$value);
+        foreach ($this->pool->all() as $id => $value) {
+            $out .= $this->strGlobalDef('@.str.' . (string)$id, $value);
         }
         $out .= $globalCells;
         // Zero word: a null vec/assoc base (the empty-literal optimization
