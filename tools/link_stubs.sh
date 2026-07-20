@@ -31,6 +31,7 @@ STUBS_O="${PREFIX}_stubs.o"
 # under e.g. fr_FR the message is `référence indéfinie vers « sym »` and any
 # pattern written against the English text silently matches nothing.
 LINK_ERR="$(LC_ALL=C LANG=C cc "${OBJS[@]}" -o /dev/null 2>&1)"
+PROBE_RC=$?
 
 # Three linker dialects report the same condition three ways:
 #
@@ -50,7 +51,10 @@ SYMS="$({
 # reported undefined symbols, extraction matched none of them, and the link
 # below then died on the very symbols this stage exists to stub. Fail here,
 # where the cause is visible, instead of one stage later where it is not.
-if [[ -n "$LINK_ERR" && -z "$SYMS" ]]; then
+#
+# Gate on the probe's EXIT CODE, not on LINK_ERR being non-empty: a successful
+# link that merely emitted warnings needs no stubs and must not trip this.
+if [[ "$PROBE_RC" -ne 0 && -z "$SYMS" ]]; then
     echo "link_stubs.sh: linker reported errors but no undefined symbols were extracted." >&2
     echo "link_stubs.sh: unrecognised linker diagnostic format — raw output follows." >&2
     printf '%s\n' "$LINK_ERR" >&2
