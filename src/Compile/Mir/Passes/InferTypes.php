@@ -876,10 +876,18 @@ final class InferTypes implements Pass
                 // so `$b[$i][$j]` carries the inner type instead of erasing to
                 // unknown — without this a nested float read is compiled as an
                 // integer op on the raw double bits (see nbody).
+                // An OBJ element refines too. Without it a bare-`array` param fed
+                // an object array kept its element UNKNOWN, so a `mixed` return
+                // of a local holding one boxed the raw handle by GUESSING int —
+                // `gettype()` said "integer" for both an object and null. The
+                // scalar elements already worked precisely BECAUSE they refine
+                // here (int → cell via nullBoxesWith, string → `?string`); this
+                // puts objects on the same, already-correct path instead of
+                // trying to recover the repr at the return boundary.
                 $nested = $elem !== null && $elem->isArray();
                 $refinable = $ek === Type::KIND_STRING || $ek === Type::KIND_INT
                     || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
-                    || $ek === Type::KIND_CELL || $nested;
+                    || $ek === Type::KIND_CELL || $ek === Type::KIND_OBJ || $nested;
                 if (!$refinable) { $conflict[$key] = true; continue; }
                 // A heterogeneous vec[cell] arg (element boxed by nature) records
                 // that this param has a CELL floor — even if a differing concrete
@@ -1009,6 +1017,11 @@ final class InferTypes implements Pass
     private function sameElemShape(Type $a, Type $b): bool
     {
         if ($a->kind !== $b->kind) { return false; }
+        // Two OBJ elements agree only for the SAME class — kind alone would let
+        // vec[obj<A>] and vec[obj<B>] merge into whichever was observed first
+        // and hand the callee the wrong layout. Only load-bearing now that an
+        // OBJ element is refinable at all.
+        if ($a->kind === Type::KIND_OBJ) { return ($a->class ?? '') === ($b->class ?? ''); }
         if ($a->isArray()) {
             $ae = $a->element;
             $be = $b->element;
