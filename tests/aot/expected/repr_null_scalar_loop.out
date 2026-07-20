@@ -2,6 +2,11 @@ string 'a,b,c'
 NULL NULL
 double 4.0
 NULL NULL
+integer 6
+integer 5
+NULL NULL
+integer 24
+NULL NULL
 integer 10
 NULL NULL
 boolean false

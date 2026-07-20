@@ -291,6 +291,8 @@ trait InferNodes
         $this->cellMergeLocals = [];
         $this->keyUsedLocals = [];
         $this->scanKeyUsedLocals($fn->body);
+        $this->arithUsedLocals = [];
+        $this->scanArithUsedLocals($fn->body);
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
         // re-kinds is a cell from function ENTRY — its reads dispatch by tag
