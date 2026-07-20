@@ -637,6 +637,19 @@ trait EmitLlvmBuiltins
             || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
     }
 
+    /** A concrete OBJECT-element array being written back through a by-ref
+     *  out-param whose element repr the `.sig` erased — the caller can only read
+     *  cells, so box each element on store. Restricted to OBJ elements: a raw
+     *  object pointer is the one concrete element the caller CANNOT interpret
+     *  (it reads as a NaN-double). Scalar-element arrays round-trip raw and are
+     *  left alone; a cell/unknown element is already self-describing. */
+    private function needsRefOutCellify(Type $valueType): bool
+    {
+        if (!$valueType->isArray()) { return false; }
+        $ve = $valueType->element;
+        return $ve !== null && $ve->kind === Type::KIND_OBJ;
+    }
+
     /**
      * The debug-backtrace builtin — a packed list of the active call frames'
      * NAMES, innermost first (from the runtime call-stack {@see needsBacktrace}).

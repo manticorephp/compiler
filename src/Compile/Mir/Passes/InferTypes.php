@@ -1179,7 +1179,9 @@ final class InferTypes implements Pass
         foreach ($thenLocals as $name => $tT) {
             if (!isset($otherLocals[$name])) { continue; }
             $oT = $otherLocals[$name];
-            if (!$this->isScalarOrCell($tT) || !$this->isScalarOrCell($oT)) { continue; }
+            $tOk = $this->isScalarOrCell($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
+            $oOk = $this->isScalarOrCell($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
+            if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }
             if (isset($this->keyUsedLocals[$name])) { continue; }
@@ -1211,6 +1213,25 @@ final class InferTypes implements Pass
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
             || $k === Type::KIND_STRING || $k === Type::KIND_BOOL
             || $k === Type::KIND_CELL;
+    }
+
+    /** Kinds a `null` merge arm may box INTO a shared cell slot: only the
+     *  NON-pointer scalars (int/float/bool), plus an already-tagged cell. Their
+     *  null cannot ride the slot raw — `0`/`0.0`/`false` collide with a real
+     *  value — so `$x = null; if ($c) $x = 5;` must become a tagged cell (the null
+     *  side via `box_null`) for `=== null` and reads to stay correct.
+     *  STRING/ARRAY/OBJ/CLOSURE are EXCLUDED: those are pointer kinds whose null
+     *  IS ptr 0. `null|obj` is already kept as `obj` by {@see \Compile\Mir\Type::
+     *  unionWith}; `null|string` staying a raw nullable string is the RIGHT model
+     *  but a `null∪string ⇒ string` unionWith rule UNMASKS latent
+     *  "declared `string[]` holds a tagged cell" arrays (a self-host `array_retain_
+     *  str` crash on generic traits) — that is the `unknown→cell` string sub-epic,
+     *  deferred here. See memory `repr-consistency-null-scalar-erasure`. */
+    private function nullBoxesWith(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_CELL;
     }
 
     /** A type whose null rides the slot RAW as ptr 0 ({@see LowerTypes::
@@ -1414,6 +1435,23 @@ final class InferTypes implements Pass
                 $out[$name] = $bt;
                 if (!isset($this->nullLoopLocals[$name])) {
                     $this->nullLoopLocals[$name] = $bt;
+                    $this->loopPromoGrew = true;
+                }
+                continue;
+            }
+            // A `null` slot the body assigns a NON-pointer scalar (int/float/bool):
+            // its null cannot ride raw (0/0.0/false collide), and the scalar gate
+            // below rejects the null entry — leaving the body to read the stale
+            // KIND_NULL and fold `=== null` to a constant. Promote to a cell (the
+            // numeric analogue of the pointer case above, and of the merge shadow's
+            // {@see nullBoxesWith}); the `cellLoopLocals` store pin boxes the
+            // `$x = null;` seed via `box_null`. A numeric body types directly, so
+            // no entry/body chicken-and-egg — key on the body kind here.
+            if ($st->kind === Type::KIND_NULL && $this->nullBoxesWith($bt)) {
+                if (isset($this->keyUsedLocals[$name])) { continue; }
+                $out[$name] = Type::cell();
+                if (!isset($this->cellLoopLocals[$name])) {
+                    $this->cellLoopLocals[$name] = true;
                     $this->loopPromoGrew = true;
                 }
                 continue;
