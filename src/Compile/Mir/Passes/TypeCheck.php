@@ -33,6 +33,18 @@ final class TypeCheck
     /** @var string[] collected, human-readable type errors */
     public array $errors = [];
 
+    /**
+     * Run ONLY the array-representation conflict check (see
+     * {@see arrayReprConflict}) and skip every other rule.
+     *
+     * That check is exempt from the "off by default" reasoning that gates the
+     * rest of this pass: it mirrors the codegen's own key-reader choice, so a
+     * hit is not a style opinion but a buffer read at the wrong type — a silent
+     * SIGSEGV. Measured at ZERO hits across the whole 571-case AOT corpus and
+     * the self-host build, so it costs the existing corpus nothing.
+     */
+    public bool $reprOnly = false;
+
     /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
     private array $paramsByFn = [];
 
@@ -43,7 +55,7 @@ final class TypeCheck
         }
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
-            $this->checkReturns($fn);
+            if (!$this->reprOnly) { $this->checkReturns($fn); }
             $this->checkNode($fn->body, $fn->name);
         }
         return $module;
@@ -57,7 +69,7 @@ final class TypeCheck
         // args, so both align at offset 0.
         if ($n->kind === Node::KIND_ADD || $n->kind === Node::KIND_SUB || $n->kind === Node::KIND_MUL
             || $n->kind === Node::KIND_DIV || $n->kind === Node::KIND_MOD) {
-            $this->checkArith($n, $inFn);
+            if (!$this->reprOnly) { $this->checkArith($n, $inFn); }
         }
         if ($n->kind === Node::KIND_CALL) {
             $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0);
@@ -95,10 +107,17 @@ final class TypeCheck
             if (!isset($params[$pi])) { break; }
             $p = $params[$pi];
             if ($p->variadic) { break; }
-            if ($this->incompatible($arg->type, $p->type)) {
+            if (!$this->reprOnly && $this->incompatible($arg->type, $p->type)) {
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected';
+                continue;
+            }
+            $why = $this->arrayReprConflict($arg->type, $p->type);
+            if ($why !== null) {
+                $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
+                    . $label . '() — ' . $why . ' (' . $arg->type->toString()
+                    . ' given, ' . $p->type->toString() . ' expected)';
             }
         }
     }
@@ -177,6 +196,88 @@ final class TypeCheck
         $aArr = $a->kind === Type::KIND_ARRAY;
         $bArr = $b->kind === Type::KIND_ARRAY;
         return $aArr !== $bArr;
+    }
+
+    /**
+     * Array-vs-array REPRESENTATION conflict at a call boundary, or null.
+     *
+     * The declared param type decides how the CALLEE reads the buffer, so a
+     * disagreement is not a style nit — it is a wild read. A packed (int-keyed)
+     * array handed to a param declared `array<string,V>` makes the callee walk
+     * an int as a string pointer: a silent SIGSEGV, the exact trap that cost a
+     * session on `http_build_query`. Same for the element repr.
+     *
+     * Deliberately narrow — it fires only when BOTH sides are informative:
+     * a cell/unknown on either side is the erased case the call site already
+     * coerces (`emitCellifyArrayRaw`) or is simply not known well enough here.
+     */
+    private function arrayReprConflict(Type $arg, Type $param): ?string
+    {
+        if ($arg->kind !== Type::KIND_ARRAY || $param->kind !== Type::KIND_ARRAY) { return null; }
+        $ak = $this->keyKindOf($arg);
+        $pk = $this->keyKindOf($param);
+        if ($ak !== null && $pk !== null && $ak !== $pk) {
+            return 'array KEY repr conflict — a ' . $this->kindName($ak)
+                . '-keyed array read as ' . $this->kindName($pk) . '-keyed walks the key as the wrong type';
+        }
+        // `concrete()`, not `reprConcrete()`: a UNION element (`obj<A>|obj<B>`)
+        // has its own kind but the same pointer repr as either arm, so it must
+        // not read as a conflict — the self-host parser legitimately passes
+        // `vec[obj<Ellipsis>|obj<Expr>]` to a `vec[obj<Expr>]` param. Same
+        // reason obj↔obj is skipped by `incompatible()`: subtyping is not modelled.
+        $ae = $arg->element;
+        $pe = $param->element;
+        if ($ae !== null && $pe !== null
+            && $this->concrete($ae) && $this->concrete($pe)
+            && $ae->kind !== $pe->kind) {
+            return 'array ELEMENT repr conflict — ' . $this->kindName($ae->kind)
+                . ' elements read as ' . $this->kindName($pe->kind);
+        }
+        return null;
+    }
+
+    /**
+     * The key KIND an array is READ with, or null when the read is TAG-DISPATCHED
+     * (and so accepts either kind).
+     *
+     * This must mirror the codegen's key-reader choice exactly — `emitForeach`
+     * (EmitLlvmControl) picking `__mir_array_key_cell_at` over
+     * `__mir_array_key_at`, and its inference twin in `InferNodes::inferForeach`.
+     * That choice keys off the ELEMENT, not the declared key: a vec whose
+     * element is cell/unknown reads keys tag-aware, which is precisely why
+     * `array<mixed,mixed>` (which lowers to vec[cell], NOT a cell-keyed assoc —
+     * `isAssoc()` means a STRING key) accepts an int-keyed array at all.
+     *
+     * So only two shapes are genuinely committed to one key repr: a vec with a
+     * CONCRETE element (packed, implicit 0..n-1) and a string-keyed assoc.
+     */
+    private function keyKindOf(Type $t): ?string
+    {
+        if (!$t->isArray()) { return null; }
+        $e = $t->element;
+        if ($e === null || !$this->reprConcrete($e)) { return null; }
+        if (!$t->isAssoc()) { return Type::KIND_INT; }
+        $k = $t->key;
+        if ($k === null || !$this->reprConcrete($k)) { return null; }
+        return $k->kind;
+    }
+
+    /** A repr we can hold the call site to (cell/unknown are the coerced cases). */
+    private function reprConcrete(Type $t): bool
+    {
+        return $t->kind !== Type::KIND_CELL && $t->kind !== Type::KIND_UNKNOWN
+            && $t->kind !== Type::KIND_NULL;
+    }
+
+    private function kindName(string $k): string
+    {
+        if ($k === Type::KIND_INT) { return 'int'; }
+        if ($k === Type::KIND_STRING) { return 'string'; }
+        if ($k === Type::KIND_FLOAT) { return 'float'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_ARRAY) { return 'array'; }
+        if ($k === Type::KIND_OBJ) { return 'object'; }
+        return 'value';
     }
 
     /** A kind we can reason about (excludes unknown / cell / null / void / closure). */

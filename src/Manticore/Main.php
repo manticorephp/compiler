@@ -1510,6 +1510,19 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // diagnostic beats a downstream clang failure or wrong codegen.
         // ANALYSIS MODE ($collect set): run the checker unconditionally and
         // COLLECT its findings for the `analyze` command instead of aborting.
+        // The array-REPRESENTATION conflict check ({@see TypeCheck::$reprOnly})
+        // is the one rule here that flags a MISCOMPILE rather than a style
+        // opinion: it mirrors the codegen's own key/element reader choice, so a
+        // hit means the callee walks the buffer at the wrong type — the silent
+        // SIGSEGV that `array<string,V>` fed an int-keyed array produces.
+        //
+        // It is NOT fatal-by-default YET, for the same reason the rest of this
+        // pass is gated: measured on the self-host build it still reports 2 hits
+        // in the compiler's own source (EmitLlvm->emitVirtualDispatch arg 8,
+        // assoc[string,bool] into vec[bool]; EnumDef::__construct arg 5,
+        // vec[int] into vec[string]). It is clean across all 571 AOT cases.
+        // Fix those two at source, then flip this to always-on — that is the
+        // staged path to making the trap impossible.
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
         $tcOn = $collect !== null || (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0");
         if ($tcOn) {
