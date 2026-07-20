@@ -1475,6 +1475,26 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * Coerce a just-emitted BUILTIN ARGUMENT to i64.
+     *
+     * `coerceToI64()` decides from the LLVM type of the value, which cannot
+     * tell an i64 holding an int from an i64 holding a TAGGED CELL. So a
+     * numericCell argument — anything typed `?int`/`int|float`, e.g. the
+     * `$x = $t === null ? 0 : $t;` an optional-parameter idiom produces —
+     * reached the arithmetic as its raw tag bits, and intdiv/abs/pow/dechex/
+     * str_repeat/strpos/explode/strcspn silently computed on nonsense
+     * (str_repeat SIGSEGV'd on the bogus count).
+     *
+     * Arithmetic OPERATORS never had this bug because they route operands
+     * through `coerceArithOperand`, which unboxes a cell (and PHP-coerces a
+     * numeric string). Builtins now share exactly that path.
+     */
+    private function coerceIntArg(Node $arg): string
+    {
+        return $this->coerceArithOperand($arg, false);
+    }
+
     /** @param Node[] $args */
     private function biAbs(array $args): string
     {
@@ -1488,7 +1508,7 @@ trait EmitLlvmBuiltins
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
         }
-        $out .= $this->coerceToI64();
+        $out .= $this->coerceIntArg($args[0]);
         $v = $this->lastValue;
         $neg = $this->ssa->allocReg();
         $out .= '  ' . $neg . ' = sub i64 0, ' . $v . "\n";
@@ -1508,8 +1528,8 @@ trait EmitLlvmBuiltins
     private function biIntdiv(array $args): ?string
     {
         if (\count($args) !== 2) { return null; }
-        $out = $this->emitNode($args[0]); $out .= $this->coerceToI64(); $a = $this->lastValue;
-        $out .= $this->emitNode($args[1]); $out .= $this->coerceToI64(); $b = $this->lastValue;
+        $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $a = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $b = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sdiv i64 ' . $a . ', ' . $b . "\n";
         return $this->finishI64($out, $reg);
@@ -1530,15 +1550,18 @@ trait EmitLlvmBuiltins
             && $args[1]->type->kind === Type::KIND_INT;
         if ($bothInt) {
             $this->rt->needsIpow = true;
-            $out = $this->emitNode($args[0]); $out .= $this->coerceToI64(); $b = $this->lastValue;
-            $out .= $this->emitNode($args[1]); $out .= $this->coerceToI64(); $e = $this->lastValue;
+            $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $b = $this->lastValue;
+            $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $e = $this->lastValue;
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @__mir_ipow(i64 ' . $b . ', i64 ' . $e . ")\n";
             return $this->finishI64($out, $reg);
         }
+        // A numericCell operand lands here (it is not KIND_INT), so the double
+        // conversion must UNBOX it via tagged_to_double rather than bitcast its
+        // tagged bits — coerceDoubleOperand, the same path float arithmetic uses.
         $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
-        $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $b = $this->lastValue;
-        $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $e = $this->lastValue;
+        $out = $this->emitNode($args[0]); $out .= $this->coerceDoubleOperand($args[0]); $b = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceDoubleOperand($args[1]); $e = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @llvm.pow.f64(double ' . $b . ', double ' . $e . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
@@ -2156,7 +2179,7 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToI64();
+        $out .= $this->coerceIntArg($args[0]);
         $v = $this->lastValue;
         $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 17)\n";
@@ -2208,7 +2231,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitPtrArg($args[0]);
         $s = $this->lastValue;
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToI64();
+        $out .= $this->coerceIntArg($args[1]);
         $n = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_repeat(ptr ' . $s . ', i64 ' . $n . ")\n";
@@ -2248,7 +2271,7 @@ trait EmitLlvmBuiltins
         $off = '0';
         if (\count($args) >= 3) {
             $out .= $this->emitNode($args[2]);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceIntArg($args[2]);
             $off = $this->lastValue;
         }
         $reg = $this->ssa->allocReg();
@@ -2277,14 +2300,14 @@ trait EmitLlvmBuiltins
         $off = '0';
         if (\count($args) >= 3) {
             $out .= $this->emitNode($args[2]);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceIntArg($args[2]);
             $off = $this->lastValue;
         }
         $len = '0';
         $haveLen = '0';
         if (\count($args) >= 4) {
             $out .= $this->emitNode($args[3]);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceIntArg($args[3]);
             $len = $this->lastValue;
             $haveLen = '1';
         }
@@ -2376,7 +2399,7 @@ trait EmitLlvmBuiltins
         $subj = $this->lastValue;
         if (\count($args) >= 3) {
             $out .= $this->emitNode($args[2]);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceIntArg($args[2]);
             $limit = $this->lastValue;
         } else {
             $limit = '9223372036854775807';

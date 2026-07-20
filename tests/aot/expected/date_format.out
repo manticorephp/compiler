@@ -1,0 +1,156 @@
+== UTC tz=UTC
+1970-01-01 00:00:00 UTC +00:00 UTC 0 0
+1970-01-01 23:59:59 UTC +00:00 UTC 0 0
+2001-01-01 00:00:00 UTC +00:00 UTC 0 0
+2005-01-01 00:00:00 UTC +00:00 UTC 0 0
+2009-02-13 23:31:30 UTC +00:00 UTC 0 0
+2017-07-14 02:40:00 UTC +00:00 UTC 0 0
+2020-09-13 12:26:40 UTC +00:00 UTC 0 0
+2023-11-14 22:13:20 UTC +00:00 UTC 0 0
+== Europe/Kyiv tz=Europe/Kyiv
+1970-01-01 03:00:00 MSK +03:00 Europe/Kyiv 0 10800
+1970-01-02 02:59:59 MSK +03:00 Europe/Kyiv 0 10800
+2001-01-01 02:00:00 EET +02:00 Europe/Kyiv 0 7200
+2005-01-01 02:00:00 EET +02:00 Europe/Kyiv 0 7200
+2009-02-14 01:31:30 EET +02:00 Europe/Kyiv 0 7200
+2017-07-14 05:40:00 EEST +03:00 Europe/Kyiv 1 10800
+2020-09-13 15:26:40 EEST +03:00 Europe/Kyiv 1 10800
+2023-11-15 00:13:20 EET +02:00 Europe/Kyiv 0 7200
+== America/New_York tz=America/New_York
+1969-12-31 19:00:00 EST -05:00 America/New_York 0 -18000
+1970-01-01 18:59:59 EST -05:00 America/New_York 0 -18000
+2000-12-31 19:00:00 EST -05:00 America/New_York 0 -18000
+2004-12-31 19:00:00 EST -05:00 America/New_York 0 -18000
+2009-02-13 18:31:30 EST -05:00 America/New_York 0 -18000
+2017-07-13 22:40:00 EDT -04:00 America/New_York 1 -14400
+2020-09-13 08:26:40 EDT -04:00 America/New_York 1 -14400
+2023-11-14 17:13:20 EST -05:00 America/New_York 0 -18000
+== Asia/Kathmandu tz=Asia/Kathmandu
+1970-01-01 05:30:00 +0530 +05:30 Asia/Kathmandu 0 19800
+1970-01-02 05:29:59 +0530 +05:30 Asia/Kathmandu 0 19800
+2001-01-01 05:45:00 +0545 +05:45 Asia/Kathmandu 0 20700
+2005-01-01 05:45:00 +0545 +05:45 Asia/Kathmandu 0 20700
+2009-02-14 05:16:30 +0545 +05:45 Asia/Kathmandu 0 20700
+2017-07-14 08:25:00 +0545 +05:45 Asia/Kathmandu 0 20700
+2020-09-13 18:11:40 +0545 +05:45 Asia/Kathmandu 0 20700
+2023-11-15 03:58:20 +0545 +05:45 Asia/Kathmandu 0 20700
+== Australia/Lord_Howe tz=Australia/Lord_Howe
+1970-01-01 10:00:00 AEST +10:00 Australia/Lord_Howe 0 36000
+1970-01-02 09:59:59 AEST +10:00 Australia/Lord_Howe 0 36000
+2001-01-01 11:00:00 +11 +11:00 Australia/Lord_Howe 1 39600
+2005-01-01 11:00:00 +11 +11:00 Australia/Lord_Howe 1 39600
+2009-02-14 10:31:30 +11 +11:00 Australia/Lord_Howe 1 39600
+2017-07-14 13:10:00 +1030 +10:30 Australia/Lord_Howe 0 37800
+2020-09-13 22:56:40 +1030 +10:30 Australia/Lord_Howe 0 37800
+2023-11-15 09:13:20 +11 +11:00 Australia/Lord_Howe 1 39600
+d=14
+D=Fri
+j=14
+l=Friday
+N=5
+S=th
+w=5
+z=194
+W=28
+o=2017
+F=July
+m=07
+M=Jul
+n=7
+t=31
+L=0
+X=+2017
+x=2017
+Y=2017
+y=17
+a=am
+A=AM
+B=152
+g=5
+G=5
+h=05
+H=05
+i=40
+s=00
+u=000000
+v=000
+e=Europe/Kyiv
+I=1
+O=+0300
+P=+03:00
+p=+03:00
+T=EEST
+Z=10800
+c=2017-07-14T05:40:00+03:00
+r=Fri, 14 Jul 2017 05:40:00 +0300
+U=1500000000
+isoweek 2021-01-01 2020-W53 5 0 0 31
+isoweek 2021-01-01 2020-W53 5 0 0 31
+isoweek 2020-01-01 2020-W01 3 0 1 31
+isoweek 2016-01-01 2015-W53 5 0 1 31
+Y-07-14
+Friday 14th of July 2017 05:40:00 AM
+\2017
+1970-01-01 00:00:00 GMT UTC +00:00
+1970-01-01 23:59:59 GMT UTC +00:00
+2001-01-01 00:00:00 GMT UTC +00:00
+2005-01-01 00:00:00 GMT UTC +00:00
+2009-02-13 23:31:30 GMT UTC +00:00
+2017-07-14 02:40:00 GMT UTC +00:00
+2020-09-13 12:26:40 GMT UTC +00:00
+2023-11-14 22:13:20 GMT UTC +00:00
+mktime UTC 946684800
+mktime UTC 1500035445
+mktime UTC 1009843200
+mktime UTC 978220800
+mktime UTC 983577600
+mktime UTC 946684799
+mktime UTC 1552185000
+mktime UTC 1572744600
+mktime Europe/Kyiv 946677600
+mktime Europe/Kyiv 1500024645
+mktime Europe/Kyiv 1009836000
+mktime Europe/Kyiv 978213600
+mktime Europe/Kyiv 983570400
+mktime Europe/Kyiv 946677599
+mktime Europe/Kyiv 1552177800
+mktime Europe/Kyiv 1572737400
+mktime America/New_York 946702800
+mktime America/New_York 1500049845
+mktime America/New_York 1009861200
+mktime America/New_York 978238800
+mktime America/New_York 983595600
+mktime America/New_York 946702799
+mktime America/New_York 1552203000
+mktime America/New_York 1572759000
+mktime Asia/Kathmandu 946664100
+mktime Asia/Kathmandu 1500014745
+mktime Asia/Kathmandu 1009822500
+mktime Asia/Kathmandu 978200100
+mktime Asia/Kathmandu 983556900
+mktime Asia/Kathmandu 946664099
+mktime Asia/Kathmandu 1552164300
+mktime Asia/Kathmandu 1572723900
+mktime Australia/Lord_Howe 946645200
+mktime Australia/Lord_Howe 1499997645
+mktime Australia/Lord_Howe 1009803600
+mktime Australia/Lord_Howe 978181200
+mktime Australia/Lord_Howe 983538000
+mktime Australia/Lord_Howe 946645199
+mktime Australia/Lord_Howe 1552145400
+mktime Australia/Lord_Howe 1572705000
+gmmktime 946684800
+gmmktime 1009843200
+gmmktime 1709164800
+checkdate 2/29/2000 true
+checkdate 2/29/1900 false
+checkdate 2/29/2024 true
+checkdate 2/30/2024 false
+checkdate 13/1/2000 false
+checkdate 0/1/2000 false
+checkdate 1/0/2000 false
+checkdate 12/31/9999 true
+getdate 2017-7-14 5:40:0 wday=5 yday=194 Friday July ts=1500000000
+localtime 0,40,5,14,6,117,5,194,1
+localtime_assoc 117 6 14 1
+idate 2017 7 14

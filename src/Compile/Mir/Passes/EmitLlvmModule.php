@@ -1125,6 +1125,18 @@ trait EmitLlvmModule
             if ($v->type->kind === Type::KIND_CELL && $this->frame->returnType !== null) {
                 $out .= $this->unboxCellToType($this->frame->returnType);
             }
+            // A FLOAT value returned from an `: int` function is CONVERTED, not
+            // reinterpreted. The i64 carrier below is a BITCAST (a float rides
+            // its raw bits and the caller bitcasts back), so without an explicit
+            // fptosi first the caller reads the double's bit pattern as an
+            // integer: `function f(): int { return 25.0; }` handed back
+            // 4627730092099895296. Mirrors the cell unboxing just above — the
+            // declared type is what the caller assumes.
+            if ($v->type->kind === Type::KIND_FLOAT
+                && $this->frame->returnType !== null
+                && $this->frame->returnType->kind === Type::KIND_INT) {
+                $out .= $this->coerceTo('i64');
+            }
             // ABI: every fn returns i64. Coerce float / ptr through
             // the i64 carrier.
             $out .= $this->coerceToI64();
