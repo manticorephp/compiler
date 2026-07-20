@@ -1,0 +1,33 @@
+UTC zid>=0 ok
+Europe/Kyiv zid>=0 ok
+America/New_York zid>=0 ok
+Australia/Lord_Howe zid>=0 ok
+Asia/Kathmandu zid>=0 ok
+Pacific/Kiritimati zid>=0 ok
+America/Sao_Paulo zid>=0 ok
+Asia/Tokyo zid>=0 ok
+Europe/Kyiv @1234567890 off=7200 dst=0 abbr=EET
+Europe/Kyiv @1500000000 off=10800 dst=1 abbr=EEST
+America/New_York @1234567890 off=-18000 dst=0 abbr=EST
+America/New_York @1500000000 off=-14400 dst=1 abbr=EDT
+Asia/Kathmandu @1500000000 off=20700 dst=0 abbr=+0545
+Australia/Lord_Howe @1500000000 off=37800 dst=0 abbr=+1030
+Pacific/Kiritimati @1500000000 off=50400 dst=0 abbr=+14
+America/Sao_Paulo @1500000000 off=-10800 dst=0 abbr=-03
+Asia/Tokyo @1500000000 off=32400 dst=0 abbr=JST
+UTC @0 off=0 dst=0 abbr=UTC
+kyiv before=7200 after=10800
+ny gap  1552203000
+ny fold 1572759000
+ny mid  1560614400
+roundtrip bad=0
+pack EEST -> 1162171220 -> EEST ok
+pack GMT -> 4672852 -> GMT ok
+pack LMT -> 5000532 -> LMT ok
+pack +0330 -> 185492255536 -> +0330 ok
+pack -03 -> 2961459 -> -03 ok
+pack ACWST -> 280302670676 -> ACWST ok
+reject ../etc/passwd -> -1
+reject /etc/passwd -> -1
+reject No/Such_Zone -> -1
+reject (empty) -> -1
