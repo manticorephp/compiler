@@ -828,7 +828,8 @@ trait EmitLlvmObjects
 
     /** All declared (fixed-slot) properties across every class, name => Type,
      *  collapsing a kind-disagreement across holders to a cell. The candidate
-     *  map for a classless dynamic-name store/read. */
+     *  map for a classless dynamic-name store/read.
+     *  @return array<string, Type> */
     private function allDeclaredPropTypes(): array
     {
         $out = [];
@@ -842,7 +843,8 @@ trait EmitLlvmObjects
     }
 
     /** True while emitting `$prop`'s own get/set hook — its `$this->$prop`
-     *  accesses read/write the backing slot directly (no hook re-entry). */
+     *  accesses read/write the backing slot directly (no hook re-entry).
+     *  @param array<string, string> $hk 'get'/'set' => the hook's fn name */
     private function insideOwnHook(array $hk): bool
     {
         return ($hk['get'] !== '' && $this->frame->name === $hk['get'])
@@ -1312,7 +1314,8 @@ trait EmitLlvmObjects
         return $this->emitDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
     }
 
-    /** Declared properties (offset >= 0) of a class as name => Type. */
+    /** Declared properties (offset >= 0) of a class as name => Type.
+     *  @return array<string, Type> */
     private function declaredPropTypes(ClassDef $cd): array
     {
         $out = [];
@@ -1324,7 +1327,8 @@ trait EmitLlvmObjects
     }
 
     /** Declared properties across a union's atoms, name => Type. Atoms that
-     *  disagree on a property's kind collapse it to a cell. */
+     *  disagree on a property's kind collapse it to a cell.
+     *  @return array<string, Type> */
     private function unionPropTypes(Type $u): array
     {
         $out = [];
@@ -2239,7 +2243,8 @@ trait EmitLlvmObjects
      * already evaluated into `$argList`; they dominate every case.
      *
      * @param string[]              $cands
-     * @param array<string, string> $targets candidate class → declaring class
+     * @param array<string, string> $targets    candidate class → declaring class
+     * @param array<string, bool>   $erasedSyms symbol → emitted-as-erased
      */
     private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = []): string
     {
