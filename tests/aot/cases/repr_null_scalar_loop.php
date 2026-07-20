@@ -14,6 +14,22 @@ function sumFloat(array $xs): mixed {
     return $acc;
 }
 
+// null-seeded SELF-REFERENTIAL INT accumulator. `unknown + int` is unknown, so the
+// body types UNKNOWN and used to take the raw ptr-0 path — where null is
+// indistinguishable from a real 0, so the empty case returned int(0) not NULL.
+// The arith-use marker routes it to the tagged-cell promotion instead.
+function sumInt(array $xs): mixed {
+    $acc = null;
+    foreach ($xs as $x) { $acc = $acc === null ? $x : $acc + $x; }
+    return $acc;
+}
+
+function prodInt(array $xs): mixed {
+    $acc = null;
+    foreach ($xs as $x) { $acc = $acc === null ? $x : $acc * $x; }
+    return $acc;
+}
+
 // null flips to an int scalar unconditionally inside the loop, read after —
 // the "$x = null; loop { $x = <int> }" case (clean numeric null-loop).
 function lastSeen(array $xs): mixed {
@@ -35,6 +51,14 @@ foreach ([['a','b','c'], []] as $xs) {
 }
 foreach ([[1.5, 2.5], []] as $xs) {
     $r = sumFloat($xs);
+    echo gettype($r), " ", var_export($r, true), "\n";
+}
+foreach ([[1, 2, 3], [5], []] as $xs) {
+    $r = sumInt($xs);
+    echo gettype($r), " ", var_export($r, true), "\n";
+}
+foreach ([[2, 3, 4], []] as $xs) {
+    $r = prodInt($xs);
     echo gettype($r), " ", var_export($r, true), "\n";
 }
 foreach ([[4, 5], []] as $xs) {

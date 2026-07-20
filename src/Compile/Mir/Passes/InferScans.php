@@ -1040,4 +1040,20 @@ trait InferScans
         }
         foreach (Walk::children($n) as $c) { $this->scanKeyUsedLocals($c); }
     }
+
+    /** Mark locals used as an ARITHMETIC operand ({@see InferTypes::$arithUsedLocals}) —
+     *  the signal that a null-seeded, UNKNOWN-bodied loop accumulator is NUMERIC
+     *  (must carry a tag) rather than an object handle (rides raw as ptr 0). */
+    private function scanArithUsedLocals(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
+            || $k === Node::KIND_DIV || $k === Node::KIND_MOD) {
+            $this->markArithLocal($n->left);
+            $this->markArithLocal($n->right);
+        } elseif ($k === Node::KIND_NEG) {
+            $this->markArithLocal($n->operand);
+        }
+        foreach (Walk::children($n) as $c) { $this->scanArithUsedLocals($c); }
+    }
 }

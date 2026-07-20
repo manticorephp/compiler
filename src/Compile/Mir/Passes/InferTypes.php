@@ -182,6 +182,18 @@ final class InferTypes implements Pass
      *  fn — ineligible for cell-merge promotion (the cell-key store/access path
      *  does not yet render a NaN-boxed key, so a merge-cell key mis-dispatches). */
     private array $keyUsedLocals = [];
+    /** @var array<string,bool> locals used as an ARITHMETIC operand (`+ - * / %`,
+     *  unary `-`) anywhere in the fn. Discriminates the one ambiguous loop shape:
+     *  a `null`-seeded accumulator whose body types UNKNOWN. `unknown + int` is
+     *  itself unknown (the body can't type until the entry does), so both the
+     *  OBJECT accumulator (`$acc = $acc ?? $x; … $acc->merge($x)`) and the NUMERIC
+     *  one land on the same UNKNOWN body — and {@see isPointerKind} counts UNKNOWN
+     *  as a pointer, so both took the raw ptr-0 path. That is right for the object
+     *  (a raw handle it can dispatch on) and WRONG for the numeric: raw 0 is
+     *  indistinguishable from a real `0`, so an empty loop returned `int(0)` where
+     *  php says NULL. Arith use is the signal that the slot is numeric and must
+     *  carry a tag. */
+    private array $arithUsedLocals = [];
     /** @var array<string,bool> locals whose kind CHANGES across a loop back-edge
      *  (`$x = 0; while (…) { $x = getenv("H"); }`) — promoted to a cell for the
      *  WHOLE function. The if/else shadow-store trick can't work here: a read at
@@ -1259,6 +1271,13 @@ final class InferTypes implements Pass
         }
     }
 
+    private function markArithLocal(?Node $operand): void
+    {
+        if ($operand !== null && $operand->kind === Node::KIND_LOAD_LOCAL) {
+            $this->arithUsedLocals[$operand->name] = true;
+        }
+    }
+
     /** The literal `true` (the `||` short-circuit then arm). */
     private function isLiteralTrue(?Node $n): bool
     {
@@ -1431,7 +1450,14 @@ final class InferTypes implements Pass
             // the whole function ({@see $nullLoopLocals}). Must precede the
             // scalar gate below — an obj/array/string body type is not a scalar,
             // so it would `continue` and leave the body reading the entry NULL.
-            if ($st->kind === Type::KIND_NULL && $this->isPointerKind($bt)) {
+            // …EXCEPT an UNKNOWN body on a name used in ARITHMETIC: `unknown + int`
+            // is unknown, so a numeric accumulator reaches here looking exactly like
+            // an object one. Raw ptr 0 cannot represent its null (indistinguishable
+            // from a real `0` — an empty loop returned `int(0)`, php says NULL), so
+            // let it fall through to the tagged-cell promotion below.
+            $arithUnknown = $bt->kind === Type::KIND_UNKNOWN
+                && isset($this->arithUsedLocals[$name]);
+            if ($st->kind === Type::KIND_NULL && $this->isPointerKind($bt) && !$arithUnknown) {
                 $out[$name] = $bt;
                 if (!isset($this->nullLoopLocals[$name])) {
                     $this->nullLoopLocals[$name] = $bt;
@@ -1447,7 +1473,7 @@ final class InferTypes implements Pass
             // {@see nullBoxesWith}); the `cellLoopLocals` store pin boxes the
             // `$x = null;` seed via `box_null`. A numeric body types directly, so
             // no entry/body chicken-and-egg — key on the body kind here.
-            if ($st->kind === Type::KIND_NULL && $this->nullBoxesWith($bt)) {
+            if ($st->kind === Type::KIND_NULL && ($this->nullBoxesWith($bt) || $arithUnknown)) {
                 if (isset($this->keyUsedLocals[$name])) { continue; }
                 $out[$name] = Type::cell();
                 if (!isset($this->cellLoopLocals[$name])) {
