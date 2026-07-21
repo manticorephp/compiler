@@ -474,6 +474,17 @@ final class EmitLlvm implements EmitVisitor
         $out .= "  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
         $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
         $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
+        // tagged_to_str returns the RAW payload ptr for a STRING cell (a borrow
+        // — must not be released) but a FRESH +1 string for int/float/bool.
+        // Distinguish by pointer identity with the cell payload; the fresh temp
+        // leaked one pooled buffer per element per pass (implode_int bench:
+        // ~128 MB RSS from 2 unreleased temps x 2000 floats x 1000 reps).
+        $out .= "  %pay = and i64 %ev, 281474976710655\n";
+        $out .= "  %payp = inttoptr i64 %pay to ptr\n";
+        $out .= "  %braw = icmp eq ptr %es, %payp\n";
+        $out .= "  br i1 %braw, label %sumk, label %sumr\n";
+        $out .= "sumr:\n  call void @__mir_rc_release_str(ptr %es)\n  br label %sumk\n";
+        $out .= "sumk:\n";
         $out .= "  %a = load i64, ptr %accp\n  %a2 = add i64 %a, %el\n  store i64 %a2, ptr %accp\n";
         $out .= "  %i2 = add i64 %i, 1\n  store i64 %i2, ptr %ip\n  br label %sumc\n";
         $out .= "alloc:\n";
@@ -495,6 +506,13 @@ final class EmitLlvm implements EmitVisitor
         $out .= "  %w1 = load i64, ptr %wp\n";
         $out .= "  %dst1 = getelementptr inbounds i8, ptr %buf, i64 %w1\n";
         $out .= "  call ptr @memcpy(ptr %dst1, ptr %es2, i64 %el2)\n";
+        // Same borrow-vs-fresh temp discipline as the sizing pass above.
+        $out .= "  %pay2 = and i64 %ev2, 281474976710655\n";
+        $out .= "  %payp2 = inttoptr i64 %pay2 to ptr\n";
+        $out .= "  %braw2 = icmp eq ptr %es2, %payp2\n";
+        $out .= "  br i1 %braw2, label %cpk, label %cpr\n";
+        $out .= "cpr:\n  call void @__mir_rc_release_str(ptr %es2)\n  br label %cpk\n";
+        $out .= "cpk:\n";
         $out .= "  %w2 = add i64 %w1, %el2\n  store i64 %w2, ptr %wp\n";
         $out .= "  %j2 = add i64 %j, 1\n  store i64 %j2, ptr %ip\n  br label %cpc\n";
         $out .= "fin:\n  %wf = load i64, ptr %wp\n";
