@@ -1934,6 +1934,38 @@ final class RuntimeLibrary
         $out .= "  store i64 %wfin, ptr %lp\n";
         $out .= "  ret void\n}\n";
 
+        // INLINE one structural byte %ch — the fast path is a cursor bump with
+        // ZERO calls (reserve is only reached on an actual grow), replacing the
+        // `call __mir_json_putc` (which itself CALLED __mir_json_reserve — two
+        // out-of-line calls per `{ } [ ] , : "`). Object encode was call-bound:
+        // a 3-key row emits ~7 structural chars, so ~14 calls/row vanished. All
+        // inside this ONE function ⇒ no per-call-site IR cost; clang -O2 folds
+        // adjacent inlined reserves. Control lands in `jpN_ok` (a fresh block);
+        // subsequent IR continues there. %len loaded pre-branch dominates the
+        // merge (grow keeps the cursor); %b is RELOADED post-branch so it picks
+        // up a relocated buffer on the grow path and the same buffer otherwise.
+        $jp = 0;
+        $inlinePutc = function (int $ch) use (&$jp): string {
+            $u = $jp; $jp = $jp + 1;
+            $o  = "  %jp{$u}buf = load ptr, ptr %slotp\n";
+            $o .= "  %jp{$u}capp = getelementptr inbounds i8, ptr %jp{$u}buf, i64 -24\n";
+            $o .= "  %jp{$u}cap = load i64, ptr %jp{$u}capp\n";
+            $o .= "  %jp{$u}len = load i64, ptr %lp\n";
+            $o .= "  %jp{$u}need = add i64 %jp{$u}len, 2\n";
+            $o .= "  %jp{$u}fits = icmp ule i64 %jp{$u}need, %jp{$u}cap\n";
+            $o .= "  br i1 %jp{$u}fits, label %jp{$u}ok, label %jp{$u}grow\n";
+            $o .= "jp{$u}grow:\n";
+            $o .= "  %jp{$u}g = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 1)\n";
+            $o .= "  br label %jp{$u}ok\n";
+            $o .= "jp{$u}ok:\n";
+            $o .= "  %jp{$u}b = load ptr, ptr %slotp\n";
+            $o .= "  %jp{$u}dst = getelementptr inbounds i8, ptr %jp{$u}b, i64 %jp{$u}len\n";
+            $o .= "  store i8 {$ch}, ptr %jp{$u}dst\n";
+            $o .= "  %jp{$u}nl = add i64 %jp{$u}len, 1\n";
+            $o .= "  store i64 %jp{$u}nl, ptr %lp\n";
+            return $o;
+        };
+
         // recursive walker.
         $out .= "\ndefine void @__mir_json_app(ptr %slotp, ptr %lp, i64 %cell) {\n";
         $out .= "entry:\n";
@@ -2039,20 +2071,24 @@ final class RuntimeLibrary
         // stride) — the mode is loop-invariant, selected once per element from
         // %ishash without a call.
         $out .= "aslist:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 91)\n";
+        $out .= $inlinePutc(91);
+        // The inlined putc ends control in `jp{N}ok`, so the `%li` phi below
+        // must name THAT block as its entry predecessor, not the original
+        // `aslist` (which now only holds the putc's head + branch-out).
+        $aslistExit = "jp" . ($jp - 1) . "ok";
         $out .= "  %lstride = select i1 %ishash, i64 $ES, i64 8\n";
         $out .= "  %lbias0 = select i1 %ishash, i64 $VAL_OFF, i64 0\n";
         $out .= "  %lbias = add i64 %lbias0, $H\n";
         $out .= "  br label %ll\n";
         $out .= "ll:\n";
-        $out .= "  %li = phi i64 [0, %aslist], [%li2, %lcont]\n";
+        $out .= "  %li = phi i64 [0, %{$aslistExit}], [%li2, %lcont]\n";
         $out .= "  %ldone = icmp sge i64 %li, %alen\n";
         $out .= "  br i1 %ldone, label %lend, label %lbody\n";
         $out .= "lbody:\n";
         $out .= "  %lfirst = icmp eq i64 %li, 0\n";
         $out .= "  br i1 %lfirst, label %lskip, label %lcomma\n";
         $out .= "lcomma:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 44)\n";
+        $out .= $inlinePutc(44);
         $out .= "  br label %lskip\n";
         $out .= "lskip:\n";
         $out .= "  %le0 = mul i64 %li, %lstride\n";
@@ -2065,21 +2101,22 @@ final class RuntimeLibrary
         $out .= "  %li2 = add i64 %li, 1\n";
         $out .= "  br label %ll\n";
         $out .= "lend:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 93)\n";
+        $out .= $inlinePutc(93);
         $out .= "  ret void\n";
         // Object emit: raw kind/key/value entry loads per element.
         $out .= "asobj:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 123)\n";
+        $out .= $inlinePutc(123);
+        $asobjExit = "jp" . ($jp - 1) . "ok";
         $out .= "  br label %ol\n";
         $out .= "ol:\n";
-        $out .= "  %oi = phi i64 [0, %asobj], [%oi2, %ocont]\n";
+        $out .= "  %oi = phi i64 [0, %{$asobjExit}], [%oi2, %ocont]\n";
         $out .= "  %odone = icmp sge i64 %oi, %alen\n";
         $out .= "  br i1 %odone, label %oend, label %obody\n";
         $out .= "obody:\n";
         $out .= "  %ofirst = icmp eq i64 %oi, 0\n";
         $out .= "  br i1 %ofirst, label %oskip, label %ocomma\n";
         $out .= "ocomma:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 44)\n";
+        $out .= $inlinePutc(44);
         $out .= "  br label %oskip\n";
         $out .= "oskip:\n";
         $out .= "  %oe0 = mul i64 %oi, $ES\n";
@@ -2095,13 +2132,13 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_json_estr(ptr %slotp, ptr %lp, ptr %oksptr)\n";
         $out .= "  br label %okdone\n";
         $out .= "okI:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 34)\n";
+        $out .= $inlinePutc(34);
         $out .= "  %okiv = load i64, ptr %oyp\n";
         $out .= "  call void @__mir_json_int(ptr %slotp, ptr %lp, i64 %okiv)\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 34)\n";
+        $out .= $inlinePutc(34);
         $out .= "  br label %okdone\n";
         $out .= "okdone:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 58)\n";
+        $out .= $inlinePutc(58);
         $out .= "  %oe3 = add i64 %oe1, $VAL_OFF\n";
         $out .= "  %ovp = getelementptr inbounds i8, ptr %arr, i64 %oe3\n";
         $out .= "  %ov = load i64, ptr %ovp\n";
@@ -2111,7 +2148,7 @@ final class RuntimeLibrary
         $out .= "  %oi2 = add i64 %oi, 1\n";
         $out .= "  br label %ol\n";
         $out .= "oend:\n";
-        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 125)\n";
+        $out .= $inlinePutc(125);
         $out .= "  ret void\n}\n";
 
         // entry: alloc a buffer + a length cursor, walk, commit len/NUL once.
