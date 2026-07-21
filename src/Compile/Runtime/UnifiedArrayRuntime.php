@@ -819,6 +819,44 @@ final class UnifiedArrayRuntime
         return $b->gep(Type::i8(), $arr, [$off]);
     }
 
+    /**
+     * Effective probe hash for a linear scan: the call site's folded literal
+     * hash when haveHash != 0, else the probe's own header cache at
+     * {@see MemoryAbi::STRING_HASH_OFFSET} (0 = uncomputed → prefilter
+     * disabled for this probe). Key must be nonnull (every string, heap or
+     * .rodata or arena, carries a readable 32-byte header).
+     */
+    private function scanProbeHash(Block $b, Value $key, Value $hash, Value $haveHash): Value
+    {
+        $cached = $b->load(Type::i64(), $this->hdr($b, $key, MemoryAbi::STRING_HASH_OFFSET));
+        return $b->select(
+            $b->icmp('ne', $haveHash, Value::int(Type::i64(), 0)),
+            $hash,
+            $cached,
+        );
+    }
+
+    /**
+     * Linear-scan hash prefilter: in $b (entry key $tk already nonnull),
+     * branch to $skip when both the effective probe hash and the entry key's
+     * cached header hash are known (nonzero) and differ — the keys cannot be
+     * equal, so $match's __mir_str_eq call is skipped. Either side 0 falls
+     * through to $match: 0 is always "uncomputed", never a hash value worth
+     * trusting (str_alloc zeroes the field in every path, literals bake a
+     * compile-time FNV; a true FNV of 0 merely disables the filter).
+     */
+    private function hashPrefilter(Block $b, Value $tk, Value $effSlot, Block $match, Block $skip): void
+    {
+        $eff = $b->load(Type::i64(), $effSlot);
+        $cached = $b->load(Type::i64(), $this->hdr($b, $tk, MemoryAbi::STRING_HASH_OFFSET));
+        $known = $b->and_(
+            $b->icmp('ne', $eff, Value::int(Type::i64(), 0)),
+            $b->icmp('ne', $cached, Value::int(Type::i64(), 0)),
+        );
+        $mism = $b->and_($known, $b->icmp('ne', $cached, $eff));
+        $b->brIf($mism, $skip, $match);
+    }
+
     /** Byte offset of hashed entry i field: HEADER + i*24 + field. */
     private function entryAddr(\Codegen\Llvm\Block $b, Value $arr, Value $i, int $field): Value
     {
@@ -1347,9 +1385,11 @@ final class UnifiedArrayRuntime
         $doidx = $fn->block('doidx');
         $chkmiss = $fn->block('chkmiss');
         $idxhit = $fn->block('idxhit');
+        $preh = $fn->block('preh');
         $head = $fn->block('head');
         $body = $fn->block('body');
         $kok = $fn->block('kind_ok');
+        $hpre = $fn->block('hpre');
         $cmp = $fn->block('cmp');
         $next = $fn->block('next');
         $hit = $fn->block('hit');
@@ -1359,6 +1399,7 @@ final class UnifiedArrayRuntime
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
         $rSlot = $chk->alloca(Type::i64(), 'r');
+        $effSlot = $chk->alloca(Type::i64(), 'effh');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
         $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $retzero, $gate);
 
@@ -1368,17 +1409,20 @@ final class UnifiedArrayRuntime
         $rf = $doidx->call('__mir_array_index_find', Type::i64(),
             [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key, Value::int(Type::i64(), 0), $hash, $haveHash]);
         $doidx->store($rf, $rSlot);
-        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $head, $chkmiss);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $preh, $chkmiss);
         $chkmiss->brIf($chkmiss->icmp('eq', $chkmiss->load(Type::i64(), $rSlot), Value::int(Type::i64(), -1)), $retzero, $idxhit);
         $ij = $idxhit->load(Type::i64(), $rSlot);
         $idxhit->ret($idxhit->load(Type::i64(), $this->entryAddr($idxhit, $arr, $ij, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET)));
 
+        $preh->store($this->scanProbeHash($preh, $key, $hash, $haveHash), $effSlot);
+        $preh->br($head);
         $i = $head->load(Type::i64(), $iSlot);
         $head->brIf($head->icmp('sge', $i, $len), $retzero, $body);
         $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
         $tk = $kok->load(Type::ptr(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $cmp);
+        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $hpre);
+        $this->hashPrefilter($hpre, $tk, $effSlot, $cmp, $next);
         $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$tk, $key]), $hit, $next);
         $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $next->br($head);
@@ -1701,9 +1745,11 @@ final class UnifiedArrayRuntime
         $idxtry = $fn->block('s_idxtry');
         $idxchk = $fn->block('s_idxchk');
         $idxupd = $fn->block('s_idxupd');
+        $preh = $fn->block('s_preh');
         $head = $fn->block('s_head');
         $body = $fn->block('s_body');
         $kok = $fn->block('s_kok');
+        $hpre = $fn->block('s_hpre');
         $cmp = $fn->block('s_cmp');
         $upd = $fn->block('s_upd');
         $next = $fn->block('s_next');
@@ -1716,6 +1762,7 @@ final class UnifiedArrayRuntime
         $arrSlot = $e->alloca(Type::ptr(), 'arr_slot');
         $iSlot = $e->alloca(Type::i64(), 'i');
         $rSlot = $e->alloca(Type::i64(), 'r');
+        $effSlot = $e->alloca(Type::i64(), 'effh');
         if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $e->store($arr, $arrSlot);
         $e->store(Value::int(Type::i64(), 0), $iSlot);
@@ -1743,10 +1790,12 @@ final class UnifiedArrayRuntime
         $rf = $idxchk->call('__mir_array_index_find', Type::i64(),
             [$cidx, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key, Value::int(Type::i64(), 0), $hash, $haveHash]);
         $idxchk->store($rf, $rSlot);
-        $idxchk->brIf($idxchk->icmp('eq', $rf, Value::int(Type::i64(), -2)), $head, $idxupd);
+        $idxchk->brIf($idxchk->icmp('eq', $rf, Value::int(Type::i64(), -2)), $preh, $idxupd);
         $rv = $idxupd->load(Type::i64(), $rSlot);
         $idxupd->brIf($idxupd->icmp('eq', $rv, Value::int(Type::i64(), -1)), $app, $upd);
 
+        $preh->store($this->scanProbeHash($preh, $key, $hash, $haveHash), $effSlot);
+        $preh->br($head);
         $cur = $head->load(Type::ptr(), $arrSlot);
         $len = $head->load(Type::i64(), $cur);
         $i = $head->load(Type::i64(), $iSlot);
@@ -1754,7 +1803,8 @@ final class UnifiedArrayRuntime
         $kind = $body->load(Type::i64(), $this->entryAddr($body, $cur, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
         $tk = $kok->load(Type::ptr(), $this->entryAddr($kok, $cur, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $cmp);
+        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $hpre);
+        $this->hashPrefilter($hpre, $tk, $effSlot, $cmp, $next);
         // Linear-scan hit: stash the found index in rSlot and converge on $upd
         // (shared with the index-find hit path).
         $cmp->store($i, $rSlot);
@@ -1930,6 +1980,8 @@ final class UnifiedArrayRuntime
         $locate = $fn->block('locate');
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
+        $idxres = $fn->block('idxres');
+        $idxhit = $fn->block('idxhit');
         $head = $fn->block('head');
         $body = $fn->block('body');
         $kok = $fn->block('kind_ok');
@@ -1961,11 +2013,19 @@ final class UnifiedArrayRuntime
 
         $packed->ret($this->packedSlot($packed, $b, $key));
 
-        // HASHED: linear scan for the KIND_INT entry with key == key.
+        // HASHED: bucket-index lookup first (-2 = small map → linear scan;
+        // -1 can't normally happen — the key was just vivified — but a miss
+        // safely degrades to the scratch cell). Large maps stop paying an
+        // O(n) walk per reference.
         $len = $hashed->load(Type::i64(), $b);
         $iSlot = $hashed->alloca(Type::i64(), 'i');
         $hashed->store(Value::int(Type::i64(), 0), $iSlot);
-        $hashed->br($head);
+        $rfI = $hashed->call('__mir_array_index_find', Type::i64(),
+            [$b, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT), Value::null(), $key,
+             Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $hashed->brIf($hashed->icmp('eq', $rfI, Value::int(Type::i64(), -2)), $head, $idxres);
+        $idxres->brIf($idxres->icmp('slt', $rfI, Value::int(Type::i64(), 0)), $miss, $idxhit);
+        $idxhit->ret($this->entryAddr($idxhit, $b, $rfI, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
         $i = $head->load(Type::i64(), $iSlot);
         $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
         $kind = $body->load(Type::i64(), $this->entryAddr($body, $b, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
@@ -1998,9 +2058,14 @@ final class UnifiedArrayRuntime
         $live = $fn->block('live');
         $vivify = $fn->block('vivify');
         $locate = $fn->block('locate');
+        $idxchk = $fn->block('idxchk');
+        $idxres = $fn->block('idxres');
+        $idxhit = $fn->block('idxhit');
+        $preh = $fn->block('preh');
         $head = $fn->block('head');
         $body = $fn->block('body');
         $kok = $fn->block('kind_ok');
+        $hpre = $fn->block('hpre');
         $cmp = $fn->block('cmp');
         $next = $fn->block('next');
         $hit = $fn->block('hit');
@@ -2021,18 +2086,32 @@ final class UnifiedArrayRuntime
         $vivify->store($vivify->ptrtoint($sv, Type::i64()), $slotAddr);
         $vivify->br($locate);
 
+        // Bucket-index lookup first (null key → straight to the linear scan,
+        // matching the old behaviour); -2 = small map → hash-prefiltered scan.
         $bi = $locate->load(Type::i64(), $slotAddr);
         $b = $locate->inttoptr($bi, Type::ptr());
         $len = $locate->load(Type::i64(), $b);
         $iSlot = $locate->alloca(Type::i64(), 'i');
+        $effSlot = $locate->alloca(Type::i64(), 'effh');
         $locate->store(Value::int(Type::i64(), 0), $iSlot);
-        $locate->br($head);
+        $locate->store(Value::int(Type::i64(), 0), $effSlot);
+        $locate->brIf($locate->icmp('eq', $key, Value::null()), $head, $idxchk);
+        $rfS = $idxchk->call('__mir_array_index_find', Type::i64(),
+            [$b, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key,
+             Value::int(Type::i64(), 0), Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $idxchk->brIf($idxchk->icmp('eq', $rfS, Value::int(Type::i64(), -2)), $preh, $idxres);
+        $idxres->brIf($idxres->icmp('slt', $rfS, Value::int(Type::i64(), 0)), $miss, $idxhit);
+        $idxhit->ret($this->entryAddr($idxhit, $b, $rfS, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $preh->store($this->scanProbeHash($preh, $key,
+            Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)), $effSlot);
+        $preh->br($head);
         $i = $head->load(Type::i64(), $iSlot);
         $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
         $kind = $body->load(Type::i64(), $this->entryAddr($body, $b, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
         $ek = $kok->load(Type::ptr(), $this->entryAddr($kok, $b, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $kok->brIf($kok->icmp('eq', $ek, Value::null()), $next, $cmp);
+        $kok->brIf($kok->icmp('eq', $ek, Value::null()), $next, $hpre);
+        $this->hashPrefilter($hpre, $ek, $effSlot, $cmp, $next);
         $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$ek, $key]), $hit, $next);
         $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $next->br($head);
@@ -2471,9 +2550,11 @@ final class UnifiedArrayRuntime
         $gate = $fn->block('gate');
         $doidx = $fn->block('doidx');
         $classify = $fn->block('classify');
+        $preh = $fn->block('preh');
         $head = $fn->block('head');
         $body = $fn->block('body');
         $kok = $fn->block('kind_ok');
+        $hpre = $fn->block('hpre');
         $cmp = $fn->block('cmp');
         $next = $fn->block('next');
         $hit = $fn->block('hit');
@@ -2483,6 +2564,7 @@ final class UnifiedArrayRuntime
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
         $rSlot = $chk->alloca(Type::i64(), 'r');
+        $effSlot = $chk->alloca(Type::i64(), 'effh');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
         $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $z, $gate);
         // A null key never matches; else index fast path (-2 → linear).
@@ -2490,14 +2572,17 @@ final class UnifiedArrayRuntime
         $rf = $doidx->call('__mir_array_index_find', Type::i64(),
             [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key, Value::int(Type::i64(), 0), $hash, $haveHash]);
         $doidx->store($rf, $rSlot);
-        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $head, $classify);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $preh, $classify);
         $classify->brIf($classify->icmp('sge', $classify->load(Type::i64(), $rSlot), Value::int(Type::i64(), 0)), $hit, $z);
+        $preh->store($this->scanProbeHash($preh, $key, $hash, $haveHash), $effSlot);
+        $preh->br($head);
         $i = $head->load(Type::i64(), $iSlot);
         $head->brIf($head->icmp('sge', $i, $len), $z, $body);
         $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
         $tk = $kok->load(Type::ptr(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $cmp);
+        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $hpre);
+        $this->hashPrefilter($hpre, $tk, $effSlot, $cmp, $next);
         $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$tk, $key]), $hit, $next);
         $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $next->br($head);
