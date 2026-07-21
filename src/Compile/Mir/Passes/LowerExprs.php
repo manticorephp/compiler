@@ -429,7 +429,7 @@ trait LowerExprs
             $arr = $this->lowerExpr($target->array);
             $idx = $target->index === null
                 ? new NullConst(Type::null_())
-                : $this->lowerExpr($target->index);
+                : $this->foldNumericKey($this->lowerExpr($target->index));
             return new StoreElement($arr, $idx, $value, $value->type);
         }
         if ($target->kind === 'PropertyAccess') {

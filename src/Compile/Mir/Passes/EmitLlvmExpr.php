@@ -284,9 +284,11 @@ trait EmitLlvmExpr
      * `offsetGet/Set` with a `mixed $key`). A PHP array key is int OR string,
      * decided at runtime; the static get/set/isset/unset helpers are typed, so
      * branch on the cell tag (PTR=4 → string key, else int) and route to the
-     * matching typed helper. Tag/unbox math is inlined so these never depend on
-     * the `needsTagged`-gated box helpers — only the always-emitted array
-     * runtime. Keys carry no rc here (offset interning is the array's concern).
+     * matching typed helper. The string tag math is inlined; the int key is
+     * de-boxed via `__mir_ckey_unbox_int` (from the always-emitted array
+     * runtime, NOT the `needsTagged`-gated general helper) so a heap-bigint key
+     * past 2^47 round-trips instead of truncating to 48 bits. Keys carry no rc
+     * here (offset interning is the array's concern).
      */
     private function cellKeyRuntime(): string
     {
@@ -300,7 +302,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
         $out .= "  %r1 = call ptr @__mir_array_set_str(ptr %arr, ptr %kp, i64 %val, i64 0, i64 0)\n  ret ptr %r1\n";
-        $out .= "i:\n  %sh = shl i64 %k, 16\n  %ki = ashr i64 %sh, 16\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r2 = call ptr @__mir_array_set_int(ptr %arr, i64 %ki, i64 %val)\n  ret ptr %r2\n}\n";
 
         $out .= "define i64 @__mir_array_get_cell(ptr %arr, i64 %k) {\n";
@@ -312,7 +314,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
         $out .= "  %r1 = call i64 @__mir_array_get_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
-        $out .= "i:\n  %sh = shl i64 %k, 16\n  %ki = ashr i64 %sh, 16\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r2 = call i64 @__mir_array_get_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
 
         $out .= "define i64 @__mir_array_isset_cell(ptr %arr, i64 %k) {\n";
@@ -324,7 +326,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
         $out .= "  %r1 = call i64 @__mir_array_isset_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
-        $out .= "i:\n  %sh = shl i64 %k, 16\n  %ki = ashr i64 %sh, 16\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r2 = call i64 @__mir_array_isset_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
 
         $out .= "define void @__mir_array_unset_cell(ptr %arr, i64 %k) {\n";
@@ -336,7 +338,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
         $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret void\n";
-        $out .= "i:\n  %sh = shl i64 %k, 16\n  %ki = ashr i64 %sh, 16\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  call void @__mir_array_unset_int(ptr %arr, i64 %ki)\n  ret void\n}\n";
         return $out;
     }
