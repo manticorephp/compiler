@@ -135,8 +135,9 @@ Emitted binaries are fully static and depend on nothing but libc. The
 - **libpcre2** (`preg_*`) and **OpenSSL 3** (TLS, `hash`/`hmac`) development
   packages, plus `pcre2-config` / `pkg-config` to locate them.
 
-macOS arm64/x86_64 is the supported platform. On Linux the toolchain works but
-the full build is blocked by a known compiler bug — details below.
+Both **macOS** (arm64 / x86_64) and **Linux** (glibc ≥ 2.33, arm64 / x86_64) are
+supported — each builds the compiler and passes the full suite, including the
+self-host fixpoint.
 
 **Per-OS package lists, Docker images and troubleshooting:
 [`docs/install.md`](docs/install.md).**
@@ -144,6 +145,12 @@ the full build is blocked by a known compiler bug — details below.
 ## Quick start
 
 ```bash
+# Install: the compiler builds itself into ~/.manticore (needs the toolchain above)
+curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
+export PATH="$HOME/.manticore/bin:$PATH"
+
+# ...or, from a checkout:
+
 # Cold bootstrap: Zend seeds the first native compiler (no binary needed yet)
 bash bin/compile                      # → bin/manticore  (~4.3 MB static binary)
 
@@ -331,12 +338,6 @@ catch layout roulette.
 
 ## Known limitations
 
-- **Linux builds do not complete yet.** The toolchain, the Zend seed and the
-  seed link all work (the Apple-`ld`-only symbol scraper that used to break the
-  link was [issue #1], fixed), but `bin/compile` stage [5/5] segfaults in
-  `EmitLlvm::unboxCellToType` while building the stdlib. A compiler bug, scoped
-  and reproducible — see [`tools/docker/README.md`](tools/docker/README.md).
-  macOS is unaffected.
 - **Integer overflow wraps** (two's-complement) instead of promoting to float
   as PHP does — `PHP_INT_MAX + 1` gives `PHP_INT_MIN`, not a float.
 - **Dynamic name resolution** is not yet supported — `new $cls()`, `$cls::m()`,

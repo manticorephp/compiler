@@ -54,9 +54,11 @@ host's binaries with Linux ones. The copy is also wiped of any stale
 `bin/compile` is never piped: it is redirected to a log. `set -euo pipefail`
 would report `tail`'s exit code and hide a failed build.
 
-### Current state: the build does NOT complete on Linux
+### Current state: the Linux build is GREEN
 
-There were two blockers. The first is **fixed**; the second is not.
+`bin/compile` cold-seeds, self-hosts (`bin/build`, fixpoint OK), and passes the
+full AOT suite on Linux (arm64) in this image, non-root. Two rounds of blockers
+got it there; both are fixed.
 
 **(a) `bin/compile` stage [3/5] was macOS-only -- FIXED (issue #1).** It stubbed
 undefined symbols by scraping the linker's error text with `grep '^  "_'`, which
@@ -84,38 +86,36 @@ ld / GNU ld / lld, and **fails loudly** if the linker reported errors but no
 symbols were extracted -- the silent-empty-`stubs.c` mode is what made this bug
 surface one stage later than its cause.
 
-**(b) The seed SIGSEGVs building the stdlib.** Stages 1-4 now pass, then stage
-[5/5] crashes:
+**(b) stage [5/5] failures -- FIXED.** This section once blamed a SIGSEGV in
+`EmitLlvm::unboxCellToType`; that crash was already gone when the port resumed
+(fixed upstream by repr-consistency work). The genuine Linux-only blockers were
+three linkage/runtime issues -- the emitted IR is byte-identical across
+platforms, so none were visible from the IR alone; only GNU ld vs Apple ld64 and
+glibc vs BSD libc differed:
 
-```
-build: library 'stdlib' (src/Runtime -> lib/manticore_stdlib.o)
-bin/compile: line 81: 43 Segmentation fault  "$SEED" build "$MANIFEST"
-```
+- **FFI-wrapper linkage.** Prelude libc wrappers (`__mc_libc_*`, declared in
+  `prelude/resource.php`) were emitted with external linkage into *every* module,
+  so a user `.o` and the prebuilt `stdlib.o` both defined them -> GNU ld
+  "multiple definition" (Apple ld64 silently coalesces). Non-prelude bindings
+  (`Runtime\Libc\*`), by contrast, are defined once and referenced across the
+  `.o` boundary, so `--gc-sections` drops a linkonce copy. Fix: `linkonce_odr`
+  for *prelude* FFI wrappers, plain external for the rest (mirrors
+  `EmitLlvmModule`'s per-function `isPrelude` linkage).
+- **Missing `-lm`.** glibc/musl keep libm in a separate archive (Darwin folds it
+  into libSystem), so `tanh`/`pow`/… went undefined. Fix: append `-lm` on the
+  non-Darwin link.
+- **Uninitialised exception runtime.** A program that never `throw`s in its own
+  code but links `stdlib.o` (which can) left `@main`'s `depth:=1` + base landing
+  pad unemitted -- both were gated on the *caller* module's `needsExceptions`. A
+  stdlib throw then read an uninitialised depth 0, computed slot `0-1 = -1`, and
+  the out-of-range guard fatally reported "Maximum try nesting" (it fires on
+  slot < 0 too). Fix: force `needsExceptions` on for every non-library module.
 
-Backtrace (gdb, arm64):
-
-```
-#0  __mir_strlen ()
-#1  __mir_str_eq ()
-#2  manticore_Compile_Mir_Passes_EmitLlvm__unboxCellToType ()
-#3  manticore_Compile_Mir_Passes_EmitLlvm__unboxCellArg ()
-#4  manticore_Compile_Mir_Passes_EmitLlvm__emitCall ()
-...
-#17 manticore_Manticore_build_compile_module ()
-#18 manticore_Manticore_cmd_build ()
-```
-
-Scoped, so it is not "Linux is broken":
-
-- The Linux seed compiles and RUNS a hello-world correctly.
-- It is not a stubbing artifact: only the seven `pcre2_*_8` symbols get stubbed
-  on Linux, which is correct (the seed does not need preg).
-- A program using `sort()`/`implode()` fails only with
-  `use of undefined value '@manticore_array_values'` -- a consequence of
-  `lib/manticore_stdlib.o` never being built, not a separate bug.
-
-So one crash in `EmitLlvm::unboxCellToType` gates the whole Linux port, and the
-AOT suite has not yet run on Linux.
+Plus a container-faithfulness fix so the image matches a real deployment: add
+`netbase` (`/etc/services`, `/etc/protocols`) and run as a non-root user (root
+bypasses DAC checks, so `is_writable()` of a `0400` file wrongly returns true).
+Root-cause detail and the debugging trail are in the git history / linux-port
+notes.
 
 ## Files
 

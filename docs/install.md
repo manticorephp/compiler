@@ -90,7 +90,7 @@ Nothing the compiler emits ever calls into a PHP runtime.
 
 ## Per-OS setup
 
-### macOS (arm64 / x86_64) — the supported platform
+### macOS (arm64 / x86_64)
 
 ```bash
 xcode-select --install                  # clang + cc + ld
@@ -138,23 +138,16 @@ functions degrade accordingly.
 
 | Platform | Status |
 |---|---|
-| macOS arm64 | **supported** — the development and gate platform |
+| macOS arm64 | **supported** — the primary development and gate platform |
 | macOS x86_64 | **supported** |
-| Linux glibc ≥ 2.33 (arm64 / x86_64) | **toolchain works, full build blocked** — see below |
+| Linux glibc ≥ 2.33 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
 | Linux glibc < 2.33 (e.g. Ubuntu 20.04) | **unsupported** — cannot link `stat` |
 | Linux musl / Alpine | same as glibc, minus some `glob` constants |
 
-### The Linux blocker
-
-The seed now builds and links on Linux — the Apple-`ld`-only symbol scraper that
-broke it was [issue #1], fixed. One blocker remains: `bin/compile` stage [5/5]
-segfaults in `EmitLlvm::unboxCellToType` while building the standard library.
-This is a live compiler bug, not a packaging problem — the Linux seed compiles
-and runs a hello-world correctly. Detail, backtrace and scoping:
-[`tools/docker/README.md`](../tools/docker/README.md).
-
-Until it is fixed, use Manticore on macOS, or use the container toolchain below
-for everything short of a full Linux build.
+Both macOS and Linux build the compiler from the cold Zend seed, self-host
+(`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite
+and the self-host fixpoint. To reproduce the Linux build + suite in a container,
+see [`tools/docker/README.md`](../tools/docker/README.md).
 
 [issue #1]: https://github.com/manticorephp/compiler/issues/1
 
@@ -173,9 +166,8 @@ docker run --rm -it -v "$PWD":/build/manticore -w /build/manticore \
     manticore-toolchain bash
 ```
 
-**`build`** — copies the repo in and runs `bin/compile`. **This target does not
-succeed yet**, for the Linux blocker above; it is wired up and correct, and will
-go green when that bug is fixed.
+**`build`** — copies the repo in and runs `bin/compile`, baking the compiler into
+the image.
 
 ```bash
 docker build --target build -t manticore .
