@@ -81,6 +81,7 @@ final class UnifiedArrayRuntime
         $this->emitShift();
         $this->emitUnshift();
         $this->emitImplode();
+        $this->emitImplodeInt();
         $this->emitIssetInt();
         $this->emitIssetStr();
         $this->emitUnsetStr();
@@ -2436,6 +2437,83 @@ final class UnifiedArrayRuntime
         $nextb->store($nextb->add($nextb->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
         $nextb->br($cond);
         $end->ret($end->load(Type::ptr(), $dSlot));
+    }
+
+    /**
+     * `__mir_array_implode_int(sep, arr) -> ptr` — join RAW-int elements:
+     * two passes (digit-count sum, then `__mir_int_fmt` straight into the
+     * exact-size buffer). Replaces the boxToCell whole-array rebuild + a
+     * tagged_to_str per element the cell fallback paid for a vec[int]
+     * (implode_int bench: 0.4× vs php, ~263 MB of cell/temp churn).
+     * Caller guarantees a non-null arr (same contract as __mir_array_implode).
+     */
+    private function emitImplodeInt(): void
+    {
+        $fn = $this->module->func('__mir_array_implode_int', Type::ptr());
+        $sep = $fn->param(Type::ptr(), 'sep');
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $empty = $fn->block('ii_empty');
+        $init = $fn->block('ii_init');
+        $sh = $fn->block('ii_sum_head');
+        $sb = $fn->block('ii_sum_body');
+        $al = $fn->block('ii_alloc');
+        $ch = $fn->block('ii_cpy_head');
+        $cb = $fn->block('ii_cpy_body');
+        $csep = $fn->block('ii_cpy_sep');
+        $cval = $fn->block('ii_cpy_val');
+        $done = $fn->block('ii_done');
+
+        $len = $e->load(Type::i64(), $arr);
+        // implode(sep, []) === "" — same empty guard as the string variant
+        // (negative size math would route str_alloc to a wrapped tiny malloc).
+        $e->brIf($e->icmp('sle', $len, Value::int(Type::i64(), 0)), $empty, $init);
+        $eb = $empty->call('__mir_str_alloc', Type::ptr(), [Value::int(Type::i64(), 1)]);
+        $empty->store(Value::int(Type::i8(), 0), $eb);
+        $empty->ret($eb);
+
+        $seplen = $init->call('__mir_strlen', Type::i64(), [$sep]);
+        $accSlot = $init->alloca(Type::i64(), 'ii_acc');
+        $iSlot = $init->alloca(Type::i64(), 'ii_i');
+        $offSlot = $init->alloca(Type::i64(), 'ii_off');
+        $init->store(Value::int(Type::i64(), 0), $accSlot);
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        $init->br($sh);
+        $i = $sh->load(Type::i64(), $iSlot);
+        $sh->brIf($sh->icmp('sge', $i, $len), $al, $sb);
+        $v = $sb->call('__mir_array_value_at', Type::i64(), [$arr, $i]);
+        $n = $sb->call('__mir_int_len', Type::i64(), [$v]);
+        $sb->store($sb->add($sb->load(Type::i64(), $accSlot), $n), $accSlot);
+        $sb->store($sb->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $sb->br($sh);
+
+        $acc = $al->load(Type::i64(), $accSlot);
+        $seps = $al->mul($seplen, $al->sub($len, Value::int(Type::i64(), 1)));
+        $total = $al->add($al->add($acc, $seps), Value::int(Type::i64(), 1));
+        $buf = $al->call('__mir_str_alloc', Type::ptr(), [$total]);
+        $al->store(Value::int(Type::i64(), 0), $iSlot);
+        $al->store(Value::int(Type::i64(), 0), $offSlot);
+        $al->br($ch);
+        $i2 = $ch->load(Type::i64(), $iSlot);
+        $ch->brIf($ch->icmp('sge', $i2, $len), $done, $cb);
+        $cb->brIf($cb->icmp('eq', $i2, Value::int(Type::i64(), 0)), $cval, $csep);
+        $off0 = $csep->load(Type::i64(), $offSlot);
+        $dsts = $csep->gep(Type::i8(), $buf, [$off0]);
+        $csep->call('memcpy', Type::ptr(), [$dsts, $sep, $seplen]);
+        $csep->store($csep->add($off0, $seplen), $offSlot);
+        $csep->br($cval);
+        $v2 = $cval->call('__mir_array_value_at', Type::i64(), [$arr, $i2]);
+        $n2 = $cval->call('__mir_int_len', Type::i64(), [$v2]);
+        $off1 = $cval->load(Type::i64(), $offSlot);
+        $cval->call('__mir_int_fmt', Type::void(), [$buf, $off1, $v2]);
+        $cval->store($cval->add($off1, $n2), $offSlot);
+        $cval->store($cval->add($i2, Value::int(Type::i64(), 1)), $iSlot);
+        $cval->br($ch);
+
+        $offF = $done->load(Type::i64(), $offSlot);
+        $done->store(Value::int(Type::i8(), 0), $done->gep(Type::i8(), $buf, [$offF]));
+        $done->call('__mir_str_set_len', Type::void(), [$buf, $offF]);
+        $done->ret($buf);
     }
 
     /**

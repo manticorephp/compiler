@@ -2440,6 +2440,35 @@ trait EmitLlvmBuiltins
         // inttoptr a non-pointer value and fault. A known string vec keeps the
         // fast path.
         $elem = $args[1]->type->element ?? null;
+        // A RAW-int element vec joins natively (digit-count + int_fmt straight
+        // into an exact-size buffer) — no boxToCell whole-array rebuild, no
+        // tagged_to_str temp per element.
+        if ($elem !== null && $elem->kind === Type::KIND_INT) {
+            $out .= $this->emitNode($args[1]);
+            $out .= $this->coerceToPtr();
+            $vec = $this->lastValue;
+            $this->rt->needsIntStr = true;
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_int(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        // A raw double IS a valid cell (untagged bits are the float repr), so a
+        // vec[float] joins via the cell runtime DIRECTLY — the boxToCell pass
+        // over a float vec was an identity element copy of the whole array.
+        if ($elem !== null && $elem->kind === Type::KIND_FLOAT) {
+            $out .= $this->emitNode($args[1]);
+            $out .= $this->coerceToPtr();
+            $vec = $this->lastValue;
+            $this->rt->needsTaggedToStr = true;
+            $this->rt->needsImplodeCell = true;
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $useCell = $elem === null || $elem->kind !== Type::KIND_STRING;
         $out .= $this->emitNode($args[1]);
         if ($useCell) {
