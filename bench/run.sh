@@ -6,6 +6,7 @@
 #   bash bench/run.sh            # all cases
 #   bash bench/run.sh -k sort    # only cases whose name matches "sort"
 #   REPS=5 bash bench/run.sh     # best-of-5 instead of best-of-3
+#   MEM=1 bash bench/run.sh      # extra max-RSS columns (one /usr/bin/time -l run)
 #
 # Not part of any gate — run it by hand to refresh the perf snapshot.
 set -u
@@ -22,6 +23,7 @@ filter="${2:-}"
 [ "${1:-}" = "-k" ] && filter="${2:-}"
 reps="${REPS:-3}"
 php_bin="${PHP:-php}"
+mem="${MEM:-0}"
 
 if [ ! -x "$mant" ]; then echo "no $mant — run bin/build first" >&2; exit 1; fi
 
@@ -35,8 +37,19 @@ best_time() {
     echo "$best"
 }
 
-printf '%-18s %10s %10s %9s   %s\n' "case" "native(s)" "php(s)" "speedup" "parity"
-printf '%s\n' "-------------------------------------------------------------------"
+# max RSS in MB of one run of "$@" (macOS `time -l` reports bytes).
+max_rss_mb() {
+    { /usr/bin/time -l "$@" >/dev/null; } 2>&1 \
+        | awk '/maximum resident set size/{printf "%.1f", $1/1048576}'
+}
+
+if [ "$mem" = "1" ]; then
+    printf '%-18s %10s %10s %9s %10s %10s   %s\n' "case" "native(s)" "php(s)" "speedup" "rss-n(MB)" "rss-p(MB)" "parity"
+    printf '%s\n' "----------------------------------------------------------------------------------------"
+else
+    printf '%-18s %10s %10s %9s   %s\n' "case" "native(s)" "php(s)" "speedup" "parity"
+    printf '%s\n' "-------------------------------------------------------------------"
+fi
 
 shopt -s nullglob
 total=0; faster=0
@@ -62,7 +75,13 @@ for f in "$cases_dir"/*.php; do
     sp="$(awk "BEGIN{ if ($nt>0) printf \"%.1fx\", $pt/$nt; else print \"inf\" }")"
     total=$((total + 1))
     awk "BEGIN{exit !($pt > $nt)}" && faster=$((faster + 1))
-    printf '%-18s %10s %10s %9s   %s\n' "$name" "$nt" "$pt" "$sp" "ok"
+    if [ "$mem" = "1" ]; then
+        rn="$(max_rss_mb "$bin")"
+        rp="$(max_rss_mb "$php_bin" "$f")"
+        printf '%-18s %10s %10s %9s %10s %10s   %s\n' "$name" "$nt" "$pt" "$sp" "$rn" "$rp" "ok"
+    else
+        printf '%-18s %10s %10s %9s   %s\n' "$name" "$nt" "$pt" "$sp" "ok"
+    fi
 done
 printf '%s\n' "-------------------------------------------------------------------"
 echo "ran $total · native faster on $faster · php $($php_bin -r 'echo PHP_VERSION;')"
