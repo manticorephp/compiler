@@ -248,24 +248,45 @@ function rsort(array &$arr): bool
 
 /**
  * `ksort` / `krsort` — sort by KEY (ascending / descending), preserving the
- * key=>value association. Self-contained insertion sort over the KEY vector;
- * `array_keys` returns NaN-boxed cell keys, so `$keys[$j] > $kk` dispatches by
- * tag (string→strcmp, int→numeric) via __manticore_tagged_compare — correct for
- * both string and int keys. Does NOT call the shared sort() (that would add a
- * conflicting call site and erase sort's element type).
+ * key=>value association. Self-contained bottom-up STABLE merge over the KEY
+ * vector (the usort idiom — the old insertion sort was O(n²), a quadratic wall
+ * on any real map); `array_keys` returns NaN-boxed cell keys, so the compare
+ * dispatches by tag (string→strcmp, int→numeric) via __manticore_tagged_compare
+ * — correct for both string and int keys. Does NOT call the shared sort() (that
+ * would add a conflicting call site and erase sort's element type).
  */
 function ksort(array &$arr): bool
 {
     $keys = array_keys($arr);
     $n = count($keys);
-    for ($i = 1; $i < $n; $i = $i + 1) {
-        $kk = $keys[$i];
-        $j = $i - 1;
-        while ($j >= 0 && $keys[$j] > $kk) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
-        $keys[$j + 1] = $kk;
+    if ($n < 2) { return true; }
+    $tmp = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $tmp[] = $keys[$i]; }
+    $width = 1;
+    $inArr = true;
+    while ($width < $n) {
+        $i = 0;
+        while ($i < $n) {
+            $mid = $i + $width; if ($mid > $n) { $mid = $n; }
+            $hi = $i + 2 * $width; if ($hi > $n) { $hi = $n; }
+            $l = $i; $r = $mid; $k = $i;
+            if ($inArr) {
+                while ($l < $mid && $r < $hi) { if ($keys[$l] <= $keys[$r]) { $tmp[$k] = $keys[$l]; $l = $l + 1; } else { $tmp[$k] = $keys[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $tmp[$k] = $keys[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $tmp[$k] = $keys[$r]; $r = $r + 1; $k = $k + 1; }
+            } else {
+                while ($l < $mid && $r < $hi) { if ($tmp[$l] <= $tmp[$r]) { $keys[$k] = $tmp[$l]; $l = $l + 1; } else { $keys[$k] = $tmp[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $keys[$k] = $tmp[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $keys[$k] = $tmp[$r]; $r = $r + 1; $k = $k + 1; }
+            }
+            $i = $i + 2 * $width;
+        }
+        $width = $width * 2;
+        $inArr = !$inArr;
     }
+    if (!$inArr) { for ($i = 0; $i < $n; $i = $i + 1) { $keys[$i] = $tmp[$i]; } }
     $new = [];
-    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
 }
@@ -274,36 +295,80 @@ function krsort(array &$arr): bool
 {
     $keys = array_keys($arr);
     $n = count($keys);
-    for ($i = 1; $i < $n; $i = $i + 1) {
-        $kk = $keys[$i];
-        $j = $i - 1;
-        while ($j >= 0 && $keys[$j] < $kk) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
-        $keys[$j + 1] = $kk;
+    if ($n < 2) { return true; }
+    $tmp = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $tmp[] = $keys[$i]; }
+    $width = 1;
+    $inArr = true;
+    while ($width < $n) {
+        $i = 0;
+        while ($i < $n) {
+            $mid = $i + $width; if ($mid > $n) { $mid = $n; }
+            $hi = $i + 2 * $width; if ($hi > $n) { $hi = $n; }
+            $l = $i; $r = $mid; $k = $i;
+            if ($inArr) {
+                while ($l < $mid && $r < $hi) { if ($keys[$l] >= $keys[$r]) { $tmp[$k] = $keys[$l]; $l = $l + 1; } else { $tmp[$k] = $keys[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $tmp[$k] = $keys[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $tmp[$k] = $keys[$r]; $r = $r + 1; $k = $k + 1; }
+            } else {
+                while ($l < $mid && $r < $hi) { if ($tmp[$l] >= $tmp[$r]) { $keys[$k] = $tmp[$l]; $l = $l + 1; } else { $keys[$k] = $tmp[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $keys[$k] = $tmp[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $keys[$k] = $tmp[$r]; $r = $r + 1; $k = $k + 1; }
+            }
+            $i = $i + 2 * $width;
+        }
+        $width = $width * 2;
+        $inArr = !$inArr;
     }
+    if (!$inArr) { for ($i = 0; $i < $n; $i = $i + 1) { $keys[$i] = $tmp[$i]; } }
     $new = [];
-    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
 }
 
 /**
  * `asort` / `arsort` — sort by VALUE (ascending / descending), preserving the
- * key=>value association. Insertion sort over the KEY vector, comparing the
- * by-key value reads `$arr[$key]` (tagged cells → __manticore_tagged_compare).
+ * key=>value association. Bottom-up STABLE merge (PHP 8 sorts are stable) over
+ * two lockstep vectors — the keys and a pre-read values DECORATION, so each
+ * comparison is one vector read (tagged compare), never a by-key map lookup.
+ * The old insertion sort was O(n²) with a hashed `$arr[$keys[$j]]` read per
+ * comparison — quadratic wall on any real map.
  */
 function asort(array &$arr): bool
 {
     $keys = array_keys($arr);
     $n = count($keys);
-    for ($i = 1; $i < $n; $i = $i + 1) {
-        $kk = $keys[$i];
-        $vv = $arr[$kk];
-        $j = $i - 1;
-        while ($j >= 0 && $arr[$keys[$j]] > $vv) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
-        $keys[$j + 1] = $kk;
+    if ($n < 2) { return true; }
+    $vals = [];
+    $ktmp = [];
+    $vtmp = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $vals[] = $arr[$keys[$i]]; $ktmp[] = $keys[$i]; $vtmp[] = $vals[$i]; }
+    $width = 1;
+    $inArr = true;
+    while ($width < $n) {
+        $i = 0;
+        while ($i < $n) {
+            $mid = $i + $width; if ($mid > $n) { $mid = $n; }
+            $hi = $i + 2 * $width; if ($hi > $n) { $hi = $n; }
+            $l = $i; $r = $mid; $k = $i;
+            if ($inArr) {
+                while ($l < $mid && $r < $hi) { if ($vals[$l] <= $vals[$r]) { $ktmp[$k] = $keys[$l]; $vtmp[$k] = $vals[$l]; $l = $l + 1; } else { $ktmp[$k] = $keys[$r]; $vtmp[$k] = $vals[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $ktmp[$k] = $keys[$l]; $vtmp[$k] = $vals[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $ktmp[$k] = $keys[$r]; $vtmp[$k] = $vals[$r]; $r = $r + 1; $k = $k + 1; }
+            } else {
+                while ($l < $mid && $r < $hi) { if ($vtmp[$l] <= $vtmp[$r]) { $keys[$k] = $ktmp[$l]; $vals[$k] = $vtmp[$l]; $l = $l + 1; } else { $keys[$k] = $ktmp[$r]; $vals[$k] = $vtmp[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $keys[$k] = $ktmp[$l]; $vals[$k] = $vtmp[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $keys[$k] = $ktmp[$r]; $vals[$k] = $vtmp[$r]; $r = $r + 1; $k = $k + 1; }
+            }
+            $i = $i + 2 * $width;
+        }
+        $width = $width * 2;
+        $inArr = !$inArr;
     }
+    if (!$inArr) { for ($i = 0; $i < $n; $i = $i + 1) { $keys[$i] = $ktmp[$i]; } }
     $new = [];
-    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
 }
@@ -312,15 +377,36 @@ function arsort(array &$arr): bool
 {
     $keys = array_keys($arr);
     $n = count($keys);
-    for ($i = 1; $i < $n; $i = $i + 1) {
-        $kk = $keys[$i];
-        $vv = $arr[$kk];
-        $j = $i - 1;
-        while ($j >= 0 && $arr[$keys[$j]] < $vv) { $keys[$j + 1] = $keys[$j]; $j = $j - 1; }
-        $keys[$j + 1] = $kk;
+    if ($n < 2) { return true; }
+    $vals = [];
+    $ktmp = [];
+    $vtmp = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $vals[] = $arr[$keys[$i]]; $ktmp[] = $keys[$i]; $vtmp[] = $vals[$i]; }
+    $width = 1;
+    $inArr = true;
+    while ($width < $n) {
+        $i = 0;
+        while ($i < $n) {
+            $mid = $i + $width; if ($mid > $n) { $mid = $n; }
+            $hi = $i + 2 * $width; if ($hi > $n) { $hi = $n; }
+            $l = $i; $r = $mid; $k = $i;
+            if ($inArr) {
+                while ($l < $mid && $r < $hi) { if ($vals[$l] >= $vals[$r]) { $ktmp[$k] = $keys[$l]; $vtmp[$k] = $vals[$l]; $l = $l + 1; } else { $ktmp[$k] = $keys[$r]; $vtmp[$k] = $vals[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $ktmp[$k] = $keys[$l]; $vtmp[$k] = $vals[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $ktmp[$k] = $keys[$r]; $vtmp[$k] = $vals[$r]; $r = $r + 1; $k = $k + 1; }
+            } else {
+                while ($l < $mid && $r < $hi) { if ($vtmp[$l] >= $vtmp[$r]) { $keys[$k] = $ktmp[$l]; $vals[$k] = $vtmp[$l]; $l = $l + 1; } else { $keys[$k] = $ktmp[$r]; $vals[$k] = $vtmp[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $keys[$k] = $ktmp[$l]; $vals[$k] = $vtmp[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $keys[$k] = $ktmp[$r]; $vals[$k] = $vtmp[$r]; $r = $r + 1; $k = $k + 1; }
+            }
+            $i = $i + 2 * $width;
+        }
+        $width = $width * 2;
+        $inArr = !$inArr;
     }
+    if (!$inArr) { for ($i = 0; $i < $n; $i = $i + 1) { $keys[$i] = $ktmp[$i]; } }
     $new = [];
-    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
 }
@@ -654,17 +740,34 @@ function uksort(array &$arr, callable $cmp): bool
 {
     $keys = array_keys($arr);
     $n = count($keys);
-    for ($i = 1; $i < $n; $i = $i + 1) {
-        $kk = $keys[$i];
-        $j = $i - 1;
-        while ($j >= 0 && $cmp($keys[$j], $kk) > 0) {
-            $keys[$j + 1] = $keys[$j];
-            $j = $j - 1;
+    if ($n < 2) { return true; }
+    $tmp = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $tmp[] = $keys[$i]; }
+    $width = 1;
+    $inArr = true;
+    while ($width < $n) {
+        $i = 0;
+        while ($i < $n) {
+            $mid = $i + $width; if ($mid > $n) { $mid = $n; }
+            $hi = $i + 2 * $width; if ($hi > $n) { $hi = $n; }
+            $l = $i; $r = $mid; $k = $i;
+            if ($inArr) {
+                while ($l < $mid && $r < $hi) { if ($cmp($keys[$l], $keys[$r]) <= 0) { $tmp[$k] = $keys[$l]; $l = $l + 1; } else { $tmp[$k] = $keys[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $tmp[$k] = $keys[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $tmp[$k] = $keys[$r]; $r = $r + 1; $k = $k + 1; }
+            } else {
+                while ($l < $mid && $r < $hi) { if ($cmp($tmp[$l], $tmp[$r]) <= 0) { $keys[$k] = $tmp[$l]; $l = $l + 1; } else { $keys[$k] = $tmp[$r]; $r = $r + 1; } $k = $k + 1; }
+                while ($l < $mid) { $keys[$k] = $tmp[$l]; $l = $l + 1; $k = $k + 1; }
+                while ($r < $hi)  { $keys[$k] = $tmp[$r]; $r = $r + 1; $k = $k + 1; }
+            }
+            $i = $i + 2 * $width;
         }
-        $keys[$j + 1] = $kk;
+        $width = $width * 2;
+        $inArr = !$inArr;
     }
+    if (!$inArr) { for ($i = 0; $i < $n; $i = $i + 1) { $keys[$i] = $tmp[$i]; } }
     $new = [];
-    foreach ($keys as $k) { $new[$k] = $arr[$k]; }
+    foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
 }
