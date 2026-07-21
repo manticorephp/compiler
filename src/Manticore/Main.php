@@ -919,9 +919,13 @@ function cmd_compile(array $args): int {
     // ld64 still errors on unless allowed. `-U ___errno_location` permits exactly
     // that one symbol undefined (it binds to 0, and the null-test branches away
     // from it). GNU ld auto-binds weak-undefined to 0, so Linux needs no flag.
+    // -lm: libm is folded into libSystem on Darwin (auto-linked) but is a
+    // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
+    // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
+    // undefined reference without it. `--as-needed` drops it when unreferenced.
     $gc = \substr(host_os(), 0, 6) === "Darwin"
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
-        : " -Wl,--gc-sections -Wl,--as-needed";
+        : " -Wl,--gc-sections -Wl,--as-needed -lm";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
         dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objPath);

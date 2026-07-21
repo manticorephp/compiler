@@ -265,6 +265,15 @@ final class EmitLlvm implements EmitVisitor
         // promote / index paths reference @__mir_arena_* under this flag, so
         // those symbols must be emitted even if no string took the arena path.
         if (\Compile\Debug::$arenaArrays) { $this->rt->needsArena = true; }
+        // A program module (not the bundled stdlib) always links stdlib.o, which
+        // CAN throw even when the user's own code never does. The exception
+        // runtime — @main's depth:=1 + base landing pad and the process-global
+        // jmp state — is what makes any throw land; gated on the caller's own
+        // `needsExceptions` it would be absent for e.g. `<?php stat($p);`, and a
+        // stdlib throw would then read an uninitialised depth 0 → slot -1 → a bogus
+        // "Maximum try nesting" fatal instead of a clean uncaught error. Force it
+        // on for every program (a lone base setjmp + BSS; no-op if nothing throws).
+        if (!$this->emitLibrary) { $this->rt->needsExceptions = true; }
         $this->pool = new StringPool();
         $this->ssa = new SsaBuilder();
         $this->gen = new GeneratorContext();

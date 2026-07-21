@@ -25,14 +25,14 @@ trait EmitLlvmExceptions
     private function catchBody(MirCatch $c): array { return $c->body; }
 
     /**
-     * `@__mir_jmp_stack + slot*256` as a ptr SSA. Appends IR to $out-by-return.
+     * `@__mir_jmp_stack + slot*512` as a ptr SSA. Appends IR to $out-by-return.
      *
      * The slot→offset step goes through `@__mir_jmp_slot`, which FATALS on an
-     * out-of-range slot rather than letting setjmp scribble past the stack (it
-     * writes 192B, so slot 16 lands on @__mir_jmp_depth / @__mir_thrown /
-     * @__manticore_argc / @__manticore_argv — corruption that surfaces far from
-     * its cause). It is tiny, so -O2 inlines it back to the compare + `mul`
-     * this used to be.
+     * out-of-range slot rather than letting setjmp scribble past the stack (glibc
+     * writes ~312B, so an out-of-range slot lands on @__mir_jmp_depth /
+     * @__mir_thrown / @__manticore_argc / @__manticore_argv — corruption that
+     * surfaces far from its cause). It is tiny, so -O2 inlines it back to the
+     * compare + `mul` this used to be. Stride is defined in @__mir_jmp_slot.
      */
     private function jmpBufExpr(string $slotReg): string
     {

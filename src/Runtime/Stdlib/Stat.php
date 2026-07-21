@@ -116,8 +116,11 @@ function __mc_stat_off(int $which): int
             ? \peek_u16($probe, $nlink)
             : ($nlinkW === 4 ? \peek_u32($probe, $nlink) : \peek_i64($probe, $nlink));
         \Runtime\Libc\free($probe);
-        // S_IFMT = 0170000, S_IFDIR = 0040000.
-        if (($pm & 0170000) !== 0040000 || $pn < 2) {
+        // S_IFMT = 0170000, S_IFDIR = 0040000. The mode is the reliable ABI probe;
+        // nlink is only a floor (>=1). Do NOT require >=2: overlayfs (Docker's
+        // default) reports st_nlink=1 for directories — it does not track the
+        // subdir link count — so a correct table would be wrongly rejected there.
+        if (($pm & 0170000) !== 0040000 || $pn < 1) {
             throw new \RuntimeException(
                 'stat: struct stat layout not recognised for ' . $sys . '/' . $machine
                 . ' (stat("/") gave mode=' . \decoct($pm) . ' nlink=' . $pn . ')'
