@@ -262,7 +262,12 @@ function __mc_dtoa_scal(int $bits, int $which): int {
     }
     $exp = $e10 + $removed;
     if ($which === 0) { return $output; }
-    return (($exp + 1024) << 1) | $sign;
+    if ($which === 1) { return (($exp + 1024) << 1) | $sign; }
+    // $which === 2: ONE-CALL packed form — digits<<13 | (exp+1024)<<2 |
+    // sign<<1 | 0. Digits above 51 bits (rare 16-17-digit shortest outputs)
+    // return 1 (flag bit): caller re-runs via which=0/1.
+    if ($output >= 2251799813685248) { return 1; }             // 1<<51
+    return ($output << 13) | (($exp + 1024) << 2) | ($sign << 1);
 }
 
 /**
