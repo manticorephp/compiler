@@ -209,7 +209,11 @@ self-reproduces the compiler. **Full end-user guide: [`docs/modules.md`](docs/mo
 - **`applications[]`** — `src` directory, `output` binary, optional `entry`
   (the file whose top level becomes `main`), optional `exclude`, optional
   `libraries` (user library deps — omit ⇒ all, `[]` ⇒ none), optional
-  `stdlib: false` (opt out of the always-on stdlib runtime).
+  `stdlib: false` (opt out of the always-on stdlib runtime), optional
+  `composer` — `true` builds the project the way Composer sees it: its
+  `composer.json` autoload (psr-4/psr-0/classmap dirs) **and** every installed
+  package from `composer.lock` (`vendor/<name>/`). The object form
+  `{ "vendor": false }` takes only the project's own autoload.
 - **`libraries[]`** — compiled to `<output>.o` + an `<output>.o.sig` interface;
   an application links a user library by naming it. A `runtime: true` library
   (the stdlib) is built but auto-linked into every app (see above).
