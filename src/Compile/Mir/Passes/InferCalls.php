@@ -319,6 +319,12 @@ trait InferCalls
             if (\count($args) === 1 && $args[0]->type->kind === Type::KIND_FLOAT) {
                 return Type::float_();
             }
+            // A CELL (a `?float`/`float|false` value) keeps its int-or-float
+            // nature at runtime — biAbs dispatches by tag and re-boxes, so the
+            // result is a numeric cell, not a bare int.
+            if (\count($args) === 1 && $args[0]->type->kind === Type::KIND_CELL) {
+                return Type::numericCell();
+            }
             return Type::int_();
         }
         return null;

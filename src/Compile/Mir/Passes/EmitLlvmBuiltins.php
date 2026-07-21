@@ -1508,6 +1508,57 @@ trait EmitLlvmBuiltins
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
         }
+        // A CELL (`?float` / `float|false`) keeps its int-or-float nature only
+        // at runtime — the int path below would read a boxed double's bits as an
+        // int. Dispatch by tag: fabs on a float payload, integer abs on an int,
+        // re-boxing each so the result is a numeric cell (see InferCalls abs).
+        if ($args[0]->type->kind === Type::KIND_CELL) {
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToFloat = true;
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsStrtod = true;
+            $this->rt->needsStrtol = true;
+            $this->libcExtra['llvm.fabs.f64'] = 'declare double @llvm.fabs.f64(double)';
+            $out .= $this->coerceToI64();
+            $cell = $this->lastValue;
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= $this->cellTagIr($cell);
+            $tag = $this->cellTagReg;
+            $isFloat = $this->ssa->allocReg();
+            $out .= '  ' . $isFloat . ' = icmp eq i64 ' . $tag . ", 6\n";
+            $fL = $this->ssa->allocLabel('abs.f');
+            $iL = $this->ssa->allocLabel('abs.i');
+            $dL = $this->ssa->allocLabel('abs.done');
+            $out .= '  br i1 ' . $isFloat . ', label %' . $fL . ', label %' . $iL . "\n";
+            $out .= $fL . ":\n";
+            $fd = $this->ssa->allocReg();
+            $out .= '  ' . $fd . ' = call double @__manticore_tagged_to_double(i64 ' . $cell . ")\n";
+            $fa = $this->ssa->allocReg();
+            $out .= '  ' . $fa . ' = call double @llvm.fabs.f64(double ' . $fd . ")\n";
+            $this->lastValue = $fa; $this->lastValueType = 'double';
+            $out .= $this->boxToCell(Type::float_());
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $dL . "\n";
+            $out .= $iL . ":\n";
+            $iv = $this->ssa->allocReg();
+            $out .= '  ' . $iv . ' = call i64 @__manticore_tagged_to_int(i64 ' . $cell . ")\n";
+            $ineg = $this->ssa->allocReg();
+            $out .= '  ' . $ineg . ' = sub i64 0, ' . $iv . "\n";
+            $ilt = $this->ssa->allocReg();
+            $out .= '  ' . $ilt . ' = icmp slt i64 ' . $iv . ", 0\n";
+            $ia = $this->ssa->allocReg();
+            $out .= '  ' . $ia . ' = select i1 ' . $ilt . ', i64 ' . $ineg . ', i64 ' . $iv . "\n";
+            $this->lastValue = $ia; $this->lastValueType = 'i64';
+            $out .= $this->boxToCell(Type::int_());
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $dL . "\n";
+            $out .= $dL . ":\n";
+            $rv = $this->ssa->allocReg();
+            $out .= '  ' . $rv . ' = load i64, ptr ' . $slot . "\n";
+            $this->lastValue = $rv; $this->lastValueType = 'i64';
+            return $out;
+        }
         $out .= $this->coerceIntArg($args[0]);
         $v = $this->lastValue;
         $neg = $this->ssa->allocReg();
@@ -1575,7 +1626,10 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra[$intrinsic] = 'declare double @' . $intrinsic . '(double)';
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceTo('double');
+        // coerceDoubleOperand (not coerceTo('double')): a CELL arg (a
+        // `float|false`/`?float` value) must be tag-decoded via tagged_to_double,
+        // not sitofp'd — the raw NaN-boxed carrier is a garbage integer.
+        $out .= $this->coerceDoubleOperand($args[0]);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @' . $intrinsic . '(double ' . $this->lastValue . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
@@ -1593,7 +1647,7 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['llvm.round.f64'] = 'declare double @llvm.round.f64(double)';
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceTo('double');
+        $out .= $this->coerceDoubleOperand($args[0]);
         $x = $this->lastValue;
         if (\count($args) < 2) {
             $reg = $this->ssa->allocReg();
@@ -1603,7 +1657,7 @@ trait EmitLlvmBuiltins
         }
         $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceTo('double');
+        $out .= $this->coerceDoubleOperand($args[1]);
         $p = $this->lastValue;
         $scale = $this->ssa->allocReg();
         $out .= '  ' . $scale . ' = call double @llvm.pow.f64(double 1.000000e+01, double ' . $p . ")\n";
@@ -1632,8 +1686,8 @@ trait EmitLlvmBuiltins
      *  @param Node[] $args */
     private function biFmod(array $args): string
     {
-        $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
-        $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $y = $this->lastValue;
+        $out = $this->emitNode($args[0]); $out .= $this->coerceDoubleOperand($args[0]); $x = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceDoubleOperand($args[1]); $y = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = frem double ' . $x . ', ' . $y . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
@@ -1645,8 +1699,8 @@ trait EmitLlvmBuiltins
     private function biFloatBinary(array $args, string $fn): string
     {
         $this->libcExtra[$fn] = 'declare double @' . $fn . '(double, double)';
-        $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
-        $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $y = $this->lastValue;
+        $out = $this->emitNode($args[0]); $out .= $this->coerceDoubleOperand($args[0]); $x = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceDoubleOperand($args[1]); $y = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @' . $fn . '(double ' . $x . ', double ' . $y . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
@@ -1657,14 +1711,14 @@ trait EmitLlvmBuiltins
     private function biLog(array $args): string
     {
         $this->libcExtra['llvm.log.f64'] = 'declare double @llvm.log.f64(double)';
-        $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
+        $out = $this->emitNode($args[0]); $out .= $this->coerceDoubleOperand($args[0]); $x = $this->lastValue;
         $lx = $this->ssa->allocReg();
         $out .= '  ' . $lx . ' = call double @llvm.log.f64(double ' . $x . ")\n";
         if (\count($args) < 2) {
             $this->lastValue = $lx; $this->lastValueType = 'double';
             return $out;
         }
-        $out .= $this->emitNode($args[1]); $out .= $this->coerceTo('double'); $b = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceDoubleOperand($args[1]); $b = $this->lastValue;
         $lb = $this->ssa->allocReg();
         $out .= '  ' . $lb . ' = call double @llvm.log.f64(double ' . $b . ")\n";
         $reg = $this->ssa->allocReg();
@@ -1686,7 +1740,7 @@ trait EmitLlvmBuiltins
      * @param Node[] $args */
     private function biFloatScale(array $args, string $hexConst): string
     {
-        $out = $this->emitNode($args[0]); $out .= $this->coerceTo('double'); $x = $this->lastValue;
+        $out = $this->emitNode($args[0]); $out .= $this->coerceDoubleOperand($args[0]); $x = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fmul double ' . $x . ', ' . $hexConst . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
