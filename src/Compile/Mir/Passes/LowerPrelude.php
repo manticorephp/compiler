@@ -131,6 +131,12 @@ trait LowerPrelude
             // the sources are concatenated then parsed as one unit.
             $src = $src . $this->reflectionSrc;
         }
+        if ($this->includeDateTime) {
+            // After exceptions.php (DateMalformedStringException extends
+            // Exception, DateError extends Error) and after spl_arrays.php,
+            // whose interfaces DatePeriod implements.
+            $src = $src . $this->dateTimeSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         return $program->statements;
     }

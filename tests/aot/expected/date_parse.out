@@ -1,0 +1,53 @@
+2017-07-14 16:01:07
+  year=2017
+  month=7
+  day=14
+  hour=16
+  minute=1
+  second=7
+  errors=no
+2017-07-14
+  year=2017
+  month=7
+  day=14
+  hour=false
+  minute=false
+  second=false
+  errors=no
+16:01:07
+  year=false
+  month=false
+  day=false
+  hour=16
+  minute=1
+  second=7
+  errors=no
+2017-07-14T16:01:07+02:00
+  year=2017
+  month=7
+  day=14
+  hour=16
+  minute=1
+  second=7
+  errors=no
+@1500000000
+  year=1970
+  month=1
+  day=1
+  hour=0
+  minute=0
+  second=0
+  errors=no
+July 14, 2017
+  year=2017
+  month=7
+  day=14
+  hour=false
+  minute=false
+  second=false
+  errors=no
+bad year=false errors=yes
+Y-m-d <- 2017-07-14 y=2017 m=7 d=14 h=false i=false
+d/m/Y <- 14/07/2017 y=2017 m=7 d=14 h=false i=false
+Y-m-d H:i:s <- 2017-07-14 16:01:07 y=2017 m=7 d=14 h=16 i=1
+H:i <- 16:01 y=false m=false d=false h=16 i=1

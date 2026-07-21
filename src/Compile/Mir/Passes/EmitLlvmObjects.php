@@ -1116,6 +1116,16 @@ trait EmitLlvmObjects
                 $val = $this->lastValue;
             }
         } else {
+            // A CELL value stored into a CONCRETE-typed property must be
+            // UNBOXED, or the tagged bits land in the slot and read back as
+            // nonsense: `private int $n` assigned from an `int|object` union
+            // parameter returned -4222124650659837 instead of 3. This is the
+            // property-slot analogue of the cell unboxing already done on the
+            // `return` path and per-element in emitStoreElementUnified;
+            // unboxCellToType no-ops for a non-concrete target.
+            if ($n->value->type->kind === Type::KIND_CELL && $propType !== null) {
+                $out .= $this->unboxCellToType($propType);
+            }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
             $out .= $this->rcRetainByType($n->value, $val, $propType, 4);

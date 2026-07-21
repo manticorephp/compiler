@@ -1,0 +1,92 @@
+UTC
+Europe/Kyiv
+America/New_York
++05:30
+2017-07-14 16:01:07 [UTC] 2017-07-14 16:01:07 UTC +00:00 UTC 0 ts=1500048067 off=0
+2017-07-14 16:01:07 [Europe/Kyiv] 2017-07-14 16:01:07 EEST +03:00 Europe/Kyiv 1 ts=1500037267 off=10800
+@1500000000 [UTC] 2017-07-14 02:40:00 GMT+0000 +00:00 +00:00 0 ts=1500000000 off=0
+@1500000000 [Europe/Kyiv] 2017-07-14 02:40:00 GMT+0000 +00:00 +00:00 0 ts=1500000000 off=0
+2001-01-01 [UTC] 2001-01-01 00:00:00 UTC +00:00 UTC 0 ts=978307200 off=0
+2001-01-01 [Europe/Kyiv] 2001-01-01 00:00:00 EET +02:00 Europe/Kyiv 0 ts=978300000 off=7200
+1999-12-31 23:59:59 [UTC] 1999-12-31 23:59:59 UTC +00:00 UTC 0 ts=946684799 off=0
+1999-12-31 23:59:59 [Europe/Kyiv] 1999-12-31 23:59:59 EET +02:00 Europe/Kyiv 0 ts=946677599 off=7200
+setDate 2020-02-29 16:01:07
+setTime 2020-02-29 01:02:03
+setTimestamp 2017-07-14 02:40:00
+setISODate 2017-07-14
+setDate overflow 2018-01-01
+modify +1 day => 2017-07-15 16:01:07
+modify -1 day => 2017-07-13 16:01:07
+modify +1 month => 2017-08-14 16:01:07
+modify +1 year => 2018-07-14 16:01:07
+modify next monday => 2017-07-17 00:00:00
+modify last day of next month => 2017-08-31 16:01:07
+modify +2 weeks => 2017-07-28 16:01:07
+modify tomorrow => 2017-07-15 00:00:00
+modify midnight => 2017-07-14 00:00:00
+add P1D => 2001-02-01 10:00:00
+sub P1D => 2001-03-30 10:00:00
+add P1M => 2001-03-03 10:00:00
+sub P1M => 2001-03-03 10:00:00
+add P1Y => 2002-01-31 10:00:00
+sub P1Y => 2000-03-31 10:00:00
+add P1Y2M3DT4H5M6S => 2002-04-03 14:05:06
+sub P1Y2M3DT4H5M6S => 2000-01-28 05:54:54
+add PT1H => 2001-01-31 11:00:00
+sub PT1H => 2001-03-31 09:00:00
+add PT90M => 2001-01-31 11:30:00
+sub PT90M => 2001-03-31 08:30:00
+add P2W => 2001-02-14 10:00:00
+sub P2W => 2001-03-17 10:00:00
+P1Y2M3DT4H5M6S y=1 m=2 d=3 h=4 i=5 s=6 invert=0 days=false
+P2W y=0 m=0 d=14 h=0 i=0 s=0 invert=0 days=false
+PT0S y=0 m=0 d=0 h=0 i=0 s=0 invert=0 days=false
+P1D y=0 m=0 d=1 h=0 i=0 s=0 invert=0 days=false
+PT36H y=0 m=0 d=0 h=36 i=0 s=0 invert=0 days=false
+fmt 1 2 3 4 5 6 + (unknown) %
+fmt2 01-02-03 04:05:06
+diff 2017-01-01 00:00:00 -> 2018-03-15 12:30:45 = 1y 2m 14d 12h 30i 45s days=438 invert=0
+  absolute invert=0
+diff 2020-02-29 00:00:00 -> 2021-03-01 00:00:00 = 1y 0m 0d 0h 0i 0s days=366 invert=0
+  absolute invert=0
+diff 2017-07-14 16:00:00 -> 2017-07-14 16:00:00 = 0y 0m 0d 0h 0i 0s days=0 invert=0
+  absolute invert=0
+diff 2018-03-15 12:30:45 -> 2017-01-01 00:00:00 = 1y 2m 14d 12h 30i 45s days=438 invert=1
+  absolute invert=0
+diff 2001-01-31 00:00:00 -> 2001-03-01 00:00:00 = 0y 0m 29d 0h 0i 0s days=29 invert=0
+  absolute invert=0
+orig  2017-07-14 12:00:00 UTC
+mod   2018-07-14 12:00:00 UTC
+add   2017-08-14 12:00:00 UTC
+date  2000-01-01 12:00:00 UTC
+time  2017-07-14 00:00:00 UTC
+tz    2017-07-14 15:00:00 EEST
+orig again 2017-07-14 12:00:00 UTC
+mutable after modify 2018-07-14 12:00:00
+utc  2017-07-14 16:01:07 UTC +00:00 ts=1500048067
+kyiv 2017-07-14 19:01:07 EEST +03:00 ts=1500048067
+ny   2017-07-14 12:01:07 EDT -04:00 ts=1500048067
+period 0 2017-01-01
+period 1 2017-01-02
+period 2 2017-01-03
+period 3 2017-01-04
+recur 0 2017-01-01
+recur 1 2017-01-02
+recur 2 2017-01-03
+recur 3 2017-01-04
+month 0 2017-01-01
+month 1 2017-02-01
+month 2 2017-03-01
+month 3 2017-04-01
+exclstart 0 2017-01-02
+exclstart 1 2017-01-03
+exclstart 2 2017-01-04
+Y-m-d\TH:i:sP
+D, d M Y H:i:s O
+2017-07-14T16:01:07+00:00
+Fri, 14 Jul 2017 16:01:07 +0000
+dt instanceof DateTimeInterface yes
+im instanceof DateTimeInterface yes
+dt instanceof DateTime yes
+im instanceof DateTime no
+cross diff days=0

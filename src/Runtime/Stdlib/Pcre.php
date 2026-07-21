@@ -84,15 +84,25 @@ function __preg_compile(string $pattern): int
  * at [0] and each captured group after it (unmatched groups → "").
  */
 /**
- * @param mixed[] $matches
- * @param-out mixed[] $matches
+ * Every capture PCRE hands back is a STRING (an unmatched group becomes ""),
+ * so $matches is declared string-element rather than erased. That is not
+ * cosmetic: a bare `array` crosses the .sig as `mixed[]`, the elements had to
+ * be NaN-boxed on the way out, and a caller in ANOTHER MODULE reading
+ * `$m[1]` as a string got the tagged bits as a pointer and SIGSEGV'd. The
+ * declared element type is what makes the read-back typed
+ * ({@see LowerFromAst::defineOutParams}).
+ *
+ * preg_match_all keeps `mixed[]`: its $matches is genuinely an array OF
+ * arrays, so its elements really are cells.
+ *
+ * @param string[] $matches
+ * @param-out string[] $matches
  */
-function preg_match(string $pattern, string $subject, #[RefOut] array &$matches = [], int $flags = 0, int $offset = 0): int
+function preg_match(string $pattern, string $subject, #[RefOut] array<int, string> &$matches = [], int $flags = 0, int $offset = 0): int
 {
-    // Reset through the by-ref: elements are written straight into $matches so
-    // the erased (cell) container NaN-boxes each string — a local string[]
-    // copied back through the untyped ref would lose its element tag and read
-    // back as a raw pointer.
+    // Written straight into the by-ref so the caller's container is the one
+    // that grows. The elements are RAW strings now that the container is
+    // declared string-element — no NaN-boxing, and no unboxing at the reader.
     $matches = [];
     $code = \__preg_compile($pattern);
     if ($code === 0) {
@@ -114,12 +124,10 @@ function preg_match(string $pattern, string $subject, #[RefOut] array &$matches 
     for ($i = 0; $i < $rc; $i = $i + 1) {
         $s = \peek_i64($ov, $i * 16);
         $e = \peek_i64($ov, $i * 16 + 8);
-        // NaN-box the string into the erased (cell) container so the caller
-        // reads back a tagged string, not a raw pointer rendered as an int.
         if ($s < 0) {
-            $matches[] = \__mir_to_cell("");   // PCRE2_UNSET (~0) → unmatched group
+            $matches[] = "";                   // PCRE2_UNSET (~0) → unmatched group
         } else {
-            $matches[] = \__mir_to_cell(\substr($subject, $s, $e - $s));
+            $matches[] = \substr($subject, $s, $e - $s);
         }
     }
     \Runtime\Pcre\matchDataFree($md);
