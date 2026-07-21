@@ -50,9 +50,21 @@ function __mc_dt_us(int $op, int $v): int
  * (still carrying the -99999 sentinel) rather than after the fill.
  *
  * $idx: 0 y, 1 month, 2 day, 3 hour, 4 minute, 5 second, 6 microsecond,
- *       7 zone offset, 8 "a zone was given".  $op 1 writes, 0 reads.
+ *       7 zone offset, 8 "a zone was given". Reads only.
+ *
+ * WRITES go through __mc_dt_publish, a single 9-argument call. The earlier
+ * form took nine separate __mc_dt_slot(1, i, v) calls INSIDE the hot
+ * __mc_strtotime_core; that stack pressure tripped a codegen fragility that
+ * corrupted a CALLER's local (a base timestamp read back as -99999). Confining
+ * every write to one small leaf keeps __mc_strtotime_core's frame unchanged.
  */
-function __mc_dt_slot(int $op, int $idx, int $v): int
+function __mc_dt_slot(int $idx): int
+{
+    return \__mc_dt_slot_store(0, $idx, 0);
+}
+
+/** Backing store for the raw parse fields. Written only by __mc_dt_publish. */
+function __mc_dt_slot_store(int $op, int $idx, int $v): int
 {
     static $s = [0, 0, 0, 0, 0, 0, 0, 0, 0];
     if ($op === 1) {
@@ -60,6 +72,21 @@ function __mc_dt_slot(int $op, int $idx, int $v): int
         return $v;
     }
     return $s[$idx];
+}
+
+/** Publish all nine raw parse fields at once — one leaf call, not nine inline. */
+function __mc_dt_publish(int $y, int $mo, int $d, int $h, int $mi, int $sec,
+    int $us, int $zOff, int $haveZone): void
+{
+    \__mc_dt_slot_store(1, 0, $y);
+    \__mc_dt_slot_store(1, 1, $mo);
+    \__mc_dt_slot_store(1, 2, $d);
+    \__mc_dt_slot_store(1, 3, $h);
+    \__mc_dt_slot_store(1, 4, $mi);
+    \__mc_dt_slot_store(1, 5, $sec);
+    \__mc_dt_slot_store(1, 6, $us);
+    \__mc_dt_slot_store(1, 7, $zOff);
+    \__mc_dt_slot_store(1, 8, $haveZone);
 }
 
 /** Month number for a full or 3+ letter English name, else 0. */
@@ -265,7 +292,7 @@ function __mc_dt_build(int $y, int $mo, int $d, int $h, int $mi, int $sec, int $
  * Parse $str relative to the UTC instant $base, in zone $zid.
  * Returns the UTC timestamp, or __mc_dt_fail() when nothing parsed.
  */
-function __mc_strtotime_core(string $str, int $base, int $zid): int
+function __mc_strtotime_core(string $str, int $base, int $zid, int $publish): int
 {
     $s = \strtolower(\trim($str));
     if ($s === '') {
@@ -568,20 +595,18 @@ function __mc_strtotime_core(string $str, int $base, int $zid): int
     }
 
     // Publish the RAW fields before the base fills them in — date_parse needs
-    // to distinguish "the input said 2017" from "the base supplied 2017".
-    // An "@epoch" is a RELATIVE offset from the epoch as far as php's
-    // date_parse is concerned: it reports 1970-01-01 00:00:00 and carries the
-    // seconds separately. This decomposes the instant directly (same result for
-    // strtotime), so the published fields are corrected back to the epoch base.
-    \__mc_dt_slot(1, 0, $isEpoch === 1 ? 1970 : $y);
-    \__mc_dt_slot(1, 1, $isEpoch === 1 ? 1 : $mo);
-    \__mc_dt_slot(1, 2, $isEpoch === 1 ? 1 : $d);
-    \__mc_dt_slot(1, 3, $isEpoch === 1 ? 0 : $h);
-    \__mc_dt_slot(1, 4, $isEpoch === 1 ? 0 : $mi);
-    \__mc_dt_slot(1, 5, $isEpoch === 1 ? 0 : $sec);
-    \__mc_dt_slot(1, 6, $us);
-    \__mc_dt_slot(1, 7, $zOff);
-    \__mc_dt_slot(1, 8, $haveZone);
+    // to distinguish "the input said 2017" from "the base supplied 2017". An
+    // "@epoch" is a RELATIVE offset from the epoch as far as php's date_parse
+    // is concerned: it reports 1970-01-01 00:00:00 and carries the seconds
+    // separately, so the epoch fields are corrected back to the epoch base.
+    // One leaf call, not nine inline stores (see __mc_dt_publish).
+    if ($publish === 1) {
+        if ($isEpoch === 1) {
+            \__mc_dt_publish(1970, 1, 1, 0, 0, 0, $us, $zOff, $haveZone);
+        } else {
+            \__mc_dt_publish($y, $mo, $d, $h, $mi, $sec, $us, $zOff, $haveZone);
+        }
+    }
 
     // Fill the unset fields from the base instant, in the zone that applies.
     $bl = $base + ($haveZone === 1 ? $zOff : \__mc_tz_offset($useZid, $base));
@@ -631,7 +656,7 @@ function strtotime(string $datetime, ?int $baseTimestamp = null): int|false
 {
     $base = $baseTimestamp === null ? \time() : $baseTimestamp;
     $zid = \__mc_tz_open(\date_default_timezone_get());
-    $r = \__mc_strtotime_core($datetime, $base, $zid);
+    $r = \__mc_strtotime_core($datetime, $base, $zid, 0);
     if ($r === \__mc_dt_fail()) {
         return false;
     }

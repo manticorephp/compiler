@@ -70,11 +70,11 @@ function __mc_dt_settime(int $ts, int $zid, int $ztype, int $zoff, int $h, int $
 function __mc_dt_modify(int $ts, int $zid, int $ztype, int $zoff, string $modifier): int
 {
     if ($ztype === 3) {
-        return \__mc_strtotime_core($modifier, $ts, $zid);
+        return \__mc_strtotime_core($modifier, $ts, $zid, 0);
     }
     // A fixed-offset zone has no registry entry: shift into UTC-as-local,
     // parse there, and shift back.
-    $r = \__mc_strtotime_core($modifier, $ts + $zoff, \__mc_tz_open('UTC'));
+    $r = \__mc_strtotime_core($modifier, $ts + $zoff, \__mc_tz_open('UTC'), 0);
     if ($r === \__mc_dt_fail()) {
         return $r;
     }
@@ -288,16 +288,8 @@ function __mc_dt_from_format(string $format, string $value): int
         $vp = $vp + 1;
     }
     // Publish the raw fields for date_parse_from_format, before any default
-    // fills them in.
-    \__mc_dt_slot(1, 0, $y);
-    \__mc_dt_slot(1, 1, $mo);
-    \__mc_dt_slot(1, 2, $d);
-    \__mc_dt_slot(1, 3, $h);
-    \__mc_dt_slot(1, 4, $mi);
-    \__mc_dt_slot(1, 5, $sec);
-    \__mc_dt_slot(1, 6, $us);
-    \__mc_dt_slot(1, 7, $zoff);
-    \__mc_dt_slot(1, 8, $haveZone);
+    // fills them in — one leaf call (see __mc_dt_publish).
+    \__mc_dt_publish($y, $mo, $d, $h, $mi, $sec, $us, $zoff, $haveZone);
     if ($epoch !== -99999) {
         \__mc_dt_us(1, $us);
         return $epoch;

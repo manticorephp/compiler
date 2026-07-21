@@ -290,7 +290,7 @@ class DateInterval
         $iv = new DateInterval('PT0S');
         $base = 0;
         $zid = \__mc_tz_open('UTC');
-        $t = \__mc_strtotime_core($datetime, $base, $zid);
+        $t = \__mc_strtotime_core($datetime, $base, $zid, 0);
         if ($t === \__mc_dt_fail()) {
             return $iv;
         }
@@ -351,7 +351,7 @@ class DateTime implements DateTimeInterface
             $this->zoff = 0;
             $this->zid = \__mc_tz_open('UTC');
         }
-        $t = \__mc_strtotime_core($datetime, \time(), $this->zid);
+        $t = \__mc_strtotime_core($datetime, \time(), $this->zid, 0);
         if ($t === \__mc_dt_fail()) {
             throw new DateMalformedStringException('DateTime::__construct(): Failed to parse time string (' . $datetime . ')');
         }
@@ -548,7 +548,7 @@ class DateTimeImmutable implements DateTimeInterface
             $this->zoff = 0;
             $this->zid = \__mc_tz_open('UTC');
         }
-        $t = \__mc_strtotime_core($datetime, \time(), $this->zid);
+        $t = \__mc_strtotime_core($datetime, \time(), $this->zid, 0);
         if ($t === \__mc_dt_fail()) {
             throw new DateMalformedStringException('DateTimeImmutable::__construct(): Failed to parse time string (' . $datetime . ')');
         }
@@ -956,13 +956,13 @@ function __mc_date_parse_row(bool $ok): array
             'warning_count' => 0, 'warnings' => [], 'error_count' => 1, 'errors' => [],
             'is_localtime' => false];
     }
-    $y = \__mc_dt_slot(0, 0, 0);
-    $mo = \__mc_dt_slot(0, 1, 0);
-    $d = \__mc_dt_slot(0, 2, 0);
-    $h = \__mc_dt_slot(0, 3, 0);
-    $mi = \__mc_dt_slot(0, 4, 0);
-    $s = \__mc_dt_slot(0, 5, 0);
-    $us = \__mc_dt_slot(0, 6, 0);
+    $y = \__mc_dt_slot(0);
+    $mo = \__mc_dt_slot(1);
+    $d = \__mc_dt_slot(2);
+    $h = \__mc_dt_slot(3);
+    $mi = \__mc_dt_slot(4);
+    $s = \__mc_dt_slot(5);
+    $us = \__mc_dt_slot(6);
     return [
         'year' => $y === $UN ? false : $y,
         'month' => $mo === $UN ? false : $mo,
@@ -975,7 +975,7 @@ function __mc_date_parse_row(bool $ok): array
         'warnings' => [],
         'error_count' => 0,
         'errors' => [],
-        'is_localtime' => \__mc_dt_slot(0, 8, 0) === 1,
+        'is_localtime' => \__mc_dt_slot(8) === 1,
     ];
 }
 
@@ -987,7 +987,7 @@ function __mc_date_parse_row(bool $ok): array
  */
 function date_parse(string $datetime): array
 {
-    $t = \__mc_strtotime_core($datetime, 0, \__mc_tz_open('UTC'));
+    $t = \__mc_strtotime_core($datetime, 0, \__mc_tz_open('UTC'), 1);
     return \__mc_date_parse_row($t !== \__mc_dt_fail());
 }
 
