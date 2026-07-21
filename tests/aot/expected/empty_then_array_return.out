@@ -1,0 +1,34 @@
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+}
+array(0) {
+}
+array(2) {
+  ["k"]=>
+  string(1) "v"
+  ["j"]=>
+  string(1) "w"
+}
+array(0) {
+}
+array(1) {
+  ["Content-Type"]=>
+  string(9) "text/html"
+}
+NULL
+bool(true)
+array(2) {
+  [0]=>
+  string(1) "A"
+  [1]=>
+  string(1) "B"
+}
+array(0) {
+}
+string(9) "text/html"
+int(2)
