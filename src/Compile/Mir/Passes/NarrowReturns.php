@@ -150,15 +150,33 @@ final class NarrowReturns implements Pass
             return $this->narrowObjectReturn($fn, $returns);
         }
         if (!$first->isArray()) { return false; }
-        $isAssoc = $first->isAssoc();
+        // An empty / unrefined array literal (`[]` → vec[unknown]) is
+        // shape-agnostic: php's `[]` is compatible with a vec AND an assoc
+        // sibling. Take the vec-vs-assoc shape from the first CONCRETE-element
+        // return and let an unrefined arm defer to it, instead of the first
+        // return fixing the shape (so `if (!$xs) return []; return ["k"=>…];`
+        // narrows to the assoc rather than conflicting to `unknown`).
+        $shapeRef = $first;
+        foreach ($returns as $ret) {
+            $t = $ret->value->type;
+            if ($t->isArray() && $t->element !== null
+                && $t->element->kind !== Type::KIND_UNKNOWN) {
+                $shapeRef = $t;
+                break;
+            }
+        }
+        $isAssoc = $shapeRef->isAssoc();
         $elem = null;
         $key = null;
         foreach ($returns as $ret) {
             $t = $ret->value->type;
-            // All returns must agree on the array shape (vec vs assoc).
-            if (!$t->isArray() || $t->isAssoc() !== $isAssoc) { return false; }
-            $e = $t->element ?? Type::unknown();
-            $elem = $elem === null ? $e : $this->joinElem($elem, $e);
+            if (!$t->isArray()) { return false; }
+            $unrefined = $t->element === null || $t->element->kind === Type::KIND_UNKNOWN;
+            // A concrete array must agree on the shape; an unrefined `[]` defers
+            // (contributes no element/key info).
+            if (!$unrefined && $t->isAssoc() !== $isAssoc) { return false; }
+            if ($unrefined) { continue; }
+            $elem = $elem === null ? $t->element : $this->joinElem($elem, $t->element);
             if ($isAssoc) {
                 $k = $t->key ?? Type::unknown();
                 $key = $key === null ? $k : $key->unionWith($k);
@@ -221,6 +239,14 @@ final class NarrowReturns implements Pass
      */
     private function joinElem(Type $a, Type $b): Type
     {
+        // UNKNOWN is the "not inferred yet" bottom, not "anything" — defer to the
+        // concrete sibling (mirrors Type::joinElement). Without this a function
+        // with `return [];` (vec[unknown]) beside `return explode(…)`
+        // (vec[string]) narrowed to vec[unknown] and the caller read each string
+        // element's pointer as a raw i64 (var_dump printed float garbage). The
+        // very common `if (!$xs) return []; return <built array>;` shape.
+        if ($a->kind === Type::KIND_UNKNOWN) { return $b; }
+        if ($b->kind === Type::KIND_UNKNOWN) { return $a; }
         $j = $a->unionWith($b);
         if ($j->kind !== Type::KIND_UNKNOWN) { return $j; }
         if ($a->kind === Type::KIND_CELL || $b->kind === Type::KIND_CELL
