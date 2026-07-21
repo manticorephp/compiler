@@ -1,0 +1,12 @@
+string(15) "Hello World-Foo"
+string(11) "Hello World"
+string(5) "A-B_C"
+string(11) "Foo.Bar.Baz"
+string(10) "******3.14"
+string(10) "........42"
+string(10) "--------hi"
+string(8) "xxxxxxx5"
+string(5) "03.14"
+string(9) "x       |"
+string(5) "+7 ff"
+####ab

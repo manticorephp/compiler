@@ -2627,6 +2627,11 @@ trait EmitLlvmBuiltins
                     // PHP's space flag is space-PADDING (the default), not C's
                     // sign-space — drop it so `% d` matches PHP (`5`, not ` 5`).
                     $j = $j + 1;
+                } elseif ($c === "'") {
+                    // A `%'X` custom pad char has no C-snprintf equivalent — this
+                    // compile-time translator can't express it, so drive the whole
+                    // format through the runtime __mc_format engine, which does.
+                    return $this->biFormatRuntime($args, $toStdout);
                 } else { break; }
             }
             while ($j < $n) {
