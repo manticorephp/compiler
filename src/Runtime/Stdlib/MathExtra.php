@@ -47,10 +47,21 @@ function bindec(string $binary_string): int
     return $v;
 }
 
-/** A non-negative int as a base-2 string (PHP `decbin`). */
+/** An int as a base-2 string (PHP `decbin`). A negative number is its full
+ *  64-bit two's-complement form (php treats the value as unsigned), so it has
+ *  no `$v > 0` termination — walk all 64 bits and let leading ones stand. */
 function decbin(int $num): string
 {
     if ($num === 0) { return "0"; }
+    if ($num < 0) {
+        $out = "";
+        for ($i = 0; $i < 64; $i = $i + 1) {
+            // `>>` is arithmetic (sign-extending), but `& 1` isolates bit $i, so
+            // this reads each of the 64 bits of the two's-complement pattern.
+            $out = (($num >> $i) & 1) === 1 ? ("1" . $out) : ("0" . $out);
+        }
+        return $out;
+    }
     $out = "";
     $v = $num;
     while ($v > 0) {

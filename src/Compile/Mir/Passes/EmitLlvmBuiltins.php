@@ -1723,6 +1723,19 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $strPtr . ', ptr null, ' . $baseArg . ")\n";
             return $this->finishI64($out, $reg);
         }
+        // A CELL / UNKNOWN (a `mixed` arg) must be DECODED by tag, not read raw:
+        // the i64 carrier is a NaN-boxed value, so coerceToI64 alone would return
+        // the tagged bits. `__manticore_tagged_to_int` dispatches int/float/bool/
+        // string (a string cell parses via strtol, hence needsStrtol) — the int
+        // mirror of biFloatval's tagged_to_double arm.
+        if ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN) {
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsStrtol = true;
+            $out .= $this->coerceToI64();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+            return $this->finishI64($out, $reg);
+        }
         $out .= $this->coerceToI64();
         return $this->finishI64($out, $this->lastValue);
     }
