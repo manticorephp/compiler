@@ -980,6 +980,98 @@ function collect_php_sources(string $dir, array $excludes): array
 }
 
 /**
+ * Join a composer base dir and a relative autoload path into a scan dir.
+ * A "." / "" base collapses to the relative path; trailing slashes trimmed.
+ */
+function composer_path_join(string $base, string $rel): string
+{
+    $b = \rtrim($base, "/");
+    $r = \rtrim($rel, "/");
+    if ($b === "" || $b === ".") { return $r === "" ? "." : $r; }
+    if ($r === "") { return $b; }
+    return $b . "/" . $r;
+}
+
+/**
+ * The directories named by one composer `autoload` block — psr-4 / psr-0 roots
+ * and classmap DIRECTORY entries — each prefixed with `$base`. `files` and
+ * single-`*.php` classmap entries are deferred: whole-program AOT already pulls
+ * in every declaration once a directory is scanned, and `files` side effects
+ * have no analogue in a compiled program.
+ *
+ * @param array<string,mixed> $autoload
+ * @return string[]
+ */
+function composer_autoload_dirs(array $autoload, string $base): array
+{
+    /** @var string[] $out */
+    $out = [];
+    foreach (["psr-4", "psr-0"] as $key) {
+        $map = isset($autoload[$key]) ? $autoload[$key] : [];
+        foreach ($map as $paths) {
+            if (\is_array($paths)) {
+                foreach ($paths as $p) { $out[] = composer_path_join($base, (string)$p); }
+            } else {
+                $out[] = composer_path_join($base, (string)$paths);
+            }
+        }
+    }
+    $cm = isset($autoload["classmap"]) ? $autoload["classmap"] : [];
+    foreach ($cm as $p) {
+        $ps = (string)$p;
+        if (\substr($ps, -4) !== ".php") { $out[] = composer_path_join($base, $ps); }
+    }
+    return $out;
+}
+
+/**
+ * Source directories of a composer project rooted at `$projRoot`: its own
+ * `autoload` (composer.json) and — when `$withVendor` — every installed
+ * package's `autoload` (composer.lock, rooted at `vendor/<name>/`). Whole-program
+ * AOT needs every reachable declaration up front, so this eagerly unions the
+ * autoload roots; the result feeds straight into {@see collect_php_sources}.
+ * Deduplicated by path, order preserved.
+ *
+ * @return string[]
+ */
+function composer_source_dirs(string $projRoot, bool $withVendor): array
+{
+    /** @var string[] $dirs */
+    $dirs = [];
+    $cjPath = $projRoot . "/composer.json";
+    $cjSrc = file_exists($cjPath) ? read_file($cjPath) : null;
+    if ($cjSrc !== null) {
+        $cj = json_decode($cjSrc, true);
+        if (\is_array($cj) && isset($cj["autoload"]) && \is_array($cj["autoload"])) {
+            foreach (composer_autoload_dirs($cj["autoload"], $projRoot) as $d) { $dirs[] = $d; }
+        }
+    }
+    if ($withVendor) {
+        $lockPath = $projRoot . "/composer.lock";
+        $lockSrc = file_exists($lockPath) ? read_file($lockPath) : null;
+        if ($lockSrc !== null) {
+            $lock = json_decode($lockSrc, true);
+            $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
+            foreach ($pkgs as $pkg) {
+                if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                $pkgRoot = $projRoot . "/vendor/" . (string)$pkg["name"];
+                if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
+                    foreach (composer_autoload_dirs($pkg["autoload"], $pkgRoot) as $d) { $dirs[] = $d; }
+                }
+            }
+        }
+    }
+    /** @var string[] $out */
+    $out = [];
+    /** @var array<string,bool> $seen */
+    $seen = [];
+    foreach ($dirs as $d) {
+        if (!isset($seen[$d])) { $seen[$d] = true; $out[] = $d; }
+    }
+    return $out;
+}
+
+/**
  * Parse every global-namespace function declaration under `$dir` (minus
  * `$excludes`) — the exported API of a library target, offered to dependent
  * applications as declare-only externs. Mirrors collect_stdlib_extern_decls
@@ -1182,6 +1274,29 @@ function cmd_build(array $args): int
         if ($entry !== "") { $moduleExcludes[] = $entry; }
         dprint("build: application '" . $name . "' (" . $srcDir . " -> " . $output . ")");
         $sources = collect_php_sources($srcDir, $moduleExcludes);
+        // Composer discovery. "composer": true builds the project the way Composer
+        // sees it — its own composer.json autoload (psr-4/psr-0 + classmap dirs)
+        // AND every installed vendor package from composer.lock (vendor/<name>/).
+        // The object form gives finer control: { "vendor": false } takes only the
+        // project's own autoload (e.g. while a dependency uses PHP the compiler
+        // does not yet support). Whole-program AOT unions these into the source
+        // set exactly like `src`; dirs already covered by `src` are skipped so a
+        // `"App\\": "src/"` map does not double-scan.
+        $composer = isset($app["composer"]) ? $app["composer"] : false;
+        $composerOn = ($composer === true) || \is_array($composer);
+        if ($composerOn) {
+            $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
+            /** @var array<string,bool> $covered */
+            $covered = [];
+            $covered[\rtrim($srcDir, "/")] = true;
+            foreach (composer_source_dirs(".", $withVendor) as $cdir) {
+                $nd = \rtrim($cdir, "/");
+                if (isset($covered[$nd])) { continue; }
+                $covered[$nd] = true;
+                dprint("build: + composer autoload '" . $nd . "'");
+                foreach (collect_php_sources($nd, $moduleExcludes) as $g) { $sources[] = $g; }
+            }
+        }
         // Extensions: opt-in native bindings. Each named extension adds its thin
         // PHP glue (FFI bindings + wrappers, module-level decls → appended BEFORE
         // the entry) to the module, and its native library to the link

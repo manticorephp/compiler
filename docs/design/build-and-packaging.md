@@ -173,7 +173,14 @@ So the same single-module decision (2A) serves stdlib and extensions uniformly.
 - ✅ Unify the Zend cold seed onto the manifest (#4) — done (`ef115f4`,
   full self-rebuild seed; per-app library selection + `--libs-only`).
 - Weak library symbols (`--emit-library` exports `weak`) so an app can override.
-- composer-style `dependencies` + `vendor/` resolution + lockfile; packaging.
+- ✅ Composer autoload discovery — done. A `build` application target with
+  `"composer": true` builds the project the way Composer sees it: its
+  `composer.json` autoload (psr-4/psr-0/classmap dirs) AND every installed
+  package from `composer.lock` (`vendor/<name>/`). The object form
+  `{ "vendor": false }` restricts it to the project's own autoload. `files` /
+  single-file classmap entries are deferred. Still open: `dependencies` install
+  (there is no `composer install` step; a populated `vendor/` is presumed) and
+  Packagist packaging (shipped separately as `install.sh` + `composer.json`).
 - Cross-library `.sig` classes; element-type precision in `.sig`.
 - ✅ The drop-ABI fix (fn-pointer drop) — DONE (`6e4d1ee`). Object slot 0 holds
   a per-class descriptor `{class_id, drop_fn}` (linkonce_odr); release calls
