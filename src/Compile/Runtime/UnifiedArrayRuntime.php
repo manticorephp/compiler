@@ -36,7 +36,7 @@ final class UnifiedArrayRuntime
      * bucket index's alloc + build cost is not worth it for small maps).
      * At/above it, get/isset lazily build an open-addressed FNV index.
      */
-    private const INDEX_THRESHOLD = 16;
+    private const INDEX_THRESHOLD = 8;
 
     public function __construct(
         private Module $module,
