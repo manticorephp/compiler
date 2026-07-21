@@ -254,16 +254,15 @@ function lcfirst(string $s): string
 
 /** Uppercase the first letter of each word (PHP `ucwords`, default delimiters
  *  whitespace " \t\r\n\f\v"). */
-function ucwords(string $s): string
+function ucwords(string $s, string $delimiters = " \t\r\n\x0C\x0B"): string
 {
     $n = \strlen($s);
     $out = "";
     $cap = true;
-    $delims = " \t\r\n\x0C\x0B";
     for ($i = 0; $i < $n; $i = $i + 1) {
         $c = \substr($s, $i, 1);
         if ($cap) { $out = $out . \strtoupper($c); } else { $out = $out . $c; }
-        $cap = \strpos($delims, $c) !== false;
+        $cap = \strpos($delimiters, $c) !== false;
     }
     return $out;
 }
