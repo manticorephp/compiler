@@ -1,0 +1,55 @@
+array(8) {
+  [0]=>
+  string(2) "z0"
+  [1]=>
+  string(2) "z1"
+  [42]=>
+  string(3) "z42"
+  [-7]=>
+  string(3) "zn7"
+  ["01"]=>
+  string(6) "keep01"
+  ["1.0"]=>
+  string(5) "keepf"
+  ["-0"]=>
+  string(8) "keepneg0"
+  ["x"]=>
+  string(2) "zx"
+}
+array(5) {
+  [0]=>
+  string(2) "b0"
+  [3]=>
+  string(2) "b3"
+  [-2]=>
+  string(3) "bn2"
+  ["07"]=>
+  string(3) "b07"
+  ["k"]=>
+  string(2) "bk"
+}
+array(1) {
+  [5]=>
+  string(10) "overwrites"
+}
+string(3) "ten"
+string(3) "ten"
+bool(true)
+bool(true)
+bool(true)
+array(4) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+  [3]=>
+  string(1) "d"
+}
+array(2) {
+  ["99999999999999999999"]=>
+  string(4) "huge"
+  ["12345678901234567890"]=>
+  string(3) "big"
+}

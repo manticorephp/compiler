@@ -2032,11 +2032,34 @@ final class LowerFromAst implements Pass
         return new Instanceof_($this->lowerExpr($e->operand), \ltrim($e->class, '\\'));
     }
 
+    /**
+     * php normalises a canonical numeric-string ARRAY KEY to an int key
+     * (`$a["42"]` IS `$a[42]`, `["0"=>x]` builds an int-keyed array). Fold a
+     * matching string LITERAL key to an IntConst here at lowering, so the STATIC
+     * key type follows and every downstream dispatch — get/set int-vs-str,
+     * foreach's raw-vs-tagged key reader, var_dump — takes the int path for
+     * free. Doing it at runtime instead is unsound: the read side picks
+     * raw-vs-tagged from the DECLARED key type, not the stored entry kind.
+     *
+     * The rule is exactly `(string)(int)$s === $s`, which rejects "01", "-0",
+     * "+1", " 1", "1 ", "1.0", "1e2", "" and — via the cast's saturation at the
+     * int64 boundary — any out-of-range digit run (all of which php keeps as
+     * string keys). Only a LITERAL is folded; a dynamic `$a[$k]` key is a
+     * separate (deferred) int|string-key-typing problem.
+     */
+    private function foldNumericKey(?Node $k): ?Node
+    {
+        if (!($k instanceof StringConst)) { return $k; }
+        $s = $k->value;
+        if ($s === '' || (string)(int)$s !== $s) { return $k; }
+        return new IntConst((int)$s, Type::int_());
+    }
+
     private function lowerArrayLit(\Parser\Ast\ArrayLit $expr): ArrayLit
     {
         $elems = [];
         foreach ($expr->elements as $el) {
-            $k = $el->key === null ? null : $this->lowerExpr($el->key);
+            $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
             if ($el->value->kind === 'Spread') {
                 $inner = $this->lowerExpr($el->value->value);
                 $elems[] = new ArrayElement_(null, new Spread_($inner, Type::unknown()));
@@ -2055,7 +2078,7 @@ final class LowerFromAst implements Pass
         $arr = $this->lowerExpr($expr->array);
         $idx = $expr->index === null
             ? new NullConst(Type::null_())
-            : $this->lowerExpr($expr->index);
+            : $this->foldNumericKey($this->lowerExpr($expr->index));
         return new ArrayAccess_($arr, $idx, Type::unknown());
     }
 
