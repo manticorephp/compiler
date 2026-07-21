@@ -1,18 +1,41 @@
 <?php
-function lt5(int|float $x): bool { return $x < 5; }
-function gt5(int|float $x): bool { return $x > 5; }
-function le5(int|float $x): bool { return $x <= 5; }
-function ge5(int|float $x): bool { return $x >= 5; }
-var_dump(lt5(2.5), lt5(7.5), lt5(3), lt5(9));
-var_dump(gt5(2.5), gt5(7.5), gt5(3), gt5(9));
-var_dump(le5(5.0), le5(5), le5(4.9));
-var_dump(ge5(5.0), ge5(5), ge5(5.1));
-// cell vs float
-function ltf(int|float $x): bool { return $x < 5.5; }
-var_dump(ltf(5.0), ltf(6.0), ltf(5));
-// cell vs cell (was already ok)
-function c2(int|float $a, int|float $b): bool { return $a < $b; }
-var_dump(c2(2.5, 3.5), c2(4, 2.5));
-// int-only still raw/fast path
-function ii(int $a, int $b): bool { return $a < $b; }
-var_dump(ii(1,2), ii(5,3));
+
+// A numeric cell (float|false, int|false, ?float, ?int) compared to a RAW int
+// or float must decode BOTH by tag. The old path unboxed the cell as an int,
+// reading a boxed double's bits wrongly — mis-ordering and mis-equalling.
+
+function ff(bool $c): float|false { return $c ? 5.0 : false; }
+function iff(bool $c): int|false { return $c ? 42 : false; }
+function nf(bool $c): ?float { return $c ? 3.5 : null; }
+function ni(bool $c): ?int { return $c ? 7 : null; }
+
+$f = ff(true);
+var_dump($f > 10);   // false
+var_dump($f > 3);    // true
+var_dump($f < 10);   // true
+var_dump($f == 5);   // true
+var_dump($f == 0);   // false
+var_dump($f != 0);   // true
+var_dump($f >= 5);   // true
+
+$i = iff(true);
+var_dump($i == 0);   // false
+var_dump($i == 42);  // true
+var_dump($i > 100);  // false
+var_dump($i < 100);  // true
+
+$x = nf(true);
+var_dump($x == 0);   // false
+var_dump($x > 3);    // true
+var_dump($x < 4);    // true
+var_dump($x != 0);   // true
+
+$n = ni(true);
+var_dump($n == 7);   // true
+var_dump($n > 0);    // true
+var_dump($n == 0);   // false
+
+// real float|false source ordered against int
+$d = disk_free_space("/");
+var_dump($d > 0);
+var_dump($d != 0);

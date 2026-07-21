@@ -3211,6 +3211,24 @@ trait EmitLlvmExpr
                 return $out;
             }
         }
+        // A CELL compared to a RAW int/float: box the raw side so the tag-aware
+        // cell-vs-cell branches below decode BOTH operands by tag. Without this
+        // the fallthrough `unbox_int` reads a boxed DOUBLE's bits as an int and
+        // both mis-orders (`float|false > 3`) and mis-equals (`?float == 0`), and
+        // it only reached the NUMERIC-cell ordering fix — a plain `float|false`
+        // cell (the bool arm demotes it to a non-numeric cell) and every eq/ne
+        // slipped through. Routing through the tagged runtime is correct for any
+        // payload (int/float, and a string cell keeps php's juggling). Restrict
+        // to a numeric raw side so a cell-vs-array/object identity is untouched.
+        if ($lk === Type::KIND_CELL && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT)) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $out .= $this->boxToCell($c->right->type);
+            $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
+        } elseif ($rk === Type::KIND_CELL && ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT)) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $out .= $this->boxToCell($c->left->type);
+            $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
+        }
         // Both operands are statically CELL, EQ/NE — dispatch by tag with PHP
         // juggling at runtime (`5 == "5"`, non-interned `"x" === "x"`). A raw i64
         // compare only accidentally works for canonical-repr ints / interned
