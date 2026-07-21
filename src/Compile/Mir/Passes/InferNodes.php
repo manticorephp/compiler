@@ -1114,6 +1114,23 @@ trait InferNodes
             $node->type = Type::union([$t, $e]);
         }
         elseif ($t->kind === $e->kind)        { $node->type = $t; }
+        elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
+            && $e->kind === Type::KIND_UNKNOWN) {
+            // One arm is a concrete object, the sibling is still UNKNOWN — the
+            // "not inferred yet" BOTTOM of the lattice, not "could be anything".
+            // Defer to the known pointer. This is what breaks the self-referential
+            // accumulator `$acc = $acc === null ? $x : $acc->merge($x)`: round 1 the
+            // else-arm (receiver still unknown) types unknown, so without this the
+            // join is unknown, `nullLoopLocals` re-seeds `acc` unknown, and the
+            // fixpoint sticks. Seeding obj<Bag> here lets round 2 resolve `merge()`
+            // to its declared `: Bag` and both arms become OBJ (the branch above).
+            // An object rides the slot raw, same repr as an unknown i64 — no boxing.
+            $node->type = $t;
+        }
+        elseif (($e->kind === Type::KIND_OBJ || $e->kind === Type::KIND_UNION)
+            && $t->kind === Type::KIND_UNKNOWN) {
+            $node->type = $e;
+        }
         elseif ($t->kind === Type::KIND_CELL || $e->kind === Type::KIND_CELL) {
             // Heterogeneous branches where one side is a NaN-boxed cell
             // (e.g. `isset($m["k"]) ? $m["k"] : []` over a json_decode value).
