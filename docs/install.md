@@ -9,6 +9,50 @@ This is an end-user guide. Quick version lives in the README's `Requirements`.
 
 ---
 
+## Quick install
+
+Manticore builds **from source** — there is no prebuilt binary to download; the
+compiler compiles itself. The installer needs the [host toolchain](#what-the-host-needs-and-why)
+present (it checks and tells you what is missing), then puts everything under
+`$MANTICORE_HOME` (default `~/.manticore`).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
+# then, as the script prints:
+export PATH="$HOME/.manticore/bin:$PATH"
+manticore version        # -> manticore 0.6.0
+```
+
+Re-running the installer **upgrades in place**: once a working `manticore` is
+installed it rebuilds the new version *with itself* (self-host, fast); the Zend
+seed is only the cold first boot. Knobs: `MANTICORE_HOME`, `MANTICORE_REF`
+(branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (build a local checkout instead
+of cloning).
+
+### Via Composer
+
+```bash
+composer create-project manticorephp/compiler manticore   # builds into ~/.manticore
+# or, if it is already a dependency:
+vendor/bin/manticore-install
+```
+
+Composer here is a delivery + build trigger, not a runtime: the package ships
+the PHP source and runs `install.sh`. (Composer only auto-runs scripts for the
+*root* project, so a plain `composer require` of Manticore as a dependency needs
+one manual `vendor/bin/manticore-install`.)
+
+The installed layout is self-contained and needs no environment variables — the
+binary finds its runtime relative to itself:
+
+```
+$MANTICORE_HOME/bin/manticore
+$MANTICORE_HOME/lib/manticore_stdlib.o(.sig)
+$MANTICORE_HOME/lib/prelude/*.php
+```
+
+---
+
 ## What the host needs, and why
 
 | Dependency | Needed for | Where it is used |

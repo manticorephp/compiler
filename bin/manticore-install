@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# Composer bin proxy: builds + installs Manticore into $MANTICORE_HOME by running
+# the package's install.sh. Reachable as `vendor/bin/manticore-install` after a
+# `composer require manticorephp/compiler`. Resolves through composer's bin
+# symlink to find the package root.
+set -euo pipefail
+src="${BASH_SOURCE[0]:-$0}"
+while [ -h "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src";; esac
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+exec bash "$ROOT/install.sh" "$@"

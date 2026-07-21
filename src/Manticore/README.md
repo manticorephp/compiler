@@ -17,7 +17,7 @@ The compiler self-builds via `manticore build manticore.json` (a self-contained 
 | `dump-llvm` | Front-end + EmitLlvm, print LLVM IR (no link). Same as `dump-llvm-mir`. |
 | `dump-llvm-mir` | Same: parse → MIR pipeline → EmitLlvm → LLVM IR on stdout. |
 | `dump-sig` | Parse + lower, print the module-interface `.sig` (exported symbol table). |
-| `version` | `manticore 0.1.0 (self-hosted bootstrap)`. |
+| `version` | `manticore 0.6.0`. |
 | `help` | Usage block. |
 
 ## `manticore build manticore.json`
