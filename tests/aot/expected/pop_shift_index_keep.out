@@ -1,0 +1,14 @@
+warm=300
+pop=24 sum=276 n=23
+pop=23 sum=253 n=22
+pop=22 sum=231 n=21
+pop=21 sum=210 n=20
+pop=20 sum=190 n=19
+pop=19 sum=171 n=18
+shift=1 sum=170 seen=17
+shift=2 sum=168 seen=16
+shift=3 sum=165 seen=15
+shift=4 sum=161 seen=14
+shift=5 sum=156 seen=13
+shift=6 sum=150 seen=12
+tail=450 n=14

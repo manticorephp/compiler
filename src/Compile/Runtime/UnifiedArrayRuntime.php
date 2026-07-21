@@ -96,6 +96,131 @@ final class UnifiedArrayRuntime
         $this->emitIndexBuild();
         $this->emitIndexFind();
         $this->emitIndexAdd();
+        $this->emitIndexUnset();
+    }
+
+    /**
+     * `__mir_array_index_unset(arr, j) -> void` — surgically remove entry j
+     * from the bucket index BEFORE the entry array memmove-compacts it away,
+     * keeping the index valid across unset/pop/shift instead of dropping and
+     * O(n)-rebuilding it on the next lookup (the drop made an unset+lookup
+     * interleave O(n²)). Three steps: locate the slot holding j+1 (probe from
+     * the entry key's home; a bounded miss degrades to index_drop, defensive),
+     * classic linear-probe BACKSHIFT deletion (a following slot moves back
+     * into the gap iff its home lies outside the emptied cyclic range — every
+     * probe chain stays unbroken), then one O(nbuckets) sweep decrementing
+     * slot values > j+1 (the memmove shifts those entries down one index).
+     * No-op when no index is built. MUST be called before the memmove — the
+     * entry keys are still in place for home recomputation.
+     */
+    private function emitIndexUnset(): void
+    {
+        $fn = $this->module->func('__mir_array_index_unset', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $j = $fn->param(Type::i64(), 'j');
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $hs = $fn->block('iu_hs');
+        $hi = $fn->block('iu_hi');
+        $linit = $fn->block('iu_linit');
+        $loc = $fn->block('iu_loc');
+        $lchk = $fn->block('iu_lchk');
+        $lstep = $fn->block('iu_lstep');
+        $bail = $fn->block('iu_bail');
+        $bsInit = $fn->block('iu_bs_init');
+        $bsStep = $fn->block('iu_bs_step');
+        $bsHome = $fn->block('iu_bs_home');
+        $bsHomeS = $fn->block('iu_bs_home_s');
+        $bsHomeI = $fn->block('iu_bs_home_i');
+        $bsCmp = $fn->block('iu_bs_cmp');
+        $bsMove = $fn->block('iu_bs_move');
+        $bsFin = $fn->block('iu_bs_fin');
+        $swHead = $fn->block('iu_sw_head');
+        $swBody = $fn->block('iu_sw_body');
+        $swDec = $fn->block('iu_sw_dec');
+        $swNext = $fn->block('iu_sw_next');
+        $ret = $fn->block('iu_ret');
+
+        $nb = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $e->brIf($e->icmp('eq', $nb, Value::int(Type::i64(), 0)), $ret, $go);
+
+        $buckets = $go->load(Type::ptr(), $this->hdr($go, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $mask = $go->sub($nb, Value::int(Type::i64(), 1));
+        $want = $go->add($j, Value::int(Type::i64(), 1));
+        $hSlot = $go->alloca(Type::i64(), 'iu_h');
+        $sSlot = $go->alloca(Type::i64(), 'iu_s');
+        $tSlot = $go->alloca(Type::i64(), 'iu_t');
+        $cSlot = $go->alloca(Type::i64(), 'iu_c');
+        $h2Slot = $go->alloca(Type::i64(), 'iu_h2');
+        $kind = $go->load(Type::i64(), $this->entryAddr($go, $arr, $j, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $go->brIf($go->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hs, $hi);
+        $kp = $hs->load(Type::ptr(), $this->entryAddr($hs, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $hs->store($hs->call('__mir_array_hash_str', Type::i64(), [$kp]), $hSlot);
+        $hs->br($linit);
+        $hi->store($hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)), $hSlot);
+        $hi->br($linit);
+        $h0 = $linit->load(Type::i64(), $hSlot);
+        $linit->store($linit->and_($h0, $mask), $sSlot);
+        $linit->store(Value::int(Type::i64(), 0), $cSlot);
+        $linit->br($loc);
+
+        // Locate the slot holding j+1 (bounded: a full lap without a hit means
+        // the index is inconsistent — drop it and let the next lookup rebuild).
+        $c = $loc->load(Type::i64(), $cSlot);
+        $loc->brIf($loc->icmp('sge', $c, $nb), $bail, $lchk);
+        $s = $lchk->load(Type::i64(), $sSlot);
+        $bv = $lchk->load(Type::i64(), $lchk->gep(Type::i64(), $buckets, [$s]));
+        $lchk->brIf($lchk->icmp('eq', $bv, $want), $bsInit, $lstep);
+        $sn = $lstep->load(Type::i64(), $sSlot);
+        $lstep->store($lstep->and_($lstep->add($sn, Value::int(Type::i64(), 1)), $mask), $sSlot);
+        $lstep->store($lstep->add($lstep->load(Type::i64(), $cSlot), Value::int(Type::i64(), 1)), $cSlot);
+        $lstep->br($loc);
+        $bail->call('__mir_array_index_drop', Type::void(), [$arr]);
+        $bail->retVoid();
+
+        // Backshift deletion from the located slot.
+        $bsInit->store($bsInit->load(Type::i64(), $sSlot), $tSlot);
+        $bsInit->br($bsStep);
+        $t0 = $bsStep->load(Type::i64(), $tSlot);
+        $t = $bsStep->and_($bsStep->add($t0, Value::int(Type::i64(), 1)), $mask);
+        $bsStep->store($t, $tSlot);
+        $bv2 = $bsStep->load(Type::i64(), $bsStep->gep(Type::i64(), $buckets, [$t]));
+        $bsStep->brIf($bsStep->icmp('eq', $bv2, Value::int(Type::i64(), 0)), $bsFin, $bsHome);
+        $k2 = $bsHome->sub($bv2, Value::int(Type::i64(), 1));
+        $kind2 = $bsHome->load(Type::i64(), $this->entryAddr($bsHome, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $bsHome->brIf($bsHome->icmp('eq', $kind2, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $bsHomeS, $bsHomeI);
+        $kp2 = $bsHomeS->load(Type::ptr(), $this->entryAddr($bsHomeS, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $bsHomeS->store($bsHomeS->call('__mir_array_hash_str', Type::i64(), [$kp2]), $h2Slot);
+        $bsHomeS->br($bsCmp);
+        $bsHomeI->store($bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)), $h2Slot);
+        $bsHomeI->br($bsCmp);
+        // Move back iff dist(home → t) >= dist(gap → t), i.e. the gap sits on
+        // the probe path from this slot's home.
+        $home = $bsCmp->and_($bsCmp->load(Type::i64(), $h2Slot), $mask);
+        $tc = $bsCmp->load(Type::i64(), $tSlot);
+        $sc = $bsCmp->load(Type::i64(), $sSlot);
+        $dmk = $bsCmp->and_($bsCmp->sub($tc, $home), $mask);
+        $dms = $bsCmp->and_($bsCmp->sub($tc, $sc), $mask);
+        $bsCmp->brIf($bsCmp->icmp('uge', $dmk, $dms), $bsMove, $bsStep);
+        $sm = $bsMove->load(Type::i64(), $sSlot);
+        $bsMove->store($bv2, $bsMove->gep(Type::i64(), $buckets, [$sm]));
+        $bsMove->store($bsMove->load(Type::i64(), $tSlot), $sSlot);
+        $bsMove->br($bsStep);
+        $sf = $bsFin->load(Type::i64(), $sSlot);
+        $bsFin->store(Value::int(Type::i64(), 0), $bsFin->gep(Type::i64(), $buckets, [$sf]));
+        $bsFin->store(Value::int(Type::i64(), 0), $cSlot);
+        $bsFin->br($swHead);
+
+        // Sweep: entries above j slide down one after the memmove.
+        $c2 = $swHead->load(Type::i64(), $cSlot);
+        $swHead->brIf($swHead->icmp('sge', $c2, $nb), $ret, $swBody);
+        $bv3 = $swBody->load(Type::i64(), $swBody->gep(Type::i64(), $buckets, [$c2]));
+        $swBody->brIf($swBody->icmp('sgt', $bv3, $want), $swDec, $swNext);
+        $swDec->store($swDec->sub($bv3, Value::int(Type::i64(), 1)), $swDec->gep(Type::i64(), $buckets, [$c2]));
+        $swDec->br($swNext);
+        $swNext->store($swNext->add($swNext->load(Type::i64(), $cSlot), Value::int(Type::i64(), 1)), $cSlot);
+        $swNext->br($swHead);
+        $ret->retVoid();
     }
 
     /**
@@ -1612,9 +1737,9 @@ final class UnifiedArrayRuntime
         $arrSlot = $e->alloca(Type::ptr(), 'arr_slot');
         if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $e->store($arr, $arrSlot);
-        // A set may append a new entry → invalidate the bucket index (rebuilt
-        // lazily on the next large-map lookup).
-        $e->call('__mir_array_index_drop', Type::void(), [$arr]);
+        // No index drop here: a PACKED array never carries an index, a HASHED
+        // update keeps the entry set's shape, and the hashed append maintains
+        // the index incrementally (index_add) — see emitHashedIntInsert.
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
 
@@ -1670,10 +1795,21 @@ final class UnifiedArrayRuntime
         // guaranteed absent (next_int = 1 + the max int key ever inserted), so
         // skip the O(n) existence scan and append directly — this is what makes a
         // sparse-int build (array_filter, increasing-key fill) O(n) not O(n²). A
-        // lower key may already exist → fall through to the linear scan.
+        // lower key may already exist → bucket-index locate (-2 small → linear
+        // scan; -1 absent → append; hit → update in place, index untouched).
+        $ihx = $fn->block($this->host->rtFreshLabel('hi_ihx'));
+        $ihr = $fn->block($this->host->rtFreshLabel('hi_ihr'));
+        $ihu = $fn->block($this->host->rtFreshLabel('hi_ihu'));
         $cur0 = $head0->load(Type::ptr(), $arrSlot);
         $ni0 = $head0->load(Type::i64(), $this->hdr($head0, $cur0, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
-        $head0->brIf($head0->icmp('sge', $idx, $ni0), $app, $head);
+        $head0->brIf($head0->icmp('sge', $idx, $ni0), $app, $ihx);
+        $rfH = $ihx->call('__mir_array_index_find', Type::i64(),
+            [$cur0, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT), Value::null(), $idx,
+             Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $ihx->brIf($ihx->icmp('eq', $rfH, Value::int(Type::i64(), -2)), $head, $ihr);
+        $ihr->brIf($ihr->icmp('slt', $rfH, Value::int(Type::i64(), 0)), $app, $ihu);
+        $ihu->store($val, $this->entryAddr($ihu, $cur0, $rfH, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $ihu->ret($cur0);
 
         $cur = $head->load(Type::ptr(), $arrSlot);
         $len = $head->load(Type::i64(), $cur);
@@ -1715,6 +1851,9 @@ final class UnifiedArrayRuntime
         $cand = $store->add($idx, Value::int(Type::i64(), 1));
         $newni = $store->select($store->icmp('sgt', $cand, $ni), $cand, $ni);
         $store->store($newni, $this->hdr($store, $buf, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        // Maintain the bucket index incrementally, like set_str's append (no-op
+        // when no index is built; drops past load factor for a bigger rebuild).
+        $store->call('__mir_array_index_add', Type::void(), [$buf, $blen]);
         $store->ret($buf);
     }
 
@@ -2315,8 +2454,10 @@ final class UnifiedArrayRuntime
         $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
         $len = $chk->load(Type::i64(), $arr);
         $chk->brIf($chk->icmp('sle', $len, Value::int(Type::i64(), 0)), $z, $go);
-        $go->call('__mir_array_index_drop', Type::void(), [$arr]);
         $nl = $go->sub($len, Value::int(Type::i64(), 1));
+        // Surgical index repair (last entry: backshift only, nothing to sweep);
+        // PACKED / no-index arrays no-op inside.
+        $go->call('__mir_array_index_unset', Type::void(), [$arr, $nl]);
         $v = $go->call('__mir_array_value_at', Type::i64(), [$arr, $nl]);
         $go->store($nl, $arr);
         $go->ret($v);
@@ -2339,7 +2480,9 @@ final class UnifiedArrayRuntime
         $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
         $len = $chk->load(Type::i64(), $arr);
         $chk->brIf($chk->icmp('sle', $len, Value::int(Type::i64(), 0)), $z, $go);
-        $go->call('__mir_array_index_drop', Type::void(), [$arr]);
+        // Surgical index repair for entry 0 (sweep shifts every survivor down
+        // one); PACKED / no-index arrays no-op inside.
+        $go->call('__mir_array_index_unset', Type::void(), [$arr, Value::int(Type::i64(), 0)]);
         $first = $go->call('__mir_array_value_at', Type::i64(), [$arr, Value::int(Type::i64(), 0)]);
         $esz = $this->elemSize($go, $arr);
         $tail = $go->sub($len, Value::int(Type::i64(), 1));
@@ -2625,6 +2768,9 @@ final class UnifiedArrayRuntime
         $key = $isStr ? $fn->param(Type::ptr(), 'key') : $fn->param(Type::i64(), 'idx');
         $e = $fn->block('entry');
         $chk = $fn->block('chk');
+        $idxc = $fn->block('idxc');
+        $idxr = $fn->block('idxr');
+        $idxf = $fn->block('idxf');
         $head = $fn->block('head');
         $body = $fn->block('body');
         $kok = $fn->block('kind_ok');
@@ -2632,14 +2778,25 @@ final class UnifiedArrayRuntime
         $found = $fn->block('found');
         $done = $fn->block('done');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $chk);
-        // A delete shifts entry indices → invalidate the bucket index.
-        $chk->call('__mir_array_index_drop', Type::void(), [$arr]);
         // HASHED only (flags != 0); PACKED is a no-op.
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $done, $head);
+        $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $done, $idxc);
+        // Index fast path: -2 (small map) → linear scan; -1 → miss (no-op);
+        // else the entry index lands in iSlot and converges on $found.
+        $rfU = $idxc->call('__mir_array_index_find', Type::i64(), [
+            $arr,
+            Value::int(Type::i64(), $isStr ? MemoryAbi::ARRAY_KIND_STRING : MemoryAbi::ARRAY_KIND_INT),
+            $isStr ? $key : Value::null(),
+            $isStr ? Value::int(Type::i64(), 0) : $key,
+            Value::int(Type::i64(), 0), Value::int(Type::i64(), 0),
+        ]);
+        $idxc->brIf($idxc->icmp('eq', $rfU, Value::int(Type::i64(), -2)), $head, $idxr);
+        $idxr->brIf($idxr->icmp('slt', $rfU, Value::int(Type::i64(), 0)), $done, $idxf);
+        $idxf->store($rfU, $iSlot);
+        $idxf->br($found);
         $i = $head->load(Type::i64(), $iSlot);
         $head->brIf($head->icmp('sge', $i, $len), $done, $body);
         $wantKind = $isStr ? MemoryAbi::ARRAY_KIND_STRING : MemoryAbi::ARRAY_KIND_INT;
@@ -2656,10 +2813,14 @@ final class UnifiedArrayRuntime
         }
         $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $next->br($head);
-        // shift entries [i+1 .. len) down one slot
-        $dst = $this->entryAddr($found, $arr, $i, 0);
-        $src = $this->entryAddr($found, $arr, $found->add($i, Value::int(Type::i64(), 1)), 0);
-        $tail = $found->sub($found->sub($len, $i), Value::int(Type::i64(), 1));
+        // Repair the index BEFORE the memmove (keys must still be in place),
+        // then shift entries [i+1 .. len) down one slot. iSlot holds the found
+        // index on both the linear and the index-find path.
+        $fi = $found->load(Type::i64(), $iSlot);
+        $found->call('__mir_array_index_unset', Type::void(), [$arr, $fi]);
+        $dst = $this->entryAddr($found, $arr, $fi, 0);
+        $src = $this->entryAddr($found, $arr, $found->add($fi, Value::int(Type::i64(), 1)), 0);
+        $tail = $found->sub($found->sub($len, $fi), Value::int(Type::i64(), 1));
         $bytes = $found->mul($tail, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE));
         $found->call('memmove', Type::ptr(), [$dst, $src, $bytes]);
         $found->store($found->sub($len, Value::int(Type::i64(), 1)), $arr);
