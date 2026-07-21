@@ -3430,16 +3430,35 @@ trait EmitLlvmExpr
             if ($kind === Type::KIND_STRING) {
                 $out .= $this->coerceToPtr();
                 // A null `?string` (ptr 0) echoes "" in PHP — map 0 → the empty
-                // C-string so printf doesn't dereference null.
+                // C-string (also headered, len@-16 = 0) so the write below sees a
+                // valid header instead of dereferencing null.
                 $sp = $this->lastValue;
                 $snn = $this->ssa->allocReg();
                 $ssafe = $this->ssa->allocReg();
                 $out .= '  ' . $snn . ' = icmp eq ptr ' . $sp . ", null\n";
                 $out .= '  ' . $ssafe . ' = select i1 ' . $snn
                       . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $sp . "\n";
-                $this->lastValue = $ssafe;
-                $fmt = '@.fmt.s';
-                $argType = 'ptr';
+                // PHP echo is BINARY-SAFE: print exactly len@-16 bytes with
+                // write(), not printf("%s") which stops at the first NUL (a raw
+                // binary string / image / protocol frame would truncate). A
+                // fflush(NULL) first keeps this unbuffered write ordered against
+                // the stdio-buffered printf the other arms use — it flushes ALL
+                // streams and needs no non-portable `stdout` symbol. Cheap in the
+                // common case: after a write the stdio buffer is empty, so a run
+                // of string echoes flushes nothing between them.
+                $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
+                $this->libcExtra['write'] = 'declare i64 @write(i32, ptr, i64)';
+                $lenp = $this->ssa->allocReg();
+                $len = $this->ssa->allocReg();
+                $out .= '  ' . $lenp . ' = getelementptr inbounds i8, ptr ' . $ssafe
+                      . ', i64 ' . (string)\Compile\MemoryAbi::STRING_LEN_OFFSET . "\n";
+                $out .= '  ' . $len . ' = load i64, ptr ' . $lenp . "\n";
+                $out .= "  call i32 @fflush(ptr null)\n";
+                $wr = $this->ssa->allocReg();
+                $out .= '  ' . $wr . ' = call i64 @write(i32 1, ptr ' . $ssafe
+                      . ', i64 ' . $len . ")\n";
+                $out .= $this->freeStrTemp($e, $ssafe);
+                continue;
             } else {
                 $out .= $this->coerceToI64();
                 $fmt = '@.fmt.d';
