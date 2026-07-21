@@ -326,7 +326,10 @@ function number_format(float $num, int $decimals = 0, string $dec_point = ".", s
     $factor = 1;
     $i = 0;
     while ($i < $decimals) { $factor = $factor * 10; $i = $i + 1; }
-    // Smallest-unit integer count, rounded half away from zero.
+    // Pre-round at $decimals FIRST (php_round semantics — cancels the binary
+    // representation error so number_format(1.005, 2) is "1.01", not "1.00"),
+    // then take the smallest-unit integer count, half away from zero.
+    $num = \round($num, $decimals);
     $scaled = (int)($num * (float)$factor + 0.5);
     $intPart = \intdiv($scaled, $factor);
     $frac = $scaled - $intPart * $factor;
@@ -378,23 +381,39 @@ function nl2br(string $s, bool $is_xhtml = true): string
     return $out;
 }
 
-/** Number of words in `$s` (PHP `str_word_count` format 0). A word is a maximal
- *  run of alphabetic characters, optionally containing `'` and `-` (PHP's
- *  default locale word set). Only format 0 (the count) is supported. */
-function str_word_count(string $s, int $format = 0): int
+/** Words in `$s` (PHP `str_word_count`). A word is a maximal run of alphabetic
+ *  characters, optionally containing `'` and `-` (PHP's default locale set).
+ *  format 0 → the count; 1 → a list of the words; 2 → words keyed by their
+ *  starting offset. */
+function str_word_count(string $s, int $format = 0): int|array
 {
     $n = \strlen($s);
-    $count = 0;
+    /** @var string[] $words */
+    $words = [];
+    /** @var int[] $starts */
+    $starts = [];
+    $cur = "";
+    $st = 0;
     $inWord = false;
     for ($i = 0; $i < $n; $i = $i + 1) {
         $c = \substr($s, $i, 1);
         $isAlpha = ($c >= "a" && $c <= "z") || ($c >= "A" && $c <= "Z");
         $isInner = $isAlpha || $c === "'" || $c === "-";
         // A run STARTS on an alphabetic char; `'`/`-` only continue an open run.
-        if ($isAlpha && !$inWord) { $count = $count + 1; $inWord = true; }
-        elseif (!$isInner) { $inWord = false; }
+        if ($isAlpha && !$inWord) { $cur = $c; $st = $i; $inWord = true; }
+        elseif ($inWord && $isInner) { $cur = $cur . $c; }
+        elseif (!$isInner && $inWord) { $words[] = $cur; $starts[] = $st; $inWord = false; }
     }
-    return $count;
+    if ($inWord) { $words[] = $cur; $starts[] = $st; }
+    if ($format === 1) { return $words; }
+    if ($format === 2) {
+        /** @var array<int,string> $byPos */
+        $byPos = [];
+        $m = \count($words);
+        for ($k = 0; $k < $m; $k = $k + 1) { $byPos[$starts[$k]] = $words[$k]; }
+        return $byPos;
+    }
+    return \count($words);
 }
 
 /** Perl-style string increment backing the `++` operator on a string. A numeric

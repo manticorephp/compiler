@@ -1,0 +1,33 @@
+string(4) "1.01"
+string(4) "2.68"
+string(1) "1"
+string(12) "1,234,567.89"
+string(6) "-1 235"
+string(5) "1,000"
+int(3)
+array(3) {
+  [0]=>
+  string(3) "one"
+  [1]=>
+  string(3) "two"
+  [2]=>
+  string(5) "three"
+}
+array(2) {
+  [0]=>
+  string(5) "hello"
+  [6]=>
+  string(5) "world"
+}
+int(3)
+array(3) {
+  [0]=>
+  string(4) "it's"
+  [1]=>
+  string(1) "a"
+  [2]=>
+  string(9) "test-case"
+}
+int(0)
+14
+int(8)
