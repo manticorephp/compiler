@@ -119,7 +119,17 @@ trait EmitLlvmCalls
             $first = false;
             $paramSig .= 'i64 %arg.' . $p->name;
         }
-        $out = 'define i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+        // Linkage mirrors emitFunction (EmitLlvmModule): a PRELUDE FFI wrapper
+        // (e.g. `__mc_libc_fclose`, declared in prelude/resource.php) is compiled
+        // into EVERY module — both a user program's `.o` AND the prebuilt stdlib
+        // `.o` — so external linkage duplicate-symbols on GNU ld (Apple ld64
+        // coalesces; GNU ld errors "multiple definition"). linkonce_odr merges the
+        // identical bodies. A NON-prelude FFI binding (`Runtime\Libc\strcmp`) is
+        // defined in ONE module and referenced across the .o boundary; it must stay
+        // external, or `--gc-sections` drops the linkonce copy and the reference
+        // goes undefined. Bodies are deterministic per C symbol → ODR-safe.
+        $ffiLinkage = $fn->isPrelude ? 'linkonce_odr ' : '';
+        $out = 'define ' . $ffiLinkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
         $cargs = [];
         $idx = 0;
         foreach ($fn->params as $p) {

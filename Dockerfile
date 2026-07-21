@@ -25,9 +25,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libssl-dev    -> TLS + hash/hmac (src/Runtime/Openssl.php, src/Runtime/Crypto.php)
 # pkg-config    -> how Main.php discovers the openssl link flags
 # gcc/libc6-dev -> `cc` drives the final link
+# netbase       -> /etc/services + /etc/protocols, the databases getservby*() /
+#                  getprotoby*() read; a bare debian:12 ships without them, so the
+#                  network stdlib would find nothing (getservbyname("http") → false).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release software-properties-common \
         gcc libc6-dev libpcre2-dev libssl-dev pkg-config binutils bash file make \
+        netbase \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- PHP 8.5 (sury.org) ----
@@ -67,20 +71,30 @@ RUN CLANG_BIN="$(ls -1 /usr/bin/clang-[0-9]* | grep -E 'clang-[0-9]+$' | sort -V
 RUN php --version && clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl
 
+# Run as a normal, unprivileged user. Under root every file is writable/executable
+# regardless of mode, so a suite that checks permissions diverges from a real
+# deployment: is_writable() of a chmod(0400) file returns true as root (the kernel
+# skips the DAC check for uid 0) but false for a normal user — matching macOS and
+# the recorded expectations. `/build` is the scratch dir run_tests.sh copies into.
+RUN useradd --create-home --uid 1000 --shell /bin/bash manticore \
+    && mkdir -p /build \
+    && chown -R manticore:manticore /build
+
 WORKDIR /build
+USER manticore
 CMD ["/bin/bash"]
 
 
 # ---- build the compiler from source ----
 #
-# WARNING: this target DOES NOT SUCCEED YET. The seed links now (the Apple-ld-only
-# symbol scraper was issue #1, fixed), but bin/compile stage [5/5] SIGSEGVs in
-# EmitLlvm::unboxCellToType while building the stdlib on Linux. That is a live
-# compiler bug, tracked in tools/docker/README.md -- not a broken Dockerfile.
-# Use `--target toolchain` until it is fixed.
+# Bakes the compiler in: `bin/compile` cold-seeds src/ -> bin/manticore + lib/.
+# The Linux blockers are fixed (issue #1 linker scrape; the [5/5] failures were
+# FFI-wrapper linkage, a missing -lm, and an uninitialised exception runtime).
 FROM toolchain AS build
 
-COPY . /build/manticore
+# --chown so the unprivileged `manticore` user (set in toolchain) owns the tree
+# and bin/compile can write bin/manticore + lib/ into it.
+COPY --chown=manticore:manticore . /build/manticore
 WORKDIR /build/manticore
 
 # A stale macOS bin/manticore or lib/*.o would fake a pass, or link Mach-O into

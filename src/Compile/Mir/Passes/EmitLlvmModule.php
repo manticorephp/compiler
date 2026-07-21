@@ -205,13 +205,27 @@ trait EmitLlvmModule
         }
         if ($this->rt->needsExceptions) {
             // setjmp/longjmp exception runtime. 16 nested-try slots ×
-            // 256B jmp_buf (macOS arm64 needs 192). @thrown holds the
-            // in-flight exception ptr.
+            // 512B jmp_buf. The slot stride must exceed the platform's jmp_buf:
+            // macOS arm64 writes 192B, but glibc aarch64 `setjmp` is
+            // `__sigsetjmp(env, 1)` — it saves the 128B signal mask on top of the
+            // 176B register area = ~312B. A 256B stride let slot N's setjmp clobber
+            // the head of slot N+1 (and the tail of slot N-1's saved buffer),
+            // corrupting the base setjmp so a longjmp restored garbage and the
+            // try-depth ran away → spurious "Maximum try nesting (16)". 512 clears
+            // every libc; uniform (no per-OS) — a per-OS minimum belongs to the
+            // target-abi epic. @thrown holds the in-flight exception ptr.
             // linkonce_odr (NOT internal): exception state is touched by
             // linkonce_odr runtime helpers; at -O2 those inline into both
             // user.o + stdlib.o. Per-.o internal copies would split the
-            // jmp/thrown state. Coalesce to one address (no-op for a lone .o).
-            $out .= "@__mir_jmp_stack = linkonce_odr global [4096 x i8] zeroinitializer\n";
+            // jmp/thrown state. These coalesce to one address on both ld64 and GNU
+            // ld — the copies are ONLY safe because @main initialises depth:=1 and
+            // installs the base landing pad. A program that never throws in its own
+            // code but links stdlib.o (which CAN throw) still needs that init, so
+            // the main module force-enables `needsExceptions` (see emit()); without
+            // it a stdlib throw read an uninitialised depth 0 → slot -1 → bogus
+            // "Maximum try nesting" fatal (latent on macOS, where stdlib rarely
+            // throws on the passing paths).
+            $out .= "@__mir_jmp_stack = linkonce_odr global [8192 x i8] zeroinitializer\n";
             $out .= "@__mir_jmp_depth = linkonce_odr global i64 0\n";
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
             $out .= $this->emitJmpSlotGuard();
@@ -881,7 +895,7 @@ trait EmitLlvmModule
         $out .= "  call void @exit(i32 255)\n";
         $out .= "  unreachable\n";
         $out .= "ok:\n";
-        $out .= "  %o = mul i64 %s, 256\n";
+        $out .= "  %o = mul i64 %s, 512\n"; // slot stride — must exceed glibc's ~312B setjmp; see @__mir_jmp_stack
         $out .= "  ret i64 %o\n}\n";
         return $out;
     }
