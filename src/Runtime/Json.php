@@ -124,24 +124,23 @@ function __mc_dtoa_bits(int $bits): string {
 }
 
 /**
- * Shared shortest-decimal core. `$upperE` picks `E` (var_dump / var_export)
- * over `e` (json); `$forceDot` appends `.0` to an integer-valued decimal
- * (var_export, which must round-trip as a float) where var_dump / json leave it
- * bare. Non-finite renders as INF / -INF / NAN (what var_dump / var_export
- * want; the json entry point intercepts those first).
+ * Scalar half of the shortest-decimal core, for a caller that formats the
+ * digits itself (the native json float emitter `__mir_json_double`): runs the
+ * Ryu loop and returns ONE scalar — `$which === 0` the decimal digits
+ * (`$output`, always >= 1 for a finite nonzero double), else
+ * `(($exp + 1024) << 1) | $sign`. A non-finite or ±0 input returns -1 (both
+ * calls) and the caller falls back to the string path. Two calls run the
+ * integer core twice — that is still far cheaper than the old per-float
+ * string tail (temp substr/concat/str_repeat allocations per value); the
+ * string tail in {@see __mc_dtoa_core} now unpacks these same two scalars, so
+ * the Ryu math lives in exactly one place.
  */
-function __mc_dtoa_core(int $bits, int $upperE, int $forceDot): string {
+function __mc_dtoa_scal(int $bits, int $which): int {
     $sign = ($bits >> 63) & 1;
     $ieeeMantissa = $bits & 4503599627370495;      // (1<<52)-1
     $ieeeExponent = ($bits >> 52) & 2047;          // 0x7FF
-    if (($bits & 9223372036854775807) === 0) {     // ±0
-        $z = $forceDot === 1 ? "0.0" : "0";
-        return $sign === 1 ? ("-" . $z) : $z;
-    }
-    if ($ieeeExponent === 2047) {
-        if ($ieeeMantissa !== 0) { return "NAN"; }
-        return $sign === 1 ? "-INF" : "INF";
-    }
+    if (($bits & 9223372036854775807) === 0) { return -1; }
+    if ($ieeeExponent === 2047) { return -1; }
 
     if ($ieeeExponent === 0) {
         $e2 = 1 - 1023 - 52 - 2;
@@ -262,6 +261,35 @@ function __mc_dtoa_core(int $bits, int $upperE, int $forceDot): string {
         $output = $vr + (($vr === $vm || $roundUp) ? 1 : 0);
     }
     $exp = $e10 + $removed;
+    if ($which === 0) { return $output; }
+    return (($exp + 1024) << 1) | $sign;
+}
+
+/**
+ * Shared shortest-decimal core. `$upperE` picks `E` (var_dump / var_export)
+ * over `e` (json); `$forceDot` appends `.0` to an integer-valued decimal
+ * (var_export, which must round-trip as a float) where var_dump / json leave it
+ * bare. Non-finite renders as INF / -INF / NAN (what var_dump / var_export
+ * want; the json entry point intercepts those first). The digit math is
+ * {@see __mc_dtoa_scal}; this is only the string tail.
+ */
+function __mc_dtoa_core(int $bits, int $upperE, int $forceDot): string {
+    $sig = \__mc_dtoa_scal($bits, 0);
+    if ($sig < 0) {
+        // ±0 / INF / NAN — the only -1 producers.
+        $sign = ($bits >> 63) & 1;
+        $ieeeMantissa = $bits & 4503599627370495;
+        if (($bits & 9223372036854775807) === 0) {
+            $z = $forceDot === 1 ? "0.0" : "0";
+            return $sign === 1 ? ("-" . $z) : $z;
+        }
+        if ($ieeeMantissa !== 0) { return "NAN"; }
+        return $sign === 1 ? "-INF" : "INF";
+    }
+    $meta = \__mc_dtoa_scal($bits, 1);
+    $sign = $meta & 1;
+    $exp = ($meta >> 1) - 1024;
+    $output = $sig;
 
     // ── format like PHP: shortest digits placed decimal or scientific ──
     $digits = (string)$output;

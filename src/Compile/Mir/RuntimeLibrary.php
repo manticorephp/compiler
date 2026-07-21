@@ -1433,15 +1433,57 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %nl)\n";
         $out .= "  ret void\n}\n";
 
+        // Bounded byte read: s[i] for i < n, else 0 — mirrors PHP's ord("") == 0
+        // on a blind UTF-8 continuation read past the end (and never touches
+        // memory past the allocation, unlike a raw load would).
+        $out .= "\ndefine i64 @__mir_json_bat(ptr %s, i64 %i, i64 %n) {\n";
+        $out .= "entry:\n";
+        $out .= "  %in = icmp slt i64 %i, %n\n";
+        $out .= "  br i1 %in, label %ld, label %z\n";
+        $out .= "ld:\n";
+        $out .= "  %p = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %b = load i8, ptr %p\n";
+        $out .= "  %bz = zext i8 %b to i64\n";
+        $out .= "  ret i64 %bz\n";
+        $out .= "z:\n  ret i64 0\n}\n";
+
+        // Write `\uXXXX` (lowercase hex) for %cp at %buf+%j, return the new j.
+        // Caller has already reserved the room.
+        $out .= "\ndefine i64 @__mir_json_u4(ptr %buf, i64 %j, i64 %cp) {\n";
+        $out .= "entry:\n";
+        $out .= "  %d0 = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 92, ptr %d0\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  %d1 = getelementptr inbounds i8, ptr %buf, i64 %j1\n";
+        $out .= "  store i8 117, ptr %d1\n";
+        $j = 2;
+        foreach ([12, 8, 4, 0] as $k => $sh) {
+            $out .= "  %n$k = lshr i64 %cp, $sh\n";
+            $out .= "  %m$k = and i64 %n$k, 15\n";
+            $out .= "  %lt$k = icmp ult i64 %m$k, 10\n";
+            $out .= "  %a$k = add i64 %m$k, 48\n";
+            $out .= "  %b$k = add i64 %m$k, 87\n";
+            $out .= "  %h$k = select i1 %lt$k, i64 %a$k, i64 %b$k\n";
+            $out .= "  %t$k = trunc i64 %h$k to i8\n";
+            $out .= "  %jx$k = add i64 %j, " . ($j + $k) . "\n";
+            $out .= "  %dx$k = getelementptr inbounds i8, ptr %buf, i64 %jx$k\n";
+            $out .= "  store i8 %t$k, ptr %dx$k\n";
+        }
+        $out .= "  %jr = add i64 %j, 6\n";
+        $out .= "  ret i64 %jr\n}\n";
+
         // Append `"<escaped s>"`. Default php flags: `"` `\` `/` and the C0
         // controls escape, and any non-ASCII byte (>=0x80) becomes `\uXXXX`. The
         // hot inline loop handles the ASCII escapes in ONE pass (fast for the
         // common short-word case), writing each byte or its two-char `\x` form.
-        // The moment a byte needs UTF-8 decoding (>=0x80) or is a rare control
-        // with no short form, it BAILS to the PHP `__mc_json_escape` (which owns
-        // the multi-byte + surrogate logic) and rewrites the whole value from the
-        // saved offset — the partial inline bytes are simply overwritten (len is
-        // only committed at the end).
+        // The first byte needing UTF-8 decoding (>=0x80) or a rare control with
+        // no short form switches to the NATIVE slow loop below (commit the
+        // inline bytes, reserve worst-case 6B/byte for the remainder, continue
+        // in place) — the old whole-string bail to the compiled-PHP
+        // `__mc_json_escape` re-escaped and re-copied everything and its
+        // per-char string concat was the 3.2 GB RSS / 8×-slower json_utf8
+        // pathology. The decode mirrors __mc_json_escape exactly (blind lead
+        // dispatch, ord("")=0 past the end, surrogate pair above the BMP).
         $out .= "\ndefine void @__mir_json_estr(ptr %slotp, ptr %s) {\n";
         $out .= "entry:\n";
         $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
@@ -1521,27 +1563,325 @@ final class RuntimeLibrary
         $out .= "  store i8 0, ptr %ep2\n";
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %jend)\n";
         $out .= "  ret void\n";
-        // Bail: escape the whole value in PHP, rewrite from the saved offset.
+        // Native slow path: commit the inline bytes written so far, reserve
+        // worst-case room for the remainder (6 B per source byte: \uXXXX; a
+        // 4-byte sequence's surrogate pair is 12 B for 4 bytes — under the
+        // bound), reload the (possibly regrown) buffer and continue in place.
         $out .= "phppath:\n";
-        $out .= "  %si64 = ptrtoint ptr %s to i64\n";
-        $out .= "  %ei = call i64 @manticore___mc_json_escape(i64 %si64)\n";
-        $out .= "  %esp = inttoptr i64 %ei to ptr\n";
-        $out .= "  %elen = call i64 @__mir_strlen(ptr %esp)\n";
-        $out .= "  %ersv = add i64 %elen, 2\n";
-        $out .= "  %ebuf = call ptr @__mir_json_reserve(ptr %slotp, i64 %ersv)\n";
-        $out .= "  %eq0 = getelementptr inbounds i8, ptr %ebuf, i64 %len0\n";
-        $out .= "  store i8 34, ptr %eq0\n";
-        $out .= "  %edst1 = getelementptr inbounds i8, ptr %eq0, i64 1\n";
-        $out .= "  call ptr @memcpy(ptr %edst1, ptr %esp, i64 %elen)\n";
-        $out .= "  %eqjp = add i64 %len0, 1\n";
-        $out .= "  %eqj = add i64 %eqjp, %elen\n";
-        $out .= "  %eqc = getelementptr inbounds i8, ptr %ebuf, i64 %eqj\n";
-        $out .= "  store i8 34, ptr %eqc\n";
-        $out .= "  %eend = add i64 %eqj, 1\n";
-        $out .= "  %enul = getelementptr inbounds i8, ptr %ebuf, i64 %eend\n";
-        $out .= "  store i8 0, ptr %enul\n";
-        $out .= "  call void @__mir_str_set_len(ptr %ebuf, i64 %eend)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %esp)\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %j)\n";
+        $out .= "  %srem = sub i64 %slen, %i\n";
+        $out .= "  %srem6 = mul i64 %srem, 6\n";
+        $out .= "  %srsv = add i64 %srem6, 2\n";
+        $out .= "  %buf2 = call ptr @__mir_json_reserve(ptr %slotp, i64 %srsv)\n";
+        $out .= "  br label %sloop\n";
+        $out .= "sloop:\n";
+        $out .= "  %si = phi i64 [%i, %phppath], [%si2, %scont]\n";
+        $out .= "  %sj = phi i64 [%j, %phppath], [%sj2, %scont]\n";
+        $out .= "  %sdone = icmp sge i64 %si, %slen\n";
+        $out .= "  br i1 %sdone, label %sfin, label %sbody\n";
+        $out .= "sbody:\n";
+        $out .= "  %ssp = getelementptr inbounds i8, ptr %s, i64 %si\n";
+        $out .= "  %sc = load i8, ptr %ssp\n";
+        $out .= "  %scz = zext i8 %sc to i64\n";
+        $out .= "  %sge80 = icmp uge i64 %scz, 128\n";
+        $out .= "  br i1 %sge80, label %sutf, label %sascii\n";
+        $out .= "sascii:\n";
+        $out .= "  %ss34 = icmp eq i64 %scz, 34\n";
+        $out .= "  %ss92 = icmp eq i64 %scz, 92\n";
+        $out .= "  %ss47 = icmp eq i64 %scz, 47\n";
+        $out .= "  %ss10 = icmp eq i64 %scz, 10\n";
+        $out .= "  %ss9  = icmp eq i64 %scz, 9\n";
+        $out .= "  %ss13 = icmp eq i64 %scz, 13\n";
+        $out .= "  %ss8  = icmp eq i64 %scz, 8\n";
+        $out .= "  %ss12 = icmp eq i64 %scz, 12\n";
+        $out .= "  %sm1 = select i1 %ss10, i64 110, i64 %scz\n";
+        $out .= "  %sm2 = select i1 %ss9,  i64 116, i64 %sm1\n";
+        $out .= "  %sm3 = select i1 %ss13, i64 114, i64 %sm2\n";
+        $out .= "  %sm4 = select i1 %ss8,  i64 98,  i64 %sm3\n";
+        $out .= "  %sm5 = select i1 %ss12, i64 102, i64 %sm4\n";
+        $out .= "  %sp1 = or i1 %ss34, %ss92\n";
+        $out .= "  %sp2 = or i1 %sp1, %ss47\n";
+        $out .= "  %sp3 = or i1 %sp2, %ss10\n";
+        $out .= "  %sp4 = or i1 %sp3, %ss9\n";
+        $out .= "  %sp5 = or i1 %sp4, %ss13\n";
+        $out .= "  %sp6 = or i1 %sp5, %ss8\n";
+        $out .= "  %sspec = or i1 %sp6, %ss12\n";
+        $out .= "  br i1 %sspec, label %sesc, label %sq\n";
+        $out .= "sq:\n";
+        $out .= "  %slt32 = icmp ult i64 %scz, 32\n";
+        $out .= "  br i1 %slt32, label %sctl, label %splain\n";
+        $out .= "sesc:\n";
+        $out .= "  %sd1 = getelementptr inbounds i8, ptr %buf2, i64 %sj\n";
+        $out .= "  store i8 92, ptr %sd1\n";
+        $out .= "  %sjb = add i64 %sj, 1\n";
+        $out .= "  %sd2 = getelementptr inbounds i8, ptr %buf2, i64 %sjb\n";
+        $out .= "  %smb = trunc i64 %sm5 to i8\n";
+        $out .= "  store i8 %smb, ptr %sd2\n";
+        $out .= "  %sje = add i64 %sj, 2\n";
+        $out .= "  br label %scont\n";
+        $out .= "sctl:\n";
+        $out .= "  %sjc = call i64 @__mir_json_u4(ptr %buf2, i64 %sj, i64 %scz)\n";
+        $out .= "  br label %scont\n";
+        $out .= "splain:\n";
+        $out .= "  %sd3 = getelementptr inbounds i8, ptr %buf2, i64 %sj\n";
+        $out .= "  store i8 %sc, ptr %sd3\n";
+        $out .= "  %sjp = add i64 %sj, 1\n";
+        $out .= "  br label %scont\n";
+        // UTF-8: blind lead dispatch, exactly __mc_json_escape's ladder.
+        $out .= "sutf:\n";
+        $out .= "  %sil = add i64 %si, 1\n";
+        $out .= "  %sf4 = icmp uge i64 %scz, 240\n";
+        $out .= "  br i1 %sf4, label %s4, label %se3\n";
+        $out .= "se3:\n";
+        $out .= "  %sf3 = icmp uge i64 %scz, 224\n";
+        $out .= "  br i1 %sf3, label %s3, label %s2\n";
+        $out .= "s4:\n";
+        $out .= "  %qb1 = call i64 @__mir_json_bat(ptr %s, i64 %sil, i64 %slen)\n";
+        $out .= "  %qi2 = add i64 %si, 2\n";
+        $out .= "  %qb2 = call i64 @__mir_json_bat(ptr %s, i64 %qi2, i64 %slen)\n";
+        $out .= "  %qi3 = add i64 %si, 3\n";
+        $out .= "  %qb3 = call i64 @__mir_json_bat(ptr %s, i64 %qi3, i64 %slen)\n";
+        $out .= "  %q7 = and i64 %scz, 7\n";
+        $out .= "  %qh = shl i64 %q7, 18\n";
+        $out .= "  %qm1 = and i64 %qb1, 63\n";
+        $out .= "  %qs1 = shl i64 %qm1, 12\n";
+        $out .= "  %qm2 = and i64 %qb2, 63\n";
+        $out .= "  %qs2 = shl i64 %qm2, 6\n";
+        $out .= "  %qm3 = and i64 %qb3, 63\n";
+        $out .= "  %qo1 = or i64 %qh, %qs1\n";
+        $out .= "  %qo2 = or i64 %qo1, %qs2\n";
+        $out .= "  %cp4 = or i64 %qo2, %qm3\n";
+        $out .= "  br label %sjoin\n";
+        $out .= "s3:\n";
+        $out .= "  %tb1 = call i64 @__mir_json_bat(ptr %s, i64 %sil, i64 %slen)\n";
+        $out .= "  %ti2 = add i64 %si, 2\n";
+        $out .= "  %tb2 = call i64 @__mir_json_bat(ptr %s, i64 %ti2, i64 %slen)\n";
+        $out .= "  %t15 = and i64 %scz, 15\n";
+        $out .= "  %th = shl i64 %t15, 12\n";
+        $out .= "  %tm1 = and i64 %tb1, 63\n";
+        $out .= "  %ts1 = shl i64 %tm1, 6\n";
+        $out .= "  %tm2 = and i64 %tb2, 63\n";
+        $out .= "  %to1 = or i64 %th, %ts1\n";
+        $out .= "  %cp3 = or i64 %to1, %tm2\n";
+        $out .= "  br label %sjoin\n";
+        $out .= "s2:\n";
+        $out .= "  %ub1 = call i64 @__mir_json_bat(ptr %s, i64 %sil, i64 %slen)\n";
+        $out .= "  %u31 = and i64 %scz, 31\n";
+        $out .= "  %uh = shl i64 %u31, 6\n";
+        $out .= "  %um1 = and i64 %ub1, 63\n";
+        $out .= "  %cp2 = or i64 %uh, %um1\n";
+        $out .= "  br label %sjoin\n";
+        $out .= "sjoin:\n";
+        $out .= "  %cp = phi i64 [%cp4, %s4], [%cp3, %s3], [%cp2, %s2]\n";
+        $out .= "  %sdi = phi i64 [4, %s4], [3, %s3], [2, %s2]\n";
+        $out .= "  %sbig = icmp ugt i64 %cp, 65535\n";
+        $out .= "  br i1 %sbig, label %spair, label %sone\n";
+        $out .= "sone:\n";
+        $out .= "  %sj1x = call i64 @__mir_json_u4(ptr %buf2, i64 %sj, i64 %cp)\n";
+        $out .= "  br label %scont\n";
+        $out .= "spair:\n";
+        $out .= "  %cpm = sub i64 %cp, 65536\n";
+        $out .= "  %hi10 = lshr i64 %cpm, 10\n";
+        $out .= "  %hicp = add i64 %hi10, 55296\n";
+        $out .= "  %lo10 = and i64 %cpm, 1023\n";
+        $out .= "  %locp = add i64 %lo10, 56320\n";
+        $out .= "  %sjh = call i64 @__mir_json_u4(ptr %buf2, i64 %sj, i64 %hicp)\n";
+        $out .= "  %sjl = call i64 @__mir_json_u4(ptr %buf2, i64 %sjh, i64 %locp)\n";
+        $out .= "  br label %scont\n";
+        $out .= "scont:\n";
+        $out .= "  %sj2 = phi i64 [%sje, %sesc], [%sjc, %sctl], [%sjp, %splain], [%sj1x, %sone], [%sjl, %spair]\n";
+        $out .= "  %sadv = phi i64 [1, %sesc], [1, %sctl], [1, %splain], [%sdi, %sone], [%sdi, %spair]\n";
+        $out .= "  %si2 = add i64 %si, %sadv\n";
+        $out .= "  br label %sloop\n";
+        $out .= "sfin:\n";
+        $out .= "  %sqc = getelementptr inbounds i8, ptr %buf2, i64 %sj\n";
+        $out .= "  store i8 34, ptr %sqc\n";
+        $out .= "  %sjend = add i64 %sj, 1\n";
+        $out .= "  %snul = getelementptr inbounds i8, ptr %buf2, i64 %sjend\n";
+        $out .= "  store i8 0, ptr %snul\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf2, i64 %sjend)\n";
+        $out .= "  ret void\n}\n";
+
+        // Float emitter: Ryu digits via the scalar core (__mc_dtoa_scal, two
+        // calls — digits and (exp<<1)|sign), formatted straight into the json
+        // buffer with the exact __mc_dtoa_core tail semantics (json flavor:
+        // lowercase e, no forced .0). Zero heap traffic per float — the old
+        // per-float PHP string tail (substr/concat/str_repeat temps + result
+        // alloc/copy/free) was ~47% of json_records wall and ALL of its 242 MB
+        // RSS churn. Non-finite / ±0 return -1 from the scalar core → the old
+        // string path (rare).
+        $out .= "\ndefine void @__mir_json_double(ptr %slotp, i64 %cell) {\n";
+        $out .= "entry:\n";
+        $out .= "  %sig = call i64 @manticore___mc_dtoa_scal(i64 %cell, i64 0)\n";
+        $out .= "  %spec = icmp slt i64 %sig, 0\n";
+        $out .= "  br i1 %spec, label %fb, label %go\n";
+        $out .= "fb:\n";
+        $out .= "  %fsi = call i64 @manticore___mc_dtoa_bits(i64 %cell)\n";
+        $out .= "  %fs = inttoptr i64 %fsi to ptr\n";
+        $out .= "  %fn = call i64 @__mir_strlen(ptr %fs)\n";
+        $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %fs, i64 %fn)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %fs)\n";
+        $out .= "  ret void\n";
+        $out .= "go:\n";
+        $out .= "  %meta = call i64 @manticore___mc_dtoa_scal(i64 %cell, i64 1)\n";
+        $out .= "  %fsign = and i64 %meta, 1\n";
+        $out .= "  %eb = lshr i64 %meta, 1\n";
+        $out .= "  %fexp = sub i64 %eb, 1024\n";
+        $out .= "  %olen = call i64 @__mir_int_len(i64 %sig)\n";
+        $out .= "  %dt = alloca [24 x i8]\n";
+        $out .= "  call void @__mir_int_fmt(ptr %dt, i64 0, i64 %sig)\n";
+        $out .= "  %eneg = icmp slt i64 %fexp, 0\n";
+        $out .= "  %nexp = sub i64 0, %fexp\n";
+        $out .= "  %aexp = select i1 %eneg, i64 %nexp, i64 %fexp\n";
+        $out .= "  %rsv0 = add i64 %olen, %aexp\n";
+        $out .= "  %rsv = add i64 %rsv0, 16\n";
+        $out .= "  %buf = call ptr @__mir_json_reserve(ptr %slotp, i64 %rsv)\n";
+        $out .= "  %lenp = getelementptr inbounds i8, ptr %buf, i64 -16\n";
+        $out .= "  %len0 = load i64, ptr %lenp\n";
+        $out .= "  %wp = alloca i64\n";
+        $out .= "  store i64 %len0, ptr %wp\n";
+        $out .= "  %isneg = icmp ne i64 %fsign, 0\n";
+        $out .= "  br i1 %isneg, label %wneg, label %fmt\n";
+        $out .= "wneg:\n";
+        $out .= "  %w0 = load i64, ptr %wp\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %w0\n";
+        $out .= "  store i8 45, ptr %np\n";
+        $out .= "  %w1 = add i64 %w0, 1\n";
+        $out .= "  store i64 %w1, ptr %wp\n";
+        $out .= "  br label %fmt\n";
+        $out .= "fmt:\n";
+        $out .= "  %esci0 = add i64 %fexp, %olen\n";
+        $out .= "  %esci = sub i64 %esci0, 1\n";
+        $out .= "  %lo = icmp slt i64 %esci, -4\n";
+        $out .= "  %hi = icmp sgt i64 %esci, 16\n";
+        $out .= "  %sci = or i1 %lo, %hi\n";
+        $out .= "  br i1 %sci, label %fsci, label %ffix\n";
+        // Fixed, integer-valued: digits then %fexp zeros (fexp <= 16 here).
+        $out .= "ffix:\n";
+        $out .= "  %epos = icmp sge i64 %fexp, 0\n";
+        $out .= "  br i1 %epos, label %fint, label %ffrac\n";
+        $out .= "fint:\n";
+        $out .= "  %wa = load i64, ptr %wp\n";
+        $out .= "  %da = getelementptr inbounds i8, ptr %buf, i64 %wa\n";
+        $out .= "  call ptr @memcpy(ptr %da, ptr %dt, i64 %olen)\n";
+        $out .= "  %wb = add i64 %wa, %olen\n";
+        $out .= "  store i64 %wb, ptr %wp\n";
+        $out .= "  br label %zl\n";
+        $out .= "zl:\n";
+        $out .= "  %zi = phi i64 [0, %fint], [%zi2, %zb]\n";
+        $out .= "  %zd = icmp sge i64 %zi, %fexp\n";
+        $out .= "  br i1 %zd, label %fdone, label %zb\n";
+        $out .= "zb:\n";
+        $out .= "  %wz = load i64, ptr %wp\n";
+        $out .= "  %zp = getelementptr inbounds i8, ptr %buf, i64 %wz\n";
+        $out .= "  store i8 48, ptr %zp\n";
+        $out .= "  %wz1 = add i64 %wz, 1\n";
+        $out .= "  store i64 %wz1, ptr %wp\n";
+        $out .= "  %zi2 = add i64 %zi, 1\n";
+        $out .= "  br label %zl\n";
+        // Fixed with a fractional part.
+        $out .= "ffrac:\n";
+        $out .= "  %dp = add i64 %olen, %fexp\n";
+        $out .= "  %dpos = icmp sgt i64 %dp, 0\n";
+        $out .= "  br i1 %dpos, label %fmid, label %fsub\n";
+        $out .= "fmid:\n";
+        $out .= "  %wc = load i64, ptr %wp\n";
+        $out .= "  %dc = getelementptr inbounds i8, ptr %buf, i64 %wc\n";
+        $out .= "  call ptr @memcpy(ptr %dc, ptr %dt, i64 %dp)\n";
+        $out .= "  %wd = add i64 %wc, %dp\n";
+        $out .= "  %pp = getelementptr inbounds i8, ptr %buf, i64 %wd\n";
+        $out .= "  store i8 46, ptr %pp\n";
+        $out .= "  %we = add i64 %wd, 1\n";
+        $out .= "  %sp2 = getelementptr inbounds i8, ptr %dt, i64 %dp\n";
+        $out .= "  %rest = sub i64 %olen, %dp\n";
+        $out .= "  %dpst = getelementptr inbounds i8, ptr %buf, i64 %we\n";
+        $out .= "  call ptr @memcpy(ptr %dpst, ptr %sp2, i64 %rest)\n";
+        $out .= "  %wf = add i64 %we, %rest\n";
+        $out .= "  store i64 %wf, ptr %wp\n";
+        $out .= "  br label %fdone\n";
+        $out .= "fsub:\n";
+        $out .= "  %wg = load i64, ptr %wp\n";
+        $out .= "  %z0p = getelementptr inbounds i8, ptr %buf, i64 %wg\n";
+        $out .= "  store i8 48, ptr %z0p\n";
+        $out .= "  %wg1 = add i64 %wg, 1\n";
+        $out .= "  %z1p = getelementptr inbounds i8, ptr %buf, i64 %wg1\n";
+        $out .= "  store i8 46, ptr %z1p\n";
+        $out .= "  %wg2 = add i64 %wg, 2\n";
+        $out .= "  store i64 %wg2, ptr %wp\n";
+        $out .= "  %nz = sub i64 0, %dp\n";
+        $out .= "  br label %z2l\n";
+        $out .= "z2l:\n";
+        $out .= "  %z2i = phi i64 [0, %fsub], [%z2i2, %z2b]\n";
+        $out .= "  %z2d = icmp sge i64 %z2i, %nz\n";
+        $out .= "  br i1 %z2d, label %fsubd, label %z2b\n";
+        $out .= "z2b:\n";
+        $out .= "  %wz2 = load i64, ptr %wp\n";
+        $out .= "  %z2p = getelementptr inbounds i8, ptr %buf, i64 %wz2\n";
+        $out .= "  store i8 48, ptr %z2p\n";
+        $out .= "  %wz21 = add i64 %wz2, 1\n";
+        $out .= "  store i64 %wz21, ptr %wp\n";
+        $out .= "  %z2i2 = add i64 %z2i, 1\n";
+        $out .= "  br label %z2l\n";
+        $out .= "fsubd:\n";
+        $out .= "  %wh0 = load i64, ptr %wp\n";
+        $out .= "  %dh = getelementptr inbounds i8, ptr %buf, i64 %wh0\n";
+        $out .= "  call ptr @memcpy(ptr %dh, ptr %dt, i64 %olen)\n";
+        $out .= "  %wh1 = add i64 %wh0, %olen\n";
+        $out .= "  store i64 %wh1, ptr %wp\n";
+        $out .= "  br label %fdone\n";
+        // Scientific: d[0] [ "." d[1..] | ".0" ] e±NN
+        $out .= "fsci:\n";
+        $out .= "  %wi = load i64, ptr %wp\n";
+        $out .= "  %d0 = load i8, ptr %dt\n";
+        $out .= "  %d0p = getelementptr inbounds i8, ptr %buf, i64 %wi\n";
+        $out .= "  store i8 %d0, ptr %d0p\n";
+        $out .= "  %wi1 = add i64 %wi, 1\n";
+        $out .= "  store i64 %wi1, ptr %wp\n";
+        $out .= "  %one = icmp eq i64 %olen, 1\n";
+        $out .= "  br i1 %one, label %sone, label %smany\n";
+        $out .= "sone:\n";
+        $out .= "  %sp0 = getelementptr inbounds i8, ptr %buf, i64 %wi1\n";
+        $out .= "  store i8 46, ptr %sp0\n";
+        $out .= "  %wi2 = add i64 %wi1, 1\n";
+        $out .= "  %sp1 = getelementptr inbounds i8, ptr %buf, i64 %wi2\n";
+        $out .= "  store i8 48, ptr %sp1\n";
+        $out .= "  %wi3 = add i64 %wi1, 2\n";
+        $out .= "  store i64 %wi3, ptr %wp\n";
+        $out .= "  br label %sexp\n";
+        $out .= "smany:\n";
+        $out .= "  %mp = getelementptr inbounds i8, ptr %buf, i64 %wi1\n";
+        $out .= "  store i8 46, ptr %mp\n";
+        $out .= "  %wi4 = add i64 %wi1, 1\n";
+        $out .= "  %dt1 = getelementptr inbounds i8, ptr %dt, i64 1\n";
+        $out .= "  %mrest = sub i64 %olen, 1\n";
+        $out .= "  %mdst = getelementptr inbounds i8, ptr %buf, i64 %wi4\n";
+        $out .= "  call ptr @memcpy(ptr %mdst, ptr %dt1, i64 %mrest)\n";
+        $out .= "  %wi5 = add i64 %wi4, %mrest\n";
+        $out .= "  store i64 %wi5, ptr %wp\n";
+        $out .= "  br label %sexp\n";
+        $out .= "sexp:\n";
+        $out .= "  %wj = load i64, ptr %wp\n";
+        $out .= "  %ec = getelementptr inbounds i8, ptr %buf, i64 %wj\n";
+        $out .= "  store i8 101, ptr %ec\n";
+        $out .= "  %wj1 = add i64 %wj, 1\n";
+        $out .= "  %eng = icmp slt i64 %esci, 0\n";
+        $out .= "  %esgn = select i1 %eng, i64 45, i64 43\n";
+        $out .= "  %esgb = trunc i64 %esgn to i8\n";
+        $out .= "  %egp = getelementptr inbounds i8, ptr %buf, i64 %wj1\n";
+        $out .= "  store i8 %esgb, ptr %egp\n";
+        $out .= "  %wj2 = add i64 %wj, 2\n";
+        $out .= "  %nesci = sub i64 0, %esci\n";
+        $out .= "  %ae = select i1 %eng, i64 %nesci, i64 %esci\n";
+        $out .= "  %ael = call i64 @__mir_int_len(i64 %ae)\n";
+        $out .= "  call void @__mir_int_fmt(ptr %buf, i64 %wj2, i64 %ae)\n";
+        $out .= "  %wj3 = add i64 %wj2, %ael\n";
+        $out .= "  store i64 %wj3, ptr %wp\n";
+        $out .= "  br label %fdone\n";
+        $out .= "fdone:\n";
+        $out .= "  %wfin = load i64, ptr %wp\n";
+        $out .= "  %nulp = getelementptr inbounds i8, ptr %buf, i64 %wfin\n";
+        $out .= "  store i8 0, ptr %nulp\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %wfin)\n";
         $out .= "  ret void\n}\n";
 
         // recursive walker.
@@ -1550,14 +1890,7 @@ final class RuntimeLibrary
         $out .= "  %tagged = icmp ugt i64 %cell, $T\n";
         $out .= "  br i1 %tagged, label %istag, label %isfloat\n";
         $out .= "isfloat:\n";
-        // Shortest round-tripping decimal via the Ryu-backed PHP formatter
-        // (__mc_dtoa_bits); the cell already holds the raw double bits. Replaces
-        // the `%.14g` snprintf, which was slow AND not shortest.
-        $out .= "  %fsi = call i64 @manticore___mc_dtoa_bits(i64 %cell)\n";
-        $out .= "  %fs = inttoptr i64 %fsi to ptr\n";
-        $out .= "  %fn = call i64 @__mir_strlen(ptr %fs)\n";
-        $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %fs, i64 %fn)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %fs)\n";
+        $out .= "  call void @__mir_json_double(ptr %slotp, i64 %cell)\n";
         $out .= "  ret void\n";
         $out .= "istag:\n";
         $out .= "  %sh = lshr i64 %cell, 48\n";
@@ -1607,13 +1940,29 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %os, i64 %on)\n";
         $out .= "  call void @__mir_rc_release_str(ptr %os)\n";
         $out .= "  ret void\n";
+        $H = (string) \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
+        $ES = (string) \Compile\MemoryAbi::ARRAY_ENTRY_SIZE;
+        $KIND_INT = (string) \Compile\MemoryAbi::ARRAY_KIND_INT;
+        $KIND_STR = (string) \Compile\MemoryAbi::ARRAY_KIND_STRING;
+        $KEY_OFF = (string) \Compile\MemoryAbi::ARRAY_ENTRY_KEY_OFFSET;
+        $VAL_OFF = (string) \Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET;
+        // Array walk. All element access is by direct 24-byte-stride entry
+        // loads (kind/key/value) — no out-of-line __mir_array_key_cell_at /
+        // value_at calls, no per-element key (re)boxing: keys read RAW, which
+        // also makes int keys > 2^47 exact (the old cell-key box path masked
+        // and leaked). Upfront reserve of ~8 B/element cuts buffer regrows on
+        // big documents (heuristic — reserve only ever grows capacity).
         $out .= "tarr:\n";
         $out .= "  %arr0 = and i64 %cell, $M\n";
         $out .= "  %arr = inttoptr i64 %arr0 to ptr\n";
         $out .= "  %alen = load i64, ptr %arr\n";
+        $out .= "  %est1 = shl i64 %alen, 3\n";
+        $out .= "  %est = add i64 %est1, 16\n";
+        $out .= "  %rbuf = call ptr @__mir_json_reserve(ptr %slotp, i64 %est)\n";
         $out .= "  %hashed = call i64 @__mir_array_is_hashed(ptr %arr)\n";
         $out .= "  %ishash = icmp ne i64 %hashed, 0\n";
         $out .= "  br i1 %ishash, label %chklist, label %aslist\n";
+        // List check: every entry kind KIND_INT with key == position, raw loads.
         $out .= "chklist:\n";
         $out .= "  br label %kl\n";
         $out .= "kl:\n";
@@ -1621,23 +1970,29 @@ final class RuntimeLibrary
         $out .= "  %kdone = icmp sge i64 %ki, %alen\n";
         $out .= "  br i1 %kdone, label %aslist, label %kbody\n";
         $out .= "kbody:\n";
-        $out .= "  %kc = call i64 @__mir_array_key_cell_at(ptr %arr, i64 %ki)\n";
-        $out .= "  %ktag = icmp ugt i64 %kc, $T\n";
-        $out .= "  br i1 %ktag, label %kchknib, label %asobj\n";
-        $out .= "kchknib:\n";
-        $out .= "  %ksh = lshr i64 %kc, 48\n";
-        $out .= "  %knib = and i64 %ksh, 15\n";
-        $out .= "  %kisint = icmp eq i64 %knib, 1\n";
+        $out .= "  %ke0 = mul i64 %ki, $ES\n";
+        $out .= "  %ke1 = add i64 %ke0, $H\n";
+        $out .= "  %kkp = getelementptr inbounds i8, ptr %arr, i64 %ke1\n";
+        $out .= "  %kkind = load i64, ptr %kkp\n";
+        $out .= "  %kisint = icmp eq i64 %kkind, $KIND_INT\n";
         $out .= "  br i1 %kisint, label %kchkidx, label %asobj\n";
         $out .= "kchkidx:\n";
-        $out .= "  %kiv = call i64 @__manticore_unbox_int(i64 %kc)\n";
+        $out .= "  %ke2 = add i64 %ke1, $KEY_OFF\n";
+        $out .= "  %kyp = getelementptr inbounds i8, ptr %arr, i64 %ke2\n";
+        $out .= "  %kiv = load i64, ptr %kyp\n";
         $out .= "  %keq = icmp eq i64 %kiv, %ki\n";
         $out .= "  br i1 %keq, label %kcont, label %asobj\n";
         $out .= "kcont:\n";
         $out .= "  %ki2 = add i64 %ki, 1\n";
         $out .= "  br label %kl\n";
+        // List emit: value addr = packed slot (8 B) or hashed entry value (24 B
+        // stride) — the mode is loop-invariant, selected once per element from
+        // %ishash without a call.
         $out .= "aslist:\n";
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 91)\n";
+        $out .= "  %lstride = select i1 %ishash, i64 $ES, i64 8\n";
+        $out .= "  %lbias0 = select i1 %ishash, i64 $VAL_OFF, i64 0\n";
+        $out .= "  %lbias = add i64 %lbias0, $H\n";
         $out .= "  br label %ll\n";
         $out .= "ll:\n";
         $out .= "  %li = phi i64 [0, %aslist], [%li2, %lcont]\n";
@@ -1650,7 +2005,10 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 44)\n";
         $out .= "  br label %lskip\n";
         $out .= "lskip:\n";
-        $out .= "  %lv = call i64 @__mir_array_value_at(ptr %arr, i64 %li)\n";
+        $out .= "  %le0 = mul i64 %li, %lstride\n";
+        $out .= "  %le1 = add i64 %le0, %lbias\n";
+        $out .= "  %lvp = getelementptr inbounds i8, ptr %arr, i64 %le1\n";
+        $out .= "  %lv = load i64, ptr %lvp\n";
         $out .= "  call void @__mir_json_app(ptr %slotp, i64 %lv)\n";
         $out .= "  br label %lcont\n";
         $out .= "lcont:\n";
@@ -1659,6 +2017,7 @@ final class RuntimeLibrary
         $out .= "lend:\n";
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 93)\n";
         $out .= "  ret void\n";
+        // Object emit: raw kind/key/value entry loads per element.
         $out .= "asobj:\n";
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 123)\n";
         $out .= "  br label %ol\n";
@@ -1673,25 +2032,29 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 44)\n";
         $out .= "  br label %oskip\n";
         $out .= "oskip:\n";
-        $out .= "  %okc = call i64 @__mir_array_key_cell_at(ptr %arr, i64 %oi)\n";
-        $out .= "  %oksh = lshr i64 %okc, 48\n";
-        $out .= "  %oknib = and i64 %oksh, 15\n";
-        $out .= "  %okstr = icmp eq i64 %oknib, 4\n";
+        $out .= "  %oe0 = mul i64 %oi, $ES\n";
+        $out .= "  %oe1 = add i64 %oe0, $H\n";
+        $out .= "  %okp = getelementptr inbounds i8, ptr %arr, i64 %oe1\n";
+        $out .= "  %okind = load i64, ptr %okp\n";
+        $out .= "  %oe2 = add i64 %oe1, $KEY_OFF\n";
+        $out .= "  %oyp = getelementptr inbounds i8, ptr %arr, i64 %oe2\n";
+        $out .= "  %okstr = icmp eq i64 %okind, $KIND_STR\n";
         $out .= "  br i1 %okstr, label %okS, label %okI\n";
         $out .= "okS:\n";
-        $out .= "  %oksp = and i64 %okc, $M\n";
-        $out .= "  %oksptr = inttoptr i64 %oksp to ptr\n";
+        $out .= "  %oksptr = load ptr, ptr %oyp\n";
         $out .= "  call void @__mir_json_estr(ptr %slotp, ptr %oksptr)\n";
         $out .= "  br label %okdone\n";
         $out .= "okI:\n";
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 34)\n";
-        $out .= "  %okiv = call i64 @__manticore_unbox_int(i64 %okc)\n";
+        $out .= "  %okiv = load i64, ptr %oyp\n";
         $out .= "  call void @__mir_json_int(ptr %slotp, i64 %okiv)\n";
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 34)\n";
         $out .= "  br label %okdone\n";
         $out .= "okdone:\n";
         $out .= "  call void @__mir_json_putc(ptr %slotp, i64 58)\n";
-        $out .= "  %ov = call i64 @__mir_array_value_at(ptr %arr, i64 %oi)\n";
+        $out .= "  %oe3 = add i64 %oe1, $VAL_OFF\n";
+        $out .= "  %ovp = getelementptr inbounds i8, ptr %arr, i64 %oe3\n";
+        $out .= "  %ov = load i64, ptr %ovp\n";
         $out .= "  call void @__mir_json_app(ptr %slotp, i64 %ov)\n";
         $out .= "  br label %ocont\n";
         $out .= "ocont:\n";
