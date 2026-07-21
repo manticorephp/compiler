@@ -99,8 +99,18 @@ trait EmitLlvmRuntime
         $p1a   = (string)\Compile\MemoryAbi::STRING_POOL1_ALLOC;
         $p0c   = (string)\Compile\MemoryAbi::STRING_POOL0_CAP;
         $p1c   = (string)\Compile\MemoryAbi::STRING_POOL1_CAP;
-        $out .= "@__mir_strpool0 = internal global ptr null\n";
-        $out .= "@__mir_strpool1 = internal global ptr null\n";
+        // linkonce_odr, NOT internal: __mir_str_alloc / __mir_str_reclaim are
+        // linkonce_odr and every linked module (user .o + stdlib .o) carries a
+        // copy referencing ITS OWN pool head. With internal pools that is an
+        // ODR violation with real teeth — the linker keeps ONE alloc and ONE
+        // reclaim, and they can land on DIFFERENT pool globals: alloc drains
+        // pool A (always empty → every string mallocs), reclaim feeds pool B
+        // (a bottomless list nothing ever pops) — ~64 B leaked per released
+        // pooled string across the stdlib boundary (json_decode leaked one
+        // string per parsed key/value; RSS 128 MB on the decode bench).
+        // linkonce_odr pools coalesce to one head, exactly like the functions.
+        $out .= "@__mir_strpool0 = linkonce_odr global ptr null\n";
+        $out .= "@__mir_strpool1 = linkonce_odr global ptr null\n";
         $out .= "define ptr @__mir_str_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(0);
