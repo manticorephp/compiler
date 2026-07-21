@@ -1754,7 +1754,15 @@ trait EmitLlvmExpr
             return $this->emitNode($nc->right);
         }
         if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
-            return $this->emitNode($nc->left);
+            // A raw int/float/bool is never null, so the left always wins. But if
+            // the node is typed a CELL (the fallback carries a different repr,
+            // e.g. `$obj->intProp ?? "str"`), the consumer expects a tagged value
+            // — box the left, or var_dump reads the raw int as a float.
+            $out = $this->emitNode($nc->left);
+            if ($n->type->kind === Type::KIND_CELL) {
+                $out .= $this->boxToCell($nc->left->type);
+            }
+            return $out;
         }
         // Runtime: use left when it isn't null. A null POINTER is 0
         // (string/obj/array), a null SCALAR is the boxed-NULL sentinel (a
