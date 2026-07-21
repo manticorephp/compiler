@@ -1286,7 +1286,7 @@ function cmd_dump_llvm(array $args): int {
 }
 
 function cmd_version(array $args): int {
-    puts("manticore 0.1.0 (self-hosted bootstrap)");
+    puts("manticore 0.6.0");
     return 0;
 }
 

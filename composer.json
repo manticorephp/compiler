@@ -1,0 +1,22 @@
+{
+    "name": "manticorephp/compiler",
+    "description": "Manticore — a PHP-to-native AOT compiler, written in PHP and self-hosted; compiles a large PHP 8.5 subset to standalone arm64/x86_64 binaries via LLVM.",
+    "keywords": ["compiler", "aot", "llvm", "native", "php", "self-hosting"],
+    "homepage": "https://github.com/manticorephp/compiler",
+    "type": "project",
+    "license": "MIT",
+    "authors": [
+        { "name": "Taras Chornyi" }
+    ],
+    "require": {
+        "php": ">=8.5"
+    },
+    "bin": ["bin/manticore-install"],
+    "scripts": {
+        "post-create-project-cmd": "@build",
+        "build": "bash install.sh"
+    },
+    "scripts-descriptions": {
+        "build": "Build Manticore from source into $MANTICORE_HOME (default ~/.manticore) and install the `manticore` binary."
+    }
+}
