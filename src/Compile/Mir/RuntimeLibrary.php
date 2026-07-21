@@ -2127,9 +2127,55 @@ final class RuntimeLibrary
         $out .= "  %oyp = getelementptr inbounds i8, ptr %arr, i64 %oe2\n";
         $out .= "  %okstr = icmp eq i64 %okind, $KIND_STR\n";
         $out .= "  br i1 %okstr, label %okS, label %okI\n";
+        // Object string KEY: the hot repeated case (every object entry). A key
+        // is almost always a short escape-free identifier, so scan it inline
+        // and, when clean, emit `"key"` with one reserve + memcpy — no estr
+        // CALL, no strlen CALL. The moment a byte needs escaping (control / " /
+        // \\ / non-ASCII), fall back to the full estr. Measured: object encode
+        // was ~51 ns PER KEY (estr call chain), the dominant object-emit cost.
         $out .= "okS:\n";
         $out .= "  %oksptr = load ptr, ptr %oyp\n";
+        $out .= "  %oklenp = getelementptr inbounds i8, ptr %oksptr, i64 -16\n";
+        $out .= "  %oklen = load i64, ptr %oklenp\n";
+        $out .= "  br label %ksscan\n";
+        $out .= "ksscan:\n";
+        $out .= "  %ksi = phi i64 [0, %okS], [%ksi2, %ksn]\n";
+        $out .= "  %ksdone = icmp sge i64 %ksi, %oklen\n";
+        $out .= "  br i1 %ksdone, label %kclean, label %ksb\n";
+        $out .= "ksb:\n";
+        $out .= "  %ksp = getelementptr inbounds i8, ptr %oksptr, i64 %ksi\n";
+        $out .= "  %ksc = load i8, ptr %ksp\n";
+        $out .= "  %ksz = zext i8 %ksc to i64\n";
+        $out .= "  %kslt = icmp ult i64 %ksz, 32\n";
+        $out .= "  %ksq = icmp eq i64 %ksz, 34\n";
+        $out .= "  %ksbs = icmp eq i64 %ksz, 92\n";
+        $out .= "  %kssl = icmp eq i64 %ksz, 47\n";
+        $out .= "  %kshi = icmp uge i64 %ksz, 128\n";
+        $out .= "  %ksd1 = or i1 %kslt, %ksq\n";
+        $out .= "  %ksd2 = or i1 %ksd1, %ksbs\n";
+        $out .= "  %ksd3 = or i1 %ksd2, %kssl\n";
+        $out .= "  %ksdirty = or i1 %ksd3, %kshi\n";
+        $out .= "  br i1 %ksdirty, label %kslow, label %ksn\n";
+        $out .= "ksn:\n";
+        $out .= "  %ksi2 = add i64 %ksi, 1\n";
+        $out .= "  br label %ksscan\n";
+        $out .= "kslow:\n";
         $out .= "  call void @__mir_json_estr(ptr %slotp, ptr %lp, ptr %oksptr)\n";
+        $out .= "  br label %okdone\n";
+        $out .= "kclean:\n";
+        $out .= "  %krsv = add i64 %oklen, 2\n";
+        $out .= "  %kbuf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %krsv)\n";
+        $out .= "  %kw0 = load i64, ptr %lp\n";
+        $out .= "  %kq0 = getelementptr inbounds i8, ptr %kbuf, i64 %kw0\n";
+        $out .= "  store i8 34, ptr %kq0\n";
+        $out .= "  %kw1 = add i64 %kw0, 1\n";
+        $out .= "  %kdst = getelementptr inbounds i8, ptr %kbuf, i64 %kw1\n";
+        $out .= "  call ptr @memcpy(ptr %kdst, ptr %oksptr, i64 %oklen)\n";
+        $out .= "  %kw2 = add i64 %kw1, %oklen\n";
+        $out .= "  %kq1 = getelementptr inbounds i8, ptr %kbuf, i64 %kw2\n";
+        $out .= "  store i8 34, ptr %kq1\n";
+        $out .= "  %kw3 = add i64 %kw2, 1\n";
+        $out .= "  store i64 %kw3, ptr %lp\n";
         $out .= "  br label %okdone\n";
         $out .= "okI:\n";
         $out .= $inlinePutc(34);
