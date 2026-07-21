@@ -90,6 +90,8 @@ final class UnifiedArrayRuntime
         $this->emitCopyCells();
         $this->emitHashStr();
         $this->emitStrCanonInt();
+        $this->emitCkeyBoxInt();
+        $this->emitCkeyUnboxInt();
         $this->emitIndexDrop();
         $this->emitIndexBuild();
         $this->emitIndexFind();
@@ -2105,8 +2107,66 @@ final class UnifiedArrayRuntime
         $hashed->brIf($hashed->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hstr, $hint);
         $sk = $hstr->load(Type::i64(), $this->entryAddr($hstr, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $hstr->ret($hstr->or_($hstr->and_($sk, $mask), $ptrTag));
+        // A HASHED int key may be ANY i64 — box it overflow-aware so a key
+        // past 2^47 rides a heap bigint (nibble 5) instead of masking to 48
+        // bits and reading back as a truncated/-1 value. (The packed arm above
+        // keeps the inline mask: a packed key is an index 0..len-1, always in
+        // range.) The de-cellify side in `cellKeyRuntime` mirrors this via
+        // `__mir_ckey_unbox_int`.
         $ik = $hint->load(Type::i64(), $this->entryAddr($hint, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $hint->ret($hint->or_($hint->and_($ik, $mask), $intTag));
+        $hint->ret($hint->call('__mir_ckey_box_int', Type::i64(), [$ik]));
+    }
+
+    /**
+     * `__mir_ckey_box_int(v) -> i64` / `__mir_ckey_unbox_int(v) -> i64` — the
+     * overflow-aware int box/unbox used by the cell-KEY path, duplicated here
+     * (rather than calling the `needsBoxInt`-gated `__manticore_box_int`)
+     * because the array runtime is ALWAYS emitted and must not depend on a
+     * gated helper. A key that fits signed-48 rides inline (tag 1); a larger
+     * one is stored on the heap and tagged nibble 5, exactly like the general
+     * int box. The heap word leaks — acceptable for a rare huge key, matching
+     * the general box_int.
+     */
+    private function emitCkeyBoxInt(): void
+    {
+        $fn = $this->module->func('__mir_ckey_box_int', Type::i64());
+        $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $e->raw('  %s = shl i64 %v, 16');
+        $e->raw('  %se = ashr i64 %s, 16');
+        $e->raw('  %fits = icmp eq i64 %se, %v');
+        $e->raw('  br i1 %fits, label %inl, label %heap');
+        $inl = $fn->block('inl');
+        $inl->raw('  %m = and i64 %v, 281474976710655');
+        $inl->raw('  %b = or i64 %m, -4222124650659840');
+        $inl->raw('  ret i64 %b');
+        $heap = $fn->block('heap');
+        $heap->raw('  %p = call ptr @malloc(i64 8)');
+        $heap->raw('  store i64 %v, ptr %p');
+        $heap->raw('  %pi = ptrtoint ptr %p to i64');
+        $heap->raw('  %pm = and i64 %pi, 281474976710655');
+        $heap->raw('  %pb = or i64 %pm, -3096224743817216');
+        $heap->raw('  ret i64 %pb');
+    }
+
+    private function emitCkeyUnboxInt(): void
+    {
+        $fn = $this->module->func('__mir_ckey_unbox_int', Type::i64());
+        $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $e->raw('  %sh = lshr i64 %v, 48');
+        $e->raw('  %nib = and i64 %sh, 15');
+        $e->raw('  %big = icmp eq i64 %nib, 5');
+        $e->raw('  br i1 %big, label %fromheap, label %inl');
+        $fh = $fn->block('fromheap');
+        $fh->raw('  %pm = and i64 %v, 281474976710655');
+        $fh->raw('  %hp = inttoptr i64 %pm to ptr');
+        $fh->raw('  %hv = load i64, ptr %hp');
+        $fh->raw('  ret i64 %hv');
+        $inl = $fn->block('inl');
+        $inl->raw('  %s2 = shl i64 %v, 16');
+        $inl->raw('  %r = ashr i64 %s2, 16');
+        $inl->raw('  ret i64 %r');
     }
 
     /**
