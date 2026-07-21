@@ -716,6 +716,20 @@ trait EmitLlvmArrays
             }
             else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
+            // set_cell's string arm RETAINS the stored key exactly like set_str
+            // below — release our own +1 on a FRESH key cell (a mixed-returning
+            // call / concat used directly as `$o[f()] = v`), or every dynamic
+            // string key leaks. Borrowed producers (local / element / property
+            // reads) stay untouched, balanced by their owner's release; scalar
+            // cells no-op inside cell_drop.
+            $ik = $se->index->kind;
+            if ($ik === Node::KIND_CALL || $ik === Node::KIND_METHOD_CALL
+                || $ik === Node::KIND_STATIC_CALL || $ik === Node::KIND_INVOKE
+                || $ik === Node::KIND_CONCAT) {
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_cell_drop(i64 ' . $key . ")\n";
+            }
         } elseif ($keyIsString) {
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToPtr();
