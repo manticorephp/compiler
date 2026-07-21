@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tier 2: build manticore from source in a Linux container and run the WHOLE
+# Build manticore from source in a Linux container and run the WHOLE
 # AOT suite there. Both arches; arm64 is native on an Apple Silicon host,
 # amd64 runs under qemu (slow but it works).
 #
@@ -41,16 +41,6 @@ cd /build/src-tree
 # (or link Mach-O into an ELF build). Start from a clean slate.
 rm -rf bin/manticore lib/ tests/aot/tmp 2>/dev/null || true
 
-if [ "${PATCH_LD:-1}" = "1" ]; then
-    echo
-    echo "=== diagnostic patch: GNU ld symbol extraction ==="
-    # bin/compile's stub scraper only understands Apple ld's error format, so on
-    # Linux stubs.c comes out empty and the seed link fails. Patch the COPY so
-    # Tier 2 can get past it and find what else breaks. PATCH_LD=0 to see the
-    # unpatched failure.
-    php /probe/patch_compile_for_gnu_ld.php bin/compile || exit 1
-fi
-
 echo
 echo "=== bin/compile (cold Zend seed) ==="
 # NEVER pipe this: `set -o pipefail` is not in play for the reader's eye, and a
@@ -83,13 +73,17 @@ echo "=== RESULT: suite exit=$suite_rc ==="
 exit $suite_rc
 EOS
 
-IMAGE_BASE=manticore-test-debian
+IMAGE_BASE=manticore-toolchain
 
 for platform in "${PLATFORMS[@]}"; do
     arch="${platform#linux/}"
     image="$IMAGE_BASE:$arch"
     echo "############ $platform ############" >&2
-    docker build --platform "$platform" -t "$image" -f "$HERE/Dockerfile.debian" "$HERE" >&2
+    # The root Dockerfile's `toolchain` target — the same image an end user
+    # builds. Its `build` target is deliberately NOT used here: this harness runs
+    # bin/compile against a bind-mounted working tree, not a baked-in copy.
+    docker build --platform "$platform" --target toolchain -t "$image" \
+        -f "$ROOT/Dockerfile" "$ROOT" >&2
 
     if [ "$SHELL_MODE" = "1" ]; then
         exec docker run --rm -it --platform "$platform" \
@@ -98,8 +92,6 @@ for platform in "${PLATFORMS[@]}"; do
 
     docker run --rm --platform "$platform" \
         -v "$ROOT":/repo:ro \
-        -v "$HERE":/probe:ro \
-        -e PATCH_LD="${PATCH_LD:-1}" \
         "$image" /bin/bash -c "$RUNNER" \
         && echo "### $platform: PASS" >&2 \
         || echo "### $platform: FAIL (exit $?)" >&2

@@ -350,7 +350,7 @@ trait LowerPrelude
             'PHP_URL_QUERY' => 6, 'PHP_URL_FRAGMENT' => 7,
             'PHP_QUERY_RFC1738' => 1, 'PHP_QUERY_RFC3986' => 2,
             // ext/sockets — host-INVARIANT constants (MEASURED identical on Darwin
-            // and Linux, tools/docker/probe.c). The host-DIVERGENT ones
+            // and Linux, tools/docker/PROBE_RESULTS.md). The host-DIVERGENT ones
             // (AF_INET6, SOL_SOCKET, SO_*, the split MSG_*, SOCKET_E*) resolve
             // against the build host in the fold below, like PHP_OS/FNM_*.
             'AF_UNSPEC' => 0, 'AF_INET' => 2, 'AF_UNIX' => 1, 'PF_INET' => 2,

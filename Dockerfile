@@ -1,4 +1,12 @@
-# Builds manticore from source on Debian. Used by tools/docker/run_tests.sh.
+# Manticore in a container. Two targets:
+#
+#   docker build --target toolchain -t manticore-toolchain .
+#   docker build --target build     -t manticore .          # see the WARNING below
+#
+# `toolchain` is a ready host environment (php 8.5 + clang + pcre2 + openssl);
+# mount a checkout into it and build by hand. `build` bakes the compiler in.
+# tools/docker/run_tests.sh builds `toolchain` too — one image definition, two
+# consumers.
 #
 # Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian
 # bookworm's stock php (8.2) and clang (14) are both wrong for this compiler:
@@ -8,19 +16,18 @@
 #     emits ("ptr type is only supported in -opaque-pointers mode"). Verified,
 #     not assumed -- stock bookworm clang-14 fails the seed assemble step.
 # So: php from sury.org, clang from apt.llvm.org.
-#
-# Deliberately NOT copying the repo in: the repo is bind mounted read-only at
-# runtime and copied to a scratch dir inside the container, so one image serves
-# any working tree and a build can never write back to the host checkout
-# (bin/compile would otherwise overwrite the host's bin/manticore and lib/ with
-# Linux artifacts).
-FROM debian:12
+
+FROM debian:12 AS toolchain
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# libpcre2-dev  -> preg_* (src/Runtime/Pcre.php binds pcre2-8 by name)
+# libssl-dev    -> TLS + hash/hmac (src/Runtime/Openssl.php, src/Runtime/Crypto.php)
+# pkg-config    -> how Main.php discovers the openssl link flags
+# gcc/libc6-dev -> `cc` drives the final link
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release software-properties-common \
-        gcc libc6-dev libpcre2-dev binutils bash file make \
+        gcc libc6-dev libpcre2-dev libssl-dev pkg-config binutils bash file make \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- PHP 8.5 (sury.org) ----
@@ -58,7 +65,28 @@ RUN CLANG_BIN="$(ls -1 /usr/bin/clang-[0-9]* | grep -E 'clang-[0-9]+$' | sort -V
     && ln -sf "$CLANG_BIN" /usr/local/bin/cc
 
 RUN php --version && clang --version | head -1 && cc --version | head -1 \
-    && pcre2-config --libs8
+    && pcre2-config --libs8 && pkg-config --libs openssl
 
 WORKDIR /build
+CMD ["/bin/bash"]
+
+
+# ---- build the compiler from source ----
+#
+# WARNING: this target DOES NOT SUCCEED YET. The seed links now (the Apple-ld-only
+# symbol scraper was issue #1, fixed), but bin/compile stage [5/5] SIGSEGVs in
+# EmitLlvm::unboxCellToType while building the stdlib on Linux. That is a live
+# compiler bug, tracked in tools/docker/README.md -- not a broken Dockerfile.
+# Use `--target toolchain` until it is fixed.
+FROM toolchain AS build
+
+COPY . /build/manticore
+WORKDIR /build/manticore
+
+# A stale macOS bin/manticore or lib/*.o would fake a pass, or link Mach-O into
+# an ELF build. .dockerignore keeps them out of the context; belt and braces.
+RUN rm -rf bin/manticore lib tests/aot/tmp \
+    && bin/compile
+
+ENV PATH="/build/manticore/bin:${PATH}"
 CMD ["/bin/bash"]
