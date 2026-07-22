@@ -1395,7 +1395,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $nr = [];
         foreach ($read as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
-            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { $nr[] = $s; $ready = $ready + 1; }
+            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { \__mc_sel_keep($nr, $s); $ready = $ready + 1; }
         }
         $read = $nr;
     }
@@ -1403,7 +1403,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $nw = [];
         foreach ($write as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
-            if (($r & ($POLLOUT | $POLLERR)) !== 0) { $nw[] = $s; $ready = $ready + 1; }
+            if (($r & ($POLLOUT | $POLLERR)) !== 0) { \__mc_sel_keep($nw, $s); $ready = $ready + 1; }
         }
         $write = $nw;
     }
@@ -1411,11 +1411,24 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $ne = [];
         foreach ($except as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
-            if (($r & ($POLLPRI | $POLLERR)) !== 0) { $ne[] = $s; $ready = $ready + 1; }
+            if (($r & ($POLLPRI | $POLLERR)) !== 0) { \__mc_sel_keep($ne, $s); $ready = $ready + 1; }
         }
         $except = $ne;
     }
     return $ready;
+}
+
+/**
+ * Append a ready stream to the rewritten select array. $s is \Resource-TYPED (a
+ * funnel): a value read out of the untyped `$read` param is an erased obj handle,
+ * and appending it raw stores a BORROWED reference — so when stream_select's
+ * `$read = $nr` reassignment releases the old array, the caller's resource is
+ * over-released (its fd zeroes on the next call). A \Resource-typed store retains
+ * the element (+1), balancing that release.
+ */
+function __mc_sel_keep(array &$dst, \Resource $s): void
+{
+    $dst[] = $s;
 }
 
 /** The transports stream_socket_client/server understand here. */
