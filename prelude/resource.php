@@ -200,6 +200,20 @@ final class Resource
     /** KIND_TLS only: the OpenSSL `SSL*`, 0 otherwise. See KIND_TLS. */
     public int $ssl = 0;
     /**
+     * SOCKET only: the host this socket connected to, '' otherwise. Kept because
+     * stream_socket_enable_crypto() (STARTTLS) needs it for SNI + cert-hostname
+     * verification — the host is consumed at connect time and is otherwise gone.
+     */
+    public string $host = '';
+    /**
+     * The ssl.* options of a context attached at create/accept, as the context's
+     * own serialised blob ({@see __mc_ctx_pack}); '' when none. A deferred STARTTLS
+     * reads verify_peer / local_cert / local_pk out of it. Stored as the blob STRING
+     * (not a ?\Resource field) so the empty check is a sound '' comparison rather
+     * than a null|object field read.
+     */
+    public string $ctxBlob = '';
+    /**
      * SOCKET/TLS read timeout in ms; 0 = the default (php's default_socket_timeout,
      * 60s). A hung peer must not block a read forever — every fill waits at most
      * this long. Set via stream_set_timeout(). `$timedOut` records that the last
@@ -207,6 +221,12 @@ final class Resource
      */
     public int $rtimeoutMs = 0;
     public bool $timedOut = false;
+    /**
+     * SOCKET/TLS blocking mode (stream_set_blocking). Default true = blocking (wait
+     * up to the read timeout). false = O_NONBLOCK on the fd AND the read path polls
+     * with a 0 timeout, so a read with no data ready returns '' instead of waiting.
+     */
+    public bool $blocking = true;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {

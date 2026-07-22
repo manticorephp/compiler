@@ -222,9 +222,11 @@ function __mc_wait_read(\Resource $s): int
     if ($s->kind === \Resource::KIND_TLS && \Runtime\Openssl\pending($s->ssl) > 0) {
         return 1;
     }
-    $to = $s->rtimeoutMs > 0 ? $s->rtimeoutMs : 60000;   // php's default_socket_timeout
+    // Non-blocking (stream_set_blocking(false)): never wait — a 0 timeout means a
+    // read with no data ready returns immediately (fill sees 0), matching php.
+    $to = $s->blocking ? ($s->rtimeoutMs > 0 ? $s->rtimeoutMs : 60000) : 0;
     if (\__mc_poll_readable($s->addr, $to) === 0) {
-        $s->timedOut = true;
+        $s->timedOut = $s->blocking;   // a non-blocking empty read is not a timeout
         return 0;
     }
     return 1;   // readable, POLLHUP (recv drains + reports EOF), or poll error
@@ -452,6 +454,40 @@ function stream_set_read_buffer(\Resource $stream, int $size): int
 function stream_set_write_buffer(\Resource $stream, int $size): int
 {
     return 0;
+}
+
+/**
+ * Set blocking (default) or non-blocking mode on a socket/TLS stream. Non-blocking
+ * sets O_NONBLOCK on the fd and flips $blocking so the read path polls with a 0
+ * timeout — a read with no data ready then returns '' instead of waiting. Only
+ * meaningful for a network stream; php returns true for it, false otherwise.
+ */
+function stream_set_blocking(\Resource $stream, bool $enable): bool
+{
+    if (!\__mc_stream_is_net($stream)) {
+        return false;
+    }
+    // F_GETFL(3) / F_SETFL(4) / O_NONBLOCK — via the socket-const table (host-split).
+    $fl = \Runtime\Libc\sys_fcntl($stream->addr, \__mc_sock_const(6), 0);
+    if ($fl < 0) {
+        return false;
+    }
+    $nb = \__mc_sock_const(5);   // O_NONBLOCK
+    $new = $enable ? ($fl & ~$nb) : ($fl | $nb);
+    if (\Runtime\Libc\sys_fcntl($stream->addr, \__mc_sock_const(7), $new) < 0) {
+        return false;
+    }
+    $stream->blocking = $enable;
+    return true;
+}
+
+/**
+ * Set the read chunk size. A tuning hint with no behavioural effect here; php
+ * returns the PREVIOUS size, which defaults to 8192.
+ */
+function stream_set_chunk_size(\Resource $stream, int $size): int
+{
+    return 8192;
 }
 
 /** Whether $stream is connected to a terminal. */
@@ -780,6 +816,110 @@ function __mc_ctx_server_certs(\Resource $context): array
     }
     $o = \__mc_ctx_unpack($context->rbuf);
     return [$o[3], $o[4]];
+}
+
+/**
+ * A stream context's ssl.verify_peer / ssl.verify_peer_name flags (blob slots
+ * [5][6]), for a client STARTTLS. Both default true when absent or not a context.
+ * $context is \Resource-typed on purpose (a cell would deref the boxed handle).
+ * @return bool[]
+ */
+function __mc_ctx_verify_flags(\Resource $context): array
+{
+    if ($context->kind !== \Resource::KIND_CONTEXT) {
+        return [true, true];
+    }
+    $o = \__mc_ctx_unpack($context->rbuf);
+    return [$o[5] === '1', $o[6] === '1'];
+}
+
+/** Reassemble the 7-field context blob from its parts (twin of the create packer). */
+function __mc_ctx_repack(string $method, string $header, string $content, string $cert, string $pk, string $vp, string $vn): string
+{
+    return \__mc_ctx_pack($method) . \__mc_ctx_pack($header) . \__mc_ctx_pack($content)
+         . \__mc_ctx_pack($cert) . \__mc_ctx_pack($pk) . $vp . $vn;
+}
+
+/**
+ * The options set on a context, as php's nested array. ⚠ BEST-EFFORT / lossy: the
+ * context stores only the honored ssl/http subset (not arbitrary wrapper keys), and
+ * with no "was set" marker it can only emit the NON-DEFAULT honored values — which
+ * matches php for the common explicit sets (verify_peer=false, POST, headers, certs)
+ * but omits an option a caller redundantly set to its default. Insertion order is
+ * ssl-before-http (the storage order), not the caller's.
+ * @return array<string,array<string,mixed>>
+ */
+function stream_context_get_options(\Resource $context): array
+{
+    /** @var array<string,array<string,mixed>> $out */
+    $out = [];
+    if ($context->kind !== \Resource::KIND_CONTEXT) {
+        return $out;
+    }
+    $o = \__mc_ctx_unpack($context->rbuf);
+    /** @var array<string,mixed> $ssl */
+    $ssl = [];
+    if ($o[5] === '0') { $ssl['verify_peer'] = false; }
+    if ($o[6] === '0') { $ssl['verify_peer_name'] = false; }
+    if ($o[3] !== '') { $ssl['local_cert'] = $o[3]; }
+    if ($o[4] !== '' && $o[4] !== $o[3]) { $ssl['local_pk'] = $o[4]; }
+    if (\count($ssl) > 0) { $out['ssl'] = $ssl; }
+    /** @var array<string,mixed> $http */
+    $http = [];
+    if ($o[0] !== '' && $o[0] !== 'GET') { $http['method'] = $o[0]; }
+    if ($o[1] !== '') { $http['header'] = $o[1]; }
+    if ($o[2] !== '') { $http['content'] = $o[2]; }
+    if (\count($http) > 0) { $out['http'] = $http; }
+    return $out;
+}
+
+/**
+ * Set one honored option on a context (or a whole ['ns'=>['k'=>v]] array), re-packing
+ * the stored blob so a later STARTTLS / http fetch honors it. Non-honored keys are
+ * accepted and ignored, matching php's tolerance. Returns true for a context.
+ * @param string|array<string,mixed> $wrapper_or_options
+ * @param mixed $value
+ */
+function stream_context_set_option(\Resource $context, $wrapper_or_options, ?string $option = null, $value = null): bool
+{
+    if ($context->kind !== \Resource::KIND_CONTEXT) {
+        return false;
+    }
+    $o = \__mc_ctx_unpack($context->rbuf);
+    $method = $o[0]; $header = $o[1]; $content = $o[2];
+    $cert = $o[3]; $pk = $o[4]; $vp = $o[5]; $vn = $o[6];
+    if (\is_array($wrapper_or_options)) {
+        // The array form: ['ssl'=>['verify_peer'=>false,...], 'http'=>[...]].
+        if (isset($wrapper_or_options['ssl']) && \is_array($wrapper_or_options['ssl'])) {
+            $s = $wrapper_or_options['ssl'];
+            if (isset($s['verify_peer'])) { $vp = $s['verify_peer'] === false ? '0' : '1'; }
+            if (isset($s['verify_peer_name'])) { $vn = $s['verify_peer_name'] === false ? '0' : '1'; }
+            if (isset($s['local_cert'])) { $cert = (string)$s['local_cert']; }
+            if (isset($s['local_pk'])) { $pk = (string)$s['local_pk']; }
+        }
+        if (isset($wrapper_or_options['http']) && \is_array($wrapper_or_options['http'])) {
+            $h = $wrapper_or_options['http'];
+            if (isset($h['method'])) { $method = (string)$h['method']; }
+            if (isset($h['header'])) { $header = \__mc_ctx_header_block($h['header']); }
+            if (isset($h['content'])) { $content = (string)$h['content']; }
+        }
+    } else {
+        // The (wrapper, option, value) form.
+        $wrapper = (string)$wrapper_or_options;
+        $opt = $option ?? '';
+        if ($wrapper === 'ssl') {
+            if ($opt === 'verify_peer') { $vp = $value === false ? '0' : '1'; }
+            elseif ($opt === 'verify_peer_name') { $vn = $value === false ? '0' : '1'; }
+            elseif ($opt === 'local_cert') { $cert = (string)$value; }
+            elseif ($opt === 'local_pk') { $pk = (string)$value; }
+        } elseif ($wrapper === 'http') {
+            if ($opt === 'method') { $method = (string)$value; }
+            elseif ($opt === 'header') { $header = \__mc_ctx_header_block($value); }
+            elseif ($opt === 'content') { $content = (string)$value; }
+        }
+    }
+    $context->rbuf = \__mc_ctx_repack($method, $header, $content, $cert, $pk, $vp, $vn);
+    return true;
 }
 
 /**

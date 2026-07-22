@@ -262,7 +262,11 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     if ($fd < 0) {
         return false;
     }
-    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    // Remember the host on the concrete resource (never on a T|false cell — that
+    // derefs the boxed handle) so a deferred STARTTLS has an SNI + verify target.
+    $r = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    $r->host = $host;
+    return $r;
 }
 
 /**
@@ -350,15 +354,24 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
 /**
  * Open a stream for a transport scheme: tcp:// (or bare) → plain socket, ssl:// /
  * tls:// → TLS. Shared by fsockopen and stream_socket_client so both grew TLS at
- * once. udp:// / unix:// are not implemented (false). TLS verifies by default,
- * matching php's stream defaults since 5.6; a per-socket verify toggle needs the
- * context threaded here (debt — only file_get_contents honours a context today).
+ * once. udp:// / unix:// route to their own connectors. TLS verifies by default,
+ * matching php's stream defaults since 5.6; a $context (from stream_socket_client)
+ * toggles ssl.verify_peer / verify_peer_name per-socket.
  * @return \Resource|false
  */
-function __mc_transport_connect(string $scheme, string $host, int $port)
+function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resource $context = null)
 {
     if ($scheme === 'ssl' || $scheme === 'tls') {
-        return \__mc_tls_connect($host, $port);
+        // A context now toggles verification per-socket (defaults on, matching php).
+        // $context is nullable (a cell) — read the flags only through a typed helper.
+        $vp = true;
+        $vn = true;
+        if ($context !== null) {
+            $f = \__mc_ctx_verify_flags($context);
+            $vp = $f[0];
+            $vn = $f[1];
+        }
+        return \__mc_tls_connect($host, $port, $vp, $vn);
     }
     if ($scheme === 'tcp' || $scheme === '') {
         return \__mc_tcp_connect($host, $port);
@@ -416,7 +429,9 @@ function __mc_unix_connect(string $path)
         \Runtime\Libc\sys_close($fd);
         return false;
     }
-    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    $r = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    $r->host = $path;
+    return $r;
 }
 
 /**
@@ -506,6 +521,47 @@ function __mc_tls_accept(int $serverCtx, int $fd)
 }
 
 /**
+ * Park a context's ssl.* options on a socket for a later STARTTLS. $s is
+ * \Resource-typed so a \Resource|false connect/listen result is unboxed (a raw
+ * store on the cell would deref the boxed handle). $ctx is likewise typed —
+ * callers null-check before calling.
+ */
+function __mc_attach_ctx(\Resource $s, \Resource $ctx): void
+{
+    if ($ctx->kind === \Resource::KIND_CONTEXT) {
+        $s->ctxBlob = $ctx->rbuf;
+    }
+}
+
+/**
+ * Server-side STARTTLS: upgrade a connected plain socket to TLS in place using a
+ * cert+key, mutating $sock to KIND_TLS on success. The server twin of
+ * __mc_tls_handshake — SSL_accept instead of SSL_connect. $sock is \Resource-typed
+ * so the mutation does not deref a boxed handle.
+ */
+function __mc_tls_server_handshake(\Resource $sock, string $cert, string $pk): bool
+{
+    $ctx = \__mc_tls_server_ctx($cert, $pk);
+    if ($ctx === 0) {
+        return false;
+    }
+    $ssl = \Runtime\Openssl\sslNew($ctx);
+    \Runtime\Openssl\ctxFree($ctx);   // SSL_new took a ref; drop ours (lives until SSL_free)
+    if ($ssl === 0) {
+        return false;
+    }
+    if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1
+        || \Runtime\Openssl\accept($ssl) !== 1) {
+        \Runtime\Openssl\sslFree($ssl);   // does not touch the fd
+        return false;
+    }
+    $sock->kind = \Resource::KIND_TLS;
+    $sock->type = 'stream';
+    $sock->ssl = $ssl;
+    return true;
+}
+
+/**
  * Open a TCP connection. php.net's signature, including the by-ref diagnostics.
  *
  * $timeout is accepted and currently IGNORED: the connect is blocking, so the
@@ -577,14 +633,17 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
 
 /**
  * php.net's stream_socket_client. Accepts `tcp://host:port`, `ssl://host:port`,
- * `tls://host:port`, or a bare `host:port` (tcp). ssl:// / tls:// negotiate TLS
- * (verify on by default). udp:// / unix:// are not implemented yet.
+ * `tls://host:port`, `udp://host:port`, or a bare `host:port` (tcp), plus
+ * `unix:///path`. ssl:// / tls:// negotiate TLS (verify on by default; a $context
+ * with ssl.verify_peer=false turns it off). A $context is also parked on the
+ * socket so a later stream_socket_enable_crypto() STARTTLS can read its ssl.*
+ * options.
  *
  * @param int $error_code
  * @param string $error_message
  * @return \Resource|false
  */
-function stream_socket_client(string $address, &$error_code = 0, &$error_message = '', ?float $timeout = null)
+function stream_socket_client(string $address, &$error_code = 0, &$error_message = '', ?float $timeout = null, int $flags = 4, ?\Resource $context = null)
 {
     $error_code = 0;
     $error_message = '';
@@ -606,6 +665,10 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
         if ($sock === false) {
             $error_code = -1;
             $error_message = 'cannot connect to ' . $address;
+            return false;
+        }
+        if ($context !== null) {
+            \__mc_attach_ctx($sock, $context);
         }
         return $sock;
     }
@@ -622,7 +685,7 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
     }
-    $sock = \__mc_transport_connect($scheme, $host, $port);
+    $sock = \__mc_transport_connect($scheme, $host, $port, $context);
     if ($sock === false) {
         $e = \__mc_net_errno(false, 0);
         $error_code = $e;
@@ -630,6 +693,9 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
             ? \__mc_errno_msg($e)
             : ('connection to ' . $host . ':' . (string)$port . ' failed');
         return false;
+    }
+    if ($context !== null) {
+        \__mc_attach_ctx($sock, $context);
     }
     return $sock;
 }
@@ -820,6 +886,11 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
         // $s is \Resource|false (a CELL) — write ssl through a typed helper.
         \__mc_mark_tls_listener($s, $ctx);
     }
+    // Park the context so accepted (plain) sockets can inherit its ssl.local_cert
+    // for a later server-side stream_socket_enable_crypto() STARTTLS.
+    if ($context !== null) {
+        \__mc_attach_ctx($s, $context);
+    }
     return $s;
 }
 
@@ -849,7 +920,12 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
     if ($server->ssl !== 0) {
         return \__mc_tls_accept($server->ssl, $fd);
     }
-    return new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    // A plain listener that carried a context passes its ssl.* options down, so a
+    // server-side stream_socket_enable_crypto() STARTTLS on the accepted socket can
+    // find ssl.local_cert. Both are concrete \Resource here — a plain field copy.
+    $conn = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    $conn->ctxBlob = $server->ctxBlob;
+    return $conn;
 }
 
 // ── DNS / address functions ────────────────────────────────────────────
@@ -1140,15 +1216,17 @@ function pfsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_
 }
 
 /**
- * STARTTLS: upgrade a connected plain socket to TLS in place. $enable=true does
- * the handshake; $crypto_method's bit 0 selects client (1) vs server (0), default
+ * STARTTLS: upgrade a connected plain socket to TLS in place, or tear a TLS stream
+ * back down. $crypto_method's bit 0 selects client (1) vs server (0), default
  * STREAM_CRYPTO_METHOD_TLS_CLIENT. Returns true on success, false otherwise.
  *
- * ⚠ Client-side only for now, and WITHOUT hostname verification: enable_crypto's
- * stream carries no host name (it was consumed at connect time), so there is no
- * SNI and no cert-hostname check here — the peer chain is not enforced. A verifying
- * STARTTLS path needs the host threaded onto the resource; server STARTTLS needs a
- * cert context. Both are debt.
+ * Client STARTTLS verifies by default (SNI + cert-chain + hostname), using the host
+ * remembered at connect time; a context attached to the socket (stream_socket_client
+ * with ssl.verify_peer=false) turns verification off. Server STARTTLS needs the
+ * socket to carry a context with ssl.local_cert (a plain listener created via
+ * stream_socket_server(..., $ctx), whose accepted sockets inherit it).
+ *
+ * $session_stream (TLS session reuse) is ignored — niche.
  *
  * @param mixed $session_stream
  * @return bool
@@ -1156,18 +1234,42 @@ function pfsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_
 function stream_socket_enable_crypto(\Resource $stream, bool $enable, ?int $crypto_method = null, $session_stream = null): bool
 {
     if (!$enable) {
-        return false;   // disabling crypto on a live stream is not supported
+        // Tear crypto down: close_notify + free the engine, revert to a plain fd.
+        // php returns false when there was no crypto to disable.
+        if ($stream->kind === \Resource::KIND_TLS && $stream->ssl !== 0) {
+            \Runtime\Openssl\shutdown($stream->ssl);
+            \Runtime\Openssl\sslFree($stream->ssl);   // does not touch the fd
+            $stream->ssl = 0;
+            $stream->kind = \Resource::KIND_SOCKET;
+            return true;
+        }
+        return false;
     }
     if ($stream->kind !== \Resource::KIND_SOCKET) {
         return false;   // not a plain socket (already TLS, or a file/memory stream)
     }
     $method = $crypto_method ?? 121;   // STREAM_CRYPTO_METHOD_TLS_CLIENT
-    if (($method & 1) === 0) {
-        return false;   // server-side STARTTLS needs a cert context — not yet
+    if (($method & 1) === 1) {
+        // Client: SNI + cert-hostname against the connect host; verify on unless a
+        // context turned it off. Mutates $stream to KIND_TLS on success.
+        $vp = true;
+        $vn = true;
+        if ($stream->ctxBlob !== '') {
+            $o = \__mc_ctx_unpack($stream->ctxBlob);
+            $vp = $o[5] === '1';
+            $vn = $o[6] === '1';
+        }
+        return \__mc_tls_handshake($stream, $stream->host, $vp, $vn);
     }
-    // host '' ⇒ no SNI; verify off (no host to check against). Mutates $stream to
-    // KIND_TLS on success — $stream is already \Resource-typed here.
-    return \__mc_tls_handshake($stream, '', false, false);
+    // Server: needs a cert context (ssl.local_cert) carried on the socket.
+    if ($stream->ctxBlob === '') {
+        return false;
+    }
+    $o = \__mc_ctx_unpack($stream->ctxBlob);
+    if ($o[3] === '') {
+        return false;
+    }
+    return \__mc_tls_server_handshake($stream, $o[3], $o[4]);
 }
 
 /**
@@ -1181,6 +1283,139 @@ function stream_socket_shutdown(\Resource $stream, int $how): bool
         return false;
     }
     return \Runtime\Libc\sys_shutdown($stream->addr, $how) === 0;
+}
+
+/**
+ * Create a connected pair of stream sockets (socketpair(2)) — an anonymous pipe
+ * that is bidirectional and full-duplex. Returns [\Resource, \Resource] (two plain
+ * KIND_SOCKET streams), or false. $domain is STREAM_PF_UNIX/INET, $type
+ * STREAM_SOCK_STREAM/DGRAM. Both handles are returned by value in an array, so the
+ * element boxing is the ordinary return path (no by-ref erasure).
+ * @return array{0:\Resource,1:\Resource}|false
+ */
+function stream_socket_pair(int $domain, int $type, int $protocol)
+{
+    $sv = \Runtime\Libc\calloc(8, 1);
+    if ($sv === null) {
+        return false;
+    }
+    $rc = \Runtime\Libc\sys_socketpair($domain, $type, $protocol, $sv);
+    if ($rc !== 0) {
+        \Runtime\Libc\free($sv);
+        return false;
+    }
+    $fd0 = \peek_i32($sv, 0);
+    $fd1 = \peek_i32($sv, 4);
+    \Runtime\Libc\free($sv);
+    $a = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd0);
+    $b = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd1);
+    return [$a, $b];
+}
+
+/** The fd behind a stream \Resource (typed so an array element is unboxed). */
+function __mc_stream_fd(\Resource $s): int
+{
+    return $s->addr;
+}
+
+/**
+ * stream_select(&$read, &$write, &$except, $sec, $usec) over poll(2) — the stream
+ * twin of socket_select (the codebase avoids fd_set / FD_SETSIZE). The three arrays
+ * are rewritten in place to hold only the ready streams; returns the ready count, 0
+ * on timeout, or false on error. O(n) per call — fine for modest fd counts; a
+ * kqueue/epoll backend is the async epic, and would slot in under this same API.
+ */
+function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec, ?int $usec = null): int|false
+{
+    $POLLIN = \__mc_net_const(1);
+    $POLLOUT = \__mc_net_const(2);
+    $POLLERR = \__mc_net_const(3);
+    $POLLHUP = \__mc_net_const(4);
+    $POLLPRI = 2;
+
+    /** @var int[] $fds */
+    $fds = [];
+    /** @var int[] $evs */
+    $evs = [];
+    if ($read !== null) {
+        foreach ($read as $s) {
+            $fd = \__mc_stream_fd($s);
+            $idx = \__mc_sel_index($fds, $fd);
+            if ($idx < 0) { $fds[] = $fd; $evs[] = $POLLIN; }
+            else { $evs[$idx] = $evs[$idx] | $POLLIN; }
+        }
+    }
+    if ($write !== null) {
+        foreach ($write as $s) {
+            $fd = \__mc_stream_fd($s);
+            $idx = \__mc_sel_index($fds, $fd);
+            if ($idx < 0) { $fds[] = $fd; $evs[] = $POLLOUT; }
+            else { $evs[$idx] = $evs[$idx] | $POLLOUT; }
+        }
+    }
+    if ($except !== null) {
+        foreach ($except as $s) {
+            $fd = \__mc_stream_fd($s);
+            $idx = \__mc_sel_index($fds, $fd);
+            if ($idx < 0) { $fds[] = $fd; $evs[] = $POLLPRI; }
+            else { $evs[$idx] = $evs[$idx] | $POLLPRI; }
+        }
+    }
+
+    $count = \count($fds);
+    if ($count === 0) {
+        return 0;
+    }
+    $pfds = \Runtime\Libc\calloc($count * 8, 1);
+    if ($pfds === null) {
+        return false;
+    }
+    for ($i = 0; $i < $count; $i = $i + 1) {
+        \poke_i32($pfds, $i * 8, $fds[$i]);
+        \poke_i16($pfds, $i * 8 + 4, $evs[$i]);
+        \poke_i16($pfds, $i * 8 + 6, 0);
+    }
+    // null $sec = block forever (-1); otherwise sec*1000 + usec/1000.
+    $um = $usec === null ? 0 : $usec;
+    $timeoutMs = $sec === null ? -1 : ($sec * 1000 + \intdiv($um, 1000));
+    $rc = \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
+    if ($rc < 0) {
+        \Runtime\Libc\free($pfds);
+        return false;
+    }
+    /** @var int[] $rev */
+    $rev = [];
+    for ($i = 0; $i < $count; $i = $i + 1) {
+        $rev[] = \peek_i16($pfds, $i * 8 + 6);
+    }
+    \Runtime\Libc\free($pfds);
+
+    $ready = 0;
+    if ($read !== null) {
+        $nr = [];
+        foreach ($read as $s) {
+            $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
+            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { $nr[] = $s; $ready = $ready + 1; }
+        }
+        $read = $nr;
+    }
+    if ($write !== null) {
+        $nw = [];
+        foreach ($write as $s) {
+            $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
+            if (($r & ($POLLOUT | $POLLERR)) !== 0) { $nw[] = $s; $ready = $ready + 1; }
+        }
+        $write = $nw;
+    }
+    if ($except !== null) {
+        $ne = [];
+        foreach ($except as $s) {
+            $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
+            if (($r & ($POLLPRI | $POLLERR)) !== 0) { $ne[] = $s; $ready = $ready + 1; }
+        }
+        $except = $ne;
+    }
+    return $ready;
 }
 
 /** The transports stream_socket_client/server understand here. */

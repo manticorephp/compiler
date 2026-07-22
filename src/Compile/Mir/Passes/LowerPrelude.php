@@ -340,6 +340,12 @@ trait LowerPrelude
             'STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT' => 33, 'STREAM_CRYPTO_METHOD_TLSv1_2_SERVER' => 32,
             'STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT' => 65, 'STREAM_CRYPTO_METHOD_TLSv1_3_SERVER' => 64,
             'STREAM_CRYPTO_PROTO_TLSv1_2' => 16, 'STREAM_CRYPTO_PROTO_TLSv1_3' => 32,
+            // stream_socket_pair domain/type/proto — host-INVARIANT AF_/SOCK_/IPPROTO_
+            // values (STREAM_PF_INET6 is host-divergent, folded below with AF_INET6).
+            'STREAM_PF_INET' => 2, 'STREAM_PF_UNIX' => 1,
+            'STREAM_SOCK_STREAM' => 1, 'STREAM_SOCK_DGRAM' => 2, 'STREAM_SOCK_RAW' => 3,
+            'STREAM_IPPROTO_IP' => 0, 'STREAM_IPPROTO_TCP' => 6, 'STREAM_IPPROTO_UDP' => 17,
+            'STREAM_IPPROTO_ICMP' => 1, 'STREAM_IPPROTO_RAW' => 255,
             // glob: php's OWN values, not the host's (php has carried its own
             // glob since 8.3) — GLOB_NOESCAPE is 0x1000 where Darwin's header
             // says 0x2000, and no libc has GLOB_ONLYDIR = 0x40000000. Host
@@ -441,13 +447,15 @@ trait LowerPrelude
         // uses the numeric __mc_sock_const() runtime selector instead.
         // Values MEASURED: Darwin arm64 <sys/socket.h>/<sys/errno.h> vs Linux
         // asm-generic (glibc/musl, x86_64 + arm64 agree).
-        if ($name === 'AF_INET6' || $name === 'PF_INET6' || $name === 'SOL_SOCKET'
+        if ($name === 'AF_INET6' || $name === 'PF_INET6' || $name === 'STREAM_PF_INET6'
+            || $name === 'SOL_SOCKET'
             || \substr($name, 0, 3) === 'SO_' || \substr($name, 0, 4) === 'MSG_'
             || \substr($name, 0, 8) === 'SOCKET_E') {
             $isDarwin = \substr(\Manticore\host_os(), 0, 6) === 'Darwin';
             $sock = [
                 'AF_INET6' => $isDarwin ? 30 : 10,
                 'PF_INET6' => $isDarwin ? 30 : 10,
+                'STREAM_PF_INET6' => $isDarwin ? 30 : 10,
                 'SOL_SOCKET' => $isDarwin ? 65535 : 1,
                 'SO_DEBUG' => 1,
                 'SO_REUSEADDR' => $isDarwin ? 4 : 2,
