@@ -85,7 +85,7 @@ trait EmitLlvmObjects
                     $out .= '  store i' . (string)($w * 8) . ' 0, ptr ' . $pGep . "\n";
                     continue;
                 }
-                $initVal = $this->cellPropBoxed($ptype, $pname)
+                $initVal = $this->cellPropBoxed($ptype, $cd->name, $pname)
                     ? '-3659174697238528' : '0';
                 $out .= '  store i64 ' . $initVal . ', ptr ' . $pGep . "\n";
             }
@@ -792,7 +792,7 @@ trait EmitLlvmObjects
         $gep = $this->ssa->allocReg();
         $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$off . "\n";
-        if ($this->cellPropBoxed($pt, $prop)) {
+        if ($this->cellPropBoxed($pt, $cd->name, $prop)) {
             return $out . $this->emitSlotStore($gep, $cd, $prop, $cellVal);
         }
         $this->lastValue = $cellVal;
@@ -1094,7 +1094,7 @@ trait EmitLlvmObjects
         // rc-managed payload (string/object) is retained on the RAW pointer
         // BEFORE boxing — a tagged cell would mis-locate the rc header. A cell
         // -array backing slot keeps the raw store + rc co-own.
-        if ($this->cellPropBoxed($propType, $n->property)) {
+        if ($this->cellPropBoxed($propType, $pcls, $n->property)) {
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_CELL) {
                 // Already a boxed cell — store as-is.

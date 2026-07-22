@@ -872,20 +872,24 @@ final class EmitLlvm implements EmitVisitor
     private function scanCellPropStores(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            // Key by the DECLARING class (+ a bare-name global fallback when the
+            // receiver is erased), so a same-named property in an unrelated class
+            // no longer poisons this slot's box decision. See cellPropBoxed.
+            $key = $this->cellPropKey($n->object->type->class ?? '', $n->property);
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_ARRAY) {
                 // A concrete array can box (boxToCell rebuilds it as a cell-array),
                 // but it only does so when the slot is already self-describing —
                 // see cellPropBoxed. Tracked separately so an array-only prop keeps
                 // its current raw behaviour (no regression for typed-array backing).
-                $this->cellPropHasArrayStore[$n->property] = true;
+                $this->cellPropHasArrayStore[$key] = true;
             } elseif (!$this->cellBoxableKind($n->value->type)) {
-                $this->cellPropNotBoxable[$n->property] = true;
+                $this->cellPropNotBoxable[$key] = true;
             } else {
-                $this->cellPropHasInPlaceBox[$n->property] = true;
+                $this->cellPropHasInPlaceBox[$key] = true;
             }
         }
-        $base = $this->cellPropArrayBaseName($n);
+        $base = $this->cellPropArrayBaseKey($n);
         if ($base !== null) { $this->cellPropArrayBase[$base] = true; }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);

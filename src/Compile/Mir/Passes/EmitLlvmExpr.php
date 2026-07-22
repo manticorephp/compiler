@@ -1407,6 +1407,51 @@ trait EmitLlvmExpr
         return null;
     }
 
+    /** The cellProp flag key when `$n` uses `$obj->name` as a RAW array base —
+     *  `declaringClass::name` (bare name if the receiver class is erased), else
+     *  null. The class-qualified counterpart of {@see cellPropArrayBaseName}. */
+    private function cellPropArrayBaseKey(Node $n): ?string
+    {
+        $base = null;
+        if ($n->kind === Node::KIND_ARRAY_ACCESS
+            || $n->kind === Node::KIND_STORE_ELEMENT
+            || $n->kind === Node::KIND_FOREACH) {
+            $base = $n->array;
+        }
+        if ($base !== null && $base->kind === Node::KIND_PROPERTY_ACCESS) {
+            return $this->cellPropKey($base->object->type->class ?? '', $base->property);
+        }
+        return null;
+    }
+
+    /** The class that DECLARES `$prop`, walking `$class` up its parent chain —
+     *  so an inherited property shares ONE cellProp key across the hierarchy.
+     *  Falls back to `$class` when unresolved. */
+    private function cellPropDeclClass(string $class, string $prop): string
+    {
+        $c = $class;
+        $seen = [];
+        while ($c !== '' && isset($this->classes[$c]) && !isset($seen[$c])) {
+            $seen[$c] = true;
+            $cd = $this->classes[$c];
+            $p = $cd->parent;
+            if ($p === '' || !isset($this->classes[$p])
+                || !isset($this->classes[$p]->propertyTypes[$prop])) {
+                return $c;
+            }
+            $c = $p;
+        }
+        return $class;
+    }
+
+    /** The cellProp flag key for a property USE on a receiver of `$class`:
+     *  `declaringClass::prop` when the class is known, else the bare name (a
+     *  conservative global key for an erased receiver). {@see cellPropBoxed}. */
+    private function cellPropKey(string $class, string $prop): string
+    {
+        return $class === '' ? $prop : $this->cellPropDeclClass($class, $prop) . '::' . $prop;
+    }
+
     /**
      * A cell/`mixed` property that is self-describing (boxed NULL default +
      * box-store) rather than a raw cell-array backing slot. True iff the
@@ -1414,16 +1459,21 @@ trait EmitLlvmExpr
      * every store boxes in place. A concrete array store rides along (boxed as a
      * cell-array) ONLY when the slot is also stored a scalar/string/object — i.e.
      * a genuinely heterogeneous bag; an array-only slot stays raw.
+     *
+     * The usage flags are keyed by DECLARING CLASS + name (plus a bare-name
+     * global fallback for erased-receiver usages), so an unrelated class whose
+     * same-named property IS a raw array base can no longer poison this one into
+     * a raw store while the reader assumes a tagged cell (int 1 → 4.94e-324).
      */
-    private function cellPropBoxed(?Type $ptype, string $prop): bool
+    private function cellPropBoxed(?Type $ptype, string $class, string $prop): bool
     {
         if ($ptype === null || $ptype->kind !== Type::KIND_CELL) { return false; }
-        if (isset($this->cellPropNotBoxable[$prop])) { return false; }
-        if (isset($this->cellPropArrayBase[$prop])) { return false; }
-        if (isset($this->cellPropHasArrayStore[$prop])
-            && !isset($this->cellPropHasInPlaceBox[$prop])) {
-            return false;
-        }
+        $qk = $this->cellPropKey($class, $prop);
+        if (isset($this->cellPropNotBoxable[$qk]) || isset($this->cellPropNotBoxable[$prop])) { return false; }
+        if (isset($this->cellPropArrayBase[$qk]) || isset($this->cellPropArrayBase[$prop])) { return false; }
+        $hasArr = isset($this->cellPropHasArrayStore[$qk]) || isset($this->cellPropHasArrayStore[$prop]);
+        $hasBox = isset($this->cellPropHasInPlaceBox[$qk]) || isset($this->cellPropHasInPlaceBox[$prop]);
+        if ($hasArr && !$hasBox) { return false; }
         return true;
     }
 
