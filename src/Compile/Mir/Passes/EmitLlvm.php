@@ -1443,7 +1443,7 @@ final class EmitLlvm implements EmitVisitor
      */
     /** A scalar kind with no rc payload — an array of these needs no
      *  per-element drop, so its release/retain can skip the repr bits. */
-    private function isNonRcScalarKind(int $k): bool
+    private function isNonRcScalarKind(string $k): bool
     {
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
             || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
