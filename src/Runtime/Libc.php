@@ -377,6 +377,16 @@ function sys_recvfrom(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int 
 function sys_sendto(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $n,
                     #[CType('int')] int $flags, Ptr $dst, #[CType('int')] int $addrlen): int {}
 
+// `ssize_t sendmsg(int fd, const struct msghdr *msg, int flags)` — scatter/gather
+// send that can also carry ancillary control data (SCM_RIGHTS fd passing).
+#[Library('c'), Symbol('sendmsg')]
+function sys_sendmsg(#[CType('int')] int $fd, Ptr $msg, #[CType('int')] int $flags): int {}
+
+// `ssize_t recvmsg(int fd, struct msghdr *msg, int flags)` — the recv twin; fills
+// the iov buffers and any control (received fds) into the msghdr.
+#[Library('c'), Symbol('recvmsg')]
+function sys_recvmsg(#[CType('int')] int $fd, Ptr $msg, #[CType('int')] int $flags): int {}
+
 // `int getpeername(int fd, sockaddr *addr, socklen_t *addrlen)` — the address of
 // the connected peer (the mirror of getsockname).
 #[Library('c'), Symbol('getpeername')]

@@ -1054,11 +1054,176 @@ function socket_atmark(\Socket $socket): bool
 }
 
 /**
- * socket_cmsg_space($level, $type, $num). The buffer size for ancillary data of
- * $type. NOT implemented — CMSG_SPACE needs msghdr/cmsghdr alignment math, part
- * of the deferred sendmsg/recvmsg subsystem. Returns null (php returns ?int).
+ * socket_cmsg_space($level, $type, $num) = CMSG_SPACE(data length) — the buffer a
+ * recvmsg must reserve for $num items of ancillary data (as the `controllen` key).
+ * Host-aware: a cmsghdr is 12 bytes / 4-aligned on Darwin, 16 bytes / 8-aligned on
+ * glibc; the data length is $num file descriptors (SCM_RIGHTS, sizeof(int)=4). So
+ * (SOL_SOCKET, SCM_RIGHTS, 1) is 16 on Darwin, 24 on Linux — matching php.
  */
 function socket_cmsg_space(int $level, int $type, int $num = 0): ?int
 {
-    return null;
+    $isDarwin = \__mc_host_is_darwin();
+    $hdr = $isDarwin ? 12 : 16;   // sizeof(struct cmsghdr)
+    $align = $isDarwin ? 4 : 8;   // CMSG_ALIGN unit
+    $dataLen = $num * 4;          // SCM_RIGHTS carries $num ints (fds)
+    $alignedHdr = \intdiv($hdr + $align - 1, $align) * $align;
+    $alignedData = \intdiv($dataLen + $align - 1, $align) * $align;
+    return $alignedHdr + $alignedData;
+}
+
+// A struct msghdr is built in a 64-byte block (>= sizeof on both hosts). The field
+// OFFSETS coincide across Darwin/Linux — msg_name@0, msg_namelen@8, msg_iov@16,
+// msg_iovlen@24, msg_control@32, msg_controllen@40 — and calloc zeroes the block, so
+// poking a small value with poke_i32 is correct even where the field is a 8-byte
+// size_t (Linux). The ONLY divergences: msg_flags sits at @44 (Darwin) vs @48 (Linux),
+// and struct cmsghdr's own layout (below).
+
+/**
+ * php.net's socket_sendmsg: a scatter/gather send that can also pass file
+ * descriptors as ancillary data. $message keys: 'iov' (string[], concatenated for a
+ * stream socket) and 'control' ([['level','type','data'=>Socket[]]] — SCM_RIGHTS fd
+ * passing). Returns the byte count, or false.
+ * @param array<string,mixed> $message
+ * @return int|false
+ */
+function socket_sendmsg(\Socket $socket, #[\Manticore\Attr\CellArg] array $message, int $flags = 0)
+{
+    $data = '';
+    if (isset($message['iov']) && \is_array($message['iov'])) {
+        foreach ($message['iov'] as $chunk) {
+            $data = $data . (string)$chunk;
+        }
+    }
+    $dlen = \strlen($data);
+    /** @var int[] $fds */
+    $fds = [];
+    if (isset($message['control']) && \is_array($message['control'])) {
+        foreach ($message['control'] as $cm) {
+            if (\is_array($cm) && isset($cm['data']) && \is_array($cm['data'])) {
+                foreach ($cm['data'] as $sk) {
+                    $fds[] = \__mc_sock_fd($sk);   // typed funnel: unbox the array-element \Socket
+                }
+            }
+        }
+    }
+    $nfds = \count($fds);
+
+    $dbuf = \__mc_str_to_buf($data);          // fresh buffer holding the bytes (caller frees)
+    if ($dbuf === null) {
+        return false;
+    }
+    $iov = \Runtime\Libc\calloc(16, 1);
+    \poke_i64($iov, 0, \ptr_to_int($dbuf));   // iov_base
+    \poke_i64($iov, 8, $dlen);                // iov_len
+    $hdr = \Runtime\Libc\calloc(64, 1);
+    \poke_i64($hdr, 16, \ptr_to_int($iov));   // msg_iov
+    \poke_i32($hdr, 24, 1);                    // msg_iovlen = 1
+
+    $cbuf = null;
+    if ($nfds > 0) {
+        $isDarwin = \__mc_host_is_darwin();
+        $hdrLen = $isDarwin ? 12 : 16;         // sizeof(struct cmsghdr)
+        $lvlOff = $isDarwin ? 4 : 8;
+        $typOff = $isDarwin ? 8 : 12;
+        $space = \socket_cmsg_space(\__mc_sock_const(0), 1, $nfds);
+        $cbuf = \Runtime\Libc\calloc($space, 1);
+        \poke_i32($cbuf, 0, $hdrLen + $nfds * 4);       // cmsg_len = CMSG_LEN(nfds*4)
+        \poke_i32($cbuf, $lvlOff, \__mc_sock_const(0)); // cmsg_level = SOL_SOCKET
+        \poke_i32($cbuf, $typOff, 1);                    // cmsg_type = SCM_RIGHTS
+        for ($i = 0; $i < $nfds; $i = $i + 1) {
+            \poke_i32($cbuf, $hdrLen + $i * 4, $fds[$i]);
+        }
+        \poke_i64($hdr, 32, \ptr_to_int($cbuf));  // msg_control
+        \poke_i32($hdr, 40, $space);              // msg_controllen
+    }
+
+    $sent = \Runtime\Libc\sys_sendmsg($socket->fd, $hdr, $flags);
+    \Runtime\Libc\free($dbuf);
+    \Runtime\Libc\free($iov);
+    \Runtime\Libc\free($hdr);
+    if ($cbuf !== null) {
+        \Runtime\Libc\free($cbuf);
+    }
+    if ($sent < 0) {
+        \__mc_sock_fail($socket);
+        return false;
+    }
+    return $sent;
+}
+
+/**
+ * php.net's socket_recvmsg: receive a message, filling &$message. Input keys:
+ * 'buffer_size' (iov buffer, default 4096) and 'controllen' (ancillary buffer,
+ * from socket_cmsg_space). After the call $message is rebuilt as php's shape:
+ * ['name'=>null, 'control'=>[['level','type','data'=>Socket[]]], 'iov'=>[string],
+ * 'flags'=>int] — received SCM_RIGHTS fds come back as \Socket objects. Returns the
+ * byte count, or false.
+ * @param array<string,mixed> $message
+ * @return int|false
+ */
+function socket_recvmsg(\Socket $socket, array &$message, int $flags = 0)
+{
+    $bufSize = isset($message['buffer_size']) ? (int)$message['buffer_size'] : 4096;
+    $ctrlLen = isset($message['controllen']) ? (int)$message['controllen'] : 0;
+    if ($bufSize <= 0) {
+        $bufSize = 4096;
+    }
+
+    $dbuf = \Runtime\Libc\calloc($bufSize, 1);
+    $iov = \Runtime\Libc\calloc(16, 1);
+    \poke_i64($iov, 0, \ptr_to_int($dbuf));
+    \poke_i64($iov, 8, $bufSize);
+    $hdr = \Runtime\Libc\calloc(64, 1);
+    \poke_i64($hdr, 16, \ptr_to_int($iov));
+    \poke_i32($hdr, 24, 1);
+    $cbuf = null;
+    if ($ctrlLen > 0) {
+        $cbuf = \Runtime\Libc\calloc($ctrlLen, 1);
+        \poke_i64($hdr, 32, \ptr_to_int($cbuf));
+        \poke_i32($hdr, 40, $ctrlLen);
+    }
+
+    $got = \Runtime\Libc\sys_recvmsg($socket->fd, $hdr, $flags);
+
+    /** @var array<int,mixed> $control */
+    $control = [];
+    if ($got >= 0 && $cbuf !== null) {
+        $isDarwin = \__mc_host_is_darwin();
+        $hdrLen = $isDarwin ? 12 : 16;
+        $lvlOff = $isDarwin ? 4 : 8;
+        $typOff = $isDarwin ? 8 : 12;
+        $cmLen = \peek_i32($cbuf, 0);   // cmsg_len (low 4 bytes hold it)
+        if ($cmLen >= $hdrLen) {
+            $lvl = \peek_i32($cbuf, $lvlOff);
+            $typ = \peek_i32($cbuf, $typOff);
+            $nfds = \intdiv($cmLen - $hdrLen, 4);
+            /** @var \Socket[] $socks */
+            $socks = [];
+            for ($i = 0; $i < $nfds; $i = $i + 1) {
+                $fd = \peek_i32($cbuf, $hdrLen + $i * 4);
+                $socks[] = new \Socket($fd);   // kernel dup'd a fresh fd into this process
+            }
+            $control[] = ['level' => $lvl, 'type' => $typ, 'data' => $socks];
+        }
+    }
+
+    /** @var string[] $iovOut */
+    $iovOut = [];
+    $iovOut[] = $got > 0 ? \str_from_buffer($dbuf, $got) : '';
+    $flagsOff = \__mc_host_is_darwin() ? 44 : 48;   // msg_flags
+    /** @var array<string,mixed> $out */
+    $out = ['name' => null, 'control' => $control, 'iov' => $iovOut, 'flags' => \peek_i32($hdr, $flagsOff)];
+    $message = $out;
+
+    \Runtime\Libc\free($dbuf);
+    \Runtime\Libc\free($iov);
+    \Runtime\Libc\free($hdr);
+    if ($cbuf !== null) {
+        \Runtime\Libc\free($cbuf);
+    }
+    if ($got < 0) {
+        \__mc_sock_fail($socket);
+        return false;
+    }
+    return $got;
 }

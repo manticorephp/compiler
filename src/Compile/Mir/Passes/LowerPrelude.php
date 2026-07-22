@@ -375,6 +375,7 @@ trait LowerPrelude
             'SOL_TCP' => 6, 'SOL_UDP' => 17,
             'TCP_NODELAY' => 1, 'SOMAXCONN' => 128,
             'SHUT_RD' => 0, 'SHUT_WR' => 1, 'SHUT_RDWR' => 2,
+            'SCM_RIGHTS' => 1,   // ancillary fd passing — 1 on both hosts
             'MSG_OOB' => 1, 'MSG_PEEK' => 2, 'MSG_DONTROUTE' => 4, 'MSG_EOR' => 8,
             'PHP_NORMAL_READ' => 1, 'PHP_BINARY_READ' => 2,
             'AI_PASSIVE' => 1, 'AI_CANONNAME' => 2, 'AI_NUMERICHOST' => 4,
