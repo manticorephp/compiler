@@ -1395,7 +1395,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $nr = [];
         foreach ($read as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
-            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { \__mc_sel_keep($nr, $s); $ready = $ready + 1; }
+            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { $nr[] = \__mc_stream_id($s); $ready = $ready + 1; }
         }
         $read = $nr;
     }
@@ -1403,7 +1403,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $nw = [];
         foreach ($write as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
-            if (($r & ($POLLOUT | $POLLERR)) !== 0) { \__mc_sel_keep($nw, $s); $ready = $ready + 1; }
+            if (($r & ($POLLOUT | $POLLERR)) !== 0) { $nw[] = \__mc_stream_id($s); $ready = $ready + 1; }
         }
         $write = $nw;
     }
@@ -1411,7 +1411,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $ne = [];
         foreach ($except as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
-            if (($r & ($POLLPRI | $POLLERR)) !== 0) { \__mc_sel_keep($ne, $s); $ready = $ready + 1; }
+            if (($r & ($POLLPRI | $POLLERR)) !== 0) { $ne[] = \__mc_stream_id($s); $ready = $ready + 1; }
         }
         $except = $ne;
     }
@@ -1419,16 +1419,16 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
 }
 
 /**
- * Append a ready stream to the rewritten select array. $s is \Resource-TYPED (a
- * funnel): a value read out of the untyped `$read` param is an erased obj handle,
- * and appending it raw stores a BORROWED reference — so when stream_select's
- * `$read = $nr` reassignment releases the old array, the caller's resource is
- * over-released (its fd zeroes on the next call). A \Resource-typed store retains
- * the element (+1), balancing that release.
+ * Identity funnel that RE-TYPES an erased select-array element to \Resource in the
+ * caller's frame, so the inline `$nr[] = __mc_stream_id($s)` store retains it (+1) —
+ * else the `$read = $nr` rewrite over-releases the caller's resources (the listener
+ * is freed after the first call, its fd zeroes, poll never fires again). A return-
+ * funnel (not a by-ref-array helper, whose .sig writeback erases the element repr)
+ * keeps the concrete obj repr so `$r[0] instanceof` still holds.
  */
-function __mc_sel_keep(array &$dst, \Resource $s): void
+function __mc_stream_id(\Resource $s): \Resource
 {
-    $dst[] = $s;
+    return $s;
 }
 
 /** The transports stream_socket_client/server understand here. */

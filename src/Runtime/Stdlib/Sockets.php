@@ -735,7 +735,7 @@ function socket_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $nr = [];
         foreach ($read as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_sock_fd($s))];
-            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { $nr[] = $s; $ready = $ready + 1; }
+            if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { $nr[] = \__mc_sock_id($s); $ready = $ready + 1; }
         }
         $read = $nr;
     }
@@ -743,7 +743,7 @@ function socket_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $nw = [];
         foreach ($write as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_sock_fd($s))];
-            if (($r & ($POLLOUT | $POLLERR)) !== 0) { $nw[] = $s; $ready = $ready + 1; }
+            if (($r & ($POLLOUT | $POLLERR)) !== 0) { $nw[] = \__mc_sock_id($s); $ready = $ready + 1; }
         }
         $write = $nw;
     }
@@ -751,12 +751,25 @@ function socket_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
         $ne = [];
         foreach ($except as $s) {
             $r = $rev[\__mc_sel_index($fds, \__mc_sock_fd($s))];
-            if (($r & ($POLLPRI | $POLLERR)) !== 0) { $ne[] = $s; $ready = $ready + 1; }
+            if (($r & ($POLLPRI | $POLLERR)) !== 0) { $ne[] = \__mc_sock_id($s); $ready = $ready + 1; }
         }
         $except = $ne;
     }
 
     return $ready;
+}
+
+/**
+ * Identity funnel that RE-TYPES an erased select-array element to \Socket in the
+ * caller's frame, so the inline `$nr[] = __mc_sock_id($s)` store retains it (+1) —
+ * else the `$read = $nr` rewrite over-releases the caller's sockets (freed after the
+ * first call, the stream_select bug). A by-ref-array store helper would retain too
+ * but its .sig writeback erases the element repr (breaks `$r[0] instanceof Socket`);
+ * a return-funnel stays in-frame and keeps the concrete obj repr.
+ */
+function __mc_sock_id(\Socket $s): \Socket
+{
+    return $s;
 }
 
 /** Linear lookup of $fd in the parallel $fds list (small n; avoids an assoc). */
