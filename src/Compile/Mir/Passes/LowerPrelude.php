@@ -340,6 +340,13 @@ trait LowerPrelude
             'STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT' => 33, 'STREAM_CRYPTO_METHOD_TLSv1_2_SERVER' => 32,
             'STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT' => 65, 'STREAM_CRYPTO_METHOD_TLSv1_3_SERVER' => 64,
             'STREAM_CRYPTO_PROTO_TLSv1_2' => 16, 'STREAM_CRYPTO_PROTO_TLSv1_3' => 32,
+            // dns_get_record type bitmask — php's OWN values (not the wire QTYPEs;
+            // the resolver maps them). Host-invariant.
+            'DNS_A' => 1, 'DNS_NS' => 2, 'DNS_CNAME' => 16, 'DNS_SOA' => 32,
+            'DNS_PTR' => 2048, 'DNS_HINFO' => 4096, 'DNS_CAA' => 8192, 'DNS_MX' => 16384,
+            'DNS_TXT' => 32768, 'DNS_A6' => 16777216, 'DNS_SRV' => 33554432,
+            'DNS_NAPTR' => 67108864, 'DNS_AAAA' => 134217728, 'DNS_ANY' => 268435456,
+            'DNS_ALL' => 268435455,
             // glob: php's OWN values, not the host's (php has carried its own
             // glob since 8.3) — GLOB_NOESCAPE is 0x1000 where Darwin's header
             // says 0x2000, and no libc has GLOB_ONLYDIR = 0x40000000. Host
