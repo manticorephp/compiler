@@ -1461,19 +1461,43 @@ final class Parser
             if ($this->check(TokenKind::Ampersand)) {
                 $this->advance();
                 $source = $this->parseAssign();
-                return Expr::refAssign($left, $source, $span);
+                return $this->buildAssign('=&', $left, $source, $span);
             }
             $right = $this->parseAssign(); // right-associative
-            return Expr::assign($left, $right, $span);
+            return $this->buildAssign('=', $left, $right, $span);
         }
         $compoundOp = $this->assignOpFor($tok->kind);
         if ($compoundOp !== null) {
             $span = $this->span();
             $this->advance();
             $right = $this->parseAssign();
-            return Expr::compoundAssign($compoundOp, $left, $right, $span);
+            return $this->buildAssign($compoundOp, $left, $right, $span);
         }
         return $left;
+    }
+
+    /**
+     * Build an assignment, re-associating when the target parsed as a binary
+     * expression. PHP binds `=` looser than the comparison / concatenation
+     * operators, so `false === $v = foo()` is `false === ($v = foo())` — the
+     * assignment attaches to the RIGHTMOST operand (the lvalue) and the operator
+     * sees its result, NOT `(false === $v) = foo()`. Recurse into the binary's
+     * right operand; a non-binary target assigns directly. `$op` is '=', '=&' or
+     * a compound operator like '.='.
+     */
+    private function buildAssign(string $op, Expr $target, Expr $value, Span $span): Expr
+    {
+        if ($target->kind === 'BinaryOp') {
+            return Expr::binary(
+                $target->op,
+                $target->left,
+                $this->buildAssign($op, $target->right, $value, $span),
+                $target->span,
+            );
+        }
+        if ($op === '=')  { return Expr::assign($target, $value, $span); }
+        if ($op === '=&') { return Expr::refAssign($target, $value, $span); }
+        return Expr::compoundAssign($op, $target, $value, $span);
     }
 
     /**

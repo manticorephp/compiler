@@ -410,6 +410,7 @@ trait LowerExprs
         if ($expr->kind === 'Identifier') { $extra = ' (' . ($expr->name ?? '?') . ')'; }
         throw new \RuntimeException(
             'MIR.lower: unsupported expression kind ' . $expr->kind . $extra
+            . ' at line ' . (string)$expr->span->line
         );
     }
 
@@ -455,6 +456,7 @@ trait LowerExprs
         }
         throw new \RuntimeException(
             'MIR.lower: unsupported assign target kind ' . $target->kind
+            . ' at line ' . (string)$target->span->line
         );
     }
 
