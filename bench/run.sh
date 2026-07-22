@@ -6,7 +6,7 @@
 #   bash bench/run.sh            # all cases
 #   bash bench/run.sh -k sort    # only cases whose name matches "sort"
 #   REPS=5 bash bench/run.sh     # best-of-5 instead of best-of-3
-#   MEM=1 bash bench/run.sh      # extra max-RSS columns (one /usr/bin/time -l run)
+#   MEM=0 bash bench/run.sh      # skip the max-RSS columns (wall-clock only)
 #
 # Not part of any gate — run it by hand to refresh the perf snapshot.
 set -u
@@ -23,7 +23,9 @@ filter="${2:-}"
 [ "${1:-}" = "-k" ] && filter="${2:-}"
 reps="${REPS:-3}"
 php_bin="${PHP:-php}"
-mem="${MEM:-0}"
+# RSS columns are ON by default (one extra `/usr/bin/time -l` run per side);
+# set MEM=0 to skip them for a faster wall-only run.
+mem="${MEM:-1}"
 
 if [ ! -x "$mant" ]; then echo "no $mant — run bin/build first" >&2; exit 1; fi
 

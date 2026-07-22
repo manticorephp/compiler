@@ -773,8 +773,10 @@ trait EmitLlvmExpr
                 ? "  ret i1 %bothnull\n"
                 : "  %nres = select i1 %bothnull, i64 0, i64 1\n  ret i64 %nres\n";
             $out .= "lens:\n";
-            $out .= "  %la = load i64, ptr %a\n";
-            $out .= "  %lb = load i64, ptr %b\n";
+            // live_len compacts out tombstones so both the length comparison
+            // and the element walk see live counts / no holes.
+            $out .= "  %la = call i64 @__mir_array_live_len(ptr %a)\n";
+            $out .= "  %lb = call i64 @__mir_array_live_len(ptr %b)\n";
             if ($eq) {
                 $out .= "  %leneq = icmp eq i64 %la, %lb\n";
                 $out .= "  br i1 %leneq, label %loop, label %no\n";

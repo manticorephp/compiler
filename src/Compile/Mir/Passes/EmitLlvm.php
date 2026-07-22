@@ -455,7 +455,7 @@ final class EmitLlvm implements EmitVisitor
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out  = "\ndefine ptr @__mir_array_implode_cell(ptr %sep, ptr %arr) {\n";
         $out .= "entry:\n";
-        $out .= "  %len = load i64, ptr %arr\n";
+        $out .= "  %len = call i64 @__mir_array_live_len(ptr %arr)\n";
         $out .= "  %ez = icmp sle i64 %len, 0\n";
         $out .= "  br i1 %ez, label %empty, label %init\n";
         $out .= "empty:\n  ret ptr " . $this->strSymBytes('@.ts.empty') . "\n";

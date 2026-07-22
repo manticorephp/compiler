@@ -422,8 +422,12 @@ trait EmitLlvmBuiltins
         $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
+        // Compact out tombstones first (null-safe on the raw ptr): the cellify
+        // walk copies each entry by physical index, so a hole would otherwise be
+        // resurrected into the rebuilt cell-array (a var_dump / json of an
+        // unset-then-boxed map showed the dead entry with a garbage key).
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $rawSrc . ")\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
@@ -1076,8 +1080,24 @@ trait EmitLlvmBuiltins
         $safe = $this->ssa->allocReg();
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $ptr . "\n";
+        $physlen = $this->ssa->allocReg();
+        $out .= '  ' . $physlen . ' = load i64, ptr ' . $safe . "\n";
+        // count() is the LIVE element count: physical entries minus the
+        // tombstone counter in the flags word (bits 8+). A never-unset array
+        // has 0 there, so count == physical len as before. The flags load off
+        // the zero-word (null path) is same-page and its value is discarded by
+        // the select — count of an empty array stays 0.
+        $flp = $this->ssa->allocReg();
+        $out .= '  ' . $flp . ' = getelementptr inbounds i8, ptr ' . $safe . ', i64 '
+              . (string) \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $flags = $this->ssa->allocReg();
+        $out .= '  ' . $flags . ' = load i64, ptr ' . $flp . "\n";
+        $tomb0 = $this->ssa->allocReg();
+        $out .= '  ' . $tomb0 . ' = lshr i64 ' . $flags . ", 8\n";
+        $tomb = $this->ssa->allocReg();
+        $out .= '  ' . $tomb . ' = select i1 ' . $isNull . ', i64 0, i64 ' . $tomb0 . "\n";
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = load i64, ptr ' . $safe . "\n";
+        $out .= '  ' . $reg . ' = sub i64 ' . $physlen . ', ' . $tomb . "\n";
         return $this->finishI64($out, $reg);
     }
 
@@ -1304,8 +1324,11 @@ trait EmitLlvmBuiltins
         $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
+        // live_len compacts out tombstones (null-safe on the raw ptr) so the
+        // walk emits only live keys; the redirected %src is used only in the
+        // loop body, which never runs when len==0 (the null case).
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $rawSrc . ")\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
@@ -1383,8 +1406,9 @@ trait EmitLlvmBuiltins
         $src = $this->ssa->allocReg();
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
+        // live_len compacts out tombstones (null-safe on the raw ptr).
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $rawSrc . ")\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();

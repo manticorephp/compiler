@@ -2037,7 +2037,8 @@ final class RuntimeLibrary
         $out .= "tarr:\n";
         $out .= "  %arr0 = and i64 %cell, $M\n";
         $out .= "  %arr = inttoptr i64 %arr0 to ptr\n";
-        $out .= "  %alen = load i64, ptr %arr\n";
+        // Compact out tombstones first so the list/object walk sees no holes.
+        $out .= "  %alen = call i64 @__mir_array_live_len(ptr %arr)\n";
         $out .= "  %est1 = shl i64 %alen, 3\n";
         $out .= "  %est = add i64 %est1, 16\n";
         $out .= "  %rbuf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %est)\n";

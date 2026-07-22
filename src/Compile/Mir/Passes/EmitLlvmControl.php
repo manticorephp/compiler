@@ -413,6 +413,12 @@ trait EmitLlvmControl
             $iSlot = $this->locals->slots["@fe.0." . (string)$fe->genSlotBase];
             $arrSlot = $this->locals->slots["@fe.1." . (string)$fe->genSlotBase];
             $out .= '  store i64 0, ptr ' . $iSlot . "\n";
+            // Compact out tombstones (holes) ONCE before the loop so the
+            // per-iteration length reloads and element addressing see a clean
+            // 0..len range. A never-unset array (the common case) short-circuits
+            // inside live_len with just a flags check.
+            $clv = $this->ssa->allocReg();
+            $out .= '  ' . $clv . ' = call i64 @__mir_array_live_len(ptr ' . $arr . ")\n";
             $aint = $this->ssa->allocReg();
             $out .= '  ' . $aint . ' = ptrtoint ptr ' . $arr . " to i64\n";
             $out .= '  store i64 ' . $aint . ', ptr ' . $arrSlot . "\n";
@@ -421,8 +427,9 @@ trait EmitLlvmControl
             $iSlot = $this->ssa->allocReg();
             $out .= '  ' . $iSlot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $iSlot . "\n";
+            // live_len compacts out tombstones once, then returns the clean len.
             $len = $this->ssa->allocReg();
-            $out .= '  ' . $len . ' = load i64, ptr ' . $arr . "\n";
+            $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $arr . ")\n";
         }
 
         $condLabel = $this->ssa->allocLabel('fe.cond');
