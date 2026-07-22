@@ -464,51 +464,83 @@ final class EmitLlvm implements EmitVisitor
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out  = "\ndefine ptr @__mir_array_implode_cell(ptr %sep, ptr %arr) {\n";
         $out .= "entry:\n";
-        $out .= "  %len = load i64, ptr %arr\n";
+        $out .= "  %len = call i64 @__mir_array_live_len(ptr %arr)\n";
         $out .= "  %ez = icmp sle i64 %len, 0\n";
         $out .= "  br i1 %ez, label %empty, label %init\n";
         $out .= "empty:\n  ret ptr " . $this->strSymBytes('@.ts.empty') . "\n";
+        // SINGLE pass into a growing buffer: each element is formatted by
+        // `__manticore_tagged_to_str` EXACTLY ONCE. The old two-pass (size, then
+        // copy) called tagged_to_str per element PER PASS — a vec[float] implode
+        // ran the snprintf float formatter twice per element (~2× the wall), and
+        // the string-key/value strlen had to stay header-based to avoid a torn
+        // read between the passes. A grow (str_alloc + memcpy + release old) is
+        // amortized O(1) — the initial `8*len+16` estimate rarely regrows.
         $out .= "init:\n";
-        // Header length (binary-safe), NOT libc strlen: tagged_to_str returns the
-        // RAW element string ptr for a string cell (no copy), which may carry no
-        // trailing NUL — libc strlen over-reads, and since the sizing and copy
-        // passes strlen independently, an intervening alloc can make el2 > el and
-        // overrun the buffer (layout-flaky heap corruption). See __mir_array_implode.
         $out .= "  %seplen = call i64 @__mir_strlen(ptr %sep)\n";
-        $out .= "  %accp = alloca i64\n  store i64 0, ptr %accp\n";
-        $out .= "  %ip = alloca i64\n  store i64 0, ptr %ip\n  br label %sumc\n";
-        $out .= "sumc:\n  %i = load i64, ptr %ip\n  %sd = icmp slt i64 %i, %len\n";
-        $out .= "  br i1 %sd, label %sumb, label %alloc\n";
-        $out .= "sumb:\n";
+        $out .= "  %c0 = shl i64 %len, 3\n";
+        $out .= "  %cap0 = add i64 %c0, 16\n";
+        $out .= "  %buf0 = call ptr @__mir_str_alloc(i64 %cap0)\n";
+        $out .= "  %bufp = alloca ptr\n  store ptr %buf0, ptr %bufp\n";
+        $out .= "  %capp = alloca i64\n  store i64 %cap0, ptr %capp\n";
+        $out .= "  %wp = alloca i64\n  store i64 0, ptr %wp\n";
+        $out .= "  %ip = alloca i64\n  store i64 0, ptr %ip\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n  %i = load i64, ptr %ip\n  %ld = icmp sge i64 %i, %len\n";
+        $out .= "  br i1 %ld, label %fin, label %body\n";
+        $out .= "body:\n";
         $out .= "  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
         $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
         $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
-        $out .= "  %a = load i64, ptr %accp\n  %a2 = add i64 %a, %el\n  store i64 %a2, ptr %accp\n";
-        $out .= "  %i2 = add i64 %i, 1\n  store i64 %i2, ptr %ip\n  br label %sumc\n";
-        $out .= "alloc:\n";
-        $out .= "  %acc = load i64, ptr %accp\n  %lm1 = sub i64 %len, 1\n";
-        $out .= "  %sb = mul i64 %seplen, %lm1\n  %t = add i64 %acc, %sb\n  %sz = add i64 %t, 1\n";
-        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n  store i8 0, ptr %buf\n";
-        $out .= "  store i64 0, ptr %ip\n  %wp = alloca i64\n  store i64 0, ptr %wp\n  br label %cpc\n";
-        $out .= "cpc:\n  %j = load i64, ptr %ip\n  %cd = icmp slt i64 %j, %len\n";
-        $out .= "  br i1 %cd, label %cpb, label %fin\n";
-        $out .= "cpb:\n  %first = icmp eq i64 %j, 0\n  br i1 %first, label %nosep, label %dosep\n";
-        $out .= "dosep:\n  %w0 = load i64, ptr %wp\n";
-        $out .= "  %dst0 = getelementptr inbounds i8, ptr %buf, i64 %w0\n";
-        $out .= "  call ptr @memcpy(ptr %dst0, ptr %sep, i64 %seplen)\n";
-        $out .= "  %w0b = add i64 %w0, %seplen\n  store i64 %w0b, ptr %wp\n  br label %nosep\n";
-        $out .= "nosep:\n";
-        $out .= "  %ev2 = call i64 @__mir_array_value_at(ptr %arr, i64 %j)\n";
-        $out .= "  %es2 = call ptr @__manticore_tagged_to_str(i64 %ev2)\n";
-        $out .= "  %el2 = call i64 @__mir_strlen(ptr %es2)\n";
-        $out .= "  %w1 = load i64, ptr %wp\n";
-        $out .= "  %dst1 = getelementptr inbounds i8, ptr %buf, i64 %w1\n";
-        $out .= "  call ptr @memcpy(ptr %dst1, ptr %es2, i64 %el2)\n";
-        $out .= "  %w2 = add i64 %w1, %el2\n  store i64 %w2, ptr %wp\n";
-        $out .= "  %j2 = add i64 %j, 1\n  store i64 %j2, ptr %ip\n  br label %cpc\n";
-        $out .= "fin:\n  %wf = load i64, ptr %wp\n";
-        $out .= "  %nulp = getelementptr inbounds i8, ptr %buf, i64 %wf\n";
-        $out .= "  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n";
+        $out .= "  %isfirst = icmp eq i64 %i, 0\n";
+        $out .= "  %sepn = select i1 %isfirst, i64 0, i64 %seplen\n";
+        $out .= "  %need = add i64 %el, %sepn\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %cap = load i64, ptr %capp\n";
+        $out .= "  %after = add i64 %w, %need\n";
+        $out .= "  %after1 = add i64 %after, 1\n";
+        $out .= "  %fits = icmp ule i64 %after1, %cap\n";
+        $out .= "  br i1 %fits, label %write, label %grow\n";
+        $out .= "grow:\n";
+        $out .= "  %g2 = shl i64 %cap, 1\n";
+        $out .= "  %gmax = icmp ugt i64 %after1, %g2\n";
+        $out .= "  %ncap = select i1 %gmax, i64 %after1, i64 %g2\n";
+        $out .= "  %nbuf = call ptr @__mir_str_alloc(i64 %ncap)\n";
+        $out .= "  %oldbuf = load ptr, ptr %bufp\n";
+        $out .= "  call ptr @memcpy(ptr %nbuf, ptr %oldbuf, i64 %w)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %oldbuf)\n";
+        $out .= "  store ptr %nbuf, ptr %bufp\n";
+        $out .= "  store i64 %ncap, ptr %capp\n";
+        $out .= "  br label %write\n";
+        $out .= "write:\n";
+        $out .= "  %b = load ptr, ptr %bufp\n";
+        $out .= "  br i1 %isfirst, label %wval, label %wsep\n";
+        $out .= "wsep:\n";
+        $out .= "  %ws = load i64, ptr %wp\n";
+        $out .= "  %sd = getelementptr inbounds i8, ptr %b, i64 %ws\n";
+        $out .= "  call ptr @memcpy(ptr %sd, ptr %sep, i64 %seplen)\n";
+        $out .= "  %ws2 = add i64 %ws, %seplen\n  store i64 %ws2, ptr %wp\n";
+        $out .= "  br label %wval\n";
+        $out .= "wval:\n";
+        $out .= "  %wv = load i64, ptr %wp\n";
+        $out .= "  %vd = getelementptr inbounds i8, ptr %b, i64 %wv\n";
+        $out .= "  call ptr @memcpy(ptr %vd, ptr %es, i64 %el)\n";
+        $out .= "  %wv2 = add i64 %wv, %el\n  store i64 %wv2, ptr %wp\n";
+        // Free the FRESH temp (int/float/bool → a +1 string); a STRING cell's
+        // tagged_to_str hands back the RAW payload ptr (a borrow — never free).
+        $out .= "  %pay = and i64 %ev, 281474976710655\n";
+        $out .= "  %payp = inttoptr i64 %pay to ptr\n";
+        $out .= "  %braw = icmp eq ptr %es, %payp\n";
+        $out .= "  br i1 %braw, label %nextk, label %rel\n";
+        $out .= "rel:\n  call void @__mir_rc_release_str(ptr %es)\n  br label %nextk\n";
+        $out .= "nextk:\n";
+        $out .= "  %i2 = add i64 %i, 1\n  store i64 %i2, ptr %ip\n  br label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %wf = load i64, ptr %wp\n";
+        $out .= "  %bf = load ptr, ptr %bufp\n";
+        $out .= "  %nulp = getelementptr inbounds i8, ptr %bf, i64 %wf\n";
+        $out .= "  store i8 0, ptr %nulp\n";
+        $out .= "  call void @__mir_str_set_len(ptr %bf, i64 %wf)\n";
+        $out .= "  ret ptr %bf\n}\n";
         return $out;
     }
 
