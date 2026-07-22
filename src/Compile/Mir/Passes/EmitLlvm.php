@@ -258,6 +258,11 @@ final class EmitLlvm implements EmitVisitor
     /** Per-module runtime-feature demand set (fresh each {@see emit}). */
     private ?RuntimeFeatures $rt = null;
 
+    /** @var array<string, MethodMeta> free functions a ReflectionFunction reflects.
+     *  Declared LAST — a new field mid-class shifts later offsets, a self-host
+     *  layout hazard (the ClassDef::$isPreludeClass lesson). */
+    private array $reflFnMeta = [];
+
     public function emit(Module $module): string
     {
         $this->rt = new RuntimeFeatures();
@@ -291,6 +296,7 @@ final class EmitLlvm implements EmitVisitor
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
         $this->traitNames = $module->traitNames;
+        $this->reflFnMeta = $module->reflFnMeta;
         $this->closureCaptures = $module->closureCaptures;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
@@ -361,6 +367,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropArrayBase = [];
         $this->cellPropHasArrayStore = [];
         $this->cellPropHasInPlaceBox = [];
+        $this->cellPropHasNestedArrayStore = [];
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
         foreach ($module->functions as $fn) {
@@ -863,23 +870,42 @@ final class EmitLlvm implements EmitVisitor
      *  heterogeneous slot — only then does an array store ride along as a boxed cell). */
     private array $cellPropHasInPlaceBox = [];
 
+    /** Prop names ever stored an array whose ELEMENT is itself an array/cell — a
+     *  NESTED structure. Reading a nested value back must preserve its array-ness
+     *  (`is_array($c->data['x'])`), so such a slot boxes as a cell-array even when
+     *  it only ever holds arrays. An array-of-SCALARS slot (e.g. a key buffer read
+     *  as a raw index) stays raw — boxing it would turn a raw key into a cell. */
+    private array $cellPropHasNestedArrayStore = [];
+
     private function scanCellPropStores(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            // Key by the DECLARING class (+ a bare-name global fallback when the
+            // receiver is erased), so a same-named property in an unrelated class
+            // no longer poisons this slot's box decision. See cellPropBoxed.
+            $key = $this->cellPropKey($n->object->type->class ?? '', $n->property);
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_ARRAY) {
                 // A concrete array can box (boxToCell rebuilds it as a cell-array),
                 // but it only does so when the slot is already self-describing —
                 // see cellPropBoxed. Tracked separately so an array-only prop keeps
                 // its current raw behaviour (no regression for typed-array backing).
-                $this->cellPropHasArrayStore[$n->property] = true;
+                $this->cellPropHasArrayStore[$key] = true;
+                // NESTED = the element is itself a concrete ARRAY (a genuine
+                // array-of-arrays). NOT a CELL element: that is boxed SCALARS
+                // (e.g. the SPL iterator's `__k = vec[cell]` heterogeneous keys),
+                // which must stay raw — boxing re-wraps an already-cell key.
+                $el = $n->value->type->element;
+                if ($el !== null && $el->kind === Type::KIND_ARRAY) {
+                    $this->cellPropHasNestedArrayStore[$key] = true;
+                }
             } elseif (!$this->cellBoxableKind($n->value->type)) {
-                $this->cellPropNotBoxable[$n->property] = true;
+                $this->cellPropNotBoxable[$key] = true;
             } else {
-                $this->cellPropHasInPlaceBox[$n->property] = true;
+                $this->cellPropHasInPlaceBox[$key] = true;
             }
         }
-        $base = $this->cellPropArrayBaseName($n);
+        $base = $this->cellPropArrayBaseKey($n);
         if ($base !== null) { $this->cellPropArrayBase[$base] = true; }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
@@ -1431,6 +1457,14 @@ final class EmitLlvm implements EmitVisitor
      * '' when `$t` is not rc-managed (scalar / void / #[Struct] / closure).
      * Mirrors the {@see rcReleaseReg} vocabulary.
      */
+    /** A scalar kind with no rc payload — an array of these needs no
+     *  per-element drop, so its release/retain can skip the repr bits. */
+    private function isNonRcScalarKind(string $k): bool
+    {
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
     private function discardReleaseFlavor(Type $t): string
     {
         $k = $t->kind;
@@ -1463,6 +1497,10 @@ final class EmitLlvm implements EmitVisitor
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
+            // A concrete scalar element (int/float/bool/null) has nothing to
+            // drop → buffer-only, skipping the repr-bit read. Only an ERASED
+            // element (unknown) reaches the repr path.
+            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
             return 'vec';
         }
         if ($t->isAssoc()) {
@@ -1470,6 +1508,7 @@ final class EmitLlvm implements EmitVisitor
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
+            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
         }
         return '';
@@ -1506,6 +1545,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return '@__mir_array_release_cell'; }
+        if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         return '';
     }

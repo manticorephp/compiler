@@ -537,8 +537,10 @@ trait EmitLlvmControl
         $out  = '  ' . $fa . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . $fo . "\n";
         $fl = $this->ssa->allocReg();
         $out .= '  ' . $fl . ' = load i64, ptr ' . $fa . "\n";
+        $flm = $this->ssa->allocReg();
+        $out .= '  ' . $flm . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
         $ish = $this->ssa->allocReg();
-        $out .= '  ' . $ish . ' = icmp ne i64 ' . $fl . ", 0\n";
+        $out .= '  ' . $ish . ' = icmp ne i64 ' . $flm . ", 0\n";
         $po0 = $this->ssa->allocReg();
         $out .= '  ' . $po0 . ' = mul i64 ' . $i . ', ' . (string)\Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE . "\n";
         $po = $this->ssa->allocReg();

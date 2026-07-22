@@ -1,0 +1,13 @@
+bool(true)
+2
+array(2) {
+  [0]=>
+  int(3)
+  [1]=>
+  int(4)
+}
+bool(true)
+3
+a:1,2 b:3,4 
+bool(true)
+6

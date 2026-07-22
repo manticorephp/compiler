@@ -1,0 +1,6 @@
+ifaces=Named,Shape
+impl Shape=1
+impl Named=1
+area ret=float null=0
+self ret=Circle
+noret has=0

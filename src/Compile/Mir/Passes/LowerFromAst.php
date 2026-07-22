@@ -243,6 +243,13 @@ final class LowerFromAst implements Pass
      */
     private array $constCallables = [];
 
+    /** `$var = new C(...)` → C, for a linear body — lets a later `$var->m(a,b)`
+     *  pack its variadic against C's exact signature (a same-named variadic
+     *  method elsewhere with a different arity otherwise defers the pack). Dropped
+     *  on any reassignment; same best-effort lifecycle as {@see $constCallables}.
+     *  @var array<string, string> */
+    private array $localNewClasses = [];
+
     /** Set true while lowering a body when a `yield` is seen (generator). */
     private bool $sawYield = false;
 
@@ -588,6 +595,7 @@ final class LowerFromAst implements Pass
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
+                $trampSrc .= \Compile\Mir\Passes\ReflectSynth::sourceFor($cd);
             }
             if ($trampSrc !== '') {
                 $trampProg = \Parser\Parser::parseSource("<?php\n" . $trampSrc);
@@ -596,6 +604,25 @@ final class LowerFromAst implements Pass
                     $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
                     $module->addFunction($this->lowerFunction($tstmt->decl));
                 }
+            }
+            // Ф4: attribute-argument + newInstance factories, built as AST
+            // directly (reusing the attribute's own arg Expr subtrees) so array /
+            // enum-case / const args lower for free. rmeta references them by the
+            // ReflectSynth naming.
+            foreach ($this->synthAttrFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $module->addFunction($this->lowerFunction($decl));
+            }
+            // Ф5: a class-constants factory per class with any constant, built as
+            // AST that references each constant by `\C::NAME` — reusing the
+            // existing class-const resolution (self:: / inherited all resolve).
+            foreach ($this->synthConstFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $module->addFunction($this->lowerFunction($decl));
+            }
+            foreach ($this->synthIfaceFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $module->addFunction($this->lowerFunction($decl));
             }
         }
 
@@ -735,6 +762,34 @@ final class LowerFromAst implements Pass
         // Last: the superglobal binding scans EVERY function body (including
         // __main and the closures), so it needs the complete function list.
         $this->injectSuperglobals($module);
+        // Ф5 ReflectionFunction: NOW that every body is lowered, scan for
+        // `new ReflectionFunction('f')` targets and synthesize an invoke
+        // trampoline per invokable one (the metadata row + registry are emitted
+        // from Module::$reflFnMeta). Deferred to here because the scan reads the
+        // lowered MIR bodies, which the early class-synthesis block predates.
+        if ($this->includeReflection) {
+            $this->collectReflFnNames($module);
+            $fnTrampSrc = '';
+            foreach ($module->reflFnMeta as $fn => $mm) {
+                $variadic = false; $byRef = false;
+                foreach ($mm->params as $p) {
+                    if ($p->variadic) { $variadic = true; }
+                    if ($p->byRef) { $byRef = true; }
+                }
+                if ($variadic || $byRef) { continue; }
+                $void = \strtolower($mm->returnType) === 'void';
+                $fnTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::functionTramp(
+                    $fn, $mm->requiredParams(), \count($mm->params), $void);
+            }
+            if ($fnTrampSrc !== '') {
+                $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);
+                foreach ($prog->statements as $s) {
+                    if ($s->kind !== 'Function') { continue; }
+                    $this->fnDecls[$s->decl->name] = $s->decl;
+                    $module->addFunction($this->lowerFunction($s->decl));
+                }
+            }
+        }
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -753,6 +808,256 @@ final class LowerFromAst implements Pass
             $guard = $guard + 1;
         }
         return $d;
+    }
+
+    /**
+     * Populate {@see Module::$reflFnNames} — every free function a
+     * `new ReflectionFunction('literal')` names. A dynamic name cannot be
+     * resolved statically (its function is simply not registered, and the ctor
+     * throws at runtime), the same trade the class registry makes.
+     */
+    private function collectReflFnNames(Module $module): void
+    {
+        foreach ($module->functions as $fn) {
+            if ($fn->body === null) { continue; }
+            $this->scanReflFn($fn->body, $module);
+        }
+    }
+
+    private function scanReflFn(\Compile\Mir\Node $n, Module $module): void
+    {
+        if ($n instanceof \Compile\Mir\NewObj
+            && \ltrim($n->class, '\\') === 'ReflectionFunction'
+            && \count($n->args) >= 1
+            && $n->args[0] instanceof \Compile\Mir\StringConst) {
+            $fn = \ltrim($n->args[0]->value, '\\');
+            if (!isset($module->reflFnMeta[$fn])) {
+                $decl = $this->fnDecls[$fn] ?? null;
+                if ($decl !== null) {
+                    $module->reflFnMeta[$fn] = $this->fnMethodMeta($fn, $decl);
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $this->scanReflFn($c, $module);
+        }
+    }
+
+    /** A free function's declared shape as a {@see MethodMeta}, so it reuses the
+     *  reflection method-row + param-table emission unchanged. */
+    private function fnMethodMeta(string $fn, \Parser\Ast\FunctionDecl $decl): \Compile\Mir\MethodMeta
+    {
+        $params = [];
+        foreach ($decl->params as $p) {
+            $params[] = new \Compile\Mir\ParamMeta(
+                $p->name,
+                $p->typeHint === null ? '' : $p->typeHint,
+                $p->default !== null,
+                $p->byRef,
+                $p->variadic,
+                '', []);
+        }
+        return new \Compile\Mir\MethodMeta(
+            $fn, 'public', false, false, false,
+            $decl->returnType === null ? '' : $decl->returnType,
+            $params, [], '');
+    }
+
+    /**
+     * Ф4 — the attribute factories for every reflectable class: per attribute
+     * occurrence (class / method / property level), a nullary `__mc_attr_args_*`
+     * returning its arguments as an array and a `__mc_attr_new_*` returning a
+     * fresh attribute instance. Built as AST directly, reusing the attribute's
+     * own arg Expr subtrees, so array / enum-case / const arguments lower
+     * through the normal path.
+     *
+     * Only for an attribute whose name resolves to a class we know — this skips
+     * the compiler's own marker attributes (`#[Struct]`, `#[CellArg]`, …), which
+     * are not instantiable classes and whose `new` would fail to compile.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthAttrFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            $decl = $this->classDecls[$cd->name] ?? null;
+            if ($decl === null) { continue; }
+            $this->attrFactoriesFor($cd->name, 'c', '', $decl->attributes, $out);
+            foreach ($decl->methods as $m) {
+                $this->attrFactoriesFor($cd->name, 'm', $m->name, $m->attributes, $out);
+            }
+            foreach ($decl->properties as $prop) {
+                $this->attrFactoriesFor($cd->name, 'p', $prop->name, $prop->attributes, $out);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Append the args + new factory for each known-class attribute in `$attrs`,
+     * keyed by the site (declaring class / kind / member / index).
+     *
+     * @param \Parser\Ast\AttributeNode[] $attrs
+     * @param \Parser\Ast\FunctionDecl[]  $out  appended to, by reference
+     */
+    private function attrFactoriesFor(string $class, string $kind, string $member, array $attrs, array &$out): void
+    {
+        $k = -1;
+        foreach ($attrs as $attr) {
+            $k = $k + 1;
+            if (!isset($this->classDecls[\ltrim($attr->name, '\\')])) { continue; }
+            $span = $attr->span;
+            // args factory: return [0 => <arg0>, 'name' => <namedArgVal>, …]
+            $elems = [];
+            $pos = 0;
+            foreach ($attr->args as $a) {
+                if ($a instanceof \Parser\Ast\NamedArg) {
+                    $elems[] = new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string($a->name, $span), $a->value);
+                } else {
+                    $elems[] = new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::int($pos, $span), $a);
+                    $pos = $pos + 1;
+                }
+            }
+            $argsBody = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $span), $span),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
+                [], 'array', $argsBody, $span);
+            // new factory: return new <AttrClass>(<original args, named preserved>);
+            $newBody = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::new_($attr->name, $attr->args, $span), $span),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
+                [], 'object', $newBody, $span);
+        }
+    }
+
+    /**
+     * Ф5 — one `__mc_consts_<C>(): array` per class that has any constant,
+     * returning `['NAME' => \C::NAME, …]`. Referencing each constant by its
+     * qualified name reuses the existing const resolution (a `self::` or
+     * inherited value resolves in the owning class's scope), so no value
+     * expression is re-lowered out of context.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthConstFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            /** @var array<string, \Parser\Ast\Span> $names name → its span */
+            $names = [];
+            $seen = [];
+            $visited = [];
+            $this->collectConstNames($cd->name, $names, $seen, $visited);
+            if ($names === []) { continue; }
+            $fqn = '\\' . \ltrim($cd->name, '\\');
+            $elems = [];
+            foreach ($names as $cn => $span) {
+                $elems[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string($cn, $span),
+                    \Parser\Ast\Expr::staticAccess($fqn, $cn, $span));
+            }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::constsFn($cd->name), [], 'array', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
+     * Gather a class's constant names (own, then parents, interfaces and traits),
+     * first declaration winning — the same reach as {@see LowerClasses::findClassConst}.
+     *
+     * @param array<string, \Parser\Ast\Span> $names   name → span, appended
+     * @param array<string, bool>             $seen    names already taken
+     * @param array<string, bool>             $visited classes already walked
+     */
+    private function collectConstNames(string $class, array &$names, array &$seen, array &$visited): void
+    {
+        $c = \ltrim($class, '\\');
+        if (isset($visited[$c])) { return; }
+        $visited[$c] = true;
+        $decl = $this->classDecls[$c] ?? null;
+        if ($decl === null) { return; }
+        foreach ($decl->consts as $const) {
+            if (isset($seen[$const->name])) { continue; }
+            $seen[$const->name] = true;
+            $names[$const->name] = $const->span;
+        }
+        foreach ($decl->uses as $t)       { $this->collectConstNames($t, $names, $seen, $visited); }
+        foreach ($decl->extends as $p)    { $this->collectConstNames($p, $names, $seen, $visited); }
+        foreach ($decl->implements as $i) { $this->collectConstNames($i, $names, $seen, $visited); }
+    }
+
+    /**
+     * Ф5 — one `__mc_ifaces_<C>(): array` per class implementing any interface,
+     * returning its transitive interface-name list as a `string[]`.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthIfaceFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $names = [];
+            $visited = [];
+            $this->collectInterfaceNames($cd->name, $names, $visited);
+            if ($names === []) { continue; }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $elems = [];
+            foreach ($names as $iname => $_) {
+                $elems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($iname, $sp));
+            }
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::ifacesFn($cd->name), [], 'array', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
+     * A class's transitive interface names. A class contributes its `implements`
+     * (+ each interface's parents); an interface contributes its `extends`; a
+     * parent class contributes its own interfaces.
+     *
+     * @param array<string, bool> $names   interface name → true, appended
+     * @param array<string, bool> $visited classes already walked
+     */
+    private function collectInterfaceNames(string $class, array &$names, array &$visited): void
+    {
+        $c = \ltrim($class, '\\');
+        if (isset($visited[$c])) { return; }
+        $visited[$c] = true;
+        $decl = $this->classDecls[$c] ?? null;
+        if ($decl === null) { return; }
+        if (($decl->kind ?? 'class') === 'interface') {
+            foreach ($decl->extends as $e) {
+                $names[\ltrim($e, '\\')] = true;
+                $this->collectInterfaceNames($e, $names, $visited);
+            }
+            return;
+        }
+        foreach ($decl->implements as $i) {
+            $names[\ltrim($i, '\\')] = true;
+            $this->collectInterfaceNames($i, $names, $visited);
+        }
+        foreach ($decl->extends as $e) {
+            $this->collectInterfaceNames($e, $names, $visited);
+        }
     }
 
     /**
@@ -897,6 +1202,7 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
+        $this->localNewClasses = [];
         // Inside a `#[TypeDef]` body `$this` IS the carrier: there is no object to
         // point at. `__invoke` — the normaliser — takes no `$this` at all: it is a
         // pure carrier→carrier function, and `new C($x)` calls it directly. (Zend
@@ -1678,6 +1984,11 @@ final class LowerFromAst implements Pass
         unset($this->constCallables[$name]);
         $info = $this->callableLiteralInfo($value);
         if ($info !== null) { $this->constCallables[$name] = $info; }
+        // Track a `$var = new C(...)` binding for receiver-class-aware variadic
+        // packing; any other assignment drops it (a later `$var->m()` then falls
+        // back to the by-name union).
+        unset($this->localNewClasses[$name]);
+        if ($value->kind === 'New') { $this->localNewClasses[$name] = \ltrim($value->class, '\\'); }
     }
 
     /** Classify a callable-literal assignment value, or null. */
@@ -2053,6 +2364,7 @@ final class LowerFromAst implements Pass
     private function methodDeclName(\Parser\Ast\MethodDecl $m): string { return $m->name; }
     /** @return \Parser\Ast\Param[] */
     private function methodDeclParams(\Parser\Ast\MethodDecl $m): array { return $m->params; }
+    private function methodDeclReturnType(\Parser\Ast\MethodDecl $m): ?string { return $m->returnType; }
 
     /**
      * `[$a, $b] = $rhs` / `["k" => $v] = $rhs` — stash the RHS in a
@@ -2333,6 +2645,51 @@ final class LowerFromAst implements Pass
         return $found;
     }
 
+    /**
+     * The static class of a method-call receiver EXPRESSION, when lowering can
+     * tell — a `new C(...)` receiver, or a `$x->m(...)` chain whose `m` has a
+     * consistent class return type across all classes that declare it. '' when
+     * unknown (a bare variable — its type waits on InferTypes). Lets a chained
+     * `$r->getMethod('x')->invoke(a, b)` pack its variadic against the ACTUAL
+     * ReflectionMethod::invoke rather than the by-name union, which breaks when a
+     * same-named variadic method (ReflectionFunction::invoke) disagrees on arity.
+     */
+    private function receiverClassHint(\Parser\Ast\Expr $obj): string
+    {
+        if ($obj->kind === 'New') { return \ltrim($obj->class, '\\'); }
+        if ($obj->kind === 'MethodCall') { return $this->methodReturnClassByName($obj->method); }
+        if ($obj->kind === 'Variable') { return $this->localNewClasses[$this->varName($obj)] ?? ''; }
+        return '';
+    }
+
+    /**
+     * The class a method NAME returns, if every class declaring it agrees on a
+     * single class return type (leading `?` stripped); '' when they disagree, a
+     * declaration has no / a non-class return type, or none declares it.
+     */
+    private function methodReturnClassByName(string $method): string
+    {
+        $ret = '';
+        foreach ($this->classDecls as $cd) {
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) !== $method) { continue; }
+                $rt = $this->methodDeclReturnType($m);
+                if ($rt === null || $rt === '') { return ''; }
+                $rt = \ltrim($rt, '\\');
+                if ($rt !== '' && $rt[0] === '?') { $rt = \substr($rt, 1); }
+                // A scalar / pseudo return type is not a class receiver.
+                $low = \strtolower($rt);
+                if ($low === 'int' || $low === 'float' || $low === 'string' || $low === 'bool'
+                    || $low === 'array' || $low === 'void' || $low === 'mixed'
+                    || $low === 'self' || $low === 'static' || $low === 'never') { return ''; }
+                if (!isset($this->classDecls[$rt])) { return ''; }
+                if ($ret !== '' && $ret !== $rt) { return ''; }
+                $ret = $rt;
+            }
+        }
+        return $ret;
+    }
+
     private function resolveMethodParams(string $class, string $method): ?array
     {
         $c = $class;
@@ -2415,6 +2772,15 @@ final class LowerFromAst implements Pass
             && $expr->object->name === 'this'
             && $this->currentLowerClass !== '') {
             $params = $this->resolveMethodParams($this->currentLowerClass, $expr->method);
+        }
+        // A statically-knowable receiver (a `new C(...)` or a chained
+        // `$x->getMethod(...)->` whose return class is unambiguous) packs against
+        // the EXACT method — the only correct choice when a same-named variadic
+        // method elsewhere disagrees on arity (ReflectionMethod::invoke vs
+        // ReflectionFunction::invoke), where the by-name union below defers.
+        if ($params === null) {
+            $hint = $this->receiverClassHint($expr->object);
+            if ($hint !== '') { $params = $this->resolveMethodParams($hint, $expr->method); }
         }
         // A variable-receiver variadic call (`$x->m(a,b,c)`) must STILL pack its
         // trailing args into a vec — but the receiver class isn't resolved until

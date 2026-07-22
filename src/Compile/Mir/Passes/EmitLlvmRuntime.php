@@ -53,7 +53,8 @@ trait EmitLlvmRuntime
             $out .= "  %ocap = load i64, ptr %capp\n";
             $out .= "  %flagp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
             $out .= "  %flags = load i64, ptr %flagp\n";
-            $out .= "  %ishash = icmp ne i64 %flags, 0\n";
+            $out .= "  %flagsh = and i64 %flags, " . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
+            $out .= "  %ishash = icmp ne i64 %flagsh, 0\n";
             $out .= "  %esz = select i1 %ishash, i64 " . (string)\Compile\MemoryAbi::ARRAY_ENTRY_SIZE . ", i64 " . $aesz . "\n";
             $out .= "  %obody = mul i64 %ocap, %esz\n";
             $out .= "  %obytes = add i64 %obody, " . $ahdr . "\n";
@@ -812,13 +813,23 @@ trait EmitLlvmRuntime
             $defs .= $this->strGlobalDef($sym, $mn);
             $pp = $this->rmetaParamTable($mm, $id, $i);
             $defs .= $pp[0];
+            $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
+            $ap = $this->attrTableFor($mm->attributes, $mdecl, 'm', $mn, '@.rmeta.mattr.' . $id . '.' . (string)$i);
+            $defs .= $ap[0];
+            // Always a real string (empty when untyped), never a null pointer:
+            // hasReturnType()/getReturnType() compare it to "" BY VALUE, and a
+            // null pointer read back is 0, which is `!== ""` — a false positive.
+            $rsym = '@.rmeta.mret.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($rsym, $mm->returnType);
+            $retFld = $this->strSymBytes($rsym);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false),
                 $this->methodTrampField($cls, $mm, $mn),
                 $this->methodArity($mm),
                 \count($mm->params),
-                $pp[1]);
+                $pp[1],
+                $ap[1], $ap[2], $retFld);
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
@@ -869,14 +880,19 @@ trait EmitLlvmRuntime
     }
 
     /**
-     * The property table for one class. Declared instance properties, in slot
-     * order — `propertyNames` is the layout, so this is also the order php
-     * reports. Static props are a separate list and are not included yet.
+     * The property table for one class. Every property php's getProperties()
+     * reports — instance AND static — in {@see \Compile\Mir\ClassDef::$propertyMeta}
+     * order (inherited first, then own), carrying real visibility / static /
+     * readonly flags now that {@see \Compile\Mir\PropertyMeta} records them.
      *
-     * Visibility is not recorded in ClassDef (only readonly is), so every entry
-     * reports PUBLIC for now. That is a KNOWN GAP, not an accident: a serializer
-     * asking `isPrivate()` would be told the wrong thing, so ReflectionProperty
-     * (Ф3) must carry visibility into ClassDef first.
+     * A property row reuses the shared 48-byte row: `name@0`, `flags@8` (member
+     * flags), tramp/arity/nparams zero, and `params@40` points at a
+     * `{ ptr typeName, ptr getter, ptr setter }` extra struct (the same slot a
+     * method row uses for its parameter table). The accessors are
+     * {@see ReflectSynth}'s synthesized `__mc_pget_/pset_` functions, referenced
+     * by symbol only when actually synthesized (an undefined DATA ref is a link
+     * error — the same guard as {@see methodTrampField}). getValue/setValue call
+     * them indirectly.
      *
      * @return string[] [globalDef, "i64 n, ptr sym"]
      */
@@ -885,19 +901,87 @@ trait EmitLlvmRuntime
         $rows = [];
         $defs = '';
         $i = 0;
-        foreach ($cls->propertyNames as $pn) {
+        foreach ($cls->propertyMeta as $pn => $pm) {
             $sym = '@.rmeta.p.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $pn);
-            $ro = isset($cls->propertyReadonly[$pn]);
-            // Properties carry only name + flags; tramp/arity/nparams/params zero.
+            // Type name — the hint AS WRITTEN (`?App\Foo`). getType() derives
+            // nullability + the clean name from it in the prelude; a property has
+            // no ALLOWS_NULL flag slot the way a parameter does. Always a real
+            // string (empty when untyped) so hasType()/getType() compare it to ""
+            // BY VALUE — a null pointer reads back 0, which is `!== ""`.
+            $tsym = '@.rmeta.pty.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($tsym, $pm->typeHint);
+            $typeFld = 'ptr ' . $this->strSymBytes($tsym);
+            $decl = $pm->declaringClass !== '' ? $pm->declaringClass : $cls->name;
+            $getFld = $this->accessorField($decl, $pm->name, false);
+            $setFld = $this->accessorField($decl, $pm->name, true);
+            $extra = 'null';
+            if ($typeFld !== 'null' || $getFld !== 'ptr null' || $setFld !== 'ptr null') {
+                $exSym = '@.rmeta.px.' . $id . '.' . (string)$i;
+                $tf = $typeFld === 'null' ? 'ptr null' : $typeFld;
+                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr } { '
+                       . $tf . ', ' . $getFld . ', ' . $setFld . " }\n";
+                $extra = $exSym;
+            }
+            $ap = $this->attrTableFor($pm->attributes, $decl, 'p', $pm->name, '@.rmeta.pattr.' . $id . '.' . (string)$i);
+            $defs .= $ap[0];
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
-                $this->memberFlags('public', false, false, false, $ro),
-                'null', 0, 0, 'null');
+                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly),
+                'null', 0, 0, $extra,
+                $ap[1], $ap[2]);
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows);
         return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
+     * A property accessor field: `ptr @manticore_…` when {@see ReflectSynth}
+     * synthesized it (guarded by its presence in the signature table — a data
+     * reference to an undefined symbol is a link error), else `ptr null`.
+     */
+    private function accessorField(string $declClass, string $prop, bool $setter): string
+    {
+        $sym = \Compile\Mir\Passes\ReflectSynth::propAccessor($declClass, $prop, $setter);
+        if (!isset($this->sigs->paramTypes[$sym])) { return 'ptr null'; }
+        return 'ptr @manticore_' . $this->mangle($sym);
+    }
+
+    /**
+     * The attribute table for one member (Ф4): a `{name, args_factory,
+     * new_factory}` row per attribute whose factory {@see ReflectSynth}
+     * synthesized — the presence of the args factory in the signature table is
+     * what tells a real attribute class from a compiler marker (`#[Struct]` …),
+     * whose factory was never emitted. `$declClass` is the DECLARING class (an
+     * inherited method's attrs key by its origin, where the factory was made).
+     *
+     * @param string[] $names attribute names, in declaration order (the index is
+     *                        the factory site key, so a skipped one keeps its k)
+     * @return array{0:string,1:int,2:string} [defs, nattrs, tableSym|'null']
+     */
+    private function attrTableFor(array $names, string $declClass, string $kind, string $member, string $sym): array
+    {
+        $rows = [];
+        $defs = '';
+        $k = -1;
+        foreach ($names as $an) {
+            $k = $k + 1;
+            $argsFn = \Compile\Mir\Passes\ReflectSynth::attrFn($declClass, $kind, $member, $k, false);
+            if (!isset($this->sigs->paramTypes[$argsFn])) { continue; }
+            $newFn = \Compile\Mir\Passes\ReflectSynth::attrFn($declClass, $kind, $member, $k, true);
+            $nameSym = $sym . '.n.' . (string)$k;
+            $defs .= $this->strGlobalDef($nameSym, $an);
+            $argsFld = 'ptr @manticore_' . $this->mangle($argsFn);
+            $newFld = isset($this->sigs->paramTypes[$newFn])
+                ? 'ptr @manticore_' . $this->mangle($newFn) : 'ptr null';
+            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaAttrRow($this->strSymBytes($nameSym), $argsFld, $newFld);
+        }
+        $n = \count($rows);
+        if ($n === 0) { return [$defs, 0, 'null']; }
+        $defs .= $sym . ' = linkonce_odr constant [' . (string)$n . ' x '
+               . \Compile\Mir\RuntimeLibrary::rmetaAttrType() . '] [' . \implode(', ', $rows) . "]\n";
+        return [$defs, $n, $sym];
     }
 
     /**
@@ -962,6 +1046,74 @@ trait EmitLlvmRuntime
         if ($final)    { $f = $f | \Compile\MemoryAbi::RMETA_MEM_FINAL; }
         if ($readonly) { $f = $f | \Compile\MemoryAbi::RMETA_MEM_READONLY; }
         return $f;
+    }
+
+    /**
+     * Ф5 — a metadata row `@__mc_fnmeta_<f>` per reflected free function, plus
+     * a name→row registry (`@__mc_refl_fn_head` + `__mc_refl_fn_find`). A
+     * function reuses the method ROW layout unchanged (flags 0, no attrs); its
+     * invoke trampoline is {@see TrampolineSynth::fnTrampBase}, referenced only
+     * when synthesized (variadic / by-ref functions have none → invoke throws).
+     *
+     * @param string[] $fnRegCtors appended with each registry ctor symbol, to
+     *                             join the single @llvm.global_ctors array
+     */
+    private function fnMetaRuntime(array &$fnRegCtors): string
+    {
+        // head + find are emitted UNCONDITIONALLY (even with no reflected
+        // functions): the `__mc_refl_fn_find` builtin a ReflectionFunction ctor
+        // calls needs the symbol defined, and a dynamic-name program registers
+        // none. `define` becomes linkonce_odr (linkonceRuntime) so it coalesces;
+        // dead-strip drops it when unused.
+        $out = '';
+        foreach ($this->reflFnMeta as $fn => $mm) {
+            $id = $this->mangle($fn);
+            $nameSym = '@.fnmeta.name.' . $id;
+            $out .= $this->strGlobalDef($nameSym, $fn);
+            $pp = $this->rmetaParamTable($mm, $id, 0);
+            $out .= $pp[0];
+            $rsym = '@.fnmeta.ret.' . $id;
+            $out .= $this->strGlobalDef($rsym, $mm->returnType);
+            $trampSym = \Compile\Mir\Passes\TrampolineSynth::fnTrampBase($fn);
+            $trampFld = isset($this->sigs->paramTypes[$trampSym])
+                ? '@manticore_' . $this->mangle($trampSym) : 'null';
+            $row = \Compile\Mir\RuntimeLibrary::rmetaRow(
+                $this->strSymBytes($nameSym), 0, $trampFld,
+                $this->methodArity($mm), \count($mm->params), $pp[1],
+                0, 'null', $this->strSymBytes($rsym));
+            $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";
+            $node = '@__mc_reflfn_node_' . $id;
+            $out .= $node . ' = linkonce_odr global { ptr, ptr, i64 } { ptr @__mc_fnmeta_'
+                  . $id . ", ptr null, i64 0 }\n";
+            $out .= 'define void @__mc_reflfn_reg_' . $id . "() {\nentry:\n";
+            $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
+            $out .= "  %fv = load i64, ptr %f\n";
+            $out .= "  %done = icmp ne i64 %fv, 0\n";
+            $out .= "  br i1 %done, label %skip, label %reg\n";
+            $out .= "reg:\n  store i64 1, ptr %f\n";
+            $out .= "  %h = load ptr, ptr @__mc_refl_fn_head\n";
+            $out .= '  %np = getelementptr i8, ptr ' . $node . ", i64 8\n";
+            $out .= "  store ptr %h, ptr %np\n";
+            $out .= '  store ptr ' . $node . ", ptr @__mc_refl_fn_head\n";
+            $out .= "  br label %skip\nskip:\n  ret void\n}\n";
+            $fnRegCtors[] = '@__mc_reflfn_reg_' . $id;
+        }
+        $noff = (string)\Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET;
+        $out .= "@__mc_refl_fn_head = linkonce_odr global ptr null\n";
+        $out .= "define i64 @__mc_refl_fn_find(ptr %name) {\nentry:\n";
+        $out .= "  %p0 = load ptr, ptr @__mc_refl_fn_head\n  br label %loop\n";
+        $out .= "loop:\n  %p = phi ptr [ %p0, %entry ], [ %next, %cont ]\n";
+        $out .= "  %end = icmp eq ptr %p, null\n  br i1 %end, label %miss, label %body\n";
+        $out .= "body:\n  %m = load ptr, ptr %p\n";
+        $out .= '  %nmp = getelementptr i8, ptr %m, i64 ' . $noff . "\n";
+        $out .= "  %nm = load ptr, ptr %nmp\n";
+        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n  %r = ptrtoint ptr %m to i64\n  ret i64 %r\n";
+        $out .= "cont:\n  %nxp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %next = load ptr, ptr %nxp\n  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
     }
 
     private function dropRuntimeBody(): string
@@ -1063,9 +1215,24 @@ trait EmitLlvmRuntime
             $pPair = $this->rmetaPropTable($cls, $id);
             $descs .= $pPair[0];
             $pFlds = $pPair[1];
+            $aPair = $this->attrTableFor($cls->attributes, $cls->name, 'c', '', '@.rmeta.cattr.' . $id);
+            $descs .= $aPair[0];
+            $attrsFlds = 'i64 ' . (string)$aPair[1] . ', '
+                       . ($aPair[2] === 'null' ? 'ptr null' : 'ptr ' . $aPair[2]);
+            $constsFnFld = 'ptr null';
+            $constsFn = \Compile\Mir\Passes\ReflectSynth::constsFn($cls->name);
+            if (isset($this->sigs->paramTypes[$constsFn])) {
+                $constsFnFld = 'ptr @manticore_' . $this->mangle($constsFn);
+            }
+            $ifacesFnFld = 'ptr null';
+            $ifacesFn = \Compile\Mir\Passes\ReflectSynth::ifacesFn($cls->name);
+            if (isset($this->sigs->paramTypes[$ifacesFn])) {
+                $ifacesFnFld = 'ptr @manticore_' . $this->mangle($ifacesFn);
+            }
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
-                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls));
+                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
+                $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.
@@ -1084,11 +1251,16 @@ trait EmitLlvmRuntime
         // stays sound. They carry no parent/method/property tables — nothing
         // reads those for a name-existence answer.
         $descs .= $this->reflNameOnlyEntries($reflIds);
+        // Ф5 ReflectionFunction: a metadata row + registry entry per reflected
+        // free function. Its startup ctors join the SAME @llvm.global_ctors array
+        // (LLVM permits only one), so they are handed to reflRegistry below.
+        $fnRegCtors = [];
+        $descs .= $this->fnMetaRuntime($fnRegCtors);
         // The name→rmeta registry: list head, the global_ctors array that fills
         // it, and __mc_refl_find. Nothing is emitted for a module with no
         // classes, so a program that declares none carries no startup cost.
         $this->rt->needsStrcmp = true;
-        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds);
+        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.

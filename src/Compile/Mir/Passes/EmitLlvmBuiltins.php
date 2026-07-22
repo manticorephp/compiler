@@ -156,6 +156,30 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_param_name')         { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_NAME_OFFSET, true); }
         if ($name === '__mc_refl_param_type')         { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_TYPE_OFFSET, true); }
         if ($name === '__mc_refl_param_flags')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_FLAGS_OFFSET, false); }
+        if ($name === '__mc_refl_prow')               { return $this->biMcReflProw($args); }
+        if ($name === '__mc_refl_prow_type')          { return $this->emitReflFieldI64($args, 0, true); }
+        if ($name === '__mc_refl_prop_getter')        { return $this->emitReflFieldI64($args, 8, true); }
+        if ($name === '__mc_refl_prop_setter')        { return $this->emitReflFieldI64($args, 16, true); }
+        if ($name === '__mc_refl_call1')              { return $this->biMcReflCall1($args); }
+        if ($name === '__mc_refl_prop_set')           { return $this->biMcReflPropSet($args); }
+        if ($name === '__mc_refl_nprops')             { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NPROPS_OFFSET, false); }
+        if ($name === '__mc_refl_props_base')         { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_PROPS_OFFSET, true); }
+        if ($name === '__mc_refl_nmethods')           { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NMETHODS_OFFSET, false); }
+        if ($name === '__mc_refl_methods_base')       { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_METHODS_OFFSET, true); }
+        if ($name === '__mc_refl_row_name')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET, true, \Compile\MemoryAbi::RMETA_ROW_SIZE); }
+        if ($name === '__mc_refl_class_nattrs')       { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NATTRS_OFFSET, false); }
+        if ($name === '__mc_refl_class_attrs')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ATTRS_OFFSET, true); }
+        if ($name === '__mc_refl_row_nattrs')         { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_NATTRS_OFFSET, false); }
+        if ($name === '__mc_refl_row_attrs')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_ATTRS_OFFSET, true); }
+        if ($name === '__mc_refl_attr_name')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NAME_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_args')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ARGS_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_new')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NEW_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_call0')              { return $this->biMcReflCall0($args); }
+        if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
+        if ($name === '__mc_refl_ifaces_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_IFACES_FN_OFFSET, true); }
+        if ($name === '__mc_refl_row_rettype')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_RETTYPE_OFFSET, true); }
+        if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
+        if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
@@ -3221,6 +3245,23 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `__mc_refl_fn_find($name)` — a free function's metadata-row address (as an
+     * int) by name, or 0. The function-registry twin of {@see biMcReflFind}
+     * (Ф5, ReflectionFunction).
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflFnFind(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_fn_find(ptr ' . $sp . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
      * `__mc_refl_member($h, $name, $wantMethods)` — a member's flags + 1, or 0
      * when absent. The `+1` keeps one i64 answering both "present?" and "what?"
      * (a public non-static member's flags are 0).
@@ -3298,6 +3339,128 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `__mc_refl_prow($h, $name)` — a property row's address (as an int), or 0.
+     * The prelude's ReflectionProperty caches it, then reads the type + accessor
+     * pointers off the extra struct at its `params` slot. Property-table twin of
+     * {@see biMcReflMrow}.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflProw(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToPtr();
+        $np = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_prow(i64 ' . $h . ', ptr ' . $np . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_call1($fn, $obj)` — call a synthesized property GETTER
+     * indirectly: `(i64 recv) -> i64 cell`. `$obj` is the receiver (untagged by
+     * the getter's typed `$t`; ignored for a static property). 0 fn ⇒ 0 (the
+     * prelude checks and throws first). Returns the boxed value cell.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCall1(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $fn = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $recv = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'c1.ok.' . $lbl;
+        $noL = 'c1.no.' . $lbl;
+        $endL = 'c1.end.' . $lbl;
+        $fz = $this->ssa->allocReg();
+        $out .= '  ' . $fz . ' = icmp eq i64 ' . $fn . ", 0\n";
+        $out .= '  br i1 ' . $fz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $fn . " to ptr\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = call i64 ' . $fp . '(i64 ' . $recv . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n  br label %" . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $cv . ', %' . $okL . ' ], [ 0, %' . $noL . " ]\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_call0($fn)` — call a synthesized nullary factory indirectly:
+     * `() -> i64 cell`. The attribute args / newInstance factories. 0 fn ⇒ 0.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCall0(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $fn = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'c0.ok.' . $lbl;
+        $noL = 'c0.no.' . $lbl;
+        $endL = 'c0.end.' . $lbl;
+        $fz = $this->ssa->allocReg();
+        $out .= '  ' . $fz . ' = icmp eq i64 ' . $fn . ", 0\n";
+        $out .= '  br i1 ' . $fz . ', label %' . $noL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $fn . " to ptr\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = call i64 ' . $fp . "()\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $noL . ":\n  br label %" . $endL . "\n";
+        $out .= $endL . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $cv . ', %' . $okL . ' ], [ 0, %' . $noL . " ]\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_prop_set($fn, $obj, $val)` — call a synthesized property SETTER
+     * indirectly: `(i64 recv, i64 val cell) -> void`. No-op when fn is 0.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflPropSet(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $fn = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $recv = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToI64();
+        $val = $this->lastValue;
+        $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
+        $okL = 'ps.ok.' . $lbl;
+        $endL = 'ps.end.' . $lbl;
+        $fz = $this->ssa->allocReg();
+        $out .= '  ' . $fz . ' = icmp eq i64 ' . $fn . ", 0\n";
+        $out .= '  br i1 ' . $fz . ', label %' . $endL . ', label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $fn . " to ptr\n";
+        $out .= '  call void ' . $fp . '(i64 ' . $recv . ', i64 ' . $val . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        // A void builtin still yields a value slot; 0 is never read.
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . " = add i64 0, 0\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
      * Load an i64 field (or a ptr field, ptrtoint'd) at `$off` from a row/rmeta
      * handle in `$args[0]`; 0 when the handle is null. The reader half of the
      * `__mc_refl_row_*` builtins.
@@ -3346,8 +3509,9 @@ trait EmitLlvmBuiltins
      *
      * @param Node[] $args
      */
-    private function emitReflParamField(array $args, int $off, bool $isPtr): string
+    private function emitReflParamField(array $args, int $off, bool $isPtr, ?int $stride = null): string
     {
+        $stride = $stride ?? \Compile\MemoryAbi::RMETA_PARAM_SIZE;
         $out = $this->emitNode($args[0]);
         $base = $this->lastValue;
         $out .= $this->emitNode($args[1]);
@@ -3356,7 +3520,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $bp . ' = inttoptr i64 ' . $base . " to ptr\n";
         $eoff = $this->ssa->allocReg();
         $out .= '  ' . $eoff . ' = mul i64 ' . $idx . ', '
-              . (string)\Compile\MemoryAbi::RMETA_PARAM_SIZE . "\n";
+              . (string)$stride . "\n";
         $ep = $this->ssa->allocReg();
         $out .= '  ' . $ep . ' = getelementptr i8, ptr ' . $bp . ', i64 ' . $eoff . "\n";
         $fp = $this->ssa->allocReg();

@@ -1,0 +1,5 @@
+name=VERSION value=2.1 decl=Config pub=1
+consts: API=3,MAX=50,SCALE=2,VERSION=2.1
+getRC MAX=50
+getRC API=3
+bool(false)

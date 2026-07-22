@@ -107,6 +107,14 @@ final class Module
      *  bare `array` erases it (values read back as raw pointer ints). */
     public array $methodDisplay = [];
 
+    /** @var array<string, \Compile\Mir\MethodMeta> free functions a
+     *  `new ReflectionFunction('f')` names literally → their declared shape (Ф5).
+     *  Each gets an `@__mc_fnmeta_<f>` metadata row + an invoke trampoline + a
+     *  registry entry. A MethodMeta (not a class member) reuses the method row /
+     *  param-table emission machinery unchanged. Declared LAST — a new field
+     *  mid-struct shifts later offsets, a self-host layout hazard. */
+    public array $reflFnMeta = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude → linkonce_odr. */
     public function addGlobalCell(string $name, Node $default, bool $isPrelude = false): void
     {
