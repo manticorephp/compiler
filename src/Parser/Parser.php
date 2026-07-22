@@ -1808,8 +1808,10 @@ final class Parser
             // value. Lower to `is_a($x, $cls)` (identical semantics for an object
             // LHS); the is_a builtin resolves the runtime class name against the
             // module's classes. A written class name keeps the static path.
+            // parsePostfix so the RHS may be a full access expression, e.g.
+            // `$x instanceof $arg->typeName` (symfony) or `$x instanceof $a[0]`.
             if ($this->check(TokenKind::Variable)) {
-                $classExpr = $this->parsePrimary();
+                $classExpr = $this->parsePostfix($this->parsePrimary());
                 return Expr::call('is_a', [$left, $classExpr], $span);
             }
             $class = $this->parseClassName();
@@ -2195,10 +2197,48 @@ final class Parser
             // accept multiple comma-separated args (isset, empty, unset,
             // list — only as expressions; the statement form for unset
             // is handled at the statement level).
-            if ($lower === 'isset' || $lower === 'empty' || $lower === 'unset' || $lower === 'list') {
+            if ($lower === 'isset' || $lower === 'empty' || $lower === 'unset') {
                 $this->advance();
                 $args = $this->parseArgList();
                 return Expr::call($lower, $args, $span);
+            }
+            // `list($a, , $c)` is just the parenthesised spelling of the `[$a, , $c]`
+            // destructuring target — same elements, same holes, same keyed form
+            // (`list('k' => $v)`). Parse it as an array literal so it shares the
+            // hole handling and the one destructure lowering, exactly as
+            // `array(…)` mirrors `[…]`.
+            if ($lower === 'list') {
+                $next = $this->tokens[$this->pos + 1] ?? null;
+                if ($next !== null && $next->kind === TokenKind::OpenParen) {
+                    $this->advance(); // 'list'
+                    $this->advance(); // '('
+                    return $this->finishArrayLiteral($span, TokenKind::CloseParen, "expected ')' to close list()");
+                }
+            }
+            // require / include (+ _once): in whole-program AOT the target's
+            // declarations are already compiled in — composer discovery and the
+            // src scan pull every autoload file, including the one being required
+            // — so the runtime load is redundant. Parse and DISCARD the path
+            // operand, lowering to a no-op that yields null (PHP's include of a
+            // file with no `return` yields int 1; nothing downstream in a compiled
+            // program depends on that). A future step could resolve the path at
+            // compile time and merge a genuinely external file into the build; the
+            // value-returning `$x = require 'data.php'` form is not modelled yet.
+            if ($lower === 'require' || $lower === 'require_once'
+                    || $lower === 'include' || $lower === 'include_once') {
+                $this->advance();
+                $this->parseExpression(); // consume + discard the path
+                return Expr::null($span);
+            }
+            // Legacy long-array syntax `array(a, b, k => v)` — identical to
+            // `[a, b, k => v]`; still common in generated / data files.
+            if ($lower === 'array') {
+                $next = $this->tokens[$this->pos + 1] ?? null;
+                if ($next !== null && $next->kind === TokenKind::OpenParen) {
+                    $this->advance(); // 'array'
+                    $this->advance(); // '('
+                    return $this->finishArrayLiteral($span, TokenKind::CloseParen, "expected ')' to close array()");
+                }
             }
             // `throw` is also valid as an expression in PHP 8+
             // (`$x ?? throw new Exception()`).
@@ -2400,18 +2440,43 @@ final class Parser
     private function parseArrayLiteral(Span $span): Expr
     {
         $this->advance(); // '['
+        return $this->finishArrayLiteral($span, TokenKind::CloseBracket, "expected ']' to close array");
+    }
+
+    /**
+     * Element loop shared by the `[ … ]` short form and the legacy `array( … )`
+     * long form; the caller has already consumed the opening token. `$closeKind`
+     * is the matching close token (`]` or `)`).
+     */
+    private function finishArrayLiteral(Span $span, string $closeKind, string $closeMsg): Expr
+    {
         $elements = [];
-        if (!$this->check(TokenKind::CloseBracket)) {
-            $elements[] = $this->parseArrayElement();
+        if (!$this->check($closeKind)) {
+            $elements[] = $this->parseArrayElementOrHole($span);
             while ($this->match(TokenKind::Comma)) {
-                if ($this->check(TokenKind::CloseBracket)) {
+                if ($this->check($closeKind)) {
                     break;
                 }
-                $elements[] = $this->parseArrayElement();
+                $elements[] = $this->parseArrayElementOrHole($span);
             }
         }
-        $this->expect(TokenKind::CloseBracket, "expected ']' to close array");
+        $this->expect($closeKind, $closeMsg);
         return Expr::arrayLit($elements, $span);
+    }
+
+    /**
+     * A list element, or a destructuring hole. `[$a, , $c] = …` skips a position:
+     * there is no hole node, so the empty slot binds to a write-only throwaway
+     * variable, keeping the later targets on their indices. (A hole is only valid
+     * in a destructuring target; in a value array it is invalid PHP, but a stray
+     * temp there is harmless.)
+     */
+    private function parseArrayElementOrHole(Span $span): ArrayElement
+    {
+        if ($this->check(TokenKind::Comma)) {
+            return new ArrayElement(null, Expr::variable('__mc_destructure_skip', $span));
+        }
+        return $this->parseArrayElement();
     }
 
     private function parseArrayElement(): ArrayElement
