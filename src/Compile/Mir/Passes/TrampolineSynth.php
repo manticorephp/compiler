@@ -66,12 +66,34 @@ final class TrampolineSynth
     public static function isSynthReturn(string $name): bool
     {
         return \str_contains($name, '__mc_rtramp_')
+            || \str_contains($name, '__mc_fntramp_')
             || \str_contains($name, '__mc_pget_')
             || \str_contains($name, '__mc_pset_')
             || \str_contains($name, '__mc_attr_args_')
             || \str_contains($name, '__mc_attr_new_')
             || \str_contains($name, '__mc_consts_')
             || \str_contains($name, '__mc_enum_cases_');
+    }
+
+    /** The free-function invoke-trampoline symbol (Ф5, ReflectionFunction).
+     *  Backslash-free, matched on the synthesis + emission sides. */
+    public static function fnTrampBase(string $fn): string
+    {
+        return '__mc_fntramp_' . \str_replace('\\', '_', \ltrim($fn, '\\'));
+    }
+
+    /**
+     * A free function's invoke trampoline — the static-method shape with the
+     * receiver ignored: `__mc_fntramp_<f>(int $t, array $a): mixed { return
+     * \f($a[0], …); }`. Arms from required..total so lowering fills defaults.
+     */
+    public static function functionTramp(string $fn, int $req, int $tot, bool $void): string
+    {
+        $fqn = '\\' . \ltrim($fn, '\\');
+        $mk = fn (string $args): string => $fqn . '(' . $args . ')';
+        $body = self::arms($req, $tot, $mk, $void);
+        return self::ARGS_HINT . 'function ' . self::fnTrampBase($fn)
+             . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
 
     /** True when a method can carry a uniform invoke trampoline. */

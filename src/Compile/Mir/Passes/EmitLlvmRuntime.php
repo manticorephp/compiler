@@ -1037,6 +1037,74 @@ trait EmitLlvmRuntime
         return $f;
     }
 
+    /**
+     * Ф5 — a metadata row `@__mc_fnmeta_<f>` per reflected free function, plus
+     * a name→row registry (`@__mc_refl_fn_head` + `__mc_refl_fn_find`). A
+     * function reuses the method ROW layout unchanged (flags 0, no attrs); its
+     * invoke trampoline is {@see TrampolineSynth::fnTrampBase}, referenced only
+     * when synthesized (variadic / by-ref functions have none → invoke throws).
+     *
+     * @param string[] $fnRegCtors appended with each registry ctor symbol, to
+     *                             join the single @llvm.global_ctors array
+     */
+    private function fnMetaRuntime(array &$fnRegCtors): string
+    {
+        // head + find are emitted UNCONDITIONALLY (even with no reflected
+        // functions): the `__mc_refl_fn_find` builtin a ReflectionFunction ctor
+        // calls needs the symbol defined, and a dynamic-name program registers
+        // none. `define` becomes linkonce_odr (linkonceRuntime) so it coalesces;
+        // dead-strip drops it when unused.
+        $out = '';
+        foreach ($this->reflFnMeta as $fn => $mm) {
+            $id = $this->mangle($fn);
+            $nameSym = '@.fnmeta.name.' . $id;
+            $out .= $this->strGlobalDef($nameSym, $fn);
+            $pp = $this->rmetaParamTable($mm, $id, 0);
+            $out .= $pp[0];
+            $rsym = '@.fnmeta.ret.' . $id;
+            $out .= $this->strGlobalDef($rsym, $mm->returnType);
+            $trampSym = \Compile\Mir\Passes\TrampolineSynth::fnTrampBase($fn);
+            $trampFld = isset($this->sigs->paramTypes[$trampSym])
+                ? '@manticore_' . $this->mangle($trampSym) : 'null';
+            $row = \Compile\Mir\RuntimeLibrary::rmetaRow(
+                $this->strSymBytes($nameSym), 0, $trampFld,
+                $this->methodArity($mm), \count($mm->params), $pp[1],
+                0, 'null', $this->strSymBytes($rsym));
+            $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";
+            $node = '@__mc_reflfn_node_' . $id;
+            $out .= $node . ' = linkonce_odr global { ptr, ptr, i64 } { ptr @__mc_fnmeta_'
+                  . $id . ", ptr null, i64 0 }\n";
+            $out .= 'define void @__mc_reflfn_reg_' . $id . "() {\nentry:\n";
+            $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
+            $out .= "  %fv = load i64, ptr %f\n";
+            $out .= "  %done = icmp ne i64 %fv, 0\n";
+            $out .= "  br i1 %done, label %skip, label %reg\n";
+            $out .= "reg:\n  store i64 1, ptr %f\n";
+            $out .= "  %h = load ptr, ptr @__mc_refl_fn_head\n";
+            $out .= '  %np = getelementptr i8, ptr ' . $node . ", i64 8\n";
+            $out .= "  store ptr %h, ptr %np\n";
+            $out .= '  store ptr ' . $node . ", ptr @__mc_refl_fn_head\n";
+            $out .= "  br label %skip\nskip:\n  ret void\n}\n";
+            $fnRegCtors[] = '@__mc_reflfn_reg_' . $id;
+        }
+        $noff = (string)\Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET;
+        $out .= "@__mc_refl_fn_head = linkonce_odr global ptr null\n";
+        $out .= "define i64 @__mc_refl_fn_find(ptr %name) {\nentry:\n";
+        $out .= "  %p0 = load ptr, ptr @__mc_refl_fn_head\n  br label %loop\n";
+        $out .= "loop:\n  %p = phi ptr [ %p0, %entry ], [ %next, %cont ]\n";
+        $out .= "  %end = icmp eq ptr %p, null\n  br i1 %end, label %miss, label %body\n";
+        $out .= "body:\n  %m = load ptr, ptr %p\n";
+        $out .= '  %nmp = getelementptr i8, ptr %m, i64 ' . $noff . "\n";
+        $out .= "  %nm = load ptr, ptr %nmp\n";
+        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n  %r = ptrtoint ptr %m to i64\n  ret i64 %r\n";
+        $out .= "cont:\n  %nxp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %next = load ptr, ptr %nxp\n  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
+    }
+
     private function dropRuntimeBody(): string
     {
         $descs = '';
@@ -1172,11 +1240,16 @@ trait EmitLlvmRuntime
         // stays sound. They carry no parent/method/property tables — nothing
         // reads those for a name-existence answer.
         $descs .= $this->reflNameOnlyEntries($reflIds);
+        // Ф5 ReflectionFunction: a metadata row + registry entry per reflected
+        // free function. Its startup ctors join the SAME @llvm.global_ctors array
+        // (LLVM permits only one), so they are handed to reflRegistry below.
+        $fnRegCtors = [];
+        $descs .= $this->fnMetaRuntime($fnRegCtors);
         // The name→rmeta registry: list head, the global_ctors array that fills
         // it, and __mc_refl_find. Nothing is emitted for a module with no
         // classes, so a program that declares none carries no startup cost.
         $this->rt->needsStrcmp = true;
-        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds);
+        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.

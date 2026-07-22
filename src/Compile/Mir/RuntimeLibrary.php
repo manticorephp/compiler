@@ -284,12 +284,17 @@ final class RuntimeLibrary
      *
      * @param string[] $ids symbol suffixes
      */
-    public static function reflRegistry(array $ids): string
+    public static function reflRegistry(array $ids, array $extraCtors = []): string
     {
         $out = "@__mc_refl_head = linkonce_odr global ptr null\n";
         $entries = [];
         foreach ($ids as $id) {
             $entries[] = '{ i32, ptr, ptr } { i32 65535, ptr @__mc_refl_reg_' . $id . ', ptr null }';
+        }
+        // Ф5 — free-function registry ctors share this one @llvm.global_ctors
+        // array (LLVM allows only a single such global per module).
+        foreach ($extraCtors as $sym) {
+            $entries[] = '{ i32, ptr, ptr } { i32 65535, ptr ' . $sym . ', ptr null }';
         }
         if (\count($entries) > 0) {
             $out .= '@llvm.global_ctors = appending global [' . (string)\count($entries)

@@ -258,6 +258,11 @@ final class EmitLlvm implements EmitVisitor
     /** Per-module runtime-feature demand set (fresh each {@see emit}). */
     private ?RuntimeFeatures $rt = null;
 
+    /** @var array<string, MethodMeta> free functions a ReflectionFunction reflects.
+     *  Declared LAST — a new field mid-class shifts later offsets, a self-host
+     *  layout hazard (the ClassDef::$isPreludeClass lesson). */
+    private array $reflFnMeta = [];
+
     public function emit(Module $module): string
     {
         $this->rt = new RuntimeFeatures();
@@ -291,6 +296,7 @@ final class EmitLlvm implements EmitVisitor
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
         $this->traitNames = $module->traitNames;
+        $this->reflFnMeta = $module->reflFnMeta;
         $this->closureCaptures = $module->closureCaptures;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;

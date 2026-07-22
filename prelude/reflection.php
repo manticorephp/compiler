@@ -943,3 +943,109 @@ class ReflectionAttribute
         return __mc_refl_call0($this->newFn);
     }
 }
+
+/**
+ * A free function (Ф5). Reads a metadata ROW the compiler emitted per function a
+ * `new ReflectionFunction('f')` names literally, resolved through a name→row
+ * registry (the function twin of the class registry). invoke() calls the
+ * function's uniform trampoline — the static-method invoke shape with the
+ * receiver ignored.
+ */
+class ReflectionFunction
+{
+    public string $name = "";
+
+    private int $row = 0;
+    private int $tramp = 0;
+
+    public function __construct(string $name)
+    {
+        $n = __mc_refl_unqualify($name);
+        $h = __mc_refl_fn_find($n);
+        if ($h === 0) {
+            throw new ReflectionException("Function " . $n . "() does not exist");
+        }
+        $this->row = $h;
+        $this->name = $n;
+        $this->tramp = __mc_refl_row_tramp($h);
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    public function getShortName(): string
+    {
+        $p = __mc_refl_last_sep($this->name);
+        if ($p < 0) { return $this->name; }
+        return \substr($this->name, $p + 1);
+    }
+
+    public function getNamespaceName(): string
+    {
+        $p = __mc_refl_last_sep($this->name);
+        if ($p < 0) { return ""; }
+        return \substr($this->name, 0, $p);
+    }
+
+    public function inNamespace(): bool
+    {
+        return __mc_refl_last_sep($this->name) >= 0;
+    }
+
+    /** @return ReflectionParameter[] */
+    public function getParameters(): array
+    {
+        $base = __mc_refl_row_params($this->row);
+        $n = __mc_refl_row_nparams($this->row);
+        $out = [];
+        $i = 0;
+        while ($i < $n) {
+            $out[] = new ReflectionParameter($base, $i);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    public function getNumberOfParameters(): int
+    {
+        return __mc_refl_row_nparams($this->row);
+    }
+
+    public function getNumberOfRequiredParameters(): int
+    {
+        return __mc_refl_row_arity($this->row) & 255;
+    }
+
+    public function hasReturnType(): bool
+    {
+        return __mc_refl_row_rettype($this->row) !== "";
+    }
+
+    public function getReturnType(): ReflectionNamedType|null
+    {
+        $t = __mc_refl_row_rettype($this->row);
+        if ($t === "") { return null; }
+        $nullable = false;
+        if (\substr($t, 0, 1) === "?") { $nullable = true; $t = \substr($t, 1); }
+        return new ReflectionNamedType($t, $nullable);
+    }
+
+    public function invoke(mixed ...$args): mixed
+    {
+        if ($this->tramp === 0) {
+            throw new ReflectionException("Function " . $this->name . " is not invokable");
+        }
+        return __mc_refl_invoke($this->tramp, 0, $args);
+    }
+
+    /** @param mixed[] $args */
+    public function invokeArgs(array $args): mixed
+    {
+        if ($this->tramp === 0) {
+            throw new ReflectionException("Function " . $this->name . " is not invokable");
+        }
+        return __mc_refl_invoke($this->tramp, 0, $args);
+    }
+}

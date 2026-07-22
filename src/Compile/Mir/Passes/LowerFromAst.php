@@ -243,6 +243,13 @@ final class LowerFromAst implements Pass
      */
     private array $constCallables = [];
 
+    /** `$var = new C(...)` → C, for a linear body — lets a later `$var->m(a,b)`
+     *  pack its variadic against C's exact signature (a same-named variadic
+     *  method elsewhere with a different arity otherwise defers the pack). Dropped
+     *  on any reassignment; same best-effort lifecycle as {@see $constCallables}.
+     *  @var array<string, string> */
+    private array $localNewClasses = [];
+
     /** Set true while lowering a body when a `yield` is seen (generator). */
     private bool $sawYield = false;
 
@@ -743,6 +750,34 @@ final class LowerFromAst implements Pass
         // Last: the superglobal binding scans EVERY function body (including
         // __main and the closures), so it needs the complete function list.
         $this->injectSuperglobals($module);
+        // Ф5 ReflectionFunction: NOW that every body is lowered, scan for
+        // `new ReflectionFunction('f')` targets and synthesize an invoke
+        // trampoline per invokable one (the metadata row + registry are emitted
+        // from Module::$reflFnMeta). Deferred to here because the scan reads the
+        // lowered MIR bodies, which the early class-synthesis block predates.
+        if ($this->includeReflection) {
+            $this->collectReflFnNames($module);
+            $fnTrampSrc = '';
+            foreach ($module->reflFnMeta as $fn => $mm) {
+                $variadic = false; $byRef = false;
+                foreach ($mm->params as $p) {
+                    if ($p->variadic) { $variadic = true; }
+                    if ($p->byRef) { $byRef = true; }
+                }
+                if ($variadic || $byRef) { continue; }
+                $void = \strtolower($mm->returnType) === 'void';
+                $fnTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::functionTramp(
+                    $fn, $mm->requiredParams(), \count($mm->params), $void);
+            }
+            if ($fnTrampSrc !== '') {
+                $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);
+                foreach ($prog->statements as $s) {
+                    if ($s->kind !== 'Function') { continue; }
+                    $this->fnDecls[$s->decl->name] = $s->decl;
+                    $module->addFunction($this->lowerFunction($s->decl));
+                }
+            }
+        }
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -761,6 +796,59 @@ final class LowerFromAst implements Pass
             $guard = $guard + 1;
         }
         return $d;
+    }
+
+    /**
+     * Populate {@see Module::$reflFnNames} — every free function a
+     * `new ReflectionFunction('literal')` names. A dynamic name cannot be
+     * resolved statically (its function is simply not registered, and the ctor
+     * throws at runtime), the same trade the class registry makes.
+     */
+    private function collectReflFnNames(Module $module): void
+    {
+        foreach ($module->functions as $fn) {
+            if ($fn->body === null) { continue; }
+            $this->scanReflFn($fn->body, $module);
+        }
+    }
+
+    private function scanReflFn(\Compile\Mir\Node $n, Module $module): void
+    {
+        if ($n instanceof \Compile\Mir\NewObj
+            && \ltrim($n->class, '\\') === 'ReflectionFunction'
+            && \count($n->args) >= 1
+            && $n->args[0] instanceof \Compile\Mir\StringConst) {
+            $fn = \ltrim($n->args[0]->value, '\\');
+            if (!isset($module->reflFnMeta[$fn])) {
+                $decl = $this->fnDecls[$fn] ?? null;
+                if ($decl !== null) {
+                    $module->reflFnMeta[$fn] = $this->fnMethodMeta($fn, $decl);
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $this->scanReflFn($c, $module);
+        }
+    }
+
+    /** A free function's declared shape as a {@see MethodMeta}, so it reuses the
+     *  reflection method-row + param-table emission unchanged. */
+    private function fnMethodMeta(string $fn, \Parser\Ast\FunctionDecl $decl): \Compile\Mir\MethodMeta
+    {
+        $params = [];
+        foreach ($decl->params as $p) {
+            $params[] = new \Compile\Mir\ParamMeta(
+                $p->name,
+                $p->typeHint === null ? '' : $p->typeHint,
+                $p->default !== null,
+                $p->byRef,
+                $p->variadic,
+                '', []);
+        }
+        return new \Compile\Mir\MethodMeta(
+            $fn, 'public', false, false, false,
+            $decl->returnType === null ? '' : $decl->returnType,
+            $params, [], '');
     }
 
     /**
@@ -1102,6 +1190,7 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
+        $this->localNewClasses = [];
         // Inside a `#[TypeDef]` body `$this` IS the carrier: there is no object to
         // point at. `__invoke` — the normaliser — takes no `$this` at all: it is a
         // pure carrier→carrier function, and `new C($x)` calls it directly. (Zend
@@ -1883,6 +1972,11 @@ final class LowerFromAst implements Pass
         unset($this->constCallables[$name]);
         $info = $this->callableLiteralInfo($value);
         if ($info !== null) { $this->constCallables[$name] = $info; }
+        // Track a `$var = new C(...)` binding for receiver-class-aware variadic
+        // packing; any other assignment drops it (a later `$var->m()` then falls
+        // back to the by-name union).
+        unset($this->localNewClasses[$name]);
+        if ($value->kind === 'New') { $this->localNewClasses[$name] = \ltrim($value->class, '\\'); }
     }
 
     /** Classify a callable-literal assignment value, or null. */
@@ -2151,6 +2245,7 @@ final class LowerFromAst implements Pass
     private function methodDeclName(\Parser\Ast\MethodDecl $m): string { return $m->name; }
     /** @return \Parser\Ast\Param[] */
     private function methodDeclParams(\Parser\Ast\MethodDecl $m): array { return $m->params; }
+    private function methodDeclReturnType(\Parser\Ast\MethodDecl $m): ?string { return $m->returnType; }
 
     /**
      * `[$a, $b] = $rhs` / `["k" => $v] = $rhs` — stash the RHS in a
@@ -2431,6 +2526,51 @@ final class LowerFromAst implements Pass
         return $found;
     }
 
+    /**
+     * The static class of a method-call receiver EXPRESSION, when lowering can
+     * tell — a `new C(...)` receiver, or a `$x->m(...)` chain whose `m` has a
+     * consistent class return type across all classes that declare it. '' when
+     * unknown (a bare variable — its type waits on InferTypes). Lets a chained
+     * `$r->getMethod('x')->invoke(a, b)` pack its variadic against the ACTUAL
+     * ReflectionMethod::invoke rather than the by-name union, which breaks when a
+     * same-named variadic method (ReflectionFunction::invoke) disagrees on arity.
+     */
+    private function receiverClassHint(\Parser\Ast\Expr $obj): string
+    {
+        if ($obj->kind === 'New') { return \ltrim($obj->class, '\\'); }
+        if ($obj->kind === 'MethodCall') { return $this->methodReturnClassByName($obj->method); }
+        if ($obj->kind === 'Variable') { return $this->localNewClasses[$this->varName($obj)] ?? ''; }
+        return '';
+    }
+
+    /**
+     * The class a method NAME returns, if every class declaring it agrees on a
+     * single class return type (leading `?` stripped); '' when they disagree, a
+     * declaration has no / a non-class return type, or none declares it.
+     */
+    private function methodReturnClassByName(string $method): string
+    {
+        $ret = '';
+        foreach ($this->classDecls as $cd) {
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) !== $method) { continue; }
+                $rt = $this->methodDeclReturnType($m);
+                if ($rt === null || $rt === '') { return ''; }
+                $rt = \ltrim($rt, '\\');
+                if ($rt !== '' && $rt[0] === '?') { $rt = \substr($rt, 1); }
+                // A scalar / pseudo return type is not a class receiver.
+                $low = \strtolower($rt);
+                if ($low === 'int' || $low === 'float' || $low === 'string' || $low === 'bool'
+                    || $low === 'array' || $low === 'void' || $low === 'mixed'
+                    || $low === 'self' || $low === 'static' || $low === 'never') { return ''; }
+                if (!isset($this->classDecls[$rt])) { return ''; }
+                if ($ret !== '' && $ret !== $rt) { return ''; }
+                $ret = $rt;
+            }
+        }
+        return $ret;
+    }
+
     private function resolveMethodParams(string $class, string $method): ?array
     {
         $c = $class;
@@ -2513,6 +2653,15 @@ final class LowerFromAst implements Pass
             && $expr->object->name === 'this'
             && $this->currentLowerClass !== '') {
             $params = $this->resolveMethodParams($this->currentLowerClass, $expr->method);
+        }
+        // A statically-knowable receiver (a `new C(...)` or a chained
+        // `$x->getMethod(...)->` whose return class is unambiguous) packs against
+        // the EXACT method — the only correct choice when a same-named variadic
+        // method elsewhere disagrees on arity (ReflectionMethod::invoke vs
+        // ReflectionFunction::invoke), where the by-name union below defers.
+        if ($params === null) {
+            $hint = $this->receiverClassHint($expr->object);
+            if ($hint !== '') { $params = $this->resolveMethodParams($hint, $expr->method); }
         }
         // A variable-receiver variadic call (`$x->m(a,b,c)`) must STILL pack its
         // trailing args into a vec — but the receiver class isn't resolved until
