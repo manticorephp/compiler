@@ -1506,6 +1506,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return '@__mir_array_release_cell'; }
+        if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         return '';
     }

@@ -307,7 +307,10 @@ trait EmitLlvmMemory
         $shared = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
             && isset($this->frame->elementSharedLocals[$t->name]);
         if ($mo->flavor === 'vec') {
-            if ($t === null || $shared) { return 'vec'; }
+            // A shared buffer (passed by value to a callee that co-owns and
+            // drops the element refs) releases BUFFER-ONLY — ignore the repr
+            // bits, or the elements are double-dropped (the parser $args UAF).
+            if ($t === null || $shared) { return 'vecbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
@@ -315,7 +318,7 @@ trait EmitLlvmMemory
             return 'vec';
         }
         if ($mo->flavor === 'assoc') {
-            if ($t === null || $shared) { return 'assoc'; }
+            if ($t === null || $shared) { return 'assocbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
@@ -354,6 +357,7 @@ trait EmitLlvmMemory
         $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
+        elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_retain_buf'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
@@ -391,6 +395,7 @@ trait EmitLlvmMemory
         $fn = '@__mir_array_release';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_release'; }
+        elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_release_buf'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_cell'; }

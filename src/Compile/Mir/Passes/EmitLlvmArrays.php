@@ -406,6 +406,8 @@ trait EmitLlvmArrays
         }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+        // Self-describe a cell-valued literal (see emitArrayLitDirect).
+        if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
         return $out;
@@ -503,6 +505,11 @@ trait EmitLlvmArrays
                   . (string)\Compile\MemoryAbi::ARRAY_NEXT_INT_OFFSET . "\n";
             $out .= '  store i64 ' . (string)$count . ', ptr ' . $ni . "\n";
         }
+        // A cell-valued literal self-describes its elements (repr CELL), so a
+        // release/COW reaching it through the plain repr helper — e.g. this
+        // record nested in an erased `vec[unknown]` — still drops its boxed
+        // cells. (A typed-flavor release ignores the bits; no double drop.)
+        if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
         $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
@@ -571,15 +578,73 @@ trait EmitLlvmArrays
      * a cow retains what the release will drop. An erased / cell base carries
      * NaN-boxed elements → the cell variant.
      */
+    /**
+     * The element-repr code to stamp when an rc-managed value lands in an
+     * ERASED (vec[unknown]) array — else null (scalar / erased / no-rc value, or
+     * a concrete-element array that already carries a typed release flavor). The
+     * value already gives the array a droppable +1 (a fresh producer transfers,
+     * a borrow is retained — see {@see EmitLlvmMemory::rcRetainByType}); the
+     * stamp lets the plain repr release drop it. Homogeneity is guaranteed
+     * upstream: a heterogeneous erased array is promoted to vec[cell] (the
+     * array-repr-conflict check), so it never reaches this raw path.
+     */
+    private function erasedReprCode(StoreElement $se): ?int
+    {
+        $at = $se->array->type;
+        // Only the erased path (element unknown) releases via the repr helper;
+        // a concrete element uses vecstr/vecobj/veccell and must not be stamped.
+        $erased = $at->kind === Type::KIND_UNKNOWN
+            || ($at->element !== null && $at->element->kind === Type::KIND_UNKNOWN)
+            || ($at->element === null && ($at->isVec() || $at->isAssoc()));
+        if (!$erased) { return null; }
+        $vt = $se->value->type;
+        $vk = $vt->kind;
+        if ($vk === Type::KIND_STRING) { return \Compile\MemoryAbi::ARRAY_REPR_STR; }
+        if ($vk === Type::KIND_ARRAY) { return \Compile\MemoryAbi::ARRAY_REPR_ARR; }
+        if ($vk === Type::KIND_CELL) { return \Compile\MemoryAbi::ARRAY_REPR_CELL; }
+        if ($vk === Type::KIND_OBJ) {
+            $cls = $vt->class ?? '';
+            if ($cls === 'Ffi\\Ptr') { return null; }
+            if ($cls === 'Generator') { return \Compile\MemoryAbi::ARRAY_REPR_STR; }
+            if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return null; }
+            if ($this->isClosureClass($cls)) { return null; }
+            if ($this->isEnumClass($cls)) { return null; }
+            return \Compile\MemoryAbi::ARRAY_REPR_OBJ;
+        }
+        return null;
+    }
+
+    /** Emit `flags = (flags & ~REPR_MASK) | code` on `$arrPtr` — stamp the
+     *  element repr. Homogeneous, so overwrite (not OR) is exact. */
+    private function emitReprStamp(string $arrPtr, int $code): string
+    {
+        $fo = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
+        $fp = $this->ssa->allocReg();
+        $out  = '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $arrPtr . ', i64 ' . $fo . "\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $fp . "\n";
+        $cl = $this->ssa->allocReg();
+        $out .= '  ' . $cl . ' = and i64 ' . $fl . ', ' . (string)(~\Compile\MemoryAbi::ARRAY_REPR_MASK) . "\n";
+        $nw = $this->ssa->allocReg();
+        $out .= '  ' . $nw . ' = or i64 ' . $cl . ', ' . (string)$code . "\n";
+        $out .= '  store i64 ' . $nw . ', ptr ' . $fp . "\n";
+        return $out;
+    }
+
     private function cowSymbolFor(Type $t): string
     {
-        if ($t->kind === Type::KIND_CELL || $t->kind === Type::KIND_UNKNOWN) {
-            return '@__mir_array_cow_cell';
-        }
+        // A genuinely-CELL carrier holds boxed cells → cow_cell. An ERASED
+        // (unknown) array/element carries RAW homogeneous elements stamped with
+        // a repr code → the repr cow co-owns exactly what the repr release drops
+        // (cow_cell's cell_retain no-ops on a raw ptr → the clone wouldn't
+        // co-own and both owners would double-drop).
+        if ($t->kind === Type::KIND_CELL) { return '@__mir_array_cow_cell'; }
+        if ($t->kind === Type::KIND_UNKNOWN) { return '@__mir_array_cow'; }
         $el = $t->element;
         if ($el === null) { return '@__mir_array_cow'; }
         $ek = $el->kind;
-        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { return '@__mir_array_cow_cell'; }
+        if ($ek === Type::KIND_CELL) { return '@__mir_array_cow_cell'; }
+        if ($ek === Type::KIND_UNKNOWN) { return '@__mir_array_cow'; }
         if ($ek === Type::KIND_STRING) { return '@__mir_array_cow_str'; }
         if ($ek === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) {
             return '@__mir_array_cow_obj';
@@ -770,6 +835,11 @@ trait EmitLlvmArrays
             else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
         }
+        // Stamp the element repr on the persisted buffer ($next may be a
+        // realloced / promoted / deimmortalised buffer) so the plain repr
+        // release/retain/cow drop/co-own this erased array's raw elements.
+        $reprCode = $this->erasedReprCode($se);
+        if ($reprCode !== null) { $out .= $this->emitReprStamp($next, $reprCode); }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
         $this->lastValue = $val;
         $this->lastValueType = 'i64';
