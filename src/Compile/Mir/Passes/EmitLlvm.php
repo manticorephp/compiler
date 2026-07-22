@@ -367,6 +367,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropArrayBase = [];
         $this->cellPropHasArrayStore = [];
         $this->cellPropHasInPlaceBox = [];
+        $this->cellPropHasNestedArrayStore = [];
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
         foreach ($module->functions as $fn) {
@@ -869,6 +870,13 @@ final class EmitLlvm implements EmitVisitor
      *  heterogeneous slot — only then does an array store ride along as a boxed cell). */
     private array $cellPropHasInPlaceBox = [];
 
+    /** Prop names ever stored an array whose ELEMENT is itself an array/cell — a
+     *  NESTED structure. Reading a nested value back must preserve its array-ness
+     *  (`is_array($c->data['x'])`), so such a slot boxes as a cell-array even when
+     *  it only ever holds arrays. An array-of-SCALARS slot (e.g. a key buffer read
+     *  as a raw index) stays raw — boxing it would turn a raw key into a cell. */
+    private array $cellPropHasNestedArrayStore = [];
+
     private function scanCellPropStores(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
@@ -883,6 +891,14 @@ final class EmitLlvm implements EmitVisitor
                 // see cellPropBoxed. Tracked separately so an array-only prop keeps
                 // its current raw behaviour (no regression for typed-array backing).
                 $this->cellPropHasArrayStore[$key] = true;
+                // NESTED = the element is itself a concrete ARRAY (a genuine
+                // array-of-arrays). NOT a CELL element: that is boxed SCALARS
+                // (e.g. the SPL iterator's `__k = vec[cell]` heterogeneous keys),
+                // which must stay raw — boxing re-wraps an already-cell key.
+                $el = $n->value->type->element;
+                if ($el !== null && $el->kind === Type::KIND_ARRAY) {
+                    $this->cellPropHasNestedArrayStore[$key] = true;
+                }
             } elseif (!$this->cellBoxableKind($n->value->type)) {
                 $this->cellPropNotBoxable[$key] = true;
             } else {
