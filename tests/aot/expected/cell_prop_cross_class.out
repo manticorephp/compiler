@@ -1,0 +1,18 @@
+1,2
+int(42)
+string(5) "hello"
+float(3.5)
+bool(true)
+10,20 sum=30
+int(7)
+string(2) "ok"
+int(5)
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+}
+string(1) "z"
