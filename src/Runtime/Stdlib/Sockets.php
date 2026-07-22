@@ -1086,7 +1086,7 @@ function socket_cmsg_space(int $level, int $type, int $num = 0): ?int
  * @param array<string,mixed> $message
  * @return int|false
  */
-function socket_sendmsg(\Socket $socket, array $message, int $flags = 0)
+function socket_sendmsg(\Socket $socket, #[\Manticore\Attr\CellArg] array $message, int $flags = 0)
 {
     $data = '';
     if (isset($message['iov']) && \is_array($message['iov'])) {
