@@ -1,0 +1,17 @@
+bool(true)
+bool(true)
+bool(false)
+bool(false)
+array(0) {
+}
+int(1)
+int(2)
+int(16)
+int(32)
+int(16384)
+int(32768)
+int(134217728)
+int(33554432)
+int(8192)
+int(268435456)
+done
