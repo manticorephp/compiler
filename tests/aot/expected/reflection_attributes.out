@@ -1,0 +1,13 @@
+-- class attrs --
+Route
+  0=/home
+  method=POST
+  middleware=a,b
+  inst path=/home method=POST mw=a,b
+-- method attrs --
+Auth
+Route
+filtered Auth count=1
+auth role=admin
+-- prop attrs --
+Auth role=user

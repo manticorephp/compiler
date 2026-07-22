@@ -204,24 +204,36 @@ final class MemoryAbi
      */
     public const RMETA_CTOR_TRAMP_OFFSET = 64;
 
+    /** `i64` / `ptr` — the class-level ATTRIBUTE table (Ф4): count, then
+     *  `[{ ptr name, ptr args_factory, ptr new_factory }]`. The factories are
+     *  {@see \Compile\Mir\Passes\ReflectSynth}'s synthesized `__mc_attr_args_/
+     *  new_` functions — getArguments()/newInstance() call them indirectly. */
+    public const RMETA_NATTRS_OFFSET = 72;
+    public const RMETA_ATTRS_OFFSET  = 80;
+
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 72;
+    public const RMETA_SIZE = 88;
 
     /** One row of the method / property tables:
-     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params }`.
+     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
+     *     i64 nattrs, ptr attrs }`.
      *  `tramp` is the method's uniform `(i64 recv, ptr args) -> i64 cell` entry
      *  (null = not invokable: abstract / interface / a by-ref param); `arity`
      *  packs `required | (total << 8) | (variadic << 16)`; `params` points at a
-     *  `[nparams x PARAM]` table (Ф2d — ReflectionParameter). Property rows keep
-     *  the method-only fields zero. */
+     *  `[nparams x PARAM]` table for a method row, or a `{ type, getter, setter }`
+     *  extra struct for a property row (Ф3). `nattrs`/`attrs` are the member's
+     *  ATTRIBUTE table (Ф4), same `[{name, args_factory, new_factory}]` shape as
+     *  the class-level one. A property row keeps tramp/arity/nparams zero. */
     public const RMETA_ROW_NAME_OFFSET   = 0;
     public const RMETA_ROW_FLAGS_OFFSET  = 8;
     public const RMETA_ROW_TRAMP_OFFSET  = 16;
     public const RMETA_ROW_ARITY_OFFSET  = 24;
     public const RMETA_ROW_NPARAMS_OFFSET = 32;
     public const RMETA_ROW_PARAMS_OFFSET  = 40;
-    public const RMETA_ROW_SIZE = 48;
+    public const RMETA_ROW_NATTRS_OFFSET  = 48;
+    public const RMETA_ROW_ATTRS_OFFSET   = 56;
+    public const RMETA_ROW_SIZE = 64;
 
     /** One parameter entry of a method's param table:
      *  `{ ptr name, ptr type, i64 flags }`. `type` is the declared type name with
@@ -231,6 +243,14 @@ final class MemoryAbi
     public const RMETA_PARAM_TYPE_OFFSET  = 8;
     public const RMETA_PARAM_FLAGS_OFFSET = 16;
     public const RMETA_PARAM_SIZE = 24;
+
+    /** One attribute entry (Ф4): `{ ptr name, ptr args_factory, ptr new_factory }`.
+     *  The factories are {@see \Compile\Mir\Passes\ReflectSynth}'s synthesized
+     *  nullary functions — getArguments()/newInstance() call them indirectly. */
+    public const RMETA_ATTR_NAME_OFFSET = 0;
+    public const RMETA_ATTR_ARGS_OFFSET = 8;
+    public const RMETA_ATTR_NEW_OFFSET  = 16;
+    public const RMETA_ATTR_SIZE = 24;
 
     public const RMETA_PARAM_HAS_DEFAULT = 1;
     public const RMETA_PARAM_ALLOWS_NULL = 2;

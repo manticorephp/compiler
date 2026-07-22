@@ -136,6 +136,30 @@ function get_declared_traits(): array
     return __mc_declared(16, 16);
 }
 
+/**
+ * Build ReflectionAttribute[] off an attribute table (`$base` = its first entry,
+ * `$n` = the count), optionally filtered to `$filter`. Shared by every
+ * getAttributes(). A leading `\` on the filter is not part of the name.
+ *
+ * @return ReflectionAttribute[]
+ */
+function __mc_refl_attrs_of(int $base, int $n, ?string $filter): array
+{
+    /** @var ReflectionAttribute[] $out */
+    $out = [];
+    $want = $filter === null ? "" : __mc_refl_unqualify($filter);
+    $i = 0;
+    while ($i < $n) {
+        $nm = __mc_refl_attr_name($base, $i);
+        if ($want === "" || $nm === $want) {
+            $out[] = new ReflectionAttribute(
+                $nm, __mc_refl_attr_args($base, $i), __mc_refl_attr_new($base, $i));
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
 class ReflectionException extends Exception {}
 
 class ReflectionClass
@@ -330,6 +354,17 @@ class ReflectionClass
         return new ReflectionProperty($this->name, $name);
     }
 
+    /**
+     * The class's attributes, optionally filtered to `$name`.
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return __mc_refl_attrs_of(
+            __mc_refl_class_attrs($this->h),
+            __mc_refl_class_nattrs($this->h), $name);
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
@@ -473,6 +508,17 @@ class ReflectionMethod
     {
         return ($this->flags() & 3) === 1;
     }
+
+    /**
+     * The method's attributes, optionally filtered to `$name`.
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return __mc_refl_attrs_of(
+            __mc_refl_row_attrs($this->row),
+            __mc_refl_row_nattrs($this->row), $name);
+    }
 }
 
 /**
@@ -497,6 +543,7 @@ class ReflectionProperty
      *  extra base; the member flags; the accessor pointers. Raw addresses as
      *  ints — immortal rodata / code, nothing retains them. */
     private int $h = 0;
+    private int $row = 0;
     private int $extra = 0;
     private int $flags = 0;
     private int $getter = 0;
@@ -523,8 +570,8 @@ class ReflectionProperty
         $this->class = $cls;
         $this->name = $property;
         $this->flags = $fl - 1;
-        $row = __mc_refl_prow($h, $property);
-        $this->extra = __mc_refl_row_params($row);
+        $this->row = __mc_refl_prow($h, $property);
+        $this->extra = __mc_refl_row_params($this->row);
         $this->getter = __mc_refl_prop_getter($this->extra);
         $this->setter = __mc_refl_prop_setter($this->extra);
     }
@@ -618,6 +665,17 @@ class ReflectionProperty
             throw new ReflectionException("Cannot write property " . $this->name);
         }
         __mc_refl_prop_set($this->setter, $object, $value);
+    }
+
+    /**
+     * The property's attributes, optionally filtered to `$name`.
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return __mc_refl_attrs_of(
+            __mc_refl_row_attrs($this->row),
+            __mc_refl_row_nattrs($this->row), $name);
     }
 }
 
@@ -734,5 +792,47 @@ class ReflectionNamedType
             return "?" . $this->name;
         }
         return $this->name;
+    }
+}
+
+/**
+ * One attribute occurrence (Ф4). getName is the attribute-class name;
+ * getArguments and newInstance call the compiler-synthesized factories that
+ * reconstruct the argument array / a fresh instance — the arguments were lowered
+ * as ordinary expressions, so arrays / enum cases / constants all come back.
+ */
+class ReflectionAttribute
+{
+    private string $name = "";
+    private int $argsFn = 0;
+    private int $newFn = 0;
+
+    public function __construct(string $name, int $argsFn, int $newFn)
+    {
+        $this->name = $name;
+        $this->argsFn = $argsFn;
+        $this->newFn = $newFn;
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    /** The attribute's arguments: positional (int keys) then named (string keys).
+     *  @return array */
+    public function getArguments(): array
+    {
+        if ($this->argsFn === 0) { return []; }
+        return __mc_refl_call0($this->argsFn);
+    }
+
+    /** A fresh instance of the attribute class, its arguments applied. */
+    public function newInstance(): object
+    {
+        if ($this->newFn === 0) {
+            throw new ReflectionException("Attribute " . $this->name . " is not instantiable");
+        }
+        return __mc_refl_call0($this->newFn);
     }
 }

@@ -1510,7 +1510,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $useReflection = $demand->mentionsAny(['ReflectionClass', 'ReflectionObject',
                                            'ReflectionMethod', 'ReflectionProperty',
                                            'ReflectionParameter', 'ReflectionNamedType',
-                                           'ReflectionException'])
+                                           'ReflectionAttribute', 'ReflectionException'])
         // get_declared_* are plain FUNCTIONS living in the same file — a program
         // may call one without ever naming a Reflection class, and would then
         // get an undefined symbol (which this toolchain stubs to `return 0`

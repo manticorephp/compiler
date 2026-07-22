@@ -802,13 +802,17 @@ trait EmitLlvmRuntime
             $defs .= $this->strGlobalDef($sym, $mn);
             $pp = $this->rmetaParamTable($mm, $id, $i);
             $defs .= $pp[0];
+            $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
+            $ap = $this->attrTableFor($mm->attributes, $mdecl, 'm', $mn, '@.rmeta.mattr.' . $id . '.' . (string)$i);
+            $defs .= $ap[0];
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false),
                 $this->methodTrampField($cls, $mm, $mn),
                 $this->methodArity($mm),
                 \count($mm->params),
-                $pp[1]);
+                $pp[1],
+                $ap[1], $ap[2]);
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
@@ -903,10 +907,13 @@ trait EmitLlvmRuntime
                        . $tf . ', ' . $getFld . ', ' . $setFld . " }\n";
                 $extra = $exSym;
             }
+            $ap = $this->attrTableFor($pm->attributes, $decl, 'p', $pm->name, '@.rmeta.pattr.' . $id . '.' . (string)$i);
+            $defs .= $ap[0];
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly),
-                'null', 0, 0, $extra);
+                'null', 0, 0, $extra,
+                $ap[1], $ap[2]);
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows);
@@ -923,6 +930,42 @@ trait EmitLlvmRuntime
         $sym = \Compile\Mir\Passes\ReflectSynth::propAccessor($declClass, $prop, $setter);
         if (!isset($this->sigs->paramTypes[$sym])) { return 'ptr null'; }
         return 'ptr @manticore_' . $this->mangle($sym);
+    }
+
+    /**
+     * The attribute table for one member (Ф4): a `{name, args_factory,
+     * new_factory}` row per attribute whose factory {@see ReflectSynth}
+     * synthesized — the presence of the args factory in the signature table is
+     * what tells a real attribute class from a compiler marker (`#[Struct]` …),
+     * whose factory was never emitted. `$declClass` is the DECLARING class (an
+     * inherited method's attrs key by its origin, where the factory was made).
+     *
+     * @param string[] $names attribute names, in declaration order (the index is
+     *                        the factory site key, so a skipped one keeps its k)
+     * @return array{0:string,1:int,2:string} [defs, nattrs, tableSym|'null']
+     */
+    private function attrTableFor(array $names, string $declClass, string $kind, string $member, string $sym): array
+    {
+        $rows = [];
+        $defs = '';
+        $k = -1;
+        foreach ($names as $an) {
+            $k = $k + 1;
+            $argsFn = \Compile\Mir\Passes\ReflectSynth::attrFn($declClass, $kind, $member, $k, false);
+            if (!isset($this->sigs->paramTypes[$argsFn])) { continue; }
+            $newFn = \Compile\Mir\Passes\ReflectSynth::attrFn($declClass, $kind, $member, $k, true);
+            $nameSym = $sym . '.n.' . (string)$k;
+            $defs .= $this->strGlobalDef($nameSym, $an);
+            $argsFld = 'ptr @manticore_' . $this->mangle($argsFn);
+            $newFld = isset($this->sigs->paramTypes[$newFn])
+                ? 'ptr @manticore_' . $this->mangle($newFn) : 'ptr null';
+            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaAttrRow($this->strSymBytes($nameSym), $argsFld, $newFld);
+        }
+        $n = \count($rows);
+        if ($n === 0) { return [$defs, 0, 'null']; }
+        $defs .= $sym . ' = linkonce_odr constant [' . (string)$n . ' x '
+               . \Compile\Mir\RuntimeLibrary::rmetaAttrType() . '] [' . \implode(', ', $rows) . "]\n";
+        return [$defs, $n, $sym];
     }
 
     /**
@@ -1088,9 +1131,13 @@ trait EmitLlvmRuntime
             $pPair = $this->rmetaPropTable($cls, $id);
             $descs .= $pPair[0];
             $pFlds = $pPair[1];
+            $aPair = $this->attrTableFor($cls->attributes, $cls->name, 'c', '', '@.rmeta.cattr.' . $id);
+            $descs .= $aPair[0];
+            $attrsFlds = 'i64 ' . (string)$aPair[1] . ', '
+                       . ($aPair[2] === 'null' ? 'ptr null' : 'ptr ' . $aPair[2]);
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
-                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls));
+                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.

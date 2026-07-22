@@ -47,6 +47,21 @@ final class ReflectSynth
     }
 
     /**
+     * The symbol base for one attribute occurrence's factory (Ф4). Keyed by the
+     * declaring class + member kind (`c` class / `m` method / `p` property) +
+     * member name + the attribute's index — a stable site identity, matched on
+     * both the synthesis ({@see \Compile\Mir\Passes\LowerFromAst}) and emission
+     * ({@see \Compile\Mir\Passes\EmitLlvmRuntime}) sides.
+     */
+    public static function attrFn(string $declClass, string $kind, string $member, int $k, bool $new): string
+    {
+        $c = \str_replace('\\', '_', \ltrim($declClass, '\\'));
+        $m = \str_replace(['\\', '$'], '_', $member);
+        return ($new ? '__mc_attr_new_' : '__mc_attr_args_')
+             . $c . '__' . $kind . '_' . $m . '_' . (string)$k;
+    }
+
+    /**
      * PHP source (no `<?php`) for everything this class contributes: an
      * accessor pair per OWN (declared here) property. '' when it contributes
      * none.

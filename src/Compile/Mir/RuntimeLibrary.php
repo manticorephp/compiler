@@ -63,20 +63,52 @@ final class RuntimeLibrary
      */
     public static function rmetaType(): string
     {
-        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr }';
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr }';
     }
 
     /** One method/property row:
-     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params }`. */
+     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
+     *     i64 nattrs, ptr attrs }`. */
     public static function rmetaRowType(): string
     {
-        return '{ ptr, i64, ptr, i64, i64, ptr }';
+        return '{ ptr, i64, ptr, i64, i64, ptr, i64, ptr }';
     }
 
     /** One parameter entry: `{ ptr name, ptr type, i64 flags }`. */
     public static function rmetaParamType(): string
     {
         return '{ ptr, ptr, i64 }';
+    }
+
+    /** One attribute entry: `{ ptr name, ptr args_factory, ptr new_factory }`. */
+    public static function rmetaAttrType(): string
+    {
+        return '{ ptr, ptr, ptr }';
+    }
+
+    /**
+     * An attribute table: `[N x { ptr name, ptr args_factory, ptr new_factory }]`
+     * plus the `{ count, ptr }` pair. Empty ⇒ `i64 0, ptr null`. `$rowsIr` are
+     * pre-built `{ … }` bodies (the caller interpolates each from concrete
+     * locals — the same self-host discipline as {@see rmetaTable}).
+     *
+     * @param string[] $rowsIr
+     * @return string[] [globalDef, countAndPtrFields]
+     */
+    public static function rmetaAttrTable(string $sym, array $rowsIr): array
+    {
+        $n = \count($rowsIr);
+        if ($n === 0) { return ['', 'i64 0, ptr null']; }
+        $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x ' . self::rmetaAttrType()
+             . '] [' . \implode(', ', $rowsIr) . "]\n";
+        return [$def, 'i64 ' . (string)$n . ', ptr ' . $sym];
+    }
+
+    /** One attribute row body: name + the two factory pointer fields (each a
+     *  `ptr @manticore_…` or `ptr null`). */
+    public static function rmetaAttrRow(string $nameIr, string $argsFld, string $newFld): string
+    {
+        return self::rmetaAttrType() . ' { ptr ' . $nameIr . ', ' . $argsFld . ', ' . $newFld . ' }';
     }
 
     /**
@@ -131,12 +163,15 @@ final class RuntimeLibrary
         return [$def, 'i64 ' . (string)$n . ', ptr ' . $sym];
     }
 
-    /** One method/property row body, fields interpolated by the caller. */
-    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr): string
+    /** One method/property row body, fields interpolated by the caller.
+     *  `$nattrs`/`$attrsIr` are the member's attribute table (0 / 'null' when it
+     *  carries none). */
+    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr, int $nattrs = 0, string $attrsIr = 'null'): string
     {
         return self::rmetaRowType() . ' { ptr ' . $nameIr . ', i64 ' . (string)$flags
              . ', ptr ' . $tramp . ', i64 ' . (string)$arity
-             . ', i64 ' . (string)$nparams . ', ptr ' . $paramsIr . ' }';
+             . ', i64 ' . (string)$nparams . ', ptr ' . $paramsIr
+             . ', i64 ' . (string)$nattrs . ', ptr ' . $attrsIr . ' }';
     }
 
     /**
@@ -160,12 +195,13 @@ final class RuntimeLibrary
         string $parentNameFld = 'ptr null',
         string $methodsFlds = 'i64 0, ptr null',
         string $propsFlds = 'i64 0, ptr null',
-        string $ctorTrampFld = 'ptr null'
+        string $ctorTrampFld = 'ptr null',
+        string $attrsFlds = 'i64 0, ptr null'
     ): string {
         return '@__mc_rmeta_v3_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
             . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds
-            . ', ' . $ctorTrampFld . " }\n";
+            . ', ' . $ctorTrampFld . ', ' . $attrsFlds . " }\n";
     }
 
     /** The rmeta pointer field for a descriptor: the class's block, or null

@@ -598,6 +598,14 @@ final class LowerFromAst implements Pass
                     $module->addFunction($this->lowerFunction($tstmt->decl));
                 }
             }
+            // Ф4: attribute-argument + newInstance factories, built as AST
+            // directly (reusing the attribute's own arg Expr subtrees) so array /
+            // enum-case / const args lower for free. rmeta references them by the
+            // ReflectSynth naming.
+            foreach ($this->synthAttrFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $module->addFunction($this->lowerFunction($decl));
+            }
         }
 
         // Pre-pass: capture every function's params so call sites can
@@ -742,6 +750,79 @@ final class LowerFromAst implements Pass
             $guard = $guard + 1;
         }
         return $d;
+    }
+
+    /**
+     * Ф4 — the attribute factories for every reflectable class: per attribute
+     * occurrence (class / method / property level), a nullary `__mc_attr_args_*`
+     * returning its arguments as an array and a `__mc_attr_new_*` returning a
+     * fresh attribute instance. Built as AST directly, reusing the attribute's
+     * own arg Expr subtrees, so array / enum-case / const arguments lower
+     * through the normal path.
+     *
+     * Only for an attribute whose name resolves to a class we know — this skips
+     * the compiler's own marker attributes (`#[Struct]`, `#[CellArg]`, …), which
+     * are not instantiable classes and whose `new` would fail to compile.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthAttrFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            $decl = $this->classDecls[$cd->name] ?? null;
+            if ($decl === null) { continue; }
+            $this->attrFactoriesFor($cd->name, 'c', '', $decl->attributes, $out);
+            foreach ($decl->methods as $m) {
+                $this->attrFactoriesFor($cd->name, 'm', $m->name, $m->attributes, $out);
+            }
+            foreach ($decl->properties as $prop) {
+                $this->attrFactoriesFor($cd->name, 'p', $prop->name, $prop->attributes, $out);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Append the args + new factory for each known-class attribute in `$attrs`,
+     * keyed by the site (declaring class / kind / member / index).
+     *
+     * @param \Parser\Ast\AttributeNode[] $attrs
+     * @param \Parser\Ast\FunctionDecl[]  $out  appended to, by reference
+     */
+    private function attrFactoriesFor(string $class, string $kind, string $member, array $attrs, array &$out): void
+    {
+        $k = -1;
+        foreach ($attrs as $attr) {
+            $k = $k + 1;
+            if (!isset($this->classDecls[\ltrim($attr->name, '\\')])) { continue; }
+            $span = $attr->span;
+            // args factory: return [0 => <arg0>, 'name' => <namedArgVal>, …]
+            $elems = [];
+            $pos = 0;
+            foreach ($attr->args as $a) {
+                if ($a instanceof \Parser\Ast\NamedArg) {
+                    $elems[] = new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string($a->name, $span), $a->value);
+                } else {
+                    $elems[] = new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::int($pos, $span), $a);
+                    $pos = $pos + 1;
+                }
+            }
+            $argsBody = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $span), $span),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
+                [], 'array', $argsBody, $span);
+            // new factory: return new <AttrClass>(<original args, named preserved>);
+            $newBody = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::new_($attr->name, $attr->args, $span), $span),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
+                [], 'object', $newBody, $span);
+        }
     }
 
     /**
