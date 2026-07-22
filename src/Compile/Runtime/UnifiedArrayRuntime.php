@@ -984,7 +984,7 @@ final class UnifiedArrayRuntime
         $z->ret(Value::null());
         $cap = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
         $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $esz = $go->select($go->icmp('ne', $flags, Value::int(Type::i64(), 0)),
+        $esz = $go->select($go->icmp('ne', $this->hashedBit($go, $flags), Value::int(Type::i64(), 0)),
             Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE),
             Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
         $bytes = $go->add($go->mul($cap, $esz), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
@@ -1118,12 +1118,21 @@ final class UnifiedArrayRuntime
         $ret->ret($ret->load(Type::ptr(), $copySlot));
     }
 
+    /** (flags & ARRAY_FLAG_HASHED) — the HASHED-mode bit isolated from the
+     *  repr/tombstone bits sharing the flags word. Use this for every
+     *  mode test (`!= 0` ⇒ HASHED, `== 0` ⇒ PACKED); a bare `flags != 0`
+     *  would misread a PACKED array once repr bits are stamped. */
+    private function hashedBit(Block $b, Value $flags): Value
+    {
+        return $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_FLAG_HASHED));
+    }
+
     /** PACKED → 8, HASHED → 24 (element/entry stride). */
     private function elemSize(Block $b, Value $arr): Value
     {
         $flags = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         return $b->select(
-            $b->icmp('ne', $flags, Value::int(Type::i64(), 0)),
+            $b->icmp('ne', $this->hashedBit($b, $flags), Value::int(Type::i64(), 0)),
             Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE),
             Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE),
         );
@@ -1313,7 +1322,7 @@ final class UnifiedArrayRuntime
         $ret = $fn->block('rt_ret');
         $len = $bump->load(Type::i64(), $arr);
         $flags = $bump->load(Type::i64(), $this->hdr($bump, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $isH = $bump->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $isH = $bump->icmp('ne', $this->hashedBit($bump, $flags), Value::int(Type::i64(), 0));
         $iSlot = $bump->alloca(Type::i64(), 'ri');
         $bump->store(Value::int(Type::i64(), 0), $iSlot);
         $hhead = $fn->block('rt_hhead');
@@ -1565,7 +1574,7 @@ final class UnifiedArrayRuntime
         $freeb = $fn->block('freeb');
         $len = $free->load(Type::i64(), $arr);
         $flags = $free->load(Type::i64(), $this->hdr($free, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $isH = $free->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $isH = $free->icmp('ne', $this->hashedBit($free, $flags), Value::int(Type::i64(), 0));
         $iSlot = $free->alloca(Type::i64(), 'di');
         $free->store(Value::int(Type::i64(), 0), $iSlot);
 
@@ -1641,7 +1650,7 @@ final class UnifiedArrayRuntime
         $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
         $z->ret(Value::int(Type::i64(), 0));
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $chk->ret($chk->zext($chk->icmp('ne', $flags, Value::int(Type::i64(), 0)), Type::i64()));
+        $chk->ret($chk->zext($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), Type::i64()));
     }
 
     /**
@@ -1674,7 +1683,7 @@ final class UnifiedArrayRuntime
         $iSlot = $chk->alloca(Type::i64(), 'i');
         $rSlot = $chk->alloca(Type::i64(), 'r');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('ne', $flags, Value::int(Type::i64(), 0)), $doidx, $packed);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $doidx, $packed);
 
         // PACKED: idx in [0,len) ?
         $oobLo = $packed->icmp('slt', $idx, Value::int(Type::i64(), 0));
@@ -1738,7 +1747,7 @@ final class UnifiedArrayRuntime
         $rSlot = $chk->alloca(Type::i64(), 'r');
         $effSlot = $chk->alloca(Type::i64(), 'effh');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $retzero, $gate);
+        $chk->brIf($chk->icmp('eq', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $retzero, $gate);
 
         // Index fast path: a null key never matches; else find returns -2
         // (small map → linear scan), -1 (miss), or the entry index (hit).
@@ -1953,7 +1962,7 @@ final class UnifiedArrayRuntime
         // update keeps the entry set's shape, and the hashed append maintains
         // the index incrementally (index_add) — see emitHashedIntInsert.
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
 
         // PACKED
         $len = $packed->load(Type::i64(), $arr);
@@ -2125,7 +2134,7 @@ final class UnifiedArrayRuntime
         $fresh->br($chk);
         $a0 = $chk->load(Type::ptr(), $arrSlot);
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $a0, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $chk->brIf($chk->icmp('ne', $flags, Value::int(Type::i64(), 0)), $idxtry, $maybeProm);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $idxtry, $maybeProm);
         // PACKED → promote (rc==1 expected; set_str callers cow upstream)
         $maybeProm->br($doProm);
         $a1 = $doProm->load(Type::ptr(), $arrSlot);
@@ -2216,7 +2225,7 @@ final class UnifiedArrayRuntime
         // below would dereference it. deimmortal(null) returns a fresh empty.
         if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $len = $packed->load(Type::i64(), $arr);
         $packed->ret($packed->call('__mir_array_set_int', Type::ptr(), [$arr, $len, $val]));
         $ni = $hashed->load(Type::i64(), $this->hdr($hashed, $arr, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
@@ -2254,7 +2263,7 @@ final class UnifiedArrayRuntime
         $len = $clone->load(Type::i64(), $arr);
         $cap = $clone->load(Type::i64(), $this->hdr($clone, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
         $flags = $clone->load(Type::i64(), $this->hdr($clone, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $isH = $clone->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $isH = $clone->icmp('ne', $this->hashedBit($clone, $flags), Value::int(Type::i64(), 0));
         $esz = $clone->select($isH,
             Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE),
             Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
@@ -2360,7 +2369,7 @@ final class UnifiedArrayRuntime
         $bi = $locate->load(Type::i64(), $slotAddr);
         $b = $locate->inttoptr($bi, Type::ptr());
         $flags = $locate->load(Type::i64(), $this->hdr($locate, $b, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $locate->brIf($locate->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+        $locate->brIf($locate->icmp('ne', $this->hashedBit($locate, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
 
         $packed->ret($this->packedSlot($packed, $b, $key));
 
@@ -2485,7 +2494,7 @@ final class UnifiedArrayRuntime
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $packed->ret($packed->load(Type::i64(), $this->packedSlot($packed, $arr, $i)));
         $hashed->ret($hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET)));
     }
@@ -2504,7 +2513,7 @@ final class UnifiedArrayRuntime
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $packed->ret($i);
         $hashed->ret($hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)));
     }
@@ -2531,7 +2540,7 @@ final class UnifiedArrayRuntime
         $intTag = Value::int(Type::i64(), -4222124650659840);
         $ptrTag = Value::int(Type::i64(), -3377699720527872);
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $flags, Value::int(Type::i64(), 0)), $hashed, $packed);
+        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $packed->ret($packed->or_($packed->and_($i, $mask), $intTag));
         $kind = $hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $hashed->brIf($hashed->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hstr, $hint);
@@ -2632,7 +2641,7 @@ final class UnifiedArrayRuntime
         $val = $body->call('__mir_array_value_at', Type::i64(), [$src, $iv]);
         $flags = $body->load(Type::i64(), $this->hdr($body, $src, MemoryAbi::ARRAY_FLAGS_OFFSET));
         // packed (flags==0) → implicit int key → renumber; hashed → check KIND
-        $body->brIf($body->icmp('eq', $flags, Value::int(Type::i64(), 0)), $doInt, $isStr);
+        $body->brIf($body->icmp('eq', $this->hashedBit($body, $flags), Value::int(Type::i64(), 0)), $doInt, $isStr);
         $kind = $isStr->load(Type::i64(), $this->entryAddr($isStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $isStr->brIf($isStr->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $doStr, $doInt);
         $key = $doStr->load(Type::ptr(), $this->entryAddr($doStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
@@ -2689,7 +2698,7 @@ final class UnifiedArrayRuntime
         // Element stride / bias chosen ONCE from the mode (PACKED 8B slot vs
         // HASHED 24B entry value) — the loop then loads each element inline.
         $flags = $init->load(Type::i64(), $this->hdr($init, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $ishash = $init->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
         $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
         $bias = $init->add(
             $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
@@ -2878,7 +2887,8 @@ final class UnifiedArrayRuntime
         $iiH  = (string) MemoryAbi::ARRAY_HEADER_SIZE;
         $init->raw('  %iflagp = getelementptr inbounds i8, ptr %arr, i64 ' . $iiFO);
         $init->raw('  %iflags = load i64, ptr %iflagp');
-        $init->raw('  %ihash = icmp ne i64 %iflags, 0');
+        $init->raw('  %iflagsh = and i64 %iflags, ' . (string) MemoryAbi::ARRAY_FLAG_HASHED);
+        $init->raw('  %ihash = icmp ne i64 %iflagsh, 0');
         $init->raw('  %istride = select i1 %ihash, i64 ' . $iiES . ', i64 8');
         $init->raw('  %ibias0 = select i1 %ihash, i64 ' . $iiVO . ', i64 0');
         $init->raw('  %ibias = add i64 %ibias0, ' . $iiH);
@@ -2978,7 +2988,7 @@ final class UnifiedArrayRuntime
         $iSlot = $chk->alloca(Type::i64(), 'i');
         $rSlot = $chk->alloca(Type::i64(), 'r');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('ne', $flags, Value::int(Type::i64(), 0)), $doidx, $packed);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $doidx, $packed);
         $ok = $packed->and_(
             $packed->icmp('sge', $idx, Value::int(Type::i64(), 0)),
             $packed->icmp('slt', $idx, $len),
@@ -3034,7 +3044,7 @@ final class UnifiedArrayRuntime
         $rSlot = $chk->alloca(Type::i64(), 'r');
         $effSlot = $chk->alloca(Type::i64(), 'effh');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $z, $gate);
+        $chk->brIf($chk->icmp('eq', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $z, $gate);
         // A null key never matches; else index fast path (-2 → linear).
         $gate->brIf($gate->icmp('eq', $key, Value::null()), $z, $doidx);
         $rf = $doidx->call('__mir_array_index_find', Type::i64(),
@@ -3108,7 +3118,7 @@ final class UnifiedArrayRuntime
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
         $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('eq', $flags, Value::int(Type::i64(), 0)), $done, $idxc);
+        $chk->brIf($chk->icmp('eq', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $done, $idxc);
         // Index fast path: -2 (small map) → linear scan; -1 → miss (no-op);
         // else the entry index lands in iSlot and converges on $found.
         $rfU = $idxc->call('__mir_array_index_find', Type::i64(), [

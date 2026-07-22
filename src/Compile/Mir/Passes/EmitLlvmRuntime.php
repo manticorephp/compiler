@@ -53,7 +53,8 @@ trait EmitLlvmRuntime
             $out .= "  %ocap = load i64, ptr %capp\n";
             $out .= "  %flagp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
             $out .= "  %flags = load i64, ptr %flagp\n";
-            $out .= "  %ishash = icmp ne i64 %flags, 0\n";
+            $out .= "  %flagsh = and i64 %flags, " . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
+            $out .= "  %ishash = icmp ne i64 %flagsh, 0\n";
             $out .= "  %esz = select i1 %ishash, i64 " . (string)\Compile\MemoryAbi::ARRAY_ENTRY_SIZE . ", i64 " . $aesz . "\n";
             $out .= "  %obody = mul i64 %ocap, %esz\n";
             $out .= "  %obytes = add i64 %obody, " . $ahdr . "\n";
