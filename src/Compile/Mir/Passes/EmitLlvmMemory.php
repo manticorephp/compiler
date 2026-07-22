@@ -315,6 +315,7 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
+            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
             return 'vec';
         }
         if ($mo->flavor === 'assoc') {
@@ -323,6 +324,7 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
+            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
         }
         return $mo->flavor;
