@@ -1,0 +1,7 @@
+class=Widget
+isInstantiable=1
+hasMethod area=1
+size=4
+size2=10
+area=100
+props=label,size

@@ -162,11 +162,6 @@ function __mc_refl_attrs_of(int $base, int $n, ?string $filter): array
 
 class ReflectionException extends Exception {}
 
-// ReflectionObject (a ReflectionClass over an instance) is DEFERRED: an empty
-// prelude subclass of ReflectionClass hits a flaky bad-free at teardown — a
-// prelude-class-subclassing drop bug. `new ReflectionClass($obj)` is the exact
-// stable equivalent.
-
 class ReflectionClass
 {
     /** PHP exposes the class name as a public property, not just getName(). */
@@ -458,6 +453,18 @@ class ReflectionClass
     {
         return $this->h;
     }
+}
+
+/**
+ * ReflectionObject — a ReflectionClass over an INSTANCE. Every query is
+ * inherited. Declared AFTER ReflectionClass on purpose: property inheritance is
+ * resolved at lowering only when the parent is already in the class table, so a
+ * subclass must follow its parent in the file (else it inherits NO slots, its
+ * instance is under-allocated, and the ctor writes overflow the heap). php's
+ * constructor is object-only; this inherits object|string — harmlessly wider.
+ */
+class ReflectionObject extends ReflectionClass
+{
 }
 
 /**
