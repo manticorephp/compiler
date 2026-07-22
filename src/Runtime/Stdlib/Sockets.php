@@ -1161,7 +1161,7 @@ function socket_sendmsg(\Socket $socket, #[\Manticore\Attr\CellArg] array $messa
  * @param array<string,mixed> $message
  * @return int|false
  */
-function socket_recvmsg(\Socket $socket, #[RefOut] array &$message, int $flags = 0)
+function socket_recvmsg(\Socket $socket, array &$message, int $flags = 0)
 {
     $bufSize = isset($message['buffer_size']) ? (int)$message['buffer_size'] : 4096;
     $ctrlLen = isset($message['controllen']) ? (int)$message['controllen'] : 0;
