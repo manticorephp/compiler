@@ -2440,12 +2440,13 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_array_implode_int(sep, arr) -> ptr` — join RAW-int elements:
-     * two passes (digit-count sum, then `__mir_int_fmt` straight into the
-     * exact-size buffer). Replaces the boxToCell whole-array rebuild + a
-     * tagged_to_str per element the cell fallback paid for a vec[int]
-     * (implode_int bench: 0.4× vs php, ~263 MB of cell/temp churn).
-     * Caller guarantees a non-null arr (same contract as __mir_array_implode).
+     * `__mir_array_implode_int(sep, arr) -> ptr` — join RAW-int elements.
+     * Two passes (digit-count sum for the exact allocation, then format), but
+     * each element is loaded INLINE (packed slot / hashed value, mode selected
+     * once) rather than through an out-of-line `__mir_array_value_at` CALL — the
+     * old version paid FOUR calls per element (value_at ×2 + int_len + int_fmt),
+     * making a vec[int] implode ~11× SLOWER than php (0.09×). Now 2 calls per
+     * element (int_len + int_fmt), matching the fast json int path.
      */
     private function emitImplodeInt(): void
     {
@@ -2472,6 +2473,15 @@ final class UnifiedArrayRuntime
         $empty->store(Value::int(Type::i8(), 0), $eb);
         $empty->ret($eb);
 
+        // Element stride / bias chosen ONCE from the mode (PACKED 8B slot vs
+        // HASHED 24B entry value) — the loop then loads each element inline.
+        $flags = $init->load(Type::i64(), $this->hdr($init, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $ishash = $init->icmp('ne', $flags, Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
         $seplen = $init->call('__mir_strlen', Type::i64(), [$sep]);
         $accSlot = $init->alloca(Type::i64(), 'ii_acc');
         $iSlot = $init->alloca(Type::i64(), 'ii_i');
@@ -2481,7 +2491,8 @@ final class UnifiedArrayRuntime
         $init->br($sh);
         $i = $sh->load(Type::i64(), $iSlot);
         $sh->brIf($sh->icmp('sge', $i, $len), $al, $sb);
-        $v = $sb->call('__mir_array_value_at', Type::i64(), [$arr, $i]);
+        $vaddr = $sb->gep(Type::i8(), $arr, [$sb->add($bias, $sb->mul($i, $stride))]);
+        $v = $sb->load(Type::i64(), $vaddr);
         $n = $sb->call('__mir_int_len', Type::i64(), [$v]);
         $sb->store($sb->add($sb->load(Type::i64(), $accSlot), $n), $accSlot);
         $sb->store($sb->add($i, Value::int(Type::i64(), 1)), $iSlot);
@@ -2502,7 +2513,8 @@ final class UnifiedArrayRuntime
         $csep->call('memcpy', Type::ptr(), [$dsts, $sep, $seplen]);
         $csep->store($csep->add($off0, $seplen), $offSlot);
         $csep->br($cval);
-        $v2 = $cval->call('__mir_array_value_at', Type::i64(), [$arr, $i2]);
+        $vaddr2 = $cval->gep(Type::i8(), $arr, [$cval->add($bias, $cval->mul($i2, $stride))]);
+        $v2 = $cval->load(Type::i64(), $vaddr2);
         $n2 = $cval->call('__mir_int_len', Type::i64(), [$v2]);
         $off1 = $cval->load(Type::i64(), $offSlot);
         $cval->call('__mir_int_fmt', Type::void(), [$buf, $off1, $v2]);
@@ -2641,6 +2653,19 @@ final class UnifiedArrayRuntime
         // yields el2 > el → the copy overruns the buffer. __mir_strlen reads
         // len@-16, identical across both passes.
         $init->raw('  %seplen = call i64 @__mir_strlen(ptr %sep)');
+        // Element stride / bias chosen ONCE (PACKED 8B slot vs HASHED 24B entry
+        // value); the loops then load each element ptr inline instead of an
+        // out-of-line __mir_array_value_at CALL per element per pass.
+        $iiFO = (string) MemoryAbi::ARRAY_FLAGS_OFFSET;
+        $iiES = (string) MemoryAbi::ARRAY_ENTRY_SIZE;
+        $iiVO = (string) MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET;
+        $iiH  = (string) MemoryAbi::ARRAY_HEADER_SIZE;
+        $init->raw('  %iflagp = getelementptr inbounds i8, ptr %arr, i64 ' . $iiFO);
+        $init->raw('  %iflags = load i64, ptr %iflagp');
+        $init->raw('  %ihash = icmp ne i64 %iflags, 0');
+        $init->raw('  %istride = select i1 %ihash, i64 ' . $iiES . ', i64 8');
+        $init->raw('  %ibias0 = select i1 %ihash, i64 ' . $iiVO . ', i64 0');
+        $init->raw('  %ibias = add i64 %ibias0, ' . $iiH);
         $init->raw('  %accp = alloca i64');
         $init->raw('  store i64 0, ptr %accp');
         $init->raw('  %ip = alloca i64');
@@ -2651,7 +2676,10 @@ final class UnifiedArrayRuntime
         $sumc->raw('  %sd = icmp slt i64 %i, %len');
         $sumc->raw('  br i1 %sd, label %sumb, label %alloc');
         $sumb = $fn->block('sumb');
-        $sumb->raw('  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)');
+        $sumb->raw('  %iea0 = mul i64 %i, %istride');
+        $sumb->raw('  %iea = add i64 %ibias, %iea0');
+        $sumb->raw('  %eap = getelementptr inbounds i8, ptr %arr, i64 %iea');
+        $sumb->raw('  %ev = load i64, ptr %eap');
         $sumb->raw('  %es = inttoptr i64 %ev to ptr');
         $sumb->raw('  %el = call i64 @__mir_strlen(ptr %es)');
         $sumb->raw('  %a = load i64, ptr %accp');
@@ -2687,7 +2715,10 @@ final class UnifiedArrayRuntime
         $dosep->raw('  store i64 %w0b, ptr %wp');
         $dosep->raw('  br label %nosep');
         $nosep = $fn->block('nosep');
-        $nosep->raw('  %ev2 = call i64 @__mir_array_value_at(ptr %arr, i64 %j)');
+        $nosep->raw('  %jea0 = mul i64 %j, %istride');
+        $nosep->raw('  %jea = add i64 %ibias, %jea0');
+        $nosep->raw('  %eap2 = getelementptr inbounds i8, ptr %arr, i64 %jea');
+        $nosep->raw('  %ev2 = load i64, ptr %eap2');
         $nosep->raw('  %es2 = inttoptr i64 %ev2 to ptr');
         $nosep->raw('  %el2 = call i64 @__mir_strlen(ptr %es2)');
         $nosep->raw('  %w1 = load i64, ptr %wp');
