@@ -1,0 +1,10 @@
+name=greet
+nparams=2
+required=1
+ret=string
+  param name type=string opt=0
+  param greeting type=string opt=1
+invoke=Hello, World!
+invoke2=Hi, X!
+add=7
+noop hasret=1 ret=void

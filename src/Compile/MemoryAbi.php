@@ -20,7 +20,7 @@ final class MemoryAbi
      * `bin/manticore version` output so vendored artefacts can
      * detect mismatches against a fresh build.
      */
-    public const VERSION = 6;
+    public const VERSION = 7;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -204,24 +204,52 @@ final class MemoryAbi
      */
     public const RMETA_CTOR_TRAMP_OFFSET = 64;
 
+    /** `i64` / `ptr` — the class-level ATTRIBUTE table (Ф4): count, then
+     *  `[{ ptr name, ptr args_factory, ptr new_factory }]`. The factories are
+     *  {@see \Compile\Mir\Passes\ReflectSynth}'s synthesized `__mc_attr_args_/
+     *  new_` functions — getArguments()/newInstance() call them indirectly. */
+    public const RMETA_NATTRS_OFFSET = 72;
+    public const RMETA_ATTRS_OFFSET  = 80;
+
+    /** `ptr` — the class-constants factory `__mc_consts_<C>()` (Ф5), or null when
+     *  the class declares none. Returns an assoc `name => value`;
+     *  getConstants()/getConstant()/hasConstant() derive from it. A synthesized
+     *  factory rather than a static table because a const VALUE is an arbitrary
+     *  constant expression, and there is no emit-time constant-cell builder. */
+    public const RMETA_CONSTS_FN_OFFSET = 88;
+
+    /** `ptr` — the interface-names factory `__mc_ifaces_<C>()` (Ф5), or null. It
+     *  returns the class's transitive `implements` list as a `string[]`;
+     *  getInterfaceNames() calls it. A factory rather than a static table keeps
+     *  the string-array building on the normal path. */
+    public const RMETA_IFACES_FN_OFFSET = 96;
+
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 72;
+    public const RMETA_SIZE = 104;
 
     /** One row of the method / property tables:
-     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params }`.
+     *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
+     *     i64 nattrs, ptr attrs }`.
      *  `tramp` is the method's uniform `(i64 recv, ptr args) -> i64 cell` entry
      *  (null = not invokable: abstract / interface / a by-ref param); `arity`
      *  packs `required | (total << 8) | (variadic << 16)`; `params` points at a
-     *  `[nparams x PARAM]` table (Ф2d — ReflectionParameter). Property rows keep
-     *  the method-only fields zero. */
+     *  `[nparams x PARAM]` table for a method row, or a `{ type, getter, setter }`
+     *  extra struct for a property row (Ф3). `nattrs`/`attrs` are the member's
+     *  ATTRIBUTE table (Ф4), same `[{name, args_factory, new_factory}]` shape as
+     *  the class-level one. A property row keeps tramp/arity/nparams zero. */
     public const RMETA_ROW_NAME_OFFSET   = 0;
     public const RMETA_ROW_FLAGS_OFFSET  = 8;
     public const RMETA_ROW_TRAMP_OFFSET  = 16;
     public const RMETA_ROW_ARITY_OFFSET  = 24;
     public const RMETA_ROW_NPARAMS_OFFSET = 32;
     public const RMETA_ROW_PARAMS_OFFSET  = 40;
-    public const RMETA_ROW_SIZE = 48;
+    public const RMETA_ROW_NATTRS_OFFSET  = 48;
+    public const RMETA_ROW_ATTRS_OFFSET   = 56;
+    /** `ptr` — a METHOD row's declared return type (the hint as written, or null);
+     *  ReflectionMethod::getReturnType() reads it. Zero on a property row. */
+    public const RMETA_ROW_RETTYPE_OFFSET = 64;
+    public const RMETA_ROW_SIZE = 72;
 
     /** One parameter entry of a method's param table:
      *  `{ ptr name, ptr type, i64 flags }`. `type` is the declared type name with
@@ -231,6 +259,14 @@ final class MemoryAbi
     public const RMETA_PARAM_TYPE_OFFSET  = 8;
     public const RMETA_PARAM_FLAGS_OFFSET = 16;
     public const RMETA_PARAM_SIZE = 24;
+
+    /** One attribute entry (Ф4): `{ ptr name, ptr args_factory, ptr new_factory }`.
+     *  The factories are {@see \Compile\Mir\Passes\ReflectSynth}'s synthesized
+     *  nullary functions — getArguments()/newInstance() call them indirectly. */
+    public const RMETA_ATTR_NAME_OFFSET = 0;
+    public const RMETA_ATTR_ARGS_OFFSET = 8;
+    public const RMETA_ATTR_NEW_OFFSET  = 16;
+    public const RMETA_ATTR_SIZE = 24;
 
     public const RMETA_PARAM_HAS_DEFAULT = 1;
     public const RMETA_PARAM_ALLOWS_NULL = 2;

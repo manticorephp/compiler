@@ -110,7 +110,7 @@ final class NarrowReturns implements Pass
         // return to a concrete scalar would drop the box, so the indirect caller
         // reads a raw int as a cell (`invoke(sum())` → 3.45e-323 not 7). Its
         // return type is a hard contract, not an inferred convenience.
-        if (\str_contains($fn->name, '__mc_rtramp_')) { return false; }
+        if (\Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name)) { return false; }
         // Only un-resolved returns (bare `array` / no hint) are candidates.
         if ($fn->returnType->kind !== Type::KIND_UNKNOWN) { return false; }
         // Early (concreteOnly) pass: a function with an ERASED param (bare

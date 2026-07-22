@@ -1,0 +1,10 @@
+MAX=100
+NAME=cfg
+DERIVED=200
+VERSION=1.0
+EXTRA=x
+SCALE=2.5
+has MIN=1
+has NOPE=0
+count=8
+ITEMS=a,b

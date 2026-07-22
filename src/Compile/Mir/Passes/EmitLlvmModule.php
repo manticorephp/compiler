@@ -634,7 +634,7 @@ trait EmitLlvmModule
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
         $this->frame->isClosure = false;
-        $this->frame->isTrampoline = \str_contains($fn->name, '__mc_rtramp_');
+        $this->frame->isTrampoline = \Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name);
 
         $isMain = $fn->name === '__main';
         if ($isMain) {
