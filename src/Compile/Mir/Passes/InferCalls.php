@@ -148,12 +148,19 @@ trait InferCalls
             || $n === '__mc_refl_tramp' || $n === '__mc_refl_ctor'
             || $n === '__mc_refl_mrow' || $n === '__mc_refl_row_nparams'
             || $n === '__mc_refl_row_params' || $n === '__mc_refl_row_arity'
+            || $n === '__mc_refl_prow' || $n === '__mc_refl_prop_getter'
+            || $n === '__mc_refl_prop_setter'
+            || $n === '__mc_refl_nprops' || $n === '__mc_refl_props_base'
+            || $n === '__mc_refl_nmethods' || $n === '__mc_refl_methods_base'
             || $n === '__mc_refl_param_flags') { return Type::int_(); }
         if ($n === '__mc_refl_name'
-            || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type') { return Type::string_(); }
+            || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
+            || $n === '__mc_refl_row_name'
+            || $n === '__mc_refl_prow_type') { return Type::string_(); }
         // The boxed result of an indirect trampoline call — a mixed cell the
         // prelude's ReflectionMethod::invoke / newInstance hand back to the user.
-        if ($n === '__mc_refl_invoke') { return Type::cell(); }
+        if ($n === '__mc_refl_invoke' || $n === '__mc_refl_call1') { return Type::cell(); }
+        if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'

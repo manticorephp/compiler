@@ -162,6 +162,61 @@ trait LowerClasses
         return $out;
     }
 
+    /**
+     * The declared shape of every property — instance and static — for
+     * `ReflectionProperty`. Order mirrors what the property table emits and php
+     * reports: inherited first (they own the lower slots), then this class's own
+     * promoted-ctor + declared + trait-mixed properties. A redeclaration
+     * overwrites the inherited entry so `declaringClass` names THIS class, as php
+     * does.
+     *
+     * @return array<string, \Compile\Mir\PropertyMeta>
+     */
+    private function buildPropertyMeta(\Parser\Ast\ClassDecl $decl, string $parent): array
+    {
+        $out = [];
+        if ($parent !== '' && isset($this->classTable[$parent])) {
+            foreach ($this->classTable[$parent]->propertyMeta as $pn => $pm) {
+                $out[$pn] = $pm;   // preserves the ancestor as declaringClass
+            }
+        }
+        foreach ($decl->methods as $m) {
+            if ($m->name !== '__construct') { continue; }
+            foreach ($m->params as $p) {
+                if ($p->promoted === '') { continue; }
+                $ro = ($p->promotedReadonly ?? false) || $decl->isReadonly;
+                $out[$p->name] = new \Compile\Mir\PropertyMeta(
+                    $p->name, $p->promoted, false, $ro,
+                    $p->typeHint === null ? '' : $p->typeHint,
+                    $p->default !== null, $decl->name,
+                    $this->attrNames($p->attributes));
+            }
+        }
+        foreach ($decl->properties as $prop) {
+            $vis = $prop->visibility === '' ? 'public' : $prop->visibility;
+            $ro = $prop->isReadonly || $decl->isReadonly;
+            $out[$prop->name] = new \Compile\Mir\PropertyMeta(
+                $prop->name, $vis, $prop->isStatic, $ro,
+                $prop->typeHint === null ? '' : $prop->typeHint,
+                $prop->default !== null, $decl->name,
+                $this->attrNames($prop->attributes));
+        }
+        foreach ($decl->uses as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->properties as $tprop) {
+                if (isset($out[$tprop->name]) && $out[$tprop->name]->declaringClass === $decl->name) { continue; }
+                $vis = $tprop->visibility === '' ? 'public' : $tprop->visibility;
+                $out[$tprop->name] = new \Compile\Mir\PropertyMeta(
+                    $tprop->name, $vis, $tprop->isStatic, $tprop->isReadonly,
+                    $tprop->typeHint === null ? '' : $tprop->typeHint,
+                    $tprop->default !== null, $decl->name,
+                    $this->attrNames($tprop->attributes));
+            }
+        }
+        return $out;
+    }
+
     private function buildClassDef(\Parser\Ast\ClassDecl $decl, int $classId): ClassDef
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
@@ -403,9 +458,11 @@ trait LowerClasses
         $isStruct = $this->hasStructAttr($decl->attributes);
         $hasBag = $this->hasDynamicPropsAttr($decl->attributes);
         $this->currentLowerClass = $savedLowerClass;
+        $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
         $cd->propertyReadonly = $roProps;
+        $cd->propertyMeta = $propMeta;
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
         $cd->isFinal = $decl->isFinal;

@@ -162,7 +162,7 @@ final class RuntimeLibrary
         string $propsFlds = 'i64 0, ptr null',
         string $ctorTrampFld = 'ptr null'
     ): string {
-        return '@__mc_rmeta_v2_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
+        return '@__mc_rmeta_v3_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
             . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds
             . ', ' . $ctorTrampFld . " }\n";
@@ -175,7 +175,7 @@ final class RuntimeLibrary
      *  error, not silent linkonce_odr coalescing onto the wrong shape. */
     public static function rmetaField(int $id): string
     {
-        return 'ptr @__mc_rmeta_v2_' . (string)$id;
+        return 'ptr @__mc_rmeta_v3_' . (string)$id;
     }
 
     /** Registry node: `{ ptr rmeta, ptr next, i64 registered }`. */
@@ -207,7 +207,7 @@ final class RuntimeLibrary
         $sid = $key;
         $node = '@__mc_refl_node_' . $sid;
         $t = self::reflNodeType();
-        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_v2_' . $sid
+        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_v3_' . $sid
              . ", ptr null, i64 0 }\n";
         $out .= 'define void @__mc_refl_reg_' . $sid . "() {\nentry:\n";
         $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
@@ -320,6 +320,49 @@ final class RuntimeLibrary
         $out .= self::reflMemberLookup();
         $out .= self::reflMemberTramp();
         $out .= self::reflMethodRow();
+        $out .= self::reflPropRow();
+        return $out;
+    }
+
+    /**
+     * `__mc_refl_prow(i64 h, ptr name) -> i64` — a PROPERTY row's address (as
+     * i64), or 0 when absent. The prelude's ReflectionProperty caches it, then
+     * reads the property's type + accessor pointers off the extra struct its
+     * `params` slot ({@see \Compile\MemoryAbi::RMETA_ROW_PARAMS_OFFSET}) points
+     * at. The property table walk — {@see reflMethodRow} over the method table.
+     */
+    private static function reflPropRow(): string
+    {
+        $np = (string)\Compile\MemoryAbi::RMETA_NPROPS_OFFSET;
+        $pt = (string)\Compile\MemoryAbi::RMETA_PROPS_OFFSET;
+        $rs = (string)\Compile\MemoryAbi::RMETA_ROW_SIZE;
+        $out = "define i64 @__mc_refl_prow(i64 %h, ptr %name) {\nentry:\n";
+        $out .= "  %hz = icmp eq i64 %h, 0\n";
+        $out .= "  br i1 %hz, label %miss, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %m = inttoptr i64 %h to ptr\n";
+        $out .= '  %cntP = getelementptr i8, ptr %m, i64 ' . $np . "\n";
+        $out .= "  %cnt = load i64, ptr %cntP\n";
+        $out .= '  %tabP = getelementptr i8, ptr %m, i64 ' . $pt . "\n";
+        $out .= "  %tab = load ptr, ptr %tabP\n";
+        $out .= "  %empty = icmp eq i64 %cnt, 0\n";
+        $out .= "  br i1 %empty, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %have ], [ %i1, %cont ]\n";
+        $out .= '  %roff = mul i64 %i, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %tab, i64 %roff\n";
+        $out .= "  %rn = load ptr, ptr %row\n";
+        $out .= "  %c = call i32 @strcmp(ptr %rn, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %r = ptrtoint ptr %row to i64\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "cont:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
         return $out;
     }
 

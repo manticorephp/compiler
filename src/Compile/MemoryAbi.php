@@ -20,7 +20,7 @@ final class MemoryAbi
      * `bin/manticore version` output so vendored artefacts can
      * detect mismatches against a fresh build.
      */
-    public const VERSION = 6;
+    public const VERSION = 7;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 

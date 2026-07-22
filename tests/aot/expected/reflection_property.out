@@ -1,0 +1,14 @@
+x vis=pub static=0 ro=0 type=int null=0
+y vis=prot static=0 ro=0 type=float null=0
+label vis=priv static=0 ro=0 type=string null=1
+id vis=pub static=0 ro=1 type=int null=0
+count vis=pub static=1 ro=0 type=int null=0
+x=1
+x'=99
+y=2.5
+y'=3.5
+label=NULL
+label'=hi
+id=42 ro=1
+count static=1 val=7
+mods x=1 label=4 count=17

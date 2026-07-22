@@ -56,6 +56,24 @@ final class TrampolineSynth
         return '__mc_rtramp_' . $c . '__' . $method;
     }
 
+    /**
+     * True for any reflection-synthesized function whose `mixed` return shares
+     * the trampoline's uniform cell-return ABI — a scalar slot must box on
+     * return (else a caller reading it as a cell decodes garbage), and
+     * NarrowReturns must not strip the box (these have no direct MIR caller).
+     * The invoke trampolines plus {@see ReflectSynth}'s accessors / factories.
+     */
+    public static function isSynthReturn(string $name): bool
+    {
+        return \str_contains($name, '__mc_rtramp_')
+            || \str_contains($name, '__mc_pget_')
+            || \str_contains($name, '__mc_pset_')
+            || \str_contains($name, '__mc_attr_args_')
+            || \str_contains($name, '__mc_attr_new_')
+            || \str_contains($name, '__mc_consts_')
+            || \str_contains($name, '__mc_enum_cases_');
+    }
+
     /** True when a method can carry a uniform invoke trampoline. */
     public static function invokable(MethodMeta $mm): bool
     {

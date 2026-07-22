@@ -859,14 +859,19 @@ trait EmitLlvmRuntime
     }
 
     /**
-     * The property table for one class. Declared instance properties, in slot
-     * order — `propertyNames` is the layout, so this is also the order php
-     * reports. Static props are a separate list and are not included yet.
+     * The property table for one class. Every property php's getProperties()
+     * reports — instance AND static — in {@see \Compile\Mir\ClassDef::$propertyMeta}
+     * order (inherited first, then own), carrying real visibility / static /
+     * readonly flags now that {@see \Compile\Mir\PropertyMeta} records them.
      *
-     * Visibility is not recorded in ClassDef (only readonly is), so every entry
-     * reports PUBLIC for now. That is a KNOWN GAP, not an accident: a serializer
-     * asking `isPrivate()` would be told the wrong thing, so ReflectionProperty
-     * (Ф3) must carry visibility into ClassDef first.
+     * A property row reuses the shared 48-byte row: `name@0`, `flags@8` (member
+     * flags), tramp/arity/nparams zero, and `params@40` points at a
+     * `{ ptr typeName, ptr getter, ptr setter }` extra struct (the same slot a
+     * method row uses for its parameter table). The accessors are
+     * {@see ReflectSynth}'s synthesized `__mc_pget_/pset_` functions, referenced
+     * by symbol only when actually synthesized (an undefined DATA ref is a link
+     * error — the same guard as {@see methodTrampField}). getValue/setValue call
+     * them indirectly.
      *
      * @return string[] [globalDef, "i64 n, ptr sym"]
      */
@@ -875,19 +880,49 @@ trait EmitLlvmRuntime
         $rows = [];
         $defs = '';
         $i = 0;
-        foreach ($cls->propertyNames as $pn) {
+        foreach ($cls->propertyMeta as $pn => $pm) {
             $sym = '@.rmeta.p.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $pn);
-            $ro = isset($cls->propertyReadonly[$pn]);
-            // Properties carry only name + flags; tramp/arity/nparams/params zero.
+            // Type name — the hint AS WRITTEN (`?App\Foo`). getType() derives
+            // nullability + the clean name from it in the prelude; a property has
+            // no ALLOWS_NULL flag slot the way a parameter does.
+            $typeFld = 'null';
+            if ($pm->typeHint !== '') {
+                $tsym = '@.rmeta.pty.' . $id . '.' . (string)$i;
+                $defs .= $this->strGlobalDef($tsym, $pm->typeHint);
+                $typeFld = 'ptr ' . $this->strSymBytes($tsym);
+            }
+            $decl = $pm->declaringClass !== '' ? $pm->declaringClass : $cls->name;
+            $getFld = $this->accessorField($decl, $pm->name, false);
+            $setFld = $this->accessorField($decl, $pm->name, true);
+            $extra = 'null';
+            if ($typeFld !== 'null' || $getFld !== 'ptr null' || $setFld !== 'ptr null') {
+                $exSym = '@.rmeta.px.' . $id . '.' . (string)$i;
+                $tf = $typeFld === 'null' ? 'ptr null' : $typeFld;
+                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr } { '
+                       . $tf . ', ' . $getFld . ', ' . $setFld . " }\n";
+                $extra = $exSym;
+            }
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
-                $this->memberFlags('public', false, false, false, $ro),
-                'null', 0, 0, 'null');
+                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly),
+                'null', 0, 0, $extra);
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.pt.' . $id, $rows);
         return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
+     * A property accessor field: `ptr @manticore_…` when {@see ReflectSynth}
+     * synthesized it (guarded by its presence in the signature table — a data
+     * reference to an undefined symbol is a link error), else `ptr null`.
+     */
+    private function accessorField(string $declClass, string $prop, bool $setter): string
+    {
+        $sym = \Compile\Mir\Passes\ReflectSynth::propAccessor($declClass, $prop, $setter);
+        if (!isset($this->sigs->paramTypes[$sym])) { return 'ptr null'; }
+        return 'ptr @manticore_' . $this->mangle($sym);
     }
 
     /**

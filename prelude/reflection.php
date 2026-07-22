@@ -303,6 +303,33 @@ class ReflectionClass
         return new ReflectionMethod($this->name, $name);
     }
 
+    /**
+     * Every declared property as a ReflectionProperty, in the property table's
+     * order (inherited first, then own — what the metadata carries).
+     * @return ReflectionProperty[]
+     */
+    public function getProperties(): array
+    {
+        $n = __mc_refl_nprops($this->h);
+        $base = __mc_refl_props_base($this->h);
+        $out = [];
+        $i = 0;
+        while ($i < $n) {
+            $out[] = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /** A property by name; throws when the class has no such property. */
+    public function getProperty(string $name): ReflectionProperty
+    {
+        if (__mc_refl_member($this->h, $name, 0) === 0) {
+            throw new ReflectionException("Property " . $name . " does not exist");
+        }
+        return new ReflectionProperty($this->name, $name);
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
@@ -445,6 +472,152 @@ class ReflectionMethod
     public function isProtected(): bool
     {
         return ($this->flags() & 3) === 1;
+    }
+}
+
+/**
+ * A property handle. Tier-3: metadata (visibility / static / readonly / type)
+ * off the class's property table, plus live getValue/setValue through the
+ * synthesized `__mc_pget_/pset_` accessors (an object read/write lowered
+ * normally, so a typed slot boxes/unboxes correctly — the same indirect-call
+ * shape as ReflectionMethod::invoke).
+ */
+class ReflectionProperty
+{
+    public const IS_STATIC = 16;
+    public const IS_READONLY = 128;
+    public const IS_PUBLIC = 1;
+    public const IS_PROTECTED = 2;
+    public const IS_PRIVATE = 4;
+
+    public string $name = "";
+    public string $class = "";
+
+    /** Owning class rmeta handle; the property row; the `{type,getter,setter}`
+     *  extra base; the member flags; the accessor pointers. Raw addresses as
+     *  ints — immortal rodata / code, nothing retains them. */
+    private int $h = 0;
+    private int $extra = 0;
+    private int $flags = 0;
+    private int $getter = 0;
+    private int $setter = 0;
+
+    /** `new ReflectionProperty('Class', 'prop')` or `(…, $obj, 'prop')`. */
+    public function __construct(object|string $objectOrClass, string $property)
+    {
+        if (\is_string($objectOrClass)) {
+            $cls = __mc_refl_unqualify($objectOrClass);
+            $h = __mc_refl_find($cls);
+        } else {
+            $h = __mc_refl_of($objectOrClass);
+            $cls = __mc_refl_name($h);
+        }
+        if ($h === 0) {
+            throw new ReflectionException("Class does not exist");
+        }
+        $fl = __mc_refl_member($h, $property, 0);
+        if ($fl === 0) {
+            throw new ReflectionException("Property " . $property . " does not exist");
+        }
+        $this->h = $h;
+        $this->class = $cls;
+        $this->name = $property;
+        $this->flags = $fl - 1;
+        $row = __mc_refl_prow($h, $property);
+        $this->extra = __mc_refl_row_params($row);
+        $this->getter = __mc_refl_prop_getter($this->extra);
+        $this->setter = __mc_refl_prop_setter($this->extra);
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    public function hasType(): bool
+    {
+        return __mc_refl_prow_type($this->extra) !== "";
+    }
+
+    /** The declared type as a ReflectionNamedType, or null when untyped. A
+     *  leading `?` is nullability, not part of the name. */
+    public function getType(): ReflectionNamedType|null
+    {
+        $t = __mc_refl_prow_type($this->extra);
+        if ($t === "") { return null; }
+        $nullable = false;
+        if (\substr($t, 0, 1) === "?") { $nullable = true; $t = \substr($t, 1); }
+        return new ReflectionNamedType($t, $nullable);
+    }
+
+    public function isPublic(): bool
+    {
+        return ($this->flags & 3) === 0;
+    }
+
+    public function isProtected(): bool
+    {
+        return ($this->flags & 3) === 1;
+    }
+
+    public function isPrivate(): bool
+    {
+        return ($this->flags & 3) === 2;
+    }
+
+    public function isStatic(): bool
+    {
+        return ($this->flags & 4) !== 0;
+    }
+
+    public function isReadonly(): bool
+    {
+        return ($this->flags & 32) !== 0;
+    }
+
+    /** php's modifier bitmask (IS_PUBLIC / … / IS_STATIC / IS_READONLY) — a
+     *  different encoding from the internal member-flags word. */
+    public function getModifiers(): int
+    {
+        $m = 0;
+        $v = $this->flags & 3;
+        if ($v === 0) { $m = $m | 1; }
+        if ($v === 1) { $m = $m | 2; }
+        if ($v === 2) { $m = $m | 4; }
+        if (($this->flags & 4) !== 0) { $m = $m | 16; }
+        if (($this->flags & 32) !== 0) { $m = $m | 128; }
+        return $m;
+    }
+
+    public function getDeclaringClass(): ReflectionClass
+    {
+        return new ReflectionClass($this->class);
+    }
+
+    /**
+     * The property's value on `$object` (null / omitted for a static property,
+     * whose accessor ignores the receiver). Reads through the synthesized
+     * getter, so a typed slot comes back boxed.
+     */
+    public function getValue(?object $object = null): mixed
+    {
+        if ($this->getter === 0) {
+            throw new ReflectionException("Cannot read property " . $this->name);
+        }
+        return __mc_refl_call1($this->getter, $object);
+    }
+
+    /**
+     * Set the property on `$object`. For a static property the receiver is
+     * ignored — pass null. A readonly property outside its declaring scope is a
+     * fatal error, as php's own setValue reports.
+     */
+    public function setValue(?object $object, mixed $value): void
+    {
+        if ($this->setter === 0) {
+            throw new ReflectionException("Cannot write property " . $this->name);
+        }
+        __mc_refl_prop_set($this->setter, $object, $value);
     }
 }
 

@@ -223,6 +223,15 @@ final class ClassDef
      *  Keeping it at the end leaves every existing field's offset untouched. */
     public bool $isPreludeClass = false;
 
+    /** Declared shape of each instance property — visibility, static, readonly,
+     *  the as-written type hint. `propertyNames`/`propertyTypes` answer layout;
+     *  this is the reflection source `ReflectionProperty` reads. Own → inherited,
+     *  matching php's getProperties() order. A missing key = not user-declared
+     *  (e.g. a compiler-synthesised slot), never an error. Appended LAST for the
+     *  same offset-stability reason as {@see $isPreludeClass}.
+     *  @var array<string, PropertyMeta> */
+    public array $propertyMeta = [];
+
     /**
      * Width in bytes of `$prop`'s slot: 8 unless the property is declared as a
      * `#[TypeDef]` whose `repr` is narrower.

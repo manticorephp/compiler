@@ -588,6 +588,7 @@ final class LowerFromAst implements Pass
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
+                $trampSrc .= \Compile\Mir\Passes\ReflectSynth::sourceFor($cd);
             }
             if ($trampSrc !== '') {
                 $trampProg = \Parser\Parser::parseSource("<?php\n" . $trampSrc);
