@@ -1,0 +1,13 @@
+bool(true)
+int(2)
+string(4) "ping"
+int(1)
+int(1)
+string(4) "data"
+bool(true)
+string(0) ""
+int(8192)
+bool(false)
+string(10) "/tmp/x.pem"
+string(4) "POST"
+done
