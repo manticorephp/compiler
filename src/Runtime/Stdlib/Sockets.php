@@ -1054,11 +1054,19 @@ function socket_atmark(\Socket $socket): bool
 }
 
 /**
- * socket_cmsg_space($level, $type, $num). The buffer size for ancillary data of
- * $type. NOT implemented — CMSG_SPACE needs msghdr/cmsghdr alignment math, part
- * of the deferred sendmsg/recvmsg subsystem. Returns null (php returns ?int).
+ * socket_cmsg_space($level, $type, $num) = CMSG_SPACE(data length) — the buffer a
+ * recvmsg must reserve for $num items of ancillary data (as the `controllen` key).
+ * Host-aware: a cmsghdr is 12 bytes / 4-aligned on Darwin, 16 bytes / 8-aligned on
+ * glibc; the data length is $num file descriptors (SCM_RIGHTS, sizeof(int)=4). So
+ * (SOL_SOCKET, SCM_RIGHTS, 1) is 16 on Darwin, 24 on Linux — matching php.
  */
 function socket_cmsg_space(int $level, int $type, int $num = 0): ?int
 {
-    return null;
+    $isDarwin = \__mc_host_is_darwin();
+    $hdr = $isDarwin ? 12 : 16;   // sizeof(struct cmsghdr)
+    $align = $isDarwin ? 4 : 8;   // CMSG_ALIGN unit
+    $dataLen = $num * 4;          // SCM_RIGHTS carries $num ints (fds)
+    $alignedHdr = \intdiv($hdr + $align - 1, $align) * $align;
+    $alignedData = \intdiv($dataLen + $align - 1, $align) * $align;
+    return $alignedHdr + $alignedData;
 }
