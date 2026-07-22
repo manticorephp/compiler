@@ -211,9 +211,16 @@ final class MemoryAbi
     public const RMETA_NATTRS_OFFSET = 72;
     public const RMETA_ATTRS_OFFSET  = 80;
 
+    /** `ptr` — the class-constants factory `__mc_consts_<C>()` (Ф5), or null when
+     *  the class declares none. Returns an assoc `name => value`;
+     *  getConstants()/getConstant()/hasConstant() derive from it. A synthesized
+     *  factory rather than a static table because a const VALUE is an arbitrary
+     *  constant expression, and there is no emit-time constant-cell builder. */
+    public const RMETA_CONSTS_FN_OFFSET = 88;
+
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 88;
+    public const RMETA_SIZE = 96;
 
     /** One row of the method / property tables:
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,

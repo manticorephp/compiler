@@ -1135,9 +1135,15 @@ trait EmitLlvmRuntime
             $descs .= $aPair[0];
             $attrsFlds = 'i64 ' . (string)$aPair[1] . ', '
                        . ($aPair[2] === 'null' ? 'ptr null' : 'ptr ' . $aPair[2]);
+            $constsFnFld = 'ptr null';
+            $constsFn = \Compile\Mir\Passes\ReflectSynth::constsFn($cls->name);
+            if (isset($this->sigs->paramTypes[$constsFn])) {
+                $constsFnFld = 'ptr @manticore_' . $this->mangle($constsFn);
+            }
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
-                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds);
+                $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
+                $constsFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.

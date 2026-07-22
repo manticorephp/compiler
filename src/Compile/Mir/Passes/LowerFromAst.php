@@ -606,6 +606,13 @@ final class LowerFromAst implements Pass
                 $this->fnDecls[$decl->name] = $decl;
                 $module->addFunction($this->lowerFunction($decl));
             }
+            // Ф5: a class-constants factory per class with any constant, built as
+            // AST that references each constant by `\C::NAME` — reusing the
+            // existing class-const resolution (self:: / inherited all resolve).
+            foreach ($this->synthConstFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $module->addFunction($this->lowerFunction($decl));
+            }
         }
 
         // Pre-pass: capture every function's params so call sites can
@@ -823,6 +830,69 @@ final class LowerFromAst implements Pass
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
                 [], 'object', $newBody, $span);
         }
+    }
+
+    /**
+     * Ф5 — one `__mc_consts_<C>(): array` per class that has any constant,
+     * returning `['NAME' => \C::NAME, …]`. Referencing each constant by its
+     * qualified name reuses the existing const resolution (a `self::` or
+     * inherited value resolves in the owning class's scope), so no value
+     * expression is re-lowered out of context.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthConstFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            /** @var array<string, \Parser\Ast\Span> $names name → its span */
+            $names = [];
+            $seen = [];
+            $visited = [];
+            $this->collectConstNames($cd->name, $names, $seen, $visited);
+            if ($names === []) { continue; }
+            $fqn = '\\' . \ltrim($cd->name, '\\');
+            $elems = [];
+            foreach ($names as $cn => $span) {
+                $elems[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string($cn, $span),
+                    \Parser\Ast\Expr::staticAccess($fqn, $cn, $span));
+            }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::constsFn($cd->name), [], 'array', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
+     * Gather a class's constant names (own, then parents, interfaces and traits),
+     * first declaration winning — the same reach as {@see LowerClasses::findClassConst}.
+     *
+     * @param array<string, \Parser\Ast\Span> $names   name → span, appended
+     * @param array<string, bool>             $seen    names already taken
+     * @param array<string, bool>             $visited classes already walked
+     */
+    private function collectConstNames(string $class, array &$names, array &$seen, array &$visited): void
+    {
+        $c = \ltrim($class, '\\');
+        if (isset($visited[$c])) { return; }
+        $visited[$c] = true;
+        $decl = $this->classDecls[$c] ?? null;
+        if ($decl === null) { return; }
+        foreach ($decl->consts as $const) {
+            if (isset($seen[$const->name])) { continue; }
+            $seen[$const->name] = true;
+            $names[$const->name] = $const->span;
+        }
+        foreach ($decl->uses as $t)       { $this->collectConstNames($t, $names, $seen, $visited); }
+        foreach ($decl->extends as $p)    { $this->collectConstNames($p, $names, $seen, $visited); }
+        foreach ($decl->implements as $i) { $this->collectConstNames($i, $names, $seen, $visited); }
     }
 
     /**

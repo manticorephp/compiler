@@ -63,7 +63,7 @@ final class RuntimeLibrary
      */
     public static function rmetaType(): string
     {
-        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr }';
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr, ptr }';
     }
 
     /** One method/property row:
@@ -196,12 +196,13 @@ final class RuntimeLibrary
         string $methodsFlds = 'i64 0, ptr null',
         string $propsFlds = 'i64 0, ptr null',
         string $ctorTrampFld = 'ptr null',
-        string $attrsFlds = 'i64 0, ptr null'
+        string $attrsFlds = 'i64 0, ptr null',
+        string $constsFnFld = 'ptr null'
     ): string {
         return '@__mc_rmeta_v3_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
             . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds
-            . ', ' . $ctorTrampFld . ', ' . $attrsFlds . " }\n";
+            . ', ' . $ctorTrampFld . ', ' . $attrsFlds . ', ' . $constsFnFld . " }\n";
     }
 
     /** The rmeta pointer field for a descriptor: the class's block, or null

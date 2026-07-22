@@ -61,6 +61,13 @@ final class ReflectSynth
              . $c . '__' . $kind . '_' . $m . '_' . (string)$k;
     }
 
+    /** The class-constants factory symbol (Ф5): `__mc_consts_<C>()` → assoc
+     *  `name => value`. Matched on the synthesis + emission sides. */
+    public static function constsFn(string $class): string
+    {
+        return '__mc_consts_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+    }
+
     /**
      * PHP source (no `<?php`) for everything this class contributes: an
      * accessor pair per OWN (declared here) property. '' when it contributes

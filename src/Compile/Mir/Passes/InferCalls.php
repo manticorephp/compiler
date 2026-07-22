@@ -155,6 +155,7 @@ trait InferCalls
             || $n === '__mc_refl_class_nattrs' || $n === '__mc_refl_class_attrs'
             || $n === '__mc_refl_row_nattrs' || $n === '__mc_refl_row_attrs'
             || $n === '__mc_refl_attr_args' || $n === '__mc_refl_attr_new'
+            || $n === '__mc_refl_consts_fn'
             || $n === '__mc_refl_param_flags') { return Type::int_(); }
         if ($n === '__mc_refl_name'
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'

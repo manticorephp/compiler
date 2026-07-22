@@ -175,6 +175,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_attr_args')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ARGS_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_new')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NEW_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_call0')              { return $this->biMcReflCall0($args); }
+        if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }

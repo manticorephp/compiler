@@ -383,6 +383,32 @@ class ReflectionClass
             __mc_refl_class_nattrs($this->h), $name);
     }
 
+    /**
+     * Every constant as `name => value`, including inherited ones. Built by the
+     * compiler-synthesized factory, which references each constant by its
+     * qualified name so the value resolves exactly as user code would see it.
+     * @return array<string, mixed>
+     */
+    public function getConstants(): array
+    {
+        $fn = __mc_refl_consts_fn($this->h);
+        if ($fn === 0) { return []; }
+        return __mc_refl_call0($fn);
+    }
+
+    /** One constant's value, or false when there is no such constant. */
+    public function getConstant(string $name): mixed
+    {
+        $c = $this->getConstants();
+        return $c[$name] ?? false;
+    }
+
+    public function hasConstant(string $name): bool
+    {
+        $c = $this->getConstants();
+        return isset($c[$name]);
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
