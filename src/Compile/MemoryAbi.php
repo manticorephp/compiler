@@ -431,6 +431,22 @@ final class MemoryAbi
     /** Bit 0 of the flags word: HASHED mode. Cleared ⇒ PACKED. */
     public const ARRAY_FLAG_HASHED = 1;
 
+    /**
+     * Bits 1-2 of the flags word: ELEMENT REPRESENTATION, the runtime-truthful
+     * record of what a release/retain/COW must do to each element — stamped as
+     * elements are stored, so it travels with the array through erased aliases
+     * (unlike the compile-time flavor guess). 0 = RAW scalars (no per-element
+     * rc); 3 = CELL (elements are self-describing NaN-boxed cells, dropped via
+     * tag dispatch). 1/2 (STR/OBJ) reserved for a later matrix collapse; unused
+     * now — a concrete str/obj array keeps its specialised release variant and
+     * never stamps these bits, so bits != 0 currently means CELL. Lives in the
+     * low byte, so compaction's `and flags, 255` preserves it. */
+    public const ARRAY_REPR_SHIFT = 1;
+    public const ARRAY_REPR_MASK = 6;   // 0b11 << 1
+    public const ARRAY_REPR_STR  = 2;   // reserved
+    public const ARRAY_REPR_OBJ  = 4;   // reserved
+    public const ARRAY_REPR_CELL = 6;   // elements are boxed cells (tag-dispatch drop)
+
     /** PACKED mode: each value is one i64 slot at data+i*8. */
     public const ARRAY_PACKED_ELEMENT_SIZE = 8;
 
