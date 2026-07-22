@@ -1,0 +1,8 @@
+string(3) "123"
+string(3) "abc"
+string(8) "1.5two31"
+string(0) ""
+string(3) "xyz"
+string(5) "1,2,3"
+string(3) "a-b"
+string(0) ""

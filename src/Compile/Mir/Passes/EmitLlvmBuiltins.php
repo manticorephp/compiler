@@ -2487,17 +2487,28 @@ trait EmitLlvmBuiltins
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
-        $out = $this->emitPtrArg($args[0]);
-        $sep = $this->lastValue;
+        // php implode has two forms: `implode($sep, $array)` and the one-arg
+        // `implode($array)` (separator defaults to ""). In the one-arg form the
+        // array is $args[0] — reading $args[1] here dereferenced a null node and
+        // SIGSEGV'd the compiler.
+        if (\count($args) >= 2) {
+            $out = $this->emitPtrArg($args[0]);
+            $sep = $this->lastValue;
+            $arr = $args[1];
+        } else {
+            $out = '';
+            $sep = $this->strSymBytes('@.cstr.empty');
+            $arr = $args[0];
+        }
         // A non-string element vec (int/float/mixed) is boxed into a cell-array
         // and joined via tagged_to_str per element — the raw C implode would
         // inttoptr a non-pointer value and fault. A known string vec keeps the
         // fast path.
-        $elem = $args[1]->type->element ?? null;
+        $elem = $arr->type->element ?? null;
         $useCell = $elem === null || $elem->kind !== Type::KIND_STRING;
-        $out .= $this->emitNode($args[1]);
+        $out .= $this->emitNode($arr);
         if ($useCell) {
-            $out .= $this->boxToCell($args[1]->type);
+            $out .= $this->boxToCell($arr->type);
             $out .= $this->cellToPtr();
             $vec = $this->lastValue;
             $this->rt->needsTaggedToStr = true;
