@@ -328,6 +328,24 @@ class ReflectionClass
     }
 
     /**
+     * Every method as a ReflectionMethod, in the method table's order (own →
+     * trait → inherited — what php's getMethods() reports).
+     * @return ReflectionMethod[]
+     */
+    public function getMethods(): array
+    {
+        $n = __mc_refl_nmethods($this->h);
+        $base = __mc_refl_methods_base($this->h);
+        $out = [];
+        $i = 0;
+        while ($i < $n) {
+            $out[] = new ReflectionMethod($this->name, __mc_refl_row_name($base, $i));
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /**
      * Every declared property as a ReflectionProperty, in the property table's
      * order (inherited first, then own — what the metadata carries).
      * @return ReflectionProperty[]
@@ -507,6 +525,28 @@ class ReflectionMethod
     public function isProtected(): bool
     {
         return ($this->flags() & 3) === 1;
+    }
+
+    /** php's modifier bitmask (IS_PUBLIC / … / IS_STATIC / IS_ABSTRACT / IS_FINAL)
+     *  — a different encoding from the internal member-flags word. */
+    public function getModifiers(): int
+    {
+        $f = $this->flags();
+        $m = 0;
+        $v = $f & 3;
+        if ($v === 0) { $m = $m | 1; }
+        if ($v === 1) { $m = $m | 2; }
+        if ($v === 2) { $m = $m | 4; }
+        if (($f & 4) !== 0)  { $m = $m | 16; }
+        if (($f & 8) !== 0)  { $m = $m | 64; }
+        if (($f & 16) !== 0) { $m = $m | 32; }
+        return $m;
+    }
+
+    /** The class this method was reached through. */
+    public function getDeclaringClass(): ReflectionClass
+    {
+        return new ReflectionClass($this->class);
     }
 
     /**

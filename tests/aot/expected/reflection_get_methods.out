@@ -1,0 +1,5 @@
+methods: greet,make,render,seal
+render mods=1 decl=Widget
+make static=1 mods=18
+seal final=1 mods=33
+props: w
