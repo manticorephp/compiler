@@ -90,10 +90,11 @@ final class ReflectAnalysis
                     $this->all = true;
                 }
             }
-            // ReflectionMethod / ReflectionProperty take (class-or-object,
-            // member): the CLASS whose metadata they read is the FIRST argument,
-            // exactly like ReflectionClass's operand.
-            if ($cls === 'ReflectionMethod' || $cls === 'ReflectionProperty') {
+            // ReflectionMethod / ReflectionProperty / ReflectionClassConstant
+            // take (class-or-object, member): the CLASS whose metadata they read
+            // is the FIRST argument, exactly like ReflectionClass's operand.
+            if ($cls === 'ReflectionMethod' || $cls === 'ReflectionProperty'
+                || $cls === 'ReflectionClassConstant') {
                 if (\count($n->args) >= 1) {
                     $this->fromArg($n->args[0]);
                 } else {

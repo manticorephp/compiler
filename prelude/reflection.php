@@ -162,6 +162,11 @@ function __mc_refl_attrs_of(int $base, int $n, ?string $filter): array
 
 class ReflectionException extends Exception {}
 
+// ReflectionObject (a ReflectionClass over an instance) is DEFERRED: an empty
+// prelude subclass of ReflectionClass hits a flaky bad-free at teardown — a
+// prelude-class-subclassing drop bug. `new ReflectionClass($obj)` is the exact
+// stable equivalent.
+
 class ReflectionClass
 {
     /** PHP exposes the class name as a public property, not just getName(). */
@@ -407,6 +412,25 @@ class ReflectionClass
     {
         $c = $this->getConstants();
         return isset($c[$name]);
+    }
+
+    /**
+     * Every constant as a ReflectionClassConstant.
+     * @return ReflectionClassConstant[]
+     */
+    public function getReflectionConstants(): array
+    {
+        $out = [];
+        foreach ($this->getConstants() as $name => $v) {
+            $out[] = new ReflectionClassConstant($this->name, $name);
+        }
+        return $out;
+    }
+
+    public function getReflectionConstant(string $name): ReflectionClassConstant|false
+    {
+        if (!$this->hasConstant($name)) { return false; }
+        return new ReflectionClassConstant($this->name, $name);
     }
 
     /**
@@ -1047,5 +1071,71 @@ class ReflectionFunction
             throw new ReflectionException("Function " . $this->name . " is not invokable");
         }
         return __mc_refl_invoke($this->tramp, 0, $args);
+    }
+}
+
+/**
+ * One class constant. getName / getValue / getDeclaringClass are exact; the
+ * value comes from the same class-constants factory getConstants() reads.
+ * Visibility is not captured in the metadata yet, so every constant reports
+ * public (a known gap, not a silent wrong answer for the common getValue path).
+ */
+class ReflectionClassConstant
+{
+    public string $name = "";
+    public string $class = "";
+
+    public function __construct(object|string $class, string $constant)
+    {
+        $rc = new ReflectionClass($class);
+        $this->class = $rc->getName();
+        $this->name = $constant;
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    /**
+     * The constant's value, fetched fresh each call. NOT cached in a property:
+     * an array-valued constant assigned to a property from a local `getConstants()`
+     * result is freed when that local drops (an array-element-ownership hazard);
+     * returning it directly keeps it retained for the caller.
+     */
+    public function getValue(): mixed
+    {
+        $consts = (new ReflectionClass($this->class))->getConstants();
+        return $consts[$this->name] ?? null;
+    }
+
+    public function getDeclaringClass(): ReflectionClass
+    {
+        return new ReflectionClass($this->class);
+    }
+
+    public function isPublic(): bool
+    {
+        return true;
+    }
+
+    public function isProtected(): bool
+    {
+        return false;
+    }
+
+    public function isPrivate(): bool
+    {
+        return false;
+    }
+
+    public function isFinal(): bool
+    {
+        return false;
+    }
+
+    public function getModifiers(): int
+    {
+        return 1;
     }
 }
