@@ -654,6 +654,18 @@ final class LowerFromAst implements Pass
             $this->externInjected = true;
         }
 
+        // Fold polyfill-style declaration guards: expand a top-level `if
+        // (compile-time predicate) { … }` into its live branch, so a declaration
+        // it guards — `if (!function_exists('X')) { function X() {…} }` — hoists to
+        // the top level when live, or is dropped when X already exists. Runs after
+        // the stdlib externs are in `$fnDecls` (so function_exists sees native
+        // functions) and only over the user portion (the prelude window stays put).
+        if ($preludeCount < \count($stmts)) {
+            $head = \array_slice($stmts, 0, $preludeCount);
+            $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
+            $stmts = \array_merge($head, $tail);
+        }
+
         $mainStmts = [];
         $stmtIdx = 0;
         foreach ($stmts as $stmt) {
@@ -1715,6 +1727,113 @@ final class LowerFromAst implements Pass
     }
 
     private function arrayLitElements(\Parser\Ast\ArrayLit $a): array { return $a->elements; }
+
+    /**
+     * Expand top-level compile-time `if` guards: an `if` whose condition (and any
+     * preceding elseif) folds statically is replaced by its live branch's
+     * statements (recursively), so a declaration it guards hoists to the top
+     * level or is dropped. Any non-foldable `if` is left as-is.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @return \Parser\Ast\Stmt[]
+     */
+    private function flattenConstantIfs(array $stmts): array
+    {
+        $out = [];
+        foreach ($stmts as $s) {
+            if ($s->kind === 'If') {
+                $branch = $this->constIfBranch($s);
+                if ($branch !== null) {
+                    foreach ($this->flattenConstantIfs($branch) as $b) {
+                        $this->registerHoistedDecl($b);
+                        $out[] = $b;
+                    }
+                    continue;
+                }
+            }
+            $out[] = $s;
+        }
+        return $out;
+    }
+
+    /**
+     * The live branch's statements of a compile-time `if`, or null when the guard
+     * (or a preceding elseif guard) is not statically foldable.
+     *
+     * @return \Parser\Ast\Stmt[]|null
+     */
+    private function constIfBranch(\Parser\Ast\IfStmt $s): ?array
+    {
+        $c = $this->foldGuard($s->condition);
+        if ($c === null) { return null; }
+        if ($c === true) { return $s->then->statements; }
+        foreach ($s->elseifs as $arm) {
+            $ac = $this->foldGuard($arm->condition);
+            if ($ac === null) { return null; }
+            if ($ac === true) { return $arm->body->statements; }
+        }
+        return $s->else !== null ? $s->else->statements : [];
+    }
+
+    /** Register a hoisted top-level function declaration so calls to it resolve. */
+    private function registerHoistedDecl(\Parser\Ast\Stmt $s): void
+    {
+        if ($s->kind !== 'Function') { return; }
+        $fqn = $s->decl->name;
+        $this->fnDecls[$fqn] = $s->decl;
+        $pos = \strrpos($fqn, '\\');
+        if ($pos !== false) {
+            $bare = \substr($fqn, $pos + 1);
+            $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
+        }
+    }
+
+    /**
+     * Compile-time truth of a declaration guard, or null when not statically
+     * foldable: `function_exists('X')` (same test the expression fold uses — the
+     * known user / stdlib-extern functions), bool literals, and `!` / `&&` / `||`
+     * over them. Anything else leaves the `if` for runtime (unexpanded).
+     */
+    private function foldGuard(\Parser\Ast\Expr $e): ?bool
+    {
+        if ($e->kind === 'BoolLiteral') { return $e->value; }
+        if ($e->kind === 'UnaryOp' && $e->op === '!') {
+            $v = $this->foldGuard($e->operand);
+            return $v === null ? null : !$v;
+        }
+        if ($e->kind === 'BinaryOp' && ($e->op === '&&' || $e->op === 'and')) {
+            $l = $this->foldGuard($e->left);
+            if ($l === false) { return false; }
+            $r = $this->foldGuard($e->right);
+            if ($r === false) { return false; }
+            return ($l === null || $r === null) ? null : true;
+        }
+        if ($e->kind === 'BinaryOp' && ($e->op === '||' || $e->op === 'or')) {
+            $l = $this->foldGuard($e->left);
+            if ($l === true) { return true; }
+            $r = $this->foldGuard($e->right);
+            if ($r === true) { return true; }
+            return ($l === null || $r === null) ? null : false;
+        }
+        if ($e->kind === 'Call' && \count($e->args) === 1 && $e->args[0]->kind === 'StringLiteral') {
+            $fn = \ltrim($e->function, '\\');
+            if ($fn === 'function_exists') {
+                return $this->functionIsKnown($this->stringLitValue($e->args[0]));
+            }
+        }
+        return null;
+    }
+
+    /** Whether a function name is already declared (user or stdlib extern / alias)
+     *  — the same predicate the `function_exists` expression fold uses. */
+    private function functionIsKnown(string $name): bool
+    {
+        $nm = \ltrim($name, '\\');
+        $pos = \strrpos($nm, '\\');
+        $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
+        return isset($this->fnDecls[$nm]) || isset($this->fnDecls[$bare])
+            || (($this->fnAliasByBare[$bare] ?? '') !== '');
+    }
 
     /**
      * Lower a call's arguments into positional MIR order for `$fnName`,

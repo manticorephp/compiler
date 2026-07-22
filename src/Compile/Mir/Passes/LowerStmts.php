@@ -193,6 +193,7 @@ trait LowerStmts
         if ($stmt->kind === 'TryCatch') { return $this->lowerTryCatch($stmt); }
         throw new \RuntimeException(
             'MIR.lower: unsupported statement kind ' . $stmt->kind
+            . ' at line ' . (string)$stmt->span->line
         );
     }
 
