@@ -333,13 +333,17 @@ function arsort(array &$arr): bool
  * does not element-box (it passes the raw vec[int]) → the elements stay raw and
  * canonical NaN-boxing misreads them as doubles. So leave `$a` a bare `array`.
  */
-function array_reverse(array $a): array
+function array_reverse(array $a, bool $preserve_keys = false): array
 {
-    $vals = array_values($a);
+    // php: STRING keys are ALWAYS kept; INT keys are re-indexed unless
+    // $preserve_keys. The old body used array_values and dropped every key.
+    $keys = \array_keys($a);
     $out = [];
-    $i = count($vals) - 1;
+    $i = \count($keys) - 1;
     while ($i >= 0) {
-        $out[] = $vals[$i];
+        $k = $keys[$i];
+        if ($preserve_keys || \is_string($k)) { $out[$k] = $a[$k]; }
+        else { $out[] = $a[$k]; }
         $i = $i - 1;
     }
     return $out;

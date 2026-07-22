@@ -1,0 +1,52 @@
+array(3) {
+  [0]=>
+  int(3)
+  [1]=>
+  int(2)
+  [2]=>
+  int(1)
+}
+array(3) {
+  [2]=>
+  int(3)
+  [1]=>
+  int(2)
+  [0]=>
+  int(1)
+}
+array(3) {
+  ["c"]=>
+  int(3)
+  ["b"]=>
+  int(2)
+  ["a"]=>
+  int(1)
+}
+array(2) {
+  ["b"]=>
+  int(2)
+  ["a"]=>
+  int(1)
+}
+array(3) {
+  ["y"]=>
+  int(3)
+  [0]=>
+  int(2)
+  ["x"]=>
+  int(1)
+}
+array(3) {
+  ["y"]=>
+  int(3)
+  [5]=>
+  int(2)
+  ["x"]=>
+  int(1)
+}
+array(0) {
+}
+array(1) {
+  ["only"]=>
+  string(3) "one"
+}
