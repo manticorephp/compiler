@@ -601,7 +601,12 @@ trait EmitLlvmArrays
         $vk = $vt->kind;
         if ($vk === Type::KIND_STRING) { return \Compile\MemoryAbi::ARRAY_REPR_STR; }
         if ($vk === Type::KIND_ARRAY) { return \Compile\MemoryAbi::ARRAY_REPR_ARR; }
-        if ($vk === Type::KIND_CELL) { return \Compile\MemoryAbi::ARRAY_REPR_CELL; }
+        // NOT KIND_CELL: a raw CELL value stored into the erased else-branch is
+        // NOT co-owned (rcRetainByType returns '' for a cell — a borrowed
+        // string|false from readdir), so stamping CELL would drop a string the
+        // array never retained (the stat_functions UAF). A cell value stays
+        // unstamped (borrowed, its owner frees it); a genuinely-owned cell rides
+        // the boxVal path (retainCellPayload) or a cell LITERAL self-stamps.
         if ($vk === Type::KIND_OBJ) {
             $cls = $vt->class ?? '';
             if ($cls === 'Ffi\\Ptr') { return null; }
