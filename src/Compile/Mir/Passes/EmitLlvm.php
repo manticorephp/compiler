@@ -1437,6 +1437,14 @@ final class EmitLlvm implements EmitVisitor
      * '' when `$t` is not rc-managed (scalar / void / #[Struct] / closure).
      * Mirrors the {@see rcReleaseReg} vocabulary.
      */
+    /** A scalar kind with no rc payload — an array of these needs no
+     *  per-element drop, so its release/retain can skip the repr bits. */
+    private function isNonRcScalarKind(int $k): bool
+    {
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
     private function discardReleaseFlavor(Type $t): string
     {
         $k = $t->kind;
@@ -1469,6 +1477,10 @@ final class EmitLlvm implements EmitVisitor
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
+            // A concrete scalar element (int/float/bool/null) has nothing to
+            // drop → buffer-only, skipping the repr-bit read. Only an ERASED
+            // element (unknown) reaches the repr path.
+            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
             return 'vec';
         }
         if ($t->isAssoc()) {
@@ -1476,6 +1488,7 @@ final class EmitLlvm implements EmitVisitor
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
+            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
         }
         return '';
@@ -1512,6 +1525,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return '@__mir_array_release_cell'; }
+        if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         return '';
     }

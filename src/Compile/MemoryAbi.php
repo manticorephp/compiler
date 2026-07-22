@@ -467,6 +467,28 @@ final class MemoryAbi
     /** Bit 0 of the flags word: HASHED mode. Cleared ⇒ PACKED. */
     public const ARRAY_FLAG_HASHED = 1;
 
+    /**
+     * Bits 1-2 of the flags word: ELEMENT REPRESENTATION, the runtime-truthful
+     * record of what a release/retain/COW must do to each element — stamped as
+     * elements are stored, so it travels with the array through erased aliases
+     * (unlike the compile-time flavor guess). 0 = RAW scalars (no per-element
+     * rc); 3 = CELL (elements are self-describing NaN-boxed cells, dropped via
+     * tag dispatch). 1/2 (STR/OBJ) reserved for a later matrix collapse; unused
+     * now — a concrete str/obj array keeps its specialised release variant and
+     * never stamps these bits, so bits != 0 currently means CELL. Lives in the
+     * low byte, so compaction's `and flags, 255` preserves it. */
+    public const ARRAY_REPR_SHIFT = 1;
+    public const ARRAY_REPR_MASK = 14;  // 0b111 << 1  (bits 1-3)
+    // Element-repr codes stored SHIFTED into the flags word (value << SHIFT).
+    // An erased homogeneous array (the array-repr-conflict check forces a
+    // heterogeneous one to vec[cell], so a vec[unknown] here is single-kind)
+    // stamps the matching code at each element store; release/retain/COW read
+    // it and drop/co-own by kind. 0 = RAW scalars (no per-element rc).
+    public const ARRAY_REPR_STR  = 2;   // 1<<1 — raw string ptrs → __mir_rc_release_str
+    public const ARRAY_REPR_OBJ  = 4;   // 2<<1 — raw obj ptrs → __mir_rc_release
+    public const ARRAY_REPR_ARR  = 6;   // 3<<1 — raw nested arrays → __mir_array_release
+    public const ARRAY_REPR_CELL = 8;   // 4<<1 — boxed cells → __mir_cell_drop (tag dispatch)
+
     /** PACKED mode: each value is one i64 slot at data+i*8. */
     public const ARRAY_PACKED_ELEMENT_SIZE = 8;
 
