@@ -409,6 +409,26 @@ class ReflectionClass
         return isset($c[$name]);
     }
 
+    /**
+     * The transitive names of every interface the class implements.
+     * @return string[]
+     */
+    public function getInterfaceNames(): array
+    {
+        $fn = __mc_refl_ifaces_fn($this->h);
+        if ($fn === 0) { return []; }
+        return __mc_refl_call0($fn);
+    }
+
+    public function implementsInterface(string $name): bool
+    {
+        $want = __mc_refl_unqualify($name);
+        foreach ($this->getInterfaceNames() as $i) {
+            if (__mc_refl_unqualify($i) === $want) { return true; }
+        }
+        return false;
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
@@ -573,6 +593,27 @@ class ReflectionMethod
     public function getDeclaringClass(): ReflectionClass
     {
         return new ReflectionClass($this->class);
+    }
+
+    public function hasReturnType(): bool
+    {
+        return __mc_refl_row_rettype($this->row) !== "";
+    }
+
+    /**
+     * The declared return type as a ReflectionNamedType, or null when none. A
+     * leading `?` is nullability; `self`/`static` resolve to the reached class
+     * (best-effort — `parent` is left as written).
+     */
+    public function getReturnType(): ReflectionNamedType|null
+    {
+        $t = __mc_refl_row_rettype($this->row);
+        if ($t === "") { return null; }
+        $nullable = false;
+        if (\substr($t, 0, 1) === "?") { $nullable = true; $t = \substr($t, 1); }
+        $lc = \strtolower($t);
+        if ($lc === "self" || $lc === "static") { $t = $this->class; }
+        return new ReflectionNamedType($t, $nullable);
     }
 
     /**

@@ -63,15 +63,15 @@ final class RuntimeLibrary
      */
     public static function rmetaType(): string
     {
-        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr, ptr }';
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr, ptr, ptr }';
     }
 
     /** One method/property row:
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
-     *     i64 nattrs, ptr attrs }`. */
+     *     i64 nattrs, ptr attrs, ptr rettype }`. */
     public static function rmetaRowType(): string
     {
-        return '{ ptr, i64, ptr, i64, i64, ptr, i64, ptr }';
+        return '{ ptr, i64, ptr, i64, i64, ptr, i64, ptr, ptr }';
     }
 
     /** One parameter entry: `{ ptr name, ptr type, i64 flags }`. */
@@ -166,12 +166,13 @@ final class RuntimeLibrary
     /** One method/property row body, fields interpolated by the caller.
      *  `$nattrs`/`$attrsIr` are the member's attribute table (0 / 'null' when it
      *  carries none). */
-    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr, int $nattrs = 0, string $attrsIr = 'null'): string
+    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr, int $nattrs = 0, string $attrsIr = 'null', string $retTypeIr = 'null'): string
     {
         return self::rmetaRowType() . ' { ptr ' . $nameIr . ', i64 ' . (string)$flags
              . ', ptr ' . $tramp . ', i64 ' . (string)$arity
              . ', i64 ' . (string)$nparams . ', ptr ' . $paramsIr
-             . ', i64 ' . (string)$nattrs . ', ptr ' . $attrsIr . ' }';
+             . ', i64 ' . (string)$nattrs . ', ptr ' . $attrsIr
+             . ', ptr ' . $retTypeIr . ' }';
     }
 
     /**
@@ -197,12 +198,14 @@ final class RuntimeLibrary
         string $propsFlds = 'i64 0, ptr null',
         string $ctorTrampFld = 'ptr null',
         string $attrsFlds = 'i64 0, ptr null',
-        string $constsFnFld = 'ptr null'
+        string $constsFnFld = 'ptr null',
+        string $ifacesFnFld = 'ptr null'
     ): string {
         return '@__mc_rmeta_v3_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
             . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds
-            . ', ' . $ctorTrampFld . ', ' . $attrsFlds . ', ' . $constsFnFld . " }\n";
+            . ', ' . $ctorTrampFld . ', ' . $attrsFlds . ', ' . $constsFnFld
+            . ', ' . $ifacesFnFld . " }\n";
     }
 
     /** The rmeta pointer field for a descriptor: the class's block, or null

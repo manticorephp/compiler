@@ -218,9 +218,15 @@ final class MemoryAbi
      *  constant expression, and there is no emit-time constant-cell builder. */
     public const RMETA_CONSTS_FN_OFFSET = 88;
 
+    /** `ptr` — the interface-names factory `__mc_ifaces_<C>()` (Ф5), or null. It
+     *  returns the class's transitive `implements` list as a `string[]`;
+     *  getInterfaceNames() calls it. A factory rather than a static table keeps
+     *  the string-array building on the normal path. */
+    public const RMETA_IFACES_FN_OFFSET = 96;
+
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 96;
+    public const RMETA_SIZE = 104;
 
     /** One row of the method / property tables:
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
@@ -240,7 +246,10 @@ final class MemoryAbi
     public const RMETA_ROW_PARAMS_OFFSET  = 40;
     public const RMETA_ROW_NATTRS_OFFSET  = 48;
     public const RMETA_ROW_ATTRS_OFFSET   = 56;
-    public const RMETA_ROW_SIZE = 64;
+    /** `ptr` — a METHOD row's declared return type (the hint as written, or null);
+     *  ReflectionMethod::getReturnType() reads it. Zero on a property row. */
+    public const RMETA_ROW_RETTYPE_OFFSET = 64;
+    public const RMETA_ROW_SIZE = 72;
 
     /** One parameter entry of a method's param table:
      *  `{ ptr name, ptr type, i64 flags }`. `type` is the declared type name with

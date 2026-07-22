@@ -613,6 +613,10 @@ final class LowerFromAst implements Pass
                 $this->fnDecls[$decl->name] = $decl;
                 $module->addFunction($this->lowerFunction($decl));
             }
+            foreach ($this->synthIfaceFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $module->addFunction($this->lowerFunction($decl));
+            }
         }
 
         // Pre-pass: capture every function's params so call sites can
@@ -893,6 +897,67 @@ final class LowerFromAst implements Pass
         foreach ($decl->uses as $t)       { $this->collectConstNames($t, $names, $seen, $visited); }
         foreach ($decl->extends as $p)    { $this->collectConstNames($p, $names, $seen, $visited); }
         foreach ($decl->implements as $i) { $this->collectConstNames($i, $names, $seen, $visited); }
+    }
+
+    /**
+     * Ф5 — one `__mc_ifaces_<C>(): array` per class implementing any interface,
+     * returning its transitive interface-name list as a `string[]`.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthIfaceFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $names = [];
+            $visited = [];
+            $this->collectInterfaceNames($cd->name, $names, $visited);
+            if ($names === []) { continue; }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $elems = [];
+            foreach ($names as $iname => $_) {
+                $elems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($iname, $sp));
+            }
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::ifacesFn($cd->name), [], 'array', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
+     * A class's transitive interface names. A class contributes its `implements`
+     * (+ each interface's parents); an interface contributes its `extends`; a
+     * parent class contributes its own interfaces.
+     *
+     * @param array<string, bool> $names   interface name → true, appended
+     * @param array<string, bool> $visited classes already walked
+     */
+    private function collectInterfaceNames(string $class, array &$names, array &$visited): void
+    {
+        $c = \ltrim($class, '\\');
+        if (isset($visited[$c])) { return; }
+        $visited[$c] = true;
+        $decl = $this->classDecls[$c] ?? null;
+        if ($decl === null) { return; }
+        if (($decl->kind ?? 'class') === 'interface') {
+            foreach ($decl->extends as $e) {
+                $names[\ltrim($e, '\\')] = true;
+                $this->collectInterfaceNames($e, $names, $visited);
+            }
+            return;
+        }
+        foreach ($decl->implements as $i) {
+            $names[\ltrim($i, '\\')] = true;
+            $this->collectInterfaceNames($i, $names, $visited);
+        }
+        foreach ($decl->extends as $e) {
+            $this->collectInterfaceNames($e, $names, $visited);
+        }
     }
 
     /**

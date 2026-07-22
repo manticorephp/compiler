@@ -805,6 +805,12 @@ trait EmitLlvmRuntime
             $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
             $ap = $this->attrTableFor($mm->attributes, $mdecl, 'm', $mn, '@.rmeta.mattr.' . $id . '.' . (string)$i);
             $defs .= $ap[0];
+            // Always a real string (empty when untyped), never a null pointer:
+            // hasReturnType()/getReturnType() compare it to "" BY VALUE, and a
+            // null pointer read back is 0, which is `!== ""` — a false positive.
+            $rsym = '@.rmeta.mret.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($rsym, $mm->returnType);
+            $retFld = $this->strSymBytes($rsym);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false),
@@ -812,7 +818,7 @@ trait EmitLlvmRuntime
                 $this->methodArity($mm),
                 \count($mm->params),
                 $pp[1],
-                $ap[1], $ap[2]);
+                $ap[1], $ap[2], $retFld);
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
@@ -889,13 +895,12 @@ trait EmitLlvmRuntime
             $defs .= $this->strGlobalDef($sym, $pn);
             // Type name — the hint AS WRITTEN (`?App\Foo`). getType() derives
             // nullability + the clean name from it in the prelude; a property has
-            // no ALLOWS_NULL flag slot the way a parameter does.
-            $typeFld = 'null';
-            if ($pm->typeHint !== '') {
-                $tsym = '@.rmeta.pty.' . $id . '.' . (string)$i;
-                $defs .= $this->strGlobalDef($tsym, $pm->typeHint);
-                $typeFld = 'ptr ' . $this->strSymBytes($tsym);
-            }
+            // no ALLOWS_NULL flag slot the way a parameter does. Always a real
+            // string (empty when untyped) so hasType()/getType() compare it to ""
+            // BY VALUE — a null pointer reads back 0, which is `!== ""`.
+            $tsym = '@.rmeta.pty.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($tsym, $pm->typeHint);
+            $typeFld = 'ptr ' . $this->strSymBytes($tsym);
             $decl = $pm->declaringClass !== '' ? $pm->declaringClass : $cls->name;
             $getFld = $this->accessorField($decl, $pm->name, false);
             $setFld = $this->accessorField($decl, $pm->name, true);
@@ -1140,10 +1145,15 @@ trait EmitLlvmRuntime
             if (isset($this->sigs->paramTypes[$constsFn])) {
                 $constsFnFld = 'ptr @manticore_' . $this->mangle($constsFn);
             }
+            $ifacesFnFld = 'ptr null';
+            $ifacesFn = \Compile\Mir\Passes\ReflectSynth::ifacesFn($cls->name);
+            if (isset($this->sigs->paramTypes[$ifacesFn])) {
+                $ifacesFnFld = 'ptr @manticore_' . $this->mangle($ifacesFn);
+            }
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
-                $constsFnFld);
+                $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
             // Registry entry, so a NAME can find this class at runtime.

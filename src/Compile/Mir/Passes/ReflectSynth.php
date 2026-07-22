@@ -68,6 +68,12 @@ final class ReflectSynth
         return '__mc_consts_' . \str_replace('\\', '_', \ltrim($class, '\\'));
     }
 
+    /** The interface-names factory symbol (Ф5): `__mc_ifaces_<C>()` → string[]. */
+    public static function ifacesFn(string $class): string
+    {
+        return '__mc_ifaces_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+    }
+
     /**
      * PHP source (no `<?php`) for everything this class contributes: an
      * accessor pair per OWN (declared here) property. '' when it contributes
