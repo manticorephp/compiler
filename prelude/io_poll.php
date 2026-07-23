@@ -270,6 +270,10 @@ namespace Io\Poll {
         private array $fds = [];
         // epoll/kqueue reactor fd; -1 for the Poll backend (rebuilds pollfd each wait).
         private int $reactorFd = -1;
+        // struct epoll_event layout is arch-dependent: aarch64 is naturally
+        // aligned (16B, data@8); x86_64 is __attribute__((packed)) (12B, data@4).
+        private int $epStride = 16;
+        private int $epDataOff = 8;
 
         public function __construct(private Backend $backend = Backend::Auto)
         {
@@ -280,6 +284,10 @@ namespace Io\Poll {
                 throw new BackendUnavailableException("Requested backend is not available");
             }
             if ($this->backend === Backend::Epoll) {
+                if (\php_uname('m') === 'x86_64') {
+                    $this->epStride = 12;
+                    $this->epDataOff = 4;
+                }
                 $this->reactorFd = \__mc_iopoll_epoll_create1(0);
                 if ($this->reactorFd < 0) {
                     throw new FailedContextInitializationException("epoll_create1() failed");
@@ -385,7 +393,7 @@ namespace Io\Poll {
             if ($max > $n) { $max = $n; }              // at most n fds can be ready
             $timeout = ($timeoutSeconds === null) ? -1 : ($timeoutSeconds * 1000 + (int)($timeoutMicroseconds / 1000));
 
-            $buf = \Runtime\Libc\calloc($max, 16);
+            $buf = \Runtime\Libc\calloc($max, $this->epStride);
             $rc = \__mc_iopoll_epoll_wait($this->reactorFd, $buf, $max, $timeout);
             if ($rc < 0) {
                 \Runtime\Libc\free($buf);
@@ -395,9 +403,9 @@ namespace Io\Poll {
             $result = [];
             $i = 0;
             while ($i < $rc) {
-                $off = $i * 16;
+                $off = $i * $this->epStride;
                 $evbits = \peek_u32($buf, $off);
-                $fd = \peek_i64($buf, $off + 8);
+                $fd = \peek_i64($buf, $off + $this->epDataOff);
                 if (isset($this->watchers[$fd])) {
                     $w = $this->watchers[$fd];
                     $w->__setTriggered(__epoll_to_bits($evbits));
@@ -489,9 +497,9 @@ namespace Io\Poll {
 
         private function __epollCtl(int $op, int $fd, int $bits): void
         {
-            $ev = \Runtime\Libc\calloc(1, 16);
+            $ev = \Runtime\Libc\calloc(1, $this->epStride);
             \poke_i32($ev, 0, __bits_to_epoll($bits));
-            \poke_i64($ev, 8, $fd);                        // data.fd (in the u64 union slot)
+            \poke_i64($ev, $this->epDataOff, $fd);          // data.fd (in the u64 union slot)
             $rc = \__mc_iopoll_epoll_ctl($this->reactorFd, $op, $fd, $ev);
             \Runtime\Libc\free($ev);
             if ($rc < 0) {

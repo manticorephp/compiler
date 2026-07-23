@@ -449,6 +449,36 @@ function __mc_host_is_darwin(): bool
     return $darwin === 1;
 }
 
+/**
+ * php_uname($mode) — host info via uname(2). $mode: 's' sysname, 'n' nodename,
+ * 'r' release, 'v' version, 'm' machine (arch), 'a' (default) all five joined by
+ * a space. The utsname field stride is 256 on Darwin / 65 on glibc (mirrors
+ * \Manticore\host_arch). Runtime probe — a compile-time one would break the cold
+ * seed (see __mc_host_is_darwin). php's 'a' also carries extra OS detail we omit.
+ */
+function php_uname(string $mode = "a"): string
+{
+    $buf = \Runtime\Libc\calloc(4096, 1);
+    if ($buf === null) {
+        throw new \RuntimeException('php_uname: cannot allocate a uname buffer');
+    }
+    \Runtime\Libc\uname($buf);
+    $sysname = \cstr_to_str($buf);
+    $stride = \substr($sysname, 0, 6) === 'Darwin' ? 256 : 65;
+    $nodename = \cstr_to_str(\ptr_offset($buf, $stride));
+    $release  = \cstr_to_str(\ptr_offset($buf, 2 * $stride));
+    $version  = \cstr_to_str(\ptr_offset($buf, 3 * $stride));
+    $machine  = \cstr_to_str(\ptr_offset($buf, 4 * $stride));
+    \Runtime\Libc\free($buf);
+    $m = \strlen($mode) > 0 ? $mode[0] : 'a';
+    if ($m === 's') { return $sysname; }
+    if ($m === 'n') { return $nodename; }
+    if ($m === 'r') { return $release; }
+    if ($m === 'v') { return $version; }
+    if ($m === 'm') { return $machine; }
+    return $sysname . ' ' . $nodename . ' ' . $release . ' ' . $version . ' ' . $machine;
+}
+
 /** Byte offset of dirent.d_name for the running host. */
 function __mc_dirent_name_off(): int
 {
