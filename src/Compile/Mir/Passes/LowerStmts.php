@@ -112,9 +112,31 @@ trait LowerStmts
     {
         $stmts = [];
         foreach ($block->statements as $stmt) {
-            $stmts[] = $this->lowerStmt($stmt);
+            $lowered = $this->lowerStmt($stmt);
+            $stmts[] = $lowered;
+            // Drop statements after an UNCONDITIONAL terminator (php treats
+            // them as dead too). Critical when a folded static guard —
+            // `if (!function_exists('pcntl_signal')) { return; }` — reduces to a
+            // bare `return`, leaving trailing code that names symbols this build
+            // has no definition for (`[\SIGINT, …]`): never lowering it avoids a
+            // spurious "unknown constant" on a branch that can never run.
+            if ($this->nodeAlwaysTerminates($lowered)) { break; }
         }
         return new Block($stmts, Type::void());
+    }
+
+    /** Whether a lowered statement unconditionally leaves the block — a
+     *  `return` / `throw`, or a block ending in one (a folded static guard). */
+    private function nodeAlwaysTerminates(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_RETURN || $k === Node::KIND_THROW) { return true; }
+        if ($k === Node::KIND_BLOCK) {
+            $ss = $n->stmts;
+            $c = \count($ss);
+            return $c > 0 && $this->nodeAlwaysTerminates($ss[$c - 1]);
+        }
+        return false;
     }
 
     private function lowerStmt(\Parser\Ast\Stmt $stmt): Node
@@ -202,8 +224,19 @@ trait LowerStmts
      * into `if cond { a } else { if c1 { b1 } else { if c2 { b2 } else { e } } }`.
      * Keeps the IR shape uniform and analysis straightforward.
      */
-    private function lowerIf(\Parser\Ast\IfStmt $stmt): If_
+    private function lowerIf(\Parser\Ast\IfStmt $stmt): Node
     {
+        // Statically-foldable guard (function_exists / defined / bool over
+        // && || !): lower ONLY the live branch, so a dead branch's
+        // unresolvable symbols — an undefined constant like SIGINT behind
+        // `defined('SIGINT')` — never reach codegen. Same fold flattenConstantIfs
+        // applies at top level, extended here to nested (method-body) `if`s.
+        $live = $this->constIfBranch($stmt);
+        if ($live !== null) {
+            $stmts = [];
+            foreach ($live as $s) { $stmts[] = $this->lowerStmt($s); }
+            return new Block($stmts, Type::void());
+        }
         $cond  = $this->lowerExpr($stmt->condition);
         $then  = $this->lowerBlockNode($stmt->then);
         $else_ = $stmt->else === null ? null : $this->lowerBlockNode($stmt->else);

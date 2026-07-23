@@ -38,6 +38,40 @@ function is_countable(mixed $value): bool
 }
 
 /**
+ * ext-filter's `filter_var` for scalar filters. Covers the *_VALIDATE_BOOL /
+ * INT / FLOAT ids and the *_DEFAULT / UNSAFE_RAW passthrough — the surface
+ * real apps hit (symfony reads `filter_var(env, FILTER_VALIDATE_BOOL)`). The
+ * array-shaped `$options` form and the sanitise filters beyond a string
+ * passthrough are not modelled. `$options` here is the int flags bitmask.
+ */
+function filter_var(mixed $value, int $filter = 516, int $options = 0): mixed
+{
+    $nullFail = ($options & 134217728) !== 0;   // FILTER_NULL_ON_FAILURE
+    if ($filter === 258) {                       // FILTER_VALIDATE_BOOL
+        $s = \strtolower(\trim((string)$value));
+        if ($s === '1' || $s === 'true' || $s === 'on' || $s === 'yes') { return true; }
+        if ($s === '0' || $s === 'false' || $s === 'off' || $s === 'no' || $s === '') {
+            return $nullFail && $s === '' ? null : false;
+        }
+        return $nullFail ? null : false;
+    }
+    if ($filter === 257) {                        // FILTER_VALIDATE_INT
+        $s = \trim((string)$value);
+        if ($s !== '' && \preg_match('/^[+-]?\d+$/', $s) === 1) { return (int)$s; }
+        return $nullFail ? null : false;
+    }
+    if ($filter === 259) {                        // FILTER_VALIDATE_FLOAT
+        $s = \trim((string)$value);
+        if ($s !== '' && \is_numeric($s)) { return (float)$s; }
+        return $nullFail ? null : false;
+    }
+    // FILTER_DEFAULT / FILTER_UNSAFE_RAW (516) and every unmodelled filter fall
+    // back to the string form of the value (php's default is an unmodified
+    // string passthrough).
+    return (string)$value;
+}
+
+/**
  * var_export string quoting: php.net escapes exactly two bytes inside the
  * single quotes — the backslash and the quote itself. Backslash first, or the
  * one introduced by the quote escape would be doubled again.

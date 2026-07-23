@@ -397,6 +397,46 @@ trait LowerPrelude
             'MSG_OOB' => 1, 'MSG_PEEK' => 2, 'MSG_DONTROUTE' => 4, 'MSG_EOR' => 8,
             'PHP_NORMAL_READ' => 1, 'PHP_BINARY_READ' => 2,
             'AI_PASSIVE' => 1, 'AI_CANONNAME' => 2, 'AI_NUMERICHOST' => 4,
+            // ext-filter — php's OWN constant values (host-invariant). filter_var
+            // uses the *_VALIDATE_* / *_DEFAULT filter ids + the NULL_ON_FAILURE
+            // and numeric flags.
+            'INPUT_POST' => 0, 'INPUT_GET' => 1, 'INPUT_COOKIE' => 2,
+            'INPUT_SERVER' => 5, 'INPUT_ENV' => 4,
+            'FILTER_DEFAULT' => 516, 'FILTER_UNSAFE_RAW' => 516,
+            'FILTER_FLAG_NONE' => 0, 'FILTER_CALLBACK' => 1024,
+            'FILTER_VALIDATE_INT' => 257, 'FILTER_VALIDATE_BOOLEAN' => 258,
+            'FILTER_VALIDATE_BOOL' => 258, 'FILTER_VALIDATE_FLOAT' => 259,
+            'FILTER_VALIDATE_REGEXP' => 272, 'FILTER_VALIDATE_DOMAIN' => 277,
+            'FILTER_VALIDATE_URL' => 273, 'FILTER_VALIDATE_EMAIL' => 274,
+            'FILTER_VALIDATE_IP' => 275, 'FILTER_VALIDATE_MAC' => 276,
+            'FILTER_SANITIZE_ENCODED' => 514, 'FILTER_SANITIZE_SPECIAL_CHARS' => 515,
+            'FILTER_SANITIZE_FULL_SPECIAL_CHARS' => 522, 'FILTER_SANITIZE_EMAIL' => 517,
+            'FILTER_SANITIZE_URL' => 518, 'FILTER_SANITIZE_NUMBER_INT' => 519,
+            'FILTER_SANITIZE_NUMBER_FLOAT' => 520, 'FILTER_SANITIZE_ADD_SLASHES' => 523,
+            'FILTER_REQUIRE_SCALAR' => 33554432, 'FILTER_REQUIRE_ARRAY' => 16777216,
+            'FILTER_FORCE_ARRAY' => 67108864, 'FILTER_NULL_ON_FAILURE' => 134217728,
+            'FILTER_FLAG_ALLOW_OCTAL' => 1, 'FILTER_FLAG_ALLOW_HEX' => 2,
+            'FILTER_FLAG_STRIP_LOW' => 4, 'FILTER_FLAG_STRIP_HIGH' => 8,
+            'FILTER_FLAG_ENCODE_LOW' => 16, 'FILTER_FLAG_ENCODE_HIGH' => 32,
+            'FILTER_FLAG_ENCODE_AMP' => 64, 'FILTER_FLAG_ALLOW_FRACTION' => 4096,
+            'FILTER_FLAG_ALLOW_THOUSAND' => 8192, 'FILTER_FLAG_ALLOW_SCIENTIFIC' => 16384,
+            'FILTER_FLAG_IPV4' => 1048576, 'FILTER_FLAG_IPV6' => 2097152,
+            'FILTER_FLAG_EMAIL_UNICODE' => 1048576,
+            // ext-intl grapheme_extract() type selector — php's own values
+            // (host-invariant). The intl-grapheme polyfill defines these behind
+            // `if (!defined(...))`, redundant once predefined here.
+            'GRAPHEME_EXTR_COUNT' => 0, 'GRAPHEME_EXTR_MAXBYTES' => 1,
+            'GRAPHEME_EXTR_MAXCHARS' => 2,
+            // ext-mbstring case-conversion modes + the (deprecated) overload
+            // selector — php's own values (host-invariant).
+            'MB_CASE_UPPER' => 0, 'MB_CASE_LOWER' => 1, 'MB_CASE_TITLE' => 2,
+            'MB_CASE_FOLD' => 3, 'MB_CASE_UPPER_SIMPLE' => 4,
+            'MB_CASE_LOWER_SIMPLE' => 5, 'MB_CASE_TITLE_SIMPLE' => 6,
+            'MB_CASE_FOLD_SIMPLE' => 7, 'MB_OVERLOAD_STRING' => 2,
+            // Linked pcre2 version — taken from the build host's pcre2 (the
+            // static lib manticore links). 10.44+ so intl-grapheme uses the `\X`
+            // grapheme-cluster shorthand.
+            'PCRE_VERSION_MAJOR' => 10, 'PCRE_VERSION_MINOR' => 47,
         ];
         if (isset($ints[$name])) { return new IntConst($ints[$name], Type::int_()); }
 
@@ -418,6 +458,11 @@ trait LowerPrelude
         $strs = [
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
             'PHP_VERSION' => '8.5.3', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PCRE_VERSION' => '10.47 2025-10-21',
+            // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
+            // path is unreachable in a manticore build. Empty keeps references
+            // compiling; a program that actually spawns `php` would need a real value.
+            'PHP_BINARY' => '', 'PHP_BINDIR' => '', 'PHP_PEAR_PHP_BIN' => '',
         ];
         if (isset($strs[$name])) { return new StringConst($strs[$name], Type::string_()); }
 
@@ -452,6 +497,23 @@ trait LowerPrelude
                 'FNM_NOMATCH' => 1,
             ];
             if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
+        }
+
+        // setlocale() category selectors — host-DIVERGENT: Darwin's <locale.h>
+        // orders the categories differently from glibc. Resolved against the
+        // build host like FNM_* / the socket constants below.
+        if (\substr($name, 0, 3) === 'LC_') {
+            $isDarwin = \Manticore\is_darwin();
+            $lc = [
+                'LC_ALL' => $isDarwin ? 0 : 6,
+                'LC_COLLATE' => $isDarwin ? 1 : 3,
+                'LC_CTYPE' => $isDarwin ? 2 : 0,
+                'LC_MONETARY' => $isDarwin ? 3 : 4,
+                'LC_NUMERIC' => $isDarwin ? 4 : 1,
+                'LC_TIME' => $isDarwin ? 5 : 2,
+                'LC_MESSAGES' => $isDarwin ? 6 : 5,
+            ];
+            if (isset($lc[$name])) { return new IntConst($lc[$name], Type::int_()); }
         }
 
         // ext/sockets — host-DIVERGENT constants. php exposes the host's own

@@ -173,8 +173,9 @@ trait LowerExprs
             }
             // EnumName::Case → ordinal int carrying the enum type. A non-case
             // name (ordinal -1) is an enum CONSTANT — fall through to the
-            // const lookup below.
-            $ecls = \ltrim($saClass, '\\');
+            // const lookup below. Resolve `self`/`static`/`parent` first so a
+            // `self::Case` inside an enum method finds its own case table.
+            $ecls = \ltrim($this->resolveStaticClass($saClass), '\\');
             if (isset($this->enumTable[$ecls])) {
                 $ord = $this->enumTable[$ecls]->ordinalOf($saName);
                 if ($ord >= 0) { return new IntConst($ord, Type::obj($ecls)); }
@@ -267,6 +268,28 @@ trait LowerExprs
             // string-"0"/"" subtlety is not exercised by the compiler.
             if ($fn === 'empty' && \count($expr->args) === 1) {
                 return new Not_($this->lowerExpr($expr->args[0]));
+            }
+            // By-ref `sscanf($str, $fmt, $a, $b, …)` — the array-return form
+            // (`$r = sscanf($s, $f)`) is a plain stdlib call; the trailing-lvalue
+            // form assigns each parsed field into a variable and returns the count.
+            // Desugar to: tmp = __mc_sscanf($s, $f); $a = tmp[0]; $b = tmp[1]; …;
+            // count(tmp). (php returns the number of assigned values; a full match
+            // makes that the field count — the partial-match tail is not modelled.)
+            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
+            if ($fnBare === 'sscanf' && \count($expr->args) > 2) {
+                $s = $this->lowerExpr($expr->args[0]);
+                $fmt = $this->lowerExpr($expr->args[1]);
+                $tmp = '__sscanf_' . (string)$this->destrCounter;
+                $this->destrCounter = $this->destrCounter + 1;
+                $vecT = Type::vec(Type::cell());
+                $stmts = [new StoreLocal($tmp, new Call('__mc_sscanf', [$s, $fmt], $vecT), $vecT)];
+                $n = \count($expr->args);
+                for ($i = 2; $i < $n; $i = $i + 1) {
+                    $val = new ArrayAccess_(new LoadLocal($tmp, $vecT), new IntConst($i - 2, Type::int_()), Type::cell());
+                    $stmts[] = $this->storeToTarget($expr->args[$i], $val);
+                }
+                $stmts[] = new Call('count', [new LoadLocal($tmp, $vecT)], Type::int_());
+                return new Block($stmts, Type::int_());
             }
             // `compact('a', 'b', ...)` with STRING-LITERAL names → an assoc array
             // built from the named locals (`['a' => $a, 'b' => $b]`). PHP resolves

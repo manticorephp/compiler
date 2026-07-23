@@ -1518,6 +1518,18 @@ final class Parser
                 $target->span,
             );
         }
+        // A prefix unary binds tighter than `=` too, so `!$x = foo()` is
+        // `!($x = foo())` — the assignment attaches to the operand (the lvalue)
+        // and the unary sees its result. Same re-association as the binary case
+        // (`@$x = …` / `-$x = …` follow identically). `throw` never prefixes an
+        // lvalue, so it does not reach here.
+        if ($target->kind === 'UnaryOp') {
+            return Expr::unary(
+                $target->op,
+                $this->buildAssign($op, $target->operand, $value, $span),
+                $target->span,
+            );
+        }
         if ($op === '=')  { return Expr::assign($target, $value, $span); }
         if ($op === '=&') { return Expr::refAssign($target, $value, $span); }
         return Expr::compoundAssign($op, $target, $value, $span);

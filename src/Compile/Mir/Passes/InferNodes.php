@@ -1102,6 +1102,12 @@ trait InferNodes
     {
         $lt = $this->inferNode($node->left);
         $rt = $this->inferNode($node->right);
+        // `$a ?? throw …`: the fallback diverges (never), so the result is
+        // simply the left's type — never the throw's void.
+        if ($node->right->kind === Node::KIND_THROW) {
+            $node->type = $lt;
+            return $lt;
+        }
         // `$a ?? $b` = `$a` when non-null, else `$b`. A null-typed left always
         // yields the fallback. An UNKNOWN-typed left carries no usable repr —
         // a `?string` local merges (null ∪ string) to unknown — so when the
@@ -1176,6 +1182,16 @@ trait InferNodes
         $this->narrowFromNegatedCond($node->cond);
         $e = $this->inferNode($node->else_);
         $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
+        // A `throw`-expression arm is `never` — it yields no value, so the
+        // result type is entirely the sibling arm's (`cond ? v : throw …`).
+        if ($node->then !== null && $node->then->kind === Node::KIND_THROW) {
+            $node->type = $e;
+            return $e;
+        }
+        if ($node->else_->kind === Node::KIND_THROW) {
+            $node->type = $t;
+            return $t;
+        }
         // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value
         // branch as a NULLABLE cell so the null case renders as NULL (not the
         // value type's zero); emitTernary boxes the value branch. A PLAIN ternary
