@@ -36,6 +36,7 @@ run(function () {
 | `api.php`       | `run` / `spawn` / `delay` |
 | `io.php`        | raw non-blocking `recv`/`send` on the fd; accept/read/write/connect/close |
 | `process.php`   | `workers($n)` — multi-process (fork), shared-nothing |
+| `Channel.php`   | Go CSP channel — buffered/unbuffered `send`/`recv`/`close` + `select()` |
 
 ## Build & run
 
@@ -64,8 +65,26 @@ Caveats: the load generator shares the box (server used only ~2.7/10 cores — r
 needs an off-box client); this server does minimal HTTP (single-byte routing, fixed
 headers) — legitimate for the TechEmpower `plaintext` case, not a full framework.
 
+## Channels (CSP)
+
+```php
+use function Async\{run, spawn, channel, select};
+
+run(function () {
+    $ch = channel();                       // unbuffered rendezvous
+    spawn(function () use ($ch) { $ch->send(42); $ch->close(); });
+    while (($v = $ch->recv()) !== null) { /* ... */ }
+
+    [$idx, $val, $ok] = select([$a, $b]);  // receive from whichever is ready first
+});
+```
+
+`select()` is sound under the cooperative scheduler via a single-claim rule: a waiter
+parked on several channels is delivered to by exactly the first channel to reach it; the
+losers observe the claim and skip it. See `chan_demo.php`.
+
 ## Not yet
 
-Transparent I/O (auto-suspend inside `fread`/`fwrite`) · channels (CSP `select`) ·
-`writev`/`io_uring` to break the 2-syscall floor · shared-memory multithreading (a future
-compiler superset). See the async roadmap memory for the full plan.
+Transparent I/O (auto-suspend inside `fread`/`fwrite`) · send-`select` (only receive-select
+so far) · `writev`/`io_uring` to break the 2-syscall floor · shared-memory multithreading
+(a future compiler superset). See the async roadmap memory for the full plan.
