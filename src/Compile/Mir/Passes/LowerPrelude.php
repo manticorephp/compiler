@@ -110,7 +110,7 @@ trait LowerPrelude
      */
     private function preludeStatements(): array
     {
-        $src = "<?php\n" . $this->exceptionsSrc . $this->resourceSrc . $this->backtraceSrc;
+        $src = "<?php\n" . $this->exceptionsSrc . $this->resourceSrc . $this->fiberSrc . $this->backtraceSrc;
         if ($this->includeVarDump) {
             $src = $src . $this->varDumpSrc;
         }

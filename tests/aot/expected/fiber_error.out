@@ -1,0 +1,4 @@
+1: Cannot suspend outside of a fiber
+2: Cannot start a fiber that has already been started
+3: Cannot get fiber return value: The fiber has not returned
+4 (as Error): Cannot resume a fiber that is not suspended

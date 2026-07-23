@@ -1,0 +1,8 @@
+outer 1
+inner A
+outer 2 (inner yielded iA)
+main mid (outer yielded oA)
+outer 3
+inner B got resumed-inner
+outer 4, inner done=true ret=inner-ret
+main end

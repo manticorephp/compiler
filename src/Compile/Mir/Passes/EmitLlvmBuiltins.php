@@ -66,6 +66,18 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
         if ($name === '__mir_clock_ns')               { return $this->biClockNs($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
+        if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
+        if ($name === '__mir_fiber_jump')             { return $this->biFiberJump($args); }
+        if ($name === '__mir_fiber_current')          { return $this->biFiberCurrent($args); }
+        if ($name === '__mir_fiber_set_current')      { return $this->biFiberSetCurrent($args); }
+        if ($name === '__mir_fiber_stack_alloc')      { return $this->biFiberStackAlloc($args); }
+        if ($name === '__mir_fiber_stack_free')       { return $this->biFiberStackFree($args); }
+        if ($name === '__mir_fiber_ctx_new')          { return $this->biFiberCtxNew($args); }
+        if ($name === '__mir_fiber_ctx_save')         { return $this->biFiberCtxSave($args); }
+        if ($name === '__mir_fiber_ctx_load')         { return $this->biFiberCtxLoad($args); }
+        if ($name === '__mir_fiber_has_current')      { return $this->biFiberHasCurrent($args); }
+        if ($name === '__mir_fiber_ctx_free')         { return $this->biFiberCtxFree($args); }
+        if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
         if ($name === 'ord')                          { return $this->biOrd($args); }
         if ($name === 'chr')                          { return $this->biChr($args); }

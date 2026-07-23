@@ -1,0 +1,6 @@
+f: in try
+main: in try
+main: caught main-ex
+f: after suspend (still in try)
+f: done
+main: end

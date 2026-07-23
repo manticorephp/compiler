@@ -128,6 +128,7 @@ final class EmitLlvm implements EmitVisitor
     use EmitLlvmBuiltins;
     use EmitLlvmExceptions;
     use EmitLlvmObjects;
+    use EmitLlvmFiber;
 
     public function name(): string { return 'emit-llvm'; }
 
@@ -328,6 +329,10 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->returnType[$fn->name] = $fn->returnType;
             $this->definedFns[$this->mangle($fn->name)] = true;
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
+            // The demand-gated fiber prelude is present iff the program uses
+            // \Fiber ⇒ settle needsFibers BEFORE the preamble emits its module
+            // asm + @__mir_current_fiber (mirrors the needsExceptions pre-scan).
+            if ($fn->name === '__mc_fiber_run') { $this->rt->needsFibers = true; }
         }
         // Pre-scan for `$gen->throw($e)`: a yield resume point must check for
         // an injected exception. Must be known BEFORE emitting any generator

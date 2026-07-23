@@ -217,6 +217,12 @@ final class InsertMemoryOps implements Pass
         // EXCEPT an FFI call: it returns a foreign libc buffer/pointer
         // with no rc header — rc-releasing it frees raw memory → abort.
         if ($k === Node::KIND_CALL) {
+            // __mir_fiber_current() hands back a BORROWED alias of the
+            // @__mir_current_fiber global (owned by the user's own `$f`), not a
+            // +1 ref — releasing it at scope exit would free the live fiber
+            // mid-run (use-after-free ⇒ a garbage resumer ⇒ jump into hyperspace).
+            $fn = \ltrim($value->function, '\\');
+            if ($fn === '__mir_fiber_current') { return false; }
             return !isset($this->ffiFns[$value->function]);
         }
         if ($k === Node::KIND_METHOD_CALL

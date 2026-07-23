@@ -63,6 +63,10 @@ final class RuntimeFeatures
     public bool $needsStrReplaceOne = false;
     public bool $needsCliArgv = false;
 
+    /** The program uses `\Fiber` — emit the fcontext `module asm` (arch-branched),
+     *  the `@__mir_current_fiber` global, and the mc_fiber_make/jump declares. */
+    public bool $needsFibers = false;
+
     /** The program reads the process environment ($_SERVER / $_ENV): emit the
      *  `environ` accessors. Off by default — a program that never asks pays
      *  nothing. */

@@ -203,6 +203,9 @@ trait EmitLlvmModule
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
         }
+        if ($this->rt->needsFibers) {
+            $out .= $this->fiberRuntime();
+        }
         if ($this->rt->needsExceptions) {
             // setjmp/longjmp exception runtime. 16 nested-try slots ×
             // 512B jmp_buf. The slot stride must exceed the platform's jmp_buf:
@@ -226,6 +229,10 @@ trait EmitLlvmModule
             // "Maximum try nesting" fatal (latent on macOS, where stdlib rarely
             // throws on the passing paths).
             $out .= "@__mir_jmp_stack = linkonce_odr global [8192 x i8] zeroinitializer\n";
+            // The active try-slot stack base. Defaults to @__mir_jmp_stack; a
+            // running Fiber swaps it to its own buffer so fiber/main tries at the
+            // same depth don't share a jmp_buf ({@see EmitLlvmFiber}, jmpBufExpr).
+            $out .= "@__mir_jmp_base = linkonce_odr global ptr @__mir_jmp_stack\n";
             $out .= "@__mir_jmp_depth = linkonce_odr global i64 0\n";
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
             $out .= $this->emitJmpSlotGuard();

@@ -1,0 +1,7 @@
+before suspend
+main between
+fiber caught: injected
+fiber done
+throw returned null: bool(true)
+bool(true)
+getReturn: ret
