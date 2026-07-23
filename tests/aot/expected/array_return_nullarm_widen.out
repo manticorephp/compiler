@@ -1,0 +1,22 @@
+NULL
+string(3) "llo"
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  NULL
+  [2]=>
+  string(1) "c"
+}
+a|NULL|c|
+bool(true)
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  NULL
+  [2]=>
+  int(3)
+}
+NULL
+-1

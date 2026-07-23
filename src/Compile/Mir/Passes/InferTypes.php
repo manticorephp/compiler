@@ -577,20 +577,25 @@ final class InferTypes implements Pass
                         $observed[$key] = Type::cell();
                     }
                 }
-            } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS
-                && $se->array->array->kind === Node::KIND_PROPERTY_ACCESS) {
-                // A NESTED element write `$this->g[$i][$j] = v` proves the prop's
-                // element is itself an ARRAY (array-of-arrays). Type that element a
-                // CELL so a read-back (`$this->g[$i]`) runtime-dispatches
-                // (is_array/var_dump/gettype) and the inner array is stored TAGGED,
-                // instead of a raw untagged pointer read as int/garbage float.
+            } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
+                // A NESTED element write `$this->g[$i][$j] = v` (any depth >= 2)
+                // proves the prop's element is itself an ARRAY. Walk the
+                // array-access chain to its root; if it roots at a property, that
+                // prop holds nested arrays — type its element a CELL so a read-back
+                // (`$this->g[$i]`, and every deeper level, which is then a cell of
+                // cells) runtime-dispatches (is_array/var_dump/gettype) and the
+                // inner arrays are stored TAGGED, not raw pointers read as int.
                 // An SPL backing slot (`$this->__s[$key] = v`) is a DEPTH-1 write
-                // (array = property_access, handled above) so it never matches here
-                // and stays raw — the flat key/index buffer must not be boxed.
-                $inner = $se->array->array;
-                $owner = $this->propElemStoreOwner($inner->object, $cls);
-                if ($owner !== '') {
-                    $observed[$owner . '::' . $inner->property] = Type::cell();
+                // (array = property_access, handled above) so it never roots here
+                // and stays raw — the flat key/index buffer must not be boxed. A
+                // chain rooted at a local (`$a[$i][$j] = v`) is handled elsewhere.
+                $root = $se->array;
+                while ($root->kind === Node::KIND_ARRAY_ACCESS) { $root = $root->array; }
+                if ($root->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $owner = $this->propElemStoreOwner($root->object, $cls);
+                    if ($owner !== '') {
+                        $observed[$owner . '::' . $root->property] = Type::cell();
+                    }
                 }
             }
         }

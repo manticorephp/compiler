@@ -1,0 +1,28 @@
+NULL
+string(1) "x"
+NULL string
+def
+NULL
+def
+int(5)
+float(1.5)
+NULL
+string(1) "a"
+NULL
+string(1) "c"
+array(3) {
+  ["k"]=>
+  NULL
+  ["j"]=>
+  string(1) "x"
+  ["m"]=>
+  int(3)
+}
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  NULL
+  [2]=>
+  string(1) "c"
+}
