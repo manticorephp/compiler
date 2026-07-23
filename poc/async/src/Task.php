@@ -24,6 +24,9 @@ final class Task
     /** True while suspended on I/O (its connection's persistent watcher is armed). */
     public bool $ioWaiting = false;
 
+    /** A value handed to this task while it was parked on a {@see Channel}. */
+    public mixed $chanValue = null;
+
     public function __construct(
         public \Fiber $fiber,
         public TaskGroup $group,

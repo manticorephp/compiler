@@ -31,3 +31,9 @@ function delay(float $seconds): void
 {
     Scheduler::instance()->sleep($seconds);
 }
+
+/** Make a channel (Go's `make(chan, cap)`); capacity 0 = unbuffered rendezvous. */
+function channel(int $capacity = 0): Channel
+{
+    return new Channel($capacity);
+}
