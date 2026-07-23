@@ -32,13 +32,5 @@ gdb --batch \
     -ex 'set pagination off' \
     -ex 'run' \
     -ex 'echo \n==== BACKTRACE ====\n' \
-    -ex 'bt' \
-    -ex 'echo \n==== FRAME (free caller) ====\n' \
-    -ex 'frame 4' \
-    -ex 'info registers' \
-    --args "$SEED" build manticore.json 2>&1 | tail -80
-
-echo ""
-echo "==================== VALGRIND (invalid free + block origin) ===================="
-valgrind --error-exitcode=0 --num-callers=25 --track-origins=yes \
-    "$SEED" build manticore.json 2>&1 | grep -A40 -i "invalid free\|invalid write\|invalid read\|mismatched" | head -70
+    -ex 'bt 30' \
+    --args "$SEED" build manticore.json 2>&1 | grep -A40 "IDROP-BAD\|BACKTRACE\|#[0-9]" | head -60

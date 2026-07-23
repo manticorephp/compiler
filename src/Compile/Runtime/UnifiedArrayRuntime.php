@@ -411,8 +411,20 @@ final class UnifiedArrayRuntime
         $comp = $fn->block('comp');
         $ret = $fn->block('ret');
         $z = $fn->block('z');
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        // A non-array base reaching here is an ERASED value — a `mixed`/cell, an
+        // undefined array-key read, or the empty-array zero word — that isn't an
+        // array at runtime. php iterates/counts such a value as empty (foreach
+        // warns and skips). Guard the header magic (0x7E66 high16 of RC_TAG):
+        // anything else returns len 0 BEFORE the header is read, so a non-array
+        // never reaches compact/index_drop (previously a wild bucket ptr was
+        // free()d — an invalid free that glibc aborts on; macOS tolerated it).
+        // Once per call (foreach/count/compare), not per iteration.
+        $tagchk = $fn->block('ll_tagchk');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $tagchk);
         $z->ret(Value::int(Type::i64(), 0));
+        $llTag = $tagchk->load(Type::i64(), $this->hdr($tagchk, $arr, MemoryAbi::RC_TAG_OFFSET));
+        $llHi = $tagchk->lshr($llTag, Value::int(Type::i64(), 48));
+        $tagchk->brIf($tagchk->icmp('ne', $llHi, Value::int(Type::i64(), 0x7E66)), $z, $chk);
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $tomb = $chk->lshr($flags, Value::int(Type::i64(), 8));
         $chk->brIf($chk->icmp('eq', $tomb, Value::int(Type::i64(), 0)), $ret, $comp);

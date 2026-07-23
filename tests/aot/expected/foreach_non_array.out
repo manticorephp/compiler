@@ -1,0 +1,5 @@
+undef: 0
+null done
+mixed-null: 0
+mixed-array: 3
+mixed-str: 0

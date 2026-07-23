@@ -5,6 +5,7 @@ FROM php:8.6-rc-cli
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang gcc libc6-dev pkg-config ca-certificates gdb valgrind \
+        libssl-dev libpcre2-dev \
     && rm -rf /var/lib/apt/lists/* \
     && (command -v cc >/dev/null || ln -s "$(command -v gcc)" /usr/local/bin/cc)
 
