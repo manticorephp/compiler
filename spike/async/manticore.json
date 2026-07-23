@@ -1,0 +1,18 @@
+{
+  "applications": [
+    {
+      "name": "async-smoke",
+      "src": "spike/async/src",
+      "output": "spike/async/smoke_bin",
+      "entry": "spike/async/smoke.php",
+      "exclude": []
+    },
+    {
+      "name": "async-echo",
+      "src": "spike/async/src",
+      "output": "spike/async/echo_bin",
+      "entry": "spike/async/echo_server.php",
+      "exclude": []
+    }
+  ]
+}
