@@ -13,6 +13,13 @@
       "output": "spike/async/echo_bin",
       "entry": "spike/async/echo_server.php",
       "exclude": []
+    },
+    {
+      "name": "async-http",
+      "src": "spike/async/src",
+      "output": "spike/async/http_bin",
+      "entry": "spike/async/http_server.php",
+      "exclude": []
     }
   ]
 }
