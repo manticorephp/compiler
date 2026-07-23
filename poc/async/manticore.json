@@ -1,0 +1,32 @@
+{
+  "applications": [
+    {
+      "name": "async-smoke",
+      "src": "poc/async/src",
+      "output": "poc/async/smoke_bin",
+      "entry": "poc/async/smoke.php",
+      "exclude": []
+    },
+    {
+      "name": "async-echo",
+      "src": "poc/async/src",
+      "output": "poc/async/echo_bin",
+      "entry": "poc/async/echo_server.php",
+      "exclude": []
+    },
+    {
+      "name": "async-load",
+      "src": "poc/async/src",
+      "output": "poc/async/load_bin",
+      "entry": "poc/async/load_client.php",
+      "exclude": []
+    },
+    {
+      "name": "async-http",
+      "src": "poc/async/src",
+      "output": "poc/async/http_bin",
+      "entry": "poc/async/http_server.php",
+      "exclude": []
+    }
+  ]
+}
