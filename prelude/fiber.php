@@ -187,6 +187,30 @@ class Fiber
         return \__mir_fiber_current();
     }
 
+    /**
+     * Free a TERMINATED fiber's stack + ctx NOW (the stack is pooled for reuse),
+     * instead of waiting for the deferred __destruct. A scheduler that runs many
+     * short-lived fibers (one per connection) calls this on completion so their
+     * stacks are reclaimed+pooled promptly rather than accumulating (a 16k-fiber
+     * churn otherwise held ~400MB). Idempotent: __destruct's guards skip the
+     * already-nulled fields, and getReturn() still works (the value is a field,
+     * not on the stack).
+     */
+    public function reclaim(): void
+    {
+        if ($this->state !== 3) {
+            return;                       // only a terminated fiber is safe to free
+        }
+        if ($this->stackBase !== 0) {
+            \__mir_fiber_stack_free($this->stackBase, 8388608);
+            $this->stackBase = 0;
+        }
+        if ($this->saveCtx !== 0) {
+            \__mir_fiber_ctx_free($this->saveCtx);
+            $this->saveCtx = 0;
+        }
+    }
+
     public function __destruct()
     {
         // A fiber left SUSPENDED at destruction must unwind its stack so `finally`
