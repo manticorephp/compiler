@@ -41,6 +41,13 @@ trait EmitLlvmFiber
         // stack; main's state lives here. {@see prelude/fiber.php} brackets every
         // jump with save/load.
         $out .= "@__mir_fiber_main_ctx = linkonce_odr global [64 x i8] zeroinitializer\n";
+        // Fiber-stack free-list: mmap'd stacks (all one size, guard page already
+        // set) returned by a destroyed fiber are POOLED here instead of munmap'd,
+        // so a new fiber reuses one — no mmap+mprotect+munmap churn per fiber
+        // (~3µs). Single-threaded (parallelism is multi-process), so no lock. Cap
+        // 128; overflow falls back to munmap.
+        $out .= "@__mir_fib_pool = linkonce_odr global [128 x i64] zeroinitializer\n";
+        $out .= "@__mir_fib_pool_n = linkonce_odr global i64 0\n";
         $out .= "declare i64 @mc_fiber_make(i64, i64, i64)\n";
         $out .= "declare i64 @mc_fiber_jump(i64)\n";
         $out .= "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n";
@@ -222,16 +229,36 @@ trait EmitLlvmFiber
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $sz = $this->lastValue;
-        // MAP_PRIVATE(2) | MAP_ANON (Darwin 0x1000, glibc/musl 0x20); PROT_RW = 3.
         $flags = \Manticore\is_darwin() ? 0x1002 : 0x22;
+        $hit = $this->ssa->allocLabel('fibpool.hit');
+        $miss = $this->ssa->allocLabel('fibpool.miss');
+        $done = $this->ssa->allocLabel('fibpool.done');
+        // Reuse a pooled stack if one is free (guard page already set), else mmap.
+        $n = $this->ssa->allocReg();
+        $out .= '  ' . $n . " = load i64, ptr @__mir_fib_pool_n\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = icmp sgt i64 ' . $n . ", 0\n";
+        $out .= '  br i1 ' . $has . ', label %' . $hit . ', label %' . $miss . "\n";
+        $out .= $hit . ":\n";
+        $idx = $this->ssa->allocReg();
+        $out .= '  ' . $idx . ' = sub i64 ' . $n . ", 1\n";
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = getelementptr inbounds [128 x i64], ptr @__mir_fib_pool, i64 0, i64 ' . $idx . "\n";
+        $pooled = $this->ssa->allocReg();
+        $out .= '  ' . $pooled . ' = load i64, ptr ' . $slot . "\n";
+        $out .= '  store i64 ' . $idx . ", ptr @__mir_fib_pool_n\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $miss . ":\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = call ptr @mmap(ptr null, i64 ' . $sz
             . ', i32 3, i32 ' . (string)$flags . ', i32 -1, i64 0)' . "\n";
-        // Guard the lowest 16KB (covers macOS arm64's 16K page and is a multiple
-        // of Linux's 4K) — a downward overflow hits PROT_NONE and faults cleanly.
         $out .= '  call i32 @mprotect(ptr ' . $p . ', i64 16384, i32 0)' . "\n";
+        $fresh = $this->ssa->allocReg();
+        $out .= '  ' . $fresh . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
+        $out .= '  ' . $r . ' = phi i64 [ ' . $pooled . ', %' . $hit . ' ], [ ' . $fresh . ', %' . $miss . " ]\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
@@ -245,9 +272,29 @@ trait EmitLlvmFiber
         $base = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
         $sz = $this->lastValue;
+        $push = $this->ssa->allocLabel('fibpool.push');
+        $unmap = $this->ssa->allocLabel('fibpool.unmap');
+        $fdone = $this->ssa->allocLabel('fibpool.free_done');
+        // Pool the stack for reuse if there's room, else munmap.
+        $n = $this->ssa->allocReg();
+        $out .= '  ' . $n . " = load i64, ptr @__mir_fib_pool_n\n";
+        $room = $this->ssa->allocReg();
+        $out .= '  ' . $room . ' = icmp slt i64 ' . $n . ", 128\n";
+        $out .= '  br i1 ' . $room . ', label %' . $push . ', label %' . $unmap . "\n";
+        $out .= $push . ":\n";
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = getelementptr inbounds [128 x i64], ptr @__mir_fib_pool, i64 0, i64 ' . $n . "\n";
+        $out .= '  store i64 ' . $base . ', ptr ' . $slot . "\n";
+        $n1 = $this->ssa->allocReg();
+        $out .= '  ' . $n1 . ' = add i64 ' . $n . ", 1\n";
+        $out .= '  store i64 ' . $n1 . ", ptr @__mir_fib_pool_n\n";
+        $out .= '  br label %' . $fdone . "\n";
+        $out .= $unmap . ":\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $base . ' to ptr' . "\n";
         $out .= '  call i32 @munmap(ptr ' . $p . ', i64 ' . $sz . ")\n";
+        $out .= '  br label %' . $fdone . "\n";
+        $out .= $fdone . ":\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
