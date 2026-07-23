@@ -10,16 +10,22 @@
 use function Async\run;
 use function Async\spawn;
 
-run(function () {
+const WORKERS = 8;
+
+$worker = Async\workers(WORKERS);        // fork BEFORE the scheduler; each worker below
+
+run(function () use ($worker) {
     $errno = 0;
     $errstr = "";
     $server = stream_socket_server("tcp://0.0.0.0:8080", $errno, $errstr);
     if ($server === false) {
-        echo "listen failed: ", $errstr, "\n";
+        echo "worker ", $worker, " listen failed: ", $errstr, "\n";
         return;
     }
     stream_set_blocking($server, false);
-    echo "http on :8080\n";
+    if ($worker === 0) {
+        echo "http on :8080 (", WORKERS, " workers)\n";
+    }
     while (true) {
         $conn = Async\accept($server);
         spawn(function () use ($conn) {
