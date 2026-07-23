@@ -372,3 +372,39 @@ function __mc_fix_exp(string $s): string
     }
     return $out;
 }
+
+/**
+ * addcslashes — backslash-escape every byte of $string that appears in the
+ * $characters set. The `"a..z"` range syntax is expanded; control bytes are
+ * NOT rendered as `\nnn` octal (they escape literally), which covers symfony's
+ * quoting use — the full octal form is not modelled.
+ */
+function addcslashes(string $string, string $characters): string
+{
+    /** @var array<string, bool> $set */
+    $set = [];
+    $cl = \strlen($characters);
+    $i = 0;
+    while ($i < $cl) {
+        // `x..y` inclusive byte range.
+        if ($i + 3 < $cl && $characters[$i + 1] === '.' && $characters[$i + 2] === '.') {
+            $lo = \ord($characters[$i]);
+            $hi = \ord($characters[$i + 3]);
+            if ($lo <= $hi) {
+                for ($b = $lo; $b <= $hi; $b = $b + 1) { $set[\chr($b)] = true; }
+            }
+            $i = $i + 4;
+            continue;
+        }
+        $set[$characters[$i]] = true;
+        $i = $i + 1;
+    }
+    $out = '';
+    $n = \strlen($string);
+    for ($j = 0; $j < $n; $j = $j + 1) {
+        $c = $string[$j];
+        if (isset($set[$c])) { $out .= '\\'; }
+        $out .= $c;
+    }
+    return $out;
+}

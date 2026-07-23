@@ -647,6 +647,7 @@ trait EmitLlvmModule
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
         $this->frame->isClosure = false;
+        $this->frame->isMain = false;
         $this->frame->isTrampoline = \Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name);
 
         $isMain = $fn->name === '__main';
@@ -969,6 +970,7 @@ trait EmitLlvmModule
     private function emitMain(FunctionDef $fn): string
     {
         $this->rt->needsCliArgv = true;
+        $this->frame->isMain = true;
         $header = "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n";
         if ($this->rt->needsExceptions) {
             // Install the base landing pad: depth 1 reserves slot 0 for this
@@ -1046,6 +1048,21 @@ trait EmitLlvmModule
     {
         $r = $n;
         $v = $r->value;
+        // In __main (emitted as `i32 @main`): a NULL/bare top-level return is a
+        // whole-program INCLUDE-return — a polyfill bootstrap's `return require …`
+        // parses to `return null`, and require is a no-op — so evaluate nothing and
+        // FALL THROUGH (it must not terminate __main before the entry's own code
+        // runs). A VALUE return is the script exit code → `ret i32`. This is
+        // targeted at null (never the compiler's own `return $rc`), so it is safe
+        // across the self-host 2-gen build.
+        if ($this->frame->isMain) {
+            if ($v === null || $v->kind === Node::KIND_NULL_CONST) { return ''; }
+            $out = $this->emitNode($v);
+            $out .= $this->coerceToI64();
+            $t = $this->ssa->allocReg();
+            $out .= '  ' . $t . ' = trunc i64 ' . $this->lastValue . " to i32\n";
+            return $out . '  ret i32 ' . $t . "\n" . $this->emitDeadLabel();
+        }
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
         // The return value (if any) is stashed in `retval` for getReturn().
         if ($this->gen->inGenerator) {

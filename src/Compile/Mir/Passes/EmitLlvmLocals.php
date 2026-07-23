@@ -274,6 +274,14 @@ trait EmitLlvmLocals
             foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
+        // A static call's args can hold an assignment (`Helper::x($f = $o->m())`) —
+        // recurse so a local FIRST bound inside a static-call arg gets its entry
+        // slot (without this its StoreLocal emits `store …, ptr ` with no slot).
+        if ($k === Node::KIND_STATIC_CALL) {
+            $out = '';
+            foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
+            return $out;
+        }
         return '';
     }
 
