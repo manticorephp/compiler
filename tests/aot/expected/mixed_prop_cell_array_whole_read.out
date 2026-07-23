@@ -23,4 +23,17 @@ array(3) {
 }
 p=10 q=20 r=30 
 40 4
+array(4) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  NULL
+  [2]=>
+  int(3)
+  [3]=>
+  string(1) "d"
+}
+bool(true)
+NULL
+4
 m>one n>two 

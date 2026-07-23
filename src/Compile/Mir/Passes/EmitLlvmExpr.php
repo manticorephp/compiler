@@ -1479,10 +1479,18 @@ trait EmitLlvmExpr
         $hasBox = isset($this->cellPropHasInPlaceBox[$qk]) || isset($this->cellPropHasInPlaceBox[$prop]);
         $hasNested = isset($this->cellPropHasNestedArrayStore[$qk]) || isset($this->cellPropHasNestedArrayStore[$prop]);
         $hasCellArr = isset($this->cellPropHasCellArrayStore[$qk]) || isset($this->cellPropHasCellArrayStore[$prop]);
+        // A VEC cell-array is ambiguous (value container vs SPL key buffer). Box it
+        // ONLY under a positive tag-read signal AND no element-as-index veto — a key
+        // buffer is never tag-consumed, so it never boxes even if an indirect
+        // index-flow escaped the veto scan (the crash-safe direction).
+        $vecCellArr = isset($this->cellPropHasVecCellArrayStore[$qk]) || isset($this->cellPropHasVecCellArrayStore[$prop]);
+        $tagRead = isset($this->cellPropTagRead[$qk]) || isset($this->cellPropTagRead[$prop]);
+        $elemIdx = isset($this->cellPropElemAsIndex[$qk]) || isset($this->cellPropElemAsIndex[$prop]);
+        $boxVecCell = $vecCellArr && $tagRead && !$elemIdx;
         // A flat cell-element array whole-store (heterogeneous / null) boxes too, so
         // a whole-read (var_dump / return) reads a tagged array cell. A raw array
         // base (element-written, SPL `__s`) already returned above and stays raw.
-        if ($hasArr && !$hasBox && !$hasNested && !$hasCellArr) { return false; }
+        if ($hasArr && !$hasBox && !$hasNested && !$hasCellArr && !$boxVecCell) { return false; }
         return true;
     }
 

@@ -29,6 +29,17 @@ echo "\n";
 $it["s"] = 40;
 echo $it["s"], " ", count($it), "\n";
 
+// VEC value container (int-keyed heterogeneous) whole-read by a tag consumer
+// boxes too — gated on the tag-read signal with no element-as-index veto, so it
+// is distinguished from the VEC key-buffer shape below.
+class VBag { public mixed $v; }
+$vb = new VBag();
+$vb->v = ["a", null, 3, "d"];
+var_dump($vb->v);
+var_dump(is_array($vb->v));
+var_dump($vb->v[1]);
+echo count($vb->v), "\n";
+
 // user key-buffer class (vec $k) must still work — boxing it would break lookup
 class KB implements Iterator {
     private mixed $d; private mixed $k; private int $i = 0;
