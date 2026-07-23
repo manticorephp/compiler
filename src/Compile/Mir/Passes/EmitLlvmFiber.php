@@ -33,12 +33,14 @@ trait EmitLlvmFiber
     private function fiberRuntime(): string
     {
         $out  = "@__mir_current_fiber = linkonce_odr global ptr null\n";
-        // Per-context arena save area (head/cur/marks/sp/mcap = 5*8B). The
-        // process-global bump arena + its mark stack are shared, so a fiber that
-        // suspends mid-scope would desync main's mark stack ⇒ heap corruption.
-        // Each fiber swaps in its OWN (lazily-allocated) arena on entry; main's
-        // lives here. {@see prelude/fiber.php} brackets every jump with save/load.
-        $out .= "@__mir_fiber_main_ctx = linkonce_odr global [40 x i8] zeroinitializer\n";
+        // Per-context save area (64B): the 5 arena globals (head/cur/marks/sp/mcap)
+        // + the 3 exception globals (jmp_base/jmp_depth/thrown). Both the bump
+        // arena+mark-stack and the try-slot jmp stack are process-global, so a
+        // fiber suspending mid-scope / mid-try would desync main's ⇒ heap
+        // corruption / aliased jmp_buf. Each fiber runs on its OWN arena + jmp
+        // stack; main's state lives here. {@see prelude/fiber.php} brackets every
+        // jump with save/load.
+        $out .= "@__mir_fiber_main_ctx = linkonce_odr global [64 x i8] zeroinitializer\n";
         $out .= "declare i64 @mc_fiber_make(i64, i64, i64)\n";
         $out .= "declare i64 @mc_fiber_jump(i64)\n";
         foreach ($this->fiberAsmLines() as $line) {
@@ -238,22 +240,35 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** The five arena globals, in save-area order. head/cur/marks are ptr, sp/mcap i64. */
-    private const FIBER_ARENA_GLOBALS = [
+    /** The saved globals, in ctx order: 5 arena + 3 exception. ptr | i64. */
+    private const FIBER_CTX_GLOBALS = [
         ['@__mir_arena_head', 'ptr', 0],
         ['@__mir_arena_cur', 'ptr', 8],
         ['@__mir_arena_marks', 'ptr', 16],
         ['@__mir_arena_sp', 'i64', 24],
         ['@__mir_arena_mcap', 'i64', 32],
+        ['@__mir_jmp_base', 'ptr', 40],
+        ['@__mir_jmp_depth', 'i64', 48],
+        ['@__mir_thrown', 'ptr', 56],
     ];
 
-    /** __mir_fiber_arena_new() : int — a zeroed 40B save area (⇒ a fresh, lazily
-     *  allocated arena the first time the fiber runs). */
-    private function biFiberArenaNew(array $args): string
+    /** __mir_fiber_ctx_new() : int — a fresh 64B save area for a new fiber. Arena
+     *  fields stay zeroed (the arena lazily self-builds). The jmp stack is its OWN
+     *  8KB buffer with depth 1 (slot 0 reserved, like main) so fiber tries never
+     *  alias main's jmp_buf; thrown starts null. */
+    private function biFiberCtxNew(array $args): string
     {
         $this->rt->needsFibers = true;
         $p = $this->ssa->allocReg();
-        $out = '  ' . $p . ' = call ptr @calloc(i64 40, i64 1)' . "\n";
+        $out = '  ' . $p . ' = call ptr @calloc(i64 64, i64 1)' . "\n";
+        $js = $this->ssa->allocReg();
+        $out .= '  ' . $js . ' = call ptr @malloc(i64 8192)' . "\n";
+        $jbslot = $this->ssa->allocReg();
+        $out .= '  ' . $jbslot . ' = getelementptr i8, ptr ' . $p . ', i64 40' . "\n";
+        $out .= '  store ptr ' . $js . ', ptr ' . $jbslot . "\n";
+        $jdslot = $this->ssa->allocReg();
+        $out .= '  ' . $jdslot . ' = getelementptr i8, ptr ' . $p . ', i64 48' . "\n";
+        $out .= '  store i64 1, ptr ' . $jdslot . "\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
         $this->lastValue = $r;
@@ -261,14 +276,14 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_arena_save(ctx) : void — snapshot the arena globals into ctx. */
-    private function biFiberArenaSave(array $args): string
+    /** __mir_fiber_ctx_save(ctx) : void — snapshot the arena + exception globals into ctx. */
+    private function biFiberCtxSave(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $cp = $this->ssa->allocReg();
         $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . ' to ptr' . "\n";
-        foreach (self::FIBER_ARENA_GLOBALS as $g) {
+        foreach (self::FIBER_CTX_GLOBALS as $g) {
             [$sym, $ty, $off] = $g;
             $v = $this->ssa->allocReg();
             $out .= '  ' . $v . ' = load ' . $ty . ', ptr ' . $sym . "\n";
@@ -281,14 +296,14 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_arena_load(ctx) : void — restore the arena globals from ctx. */
-    private function biFiberArenaLoad(array $args): string
+    /** __mir_fiber_ctx_load(ctx) : void — restore the arena + exception globals from ctx. */
+    private function biFiberCtxLoad(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $cp = $this->ssa->allocReg();
         $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . ' to ptr' . "\n";
-        foreach (self::FIBER_ARENA_GLOBALS as $g) {
+        foreach (self::FIBER_CTX_GLOBALS as $g) {
             [$sym, $ty, $off] = $g;
             $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . ' = getelementptr i8, ptr ' . $cp . ', i64 ' . (string)$off . "\n";
@@ -297,6 +312,22 @@ trait EmitLlvmFiber
             $out .= '  store ' . $ty . ' ' . $v . ', ptr ' . $sym . "\n";
         }
         $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** __mir_fiber_has_current() : bool — is a fiber running? (global != null).
+     *  An int-level null test, so it dodges the unsound `=== null` on an obj. */
+    private function biFiberHasCurrent(array $args): string
+    {
+        $this->rt->needsFibers = true;
+        $p = $this->ssa->allocReg();
+        $out = '  ' . $p . ' = load ptr, ptr @__mir_current_fiber' . "\n";
+        $b = $this->ssa->allocReg();
+        $out .= '  ' . $b . ' = icmp ne ptr ' . $p . ', null' . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $b . ' to i64' . "\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }

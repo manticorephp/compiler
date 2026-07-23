@@ -72,9 +72,10 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_fiber_set_current')      { return $this->biFiberSetCurrent($args); }
         if ($name === '__mir_fiber_stack_alloc')      { return $this->biFiberStackAlloc($args); }
         if ($name === '__mir_fiber_stack_free')       { return $this->biFiberStackFree($args); }
-        if ($name === '__mir_fiber_arena_new')        { return $this->biFiberArenaNew($args); }
-        if ($name === '__mir_fiber_arena_save')       { return $this->biFiberArenaSave($args); }
-        if ($name === '__mir_fiber_arena_load')       { return $this->biFiberArenaLoad($args); }
+        if ($name === '__mir_fiber_ctx_new')          { return $this->biFiberCtxNew($args); }
+        if ($name === '__mir_fiber_ctx_save')         { return $this->biFiberCtxSave($args); }
+        if ($name === '__mir_fiber_ctx_load')         { return $this->biFiberCtxLoad($args); }
+        if ($name === '__mir_fiber_has_current')      { return $this->biFiberHasCurrent($args); }
         if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
         if ($name === 'ord')                          { return $this->biOrd($args); }

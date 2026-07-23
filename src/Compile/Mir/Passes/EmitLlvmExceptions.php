@@ -37,9 +37,16 @@ trait EmitLlvmExceptions
     private function jmpBufExpr(string $slotReg): string
     {
         $off = $this->ssa->allocReg();
+        $base = $this->ssa->allocReg();
         $this->jmpScratch = $this->ssa->allocReg();
         $ir = '  ' . $off . ' = call i64 @__mir_jmp_slot(i64 ' . $slotReg . ")\n";
-        $ir .= '  ' . $this->jmpScratch . ' = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 ' . $off . "\n";
+        // Indirect through @__mir_jmp_base (defaults to @__mir_jmp_stack) so a
+        // running Fiber can point the try-slot stack at its OWN buffer — without
+        // it a fiber try and a main try at the same nesting depth alias one
+        // jmp_buf. Non-fiber programs never move the base, so this is one extra
+        // load over the old direct @__mir_jmp_stack reference.
+        $ir .= '  ' . $base . ' = load ptr, ptr @__mir_jmp_base' . "\n";
+        $ir .= '  ' . $this->jmpScratch . ' = getelementptr inbounds i8, ptr ' . $base . ', i64 ' . $off . "\n";
         return $ir;
     }
     private string $jmpScratch = '';

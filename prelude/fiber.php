@@ -13,6 +13,10 @@
 //
 // State: 0=NEW 1=RUNNING 2=SUSPENDED 3=TERMINATED.
 
+class FiberError extends \Error
+{
+}
+
 class Fiber
 {
     private $callable;
@@ -21,7 +25,7 @@ class Fiber
     private int $fctx = 0;        // this fiber's own suspended context
     private int $resumer = 0;     // context to jump back to on suspend/finish
     private int $stackBase = 0;
-    private int $arenaCtx = 0;    // this fiber's private arena save area
+    private int $saveCtx = 0;    // this fiber's private arena + jmp save area (64B)
     private int $state = 0;
     private bool $started = false;
     private mixed $valueIn = null;   // resume($v) -> returned by suspend()
@@ -37,17 +41,20 @@ class Fiber
 
     public function start(mixed ...$args): mixed
     {
+        if ($this->started) {
+            throw new \FiberError("Cannot start a fiber that has already been started");
+        }
         $this->args = $args;
         $this->started = true;
         $this->state = 1;
-        $this->arenaCtx = \__mir_fiber_arena_new();
+        $this->saveCtx = \__mir_fiber_ctx_new();
         $base = \__mir_fiber_stack_alloc(8388608);
         $this->stackBase = $base;
         $this->fctx = \__mir_fiber_make($base + 8388608, $this);
         $prev = \__mir_fiber_current();
         \__mir_fiber_set_current($this);
-        \__mir_fiber_arena_save(\__mir_fiber_main_ctx());
-        \__mir_fiber_arena_load($this->arenaCtx);
+        \__mir_fiber_ctx_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
@@ -77,8 +84,8 @@ class Fiber
         }
         $this->state = 3;
         $this->valueOut = null;   // a terminated fiber's resume() yields null, not the last suspend value
-        \__mir_fiber_arena_save($this->arenaCtx);
-        \__mir_fiber_arena_load(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_save($this->saveCtx);
+        \__mir_fiber_ctx_load(\__mir_fiber_main_ctx());
         \__mir_fiber_jump($this->resumer);
     }
 
@@ -86,8 +93,8 @@ class Fiber
     {
         $this->valueOut = $value;
         $this->state = 2;
-        \__mir_fiber_arena_save($this->arenaCtx);
-        \__mir_fiber_arena_load(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_save($this->saveCtx);
+        \__mir_fiber_ctx_load(\__mir_fiber_main_ctx());
         $nr = \__mir_fiber_jump($this->resumer);
         $this->resumer = $nr;
         $this->state = 1;
@@ -101,12 +108,15 @@ class Fiber
 
     public function resume(mixed $value = null): mixed
     {
+        if ($this->state !== 2) {
+            throw new \FiberError("Cannot resume a fiber that is not suspended");
+        }
         $this->valueIn = $value;
         $this->state = 1;
         $prev = \__mir_fiber_current();
         \__mir_fiber_set_current($this);
-        \__mir_fiber_arena_save(\__mir_fiber_main_ctx());
-        \__mir_fiber_arena_load($this->arenaCtx);
+        \__mir_fiber_ctx_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
@@ -120,12 +130,15 @@ class Fiber
 
     public function throw(\Throwable $exception): mixed
     {
+        if ($this->state !== 2) {
+            throw new \FiberError("Cannot resume a fiber that is not suspended");
+        }
         $this->injectEx = $exception;
         $this->state = 1;
         $prev = \__mir_fiber_current();
         \__mir_fiber_set_current($this);
-        \__mir_fiber_arena_save(\__mir_fiber_main_ctx());
-        \__mir_fiber_arena_load($this->arenaCtx);
+        \__mir_fiber_ctx_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
@@ -137,7 +150,13 @@ class Fiber
         return $this->valueOut;
     }
 
-    public function getReturn(): mixed { return $this->ret; }
+    public function getReturn(): mixed
+    {
+        if ($this->state !== 3) {
+            throw new \FiberError("Cannot get fiber return value: The fiber has not returned");
+        }
+        return $this->ret;
+    }
     public function isStarted(): bool { return $this->started; }
     public function isRunning(): bool { return $this->state === 1; }
     public function isSuspended(): bool { return $this->state === 2; }
@@ -145,6 +164,9 @@ class Fiber
 
     public static function suspend(mixed $value = null): mixed
     {
+        if (!\__mir_fiber_has_current()) {
+            throw new \FiberError("Cannot suspend outside of a fiber");
+        }
         $cur = \__mir_fiber_current();
         return $cur->__mcSuspend($value);
     }
