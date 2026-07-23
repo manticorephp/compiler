@@ -4,16 +4,23 @@
 // object's fields, not the asm. DEMAND-GATED (Main.php): compiled only when a
 // program mentions Fiber, so the fiber-free compiler build never emits the asm.
 //
-// The process-global bump arena (cur + a mark stack) is shared, so a fiber that
-// suspends mid-scope would desync main's mark stack ⇒ heap corruption. Each fiber
-// runs on its OWN arena: every jump is bracketed by save(leaving)/load(entering)
-// of the five arena globals. A fresh (zeroed) ctx makes the arena lazily build
-// itself the first time the fiber runs. MVP: the resumer is always the main
-// context (nested fiber-resumes-fiber not yet handled).
+// The process-global bump arena (cur + a mark stack) and the exception try-slot
+// stack are shared, so a fiber that suspends mid-scope / mid-try would desync
+// main's ⇒ heap corruption / aliased jmp_buf. Each fiber runs on its OWN arena +
+// jmp stack: every jump is bracketed by save(leaving)/load(entering) of the 8
+// context globals (5 arena + jmp_base/depth/thrown). A fresh ctx makes the arena
+// lazily build itself. Nesting works: the "resumer" ctx is the CURRENTLY-running
+// fiber's own ctx (or main's if none), captured per resume in $resumerCtx.
 //
 // State: 0=NEW 1=RUNNING 2=SUSPENDED 3=TERMINATED.
 
 class FiberError extends \Error
+{
+}
+
+// Thrown into a fiber that is still suspended when it is destroyed, so its
+// `finally` blocks unwind before the stack is reclaimed.
+class FiberExit extends \Exception
 {
 }
 
@@ -23,7 +30,8 @@ class Fiber
     /** @var array */
     private array $args = [];
     private int $fctx = 0;        // this fiber's own suspended context
-    private int $resumer = 0;     // context to jump back to on suspend/finish
+    private int $resumer = 0;     // fctx to jump back to on suspend/finish
+    private int $resumerCtx = 0;  // the resumer's 64B save area (main's or an outer fiber's)
     private int $stackBase = 0;
     private int $saveCtx = 0;    // this fiber's private arena + jmp save area (64B)
     private int $state = 0;
@@ -52,8 +60,9 @@ class Fiber
         $this->stackBase = $base;
         $this->fctx = \__mir_fiber_make($base + 8388608, $this);
         $prev = \__mir_fiber_current();
+        $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
-        \__mir_fiber_ctx_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
@@ -85,7 +94,7 @@ class Fiber
         $this->state = 3;
         $this->valueOut = null;   // a terminated fiber's resume() yields null, not the last suspend value
         \__mir_fiber_ctx_save($this->saveCtx);
-        \__mir_fiber_ctx_load(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_load($this->resumerCtx);
         \__mir_fiber_jump($this->resumer);
     }
 
@@ -94,7 +103,7 @@ class Fiber
         $this->valueOut = $value;
         $this->state = 2;
         \__mir_fiber_ctx_save($this->saveCtx);
-        \__mir_fiber_ctx_load(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_load($this->resumerCtx);
         $nr = \__mir_fiber_jump($this->resumer);
         $this->resumer = $nr;
         $this->state = 1;
@@ -114,8 +123,9 @@ class Fiber
         $this->valueIn = $value;
         $this->state = 1;
         $prev = \__mir_fiber_current();
+        $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
-        \__mir_fiber_ctx_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
@@ -136,8 +146,9 @@ class Fiber
         $this->injectEx = $exception;
         $this->state = 1;
         $prev = \__mir_fiber_current();
+        $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
-        \__mir_fiber_ctx_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
@@ -174,6 +185,34 @@ class Fiber
     public static function getCurrent(): ?Fiber
     {
         return \__mir_fiber_current();
+    }
+
+    public function __destruct()
+    {
+        // A fiber left SUSPENDED at destruction must unwind its stack so `finally`
+        // blocks run: inject a FiberExit at the suspend point and let it propagate
+        // to termination, then swallow it (it must not escape the destructor).
+        if ($this->state === 2) {
+            $this->injectEx = new \FiberExit("");
+            $this->state = 1;
+            $prev = \__mir_fiber_current();
+            $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
+            \__mir_fiber_set_current($this);
+            \__mir_fiber_ctx_save($this->resumerCtx);
+            \__mir_fiber_ctx_load($this->saveCtx);
+            $r = \__mir_fiber_jump($this->fctx);
+            $this->fctx = $r;
+            \__mir_fiber_set_current($prev);
+            $this->pendingEx = null;   // the FiberExit terminated it; do not re-raise
+        }
+        if ($this->stackBase !== 0) {
+            \__mir_fiber_stack_free($this->stackBase, 8388608);
+            $this->stackBase = 0;
+        }
+        if ($this->saveCtx !== 0) {
+            \__mir_fiber_ctx_free($this->saveCtx);
+            $this->saveCtx = 0;
+        }
     }
 }
 

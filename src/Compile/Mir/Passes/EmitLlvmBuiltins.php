@@ -76,6 +76,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_fiber_ctx_save')         { return $this->biFiberCtxSave($args); }
         if ($name === '__mir_fiber_ctx_load')         { return $this->biFiberCtxLoad($args); }
         if ($name === '__mir_fiber_has_current')      { return $this->biFiberHasCurrent($args); }
+        if ($name === '__mir_fiber_ctx_free')         { return $this->biFiberCtxFree($args); }
         if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
         if ($name === 'ord')                          { return $this->biOrd($args); }

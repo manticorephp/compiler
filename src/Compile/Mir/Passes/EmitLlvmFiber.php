@@ -43,6 +43,9 @@ trait EmitLlvmFiber
         $out .= "@__mir_fiber_main_ctx = linkonce_odr global [64 x i8] zeroinitializer\n";
         $out .= "declare i64 @mc_fiber_make(i64, i64, i64)\n";
         $out .= "declare i64 @mc_fiber_jump(i64)\n";
+        $out .= "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n";
+        $out .= "declare i32 @munmap(ptr, i64)\n";
+        $out .= "declare i32 @mprotect(ptr, i64, i32)\n";
         foreach ($this->fiberAsmLines() as $line) {
             $out .= 'module asm "' . $line . '"' . "\n";
         }
@@ -211,14 +214,22 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_stack_alloc(size) : int — malloc'd stack, returns the base. */
+    /** __mir_fiber_stack_alloc(size) : int — an mmap'd stack with a PROT_NONE
+     *  guard page at the low end (stack grows down ⇒ overflow faults instead of
+     *  scribbling the heap). Returns the base. */
     private function biFiberStackAlloc(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $sz = $this->lastValue;
+        // MAP_PRIVATE(2) | MAP_ANON (Darwin 0x1000, glibc/musl 0x20); PROT_RW = 3.
+        $flags = \Manticore\is_darwin() ? 0x1002 : 0x22;
         $p = $this->ssa->allocReg();
-        $out .= '  ' . $p . ' = call ptr @malloc(i64 ' . $sz . ")\n";
+        $out .= '  ' . $p . ' = call ptr @mmap(ptr null, i64 ' . $sz
+            . ', i32 3, i32 ' . (string)$flags . ', i32 -1, i64 0)' . "\n";
+        // Guard the lowest 16KB (covers macOS arm64's 16K page and is a multiple
+        // of Linux's 4K) — a downward overflow hits PROT_NONE and faults cleanly.
+        $out .= '  call i32 @mprotect(ptr ' . $p . ', i64 16384, i32 0)' . "\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
         $this->lastValue = $r;
@@ -226,15 +237,36 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_stack_free(base) : void */
+    /** __mir_fiber_stack_free(base, size) : void — munmap the fiber stack. */
     private function biFiberStackFree(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $base = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $sz = $this->lastValue;
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $base . ' to ptr' . "\n";
-        $out .= '  call void @free(ptr ' . $p . ")\n";
+        $out .= '  call i32 @munmap(ptr ' . $p . ', i64 ' . $sz . ")\n";
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** __mir_fiber_ctx_free(ctx) : void — free the fiber's jmp_stack buffer
+     *  (ctx+40) then the ctx block itself. */
+    private function biFiberCtxFree(array $args): string
+    {
+        $this->rt->needsFibers = true;
+        $out = $this->emitIntArg($args[0]);
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . ' to ptr' . "\n";
+        $jbslot = $this->ssa->allocReg();
+        $out .= '  ' . $jbslot . ' = getelementptr i8, ptr ' . $cp . ', i64 40' . "\n";
+        $js = $this->ssa->allocReg();
+        $out .= '  ' . $js . ' = load ptr, ptr ' . $jbslot . "\n";
+        $out .= '  call void @free(ptr ' . $js . ")\n";
+        $out .= '  call void @free(ptr ' . $cp . ")\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
