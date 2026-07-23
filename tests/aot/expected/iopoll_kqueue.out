@@ -1,0 +1,8 @@
+backend: Kqueue
+edge: yes
+bool(true)
+ready before write: 0
+ready after write: 1
+hasRead: yes
+triggered count: 1 first: Read
+bool(false)

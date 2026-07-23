@@ -185,7 +185,11 @@ trait EmitLlvmCalls
         // captured by main), so don't also declare them — a declare + define
         // of one symbol is an LLVM redefinition error.
         if ($cSym !== 'manticore_cli_argc' && $cSym !== 'manticore_cli_argv') {
-            $this->libcExtra[$cSym] = 'declare ' . $ret . ' @' . $cSym
+            // `#[Ffi\Weak]`: a symbol that may be absent on this target (e.g.
+            // epoll_* on macOS) binds to null via extern_weak; the call is
+            // guarded by a runtime OS branch so it never fires where absent.
+            $weak = $fn->ffiWeak ? 'extern_weak ' : '';
+            $this->libcExtra[$cSym] = 'declare ' . $weak . $ret . ' @' . $cSym
                 . '(' . $declParams . ')';
         }
         $callArgs = \implode(', ', $cargs);

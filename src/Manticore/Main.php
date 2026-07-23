@@ -923,8 +923,15 @@ function cmd_compile(array $args): int {
     // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
     // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
     // undefined reference without it. `--as-needed` drops it when unreferenced.
+    // Io\Poll's epoll backend binds Linux-only symbols with `#[Ffi\Weak]`
+    // (extern_weak). On a macOS build those are weak-undefined, which ld64
+    // rejects unless allowed — `-U _epoll_*` permits exactly them (they bind to
+    // 0 and the Linux-only branch never calls them). Harmless when unreferenced,
+    // exactly like ___errno_location. kqueue/kevent are present on Darwin (no
+    // flag); on Linux GNU ld auto-binds any weak-undefined to 0.
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
+            . " -Wl,-U,_epoll_create1 -Wl,-U,_epoll_ctl -Wl,-U,_epoll_wait"
         : " -Wl,--gc-sections -Wl,--as-needed -lm";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {

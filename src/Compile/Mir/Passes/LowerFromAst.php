@@ -1476,6 +1476,16 @@ final class LowerFromAst implements Pass
         return null;
     }
 
+    /** True when a `#[Ffi\Weak]` attribute is present (extern_weak binding). */
+    private function ffiIsWeak(array $attributes): bool
+    {
+        foreach ($attributes as $attr) {
+            $name = \ltrim($attr->name, '\\');
+            if ($name === 'Weak' || $name === 'Ffi\\Weak') { return true; }
+        }
+        return false;
+    }
+
     /** Subclass-typed read of a StringLiteral's value (correct offset). */
     private function strLitValue(\Parser\Ast\StringLiteral $s): string { return $s->value; }
 
