@@ -36,7 +36,9 @@ function serve(\Resource $conn): void
         if ($req === "") {
             break;                       // peer closed
         }
-        if (\strpos($req, "/json") !== false) {
+        // Route on a single byte: the request is "GET /json…" or "GET /plaintext…",
+        // so the char after "GET /" (index 5) decides — no full-request strpos scan.
+        if (\strlen($req) > 5 && $req[5] === "j") {
             $body = '{"message":"Hello, World!"}';
             $ctype = "application/json";
         } else {
