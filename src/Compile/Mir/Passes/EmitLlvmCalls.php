@@ -281,8 +281,22 @@ trait EmitLlvmCalls
                 $out .= $this->emitNode($c);
                 $out .= $this->coerceToI64();
                 $capV = $this->lastValue;
-                // The closure owns a reference to each captured obj.
-                $out .= $this->rcRetainByType($c, $capV, null, 1);
+                // The closure co-owns a reference to each captured rc value. A
+                // CELL/UNKNOWN capture — a resource/object read off a `mixed` or
+                // bare array, or a `T|false` return — needs a TAG-checked retain:
+                // rcRetainByType only handles concrete obj/array/string and would
+                // no-op it, leaving the closure a dangling pointer once the
+                // enclosing scope frees the value (use-after-free — surfaced by a
+                // fiber that captures a socket and runs after the accept loop
+                // reassigned the variable).
+                $ck = $c->type->kind;
+                if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $capV . ")\n";
+                } else {
+                    $out .= $this->rcRetainByType($c, $capV, null, 1);
+                }
             }
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)($i + 1) . "\n";
