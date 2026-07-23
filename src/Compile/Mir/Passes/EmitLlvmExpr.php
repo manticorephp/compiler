@@ -1478,7 +1478,11 @@ trait EmitLlvmExpr
         $hasArr = isset($this->cellPropHasArrayStore[$qk]) || isset($this->cellPropHasArrayStore[$prop]);
         $hasBox = isset($this->cellPropHasInPlaceBox[$qk]) || isset($this->cellPropHasInPlaceBox[$prop]);
         $hasNested = isset($this->cellPropHasNestedArrayStore[$qk]) || isset($this->cellPropHasNestedArrayStore[$prop]);
-        if ($hasArr && !$hasBox && !$hasNested) { return false; }
+        $hasCellArr = isset($this->cellPropHasCellArrayStore[$qk]) || isset($this->cellPropHasCellArrayStore[$prop]);
+        // A flat cell-element array whole-store (heterogeneous / null) boxes too, so
+        // a whole-read (var_dump / return) reads a tagged array cell. A raw array
+        // base (element-written, SPL `__s`) already returned above and stays raw.
+        if ($hasArr && !$hasBox && !$hasNested && !$hasCellArr) { return false; }
         return true;
     }
 

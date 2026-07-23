@@ -3,8 +3,9 @@
 // element: unionTypes(null, string) collapses to bare string, dropping the null,
 // so the null would store as a raw ptr 0 read back as float(0)/garbage. A local
 // is rescued by the local-element scan; a literal straight into a cell prop is
-// not. This covers ELEMENT reads (the fixed path); a whole-array read of a
-// mixed prop is a separate cellProp raw-backing tension, out of scope here.
+// not. A WHOLE read of such a string-keyed cell-array mixed prop (var_dump /
+// is_array / return) also works: the slot boxes as a tagged array cell (a VEC
+// cell-array key buffer, the SPL shape, stays raw).
 
 class C { public mixed $d; }
 
@@ -14,6 +15,15 @@ var_dump($c->d["k"]);        // NULL
 var_dump($c->d["j"]);        // string "x"
 echo gettype($c->d["k"]), " ", gettype($c->d["j"]), "\n";
 echo ($c->d["k"] ?? "def"), "\n";
+var_dump($c->d);             // array(2){ NULL, "x" }
+var_dump(is_array($c->d));   // true
+echo gettype($c->d), "\n";   // array
+
+// whole read via a mixed return
+class Box { public mixed $b; public function get(): mixed { return $this->b; } }
+$bx = new Box();
+$bx->b = ["a" => 1.5, "z" => null];
+var_dump($bx->get());
 
 // null beside int
 $n = new C();

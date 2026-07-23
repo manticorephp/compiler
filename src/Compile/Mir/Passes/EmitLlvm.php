@@ -368,6 +368,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropHasArrayStore = [];
         $this->cellPropHasInPlaceBox = [];
         $this->cellPropHasNestedArrayStore = [];
+        $this->cellPropHasCellArrayStore = [];
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
         foreach ($module->functions as $fn) {
@@ -877,6 +878,15 @@ final class EmitLlvm implements EmitVisitor
      *  as a raw index) stays raw — boxing it would turn a raw key into a cell. */
     private array $cellPropHasNestedArrayStore = [];
 
+    /** Prop names whole-stored an array whose ELEMENT is a CELL (a heterogeneous /
+     *  null-carrying flat array — `$c->d = ["k"=>null,"j"=>"x"]`). A whole-read of
+     *  such a slot (var_dump/return) must see a self-describing array cell, so it
+     *  boxes — UNLESS the slot is also a raw array base (element-written, e.g. an
+     *  SPL `__s`), which is caught earlier and stays raw. A cell-array key buffer
+     *  read as a raw index (SPL `__k`) declares its slot a concrete `array`, so it
+     *  is not a cell prop and never reaches here. */
+    private array $cellPropHasCellArrayStore = [];
+
     private function scanCellPropStores(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
@@ -898,6 +908,17 @@ final class EmitLlvm implements EmitVisitor
                 $el = $n->value->type->element;
                 if ($el !== null && $el->kind === Type::KIND_ARRAY) {
                     $this->cellPropHasNestedArrayStore[$key] = true;
+                } elseif ($el !== null && $el->kind === Type::KIND_CELL
+                    && $n->value->type->isAssoc()) {
+                    // A flat heterogeneous / null-carrying ASSOC (string-keyed,
+                    // element = cell) whole-stored into a mixed slot: a whole-read
+                    // must see a tagged array cell, so box it (unless it is a raw
+                    // array base, checked first in cellPropBoxed). Restricted to an
+                    // ASSOC: a VEC cell-array is the SPL key-buffer shape
+                    // (`$ks[]=$k; $this->k=$ks`) read raw as an index — boxing it
+                    // double-cells the key and breaks count()/element reads, the
+                    // consumer co-flip this scan deliberately avoids.
+                    $this->cellPropHasCellArrayStore[$key] = true;
                 }
             } elseif (!$this->cellBoxableKind($n->value->type)) {
                 $this->cellPropNotBoxable[$key] = true;
