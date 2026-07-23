@@ -392,7 +392,8 @@ trait EmitLlvmControl
         $arr = $this->lastValue;
         // Empty vec/assoc literals lower to a null ptr; reading the length
         // word from null faults. Redirect a null base to a shared zero word
-        // so `len` reads 0 and the loop body is skipped entirely.
+        // so `len` reads 0 and the loop body is skipped entirely. A non-array
+        // (erased) base is handled inside live_len (tag guard → len 0).
         $nz = $this->ssa->allocReg();
         $out .= '  ' . $nz . ' = icmp eq ptr ' . $arr . ", null\n";
         $arrSafe = $this->ssa->allocReg();

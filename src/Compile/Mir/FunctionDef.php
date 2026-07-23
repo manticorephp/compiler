@@ -30,6 +30,13 @@ final class FunctionDef
     public array $ffiParamCTypes = [];
     /** LLVM C return type of the extern. */
     public string $ffiRetCType = 'i64';
+    /**
+     * FFI binding with `#[Ffi\Weak]`: emit `declare extern_weak` so a symbol
+     * absent on the current target binds to null instead of a link error. The
+     * wrapper must only be CALLED behind a runtime OS guard (e.g. epoll_* on
+     * a macOS build). Set by {@see Passes\LowerFromAst}.
+     */
+    public bool $ffiWeak = false;
 
     /**
      * Signature-only import from the prebuilt stdlib: EmitLlvm emits a bare

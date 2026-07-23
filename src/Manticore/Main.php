@@ -923,8 +923,15 @@ function cmd_compile(array $args): int {
     // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
     // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
     // undefined reference without it. `--as-needed` drops it when unreferenced.
+    // Io\Poll's epoll backend binds Linux-only symbols with `#[Ffi\Weak]`
+    // (extern_weak). On a macOS build those are weak-undefined, which ld64
+    // rejects unless allowed — `-U _epoll_*` permits exactly them (they bind to
+    // 0 and the Linux-only branch never calls them). Harmless when unreferenced,
+    // exactly like ___errno_location. kqueue/kevent are present on Darwin (no
+    // flag); on Linux GNU ld auto-binds any weak-undefined to 0.
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
+            . " -Wl,-U,_epoll_create1 -Wl,-U,_epoll_ctl -Wl,-U,_epoll_wait"
         : " -Wl,--gc-sections -Wl,--as-needed -lm";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
@@ -1536,6 +1543,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // host_arch() is a libc-stub under the Zend cold seed, so a fiber-free
     // build (the compiler's own) must never pull \Fiber in.
     $fiberSrc = prelude_src_or_empty("fiber.php");
+    // Io\Poll (PHP 8.6 fd-readiness multiplexer) — DEMAND-GATED, namespaced class
+    // tree (braced namespaces isolate it in the prelude blob).
+    $ioPollSrc = prelude_src_or_empty("io_poll.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1544,6 +1554,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);
+    // `new \Io\Poll\Context`, a `use Io\Poll\...`, or `new StreamPollHandle` all
+    // mention one of these identifiers.
+    $useIoPoll = $demand->mentionsAny(['StreamPollHandle', 'Poll', 'IoException']);
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
     // ReflectionException. A program that never reflects carries none of it.
@@ -1646,6 +1659,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->exceptionsSrc = $exceptionsSrc;
         $lower->resourceSrc = $resourceSrc;
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
+        $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;

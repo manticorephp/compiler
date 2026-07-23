@@ -289,6 +289,9 @@ final class LowerFromAst implements Pass
     /** \Fiber — DEMAND-GATED (empty unless the program mentions Fiber): its
      *  presence flips needsFibers, which emits arch-branched module asm. */
     public string $fiberSrc = '';
+    /** Io\Poll — DEMAND-GATED (empty unless the program mentions it). Namespaced
+     *  class tree in braced `namespace {}` blocks. */
+    public string $ioPollSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
@@ -386,11 +389,22 @@ final class LowerFromAst implements Pass
         // through the normal class machinery.
         $stmts = [];
         $preludeStmts = $this->preludeStatements();
-        $preludeCount = \count($preludeStmts);
-        foreach ($preludeStmts as $ps) { $stmts[] = $ps; }
-        // Flatten braced-namespace blocks (`namespace Ffi { ... }`) into
-        // their inner statements — the parser already qualified the inner
-        // decl names (`Ffi\call`), so they lower like any unbraced-ns file.
+        // Flatten braced-namespace blocks (`namespace Io\Poll { ... }`) into
+        // their inner statements — the parser already qualified the inner decl
+        // names (`Io\Poll\Backend`), so they register/lower like any unbraced-ns
+        // file. The PRELUDE needs this too (io_poll.php's namespaced class tree),
+        // not just the user program below — else the inner enums/classes hide
+        // inside an unregistered Namespace wrapper.
+        foreach ($preludeStmts as $ps) {
+            if ($ps->kind === 'Namespace' && $ps->body !== null) {
+                foreach ($ps->body->statements as $inner) { $stmts[] = $inner; }
+            } else {
+                $stmts[] = $ps;
+            }
+        }
+        // Count AFTER flattening — $preludeCount indexes into $stmts to mark a
+        // class's static-prop linkage as prelude (linkonce_odr).
+        $preludeCount = \count($stmts);
         foreach ($this->program->statements as $us) {
             if ($us->kind === 'Namespace' && $us->body !== null) {
                 foreach ($us->body->statements as $inner) { $stmts[] = $inner; }
@@ -1460,6 +1474,16 @@ final class LowerFromAst implements Pass
             if ($arg->kind === 'StringLiteral') { return $this->strLitValue($arg); }
         }
         return null;
+    }
+
+    /** True when a `#[Ffi\Weak]` attribute is present (extern_weak binding). */
+    private function ffiIsWeak(array $attributes): bool
+    {
+        foreach ($attributes as $attr) {
+            $name = \ltrim($attr->name, '\\');
+            if ($name === 'Weak' || $name === 'Ffi\\Weak') { return true; }
+        }
+        return false;
     }
 
     /** Subclass-typed read of a StringLiteral's value (correct offset). */

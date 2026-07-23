@@ -915,7 +915,7 @@ trait EmitLlvmObjects
         if ($pa->property === 'value' && $this->edBacking($ed) === 'int') {
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x i64], ptr @'
-                  . $ecls . '__values, i64 0, i64 ' . $ord . "\n";
+                  . $this->mangle($ecls) . '__values, i64 0, i64 ' . $ord . "\n";
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = load i64, ptr ' . $gep . "\n";
             $this->lastValue = $r; $this->lastValueType = 'i64';
@@ -925,7 +925,7 @@ trait EmitLlvmObjects
         $table = ($pa->property === 'value') ? '__values' : '__names';
         $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x ptr], ptr @'
-              . $ecls . $table . ', i64 0, i64 ' . $ord . "\n";
+              . $this->mangle($ecls) . $table . ', i64 0, i64 ' . $ord . "\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load ptr, ptr ' . $gep . "\n";
         $this->lastValue = $r; $this->lastValueType = 'ptr';
@@ -2000,7 +2000,7 @@ trait EmitLlvmObjects
             $nextL = $this->ssa->allocLabel('efrom.next');
             $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr [' . (string)$n . ' x ' . $vt . '], ptr @'
-                  . $enum . '__values, i64 0, i64 ' . (string)$i . "\n";
+                  . $this->mangle($enum) . '__values, i64 0, i64 ' . (string)$i . "\n";
             $v = $this->ssa->allocReg();
             $out .= '  ' . $v . ' = load ' . $vt . ', ptr ' . $g . "\n";
             $eq = $this->ssa->allocReg();
@@ -2014,7 +2014,7 @@ trait EmitLlvmObjects
             if ($try) {
                 $cg = $this->ssa->allocReg();
                 $out .= '  ' . $cg . ' = getelementptr [' . (string)$n . ' x i64], ptr @'
-                      . $enum . '__cases, i64 0, i64 ' . (string)$i . "\n";
+                      . $this->mangle($enum) . '__cases, i64 0, i64 ' . (string)$i . "\n";
                 $dp = $this->ssa->allocReg();
                 $out .= '  ' . $dp . ' = load i64, ptr ' . $cg . "\n";
                 $pp = $this->ssa->allocReg();

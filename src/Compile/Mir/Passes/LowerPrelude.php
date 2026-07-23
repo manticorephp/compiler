@@ -138,7 +138,16 @@ trait LowerPrelude
             $src = $src . $this->dateTimeSrc;
         }
         $program = \Parser\Parser::parseSource($src);
-        return $program->statements;
+        $stmts = $program->statements;
+        // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
+        // PHP forbids mixing bracketed + unbracketed namespaces in one unit, so
+        // it is parsed on its OWN (all-braced, self-contained) and its statements
+        // are appended — the namespaces resolve to their real FQNs that way.
+        if ($this->ioPollSrc !== '') {
+            $ip = \Parser\Parser::parseSource("<?php\n" . $this->ioPollSrc);
+            foreach ($ip->statements as $s) { $stmts[] = $s; }
+        }
+        return $stmts;
     }
 
     /**
