@@ -772,6 +772,16 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16, int $wantTy
             $proto = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(2));
             $cand = \Runtime\Libc\sys_socket($family, $wantType, $proto);
             if ($cand >= 0) {
+                // SO_REUSEADDR (rebind past TIME_WAIT, like php) + SO_REUSEPORT
+                // (multiple processes bind the same port; the kernel load-balances
+                // accepts — the basis of shared-nothing multi-worker servers).
+                // SO_REUSEPORT: Darwin 0x0200, Linux 15.
+                $one = \Runtime\Libc\calloc(4, 1);
+                \poke_i32($one, 0, 1);
+                $sol = \__mc_sock_const(0);
+                \Runtime\Libc\sys_setsockopt($cand, $sol, \__mc_sock_const(9), $one, 4);
+                \Runtime\Libc\sys_setsockopt($cand, $sol, \__mc_host_is_darwin() ? 512 : 15, $one, 4);
+                \Runtime\Libc\free($one);
                 $a = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
                 if (\Runtime\Libc\sys_bind($cand, \int_to_ptr($a), $alen) === 0
