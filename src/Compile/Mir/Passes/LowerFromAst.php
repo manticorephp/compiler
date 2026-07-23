@@ -286,6 +286,9 @@ final class LowerFromAst implements Pass
     public string $exceptionsSrc = '';
     /** \Resource — unconditional: the .sig carries no classes, so every module needs its own copy. */
     public string $resourceSrc = '';
+    /** \Fiber — DEMAND-GATED (empty unless the program mentions Fiber): its
+     *  presence flips needsFibers, which emits arch-branched module asm. */
+    public string $fiberSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
