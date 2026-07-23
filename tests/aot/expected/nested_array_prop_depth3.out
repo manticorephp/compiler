@@ -1,0 +1,13 @@
+bool(true)
+bool(true)
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  float(2.5)
+}
+2 2
+float(2.5)
+float(9.5)
+bool(true)
+string(4) "deep"

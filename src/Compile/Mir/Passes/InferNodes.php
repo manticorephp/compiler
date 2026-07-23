@@ -1393,6 +1393,13 @@ trait InferNodes
         // read as mixed (var_dump / print_r). Type the outer element CELL so each
         // sub-array is deep-boxed individually at its store with its own type.
         $hetSubArrays = \count($subArrElemKinds) >= 2;
+        // A NULL element beside a concrete non-null one (`["k"=>null, "j"=>"x"]`)
+        // must ride a CELL element: `unionTypes(null, string)` collapses to a bare
+        // `string`, dropping the null-ness, so the null would store as a raw ptr 0
+        // read back as float(0)/garbage. A LOCAL is rescued by the local-element
+        // scan, but a literal stored straight into a cell prop is not. (All-null →
+        // $vt is KIND_NULL, cell-ified below; homogeneous non-null is unaffected.)
+        $hasNullMix = isset($concreteKinds[Type::KIND_NULL]) && \count($concreteKinds) >= 2;
         if ($first) {
             $node->type = Type::vec(Type::unknown());
             return $node->type;
@@ -1403,12 +1410,16 @@ trait InferNodes
             $vt = $valType ?? Type::unknown();
             if ($vt->kind === Type::KIND_UNKNOWN) { $vt = Type::cell(); }
             elseif ($vt->kind === Type::KIND_NULL) { $vt = Type::cell(); }
+            elseif ($hasNullMix) { $vt = Type::cell(); }
             elseif ($hetSubArrays && $vt->isArray()) { $vt = Type::cell(); }
             // All keys are string literals and the element shape is regular
-            // (no het-sub-array cell coercion) → a RECORD: same assoc repr
-            // ({@see Type::record} recomputes the same element), plus the
-            // per-field types so a consumer (json_encode) can specialize.
-            if ($allStrConstKeys && !$hetSubArrays && \count($recordFields) > 0) {
+            // (no het-sub-array / null-mix cell coercion) → a RECORD: same assoc
+            // repr ({@see Type::record} recomputes the same element), plus the
+            // per-field types so a consumer (json_encode) can specialize. A
+            // null-mix array must NOT be a record: its element is now a CELL but
+            // the per-field types stay raw (null/string), and the whole-array
+            // reader (var_dump) then decodes the fields raw → garbage/crash.
+            if ($allStrConstKeys && !$hetSubArrays && !$hasNullMix && \count($recordFields) > 0) {
                 $node->type = Type::record($recordFields, $vt);
                 return $node->type;
             }
@@ -1423,6 +1434,8 @@ trait InferNodes
         if ($vt->kind === Type::KIND_UNKNOWN && count($concreteKinds) >= 2) {
             $vt = Type::cell();
         } elseif ($vt->kind === Type::KIND_NULL) {
+            $vt = Type::cell();
+        } elseif ($hasNullMix) {
             $vt = Type::cell();
         } elseif ($hetSubArrays && $vt->isArray()) {
             $vt = Type::cell();
