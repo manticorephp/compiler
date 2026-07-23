@@ -54,5 +54,5 @@ function serve(\Resource $conn): void
               . $body;
         Async\write($conn, $resp);
     }
-    \fclose($conn);
+    Async\close($conn);
 }

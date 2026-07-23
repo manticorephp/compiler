@@ -40,27 +40,32 @@ function accept(\Resource $server): \Resource
             \stream_set_blocking($conn, false);
             return $conn;
         }
-        Scheduler::instance()->waitIo($server, Event::Read);
+        Scheduler::instance()->waitReadable($server);
     }
+}
+
+/** Drop the connection's persistent reactor watcher, then close it. */
+function close(\Resource $conn): void
+{
+    Scheduler::instance()->closeConn($conn);
+    \fclose($conn);
 }
 
 /** Read up to $length bytes (raw recv), suspending until readable. "" at EOF. */
 function read(\Resource $conn, int $length): string
 {
     $fd = $conn->addr;
+    $sched = Scheduler::instance();
+    $buf = $sched->readBuf($length);         // reused, no per-read calloc/free
     while (true) {
-        $buf = \Runtime\Libc\calloc($length, 1);
         $n = \Async\sys_recv($fd, $buf, $length, 0);
         if ($n > 0) {
-            $s = \str_from_buffer($buf, $n);
-            \Runtime\Libc\free($buf);
-            return $s;
+            return \str_from_buffer($buf, $n);
         }
-        \Runtime\Libc\free($buf);
         if ($n === 0) {
             return '';                       // peer closed
         }
-        Scheduler::instance()->waitIo($conn, Event::Read);   // EWOULDBLOCK
+        $sched->waitReadable($conn);  // EWOULDBLOCK
     }
 }
 
@@ -78,7 +83,7 @@ function write(\Resource $conn, string $data): int
         } elseif ($n === 0) {
             break;
         } else {
-            Scheduler::instance()->waitIo($conn, Event::Write);
+            Scheduler::instance()->waitWritable($conn);
         }
     }
     return $total;
