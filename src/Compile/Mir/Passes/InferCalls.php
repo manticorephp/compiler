@@ -137,6 +137,15 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        // Fiber switch intrinsics: fctx/stack handles are raw addresses carried
+        // as ints; current-fiber is a \Fiber obj (0 = none); the setters are void.
+        if ($n === '__mir_fiber_make' || $n === '__mir_fiber_jump'
+            || $n === '__mir_fiber_stack_alloc' || $n === '__mir_fiber_arena_new'
+            || $n === '__mir_fiber_main_ctx') { return Type::int_(); }
+        if ($n === '__mir_fiber_current') { return Type::obj('Fiber'); }
+        if ($n === '__mir_fiber_set_current' || $n === '__mir_fiber_stack_free'
+            || $n === '__mir_fiber_arena_save'
+            || $n === '__mir_fiber_arena_load') { return Type::void(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         // Reflection Tier-2: an rmeta HANDLE is a raw address carried as an int
         // (the Ffi\Ptr::$address idiom), never an obj — nothing may retain,

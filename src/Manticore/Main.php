@@ -1531,12 +1531,19 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
     $reflectionSrc = prelude_src_or_empty("reflection.php");
     $dateTimeSrc = prelude_src_or_empty("datetime.php");
+    // Fiber (stackful coroutines) — DEMAND-GATED. Must NOT be unconditional:
+    // the preamble emits arch-branched `module asm` under needsFibers, and
+    // host_arch() is a libc-stub under the Zend cold seed, so a fiber-free
+    // build (the compiler's own) must never pull \Fiber in.
+    $fiberSrc = prelude_src_or_empty("fiber.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
     $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
+    // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
+    $useFiber = $demand->mentionsAny(['Fiber']);
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
     // ReflectionException. A program that never reflects carries none of it.
@@ -1638,6 +1645,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->includeCli = $useCli;
         $lower->exceptionsSrc = $exceptionsSrc;
         $lower->resourceSrc = $resourceSrc;
+        $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;

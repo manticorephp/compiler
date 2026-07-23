@@ -203,6 +203,9 @@ trait EmitLlvmModule
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
         }
+        if ($this->rt->needsFibers) {
+            $out .= $this->fiberRuntime();
+        }
         if ($this->rt->needsExceptions) {
             // setjmp/longjmp exception runtime. 16 nested-try slots ×
             // 512B jmp_buf. The slot stride must exceed the platform's jmp_buf:
