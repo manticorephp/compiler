@@ -27,6 +27,13 @@
       "output": "poc/async/http_bin",
       "entry": "poc/async/http_server.php",
       "exclude": []
+    },
+    {
+      "name": "async-chan",
+      "src": "poc/async/src",
+      "output": "poc/async/chan_bin",
+      "entry": "poc/async/chan_demo.php",
+      "exclude": []
     }
   ]
 }
