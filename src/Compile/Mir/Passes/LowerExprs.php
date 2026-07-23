@@ -223,16 +223,23 @@ trait LowerExprs
                 while ($ci < \count($expr->args)) { $rest[] = $expr->args[$ci]; $ci = $ci + 1; }
                 return $this->lowerInvoke(new \Parser\Ast\Invoke($expr->args[0], $rest, $expr->span));
             }
-            // `call_user_func_array($cb, [$a, $b])` — spread a LITERAL arg array
-            // as positional args (a runtime array needs argument unpacking; not
-            // yet supported and left to the normal stdlib path).
-            if ($fn === 'call_user_func_array' && \count($expr->args) === 2
-                && $expr->args[1]->kind === 'ArrayLit') {
-                $spread = [];
-                foreach ($this->arrayLitElements($expr->args[1]) as $el) {
-                    $spread[] = $this->elemValue($el);
+            // `call_user_func_array($cb, [$a, $b])` — a LITERAL array spreads
+            // into clean fixed positional args (avoids the runtime element
+            // loop). A RUNTIME array is forwarded as a single `...$arr` spread,
+            // which lowerInvoke routes to the string/const-callable path (→ a
+            // Call that emitCall expands) or the known-closure invoke path.
+            // Array/static/method callable + a runtime array remains
+            // unsupported (StaticCall_/MethodCall_ don't expand a spread).
+            if ($fn === 'call_user_func_array' && \count($expr->args) === 2) {
+                if ($expr->args[1]->kind === 'ArrayLit') {
+                    $spread = [];
+                    foreach ($this->arrayLitElements($expr->args[1]) as $el) {
+                        $spread[] = $this->elemValue($el);
+                    }
+                    return $this->lowerInvoke(new \Parser\Ast\Invoke($expr->args[0], $spread, $expr->span));
                 }
-                return $this->lowerInvoke(new \Parser\Ast\Invoke($expr->args[0], $spread, $expr->span));
+                $spreadArg = new \Parser\Ast\Spread($expr->args[1], $expr->span);
+                return $this->lowerInvoke(new \Parser\Ast\Invoke($expr->args[0], [$spreadArg], $expr->span));
             }
             if ($fn === 'isset') {
                 $ts = [];

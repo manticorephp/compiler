@@ -304,6 +304,37 @@ trait EmitLlvmCalls
         $out .= $this->coerceToPtr();
         $keyP = $this->lastValue;
         $argc = \count($iv->args);
+        // A `...$arr` spread makes the runtime arg count unknown. HOIST the
+        // fixed-prefix arg values and the spread array pointer ONCE, before the
+        // candidate loop, so they dominate every sibling hit block — then each
+        // candidate's call is built DIRECTLY (see below), never by re-emitting a
+        // `Call` per block (that route runs the spread through emitCall/
+        // emitBuiltin in each block and a Spread_ the builtins don't handle
+        // reads a stale value → an SSA dominance violation). Only a single
+        // trailing spread is supported.
+        $spreadIdx = -1;
+        foreach ($iv->args as $i => $a) {
+            if ($a->kind === Node::KIND_SPREAD) {
+                if ($spreadIdx !== -1 || $i !== \count($iv->args) - 1) {
+                    throw new \RuntimeException('only a single trailing spread into a dynamic function-name callable is supported');
+                }
+                $spreadIdx = $i;
+            }
+        }
+        $hasSpread = $spreadIdx !== -1;
+        $numFixed = $hasSpread ? $spreadIdx : $argc;
+        $fixedRegs = [];
+        $spreadArr = '';
+        if ($hasSpread) {
+            for ($fi = 0; $fi < $numFixed; $fi = $fi + 1) {
+                $out .= $this->emitNode($iv->args[$fi]);
+                $out .= $this->coerceToI64();
+                $fixedRegs[] = $this->lastValue;
+            }
+            $out .= $this->emitNode($iv->args[$spreadIdx]->operand);
+            $out .= $this->coerceToPtr();
+            $spreadArr = $this->lastValue;
+        }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -317,7 +348,13 @@ trait EmitLlvmCalls
             for ($pi = 0; $pi < $tot; $pi = $pi + 1) {
                 if (($pdefs[$pi] ?? null) === null) { $req = $req + 1; }
             }
-            if ($argc < $req || $argc > $tot) { continue; }
+            // With a spread the runtime argc is unknown; only the fixed prefix
+            // gives a static lower bound on the callee arity.
+            if ($hasSpread) {
+                if ($tot < $numFixed) { continue; }
+            } elseif ($argc < $req || $argc > $tot) {
+                continue;
+            }
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
             $cmp = $this->ssa->allocReg();
@@ -326,8 +363,31 @@ trait EmitLlvmCalls
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $call = new \Compile\Mir\Call($fname, $iv->args, $rt);
-            $out .= $this->emitNode($call);
+            if ($hasSpread) {
+                // Build the call directly: fixed prefix from the hoisted regs,
+                // the rest read from the spread array (element k → param
+                // numFixed+k). Matches emitCall's fixed-arity spread contract —
+                // the array must supply the callee's remaining params.
+                $argList = '';
+                for ($pi = 0; $pi < $tot; $pi = $pi + 1) {
+                    if ($pi > 0) { $argList .= ', '; }
+                    if ($pi < $numFixed) {
+                        $argList .= 'i64 ' . $fixedRegs[$pi];
+                        continue;
+                    }
+                    $ev = $this->ssa->allocReg();
+                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $spreadArr
+                          . ', i64 ' . (string)($pi - $numFixed) . ")\n";
+                    $argList .= 'i64 ' . $ev;
+                }
+                $reg = $this->ssa->allocReg();
+                $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fname) . '(' . $argList . ")\n";
+                $this->lastValue = $reg;
+                $this->lastValueType = 'i64';
+            } else {
+                $call = new \Compile\Mir\Call($fname, $iv->args, $rt);
+                $out .= $this->emitNode($call);
+            }
             $out .= $this->boxToCell($rt);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
@@ -392,9 +452,46 @@ trait EmitLlvmCalls
         // expects, so cellifying blindly (which crashed self-host) is avoided.
         $known = $fn !== '' && isset($this->closureCaptures[$fn]);
         $calleeParams = $known ? ($this->sigs->paramTypes[$fn] ?? []) : [];
-        foreach ($iv->args as $ai => $a) {
+        // Running param index — diverges from the loop key once a spread has
+        // expanded into multiple positional slots.
+        $pi = 0;
+        foreach ($iv->args as $a) {
+            // Argument unpacking `$fn(...$arr)`: expand the array across the
+            // closure's remaining declared params (fixed-arity), boxing each
+            // scalar element per the uniform closure ABI. A DYNAMIC callee has
+            // no static arity — the indirect call builds its own signature and
+            // the closure struct carries no arity, so a spread can't be
+            // materialized (padding an indirect call is UB). Fail loud rather
+            // than emit the corrupt arg list the old no-op `visitSpread` left.
+            if ($a->kind === Node::KIND_SPREAD) {
+                if (!$known) {
+                    throw new \RuntimeException('spread into a dynamic callable of unknown arity is unsupported');
+                }
+                $out .= $this->emitNode($a->operand);
+                $out .= $this->coerceToPtr();
+                $arr = $this->lastValue;
+                $elemType = $a->operand->type->element ?? null;
+                $nparams = \count($calleeParams);
+                $base = $pi;
+                while ($pi < $nparams) {
+                    $ev = $this->ssa->allocReg();
+                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
+                          . ', i64 ' . (string)($pi - $base) . ")\n";
+                    if ($elemType !== null && $elemType->kind !== Type::KIND_CELL
+                        && $this->isCellBoxableArg($elemType)) {
+                        $this->lastValue = $ev;
+                        $this->lastValueType = 'i64';
+                        $out .= $this->boxToCell($elemType);
+                        $ev = $this->lastValue;
+                    }
+                    $argList .= ', i64 ' . $ev;
+                    $argTypes .= ', i64';
+                    $pi = $pi + 1;
+                }
+                continue;
+            }
             $out .= $this->emitNode($a);
-            $pt = $calleeParams[$ai] ?? null;
+            $pt = $calleeParams[$pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
             // (cell/unknown). A dynamic callee (`callable`) can't be gated — its
             // param might be a TYPED array (an array_map-style callback) that
@@ -413,6 +510,7 @@ trait EmitLlvmCalls
             }
             $argList .= ', i64 ' . $this->lastValue;
             $argTypes .= ', i64';
+            $pi = $pi + 1;
         }
         $reg = $this->ssa->allocReg();
         if ($known) {
