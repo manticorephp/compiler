@@ -205,6 +205,7 @@ final class Parser
             if ($kw === 'global')    return $this->parseGlobal();
             if ($kw === 'goto')      return $this->parseGoto();
             if ($kw === 'declare')   return $this->parseDeclare();
+            if ($kw === 'const')     return $this->parseTopLevelConst();
         }
 
         // Statement label `name:` — an identifier immediately followed by a
@@ -1337,6 +1338,28 @@ final class Parser
         $tok = $this->expect(TokenKind::Identifier, "expected label after 'goto'");
         $this->expect(TokenKind::Semicolon, "expected ';' after goto label");
         return new \Parser\Ast\GotoStmt($tok->lexeme, $span);
+    }
+
+    /**
+     * Top-level `const NAME = <const-expr>;` (outside a class). Lowered to
+     * `define("NAME", <expr>)` — the const-registration pre-pass in LowerFromAst
+     * picks that up, so a later bareword reference resolves at compile time,
+     * matching php's compile-time top-level const. One name per statement.
+     */
+    private function parseTopLevelConst(): Stmt
+    {
+        $span = $this->span();
+        $this->advance(); // 'const'
+        $nameTok = $this->expect(TokenKind::Identifier, 'expected const name');
+        $this->expect(TokenKind::Equals, "expected '=' in const declaration");
+        $value = $this->parseExpression();
+        $this->expect(TokenKind::Semicolon, "expected ';' after const declaration");
+        $call = new \Parser\Ast\CallExpr(
+            'define',
+            [new \Parser\Ast\StringLiteral($nameTok->lexeme, $span), $value],
+            $span,
+        );
+        return new \Parser\Ast\ExpressionStmt($call, $span);
     }
 
     private function parseGlobal(): Stmt
