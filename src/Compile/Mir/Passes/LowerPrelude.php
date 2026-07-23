@@ -413,10 +413,7 @@ trait LowerPrelude
         // sysname ("Darwin" / "Linux") is both PHP_OS and PHP_OS_FAMILY for the
         // two supported targets, matching the interpreter on the build host.
         if ($name === 'PHP_OS' || $name === 'PHP_OS_FAMILY') {
-            $os = \Manticore\host_os();
-            $os = \substr($os, 0, 6) === 'Darwin' ? 'Darwin'
-                : (\substr($os, 0, 5) === 'Linux' ? 'Linux' : $os);
-            return new StringConst($os, Type::string_());
+            return new StringConst(\Manticore\target_os_family(), Type::string_());
         }
 
         // fnmatch(3) flags. Unlike LOCK_*, php does NOT invent its own values
@@ -432,7 +429,7 @@ trait LowerPrelude
         // the cold bootstrap. Like PHP_OS, this stays safe only as long as no
         // stdlib source mentions an FNM_* name.
         if (\substr($name, 0, 4) === 'FNM_') {
-            $isDarwin = \substr(\Manticore\host_os(), 0, 6) === 'Darwin';
+            $isDarwin = \Manticore\is_darwin();
             $fnm = [
                 'FNM_NOESCAPE' => $isDarwin ? 1 : 2,
                 'FNM_PATHNAME' => $isDarwin ? 2 : 1,
@@ -459,7 +456,7 @@ trait LowerPrelude
             || $name === 'SOL_SOCKET'
             || \substr($name, 0, 3) === 'SO_' || \substr($name, 0, 4) === 'MSG_'
             || \substr($name, 0, 8) === 'SOCKET_E') {
-            $isDarwin = \substr(\Manticore\host_os(), 0, 6) === 'Darwin';
+            $isDarwin = \Manticore\is_darwin();
             $sock = [
                 'AF_INET6' => $isDarwin ? 30 : 10,
                 'PF_INET6' => $isDarwin ? 30 : 10,

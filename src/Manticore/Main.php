@@ -923,7 +923,7 @@ function cmd_compile(array $args): int {
     // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
     // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
     // undefined reference without it. `--as-needed` drops it when unreferenced.
-    $gc = \substr(host_os(), 0, 6) === "Darwin"
+    $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
         : " -Wl,--gc-sections -Wl,--as-needed -lm";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
@@ -945,6 +945,43 @@ function host_os(): string {
     // `$buf` is a raw calloc block (no header). cstr_to_str copies to the NUL
     // into an owned, headered MIR string — the single raw→string boundary.
     return \cstr_to_str($buf);
+}
+
+/**
+ * Host CPU arch, normalized to the codegen names ("arm64" / "x86_64"), via
+ * the `machine` member of libc uname(2). Unlike sysname (offset 0), `machine`
+ * is the 5th utsname field, so its offset depends on the per-field stride —
+ * and the stride itself is OS-divergent: Darwin's _SYS_NAMELEN is 256, glibc/
+ * musl's _UTSNAME_LENGTH is 65. So read sysname first to pick the stride, then
+ * read machine at 4*stride. Same compile-time host==target assumption as
+ * host_os(): the arch the compiler runs on IS the arch it emits for (no
+ * cross-compile), so this must only be reached from a compiler pass, never a
+ * path the stdlib itself walks (libc bindings are stubs under the Zend seed).
+ */
+function host_arch(): string {
+    $buf = calloc(2048, 1);
+    uname($buf);
+    $stride = \substr(\cstr_to_str($buf), 0, 6) === 'Darwin' ? 256 : 65;
+    $machine = \cstr_to_str(\ptr_offset($buf, 4 * $stride));
+    if ($machine === 'arm64' || $machine === 'aarch64') { return 'arm64'; }
+    if ($machine === 'x86_64' || $machine === 'amd64') { return 'x86_64'; }
+    return $machine;
+}
+
+/**
+ * Compile-time target OS family, one of "Darwin" / "Linux" (else the raw
+ * sysname). The single source emitters branch on instead of re-deriving it
+ * from host_os() at each site. Same host==target assumption as host_os().
+ */
+function target_os_family(): string {
+    $os = host_os();
+    return \substr($os, 0, 6) === 'Darwin' ? 'Darwin'
+        : (\substr($os, 0, 5) === 'Linux' ? 'Linux' : $os);
+}
+
+/** True when the compile target is Darwin/macOS. */
+function is_darwin(): bool {
+    return \substr(host_os(), 0, 6) === 'Darwin';
 }
 
 // ── manticore.json manifest build (cargo-like targets) ────────────────────

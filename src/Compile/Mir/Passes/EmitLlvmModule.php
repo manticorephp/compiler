@@ -382,7 +382,7 @@ trait EmitLlvmModule
             // host_os() at lower time and crash the Zend cold-seed). This block
             // only runs when the program uses a stream; the compiler's own src/
             // never does, so the seed never executes it under Zend.
-            $darwin = \strpos(\Manticore\host_os(), 'Darwin') !== false;
+            $darwin = \Manticore\is_darwin();
             $syms = $darwin
                 ? ['stdin' => '__stdinp', 'stdout' => '__stdoutp', 'stderr' => '__stderrp']
                 : ['stdin' => 'stdin', 'stdout' => 'stdout', 'stderr' => 'stderr'];
