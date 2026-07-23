@@ -115,11 +115,13 @@ final class Scheduler
         } catch (\Throwable $e) {
             $this->running = $prev;
             $this->settle($task, Task::FAILED, null, $e);
+            $task->fiber->reclaim();      // terminated via exception → free stack now
             return;
         }
         $this->running = $prev;
         if ($task->fiber->isTerminated()) {
             $this->settle($task, Task::DONE, $task->fiber->getReturn(), null);
+            $task->fiber->reclaim();      // free+pool the stack now, not at __destruct
         }
     }
 
@@ -136,6 +138,10 @@ final class Scheduler
             // never silently lost (the point of structured concurrency).
             $task->group->fail($error);
         }
+        // Drop the finished task from its scope so a long-lived group (a server's
+        // root) does not accumulate completed tasks and leak their fibers. An
+        // awaiter keeps its own reference, so its result survives the prune.
+        $task->group->childSettled($task);
     }
 
     // ── suspend / wake ─────────────────────────────────────────────────────

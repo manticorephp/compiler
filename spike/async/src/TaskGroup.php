@@ -53,19 +53,43 @@ final class TaskGroup
         return $task;
     }
 
-    /** Wait for every child to settle. First failure cancels the rest. */
+    /**
+     * Wait for every child to settle. A settled child is pruned from the list by
+     * {@see childSettled} (so a long-lived scope — e.g. a server's root group —
+     * does not accumulate finished tasks and leak their fibers), so this drains
+     * until empty rather than iterating a fixed snapshot. First failure cancels
+     * the rest.
+     */
     public function joinAll(): void
     {
-        foreach ($this->children as $child) {
+        while (\count($this->children) > 0) {
+            $child = $this->children[0];
             if ($child->state === Task::PENDING) {
                 try {
                     $child->await();
                 } catch (\Throwable $e) {
                     $this->fail($e);
                 }
-            } elseif ($child->state === Task::FAILED && $this->failure === null) {
-                $this->failure = $child->error;
-                $this->cancel();
+            } else {
+                // Already settled but not yet pruned (no awaiter ran) — drop it.
+                $this->childSettled($child);
+                if ($child->state === Task::FAILED) {
+                    $this->fail($child->error);
+                }
+            }
+        }
+    }
+
+    /** Drop a settled child so its Task + fiber can be reclaimed (no leak). O(1),
+     *  order-independent: swap the match with the last element and pop. */
+    public function childSettled(Task $task): void
+    {
+        $n = \count($this->children);
+        for ($i = 0; $i < $n; $i++) {
+            if ($this->children[$i] === $task) {
+                $this->children[$i] = $this->children[$n - 1];
+                \array_pop($this->children);
+                return;
             }
         }
     }
