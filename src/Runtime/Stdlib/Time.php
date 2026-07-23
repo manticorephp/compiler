@@ -48,6 +48,39 @@ function __mc_hrtime_i(): int
     return __mir_clock_ns(1);
 }
 
+/** Suspend execution for $microseconds (libc usleep). */
+function usleep(int $microseconds): void
+{
+    \Runtime\Libc\sys_usleep($microseconds);
+}
+
+/**
+ * Delay for $seconds + $nanoseconds (libc nanosleep). Returns true on success.
+ * (php also returns a [seconds, nanoseconds] remainder on EINTR — a signal
+ * mid-sleep, which we do not surface here.)
+ */
+function time_nanosleep(int $seconds, int $nanoseconds): bool
+{
+    $req = \Runtime\Libc\calloc(1, 16);          // struct timespec {tv_sec@0; tv_nsec@8}
+    \poke_i64($req, 0, $seconds);
+    \poke_i64($req, 8, $nanoseconds);
+    $rc = \Runtime\Libc\sys_nanosleep($req, \int_to_ptr(0));
+    \Runtime\Libc\free($req);
+    return $rc === 0;
+}
+
+/** Sleep until the wall-clock $timestamp. false (php warns) if it is in the past. */
+function time_sleep_until(float $timestamp): bool
+{
+    $delta = $timestamp - \__mc_microtime_f();
+    if ($delta <= 0.0) {
+        return false;
+    }
+    $sec = (int)$delta;
+    $nsec = (int)(($delta - (float)$sec) * 1000000000.0);
+    return \time_nanosleep($sec, $nsec);
+}
+
 /**
  * The MONOTONIC clock — the one to measure an elapsed interval with (the wall
  * clock can step). `hrtime(true)` is nanoseconds as an int; the default is
