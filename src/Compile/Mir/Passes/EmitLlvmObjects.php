@@ -912,6 +912,9 @@ trait EmitLlvmObjects
             $out .= '  ' . $ordR . ' = load i64, ptr ' . $g0 . "\n";
             $ord = $ordR;
         }
+        // The enum tables are emitted under the mangled FQN (EmitLlvmModule);
+        // the key lookup above uses the raw name, the symbol must match emit.
+        $eclsSym = $this->mangle($ecls);
         if ($pa->property === 'value' && $this->edBacking($ed) === 'int') {
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x i64], ptr @'

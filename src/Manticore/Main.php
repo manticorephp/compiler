@@ -1610,7 +1610,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // an empty array literal and need nothing.
     $useCli = $demand->usesVar('argv') || $demand->usesVar('argc')
         || $demand->usesVar('_SERVER') || $demand->usesVar('_ENV')
-        || $demand->calls('getopt');
+        || $demand->calls('getopt')
+        // no-arg `getenv()` lowers to the $_ENV builder (__mc_env), which lives here.
+        || $demand->calls('getenv');
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.

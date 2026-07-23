@@ -1960,12 +1960,15 @@ final class LowerFromAst implements Pass
      */
     private function lowerStaticLocal(\Parser\Ast\StaticLocalStmt $stmt): Node
     {
-        $base = $this->currentLowerClass !== ''
-            ? '@' . $this->currentLowerClass . '__' . $this->currentLowerFn
-            : '@' . $this->currentLowerFn;
+        // Sanitize the class+fn base like the static-PROPERTY path (__sp_): a
+        // namespaced class (`Symfony\Component\…`) has backslashes, which are
+        // illegal in an unquoted LLVM global name (`@…\… = global` → "expected '='").
+        $rawBase = $this->currentLowerClass !== ''
+            ? $this->currentLowerClass . '__' . $this->currentLowerFn
+            : $this->currentLowerFn;
         $nodes = [];
         foreach ($stmt->decls as $d) {
-            $cell = $base . '__sl_' . $d->name;
+            $cell = '@' . $this->sanitizeSym($rawBase . '__sl_' . $d->name);
             $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
             $guard = '';
             $init = null;

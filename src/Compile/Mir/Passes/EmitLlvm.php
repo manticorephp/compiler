@@ -379,7 +379,12 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropElemAsIndex = [];
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
+        // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
+        // it is emitted — the last line printed before a codegen SIGSEGV names the
+        // offending function. Off by default (one env read, not per-function).
+        $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
         foreach ($module->functions as $fn) {
+            if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
             $functionBodies .= $this->emitFunction($fn);
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
@@ -437,6 +442,10 @@ final class EmitLlvm implements EmitVisitor
     private function emitEnumCellSingletons(string $name, \Compile\Mir\EnumDef $ed): string
     {
         $cid = (string)$ed->classId;
+        // `$name` is the raw FQN — used for the class-descriptor DEDUP (classes are
+        // keyed by it) and the var_dump display string. `$en` mangles backslashes
+        // for the LLVM symbol spellings (must match EmitLlvmModule / EmitLlvmObjects).
+        $en = $this->mangle($name);
         $out = '';
         // Descriptor — reuse the class descriptor if a method-enum already
         // registered one (dropRuntime emits `@__mir_cd_<id>` for it); else emit.

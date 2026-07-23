@@ -276,6 +276,14 @@ trait LowerExprs
             // count(tmp). (php returns the number of assigned values; a full match
             // makes that the field count — the partial-match tail is not modelled.)
             $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
+            // `getenv()` with NO argument returns the whole environment as an
+            // assoc array — the same value as `$_ENV`. Reading the superglobal (not
+            // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
+            // builder; a direct call would be tree-shaken (undefined at link). The
+            // single-arg `getenv($name)` stays the codegen builtin.
+            if ($fnBare === 'getenv' && \count($expr->args) === 0) {
+                return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
+            }
             if ($fnBare === 'sscanf' && \count($expr->args) > 2) {
                 $s = $this->lowerExpr($expr->args[0]);
                 $fmt = $this->lowerExpr($expr->args[1]);

@@ -289,3 +289,21 @@ function __mc_minmax_of(mixed $arr, bool $isMax): mixed
     }
     return $acc;
 }
+
+/**
+ * The `+` array-union operator: every key of $a, then each key of $b that $a
+ * does NOT already have (first-wins, and int keys are NOT renumbered — unlike
+ * array_merge). A fresh array is built so neither operand is mutated.
+ * @param array<int|string, mixed> $a
+ * @param array<int|string, mixed> $b
+ * @return array<int|string, mixed>
+ */
+function __mir_array_union(array $a, array $b): array
+{
+    $out = [];
+    foreach ($a as $k => $v) { $out[$k] = $v; }
+    foreach ($b as $k => $v) {
+        if (!\array_key_exists($k, $out)) { $out[$k] = $v; }
+    }
+    return $out;
+}
