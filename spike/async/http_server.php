@@ -12,27 +12,30 @@ use function Async\spawn;
 
 const WORKERS = 8;
 
-$worker = Async\workers(WORKERS);        // fork BEFORE the scheduler; each worker below
-
-run(function () use ($worker) {
-    $errno = 0;
-    $errstr = "";
-    $server = stream_socket_server("tcp://0.0.0.0:8080", $errno, $errstr);
-    if ($server === false) {
-        echo "worker ", $worker, " listen failed: ", $errstr, "\n";
-        return;
-    }
+// PREFORK: bind ONE listener, then fork — every worker shares that fd and pulls
+// connections off it with accept(). Portable distribution (macOS SO_REUSEPORT does
+// NOT load-balance across sockets; a shared accept queue does). SO_REUSEADDR still
+// helps restarts.
+$errno = 0;
+$errstr = "";
+$server = stream_socket_server("tcp://0.0.0.0:8080", $errno, $errstr);
+if ($server === false) {
+    echo "listen failed: ", $errstr, "\n";
+} else {
     stream_set_blocking($server, false);
+    $worker = Async\workers(WORKERS);    // fork; children inherit the listener fd
     if ($worker === 0) {
-        echo "http on :8080 (", WORKERS, " workers)\n";
+        echo "http on :8080 (", WORKERS, " workers, prefork)\n";
     }
-    while (true) {
-        $conn = Async\accept($server);
-        spawn(function () use ($conn) {
-            serve($conn);
-        });
-    }
-});
+    run(function () use ($server) {
+        while (true) {
+            $conn = Async\accept($server);
+            spawn(function () use ($conn) {
+                serve($conn);
+            });
+        }
+    });
+}
 
 /** Keep-alive request loop for one connection. */
 function serve(\Resource $conn): void
