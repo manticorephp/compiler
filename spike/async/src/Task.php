@@ -21,6 +21,9 @@ final class Task
     /** @var Task[] tasks awaiting THIS one — resumed when it settles */
     public array $waiters = [];
 
+    /** True while suspended on I/O (its connection's persistent watcher is armed). */
+    public bool $ioWaiting = false;
+
     public function __construct(
         public \Fiber $fiber,
         public TaskGroup $group,

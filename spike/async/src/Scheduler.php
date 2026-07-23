@@ -28,6 +28,13 @@ final class Scheduler
 
     private PollContext $reactor;
     private int $ioCount = 0;
+    /** @var array<int, \Io\Poll\Watcher> fd → its PERSISTENT reactor watcher */
+    private array $connWatcher = [];
+    // A single reused recv scratch buffer. Safe to share: a read copies out to a
+    // string (str_from_buffer) before the fiber can suspend, so no two reads hold
+    // it at once (cooperative). Grows on demand; never freed per read.
+    private ?\Ffi\Ptr $rbuf = null;
+    private int $rbufLen = 0;
     /** @var array<int, float> task-id → deadline (seconds); parallel to timerTask */
     private array $timerDeadline = [];
     /** @var array<int, Task> task-id → task waiting on a timer */
@@ -59,6 +66,17 @@ final class Scheduler
     public function current(): Task
     {
         return $this->running;
+    }
+
+    /** The reused recv scratch buffer, grown to at least $len bytes. */
+    public function readBuf(int $len): \Ffi\Ptr
+    {
+        if ($this->rbuf === null || $len > $this->rbufLen) {
+            if ($this->rbuf !== null) { \Runtime\Libc\free($this->rbuf); }
+            $this->rbuf = \Runtime\Libc\calloc($len, 1);
+            $this->rbufLen = $len;
+        }
+        return $this->rbuf;
     }
 
     // ── task creation ──────────────────────────────────────────────────────
@@ -167,14 +185,50 @@ final class Scheduler
         $this->suspendCurrent();
     }
 
-    // ── I/O readiness ──────────────────────────────────────────────────────
-    /** Register the stream's fd for readiness and suspend until it fires. */
-    public function waitIo($stream, Event $event): void
+    // ── I/O readiness (PERSISTENT registration) ────────────────────────────
+    // A connection's fd is registered ONCE (level-triggered Read) and kept for the
+    // connection's life — no add/remove kevent per read. Safe because a fiber only
+    // suspends on I/O after a recv/send returned EWOULDBLOCK (the fd is drained),
+    // so the level-triggered watcher does not re-fire until NEW readiness arrives.
+
+    /** Suspend until $conn is readable; registers a persistent watcher on first use. */
+    public function waitReadable(\Resource $conn): void
     {
-        $handle = new \StreamPollHandle($stream);
-        $this->reactor->add($handle, [$event], $this->running);
-        $this->ioCount = $this->ioCount + 1;
+        $fd = $conn->addr;
+        if (!isset($this->connWatcher[$fd])) {
+            $this->connWatcher[$fd] = $this->reactor->add(new \StreamPollHandle($conn), [Event::Read], $this->running);
+            $this->ioCount = $this->ioCount + 1;
+        }
+        $this->running->ioWaiting = true;
         $this->suspendCurrent();
+    }
+
+    /** Suspend until $conn is writable — arms Write on the persistent watcher, then disarms. */
+    public function waitWritable(\Resource $conn): void
+    {
+        $fd = $conn->addr;
+        if (!isset($this->connWatcher[$fd])) {
+            $this->connWatcher[$fd] = $this->reactor->add(new \StreamPollHandle($conn), [Event::Read, Event::Write], $this->running);
+            $this->ioCount = $this->ioCount + 1;
+        } else {
+            $this->connWatcher[$fd]->modifyEvents([Event::Read, Event::Write]);
+        }
+        $this->running->ioWaiting = true;
+        $this->suspendCurrent();
+        if (isset($this->connWatcher[$fd])) {
+            $this->connWatcher[$fd]->modifyEvents([Event::Read]);   // back to read-only
+        }
+    }
+
+    /** Drop $conn's persistent watcher (call before fclose so it stops firing). */
+    public function closeConn(\Resource $conn): void
+    {
+        $fd = $conn->addr;
+        if (isset($this->connWatcher[$fd])) {
+            $this->connWatcher[$fd]->remove();
+            unset($this->connWatcher[$fd]);
+            $this->ioCount = $this->ioCount - 1;
+        }
     }
 
     // ── the blocking step: wait for fds / the next timer, wake tasks ────────
@@ -190,9 +244,10 @@ final class Scheduler
             $ready = $this->reactor->wait($sec, $usec, null);
             foreach ($ready as $watcher) {
                 $task = $watcher->getData();
-                $watcher->remove();
-                $this->ioCount = $this->ioCount - 1;
-                $this->wake($task);
+                if ($task->ioWaiting) {   // persistent watcher stays; only wake if actually waiting
+                    $task->ioWaiting = false;
+                    $this->wake($task);
+                }
             }
         } elseif ($timeout > 0) {
             \usleep((int)($timeout * 1000000));

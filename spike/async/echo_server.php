@@ -23,7 +23,7 @@ run(function () {
         $conn = Async\accept($server);
         $msg = Async\read($conn, 1024);
         Async\write($conn, "echo:" . $msg);
-        fclose($conn);
+        Async\close($conn);
     });
 
     // Client, on the root task.
