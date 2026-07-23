@@ -815,6 +815,13 @@ class ReflectionProperty
             __mc_refl_row_attrs($this->row),
             __mc_refl_row_nattrs($this->row), $name);
     }
+
+    /** Manticore has no per-object uninitialized-slot tracking; typed slots
+     *  carry their declared default, so a property always reads as set. */
+    public function isInitialized(?object $object = null): bool
+    {
+        return true;
+    }
 }
 
 /**
@@ -1078,6 +1085,27 @@ class ReflectionFunction
             throw new ReflectionException("Function " . $this->name . " is not invokable");
         }
         return __mc_refl_invoke($this->tramp, 0, $args);
+    }
+
+    public function getClosureThis(): ?object
+    {
+        return null;
+    }
+
+    public function getClosureCalledClass(): ?object
+    {
+        return null;
+    }
+
+    public function isAnonymous(): bool
+    {
+        return false;
+    }
+
+    /** @return mixed[] */
+    public function getStaticVariables(): array
+    {
+        return [];
     }
 }
 
