@@ -27,6 +27,8 @@ class Fiber
     private mixed $valueIn = null;   // resume($v) -> returned by suspend()
     private mixed $valueOut = null;  // suspend($v) -> returned by resume()/start()
     private mixed $ret = null;       // the callback's return value
+    private mixed $pendingEx = null; // uncaught throwable from the callback, re-raised in the resumer
+    private mixed $injectEx = null;  // throw()-injected throwable, raised at the suspend point
 
     public function __construct(callable $callback)
     {
@@ -49,6 +51,11 @@ class Fiber
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        if ($this->pendingEx !== null) {
+            $e = $this->pendingEx;
+            $this->pendingEx = null;
+            throw $e;
+        }
         return $this->valueOut;
     }
 
@@ -59,7 +66,15 @@ class Fiber
         $this->resumer = $resumer;
         $cb = $this->callable;
         $a = $this->args;
-        $this->ret = $cb(...$a);
+        // Catch an uncaught throwable at the FIBER boundary and hand it back to
+        // the resumer as a normal return — never let it longjmp across the stack
+        // switch (that bypasses the arena/context restore ⇒ main runs on the
+        // fiber's arena ⇒ corruption). start()/resume() re-raise it in-context.
+        try {
+            $this->ret = $cb(...$a);
+        } catch (\Throwable $e) {
+            $this->pendingEx = $e;
+        }
         $this->state = 3;
         $this->valueOut = null;   // a terminated fiber's resume() yields null, not the last suspend value
         \__mir_fiber_arena_save($this->arenaCtx);
@@ -76,6 +91,11 @@ class Fiber
         $nr = \__mir_fiber_jump($this->resumer);
         $this->resumer = $nr;
         $this->state = 1;
+        if ($this->injectEx !== null) {
+            $e = $this->injectEx;
+            $this->injectEx = null;
+            throw $e;   // Fiber::throw() raises at the suspension point
+        }
         return $this->valueIn;
     }
 
@@ -90,6 +110,30 @@ class Fiber
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        if ($this->pendingEx !== null) {
+            $e = $this->pendingEx;
+            $this->pendingEx = null;
+            throw $e;
+        }
+        return $this->valueOut;
+    }
+
+    public function throw(\Throwable $exception): mixed
+    {
+        $this->injectEx = $exception;
+        $this->state = 1;
+        $prev = \__mir_fiber_current();
+        \__mir_fiber_set_current($this);
+        \__mir_fiber_arena_save(\__mir_fiber_main_ctx());
+        \__mir_fiber_arena_load($this->arenaCtx);
+        $r = \__mir_fiber_jump($this->fctx);
+        $this->fctx = $r;
+        \__mir_fiber_set_current($prev);
+        if ($this->pendingEx !== null) {
+            $e = $this->pendingEx;
+            $this->pendingEx = null;
+            throw $e;
+        }
         return $this->valueOut;
     }
 

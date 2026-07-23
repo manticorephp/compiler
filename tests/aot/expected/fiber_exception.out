@@ -1,0 +1,3 @@
+before throw
+main caught: boom
+after
