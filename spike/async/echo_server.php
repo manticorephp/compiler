@@ -27,11 +27,7 @@ run(function () {
     });
 
     // Client, on the root task.
-    $client = stream_socket_client("tcp://" . $addr, $errno, $errstr);
-    if ($client === false) {
-        echo "connect failed: ", $errstr, "\n";
-        return;
-    }
+    $client = Async\connect("tcp://" . $addr);
     Async\write($client, "hello");
     $reply = Async\read($client, 1024);
     echo "reply: ", $reply, "\n";

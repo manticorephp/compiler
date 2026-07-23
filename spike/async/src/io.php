@@ -4,17 +4,36 @@ namespace Async;
 
 use Io\Poll\Event;
 
-/**
- * Blocking-LOOKING async I/O over the reactor. Each call sets the stream
- * non-blocking, attempts the operation, and on EWOULDBLOCK suspends the current
- * task until the fd is ready — then retries. The caller writes straight-line code;
- * the fiber does the yielding.
- */
+// Raw fd-level async I/O. We have our OWN reactor (Io\Poll = kqueue/epoll), so the
+// read/write path must NOT go through the stream stdio layer (fread/fwrite) — that
+// does its own internal poll(2) per call, blocking the single-threaded scheduler.
+// Instead: raw recv/send on the fd (non-blocking). recv/send returning <0 means
+// EWOULDBLOCK (we only got here because the reactor said ready, so treat it as a
+// spurious wake) → suspend on the reactor and retry. The reactor is the ONLY thing
+// that ever waits.
 
-/** Accept the next connection on a listening socket, suspending until one arrives. */
-function accept($server)
+#[\Ffi\Library('c'), \Ffi\Symbol('recv')]
+function sys_recv(int $fd, \Ffi\Ptr $buf, int $len, int $flags): int {}
+
+#[\Ffi\Library('c'), \Ffi\Symbol('send')]
+function sys_send(int $fd, string $buf, int $len, int $flags): int {}
+
+/** Connect to $addr (e.g. "tcp://127.0.0.1:8080"), returning a non-blocking stream. */
+function connect(string $addr): \Resource
 {
-    \stream_set_blocking($server, false);
+    $errno = 0;
+    $errstr = "";
+    $conn = \stream_socket_client($addr, $errno, $errstr);
+    if ($conn === false) {
+        throw new \RuntimeException("connect failed: " . $errstr);
+    }
+    \stream_set_blocking($conn, false);
+    return $conn;
+}
+
+/** Accept the next connection, suspending until one arrives. Sets it non-blocking ONCE. */
+function accept(\Resource $server): \Resource
+{
     while (true) {
         $conn = \stream_socket_accept($server, 0);
         if ($conn !== false) {
@@ -25,41 +44,42 @@ function accept($server)
     }
 }
 
-/**
- * Read up to $length bytes, suspending until data is available. Returns the bytes,
- * or "" at end-of-stream (peer closed) — mirrors a blocking fread's EOF.
- */
-function read($stream, int $length): string
+/** Read up to $length bytes (raw recv), suspending until readable. "" at EOF. */
+function read(\Resource $conn, int $length): string
 {
-    \stream_set_blocking($stream, false);
+    $fd = $conn->addr;
     while (true) {
-        $data = \fread($stream, $length);
-        if ($data !== '' && $data !== false) {
-            return $data;
+        $buf = \Runtime\Libc\calloc($length, 1);
+        $n = \Async\sys_recv($fd, $buf, $length, 0);
+        if ($n > 0) {
+            $s = \str_from_buffer($buf, $n);
+            \Runtime\Libc\free($buf);
+            return $s;
         }
-        if (\feof($stream)) {
-            return '';
+        \Runtime\Libc\free($buf);
+        if ($n === 0) {
+            return '';                       // peer closed
         }
-        Scheduler::instance()->waitIo($stream, Event::Read);
+        Scheduler::instance()->waitIo($conn, Event::Read);   // EWOULDBLOCK
     }
 }
 
-/** Write all of $data, suspending on back-pressure until the fd is writable. */
-function write($stream, string $data): int
+/** Write all of $data (raw send), suspending on back-pressure. */
+function write(\Resource $conn, string $data): int
 {
-    \stream_set_blocking($stream, false);
-    $total = 0;
+    $fd = $conn->addr;
     $len = \strlen($data);
+    $total = 0;
     while ($total < $len) {
-        $n = \fwrite($stream, \substr($data, $total));
-        if ($n === false) {
-            return $total;
+        $chunk = $total === 0 ? $data : \substr($data, $total);
+        $n = \Async\sys_send($fd, $chunk, $len - $total, 0);
+        if ($n > 0) {
+            $total = $total + $n;
+        } elseif ($n === 0) {
+            break;
+        } else {
+            Scheduler::instance()->waitIo($conn, Event::Write);
         }
-        if ($n === 0) {
-            Scheduler::instance()->waitIo($stream, Event::Write);
-            continue;
-        }
-        $total = $total + $n;
     }
     return $total;
 }
