@@ -3745,8 +3745,19 @@ trait EmitLlvmBuiltins
     private function biGetClass(array $args): string
     {
         $cls = $args[0]->type->class ?? '';
-        $cands = ($cls !== '' && isset($this->classes[$cls]))
-            ? $this->selfAndDescendants($cls) : [];
+        // Candidate runtime classes = every class that IS-A $cls — extends AND
+        // implements. selfAndDescendants only walks `parent`, so an INTERFACE
+        // static type (e.g. `Throwable`, from a catch var or a `: Throwable`
+        // return) had an empty set and fell to the static-name path, printing
+        // the interface name instead of the concrete class. classIsA follows
+        // interface implementation, so implementors are included.
+        $cands = [];
+        if ($cls !== '') {
+            if (isset($this->classes[$cls])) { $cands[] = $cls; }
+            foreach ($this->classes as $cd) {
+                if ($cd->name !== $cls && $this->classIsA($cd->name, $cls)) { $cands[] = $cd->name; }
+            }
+        }
         // Unknown class, or a monomorphic one (no subclass) — the static type
         // is exact, so emit the name literal directly.
         if (\count($cands) <= 1) {

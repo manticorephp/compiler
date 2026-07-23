@@ -114,8 +114,10 @@ namespace Io\Poll {
     function __bits_to_epoll(int $bits): int
     {
         $m = 0;
-        if (($bits & 1) !== 0) { $m = $m | 1; }   // Read  -> EPOLLIN
-        if (($bits & 2) !== 0) { $m = $m | 4; }   // Write -> EPOLLOUT
+        if (($bits & 1) !== 0) { $m = $m | 1; }             // Read  -> EPOLLIN
+        if (($bits & 2) !== 0) { $m = $m | 4; }             // Write -> EPOLLOUT
+        if (($bits & 32) !== 0) { $m = $m | 0x40000000; }   // OneShot -> EPOLLONESHOT
+        if (($bits & 64) !== 0) { $m = $m | 0x80000000; }   // EdgeTriggered -> EPOLLET
         return $m;
     }
 
@@ -302,6 +304,9 @@ namespace Io\Poll {
 
         public function add(Handle $handle, array $events, mixed $data = null): Watcher
         {
+            if (\count($events) === 0) {
+                throw new \TypeError("Io\\Poll\\Context::add(): Argument #2 (\$events) must be array of Event enums");
+            }
             $bits = __events_to_bits($events);
             $fd = $this->handleFd($handle);
             if (isset($this->watchers[$fd])) {
@@ -499,11 +504,15 @@ namespace Io\Poll {
         {
             $chg = \Runtime\Libc\calloc(2, 32);
             $k = 0;
+            // EV_ADD=1, plus EV_CLEAR=0x20 (edge-triggered) / EV_ONESHOT=0x10.
+            $addF = 1;
+            if (($newBits & 64) !== 0) { $addF = $addF | 0x20; }   // EdgeTriggered -> EV_CLEAR
+            if (($newBits & 32) !== 0) { $addF = $addF | 0x10; }   // OneShot -> EV_ONESHOT
             $oldR = ($oldBits & 1) !== 0; $newR = ($newBits & 1) !== 0;
-            if ($newR && !$oldR) { $k = $this->__kevPut($chg, $k, $fd, -1, 1); }       // EVFILT_READ, EV_ADD
+            if ($newR && !$oldR) { $k = $this->__kevPut($chg, $k, $fd, -1, $addF); }   // EVFILT_READ, EV_ADD
             elseif (!$newR && $oldR) { $k = $this->__kevPut($chg, $k, $fd, -1, 2); }   // EV_DELETE
             $oldW = ($oldBits & 2) !== 0; $newW = ($newBits & 2) !== 0;
-            if ($newW && !$oldW) { $k = $this->__kevPut($chg, $k, $fd, -2, 1); }       // EVFILT_WRITE, EV_ADD
+            if ($newW && !$oldW) { $k = $this->__kevPut($chg, $k, $fd, -2, $addF); }   // EVFILT_WRITE, EV_ADD
             elseif (!$newW && $oldW) { $k = $this->__kevPut($chg, $k, $fd, -2, 2); }
             if ($k > 0) {
                 $rc = \__mc_iopoll_kevent($this->reactorFd, $chg, $k, \int_to_ptr(0), 0, \int_to_ptr(0));
