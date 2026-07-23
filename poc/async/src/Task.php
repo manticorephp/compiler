@@ -26,6 +26,15 @@ final class Task
 
     /** A value handed to this task while it was parked on a {@see Channel}. */
     public mixed $chanValue = null;
+    /** False when the delivering channel was closed (so recv/select report !ok). */
+    public bool $chanOk = true;
+
+    /** True while parked across several channels in a {@see select()}. */
+    public bool $selecting = false;
+    /** Set once ONE channel commits to delivering to this select-waiter (atomic claim). */
+    public bool $selectClaimed = false;
+    /** The channel that actually delivered — identifies the winning select case. */
+    public ?Channel $chanReady = null;
 
     public function __construct(
         public \Fiber $fiber,

@@ -50,11 +50,12 @@ final class Channel
         $sched = Scheduler::instance();
 
         // A receiver is already parked → hand the value straight to it (rendezvous).
-        if (\count($this->recvQ) > 0) {
+        // Skip any select-waiter another channel already claimed (returns false).
+        while (\count($this->recvQ) > 0) {
             $r = \array_shift($this->recvQ);
-            $r->chanValue = $value;
-            $sched->wake($r);
-            return;
+            if ($this->wakeReceiver($r, $value, true)) {
+                return;
+            }
         }
 
         // Room in the buffer → enqueue and proceed without suspending.
@@ -101,9 +102,75 @@ final class Channel
         // Nothing to take → park until a sender (or close) delivers.
         $me = $sched->current();
         $me->chanValue = null;
+        $me->chanOk = true;
         $this->recvQ[] = $me;
         $sched->suspendCurrent();
         return $me->chanValue;
+    }
+
+    /**
+     * Deliver ($value, $ok) to a parked receiver, honouring the single-claim rule
+     * that makes {@see select()} sound: a select-waiter may be parked on several
+     * channels at once, but only the FIRST channel to reach it wins. Returns false
+     * (deliver nothing) if this task was already claimed elsewhere, so the caller
+     * discards the stale queue entry and tries the next receiver.
+     */
+    private function wakeReceiver(Task $r, mixed $value, bool $ok): bool
+    {
+        if ($r->selecting) {
+            if ($r->selectClaimed) {
+                return false;
+            }
+            $r->selectClaimed = true;
+        }
+        $r->chanValue = $value;
+        $r->chanOk = $ok;
+        $r->chanReady = $this;
+        Scheduler::instance()->wake($r);
+        return true;
+    }
+
+    // ── select() support ────────────────────────────────────────────────────
+    /**
+     * Non-blocking receive attempt for the select() fast path.
+     * @return array{0: bool, 1: mixed, 2: bool} [taken, value, ok]
+     */
+    public function trySelectRecv(): array
+    {
+        if (\count($this->buffer) > 0) {
+            $v = \array_shift($this->buffer);
+            $this->promoteSender();
+            return [true, $v, true];
+        }
+        if (\count($this->sendQ) > 0) {
+            $s = \array_shift($this->sendQ);
+            $v = \array_shift($this->sendVal);
+            Scheduler::instance()->wake($s);
+            return [true, $v, true];
+        }
+        if ($this->closed) {
+            return [true, null, false];
+        }
+        return [false, null, false];
+    }
+
+    /** Park $t on this channel's receive queue (select() slow path). */
+    public function registerSelectRecv(Task $t): void
+    {
+        $this->recvQ[] = $t;
+    }
+
+    /** Remove a parked receiver by identity (deregister select() losers). No array_splice. */
+    public function removeRecvWaiter(Task $t): void
+    {
+        /** @var Task[] $kept */
+        $kept = [];
+        foreach ($this->recvQ as $r) {
+            if ($r !== $t) {
+                $kept[] = $r;
+            }
+        }
+        $this->recvQ = $kept;
     }
 
     /** Move one parked sender's value into a buffer slot freed by a recv. */
@@ -127,8 +194,7 @@ final class Channel
         $sched = Scheduler::instance();
 
         foreach ($this->recvQ as $r) {
-            $r->chanValue = null;
-            $sched->wake($r);
+            $this->wakeReceiver($r, null, false);   // claimed select-waiters skip
         }
         $this->recvQ = [];
 
