@@ -398,6 +398,17 @@ function sys_getpeername(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int 
 #[Library('c'), Symbol('poll')]
 function sys_poll(Ptr $fds, #[CType('size_t')] int $nfds, #[CType('int')] int $timeout): int {}
 
+// `int usleep(useconds_t usec)` — suspend the calling thread for $usec
+// microseconds. Distinct `sys_` name so the global `usleep` wrapper resolves it
+// cleanly (a bare `usleep` alias would collide).
+#[Library('c'), Symbol('usleep')]
+function sys_usleep(#[CType('unsigned int')] int $usec): int {}
+
+// `int nanosleep(const struct timespec *req, struct timespec *rem)` — $req/$rem
+// are timespec{tv_sec@0, tv_nsec@8} (16B on both hosts). 0 on success.
+#[Library('c'), Symbol('nanosleep')]
+function sys_nanosleep(Ptr $req, Ptr $rem): int {}
+
 // `int shutdown(int fd, int how)` — SHUT_RD/WR/RDWR are 0/1/2 on both hosts.
 #[Library('c'), Symbol('shutdown')]
 function sys_shutdown(#[CType('int')] int $fd, #[CType('int')] int $how): int {}
