@@ -682,6 +682,125 @@ function array_intersect_key(array $arr, array ...$others): array
 }
 
 /**
+ * `array_diff_ukey(arr, arr2, cb)` — entries of `$arr` whose KEY matches no key
+ * of `$arr2` under the user comparator (`$cb($k1,$k2) === 0` ⇒ equal). The
+ * callable dimension monomorphizes `$cb`, so a string-name comparator like
+ * `'strcasecmp'` resolves to a direct call. (symfony's Windows env-merge form.)
+ */
+function array_diff_ukey(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        $found = false;
+        foreach ($arr2 as $ok => $_) {
+            if ($cb($k, $ok) === 0) { $found = true; break; }
+        }
+        if (!$found) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_intersect_ukey(arr, arr2, cb)` — entries of `$arr` whose KEY matches
+ * some key of `$arr2` under the user comparator.
+ */
+function array_intersect_ukey(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    foreach ($arr as $k => $v) {
+        foreach ($arr2 as $ok => $_) {
+            if ($cb($k, $ok) === 0) { $out[$k] = $v; break; }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_replace_recursive(arr, ...others)` — later arrays overwrite by key;
+ * where both sides hold an array at the same key, the merge recurses.
+ */
+function array_replace_recursive(array $arr, array ...$others): array
+{
+    $out = $arr;
+    foreach ($others as $o) {
+        foreach ($o as $k => $v) {
+            if (isset($out[$k]) && \is_array($out[$k]) && \is_array($v)) {
+                $out[$k] = array_replace_recursive($out[$k], $v);
+            } else {
+                $out[$k] = $v;
+            }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_splice(&$arr, offset, length, replacement)` — remove `$length` entries
+ * at `$offset` (negative counts from the end; null length ⇒ to the end), splice
+ * in `$replacement`, REINDEX. Returns the removed slice. List semantics — what
+ * symfony's section/row buffers rely on; numeric keys are renumbered as PHP does.
+ * @param mixed[] $arr
+ * @return mixed[]
+ */
+function array_splice(array &$arr, int $offset, ?int $length = null, mixed $replacement = []): array
+{
+    $vals = array_values($arr);
+    $n = count($vals);
+    if ($offset < 0) { $offset = $n + $offset; if ($offset < 0) { $offset = 0; } }
+    elseif ($offset > $n) { $offset = $n; }
+    if ($length === null) { $len = $n - $offset; }
+    elseif ($length < 0) { $len = $n + $length - $offset; if ($len < 0) { $len = 0; } }
+    else { $len = $length; }
+    if ($offset + $len > $n) { $len = $n - $offset; }
+    if (!\is_array($replacement)) { $replacement = [$replacement]; }
+    $removed = [];
+    $i = $offset;
+    while ($i < $offset + $len) { $removed[] = $vals[$i]; $i = $i + 1; }
+    $new = [];
+    $i = 0;
+    while ($i < $offset) { $new[] = $vals[$i]; $i = $i + 1; }
+    foreach ($replacement as $rv) { $new[] = $rv; }
+    $i = $offset + $len;
+    while ($i < $n) { $new[] = $vals[$i]; $i = $i + 1; }
+    $arr = $new;
+    return $removed;
+}
+
+/**
+ * `array_walk(&$arr, cb, extra)` — apply `$cb($value, $key, $extra)` to every
+ * entry. NOTE: a leaf mutated through a `&$value` callback param does not yet
+ * propagate (dynamic by-ref args are a known gap); by-value callbacks are exact.
+ * @param mixed[] $arr
+ */
+function array_walk(array &$arr, callable $cb, mixed $extra = null): bool
+{
+    foreach ($arr as $k => $v) {
+        $cb($v, $k, $extra);
+        $arr[$k] = $v;
+    }
+    return true;
+}
+
+/**
+ * `array_walk_recursive(&$arr, cb, extra)` — like array_walk but descends into
+ * array leaves, invoking `$cb` only on scalar leaves.
+ * @param mixed[] $arr
+ */
+function array_walk_recursive(array &$arr, callable $cb, mixed $extra = null): bool
+{
+    foreach ($arr as $k => $v) {
+        if (\is_array($v)) {
+            array_walk_recursive($v, $cb, $extra);
+            $arr[$k] = $v;
+        } else {
+            $cb($v, $k, $extra);
+            $arr[$k] = $v;
+        }
+    }
+    return true;
+}
+
+/**
  * `array_unique(arr)` — first occurrence of each (string) value, keys preserved
  * (PHP default SORT_STRING comparison).
  */

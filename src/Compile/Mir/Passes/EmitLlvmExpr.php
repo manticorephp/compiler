@@ -1539,6 +1539,15 @@ trait EmitLlvmExpr
         if ($self->type->isNumericCell()) {
             return $this->emitTaggedArith($left, $right, $intOp);
         }
+        // Array `+` is PHP's union operator (left keys win, right fills gaps),
+        // NOT a numeric add. LowerTypes::isArrayUnion already types the result
+        // KIND_ARRAY; without this the int path emits `add i64 ptr, ptr`. `-`/`*`
+        // on arrays is a TypeError in PHP, so only `add` reaches an array result.
+        if ($intOp === 'add' && ($self->type->kind === Type::KIND_ARRAY
+                || $left->type->kind === Type::KIND_ARRAY
+                || $right->type->kind === Type::KIND_ARRAY)) {
+            return $this->emitArrayUnion($left, $right);
+}
         $isFloat = $self->type->kind === Type::KIND_FLOAT;
         $target = $isFloat ? 'double' : 'i64';
         $op = $isFloat ? $floatOp : $intOp;
