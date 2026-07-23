@@ -29,7 +29,7 @@ run(function () {
 });
 
 /** Keep-alive request loop for one connection. */
-function serve($conn): void
+function serve(\Resource $conn): void
 {
     while (true) {
         $req = Async\read($conn, 8192);
