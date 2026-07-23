@@ -111,8 +111,19 @@ final class NarrowReturns implements Pass
         // reads a raw int as a cell (`invoke(sum())` → 3.45e-323 not 7). Its
         // return type is a hard contract, not an inferred convenience.
         if (\Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name)) { return false; }
-        // Only un-resolved returns (bare `array` / no hint) are candidates.
-        if ($fn->returnType->kind !== Type::KIND_UNKNOWN) { return false; }
+        // Only un-resolved returns (bare `array` / no hint) are candidates —
+        // EXCEPT the full pass may WIDEN an already-narrowed concrete scalar-element
+        // array to a CELL element. The early (concreteOnly) pass can lock a
+        // `vec[string]` from a pre-convergence view of a `null|string` accumulator
+        // (`$r[] = $c ? null : $s`) that later settles to `vec[cell]`; a caller then
+        // reads the box_null cells as raw string pointers → var_dump SIGSEGV. This
+        // widen is monotone (cell is the top element, so it never re-fires) and only
+        // ever moves scalar → cell, never the reverse.
+        $rt = $fn->returnType;
+        $mayWiden = !$this->concreteOnly && $rt->isArray() && $rt->element !== null
+            && $rt->element->kind !== Type::KIND_CELL
+            && $rt->element->kind !== Type::KIND_UNKNOWN;
+        if ($rt->kind !== Type::KIND_UNKNOWN && !$mayWiden) { return false; }
         // Early (concreteOnly) pass: a function with an ERASED param (bare
         // `array` / unknown) has a return that Monomorphize can still re-shape
         // per call site (`flip(array $a){ $o[$v]=… }` becomes assoc once $a is
@@ -190,6 +201,18 @@ final class NarrowReturns implements Pass
         // erased helper return (vec[unknown] from array_map over a bare-array
         // param) is left for Monomorphize to specialize then the post-Mono pass.
         if ($this->concreteOnly && !$this->isConcreteArray($result)) { return false; }
+        // Widening an already-narrowed return: only accept a CELL-element result
+        // (the scalar → cell correction) and only when it actually differs — never
+        // re-narrow a concrete scalar to a different scalar (would not converge).
+        if ($mayWiden) {
+            if ($result->element === null || $result->element->kind !== Type::KIND_CELL) {
+                return false;
+            }
+            if ($rt->isAssoc() === $result->isAssoc()
+                && $rt->element !== null && $rt->element->kind === $result->element->kind) {
+                return false;
+            }
+        }
         $fn->returnType = $result;
         return true;
     }

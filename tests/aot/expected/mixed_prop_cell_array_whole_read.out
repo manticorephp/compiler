@@ -1,0 +1,39 @@
+array(3) {
+  ["host"]=>
+  string(1) "x"
+  ["port"]=>
+  NULL
+  ["n"]=>
+  int(8080)
+}
+bool(true)
+array
+NULL
+3
+host:string(1) "x"
+port:NULL
+n:int(8080)
+array(3) {
+  ["a"]=>
+  float(1.5)
+  ["z"]=>
+  NULL
+  ["s"]=>
+  string(1) "t"
+}
+p=10 q=20 r=30 
+40 4
+array(4) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  NULL
+  [2]=>
+  int(3)
+  [3]=>
+  string(1) "d"
+}
+bool(true)
+NULL
+4
+m>one n>two 

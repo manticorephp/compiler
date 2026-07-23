@@ -308,6 +308,37 @@ trait EmitLlvmCalls
         $out .= $this->coerceToPtr();
         $keyP = $this->lastValue;
         $argc = \count($iv->args);
+        // A `...$arr` spread makes the runtime arg count unknown. HOIST the
+        // fixed-prefix arg values and the spread array pointer ONCE, before the
+        // candidate loop, so they dominate every sibling hit block — then each
+        // candidate's call is built DIRECTLY (see below), never by re-emitting a
+        // `Call` per block (that route runs the spread through emitCall/
+        // emitBuiltin in each block and a Spread_ the builtins don't handle
+        // reads a stale value → an SSA dominance violation). Only a single
+        // trailing spread is supported.
+        $spreadIdx = -1;
+        foreach ($iv->args as $i => $a) {
+            if ($a->kind === Node::KIND_SPREAD) {
+                if ($spreadIdx !== -1 || $i !== \count($iv->args) - 1) {
+                    throw new \RuntimeException('only a single trailing spread into a dynamic function-name callable is supported');
+                }
+                $spreadIdx = $i;
+            }
+        }
+        $hasSpread = $spreadIdx !== -1;
+        $numFixed = $hasSpread ? $spreadIdx : $argc;
+        $fixedRegs = [];
+        $spreadArr = '';
+        if ($hasSpread) {
+            for ($fi = 0; $fi < $numFixed; $fi = $fi + 1) {
+                $out .= $this->emitNode($iv->args[$fi]);
+                $out .= $this->coerceToI64();
+                $fixedRegs[] = $this->lastValue;
+            }
+            $out .= $this->emitNode($iv->args[$spreadIdx]->operand);
+            $out .= $this->coerceToPtr();
+            $spreadArr = $this->lastValue;
+        }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -321,7 +352,13 @@ trait EmitLlvmCalls
             for ($pi = 0; $pi < $tot; $pi = $pi + 1) {
                 if (($pdefs[$pi] ?? null) === null) { $req = $req + 1; }
             }
-            if ($argc < $req || $argc > $tot) { continue; }
+            // With a spread the runtime argc is unknown; only the fixed prefix
+            // gives a static lower bound on the callee arity.
+            if ($hasSpread) {
+                if ($tot < $numFixed) { continue; }
+            } elseif ($argc < $req || $argc > $tot) {
+                continue;
+            }
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
             $cmp = $this->ssa->allocReg();
@@ -330,8 +367,31 @@ trait EmitLlvmCalls
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $call = new \Compile\Mir\Call($fname, $iv->args, $rt);
-            $out .= $this->emitNode($call);
+            if ($hasSpread) {
+                // Build the call directly: fixed prefix from the hoisted regs,
+                // the rest read from the spread array (element k → param
+                // numFixed+k). Matches emitCall's fixed-arity spread contract —
+                // the array must supply the callee's remaining params.
+                $argList = '';
+                for ($pi = 0; $pi < $tot; $pi = $pi + 1) {
+                    if ($pi > 0) { $argList .= ', '; }
+                    if ($pi < $numFixed) {
+                        $argList .= 'i64 ' . $fixedRegs[$pi];
+                        continue;
+                    }
+                    $ev = $this->ssa->allocReg();
+                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $spreadArr
+                          . ', i64 ' . (string)($pi - $numFixed) . ")\n";
+                    $argList .= 'i64 ' . $ev;
+                }
+                $reg = $this->ssa->allocReg();
+                $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fname) . '(' . $argList . ")\n";
+                $this->lastValue = $reg;
+                $this->lastValueType = 'i64';
+            } else {
+                $call = new \Compile\Mir\Call($fname, $iv->args, $rt);
+                $out .= $this->emitNode($call);
+            }
             $out .= $this->boxToCell($rt);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
@@ -396,9 +456,57 @@ trait EmitLlvmCalls
         // expects, so cellifying blindly (which crashed self-host) is avoided.
         $known = $fn !== '' && isset($this->closureCaptures[$fn]);
         $calleeParams = $known ? ($this->sigs->paramTypes[$fn] ?? []) : [];
-        foreach ($iv->args as $ai => $a) {
+        // A `...$arr` spread into a DYNAMIC closure (concrete __closure_N lost ⇒
+        // arity unknown, e.g. a `callable`/`\Closure` param): the fixed-arity
+        // fill below can't apply. Route to a trampoline that switches on the
+        // runtime arg count and calls the fn ptr with EXACTLY that many slots.
+        $dynSpread = -1;
+        foreach ($iv->args as $si => $sa) {
+            if ($sa->kind === Node::KIND_SPREAD) { $dynSpread = $si; break; }
+        }
+        if ($dynSpread !== -1 && !$known) {
+            return $out . $this->emitDynClosureSpread($struct, $iv->args, $dynSpread, $n->type);
+        }
+        // Running param index — diverges from the loop key once a spread has
+        // expanded into multiple positional slots.
+        $pi = 0;
+        foreach ($iv->args as $a) {
+            // Argument unpacking `$fn(...$arr)`: expand the array across the
+            // closure's remaining declared params (fixed-arity), boxing each
+            // scalar element per the uniform closure ABI. A DYNAMIC callee has
+            // no static arity — the indirect call builds its own signature and
+            // the closure struct carries no arity, so a spread can't be
+            // materialized (padding an indirect call is UB). Fail loud rather
+            // than emit the corrupt arg list the old no-op `visitSpread` left.
+            if ($a->kind === Node::KIND_SPREAD) {
+                if (!$known) {
+                    throw new \RuntimeException('spread into a dynamic callable of unknown arity is unsupported');
+                }
+                $out .= $this->emitNode($a->operand);
+                $out .= $this->coerceToPtr();
+                $arr = $this->lastValue;
+                $elemType = $a->operand->type->element ?? null;
+                $nparams = \count($calleeParams);
+                $base = $pi;
+                while ($pi < $nparams) {
+                    $ev = $this->ssa->allocReg();
+                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
+                          . ', i64 ' . (string)($pi - $base) . ")\n";
+                    if ($elemType !== null && $elemType->kind !== Type::KIND_CELL
+                        && $this->isCellBoxableArg($elemType)) {
+                        $this->lastValue = $ev;
+                        $this->lastValueType = 'i64';
+                        $out .= $this->boxToCell($elemType);
+                        $ev = $this->lastValue;
+                    }
+                    $argList .= ', i64 ' . $ev;
+                    $argTypes .= ', i64';
+                    $pi = $pi + 1;
+                }
+                continue;
+            }
             $out .= $this->emitNode($a);
-            $pt = $calleeParams[$ai] ?? null;
+            $pt = $calleeParams[$pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
             // (cell/unknown). A dynamic callee (`callable`) can't be gated — its
             // param might be a TYPED array (an array_map-style callback) that
@@ -417,6 +525,7 @@ trait EmitLlvmCalls
             }
             $argList .= ', i64 ' . $this->lastValue;
             $argTypes .= ', i64';
+            $pi = $pi + 1;
         }
         $reg = $this->ssa->allocReg();
         if ($known) {
@@ -439,6 +548,104 @@ trait EmitLlvmCalls
         // stays boxed. A non-scalar (array/obj) result rode raw → no unbox.
         if ($this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
+        }
+        return $out;
+    }
+
+    /**
+     * `$cb(...$arr)` where `$cb` is a DYNAMIC closure of unknown arity. The
+     * closure struct carries no arity and an indirect call's signature is fixed
+     * per call site, so we can't emit one variable-length call. Instead switch
+     * on the runtime arg count (numFixed + array length) and, for each count K,
+     * emit a fixed K-arg indirect call — so when the runtime count matches the
+     * closure's real arity (the correct-args case) the signature matches
+     * exactly, no UB. Counts beyond MAX_DYN_SPREAD_ARITY fall through to a
+     * zero result. Each scalar arg is boxed to a tagged cell (uniform closure
+     * ABI), the same as the static-arity path.
+     * @param Node[] $args
+     */
+    private function emitDynClosureSpread(string $struct, array $args, int $spreadPos, Type $retType): string
+    {
+        if ($spreadPos !== \count($args) - 1) {
+            throw new \RuntimeException('only a single trailing spread into a dynamic closure is supported');
+        }
+        $maxArity = 10;
+        $numFixed = $spreadPos;
+        $out = '';
+        $fixedRegs = [];
+        for ($i = 0; $i < $numFixed; $i = $i + 1) {
+            $out .= $this->emitNode($args[$i]);
+            if ($this->isCellBoxableArg($args[$i]->type)) {
+                $out .= $this->boxToCell($args[$i]->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $fixedRegs[] = $this->lastValue;
+        }
+        $out .= $this->emitNode($args[$spreadPos]->operand);
+        $out .= $this->coerceToPtr();
+        $arr = $this->lastValue;
+        $elemType = $args[$spreadPos]->operand->type->element ?? null;
+        $boxElem = $elemType !== null && $elemType->kind !== Type::KIND_CELL
+            && $elemType->kind !== Type::KIND_UNKNOWN
+            && $this->isCellBoxableArg($elemType);
+        $len = $this->ssa->allocReg();
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $arr . ")\n";
+        $total = $this->ssa->allocReg();
+        $out .= '  ' . $total . ' = add i64 ' . $len . ', ' . (string)$numFixed . "\n";
+        $fpi = $this->ssa->allocReg();
+        $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('clspread.end');
+        $defL = $this->ssa->allocLabel('clspread.def');
+        $caseL = [];
+        for ($k = $numFixed; $k <= $maxArity; $k = $k + 1) {
+            $caseL[$k] = $this->ssa->allocLabel('clspread.c' . $k);
+        }
+        $sw = '  switch i64 ' . $total . ', label %' . $defL . " [\n";
+        for ($k = $numFixed; $k <= $maxArity; $k = $k + 1) {
+            $sw .= '    i64 ' . $k . ', label %' . $caseL[$k] . "\n";
+        }
+        $out .= $sw . "  ]\n";
+        for ($k = $numFixed; $k <= $maxArity; $k = $k + 1) {
+            $out .= $caseL[$k] . ":\n";
+            $argList = 'ptr ' . $struct;
+            $argTypes = 'ptr';
+            for ($f = 0; $f < $numFixed; $f = $f + 1) {
+                $argList .= ', i64 ' . $fixedRegs[$f];
+                $argTypes .= ', i64';
+            }
+            for ($e = 0; $e < $k - $numFixed; $e = $e + 1) {
+                $ev = $this->ssa->allocReg();
+                $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
+                      . ', i64 ' . (string)$e . ")\n";
+                if ($boxElem) {
+                    $this->lastValue = $ev;
+                    $this->lastValueType = 'i64';
+                    $out .= $this->boxToCell($elemType);
+                    $ev = $this->lastValue;
+                }
+                $argList .= ', i64 ' . $ev;
+                $argTypes .= ', i64';
+            }
+            $rk = $this->ssa->allocReg();
+            $out .= '  ' . $rk . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
+            $out .= '  store i64 ' . $rk . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+        }
+        $out .= $defL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $rres = $this->ssa->allocReg();
+        $out .= '  ' . $rres . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $rres;
+        $this->lastValueType = 'i64';
+        if ($this->isCellScalarParam($retType)) {
+            $out .= $this->unboxCellToType($retType);
         }
         return $out;
     }
@@ -495,6 +702,43 @@ trait EmitLlvmCalls
         $flavor = $this->discardReleaseFlavor($s->type);
         if ($flavor === '') { return ''; }
         return $this->rcReleaseReg($this->lastValue, $flavor);
+    }
+
+    /**
+     * Fixed-arity spread expansion for a KNOWN callee: read the elements of the
+     * runtime array `$arrReg` filling the callee's params `[$firstParam ..
+     * count($ptypes))`. Each element is boxed to a tagged cell when the target
+     * param is tagged/cell and the source element is a concrete scalar (the
+     * same boundary rule the inline call-site spread arms use). Returns the IR
+     * plus the SSA i64 regs for the produced args (caller appends them to its
+     * own arg list with the right separators / `$this` offset).
+     * @param Type[] $ptypes
+     * @param array<int,bool> $tmask
+     * @return array{0:string,1:string[]}
+     */
+    private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes, array $tmask, ?Type $elemType): array
+    {
+        $out = '';
+        $regs = [];
+        $n = \count($ptypes);
+        for ($k = $firstParam; $k < $n; $k = $k + 1) {
+            $ev = $this->ssa->allocReg();
+            $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
+                  . ', i64 ' . (string)($k - $firstParam) . ")\n";
+            $pt = $ptypes[$k] ?? null;
+            $needBox = ($tmask[$k] ?? false)
+                || ($pt !== null && $pt->kind === Type::KIND_CELL);
+            if ($needBox && $elemType !== null
+                && $elemType->kind !== Type::KIND_CELL
+                && $elemType->kind !== Type::KIND_UNKNOWN) {
+                $this->lastValue = $ev;
+                $this->lastValueType = 'i64';
+                $out .= $this->boxToCell($elemType);
+                $ev = $this->lastValue;
+            }
+            $regs[] = $ev;
+        }
+        return [$out, $regs];
     }
 
     /**
