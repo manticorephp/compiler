@@ -1536,6 +1536,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // host_arch() is a libc-stub under the Zend cold seed, so a fiber-free
     // build (the compiler's own) must never pull \Fiber in.
     $fiberSrc = prelude_src_or_empty("fiber.php");
+    // Io\Poll (PHP 8.6 fd-readiness multiplexer) — DEMAND-GATED, namespaced class
+    // tree (braced namespaces isolate it in the prelude blob).
+    $ioPollSrc = prelude_src_or_empty("io_poll.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1544,6 +1547,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);
+    // `new \Io\Poll\Context`, a `use Io\Poll\...`, or `new StreamPollHandle` all
+    // mention one of these identifiers.
+    $useIoPoll = $demand->mentionsAny(['StreamPollHandle', 'Poll', 'IoException']);
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
     // ReflectionException. A program that never reflects carries none of it.
@@ -1646,6 +1652,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->exceptionsSrc = $exceptionsSrc;
         $lower->resourceSrc = $resourceSrc;
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
+        $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
