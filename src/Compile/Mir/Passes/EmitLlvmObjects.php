@@ -2160,6 +2160,23 @@ trait EmitLlvmObjects
         $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
         $ai = 0;
         foreach ($n->args as $a) {
+            // `Cls::m(...$arr)`: expand across the method's declared params
+            // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
+            if ($a->kind === Node::KIND_SPREAD) {
+                $out .= $this->emitNode($a->operand);
+                $out .= $this->coerceToPtr();
+                $arr = $this->lastValue;
+                $elemType = $a->operand->type->element ?? null;
+                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType);
+                $out .= $sir;
+                foreach ($sregs as $rg) {
+                    if (!$first) { $argList .= ', '; }
+                    $first = false;
+                    $argList .= 'i64 ' . $rg;
+                }
+                $ai = \count($ptypes);
+                continue;
+            }
             if (!$first) { $argList .= ', '; }
             $first = false;
             if ($this->argIsByRef($mask, $ai, $a)) {
@@ -2578,6 +2595,19 @@ trait EmitLlvmObjects
         $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
         $ai = 0;
         foreach ($mc->args as $a) {
+            // `$obj->m(...$arr)`: expand across the method's declared params
+            // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
+            if ($a->kind === Node::KIND_SPREAD) {
+                $out .= $this->emitNode($a->operand);
+                $out .= $this->coerceToPtr();
+                $arr = $this->lastValue;
+                $elemType = $a->operand->type->element ?? null;
+                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai + 1, $ptypes, $tmask, $elemType);
+                $out .= $sir;
+                foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                $ai = \count($ptypes) - 1;
+                continue;
+            }
             if ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
