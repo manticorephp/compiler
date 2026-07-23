@@ -2,7 +2,7 @@
 
 // Channels (CSP) over the async runtime: unbuffered rendezvous, buffered, fan-in.
 
-use function Async\{run, spawn, channel};
+use function Async\{run, spawn, channel, select};
 use Async\TaskGroup;
 
 run(function () {
@@ -51,4 +51,36 @@ run(function () {
         $total += $v;
     }
     echo "fan-in total: ", $total, "\n";
+
+    // select: two producers on two channels; drain both, dropping each as it closes.
+    $a = channel();
+    $d = channel();
+    spawn(function () use ($a) {
+        $a->send(1);
+        $a->send(3);
+        $a->close();
+    });
+    spawn(function () use ($d) {
+        $d->send(2);
+        $d->send(4);
+        $d->close();
+    });
+    $openA = true;
+    $openD = true;
+    $acc = 0;
+    while ($openA || $openD) {
+        /** @var Async\Channel[] $chans */
+        $chans = [];
+        if ($openA) { $chans[] = $a; }
+        if ($openD) { $chans[] = $d; }
+        [$idx, $val, $ok] = select($chans);
+        $fired = $chans[$idx];
+        if (!$ok) {
+            if ($fired === $a) { $openA = false; }
+            if ($fired === $d) { $openD = false; }
+            continue;
+        }
+        $acc += $val;
+    }
+    echo "select sum: ", $acc, "\n";
 });
