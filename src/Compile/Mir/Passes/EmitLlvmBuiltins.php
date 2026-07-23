@@ -291,7 +291,7 @@ trait EmitLlvmBuiltins
             $ord = $this->ssa->allocReg();
             $out .= '  ' . $ord . ' = load i64, ptr ' . $og . "\n";
             $fg = $this->ssa->allocReg();
-            $out .= '  ' . $fg . ' = getelementptr [' . $ct . ' x ptr], ptr @' . $ename . '__fqns, i64 0, i64 ' . $ord . "\n";
+            $out .= '  ' . $fg . ' = getelementptr [' . $ct . ' x ptr], ptr @' . $this->mangle($ename) . '__fqns, i64 0, i64 ' . $ord . "\n";
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = load ptr, ptr ' . $fg . "\n";
             $out .= '  store ptr ' . $fp . ', ptr ' . $res . "\n";
@@ -367,7 +367,7 @@ trait EmitLlvmBuiltins
             // faults every generic object consumer). See emitEnumCellSingletons.
             $out = $this->coerceToI64();
             $ord = $this->lastValue;
-            $tbl = '@' . $t->class . '__cases';
+            $tbl = '@' . $this->mangle($t->class) . '__cases';
             $ct = (string)\count($this->enums[$t->class]->caseNames);
             $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";

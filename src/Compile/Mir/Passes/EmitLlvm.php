@@ -442,23 +442,27 @@ final class EmitLlvm implements EmitVisitor
             $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal($ed->classId, 'ptr null');
         }
         $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
+        // LLVM symbol infix must fold `\` (namespaced enums like Io\Poll\Backend
+        // emit invalid `@Io\Poll\...` otherwise); the DISPLAY string keeps the
+        // real FQN so get_class / enum(...) render right.
+        $mn = $this->mangle($name);
         $n = \count($ed->caseNames);
         $dataPtrs = [];
         $fqnPtrs = [];
         $i = 0;
         foreach ($ed->caseNames as $cn) {
-            $sym = '@' . $name . '__case_' . (string)$i;
+            $sym = '@' . $mn . '__case_' . (string)$i;
             $out .= $sym . ' = linkonce_odr constant { i64, i64, i64, i64 } { i64 0, i64 '
                   . $descI . ', i64 0, i64 ' . (string)$i . " }\n";
             $dataPtrs[] = 'i64 ptrtoint (ptr getelementptr (i8, ptr ' . $sym . ', i64 8) to i64)';
-            $fq = '@' . $name . '__fqn_' . (string)$i;
+            $fq = '@' . $mn . '__fqn_' . (string)$i;
             $out .= $this->strGlobalDef($fq, $name . '::' . $cn);
             $fqnPtrs[] = 'ptr ' . $this->strSymBytes($fq);
             $i = $i + 1;
         }
-        $out .= '@' . $name . '__cases = linkonce_odr constant [' . (string)$n
+        $out .= '@' . $mn . '__cases = linkonce_odr constant [' . (string)$n
               . ' x i64] [' . \implode(', ', $dataPtrs) . "]\n";
-        $out .= '@' . $name . '__fqns = linkonce_odr constant [' . (string)$n
+        $out .= '@' . $mn . '__fqns = linkonce_odr constant [' . (string)$n
               . ' x ptr] [' . \implode(', ', $fqnPtrs) . "]\n";
         return $out;
     }

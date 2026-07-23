@@ -488,34 +488,37 @@ trait EmitLlvmModule
     {
         $out = '';
         foreach ($this->enums as $name => $ed) {
+            // Fold `\` for the LLVM symbol infix (namespaced enums); string
+            // CONTENT (case names / backing values) stays as-is.
+            $mn = $this->mangle($name);
             $n = \count($ed->caseNames);
             // case-name strings + names table
             $namePtrs = [];
             $i = 0;
             foreach ($ed->caseNames as $cn) {
-                $sym = '@' . $name . '__nm_' . (string)$i;
+                $sym = '@' . $mn . '__nm_' . (string)$i;
                 $out .= $this->strGlobalDef($sym, $cn);
                 $namePtrs[] = 'ptr ' . $this->strSymBytes($sym);
                 $i = $i + 1;
             }
-            $out .= '@' . $name . '__names = private unnamed_addr constant ['
+            $out .= '@' . $mn . '__names = private unnamed_addr constant ['
                   . (string)$n . ' x ptr] [' . \implode(', ', $namePtrs) . "]\n";
             $backing = $this->edBacking($ed);
             if ($backing === 'int') {
                 $vals = [];
                 foreach ($ed->intValues as $v) { $vals[] = 'i64 ' . (string)$v; }
-                $out .= '@' . $name . '__values = private unnamed_addr constant ['
+                $out .= '@' . $mn . '__values = private unnamed_addr constant ['
                       . (string)$n . ' x i64] [' . \implode(', ', $vals) . "]\n";
             } elseif ($backing === 'string') {
                 $vptrs = [];
                 $j = 0;
                 foreach ($ed->strValues as $sv) {
-                    $sym = '@' . $name . '__vs_' . (string)$j;
+                    $sym = '@' . $mn . '__vs_' . (string)$j;
                     $out .= $this->strGlobalDef($sym, $sv);
                     $vptrs[] = 'ptr ' . $this->strSymBytes($sym);
                     $j = $j + 1;
                 }
-                $out .= '@' . $name . '__values = private unnamed_addr constant ['
+                $out .= '@' . $mn . '__values = private unnamed_addr constant ['
                       . (string)$n . ' x ptr] [' . \implode(', ', $vptrs) . "]\n";
             }
             $out .= $this->emitEnumCellSingletons($name, $ed);
