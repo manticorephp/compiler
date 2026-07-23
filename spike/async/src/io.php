@@ -57,16 +57,24 @@ function read(\Resource $conn, int $length): string
     $fd = $conn->addr;
     $sched = Scheduler::instance();
     $buf = $sched->readBuf($length);         // reused, no per-read calloc/free
-    while (true) {
-        $n = \Async\sys_recv($fd, $buf, $length, 0);
-        if ($n > 0) {
-            return \str_from_buffer($buf, $n);
-        }
-        if ($n === 0) {
-            return '';                       // peer closed
-        }
-        $sched->waitReadable($conn);  // EWOULDBLOCK
+    // Optimistic read (data may already be buffered).
+    $n = \Async\sys_recv($fd, $buf, $length, 0);
+    if ($n > 0) {
+        return \str_from_buffer($buf, $n);
     }
+    if ($n === 0) {
+        return '';                           // clean EOF
+    }
+    // n < 0 = EWOULDBLOCK (no data yet). Suspend until readable, then read ONCE
+    // more. A <= 0 return after a readability wake is EOF or a hard error
+    // (ECONNRESET) — not would-block — so we return closed rather than spinning
+    // forever on a reset connection (there is no errno binding to distinguish).
+    $sched->waitReadable($conn);
+    $n = \Async\sys_recv($fd, $buf, $length, 0);
+    if ($n > 0) {
+        return \str_from_buffer($buf, $n);
+    }
+    return '';                               // EOF or error → closed
 }
 
 /** Write all of $data (raw send), suspending on back-pressure. */
@@ -75,15 +83,26 @@ function write(\Resource $conn, string $data): int
     $fd = $conn->addr;
     $len = \strlen($data);
     $total = 0;
+    $sched = Scheduler::instance();
     while ($total < $len) {
         $chunk = $total === 0 ? $data : \substr($data, $total);
         $n = \Async\sys_send($fd, $chunk, $len - $total, 0);
         if ($n > 0) {
             $total = $total + $n;
-        } elseif ($n === 0) {
+            continue;
+        }
+        if ($n === 0) {
             break;
+        }
+        // n < 0 = back-pressure (EWOULDBLOCK). Wait for writability, retry ONCE;
+        // a second <= 0 is a hard error (EPIPE / reset), not would-block, so we
+        // stop rather than spin forever writing to a dead peer.
+        $sched->waitWritable($conn);
+        $n = \Async\sys_send($fd, $chunk, $len - $total, 0);
+        if ($n > 0) {
+            $total = $total + $n;
         } else {
-            Scheduler::instance()->waitWritable($conn);
+            break;
         }
     }
     return $total;
