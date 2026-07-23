@@ -15,6 +15,15 @@
       "exclude": []
     },
     {
+      "name": "async-load",
+      "src": "spike/async/src",
+      "output": "spike/async/load_bin",
+      "entry": "spike/async/load_client.php",
+      "exclude": []
+
+    },
+
+    {
       "name": "async-http",
       "src": "spike/async/src",
       "output": "spike/async/http_bin",
