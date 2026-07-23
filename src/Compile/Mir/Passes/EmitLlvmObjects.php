@@ -2781,6 +2781,22 @@ trait EmitLlvmObjects
         $boxCell = $n->type->kind === Type::KIND_CELL;
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
+            // Absent-optional-dependency method call: no candidate resolved the
+            // method AND the receiver's static class is genuinely ABSENT (never
+            // compiled — an EventDispatcher / ext type that was not installed). A
+            // real call is php's "undefined method" Error, and every such site is
+            // dead null-guarded integration code. Degrade to null rather than a
+            // direct call to an undefined `@manticore_<empty>__<method>` symbol (a
+            // link error). The `!isset($this->classes[$static])` guard keeps this
+            // OFF known classes — a legit trampoline / cross-module callee whose
+            // sig is not in paramTypes must NOT be nulled (2-gen safety).
+            if ($distinct === [] && !isset($this->sigs->paramTypes[$sym])
+                && ($static === '' || !isset($this->classes[$static]))) {
+                if ($btName !== '') { $out .= $this->btPop(); }
+                $this->lastValue = '0';
+                $this->lastValueType = 'i64';
+                return $out;
+            }
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
                   . '(' . $argList . ")\n";
