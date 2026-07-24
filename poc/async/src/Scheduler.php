@@ -98,11 +98,34 @@ final class Scheduler
         $this->pushGroup($root);
         $rootTask = $this->newTask($main, [], $root);
         $root->children[] = $rootTask;
+        $this->installNetpoller();
         $this->loop();
+        $this->clearNetpoller();
         $this->popGroup();
         if ($root->failure !== null) {
             throw $root->failure;
         }
+    }
+
+    // ── transparent I/O: expose suspend/close to the stdlib stream layer ──────
+    // Plain fread/fwrite/stream_socket_accept/fclose consult \Runtime\AsyncHook and
+    // route their would-block through these, so ordinary blocking-looking PHP I/O
+    // suspends the fiber instead of the process (the Go netpoller model).
+    private function installNetpoller(): void
+    {
+        // Method call (links by symbol across the stdlib boundary), not a direct
+        // AsyncHook::$prop write — a cross-unit static-prop store needs class/type
+        // metadata the .sig does not export. AsyncHook assigns via self:: inside.
+        \Runtime\AsyncHook::install(
+            function (\Resource $s): void { $this->waitReadable($s); },
+            function (\Resource $s): void { $this->waitWritable($s); },
+            function (\Resource $s): void { $this->closeConn($s); },
+        );
+    }
+
+    private function clearNetpoller(): void
+    {
+        \Runtime\AsyncHook::clear();
     }
 
     private function loop(): void

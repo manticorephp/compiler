@@ -1,3 +1,4 @@
+<?php
 // Io\Poll — PHP 8.6 low-level fd-readiness multiplexer (RFC poll_api). Oracle =
 // php 8.6. A thin PHP layer (compiled native) over poll(2); kqueue/epoll backends
 // slot in later. DEMAND-GATED (Main.php): compiled only when a program mentions

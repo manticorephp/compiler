@@ -358,6 +358,15 @@ function sys_send(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $
 function sys_send_buf(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
                       #[CType('int')] int $flags): int {}
 
+// `ssize_t writev(int fd, const struct iovec *iov, int iovcnt)` — vectored write:
+// send N discontiguous chunks with ONE syscall. $iov points at a PHP-built array
+// of `iovec { void *iov_base; size_t iov_len; }` (16 bytes/entry on 64-bit, both
+// hosts). Returns the total bytes queued, or -1. Used by fwrite($stream, array)
+// to send a precomputed HTTP header + a dynamic body without a userspace concat
+// AND without splitting the response into two `send()` syscalls.
+#[Library('c'), Symbol('writev')]
+function sys_writev(#[CType('int')] int $fd, Ptr $iov, #[CType('int')] int $iovcnt): int {}
+
 // `ssize_t recv(int fd, void *buf, size_t n, int flags)` — bytes read, 0 at the
 // peer's orderly shutdown, -1 on error.
 #[Library('c'), Symbol('recv')]

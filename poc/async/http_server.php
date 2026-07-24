@@ -7,7 +7,7 @@
 //   ./http_bin              # listens on :8080
 //   ab -k -n 100000 -c 256 http://127.0.0.1:8080/plaintext
 
-use function Async\run;
+use function Async\async;
 use function Async\spawn;
 
 const WORKERS = 8;
@@ -27,7 +27,7 @@ if ($server === false) {
     if ($worker === 0) {
         echo "http on :8080 (", WORKERS, " workers, prefork)\n";
     }
-    run(function () use ($server) {
+    async(function () use ($server) {
         while (true) {
             $conn = Async\accept($server);
             spawn(function () use ($conn) {

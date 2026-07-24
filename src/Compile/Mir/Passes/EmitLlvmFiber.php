@@ -29,7 +29,23 @@ namespace Compile\Mir\Passes;
 trait EmitLlvmFiber
 {
     /** Module-level fiber runtime: current-fiber global, switch declares, and the
-     *  arch-branched fcontext `module asm`. Emitted in the preamble under needsFibers. */
+     *  arch-branched fcontext `module asm`. Emitted in the preamble under needsFibers.
+     *
+     *  DEFINITION vs DECLARATION: the fcontext asm below (`.globl mc_fiber_jump`
+     *  + `mc_fiber_make` + the `mc_fiber_trampoline` helper) is a hard SYMBOL
+     *  DEFINITION — Mach-O `ld` rejects two of them at link time (`duplicate
+     *  symbol '_mc_fiber_jump'`). Whenever a program mentions `\Fiber`, this
+     *  runtime is demanded; the src/Runtime stdlib DOES mention it (AsyncHook
+     *  probes `\Fiber::getCurrent`), so the asm was already inside
+     *  `lib/manticore_stdlib.o`. Emitting it a SECOND time from the application
+     *  (poc/async/smoke.php uses \Fiber too) then broke the link.
+     *
+     *  Gate: emit the module-asm DEFINITIONS only under `--emit-library`
+     *  (the stdlib.o build). Applications get the plain `declare` lines and
+     *  resolve `mc_fiber_*` from the linked-in stdlib.o. The three
+     *  `linkonce_odr` globals stay unconditional — they merge cleanly under a
+     *  duplicate, and keeping them here means a fiber-less user program that
+     *  happens to inline something referencing them still links. */
     private function fiberRuntime(): string
     {
         $out  = "@__mir_current_fiber = linkonce_odr global ptr null\n";
@@ -53,8 +69,12 @@ trait EmitLlvmFiber
         $out .= "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n";
         $out .= "declare i32 @munmap(ptr, i64)\n";
         $out .= "declare i32 @mprotect(ptr, i64, i32)\n";
-        foreach ($this->fiberAsmLines() as $line) {
-            $out .= 'module asm "' . $line . '"' . "\n";
+        // Only the stdlib build carries the fcontext DEFINITIONS; app builds
+        // inherit them by linking against manticore_stdlib.o.
+        if ($this->emitLibrary) {
+            foreach ($this->fiberAsmLines() as $line) {
+                $out .= 'module asm "' . $line . '"' . "\n";
+            }
         }
         return $out;
     }
