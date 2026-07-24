@@ -4,10 +4,10 @@
 // client task connects, sends, and reads the reply — both driven by the reactor.
 // Self-contained (no external client) so it runs as a deterministic test.
 
-use function Async\run;
+use function Async\async;
 use function Async\spawn;
 
-run(function () {
+async(function () {
     $errno = 0;
     $errstr = "";
     $addr = "127.0.0.1:39217";

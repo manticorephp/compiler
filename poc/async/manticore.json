@@ -34,6 +34,13 @@
       "output": "poc/async/chan_bin",
       "entry": "poc/async/chan_demo.php",
       "exclude": []
+    },
+    {
+      "name": "async-http-transparent",
+      "src": "poc/async/src",
+      "output": "poc/async/http_transparent_bin",
+      "entry": "poc/async/http_transparent.php",
+      "exclude": []
     }
   ]
 }

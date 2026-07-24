@@ -1,7 +1,7 @@
 <?php
-use function Async\run;
+use function Async\async;
 use function Async\spawn;
-run(function () {
+async(function () {
     $N = 30000;
     $t0 = microtime(true);
     for ($i = 0; $i < $N; $i++) {

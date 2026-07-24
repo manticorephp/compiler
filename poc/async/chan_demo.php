@@ -2,10 +2,10 @@
 
 // Channels (CSP) over the async runtime: unbuffered rendezvous, buffered, fan-in.
 
-use function Async\{run, spawn, channel, select};
+use function Async\{async, spawn, channel, select};
 use Async\TaskGroup;
 
-run(function () {
+async(function () {
     // Unbuffered rendezvous: producer hands off 1..5, consumer sums, close ends it.
     $ch = channel();
     spawn(function () use ($ch) {

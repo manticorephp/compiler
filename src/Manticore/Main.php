@@ -766,9 +766,10 @@ function resolve_source_files(array $files): ?array {
  * backend (the legacy AST Compiler was removed — MIR is self-hosting).
  *
  * @param string[] $sources
+ * @param string[] $paths   parallel to $sources; used for diagnostics only
  */
-function compile_with_backend(array $sources): ?string {
-    return compile_via_mir($sources);
+function compile_with_backend(array $sources, array $paths = []): ?string {
+    return compile_via_mir($sources, $paths);
 }
 
 function cmd_compile(array $args): int {
@@ -793,15 +794,27 @@ function cmd_compile(array $args): int {
     $strict = $p->flag("analyze-strict");
     $output = CompileArgs::$output;
 
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
+    // Read once, as SourceFile[] (path + contents), so every downstream stage
+    // — the analyzer AND the front-end's `parse failed` diagnostics — can name
+    // the specific file that broke. Previously we ran resolve_sources() and
+    // resolve_source_files() back-to-back and lost the paths on the compile
+    // path, so a `bin/manticore compile manticore.json` (or one bad file inside
+    // a directory arg) printed `parse failed: expected ';' after expression`
+    // with no filename.
+    $afiles = resolve_source_files(CompileArgs::$files);
+    if ($afiles === null) {
         dprint("compile: source resolution failed — no input read (rc=66)");
         return 66;
     }
-    if (\count($sources) === 0) {
+    if (\count($afiles) === 0) {
         dprint("compile: source list is empty (rc=66)");
         return 66;
     }
+    /** @var string[] $sources */
+    $sources = [];
+    /** @var string[] $paths */
+    $paths = [];
+    foreach ($afiles as $sf) { $sources[] = $sf->contents; $paths[] = $sf->path; }
 
     if ($analyze) {
         // Advisory by default: any failure inside the analyzer is swallowed so it
@@ -809,8 +822,7 @@ function cmd_compile(array $args): int {
         // `--analyze-strict`, error-severity findings instead FAIL the compile
         // (rc=65, before codegen) — a lint gate for CI.
         try {
-            $afiles = resolve_source_files(CompileArgs::$files);
-            if ($afiles !== null && \count($afiles) > 0) {
+            if (\count($afiles) > 0) {
                 $adiags = perform_analysis($afiles, CompileArgs::$files, false);
                 if (\count($adiags) > 0) { \error_log("\n" . \Analyze\Report::human($adiags)); }
                 if ($strict) {
@@ -839,7 +851,7 @@ function cmd_compile(array $args): int {
     // compiler on some stdlib+user combinations (the "stdlib as guest"
     // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
     // (see discover_stdlib_files / the link tail) — built once, in isolation.
-    $ir = compile_with_backend($sources);
+    $ir = compile_with_backend($sources, $paths);
     if ($ir === null) {
         dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");
         return 65;
@@ -1024,6 +1036,37 @@ function collect_php_sources(string $dir, array $excludes): array
 }
 
 /**
+ * Same as {@see collect_php_sources}, but returns each file's PATH alongside
+ * its contents so a diagnostic (`parse failed` at line/col) can name the real
+ * file. Kept parallel rather than replacing the plain-`string[]` version
+ * because the self-host boundary loses the element types across a mixed
+ * `array<path,contents>` shape — hence a typed `SourceFile[]`.
+ *
+ * @param string[] $excludes
+ * @return \Analyze\SourceFile[]
+ */
+function collect_php_source_files(string $dir, array $excludes): array
+{
+    /** @var \Analyze\SourceFile[] $out */
+    $out = [];
+    $listPath = "/tmp/manticore_buildf_" . (string)getpid() . ".txt";
+    system("find " . $dir . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
+    $contents = read_file($listPath);
+    if ($contents === null) { return $out; }
+    foreach (\explode("\n", $contents) as $path) {
+        if (\strlen($path) === 0) { continue; }
+        $skip = false;
+        foreach ($excludes as $ex) {
+            if (\strlen($ex) > 0 && \str_starts_with($path, $ex)) { $skip = true; break; }
+        }
+        if ($skip) { continue; }
+        $src = read_file($path);
+        if ($src !== null) { $out[] = new \Analyze\SourceFile($path, $src); }
+    }
+    return $out;
+}
+
+/**
  * Join a composer base dir and a relative autoload path into a scan dir.
  * A "." / "" base collapses to the relative path; trailing slashes trimmed.
  */
@@ -1159,7 +1202,7 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
  * @param string[] $sources
  * @param string[] $linkObjs
  */
-function build_compile_module(array $sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false): int
+function build_compile_module(array $sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false, array $paths = []): int
 {
     CompileArgs::$emitLibrary = $emitLibrary;
     // Ensure the output directory exists — a fresh checkout has no `lib/` (it is
@@ -1172,7 +1215,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     if ($withStdlib && !$emitLibrary) {
         foreach (collect_stdlib_extern_decls() as $d) { CompileArgs::$externDecls[] = $d; }
     }
-    $module = lower_module($sources);
+    $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
     try {
         $emit = new \Compile\Mir\Passes\EmitLlvm();
@@ -1288,13 +1331,20 @@ function cmd_build(array $args): int
         $excludes = [];
         foreach ($lib["exclude"] as $e) { $excludes[] = (string)$e; }
         dprint("build: library '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        $sources = collect_php_sources($srcDir, $excludes);
+        /** @var string[] $sources */
+        $sources = [];
+        /** @var string[] $paths */
+        $paths = [];
+        foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
+            $sources[] = $sf->contents;
+            $paths[] = $sf->path;
+        }
         if (\count($sources) === 0) {
             dprint("build: no sources for library '" . $name . "'");
             return 66;
         }
         CompileArgs::$externDecls = [];
-        $rc = build_compile_module($sources, $output, true, []);
+        $rc = build_compile_module($sources, $output, true, [], '', false, $paths);
         if ($rc !== 0) { return $rc; }
     }
     if ($libsOnly) { return 0; }
@@ -1317,7 +1367,14 @@ function cmd_build(array $args): int
         $moduleExcludes = $excludes;
         if ($entry !== "") { $moduleExcludes[] = $entry; }
         dprint("build: application '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        $sources = collect_php_sources($srcDir, $moduleExcludes);
+        /** @var string[] $sources */
+        $sources = [];
+        /** @var string[] $paths */
+        $paths = [];
+        foreach (collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
+            $sources[] = $sf->contents;
+            $paths[] = $sf->path;
+        }
         // Composer discovery. "composer": true builds the project the way Composer
         // sees it — its own composer.json autoload (psr-4/psr-0 + classmap dirs)
         // AND every installed vendor package from composer.lock (vendor/<name>/).
@@ -1338,7 +1395,10 @@ function cmd_build(array $args): int
                 if (isset($covered[$nd])) { continue; }
                 $covered[$nd] = true;
                 dprint("build: + composer autoload '" . $nd . "'");
-                foreach (collect_php_sources($nd, $moduleExcludes) as $g) { $sources[] = $g; }
+                foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
+                    $sources[] = $sf->contents;
+                    $paths[] = $sf->path;
+                }
             }
         }
         // Extensions: opt-in native bindings. Each named extension adds its thin
@@ -1355,7 +1415,10 @@ function cmd_build(array $args): int
             }
             $ext = $extDefs[$en];
             $extSrc = (string)$ext["src"];
-            foreach (collect_php_sources($extSrc, []) as $g) { $sources[] = $g; }
+            foreach (collect_php_source_files($extSrc, []) as $sf) {
+                $sources[] = $sf->contents;
+                $paths[] = $sf->path;
+            }
             foreach ($ext["link"] as $lib) { $linkFlags = $linkFlags . " -l" . (string)$lib; }
             dprint("build: + extension '" . $en . "' (" . $extSrc . ")");
         }
@@ -1366,6 +1429,7 @@ function cmd_build(array $args): int
                 return 66;
             }
             $sources[] = $entrySrc;
+            $paths[] = $entry;
         }
         if (\count($sources) === 0) {
             dprint("build: no sources for application '" . $name . "'");
@@ -1420,7 +1484,7 @@ function cmd_build(array $args): int
             $linkObjs[] = $libOut;
         }
         CompileArgs::$externDecls = $externDecls;
-        $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib);
+        $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
         if ($rc !== 0) { return $rc; }
     }
     return 0;
@@ -1504,17 +1568,24 @@ function cmd_dump_ast(array $args): int {
  * by compile_via_mir (→ LLVM IR) and cmd_dump_sig (→ .sig). Externs/typing
  * come from {@see CompileArgs::$externDecls}.
  *
+ * `$paths` is optional but STRONGLY recommended: it names each source so a
+ * `parse failed` diagnostic points at the real file rather than swallowing
+ * the location (a compile-time UX regression that hits hardest when the caller
+ * passes `manticore.json` by mistake or one file in a 20-file manifest breaks).
+ *
  * @param string[] $sources
+ * @param string[] $paths   parallel to $sources; used only for diagnostics
  */
-function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Compile\Mir\Module {
+function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
     $docs = [];
-    foreach ($sources as $source) {
+    foreach ($sources as $i => $source) {
         try {
             $program = Parser::parseSource($source);
         } catch (\Throwable $e) {
-            dprint("parse failed: " . $e->getMessage());
+            $where = isset($paths[$i]) ? $paths[$i] : "<source>";
+            dprint($where . ": parse failed: " . $e->getMessage());
             return null;
         }
         foreach ($program->statements as $s) { $stmts[] = $s; }
@@ -1803,15 +1874,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     }
 }
 
-function compile_via_mir(array $sources): ?string {
-    $module = lower_module($sources);
+function compile_via_mir(array $sources, array $paths = []): ?string {
+    $module = lower_module($sources, null, $paths);
     if ($module === null) { return null; }
     try {
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
         return $emit->emit($module);
     } catch (\Throwable $e) {
-        dprint("compile failed (emit): " . $e->getMessage());
+        dprint("compile failed (emit): " . $e->getMessage(). " ({$e->getFile()}:{$e->getLine()})");
         return null;
     }
 }
@@ -1876,6 +1947,13 @@ function analyze_prelude_files(): array {
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
         "datetime.php",
+        // \Fiber (fiber.php) and the Io\Poll\* class tree (io_poll.php) are
+        // DEMAND-GATED at compile time (Main::lower_module), but the analyzer's
+        // undefined-symbol rules run closed-world across the whole source set —
+        // so they need every prelude class the user program can name. Without
+        // these, `new \Fiber(...)`, an `\Io\Poll\Context` hint, or the
+        // `StreamPollHandle` handle read as unknown classes.
+        "fiber.php", "io_poll.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

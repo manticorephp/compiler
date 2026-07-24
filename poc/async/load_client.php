@@ -5,13 +5,13 @@
 // php client (compiled, no interpreter), so several instances can actually drive
 // a multi-worker server. Prints its own req/s.
 
-use function Async\run;
+use function Async\async;
 use Async\TaskGroup;
 
 const CONNS = 50;
 const REQS = 4000;
 
-run(function () {
+async(function () {
     $req = "GET /plaintext HTTP/1.1\r\nHost: x\r\n\r\n";
     $t0 = microtime(true);
     TaskGroup::run(function (TaskGroup $g) use ($req) {

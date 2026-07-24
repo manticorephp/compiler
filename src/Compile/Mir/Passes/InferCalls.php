@@ -180,6 +180,12 @@ trait InferCalls
         if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }
+        // str_bytes: the raw address of a headered string's DATA bytes (i.e. the
+        // same pointer C sees when a `string` is passed through an FFI `char *`
+        // parameter). Used to poke an iovec.iov_base for a writev syscall
+        // without materialising a Ptr handle. Returns i64.
+        if ($n === 'str_bytes') { return Type::int_(); }
+
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'

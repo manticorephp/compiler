@@ -1,3 +1,4 @@
+<?php
 // \Fiber — stackful coroutines. Oracle = Zend Fiber (php 8.1+). The switch is an
 // fcontext primitive emitted as `module asm`; this class is the thin PHP layer
 // over the __mir_fiber_* intrinsics. Value passing (suspend<->resume) rides the

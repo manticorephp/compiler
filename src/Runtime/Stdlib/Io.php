@@ -130,7 +130,7 @@ function __mc_std_res(int $which, \Ffi\Ptr $handle): \Resource
 // ── the one place a stream blocks ──────────────────────────────────────
 //
 // EVERY socket read goes through __mc_stream_fill(). That is a rule, not a
-// convenience: for `Async\run(fn() => file_get_contents(...))` to become
+// convenience: for `Async\async(fn() => file_get_contents(...))` to become
 // non-blocking later WITHOUT rewriting the HTTP layer, there has to be exactly
 // ONE function that decides to wait. Teaching it to suspend (scheduler active ?
 // Io\Poll + suspend : recv) is then a local change; a parser that called recv()
@@ -212,6 +212,109 @@ function __mc_transport_send(\Resource $s, string $data, int $n): int
 }
 
 /**
+ * Advance a PHP-built iovec array past $bytes already sent, in-place. Zero-lens
+ * the fully-consumed leading entries (writev of a zero-len entry is a no-op, so
+ * the retry does not need to shift the array) and trims the first partial one.
+ */
+function __mc_iov_advance(\Ffi\Ptr $iov, int $n, int $bytes): void
+{
+    $remain = $bytes;
+    $i = 0;
+    while ($i < $n && $remain > 0) {
+        $l = \peek_i64($iov, $i * 16 + 8);
+        if ($l === 0) { $i = $i + 1; continue; }
+        if ($remain >= $l) {
+            $remain = $remain - $l;
+            \poke_i64($iov, $i * 16 + 8, 0);
+            $i = $i + 1;
+            continue;
+        }
+        $base = \peek_i64($iov, $i * 16);
+        \poke_i64($iov, $i * 16, $base + $remain);
+        \poke_i64($iov, $i * 16 + 8, $l - $remain);
+        return;
+    }
+}
+
+/**
+ * Vectored send for a plain socket: `writev(2)` on the built iov, with the same
+ * suspend-on-EWOULDBLOCK loop as `fwrite`'s single-buffer path under AsyncHook.
+ * TLS has no vector primitive in OpenSSL's stream API — we fall back to a
+ * per-chunk `__mc_transport_send` loop there. Callers keep the $chunks array
+ * alive for the duration of the call; the iov's `iov_base` fields point INTO
+ * those strings' byte data via `str_bytes()`.
+ *
+ * Returns the total bytes written (all chunks concatenated), 0 on early error.
+ *
+ * @param string[] $chunks
+ */
+function __mc_stream_sendv(\Resource $s, array $chunks): int
+{
+    $n = \count($chunks);
+    if ($n === 0) { return 0; }
+    $total = 0;
+    foreach ($chunks as $c) { $total = $total + \strlen($c); }
+    if ($total === 0) { return 0; }
+    // TLS: no writev — degrade to a per-chunk transport_send loop. Still avoids
+    // the userspace concat (SSL_write of $n small records vs one big buffer).
+    if ($s->kind === \Resource::KIND_TLS) {
+        $sent = 0;
+        foreach ($chunks as $c) {
+            $len = \strlen($c);
+            if ($len === 0) { continue; }
+            $w = __mc_transport_send($s, $c, $len);
+            if ($w <= 0) { return $sent; }
+            $sent = $sent + $w;
+            if ($w < $len) { return $sent; }
+        }
+        return $sent;
+    }
+    // Build iovec[$n] as [base:i64, len:i64] × n = 16 bytes/entry. iov_base is a
+    // raw address into a live PHP string's data (str_bytes); the caller's $chunks
+    // array keeps those strings pinned for the duration.
+    $iov = \Runtime\Libc\malloc($n * 16);
+    if ($iov === null) { return 0; }
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $sc = $chunks[$i];
+        \poke_i64($iov, $i * 16, \str_bytes($sc));
+        \poke_i64($iov, $i * 16 + 8, \strlen($sc));
+    }
+    if (\Runtime\AsyncHook::active()) {
+        $h = \Runtime\AsyncHook::writable();
+        $sent = 0;
+        while ($sent < $total) {
+            $w = \Runtime\Libc\sys_writev($s->addr, $iov, $n);
+            if ($w > 0) {
+                $sent = $sent + $w;
+                if ($sent >= $total) { break; }
+                \__mc_iov_advance($iov, $n, $w);
+                continue;
+            }
+            if ($w === 0) { break; }
+            // -1 → EWOULDBLOCK (the plain-socket write path never sees a hard
+            // error here: EPIPE/ECONNRESET surface as 0 after the next park).
+            $h($s);
+            $w = \Runtime\Libc\sys_writev($s->addr, $iov, $n);
+            if ($w > 0) {
+                $sent = $sent + $w;
+                if ($sent >= $total) { break; }
+                \__mc_iov_advance($iov, $n, $w);
+                continue;
+            }
+            break;
+        }
+        \Runtime\Libc\free($iov);
+        return $sent;
+    }
+    // Blocking / synchronous socket: one shot; short writes are the caller's
+    // problem to notice (mirrors the plain fwrite path, which also does not
+    // retry a partial send outside AsyncHook).
+    $w = \Runtime\Libc\sys_writev($s->addr, $iov, $n);
+    \Runtime\Libc\free($iov);
+    return $w < 0 ? 0 : $w;
+}
+
+/**
  * Wait (bounded) for a network stream to be readable before a blocking recv, so a
  * hung peer cannot block forever. Returns 1 to proceed, 0 on timeout (records
  * $timedOut). For TLS, buffered plaintext (SSL_pending) counts as readable — the
@@ -220,6 +323,14 @@ function __mc_transport_send(\Resource $s, string $data, int $n): int
 function __mc_wait_read(\Resource $s): int
 {
     if ($s->kind === \Resource::KIND_TLS && \Runtime\Openssl\pending($s->ssl) > 0) {
+        return 1;
+    }
+    // Netpoller: inside a scheduler+fiber, suspend on the reactor until the fd is
+    // readable instead of blocking the process (or, on a non-blocking stream,
+    // returning empty). The hook returns once readable; the recv below proceeds.
+    if (\Runtime\AsyncHook::active()) {
+        $h = \Runtime\AsyncHook::readable();
+        $h($s);
         return 1;
     }
     // Non-blocking (stream_set_blocking(false)): never wait — a 0 timeout means a
@@ -244,12 +355,42 @@ function __mc_stream_fill(\Resource $s, int $want): int
     if ($want < 4096) {
         $want = 4096;   // a syscall costs the same for 1 byte or 4 KiB
     }
-    if (\__mc_wait_read($s) === 0) {
-        return 0;   // timed out — do not block on recv
-    }
-    $buf = \Runtime\Libc\calloc($want + 1, 1);
+    // malloc, NOT calloc: recv/SSL_read overwrite the whole buffer before we
+    // read from it, so the zero-init is pure waste. Under wrk profiling
+    // `_platform_memset` on this calloc took ~4% of the request-hot time.
+    // A persistent scratch buffer (reused across fills) was also tried, but
+    // regressed: macOS's zone allocator has a thread-local cache so malloc(4K)
+    // is effectively free, and the static-property access ended up costlier
+    // than the malloc it was meant to skip.
+    $buf = \Runtime\Libc\malloc($want + 1);
     if ($buf === null) {
         return 0;
+    }
+    // OPTIMISTIC RECV under AsyncHook. Transparent-I/O fds are non-blocking
+    // (stream_set_blocking(false)), so a recv with the next request already
+    // buffered in the kernel returns immediately — no reactor round-trip, no
+    // fiber park on the (very common) keep-alive case. Mirrors the raw
+    // `Async\read` pattern in poc/async/src/io.php. Plain sockets only: TLS
+    // keeps the existing wait/pending flow (SSL_read buffered-plaintext
+    // accounting is done inside __mc_wait_read).
+    if ($s->kind === \Resource::KIND_SOCKET && \Runtime\AsyncHook::active()) {
+        $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
+        if ($got > 0) {
+            __mc_buf_compact($s);
+            $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
+            \Runtime\Libc\free($buf);
+            return $got;
+        }
+        if ($got === 0) {
+            $s->eof = true;
+            \Runtime\Libc\free($buf);
+            return 0;
+        }
+        // got < 0 → EWOULDBLOCK; fall through to park + retry via __mc_wait_read.
+    }
+    if (\__mc_wait_read($s) === 0) {
+        \Runtime\Libc\free($buf);
+        return 0;   // timed out — do not block on recv
     }
     $got = __mc_transport_recv($s, $buf, $want);
     if ($got > 0) {
@@ -286,7 +427,8 @@ function __mc_stream_read(\Resource $s, int $n): string
             if (\__mc_wait_read($s) === 0) {
                 return '';   // timed out
             }
-            $buf = \Runtime\Libc\calloc($n + 1, 1);
+            // malloc: recv overwrites the whole buffer, zero-init is waste.
+            $buf = \Runtime\Libc\malloc($n + 1);
             if ($buf === null) {
                 return '';
             }
@@ -976,6 +1118,12 @@ function fopen(string $filename, string $mode)
  */
 function fclose(\Resource $stream): bool
 {
+    // Netpoller: drop the reactor registration before the fd is closed, so the loop
+    // stops watching a dead fd. Safe outside a fiber (just unhooks the watcher).
+    $oc = \Runtime\AsyncHook::closer();
+    if ($oc !== null && \__mc_stream_is_net($stream)) {
+        $oc($stream);
+    }
     // TLS teardown lives here, not in Resource::close(): the prelude must not
     // reference OpenSSL (see \Resource::KIND_TLS). Send close_notify and free the
     // SSL engine BEFORE close() drops the fd; guard on $ssl so a double fclose is
@@ -997,10 +1145,35 @@ function fclose(\Resource $stream): bool
 /**
  * Write $data to $stream, at most $length bytes when given. Returns the
  * number of bytes written.
+ *
+ * Two forms:
+ *   fwrite($s, $str)           — single string (php.net)
+ *   fwrite($s, [$hdr, $body])  — VECTORED, sent to a plain socket with one
+ *                                 `writev(2)` syscall (no userspace concat, no
+ *                                 split into N sends). A non-socket sink or a
+ *                                 TLS stream degrades to concat/loop; the
+ *                                 return value is identical to the concat path.
+ *
  * @param \Resource $stream
+ * @param string|string[] $data
  */
-function fwrite(\Resource $stream, string $data, ?int $length = null): int
+function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
 {
+    if (\is_array($data)) {
+        // Vectored path is worthwhile only on a plain socket (writev(2)) and
+        // only when the request is "send it all", i.e. no $length cap; a $length
+        // that cuts a chunk mid-buffer is rare, so we handle it via a one-shot
+        // concat+recurse rather than a per-entry ceiling in sendv.
+        if ($stream->kind === \Resource::KIND_SOCKET && $length === null) {
+            /** @var string[] $chunks */
+            $chunks = [];
+            foreach ($data as $c) { $chunks[] = (string)$c; }
+            return \__mc_stream_sendv($stream, $chunks);
+        }
+        $joined = '';
+        foreach ($data as $c) { $joined = $joined . (string)$c; }
+        return fwrite($stream, $joined, $length);
+    }
     $len = \strlen($data);
     if ($length !== null && $length >= 0 && $length < $len) {
         $len = $length;
@@ -1028,6 +1201,24 @@ function fwrite(\Resource $stream, string $data, ?int $length = null): int
         return $len;
     }
     if (\__mc_stream_is_net($stream)) {
+        // Netpoller: in a scheduler+fiber, write ALL of $data, suspending on the
+        // reactor whenever send() reports back-pressure — blocking-looking, but the
+        // process never blocks. A <=0 right after a writability wake is a hard error
+        // (EPIPE/reset), not would-block, so we stop instead of spinning.
+        if (\Runtime\AsyncHook::active()) {
+            $h = \Runtime\AsyncHook::writable();
+            $total = 0;
+            while ($total < $len) {
+                $chunk = $total === 0 ? $data : \substr($data, $total);
+                $n = \__mc_transport_send($stream, $chunk, $len - $total);
+                if ($n > 0) { $total = $total + $n; continue; }
+                if ($n === 0) { break; }
+                $h($stream);
+                $n = \__mc_transport_send($stream, $chunk, $len - $total);
+                if ($n > 0) { $total = $total + $n; } else { break; }
+            }
+            return $total;
+        }
         // A socket's addr is an fd, so int_to_ptr() would hand fwrite a small
         // integer as a FILE*. send(2) — or SSL_write for TLS — instead, and a
         // short write is a real outcome here, not an error, so report what went out.
@@ -1038,10 +1229,11 @@ function fwrite(\Resource $stream, string $data, ?int $length = null): int
 }
 
 /**
- * Alias of fwrite().
+ * Alias of fwrite() — accepts a string OR a `string[]` for the writev path.
  * @param \Resource $stream
+ * @param string|string[] $data
  */
-function fputs(\Resource $stream, string $data, ?int $length = null): int
+function fputs(\Resource $stream, string|array $data, ?int $length = null): int
 {
     return fwrite($stream, $data, $length);
 }
