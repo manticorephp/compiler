@@ -915,15 +915,27 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
  */
 function stream_socket_accept(\Resource $server, ?float $timeout = null)
 {
-    if ($timeout !== null && $timeout >= 0.0) {
-        $ready = \__mc_poll_one($server->addr, false, (int)($timeout * 1000.0));
-        if ($ready <= 0) {
+    if ($timeout === null && \Runtime\AsyncHook::active()) {
+        // Netpoller: suspend on the listener until readable, then accept. Loop — a
+        // prefork sibling can take the connection between the wake and our accept
+        // (the listener is non-blocking, so a lost race is EWOULDBLOCK, not a stall).
+        $h = \Runtime\AsyncHook::readable();
+        $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+        while ($fd < 0) {
+            $h($server);
+            $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+        }
+    } else {
+        if ($timeout !== null && $timeout >= 0.0) {
+            $ready = \__mc_poll_one($server->addr, false, (int)($timeout * 1000.0));
+            if ($ready <= 0) {
+                return false;
+            }
+        }
+        $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+        if ($fd < 0) {
             return false;
         }
-    }
-    $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-    if ($fd < 0) {
-        return false;
     }
     // A TLS listener parks its server ctx in $ssl (see __mc_mark_tls_listener):
     // handshake the accepted fd server-side and hand back a TLS stream.
@@ -935,6 +947,11 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
     // find ssl.local_cert. Both are concrete \Resource here — a plain field copy.
     $conn = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
     $conn->ctxBlob = $server->ctxBlob;
+    // Netpoller: an accepted connection is driven non-blocking so recv/send report
+    // would-block (→ suspend) instead of stalling the loop.
+    if (\Runtime\AsyncHook::active()) {
+        \stream_set_blocking($conn, false);
+    }
     return $conn;
 }
 

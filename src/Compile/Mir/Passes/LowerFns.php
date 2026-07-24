@@ -264,7 +264,7 @@ trait LowerFns
             || $n === 'strcspn'
             || $n === '__float_bits' || $n === '__ugt' || $n === '__ryu_msp'
             || $n === 'substr' || $n === 'str_repeat'
-            || $n === 'str_from_buffer' || $n === 'cstr_to_str'
+            || $n === 'str_from_buffer' || $n === 'cstr_to_str' || $n === 'str_bytes'
             || $n === '__mir_stdin' || $n === '__mir_stdout' || $n === '__mir_stderr'
             || $n === '__mir_argc' || $n === '__mir_argv_at' || $n === '__mir_to_cell'
             || $n === '__mir_env_count' || $n === '__mir_env_at'

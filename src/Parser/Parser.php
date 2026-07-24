@@ -2951,6 +2951,6 @@ final class Parser
     private function error(string $message): ParseError
     {
         $tok = $this->tokens[$this->pos];
-        return new ParseError($message, $tok->line, $tok->column);
+        return new ParseError($message . " ($tok->lexeme)", $tok->line, $tok->column);
     }
 }

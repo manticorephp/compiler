@@ -450,6 +450,21 @@ trait EmitLlvmCalls
         // The closure struct is the env: the __closure fn unpacks its own
         // captures from it (slot 1+), so the call passes only `env + args`.
         $out = $this->emitNode($iv->callee);
+        // A `mixed`/`cell` callee (e.g. `AsyncHook::readable(): mixed` returning
+        // a closure) still carries NaN-box TAG BITS in its i64 slot — those must
+        // be masked off before we treat the value as a struct pointer. Missing
+        // this mask reads the fn ptr from a tagged address → SIGSEGV on the very
+        // first indirect call (the "transparent I/O" AsyncHook path). Concrete
+        // `Closure`/object-typed callees are already stored as raw pointers, so
+        // they don't need the mask; only untype-erased slots do.
+        $ck = $iv->callee->type->kind;
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+        }
         $out .= $this->coerceToPtr();
         $struct = $this->lastValue;
         $argList = 'ptr ' . $struct;

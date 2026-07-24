@@ -1,9 +1,9 @@
 <?php
-use function Async\run;
+use function Async\async;
 use function Async\spawn;
 use function Async\delay;
 
-run(function () {
+async(function () {
     // Closures capturing a loop variable by value must see DISTINCT values,
     // even though they all run after the loop (via delay).
     $tasks = [];

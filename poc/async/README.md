@@ -14,10 +14,10 @@ concurrency, no fire-and-forget** — every task lives in a `TaskGroup` scope th
 children and propagates the first failure.
 
 ```php
-use function Async\{run, spawn, delay};
+use function Async\{async, spawn, delay};
 use Async\TaskGroup;
 
-run(function () {
+async(function () {
     TaskGroup::run(function (TaskGroup $g) {
         $g->spawn(fn() => work("a"));
         $g->spawn(fn() => work("b"));
@@ -27,16 +27,16 @@ run(function () {
 
 ## Layout (`src/`)
 
-| file | role |
-|------|------|
-| `Scheduler.php` | run-queue + `Io\Poll` reactor + timer heap; the single event loop |
-| `Task.php`      | a spawned unit — state, result, waiters |
-| `TaskGroup.php` | structured scope: joins children, prunes settled, first-failure wins |
-| `Context.php`   | ambient scope + cooperative cancellation |
-| `api.php`       | `run` / `spawn` / `delay` |
+| file            | role                                                                      |
+|-----------------|---------------------------------------------------------------------------|
+| `Scheduler.php` | run-queue + `Io\Poll` reactor + timer heap; the single event loop         |
+| `Task.php`      | a spawned unit — state, result, waiters                                   |
+| `TaskGroup.php` | structured scope: joins children, prunes settled, first-failure wins      |
+| `Context.php`   | ambient scope + cooperative cancellation                                  |
+| `api.php`       | `run` / `spawn` / `delay`                                                 |
 | `io.php`        | raw non-blocking `recv`/`send` on the fd; accept/read/write/connect/close |
-| `process.php`   | `workers($n)` — multi-process (fork), shared-nothing |
-| `Channel.php`   | Go CSP channel — buffered/unbuffered `send`/`recv`/`close` + `select()` |
+| `process.php`   | `workers($n)` — multi-process (fork), shared-nothing                      |
+| `Channel.php`   | Go CSP channel — buffered/unbuffered `send`/`recv`/`close` + `select()`   |
 
 ## Build & run
 
@@ -54,12 +54,12 @@ Standalone examples (no manifest): `capture.php` (per-task value capture),
 Single-core keep-alive ~64.5k rps (2-syscall/req floor). Multi-process (8-worker prefork)
 same-box vs reference servers driven by the same `wrk`:
 
-| server | req/s |
-|--------|-------|
-| **manticore (8w prefork)** | **148–149k** |
-| go (`net/http`, all cores) | 137–145k |
-| bun (1 core) | 101–103k |
-| node (1 core) | 63–64k |
+| server                     | req/s        |
+|----------------------------|--------------|
+| **manticore (8w prefork)** | **150–160k** |
+| go (`net/http`, all cores) | 137–145k     |
+| bun (1 core)               | 101–103k     |
+| node (1 core)              | 63–64k       |
 
 Caveats: the load generator shares the box (server used only ~2.7/10 cores — real ceiling
 needs an off-box client); this server does minimal HTTP (single-byte routing, fixed
@@ -68,9 +68,9 @@ headers) — legitimate for the TechEmpower `plaintext` case, not a full framewo
 ## Channels (CSP)
 
 ```php
-use function Async\{run, spawn, channel, select};
+use function Async\{async, spawn, channel, select};
 
-run(function () {
+async(function () {
     $ch = channel();                       // unbuffered rendezvous
     spawn(function () use ($ch) { $ch->send(42); $ch->close(); });
     while (($v = $ch->recv()) !== null) { /* ... */ }
