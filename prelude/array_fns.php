@@ -574,6 +574,28 @@ function array_diff(array $arr, array ...$others): array
 }
 
 /**
+ * `array_diff_assoc(arr, ...others)` — retain entries whose key/value pair is
+ * absent from every other array. PHP compares both keys and values as strings.
+ */
+function array_diff_assoc(array $arr, array ...$others): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($others as $other) {
+            if (array_key_exists($key, $other) && $other[$key] == $value) {
+                $found = true;
+                break;
+            }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
  * `array_intersect(arr, ...others)` — elements of `$arr` whose (string) value is
  * present in EVERY other array, keys preserved.
  */
@@ -590,6 +612,28 @@ function array_intersect(array $arr, array ...$others): array
             if (!$inThis) { $inAll = false; break; }
         }
         if ($inAll) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
+/**
+ * `array_intersect_assoc(arr, ...others)` — retain entries whose key/value
+ * pair occurs in every other array; keys from the first array are preserved.
+ */
+function array_intersect_assoc(array $arr, array ...$others): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $inAll = true;
+        foreach ($others as $other) {
+            if (!array_key_exists($key, $other) || !($other[$key] == $value)) {
+                $inAll = false;
+                break;
+            }
+        }
+        if ($inAll) { $out[$key] = $value; }
     }
     return $out;
 }
@@ -774,4 +818,79 @@ function uksort(array &$arr, callable $cmp): bool
     foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
+}
+
+/**
+ * `array_all(a, predicate)` — true when every value satisfies `$predicate`.
+ * The empty array is vacuously true, as in PHP 8.4.
+ */
+function array_all(array $a, callable $predicate): bool
+{
+    foreach ($a as $value) {
+        if (!$predicate($value)) { return false; }
+    }
+    return true;
+}
+
+/**
+ * `array_any(a, predicate)` — true when at least one value satisfies
+ * `$predicate`; false for an empty array.
+ */
+function array_any(array $a, callable $predicate): bool
+{
+    foreach ($a as $value) {
+        if ($predicate($value)) { return true; }
+    }
+    return false;
+}
+
+/** Return the first value accepted by `$predicate`, or null when absent. */
+function array_find(array $a, callable $predicate): mixed
+{
+    foreach ($a as $value) {
+        if ($predicate($value)) { return $value; }
+    }
+    return null;
+}
+
+/** Return the first key accepted by `$predicate`, or null when absent. */
+function array_find_key(array $a, callable $predicate): int|string|null
+{
+    // Pull keys through array_keys: foreach's native key channel can carry a
+    // raw string pointer, whereas array_keys returns a correctly boxed key.
+    $keys = array_keys($a);
+    foreach ($keys as $key) {
+        $value = $a[$key];
+        if ($predicate($value)) { return $key; }
+    }
+    return null;
+}
+
+/**
+ * `array_change_key_case(a, case)` — transform string keys only.  PHP defines
+ * CASE_LOWER as 0 and CASE_UPPER as 1; numeric keys remain untouched.
+ */
+function array_change_key_case(array $a, int $case = 0): array
+{
+    $out = [];
+    // See array_reverse: iterate boxed keys so transformed string keys retain
+    // their representation when this prelude function is monomorphized.
+    $keys = array_keys($a);
+    foreach ($keys as $key) {
+        $value = $a[$key];
+        if (is_string($key)) {
+            // Keep the converted result in a string-typed local. Reassigning
+            // `$key` (which starts as an int|string cell) loses the string
+            // representation before the array-store lowering sees it.
+            if ($case === 1) {
+                $converted = strtoupper($key);
+            } else {
+                $converted = strtolower($key);
+            }
+            $out[$converted] = $value;
+        } else {
+            $out[$key] = $value;
+        }
+    }
+    return $out;
 }
