@@ -1,0 +1,4 @@
+bool(true)
+read=empty timed_out=yes bounded=yes ticks=4
+false bounded=yes ticks=3
+done

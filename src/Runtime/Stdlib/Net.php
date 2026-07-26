@@ -1022,15 +1022,44 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
  */
 function stream_socket_accept(\Resource $server, ?float $timeout = null)
 {
-    if ($timeout === null && \Runtime\AsyncHook::active()) {
+    if (\Runtime\AsyncHook::active()) {
+        // ⚠ The LISTENER itself must be O_NONBLOCK under a scheduler. accept(2) on
+        // an idle BLOCKING listener blocks the whole PROCESS — every timer, every
+        // other connection and the signal pump with it — and this path attempts an
+        // accept before it ever parks. A listener is usually created before async()
+        // starts, so nothing else can have done it: it is the accept site's job.
+        if ($server->blocking) {
+            \__mc_fd_nonblock($server->addr);
+            $server->blocking = false;
+        }
         // Netpoller: suspend on the listener until readable, then accept. Loop — a
         // prefork sibling can take the connection between the wake and our accept
         // (the listener is non-blocking, so a lost race is EWOULDBLOCK, not a stall).
-        $h = \Runtime\AsyncHook::readable();
+        // A $timeout is honoured by the reactor's BOUNDED wait; it used to fall into
+        // the branch below, whose poll(2) blocked the whole scheduler. The deadline
+        // is absolute, so a re-park after a lost race cannot extend it.
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-        while ($fd < 0) {
-            $h($server);
-            $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+        if ($fd < 0 && $timeout !== null && $timeout >= 0.0) {
+            $hf = \Runtime\AsyncHook::readableFor();
+            $deadline = \__mc_microtime_f() + $timeout;
+            while ($fd < 0) {
+                $left = $deadline - \__mc_microtime_f();
+                if ($left <= 0.0) {
+                    return false;
+                }
+                // `=== true`: the hook is an untyped slot, so its result arrives as
+                // a tagged cell and is read by tag, never as a raw word.
+                if ($hf($server, $left) !== true) {
+                    return false;
+                }
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+            }
+        } else {
+            $h = \Runtime\AsyncHook::readable();
+            while ($fd < 0) {
+                $h($server);
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+            }
         }
     } else {
         if ($timeout !== null && $timeout >= 0.0) {
