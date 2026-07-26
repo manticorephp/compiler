@@ -3751,9 +3751,26 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  get_class($o) — the operand's class name. Uses
      * the static type (matches `::class`); the compiler's lone call site
      * has a precisely-typed receiver. */
+    /** A receiver whose static type names no class but which DOES hold one at
+     *  run time: a cell / mixed / union slot, or a classless `object` hint. */
+    private function getClassReceiverIsErased(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN
+            || $k === Type::KIND_UNION || $k === Type::KIND_OBJ;
+    }
+
     private function biGetClass(array $args): string
     {
-        $cls = $args[0]->type->class ?? '';
+        // NEVER read `->class` off a non-obj type here. A `?string` property
+        // holding null does NOT read back as null under the self-host, so the
+        // `?? ''` did not fire on a cell/unknown receiver and `$cls` came back
+        // as garbage — non-empty, matching no class, so the candidate set was
+        // empty and get_class() emitted the empty string as a LITERAL. Green
+        // under Zend, wrong in every self-built compiler. Decide on the KIND.
+        $t = $args[0]->type;
+        $erased = $this->getClassReceiverIsErased($t);
+        $cls = $erased ? '' : ($t->class ?? '');
         // Candidate runtime classes = every class that IS-A $cls — extends AND
         // implements. selfAndDescendants only walks `parent`, so an INTERFACE
         // static type (e.g. `Throwable`, from a catch var or a `: Throwable`
@@ -3766,10 +3783,21 @@ trait EmitLlvmBuiltins
             foreach ($this->classes as $cd) {
                 if ($cd->name !== $cls && $this->classIsA($cd->name, $cls)) { $cands[] = $cd->name; }
             }
+        } elseif ($erased) {
+            // An ERASED receiver — a cell / mixed / `object|string` param, a
+            // classless `object` hint. `type->class` is null there, and the
+            // `?? ''` used to fall straight through to the monomorphic path,
+            // which emits the STATIC name as a literal: get_class() returned the
+            // EMPTY STRING for every such receiver, silently. Nothing about it
+            // is unknowable at run time — the object header carries the class_id
+            // — so switch over every class exactly like a polymorphic receiver.
+            foreach ($this->classes as $cd) { $cands[] = $cd->name; }
         }
         // Unknown class, or a monomorphic one (no subclass) — the static type
-        // is exact, so emit the name literal directly.
-        if (\count($cands) <= 1) {
+        // is exact, so emit the name literal directly. An ERASED receiver never
+        // qualifies, whatever the candidate count: its static type names no
+        // class, so the literal would be the empty string.
+        if (!$erased && \count($cands) <= 1) {
             $out = $this->emitNode($args[0]);
             $this->lastValue = $this->strLitId($this->pool->intern($this->displayClassName($cls)));
             $this->lastValueType = 'ptr';
@@ -3780,7 +3808,10 @@ trait EmitLlvmBuiltins
         // runtime class, not the static type — matters inside an inherited
         // method on a subclass instance).
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        // A boxed receiver carries the NaN tag — mask it off before the header
+        // read, or the class_id load dereferences the tag bits.
+        $out .= $args[0]->type->kind === Type::KIND_CELL
+            ? $this->cellToPtr() : $this->coerceToPtr();
         $objp = $this->lastValue;
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
@@ -3993,7 +4024,12 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsStrcmp = true;
         $out = $this->emitNode($arg);
-        $out .= $this->coerceToPtr();
+        // The name can arrive NaN-BOXED — `class_exists($n)` where `$n` came out
+        // of a cell slot (`is_object($x) ? get_class($x) : $x` on a
+        // `object|string` param is the canonical shape). coerceToPtr would
+        // inttoptr the tag bits and __mc_refl_find would walk a bogus pointer.
+        $out .= $arg->type->kind === Type::KIND_CELL
+            ? $this->cellToPtr() : $this->coerceToPtr();
         $h = $this->ssa->allocReg();
         $out .= '  ' . $h . ' = call i64 @__mc_refl_find(ptr ' . $this->lastValue . ")\n";
         $found = $this->ssa->allocReg();
