@@ -108,6 +108,23 @@ final class InsertMemoryOps implements Pass
         $this->rcObjOrder = [];
         $this->rcObjType = [];
 
+        // A PARAMETER slot is never a scope-exit release candidate. Unlike an
+        // ordinary local it is NOT null-inited — it arrives holding the CALLER's
+        // value — so the "release on null is a no-op" safety net that makes a
+        // conditionally-assigned local safe does not apply. A param reassigned
+        // on only SOME path (`if (!is_array($r)) { $r = [$r]; }`) then had its
+        // slot released at scope exit, freeing the caller's still-live array:
+        // a use-after-free / double-free, and a hard SIGSEGV for
+        // array_splice's `mixed $replacement = []`.
+        //
+        // The conservative direction is a leak, not a free: a param reassigned
+        // to a fresh array on every path keeps that array alive to the end of
+        // the process instead of being freed at scope exit.
+        foreach ($fn->params as $p) {
+            $this->blocked[$p->name] = true;
+            $this->rcObjBlocked[$p->name] = true;
+        }
+
         $this->scanStores($fn->body);
 
         // Per-local releases for rc-mode confined allocations.

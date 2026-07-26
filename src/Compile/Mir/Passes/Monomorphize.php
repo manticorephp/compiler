@@ -257,10 +257,21 @@ final class Monomorphize implements Pass
         $clones = [];
         foreach ($keyToCall as $key => $repCall) {
             $specName = $fn->name . '$mono$' . $key;
+            // Already minted in an earlier ROUND — re-point this site at it, but
+            // do NOT clone a second body. A RECURSIVE function keeps a call to
+            // itself inside the original, so the next round re-derives the very
+            // same key and emitted a duplicate definition: clang rejected
+            // `array_walk_recursive$mono$p1_obj___closure_1` with "invalid
+            // redefinition".
+            if (isset($this->fnByName[$specName])) {
+                $keyToName[$key] = $specName;
+                continue;
+            }
             $clone = $this->cloneWith($fn, $specName, $repCall, $dims);
             if ($clone === null) { return []; }
             $keyToName[$key] = $specName;
             $clones[] = $clone;
+            $this->fnByName[$specName] = $clone;
         }
 
         // DEFER repointing to the end of the round (applied in runOnce). A

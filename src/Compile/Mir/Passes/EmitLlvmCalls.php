@@ -469,7 +469,15 @@ trait EmitLlvmCalls
         // TYPED array (an array_map-style callback) still gets the raw array it
         // expects, so cellifying blindly (which crashed self-host) is avoided.
         $known = $fn !== '' && isset($this->closureCaptures[$fn]);
+        // A closure's params are PREFIXED by its captures (EmitLlvmModule emits
+        // `ptr %env` plus params[capCnt..]), and every sig mask — paramTypes,
+        // refParams — is index-parallel to that FULL list. The argument at
+        // position $pi is therefore params[$capCnt + $pi]; indexing from 0 read
+        // a CAPTURE's type instead, so every boxing decision below was made
+        // against the wrong param for any closure that captures anything.
+        $capCnt = $known ? ($this->closureCaptures[$fn] ?? 0) : 0;
         $calleeParams = $known ? ($this->sigs->paramTypes[$fn] ?? []) : [];
+        $calleeRefs = $known ? ($this->sigs->refParams[$fn] ?? []) : [];
         // A `...$arr` spread into a DYNAMIC closure (concrete __closure_N lost ⇒
         // arity unknown, e.g. a `callable`/`\Closure` param): the fixed-arity
         // fill below can't apply. Route to a trampoline that switches on the
@@ -500,7 +508,8 @@ trait EmitLlvmCalls
                 $out .= $this->coerceToPtr();
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
-                $nparams = \count($calleeParams);
+                // Declared ARGUMENT arity — the captures are not call slots.
+                $nparams = \count($calleeParams) - $capCnt;
                 $base = $pi;
                 while ($pi < $nparams) {
                     $ev = $this->ssa->allocReg();
@@ -519,8 +528,34 @@ trait EmitLlvmCalls
                 }
                 continue;
             }
+            // A BY-REF callback param (`array_walk($a, function (&$v) {...})`)
+            // takes the ADDRESS of the caller's slot, exactly like the named-call
+            // path below: the closure body stores `%arg.<name>` raw and treats it
+            // as a ref-local, so handing it a boxed VALUE made it dereference
+            // NaN-boxed tag bits. Without this the callee's writes vanished (a
+            // silently dropped mutation) or crashed.
+            if (($calleeRefs[$capCnt + $pi] ?? false)) {
+                if ($this->isByRefAddressable($a)) {
+                    $out .= $this->byRefAddrOf($a);
+                } else {
+                    // Not an lvalue — back it with a throwaway slot so the
+                    // callee's write lands somewhere (PHP discards it).
+                    $tmp = $this->ssa->allocReg();
+                    $out .= '  ' . $tmp . " = alloca i64\n";
+                    $out .= $this->emitNode($a);
+                    $out .= $this->coerceToI64();
+                    $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+                    $addr = $this->ssa->allocReg();
+                    $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                    $this->lastValue = $addr;
+                }
+                $argList .= ', i64 ' . $this->lastValue;
+                $argTypes .= ', i64';
+                $pi = $pi + 1;
+                continue;
+            }
             $out .= $this->emitNode($a);
-            $pt = $calleeParams[$pi] ?? null;
+            $pt = $calleeParams[$capCnt + $pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
             // (cell/unknown). A dynamic callee (`callable`) can't be gated — its
             // param might be a TYPED array (an array_map-style callback) that

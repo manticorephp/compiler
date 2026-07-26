@@ -1,0 +1,27 @@
+Array
+(
+    [a] => 10
+    [b] => 20
+    [c] => 30
+)
+Array
+(
+    [x] => 3
+    [y] => 6
+)
+60
+#x=3 #y=6 
+p:1 q:2 plain:3 f:4 
+Array
+(
+    [blue] => 2
+)
+Array
+(
+    [GREEN] => 1
+    [Red] => 3
+)
+Array
+(
+    [blue] => 2
+)

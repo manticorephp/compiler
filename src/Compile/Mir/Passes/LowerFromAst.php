@@ -1705,6 +1705,20 @@ final class LowerFromAst implements Pass
     private function lowerFcc(string $fnName): Node
     {
         $decl = $this->fnDecls[$fnName] ?? null;
+        // A stdlib extern is registered under its FQN (`Runtime\Libc\strcasecmp`)
+        // with only a bare-name ALIAS, so the bare lookup above misses and the
+        // unary fallback below built `fn($a) => strcasecmp($a)` for a
+        // two-parameter function. The wrapper then took ONE arg while the
+        // comparator was invoked with two — array_diff_ukey($a,$b,'strcasecmp')
+        // SIGSEGV'd. Resolve through the same alias path the BODY call uses.
+        $target = $fnName;
+        if ($decl === null) {
+            $resolved = $this->resolveCallName($fnName);
+            if ($resolved !== $fnName && isset($this->fnDecls[$resolved])) {
+                $decl = $this->fnDecls[$resolved];
+                $target = $resolved;
+            }
+        }
         if ($decl === null) {
             // Builtin / unknown target — best-effort unary wrapper closure
             // `fn($a) => name($a)`. Covers scalar builtins (strtoupper/strlen/
@@ -1719,7 +1733,7 @@ final class LowerFromAst implements Pass
             $callArgs[] = new LoadLocal($p->name, $this->lowerTypeHint($p->typeHint));
         }
         $ret = $this->lowerTypeHint($decl->returnType);
-        $call = new Call($fnName, $callArgs, $ret);
+        $call = new Call($target, $callArgs, $ret);
         $body = new Block([new Return_($call, Type::void())], Type::void());
         return $this->finishClosure([], $decl->params, $body, $decl->returnType);
     }

@@ -27,24 +27,16 @@
  *    array_map/usort live in the prelude.
  *
  * ⚠ STATUS — this file is WORK IN PROGRESS, do NOT merge it as done.
- * Verified against php:  array_diff_assoc · array_intersect_assoc (case
- * array_assoc_set_ops) · array_all · array_any · array_find · array_find_key ·
- * array_change_key_case (case array_predicate_case) · array_walk with a
- * BY-VALUE callback.
- * KNOWN BROKEN, each with its cause:
- *  - array_splice — SIGSEGV. A by-ref `array &$arr` prelude param cannot be
- *    narrowed per call site (InferScans::scanCallSiteRefParams, linkonce_odr),
- *    so the whole-array reassignment `$arr = $new` runs against an erased slot.
- *  - array_diff_ukey / array_intersect_ukey — SIGSEGV. The comparator crosses
- *    the closure ABI: EmitLlvmCalls::emitInvoke boxes every argument and never
- *    consults the callee's by-ref/param mask, and indexes paramTypes from 0
- *    while a closure's params are prefixed by its captures.
- *  - array_walk_recursive — clang "invalid redefinition of
- *    array_walk_recursive$mono$p1_obj___closure_1": a RECURSIVE prelude fn with
- *    a callable dimension emits its mono clone twice (Monomorphize repoints the
- *    self-call into the clone being cloned).
- *  - array_walk with a `&$value` callback silently drops the mutation (see the
- *    TODO on the function itself).
+ * Verified against php: array_diff_assoc · array_intersect_assoc · array_all ·
+ * array_any · array_find · array_find_key · array_change_key_case ·
+ * array_diff_ukey · array_intersect_ukey (string-name AND closure comparators) ·
+ * array_walk (by-value AND `&$value` callbacks) · array_walk_recursive.
+ * NOT HERE YET, each blocked on a named compiler root cause:
+ *  - array_splice — the in-place rebuild appends the replacement into an erased
+ *    by-ref array, and a raw string element lands unboxed (prints as a pointer).
+ *    Needs the store-side repr fix: an erased element store must stamp/box.
+ *  - array_replace_recursive / array_merge_recursive — a recursive self-call
+ *    re-enters with a cell-typed arg, so the erased body stays live.
  */
 
 /**
@@ -123,38 +115,6 @@ function array_intersect_ukey(array $arr, array $arr2, callable $cb): array
         }
     }
     return $out;
-}
-
-/**
- * `array_splice(&$arr, offset, length, replacement)` — remove `$length` entries
- * at `$offset` (negative counts from the end; null length ⇒ to the end), splice
- * in `$replacement`, REINDEX. Returns the removed slice. List semantics; numeric
- * keys are renumbered as PHP does.
- * @param mixed[] $arr
- * @return mixed[]
- */
-function array_splice(array &$arr, int $offset, ?int $length = null, mixed $replacement = []): array
-{
-    $vals = array_values($arr);
-    $n = count($vals);
-    if ($offset < 0) { $offset = $n + $offset; if ($offset < 0) { $offset = 0; } }
-    elseif ($offset > $n) { $offset = $n; }
-    if ($length === null) { $len = $n - $offset; }
-    elseif ($length < 0) { $len = $n + $length - $offset; if ($len < 0) { $len = 0; } }
-    else { $len = $length; }
-    if ($offset + $len > $n) { $len = $n - $offset; }
-    if (!\is_array($replacement)) { $replacement = [$replacement]; }
-    $removed = [];
-    $i = $offset;
-    while ($i < $offset + $len) { $removed[] = $vals[$i]; $i = $i + 1; }
-    $new = [];
-    $i = 0;
-    while ($i < $offset) { $new[] = $vals[$i]; $i = $i + 1; }
-    foreach ($replacement as $rv) { $new[] = $rv; }
-    $i = $offset + $len;
-    while ($i < $n) { $new[] = $vals[$i]; $i = $i + 1; }
-    $arr = $new;
-    return $removed;
 }
 
 /**
