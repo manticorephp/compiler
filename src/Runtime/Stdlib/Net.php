@@ -253,13 +253,25 @@ function __mc_so_error(int $fd): int
  * marked closed before it dies — otherwise it would close the fd we just
  * connected.
  */
-function __mc_await_connect(int $fd): int
+function __mc_await_connect(int $fd, float $timeout = 0.0): int
 {
     $tmp = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
-    $w = \Runtime\AsyncHook::writable();
-    $w($tmp);
+    // BOUNDED: a connect(2) to a black-holed address completes never, and an
+    // unbounded park held the fiber forever while the caller's own timeout
+    // (fsockopen's 5th argument) was silently ignored. 0.0 = "no explicit
+    // timeout" → php's default_socket_timeout of 60 s, the same floor the read
+    // path uses.
+    $secs = $timeout > 0.0 ? $timeout : 60.0;
+    $wf = \Runtime\AsyncHook::writableFor();
+    $ok = $wf($tmp, $secs) === true;
     $c = \Runtime\AsyncHook::closer();
     $c($tmp);
+    if (!$ok) {
+        $tmp->closed = true;
+        $tmp->addr = 0;
+        \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+        return -1;
+    }
     $e = \__mc_so_error($fd);
     // Detach BEFORE the temp dies: __destruct closes an open handle, and this fd
     // belongs to the caller.
@@ -348,7 +360,7 @@ function __mc_resolve_async(string $host): string
     return '';
 }
 
-function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
+function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $timeout = 0.0)
 {
     // $wantType is the socket type to select from the resolver's list: 1
     // SOCK_STREAM (tcp), 2 SOCK_DGRAM (udp) — both values are the same on every
@@ -410,7 +422,7 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
                 }
                 $rc = \Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen);
                 if ($rc !== 0 && $async && \__mc_errno() === \__mc_sock_const(12)) {
-                    $rc = \__mc_await_connect($cand);
+                    $rc = \__mc_await_connect($cand, $timeout);
                 }
                 if ($rc === 0) {
                     $fd = $cand;
@@ -452,9 +464,9 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
  *
  * @return \Resource|false
  */
-function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool $verifyName = true)
+function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool $verifyName = true, float $timeout = 0.0)
 {
-    $sock = \__mc_tcp_connect($host, $port);
+    $sock = \__mc_tcp_connect($host, $port, 1, $timeout);
     if ($sock === false) {
         return false;
     }
@@ -463,7 +475,7 @@ function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool
     // handshake (which mutates the resource) MUST run through a \Resource-typed
     // parameter so codegen unboxes to a real object handle. Same funnel Ф3 uses
     // for __mc_http_read_response.
-    if (!\__mc_tls_handshake($sock, $host, $verifyPeer, $verifyName)) {
+    if (!\__mc_tls_handshake($sock, $host, $verifyPeer, $verifyName, $timeout)) {
         \fclose($sock);
         return false;
     }
@@ -484,31 +496,41 @@ function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool
  * handshake overlap with every other task instead of stalling the loop.
  * Returns SSL_connect's final code (1 = connected).
  */
-function __mc_tls_drive_connect(\Resource $sock, int $ssl): int
+function __mc_tls_drive_connect(\Resource $sock, int $ssl, float $timeout = 0.0): int
 {
     $rc = \Runtime\Openssl\connect($ssl);
     if ($rc === 1 || !\Runtime\AsyncHook::active()) {
         return $rc;
     }
-    // Bounded only by the peer: a handshake flight always ends in readable or
-    // writable readiness, and a dead peer surfaces as a hard SSL error below.
+    // BOUNDED by an absolute deadline, not "by the peer". A peer that completes the
+    // TCP handshake and then goes silent mid-flight produces neither readiness nor
+    // an SSL error, so the old loop parked forever — a trivial way to wedge a
+    // client. 0.0 = no explicit timeout → the same 60 s default_socket_timeout
+    // floor the connect and read paths use.
+    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $rf = \Runtime\AsyncHook::readableFor();
+    $wf = \Runtime\AsyncHook::writableFor();
     while ($rc !== 1) {
         $err = \Runtime\Openssl\getError($ssl, $rc);
-        if ($err === 2) {
-            $h = \Runtime\AsyncHook::readable();
-            $h($sock);
-        } elseif ($err === 3) {
-            $h = \Runtime\AsyncHook::writable();
-            $h($sock);
-        } else {
+        if ($err !== 2 && $err !== 3) {
             return $rc;   // a real handshake failure (bad chain, wrong host, reset)
+        }
+        $left = $deadline - \__mc_microtime_f();
+        if ($left <= 0.0) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $ready = $err === 2 ? $rf($sock, $left) : $wf($sock, $left);
+        if ($ready !== true) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
         }
         $rc = \Runtime\Openssl\connect($ssl);
     }
     return $rc;
 }
 
-function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = true, bool $verifyName = true): bool
+function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = true, bool $verifyName = true, float $timeout = 0.0): bool
 {
     $method = \Runtime\Openssl\clientMethod();   // highest TLS the peer offers
     if ($method === 0) {
@@ -540,7 +562,7 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
         \Runtime\Openssl\set1Host($ssl, $host);
     }
     if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1
-        || \__mc_tls_drive_connect($sock, $ssl) !== 1) {
+        || \__mc_tls_drive_connect($sock, $ssl, $timeout) !== 1) {
         \Runtime\Openssl\sslFree($ssl);   // does not touch the fd
         return false;
     }
@@ -559,7 +581,7 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
  * toggles ssl.verify_peer / verify_peer_name per-socket.
  * @return \Resource|false
  */
-function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resource $context = null)
+function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resource $context = null, float $timeout = 0.0)
 {
     if ($scheme === 'ssl' || $scheme === 'tls') {
         // A context now toggles verification per-socket (defaults on, matching php).
@@ -571,13 +593,13 @@ function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resou
             $vp = $f[0];
             $vn = $f[1];
         }
-        return \__mc_tls_connect($host, $port, $vp, $vn);
+        return \__mc_tls_connect($host, $port, $vp, $vn, $timeout);
     }
     if ($scheme === 'tcp' || $scheme === '') {
-        return \__mc_tcp_connect($host, $port);
+        return \__mc_tcp_connect($host, $port, 1, $timeout);
     }
     if ($scheme === 'udp') {
-        return \__mc_tcp_connect($host, $port, 2);   // 2 = SOCK_DGRAM
+        return \__mc_tcp_connect($host, $port, 2, $timeout);   // 2 = SOCK_DGRAM
     }
     if ($scheme === 'unix') {
         return \__mc_unix_connect($host);            // $host carries the path
@@ -816,7 +838,8 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
         $error_message = 'no port specified';
         return false;
     }
-    $sock = \__mc_transport_connect($scheme, $host, $port);
+    $sock = \__mc_transport_connect($scheme, $host, $port, null,
+                                    $timeout === null ? 0.0 : (float)$timeout);
     if ($sock === false) {
         // Report the real errno + strerror, as php does — a closed port gives
         // ECONNREFUSED / "Connection refused". Falls back to a generic message
@@ -885,7 +908,10 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
     }
-    $sock = \__mc_transport_connect($scheme, $host, $port, $context);
+    // $timeout is php's connect timeout; under a scheduler it now bounds the
+    // non-blocking connect AND the TLS handshake (both used to park forever).
+    $sock = \__mc_transport_connect($scheme, $host, $port, $context,
+                                    $timeout === null ? 0.0 : (float)$timeout);
     if ($sock === false) {
         $e = \__mc_net_errno(false, 0);
         $error_code = $e;

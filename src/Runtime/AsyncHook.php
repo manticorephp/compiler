@@ -28,15 +28,18 @@ final class AsyncHook
     public static mixed $waitWritable = null;
     public static mixed $onClose = null;
     public static mixed $waitReadableFor = null;
+    public static mixed $waitWritableFor = null;
     public static mixed $sleeper = null;
 
     public static function install(mixed $waitReadable, mixed $waitWritable, mixed $onClose,
-                                   mixed $waitReadableFor, mixed $sleeper): void
+                                   mixed $waitReadableFor, mixed $waitWritableFor,
+                                   mixed $sleeper): void
     {
         self::$waitReadable = $waitReadable;
         self::$waitWritable = $waitWritable;
         self::$onClose = $onClose;
         self::$waitReadableFor = $waitReadableFor;
+        self::$waitWritableFor = $waitWritableFor;
         self::$sleeper = $sleeper;
     }
 
@@ -46,6 +49,7 @@ final class AsyncHook
         self::$waitWritable = null;
         self::$onClose = null;
         self::$waitReadableFor = null;
+        self::$waitWritableFor = null;
         self::$sleeper = null;
     }
 
@@ -60,6 +64,8 @@ final class AsyncHook
     public static function closer(): mixed { return self::$onClose; }
     /** Bounded readable wait: `fn(\Resource, float $seconds): bool`. */
     public static function readableFor(): mixed { return self::$waitReadableFor; }
+    /** Bounded writable wait: `fn(\Resource, float $seconds): bool`. */
+    public static function writableFor(): mixed { return self::$waitWritableFor; }
     /** Fiber-aware sleep: `fn(float $seconds): void`. */
     public static function sleeper(): mixed { return self::$sleeper; }
 }
