@@ -1,0 +1,8 @@
+sum: 42
+group: 12
+all: 1,2,3
+all-empty: 0
+any: ok
+any-all-fail: e1,e2
+previous: e1
+done

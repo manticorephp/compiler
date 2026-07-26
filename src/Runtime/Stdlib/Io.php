@@ -393,6 +393,25 @@ function __mc_stream_fill(\Resource $s, int $want): int
         return 0;   // timed out — do not block on recv
     }
     $got = __mc_transport_recv($s, $buf, $want);
+    // TLS on a non-blocking fd: SSL_read returns <= 0 with SSL_ERROR_WANT_READ (2)
+    // / WANT_WRITE (3) whenever a record is only partly on the wire. That is NOT
+    // end-of-stream — reporting 0 here truncated the response at a record
+    // boundary. Park on the reactor and read the rest.
+    if ($got <= 0 && $s->kind === \Resource::KIND_TLS && \Runtime\AsyncHook::active()) {
+        while ($got <= 0) {
+            $err = \Runtime\Openssl\getError($s->ssl, $got);
+            if ($err === 2) {
+                $h = \Runtime\AsyncHook::readable();
+                $h($s);
+            } elseif ($err === 3) {
+                $h = \Runtime\AsyncHook::writable();
+                $h($s);
+            } else {
+                break;   // clean shutdown (SSL_ERROR_ZERO_RETURN) or a hard error
+            }
+            $got = __mc_transport_recv($s, $buf, $want);
+        }
+    }
     if ($got > 0) {
         __mc_buf_compact($s);
         $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);

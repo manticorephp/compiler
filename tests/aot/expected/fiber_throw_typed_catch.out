@@ -1,0 +1,4 @@
+typed catch: injected
+bool(true)
+ret
+resumer typed catch: from fiber

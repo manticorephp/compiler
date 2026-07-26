@@ -208,6 +208,66 @@ function __mc_sock_error(int $fd): int
  *
  * @return \Resource|false
  */
+/** Put $fd in O_NONBLOCK. False if either fcntl failed. */
+function __mc_fd_nonblock(int $fd): bool
+{
+    $fl = \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(6), 0);
+    if ($fl < 0) {
+        return false;
+    }
+    return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5)) >= 0;
+}
+
+/**
+ * SO_ERROR on $fd — 0 once a non-blocking connect(2) has completed cleanly, the
+ * failing errno otherwise. The errno-free way to collect an async connect's
+ * outcome (errno itself belongs to the poll, not to the connect).
+ */
+function __mc_so_error(int $fd): int
+{
+    $val = \Runtime\Libc\calloc(1, 4);
+    if ($val === null) {
+        return -1;
+    }
+    $len = \Runtime\Libc\calloc(1, 4);
+    if ($len === null) {
+        \Runtime\Libc\free($val);
+        return -1;
+    }
+    \poke_i32($len, 0, 4);
+    $rc = \Runtime\Libc\sys_getsockopt($fd, \__mc_sock_const(0), \__mc_sock_const(1), $val, $len);
+    $e = $rc === 0 ? \peek_i32($val, 0) : -1;
+    \Runtime\Libc\free($val);
+    \Runtime\Libc\free($len);
+    return $e;
+}
+
+/**
+ * Finish an in-flight non-blocking connect: park the fiber until the fd is
+ * writable (the kernel's completion signal), then read SO_ERROR. Returns 0 on a
+ * connected socket, -1 otherwise. Only ever called under AsyncHook.
+ *
+ * The temporary \Resource is just a handle for the reactor (StreamPollHandle
+ * reads ->addr); the watcher is dropped again right after so the real stream
+ * registers cleanly. \Resource::__destruct closes an OPEN handle, so the temp is
+ * marked closed before it dies — otherwise it would close the fd we just
+ * connected.
+ */
+function __mc_await_connect(int $fd): int
+{
+    $tmp = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    $w = \Runtime\AsyncHook::writable();
+    $w($tmp);
+    $c = \Runtime\AsyncHook::closer();
+    $c($tmp);
+    $e = \__mc_so_error($fd);
+    // Detach BEFORE the temp dies: __destruct closes an open handle, and this fd
+    // belongs to the caller.
+    $tmp->closed = true;
+    $tmp->addr = 0;
+    return $e === 0 ? 0 : -1;
+}
+
 function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
 {
     // $wantType is the socket type to select from the resolver's list: 1
@@ -232,6 +292,11 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
         return false;
     }
 
+    // Under a scheduler the handshake must not stall the loop: the socket goes
+    // non-blocking BEFORE connect(2), EINPROGRESS parks the fiber on writability
+    // and SO_ERROR reports the outcome. Two spawned file_get_contents('https://…')
+    // then overlap their connects instead of serialising on them.
+    $async = \Runtime\AsyncHook::active();
     $fd = -1;
     $ai = $head;
     while ($ai !== 0) {
@@ -247,7 +312,14 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
                 // ai_canonname, so a wrong table passes a char* here).
                 $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $addrLen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
-                if (\Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen) === 0) {
+                if ($async) {
+                    \__mc_fd_nonblock($cand);
+                }
+                $rc = \Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen);
+                if ($rc !== 0 && $async && \__mc_errno() === \__mc_sock_const(12)) {
+                    $rc = \__mc_await_connect($cand);
+                }
+                if ($rc === 0) {
                     $fd = $cand;
                     break;
                 }
@@ -266,6 +338,9 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     // derefs the boxed handle) so a deferred STARTTLS has an SNI + verify target.
     $r = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
     $r->host = $host;
+    if ($async) {
+        $r->blocking = false;   // the fd went O_NONBLOCK above; keep the flag honest
+    }
     return $r;
 }
 
@@ -308,6 +383,38 @@ function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool
  * failure (the caller closes the fd). $sock is \Resource-typed on purpose — see
  * the warning in __mc_tls_connect.
  */
+/**
+ * Drive SSL_connect to completion. On a blocking fd that is a single call; on a
+ * non-blocking one (i.e. under a scheduler) OpenSSL returns <= 0 with
+ * SSL_ERROR_WANT_READ (2) / SSL_ERROR_WANT_WRITE (3) between handshake flights,
+ * and each of those is a park on the reactor — so the two RTTs of a TLS
+ * handshake overlap with every other task instead of stalling the loop.
+ * Returns SSL_connect's final code (1 = connected).
+ */
+function __mc_tls_drive_connect(\Resource $sock, int $ssl): int
+{
+    $rc = \Runtime\Openssl\connect($ssl);
+    if ($rc === 1 || !\Runtime\AsyncHook::active()) {
+        return $rc;
+    }
+    // Bounded only by the peer: a handshake flight always ends in readable or
+    // writable readiness, and a dead peer surfaces as a hard SSL error below.
+    while ($rc !== 1) {
+        $err = \Runtime\Openssl\getError($ssl, $rc);
+        if ($err === 2) {
+            $h = \Runtime\AsyncHook::readable();
+            $h($sock);
+        } elseif ($err === 3) {
+            $h = \Runtime\AsyncHook::writable();
+            $h($sock);
+        } else {
+            return $rc;   // a real handshake failure (bad chain, wrong host, reset)
+        }
+        $rc = \Runtime\Openssl\connect($ssl);
+    }
+    return $rc;
+}
+
 function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = true, bool $verifyName = true): bool
 {
     $method = \Runtime\Openssl\clientMethod();   // highest TLS the peer offers
@@ -340,7 +447,7 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
         \Runtime\Openssl\set1Host($ssl, $host);
     }
     if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1
-        || \Runtime\Openssl\connect($ssl) !== 1) {
+        || \__mc_tls_drive_connect($sock, $ssl) !== 1) {
         \Runtime\Openssl\sslFree($ssl);   // does not touch the fd
         return false;
     }
