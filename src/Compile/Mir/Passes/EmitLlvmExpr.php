@@ -3729,8 +3729,13 @@ trait EmitLlvmExpr
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr(i64 '
                  . $this->lastValue . ")\n";
-            $this->lastValue = $r;
-            $this->lastValueType = 'ptr';
+            // Hand back an i64 like the plain strip did: this helper serves
+            // every cell→string boundary, and a `return` site stores the result
+            // straight into an i64 slot without coercing.
+            $ri = $this->ssa->allocReg();
+            $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
+            $this->lastValue = $ri;
+            $this->lastValueType = 'i64';
             return $out;
         }
         if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ) {

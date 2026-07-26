@@ -362,6 +362,32 @@ trait EmitLlvmControl
         return $out;
     }
 
+    /** Does this foreach's body `unset()` an element of the very local it walks?
+     *  Syntactic and deliberately narrow — the snapshot copy it triggers costs
+     *  an allocation, so only the shape that actually needs it pays. */
+    private function foreachBodyUnsetsBase(Foreach_ $fe): bool
+    {
+        if ($fe->array->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        return $this->nodeUnsetsLocalElem($fe->body, $fe->array->name);
+    }
+
+    private function nodeUnsetsLocalElem(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach ($n->targets as $t) {
+                if ($t->kind === Node::KIND_ARRAY_ACCESS
+                    && $t->array->kind === Node::KIND_LOAD_LOCAL
+                    && $t->array->name === $name) {
+                    return true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->nodeUnsetsLocalElem($c, $name)) { return true; }
+        }
+        return false;
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
@@ -390,6 +416,18 @@ trait EmitLlvmControl
             $out .= $this->coerceToPtr();
         }
         $arr = $this->lastValue;
+        // `foreach ($a as $k => $v) { … unset($a[$k]); … }` — PHP iterates a
+        // SNAPSHOT of a by-value foreach, so the deletions do not disturb the
+        // walk. That is not free here: an unset on a packed buffer promotes it
+        // to the hashed layout, which RELOCATES, and the loop would keep
+        // walking the freed base. Copy up front for this shape only; the copy
+        // is a bounded leak (conservative direction — never free a buffer the
+        // body may still hand out).
+        if ($this->foreachBodyUnsetsBase($fe)) {
+            $snap = $this->ssa->allocReg();
+            $out .= '  ' . $snap . ' = call ptr @__mir_array_copy(ptr ' . $arr . ")\n";
+            $arr = $snap;
+        }
         // Empty vec/assoc literals lower to a null ptr; reading the length
         // word from null faults. Redirect a null base to a shared zero word
         // so `len` reads 0 and the loop body is skipped entirely. A non-array

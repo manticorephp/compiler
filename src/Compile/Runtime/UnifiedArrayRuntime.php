@@ -88,6 +88,7 @@ final class UnifiedArrayRuntime
         $this->emitIssetStr();
         $this->emitUnsetStr();
         $this->emitUnsetInt();
+        $this->emitUnsetAt();
         $this->emitCopy();
         $this->emitCopyDeep();
         $this->emitCopyCells();
@@ -3460,5 +3461,57 @@ final class UnifiedArrayRuntime
             $this->hdr($found, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $found->br($done);
         $done->retVoid();
+    }
+
+    /**
+     * `__mir_array_unset_at(arr, idx) -> ptr` — `unset($a[$i])` including on a
+     * PACKED buffer, returning the (possibly relocated) array.
+     *
+     * A packed buffer has no per-slot key, so it cannot carry a hole, and the
+     * void {@see emitUnsetInt} therefore did nothing at all: `unset($list[1])`
+     * was a silent no-op. PHP leaves a HOLE and never reindexes, which IS the
+     * hashed layout — so promote first, then take the ordinary tombstone
+     * delete. Out-of-range indices promote nothing (an unset of an absent key
+     * is a no-op in PHP too, and promoting there would cost a copy per miss).
+     *
+     * A separate SYMBOL from the void unset_int on purpose: the bundled stdlib
+     * `.o` is compiled by the PREVIOUS generation's binary, so redefining the
+     * existing symbol with a new return type would have one object calling a
+     * void function through a ptr-returning declaration.
+     */
+    private function emitUnsetAt(): void
+    {
+        $fn = $this->module->func('__mir_array_unset_at', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $idx = $fn->param(Type::i64(), 'idx');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $hashed = $fn->block('hashed');
+        $rng = $fn->block('rng');
+        $prom = $fn->block('prom');
+        $done = $fn->block('done');
+        $nuSlot = $e->alloca(Type::ptr(), 'nu');
+        $e->store($arr, $nuSlot);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $hashed, $rng);
+        $hashed->call('__mir_array_unset_int', Type::void(), [$arr, $idx]);
+        $hashed->br($done);
+        // PACKED: only a live index is worth the promote.
+        $len = $rng->load(Type::i64(), $arr);
+        $inRange = $rng->and_(
+            $rng->icmp('sge', $idx, Value::int(Type::i64(), 0)),
+            $rng->icmp('slt', $idx, $len),
+        );
+        $rng->brIf($inRange, $prom, $done);
+        // The promote assumes sole ownership (it frees the packed base), so take
+        // the copy-on-write first: a shared buffer must not be rewritten under
+        // its other holders.
+        $own = $prom->call('__mir_array_cow', Type::ptr(), [$arr]);
+        $nu = $prom->call('__mir_array_promote', Type::ptr(), [$own]);
+        $prom->store($nu, $nuSlot);
+        $prom->call('__mir_array_unset_int', Type::void(), [$nu, $idx]);
+        $prom->br($done);
+        $done->ret($done->load(Type::ptr(), $nuSlot));
     }
 }
