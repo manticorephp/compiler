@@ -404,6 +404,45 @@ trait EmitLlvmExpr
      * int → decimal, float → %.14g, true → "1", false/null → "", ptr →
      * the string itself, array → "Array".
      */
+    /**
+     * `__manticore_cell_to_strptr` — a cell at a typed-`string` boundary.
+     *
+     * ONLY a tagged INT (inline tag 1 / heap tag 5) or BOOL (2) renders — the
+     * kinds whose payload is not a pointer and would arrive as a bare number
+     * (key 0 → NULL). Everything else takes the plain payload strip, which is
+     * what this boundary always did: null must stay a NULL pointer (a `?string`
+     * consumer tests the pointer), an array/object cell is not this function's
+     * business, and — the reason UNTAGGED cannot render — a `cell`-typed slot
+     * often carries a RAW string pointer at runtime (an erased prelude body
+     * hands raw values to an FCC trampoline whose params are declared cell).
+     * An untagged value is indistinguishable from a raw double, so rendering it
+     * would turn every such pointer into a float's decimal form.
+     */
+    private function cellToStrPtrRuntime(): string
+    {
+        $out  = "\ndefine ptr @__manticore_cell_to_strptr(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %ts, 15\n";
+        $out .= "  %e1 = icmp eq i64 %nib, 1\n";
+        $out .= "  %e5 = icmp eq i64 %nib, 5\n";
+        $out .= "  %e2 = icmp eq i64 %nib, 2\n";
+        $out .= "  %o1 = or i1 %e1, %e5\n";
+        $out .= "  %o2 = or i1 %o1, %e2\n";
+        $out .= "  %scalar = and i1 %istag, %o2\n";
+        $out .= "  br i1 %scalar, label %render, label %strip\n";
+        $out .= "strip:\n";
+        $out .= "  %m = and i64 %v, 281474976710655\n";
+        $out .= "  %p = inttoptr i64 %m to ptr\n";
+        $out .= "  ret ptr %p\n";
+        $out .= "render:\n";
+        $out .= "  %s = call ptr @__manticore_tagged_to_str(i64 %v)\n";
+        $out .= "  ret ptr %s\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     private function taggedToStrRuntime(): string
     {
         $this->rt->needsIntStr = true;
@@ -3677,8 +3716,24 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
-        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_STRING
-            || $pk === Type::KIND_OBJ) {
+        if ($pk === Type::KIND_STRING) {
+            // A cell reaching a STRING consumer need not HOLD a string: the keys
+            // of a mixed-key array come back from array_keys as cells, and an
+            // int key handed to `strcasecmp(string,string)` (array_diff_uassoc's
+            // comparator) arrived as the bare payload — 0 for key 0, i.e. a NULL
+            // pointer the callee dereferenced. Render the scalar tags; keep the
+            // plain strip for everything pointer-shaped, so a null `?string` stays
+            // NULL and an object/array cell is untouched.
+            $this->rt->needsCellToStrPtr = true;
+            $this->rt->needsTaggedToStr = true;
+            $r = $this->ssa->allocReg();
+            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr(i64 '
+                 . $this->lastValue . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;

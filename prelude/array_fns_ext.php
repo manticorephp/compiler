@@ -118,6 +118,166 @@ function array_intersect_ukey(array $arr, array $arr2, callable $cb): array
 }
 
 /**
+ * `array_udiff(arr, arr2, cb)` — entries of `$arr` whose VALUE matches no value
+ * of `$arr2` under the user comparator (`$cb($v1,$v2) === 0` ⇒ equal).
+ *
+ * PHP declares the u* family variadic with the callbacks last
+ * (`array_udiff(array $array, array ...$arrays, callable $cb)`); the TWO-array
+ * form is what this file implements throughout, like array_diff_ukey above —
+ * a callback inside a variadic pack never reaches Monomorphize's callable
+ * dimension, so it would degrade to a dynamic invoke.
+ */
+function array_udiff(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($arr2 as $ov) {
+            if ($cb($value, $ov) === 0) { $found = true; break; }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_uintersect(arr, arr2, cb)` — entries of `$arr` whose VALUE matches some
+ * value of `$arr2` under the user comparator.
+ */
+function array_uintersect(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        foreach ($arr2 as $ov) {
+            if ($cb($value, $ov) === 0) { $out[$key] = $value; break; }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_udiff_assoc(arr, arr2, cb)` — keys are compared internally, values with
+ * the user comparator: keep an entry unless `$arr2` holds the SAME key with a
+ * value the comparator calls equal.
+ */
+function array_udiff_assoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $same = false;
+        if (array_key_exists($key, $arr2) && $cb($value, $arr2[$key]) === 0) { $same = true; }
+        if (!$same) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_uintersect_assoc(arr, arr2, cb)` — the same pairing, kept instead of
+ * dropped: the key must exist in `$arr2` and the values compare equal.
+ */
+function array_uintersect_assoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        if (array_key_exists($key, $arr2) && $cb($value, $arr2[$key]) === 0) {
+            $out[$key] = $value;
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_diff_uassoc(arr, arr2, cb)` — the mirror image of array_udiff_assoc:
+ * KEYS are compared with the user comparator, values internally.
+ */
+function array_diff_uassoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($otherKeys as $ok) {
+            if ($cb($key, $ok) === 0 && $arr2[$ok] == $value) { $found = true; break; }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_intersect_uassoc(arr, arr2, cb)` — keep an entry whose key matches some
+ * key of `$arr2` under the comparator AND whose value is equal.
+ */
+function array_intersect_uassoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        foreach ($otherKeys as $ok) {
+            if ($cb($key, $ok) === 0 && $arr2[$ok] == $value) { $out[$key] = $value; break; }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_udiff_uassoc(arr, arr2, valueCb, keyCb)` — both halves user-compared:
+ * drop an entry only when `$arr2` holds a key the key-comparator calls equal
+ * whose value the value-comparator also calls equal.
+ */
+function array_udiff_uassoc(array $arr, array $arr2, callable $valueCb, callable $keyCb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($otherKeys as $ok) {
+            if ($keyCb($key, $ok) === 0 && $valueCb($value, $arr2[$ok]) === 0) {
+                $found = true;
+                break;
+            }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_uintersect_uassoc(arr, arr2, valueCb, keyCb)` — the intersecting half of
+ * the same pairing.
+ */
+function array_uintersect_uassoc(array $arr, array $arr2, callable $valueCb, callable $keyCb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        foreach ($otherKeys as $ok) {
+            if ($keyCb($key, $ok) === 0 && $valueCb($value, $arr2[$ok]) === 0) {
+                $out[$key] = $value;
+                break;
+            }
+        }
+    }
+    return $out;
+}
+
+/**
  * `array_walk(&$arr, cb, extra)` — apply `$cb($value, $key, $extra)` to every
  * entry.
  *
