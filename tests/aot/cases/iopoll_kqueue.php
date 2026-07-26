@@ -4,7 +4,16 @@
 use Io\Poll\Context;
 use Io\Poll\Backend;
 use Io\Poll\Event;
-$ctx = new Context(Backend::Kqueue);
+// Kqueue exists only on the BSDs/macOS. Say so and stop, rather than dying with an
+// uncaught BackendUnavailableException on Linux (which is what the first Linux gate
+// run reported as a regression). The Linux expectation lives in
+// expected/iopoll_kqueue.linux.out.
+try {
+    $ctx = new Context(Backend::Kqueue);
+} catch (\Io\Poll\BackendUnavailableException $e) {
+    echo "kqueue: unavailable on this host\n";
+    exit;
+}
 echo "backend: ", $ctx->getBackend()->name, "\n";
 echo "edge: ", ($ctx->getBackend()->supportsEdgeTriggering() ? "yes" : "no"), "\n";
 $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);

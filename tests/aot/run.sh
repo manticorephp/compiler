@@ -84,8 +84,22 @@ passed=0
 failed=0
 failed_names=()
 
+# Platform-divergent expectations. A few cases CANNOT have one expected output on
+# every host — `iopoll_kqueue` builds a Kqueue backend that does not exist on Linux,
+# and a cmsg header is 16 bytes on Darwin vs 24 on Linux (both matching php). Rather
+# than pretend otherwise (which made the Linux gate report them as regressions), an
+# optional per-OS file WINS over the shared one:
+#
+#   expected/<name>.out           shared
+#   expected/<name>.darwin.out    used on Darwin, if present
+#   expected/<name>.linux.out     used on Linux, if present
+OSTAG="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
 for name in "${cases[@]}"; do
     expected="$EXPECTED/$name.out"
+    if [[ -f "$EXPECTED/$name.$OSTAG.out" ]]; then
+        expected="$EXPECTED/$name.$OSTAG.out"
+    fi
     bin="$WORK/$name.bin"
     stderr_log="$WORK/$name.stderr"
     actual="$WORK/$name.out"
