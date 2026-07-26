@@ -1597,7 +1597,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // get an undefined symbol (which this toolchain stubs to `return 0`
         // rather than failing).
         || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
-                              'get_declared_traits']);
+                              'get_declared_traits', 'class_implements',
+                              'get_defined_constants']);
     // The DateTime family gates on a MENTION, like the array and Reflection
     // classes. It can be gated at all only because NO stdlib signature names a
     // DateTime* class — the whole family talks to the stdlib through scalars —

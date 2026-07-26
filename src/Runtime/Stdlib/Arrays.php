@@ -125,6 +125,23 @@ function end(array &$arr): mixed
     return $last;
 }
 
+// current() / key() answer from the FIRST entry, the same simplification
+// reset() and end() already make: an array here carries no internal pointer, so
+// there is no cursor for next()/prev() to move. That covers the overwhelmingly
+// common `key($arr)` / `current($arr)` on a freshly built array (symfony reads
+// `key(class_implements($x))` exactly so) and is honest about the rest.
+function current(array &$arr): mixed
+{
+    foreach ($arr as $v) { return $v; }
+    return false;
+}
+
+function key(array &$arr): mixed
+{
+    foreach ($arr as $k => $v) { return $k; }
+    return null;
+}
+
 /**
  * `array_is_list` — true iff `$a`'s keys are the integers 0..n-1 in order
  * (an empty array is a list). A cell key is cast to int for the index check

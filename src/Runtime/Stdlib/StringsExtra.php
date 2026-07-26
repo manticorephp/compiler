@@ -408,3 +408,38 @@ function addcslashes(string $string, string $characters): string
     }
     return $out;
 }
+
+/**
+ * `escapeshellarg($arg)` — the POSIX form: wrap in single quotes, and close /
+ * escape / reopen around every embedded single quote. php's Windows variant
+ * does not apply; this toolchain targets POSIX shells. A NUL cannot survive an
+ * argv entry, so php drops it and so does this.
+ */
+function escapeshellarg(string $arg): string
+{
+    $clean = \str_replace("\0", '', $arg);
+
+    return "'" . \str_replace("'", "'\\''", $clean) . "'";
+}
+
+/**
+ * `escapeshellcmd($cmd)` — backslash-escape every shell metacharacter, quotes
+ * included (php escapes unpaired ones; escaping both is what it does for the
+ * shapes that matter here).
+ */
+function escapeshellcmd(string $cmd): string
+{
+    // php's own set. WHITESPACE IS NOT IN IT — `escapeshellcmd('ls -l; rm *')`
+    // is `ls -l\; rm \*`, spaces untouched (the command still has to word-split).
+    $meta = "#&;`|*?~<>^()[]{}$\\\n\xFF\"'";
+    $out = '';
+    $n = \strlen($cmd);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = $cmd[$i];
+        if ($c === "\0") { continue; }
+        if (\strpos($meta, $c) !== false) { $out .= '\\'; }
+        $out .= $c;
+    }
+
+    return $out;
+}

@@ -127,3 +127,29 @@ function __mc_var_export_cell(mixed $v, int $indent): string
     }
     return 'NULL';
 }
+
+/**
+ * `error_get_last()` — always NULL. There is no error handler to record into:
+ * a diagnostic that Zend would raise as a warning is an EXCEPTION here, so
+ * nothing ever lands in the last-error slot. Callers use it to decide whether a
+ * preceding call failed quietly, and here it never did.
+ */
+function error_get_last(): ?array
+{
+    return null;
+}
+
+/**
+ * `extension_loaded($name)` — the runtime answer for a name only known at run
+ * time; the compile-time fold in LowerFromAst::foldGuard covers the literal
+ * case (and must agree with this list). A whole-program binary carries a fixed
+ * set: nothing can be loaded later.
+ */
+function extension_loaded(string $extension): bool
+{
+    $e = \strtolower($extension);
+
+    return $e === 'pcre' || $e === 'json' || $e === 'ctype'
+        || $e === 'openssl' || $e === 'core' || $e === 'standard';
+}
+
