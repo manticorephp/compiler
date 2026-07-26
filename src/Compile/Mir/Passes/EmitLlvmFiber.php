@@ -128,8 +128,20 @@ trait EmitLlvmFiber
             'sub x0, x0, #0xa0',
             'str x1, [x0, #0x00]',
             'str x2, [x0, #0x08]',
-            'adrp x3, ' . $u . 'mc_fiber_trampoline@PAGE',
-            'add x3, x3, ' . $u . 'mc_fiber_trampoline@PAGEOFF',
+            // Taking the trampoline's address is the ONE place this asm is
+            // object-format specific: Mach-O spells the two halves of a PC-relative
+            // symbol reference `@PAGE`/`@PAGEOFF`, ELF spells the low half
+            // `:lo12:` (and the high half needs no suffix). Emitting the Mach-O form
+            // on Linux fails to assemble outright —
+            //   <inline asm>: unexpected token in argument list
+            //   adrp x3, mc_fiber_trampoline@PAGE
+            // which is how a Linux build of the stdlib broke the moment
+            // src/Runtime/AsyncHook.php started mentioning \Fiber (that makes every
+            // build demand the fiber preamble, Linux included).
+            'adrp x3, ' . $u . 'mc_fiber_trampoline' . ($u === '_' ? '@PAGE' : ''),
+            'add x3, x3, ' . ($u === '_'
+                ? ($u . 'mc_fiber_trampoline@PAGEOFF')
+                : (':lo12:mc_fiber_trampoline')),
             'str x3, [x0, #0x58]',
             'mov x4, #0',
             'str x4, [x0, #0x50]',
