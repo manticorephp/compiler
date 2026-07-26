@@ -205,7 +205,7 @@ final class Parser
             if ($kw === 'global')    return $this->parseGlobal();
             if ($kw === 'goto')      return $this->parseGoto();
             if ($kw === 'declare')   return $this->parseDeclare();
-            if ($kw === 'const')     return $this->parseTopLevelConst();
+            if ($kw === 'const')     return $this->parseTopLevelConst($attrs);
         }
 
         // Statement label `name:` — an identifier immediately followed by a
@@ -580,7 +580,8 @@ final class Parser
                     $value = $this->parseExpression();
                 }
                 $this->expect(TokenKind::Semicolon, "expected ';' after enum case");
-                $cases[] = new \Parser\Ast\EnumCase($caseNameTok->lexeme, $value);
+                $cases[] = new \Parser\Ast\EnumCase($caseNameTok->lexeme, $value,
+                    $memberAttrs, $memberSpan);
                 continue;
             }
 
@@ -1346,7 +1347,8 @@ final class Parser
      * picks that up, so a later bareword reference resolves at compile time,
      * matching php's compile-time top-level const. One name per statement.
      */
-    private function parseTopLevelConst(): Stmt
+    /** @param \Parser\Ast\AttributeNode[] $attrs */
+    private function parseTopLevelConst(array $attrs = []): Stmt
     {
         $span = $this->span();
         $this->advance(); // 'const'
@@ -1359,7 +1361,7 @@ final class Parser
             [new \Parser\Ast\StringLiteral($nameTok->lexeme, $span), $value],
             $span,
         );
-        return new \Parser\Ast\ExpressionStmt($call, $span);
+        return new \Parser\Ast\ExpressionStmt($call, $span, null, $attrs);
     }
 
     private function parseGlobal(): Stmt

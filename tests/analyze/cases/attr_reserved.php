@@ -45,6 +45,23 @@ class DeprecatedClass {}
 #[\NoDiscard]
 function repeated(): int { return 1; }
 
+enum Suit: string
+{
+    #[\Override]
+    case Hearts = 'H';
+}
+
+class HasConst
+{
+    #[\Override]
+    const NOPE = 1;
+}
+
+#[\Override]
+const TOP_LEVEL = 7;
+
+function withParam(#[\Override] int $x): int { return $x; }
+
 // Suppressed: validation moves to ReflectionAttribute::newInstance().
 #[\Override]
 #[\DelayedTargetValidation]

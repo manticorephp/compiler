@@ -90,6 +90,14 @@ trait LowerAttrChecks
             if ($i < $preludeCount) { continue; }
             if ($stmt->kind === 'Class') {
                 $this->checkClassDeclAttrs($this->classStmtDecl($stmt));
+            } elseif ($stmt->kind === 'Expression') {
+                // A top-level `const NAME = …;` desugars to `define()`, so its
+                // attributes ride on the expression statement.
+                $attrs = $this->exprStmtAttrs($stmt);
+                if ($attrs !== []) {
+                    $this->checkAttrSite($attrs, \Compile\BuiltinAttributes::TARGET_CONSTANT,
+                        $this->stmtSpan($stmt));
+                }
             } elseif ($stmt->kind === 'Function') {
                 $decl = $this->fnStmtDecl($stmt);
                 $this->checkAttrSite($this->fnDeclAttrs($decl),
@@ -146,6 +154,13 @@ trait LowerAttrChecks
         foreach ($d->consts as $c) {
             $this->checkAttrSite($this->constAttrs($c),
                 \Compile\BuiltinAttributes::TARGET_CLASS_CONSTANT, $this->constSpan($c));
+        }
+        // An enum case reports TARGET_CLASS_CONSTANT, not TARGET_CLASS (probed).
+        foreach ($d->cases as $c) {
+            $cspan = $this->enumCaseSpan($c);
+            $this->checkAttrSite($this->enumCaseAttrs($c),
+                \Compile\BuiltinAttributes::TARGET_CLASS_CONSTANT,
+                $cspan === null ? $d->span : $cspan);
         }
     }
 
@@ -305,6 +320,12 @@ trait LowerAttrChecks
     private function paramAttrs(\Parser\Ast\Param $p): array { return $p->attributes; }
     private function paramPromoted(\Parser\Ast\Param $p): string { return $p->promoted; }
     private function paramSpan(\Parser\Ast\Param $p): \Parser\Ast\Span { return $p->span; }
+    /** @return \Parser\Ast\AttributeNode[] */
+    private function enumCaseAttrs(\Parser\Ast\EnumCase $c): array { return $c->attributes; }
+    private function enumCaseSpan(\Parser\Ast\EnumCase $c): ?\Parser\Ast\Span { return $c->span; }
+    /** @return \Parser\Ast\AttributeNode[] */
+    private function exprStmtAttrs(\Parser\Ast\ExpressionStmt $s): array { return $s->attributes; }
+    private function stmtSpan(\Parser\Ast\Stmt $s): \Parser\Ast\Span { return $s->span; }
     /** @return \Parser\Ast\PropertyDecl[] */
     private function classDeclProperties(\Parser\Ast\ClassDecl $d): array { return $d->properties; }
     /** @return string[] */
