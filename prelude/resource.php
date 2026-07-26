@@ -321,6 +321,13 @@ final class Socket
      * as a global one).
      */
     public int $lastErr = 0;
+    /**
+     * Blocking mode, mirroring \Resource::$blocking. Default true (php's default);
+     * socket_set_nonblock() clears it, and under a scheduler the socket_* read/write
+     * paths clear it themselves so a would-block can PARK the fiber instead of
+     * blocking the loop ({@see \Runtime\Stdlib\__mc_sock_async_prep}).
+     */
+    public bool $blocking = true;
 
     public function __construct(int $fd, int $family = 0, int $type = 0, int $proto = 0)
     {
