@@ -137,6 +137,12 @@ final class ExpressionStmt extends Stmt
         Span $span,
         /** Leading doc comment (inline `/** @var T $x *\/`), or null. */
         public readonly ?string $docComment = null,
+        /**
+         * Attributes on a top-level `const NAME = …;`, which desugars to a
+         * `define()` call and so has no declaration node of its own.
+         * @var AttributeNode[]
+         */
+        public readonly array $attributes = [],
     ) {
         parent::__construct('Expression', $span);
     }

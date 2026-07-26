@@ -215,6 +215,12 @@ trait EmitLlvmVisit
     {
             $out = '';
             foreach ($n->stmts as $s) {
+                // Order matters: the #[\NoDiscard] warning is emitted BEFORE the
+                // call, like php's, so it precedes anything the call itself
+                // prints. This loop is the established "a call in statement
+                // position = its result is discarded" predicate — the same one
+                // emitDiscardedCallRelease keys on.
+                $out .= $this->emitNoDiscardWarn($s);
                 $out .= $this->emitNode($s);
                 $out .= $this->emitDiscardedCallRelease($s);
             }

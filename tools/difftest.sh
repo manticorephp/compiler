@@ -54,7 +54,15 @@ for f in "${FILES[@]}"; do
 
     # Reference: the PHP interpreter. A fatal/parse error (rc!=0 with no
     # stdout, or a stderr Fatal) means the file isn't plain runnable PHP.
-    ref="$(php -d error_reporting=0 -d display_errors=0 "$f" 2>"$WORK/ref.err")"; rrc=$?
+    # A `<case>.diag` sidecar marks a case whose POINT is a diagnostic
+    # (`#[\Deprecated]`, `#[\NoDiscard]`). Those need php's error output ON,
+    # which the default invocation deliberately suppresses.
+    if [[ -f "${f%.php}.diag" ]]; then
+        ref="$(php -d error_reporting=E_ALL -d display_errors=STDOUT -d html_errors=0 \
+                   -d log_errors=0 "$f" 2>"$WORK/ref.err")"; rrc=$?
+    else
+        ref="$(php -d error_reporting=0 -d display_errors=0 "$f" 2>"$WORK/ref.err")"; rrc=$?
+    fi
     if [[ $rrc -ne 0 && -z "$ref" ]] || grep -qiE 'Parse error|Fatal error|Uncaught' "$WORK/ref.err"; then
         phpskip=$((phpskip + 1)); continue
     fi
@@ -64,6 +72,13 @@ for f in "${FILES[@]}"; do
         compile=$((compile + 1)); COMPILES+=("$name"); continue
     fi
     got="$("$WORK/bin" 2>/dev/null)"
+
+    # Same `<case>.sed` normaliser tests/aot/run.sh applies — diagnostics carry
+    # the source path each side was handed, and those need not be spelled alike.
+    if [[ -f "${f%.php}.sed" ]]; then
+        ref="$(printf '%s\n' "$ref" | sed -f "${f%.php}.sed")"
+        got="$(printf '%s\n' "$got" | sed -f "${f%.php}.sed")"
+    fi
 
     if [[ "$got" == "$ref" ]]; then
         match=$((match + 1))

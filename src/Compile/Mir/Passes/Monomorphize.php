@@ -683,13 +683,21 @@ final class Monomorphize implements Pass
     private function isSpecializableVariadicPack(Param $p, int $idx, array $calls): bool
     {
         if (!$this->isErasedArrayParam($p->type)) { return false; }
-        $seen = false;
+        // ONE definite site is enough, exactly like the erased-array branch of
+        // {@see dimensions}. Demanding that EVERY site agree is self-defeating
+        // for a RECURSIVE function: the erased original keeps a self-call whose
+        // pack is still `vec[unknown]`, so that single site vetoed the dimension
+        // for every real caller — the pack stayed erased and the body walked its
+        // string keys as positional indices. Soundness comes from
+        // {@see callKey}, not from this predicate: a site whose pack is not
+        // specializable produces an empty key and stays on the original body.
         foreach ($calls as $call) {
-            if ($idx >= \count($call->args)) { return false; }
-            if (!$this->isSpecializableArray($call->args[$idx]->type)) { return false; }
-            $seen = true;
+            if ($idx < \count($call->args)
+                && $this->isSpecializableArray($call->args[$idx]->type)) {
+                return true;
+            }
         }
-        return $seen;
+        return false;
     }
 
     /** {@see isConcreteElem}, but a CELL is a definite repr. */

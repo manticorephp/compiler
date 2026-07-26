@@ -144,13 +144,11 @@ trait LowerTypeDefs
     private function typeDefAttrRepr(array $attributes): ?string
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name !== 'TypeDef'
-                && $name !== 'Manticore\\Attr\\TypeDef'
-                && $name !== 'Attr\\TypeDef') {
+            if (!$this->attrIsOneOf($attr, ['TypeDef',
+                'Manticore\\Attr\\TypeDef', 'Attr\\TypeDef'])) {
                 continue;
             }
-            foreach ($attr->args as $arg) {
+            foreach ($this->attrArgs($attr) as $arg) {
                 $val = $arg;
                 if ($arg->kind === 'NamedArg') {
                     if ($arg->name !== 'repr') { continue; }

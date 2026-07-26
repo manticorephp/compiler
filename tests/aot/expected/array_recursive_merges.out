@@ -1,0 +1,65 @@
+Array
+(
+    [a] => 1
+    [nested] => Array
+        (
+            [x] => 1
+            [y] => 20
+            [z] => 30
+        )
+
+    [list] => Array
+        (
+            [0] => 9
+            [1] => 2
+        )
+
+    [b] => 2
+)
+Array
+(
+    [x] => Array
+        (
+            [y] => Array
+                (
+                    [z] => Array
+                        (
+                            [w] => 1
+                            [keep] => me
+                            [v] => 2
+                        )
+
+                )
+
+        )
+
+)
+Array
+(
+    [db] => Array
+        (
+            [host] => localhost
+            [port] => 5432
+            [opts] => Array
+                (
+                    [charset] => utf8
+                    [timeout] => 5
+                )
+
+        )
+
+    [debug] => 1
+)
+Array
+(
+    [0] => 
+    [1] => 8
+    [2] => 3
+)
+Array
+(
+    [keep] => me
+)
+Array
+(
+)

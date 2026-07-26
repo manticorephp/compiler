@@ -1,0 +1,12 @@
+tests/analyze/cases/attr_reserved.php:18:0: error: Child::absent() has #[\Override] attribute, but no matching parent method exists
+tests/analyze/cases/attr_reserved.php:21:0: error: Child::$gone has #[\Override] attribute, but no matching parent property exists
+tests/analyze/cases/attr_reserved.php:35:0: error: UsesTrait::mixed_in() has #[\Override] attribute, but no matching parent method exists
+tests/analyze/cases/attr_reserved.php:39:0: error: Attribute "Override" cannot target class (allowed targets: method, property)
+tests/analyze/cases/attr_reserved.php:42:0: error: Cannot apply #[\Deprecated] to class DeprecatedClass
+tests/analyze/cases/attr_reserved.php:46:0: error: Attribute "NoDiscard" must not be repeated
+tests/analyze/cases/attr_reserved.php:51:0: error: Attribute "Override" cannot target class constant (allowed targets: method, property)
+tests/analyze/cases/attr_reserved.php:57:0: error: Attribute "Override" cannot target class constant (allowed targets: method, property)
+tests/analyze/cases/attr_reserved.php:61:0: error: Attribute "Override" cannot target constant (allowed targets: method, property)
+tests/analyze/cases/attr_reserved.php:63:0: error: Attribute "Override" cannot target parameter (allowed targets: method, property)
+
+Found 10 error(s), 0 warning(s).

@@ -178,6 +178,9 @@ trait LowerStmts
     {
         if ($stmt->kind === 'Expression') {
             $lowered = $this->lowerExpr($stmt->expr);
+            // `(void) f();` — the cast lowered away, so mark the call itself so
+            // the #[\NoDiscard] check stays quiet for it.
+            if ($this->isVoidCastExpr($stmt->expr)) { $this->markVoidCast($lowered); }
             // Inline `/** @var T $x */` on a local binding seeds the slot type
             // (a per-declaration annotation InferTypes honors — element types a
             // bare `array` local can't carry, e.g. `@var array<string, Type>`).

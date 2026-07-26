@@ -1632,7 +1632,15 @@ trait InferNodes
             if ($at->isAssoc()
                 || isset($this->assocLocals[$name]) && $at->isVec()) {
                 // assoc local: refine the value element across string-keyed stores.
-                $cur = $at->isAssoc() ? ($at->element ?? null) : null;
+                // The running element comes off the TYPE, not off `isAssoc()`: a
+                // CELL-KEYED assoc reports isVec() (isAssoc is string-key-only,
+                // see the key note below), so keying on it threw the element away
+                // on every store and the LAST store's value type became the whole
+                // element. `$out[$k] = $mixed` then `$out['x'] = [1,2]` demoted a
+                // cell element to `vec[int]` — and the function's return type with
+                // it, so a caller rebuilt the boxed array as if its values were
+                // raw (SIGSEGV) or read them raw (garbage floats).
+                $cur = $at->element ?? null;
                 $elem = isset($this->nestedCellVecLocals[$name])
                     ? Type::vec(Type::cell())
                     : (isset($this->cellElemLocals[$name])

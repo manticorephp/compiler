@@ -151,14 +151,16 @@ trait LowerClasses
         return null;
     }
 
-    /** Attribute NAMES as written. No namespace resolution — the compiler's own
-     *  attribute lookups are raw string matches, and this inherits that.
+    /** Canonical attribute NAMES. The parser already resolves an attribute name
+     *  to an FQN (`resolveClassName`: leading `\` stripped, `use ... as` aliases
+     *  expanded, current namespace prepended); `attrFqn` only drops the leading
+     *  backslash a `\Foo` spelling would still carry.
      *  @param \Parser\Ast\AttributeNode[] $attrs
      *  @return string[] */
     private function attrNames(array $attrs): array
     {
         $out = [];
-        foreach ($attrs as $at) { $out[] = $at->name; }
+        foreach ($attrs as $at) { $out[] = $this->attrFqn($at); }
         return $out;
     }
 
@@ -272,7 +274,9 @@ trait LowerClasses
             if ($m->name === '__construct') {
                 foreach ($m->params as $p) {
                     if ($p->promoted !== '') {
-                        $names[] = $p->name;
+                        // A promoted param that REDECLARES an inherited property
+                        // keeps the parent's slot — see the note below.
+                        if (!isset($types[$p->name])) { $names[] = $p->name; }
                         $pdoc = $this->docTagType($m->docComment, '@param', $p->name);
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
@@ -318,7 +322,13 @@ trait LowerClasses
                 $this->staticPropTypes[$decl->name . '::' . $prop->name] = $pt;
                 continue;
             }
-            $names[] = $prop->name;
+            // A subclass REDECLARING a parent property shares the parent's slot,
+            // as php does — appending a second entry under the same name gave the
+            // class two slots for one property. The later one won every lookup,
+            // so the layout grew by a word and every field the parent's
+            // constructor wrote past that point landed on the wrong offset
+            // (an inherited promoted ctor param read back as 0).
+            if (!isset($types[$prop->name])) { $names[] = $prop->name; }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
@@ -740,9 +750,29 @@ trait LowerClasses
                 ),
             ));
         }
-        // No user ctor but defaulted properties → synthesise a ctor
-        // (`Class____construct($this)`) holding just the default stores.
+        // No user ctor but defaulted properties → the defaults still have to run
+        // at instantiation, so a ctor is synthesised for them.
         if (!$sawCtor && $defaultStores !== []) {
+            // If an ANCESTOR declares a real constructor, a nullary
+            // `Class____construct($this)` would SHADOW it: `new Leaf(9)` resolved
+            // the subclass symbol, dropped the argument and never ran the parent
+            // body, so every parent-initialised field read back as 0. Re-lower the
+            // inherited constructor under this class instead — same shape as the
+            // late-static-binding specialisations — with this class's defaults
+            // prepended, which is exactly php's order (defaults, then ctor body).
+            $inherited = $this->inheritedCtorDecl($decl);
+            if ($inherited !== null) {
+                $module->addFunction($this->lowerMethodFn(
+                    $decl, $inherited, $cd, $defaultStores,
+                    $decl->name, $decl->name . '____construct',
+                ));
+                $module->methodDisplay[$decl->name . '____construct'] =
+                    $decl->name . '->__construct';
+                if ($this->sawStaticUse) {
+                    $this->lsbPending[] = new LsbPending($decl, $inherited, $cd, $defaultStores);
+                }
+                return;
+            }
             $module->addFunction(new FunctionDef(
                 name: $decl->name . '____construct',
                 params: [new Param(
@@ -756,6 +786,30 @@ trait LowerClasses
             ));
         }
     }
+
+    /**
+     * The nearest ancestor's `__construct` declaration, or null when no ancestor
+     * declares one with a body. Guarded against a cyclic `extends`.
+     */
+    private function inheritedCtorDecl(\Parser\Ast\ClassDecl $decl): ?\Parser\Ast\MethodDecl
+    {
+        $pname = $decl->extends !== [] ? \ltrim($decl->extends[0], '\\') : '';
+        $guard = 0;
+        while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
+            $pdecl = $this->classDecls[$pname];
+            foreach ($this->classDeclMethods($pdecl) as $m) {
+                if ($this->methodDeclName($m) !== '__construct') { continue; }
+                if ($this->methodDeclBody($m) === null) { continue; }
+                return $m;
+            }
+            $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
+            $guard = $guard + 1;
+        }
+        return null;
+    }
+
+    /** Typed read of a method's body (T5). */
+    private function methodDeclBody(\Parser\Ast\MethodDecl $m): ?\Parser\Ast\Block { return $m->body; }
 
     /**
      * Resolve `Class::CONST` to its initializer expression, walking the
@@ -785,6 +839,15 @@ trait LowerClasses
             foreach ($decl->implements as $ifaceName) {
                 $found = $this->findClassConst(\ltrim($ifaceName, '\\'), $name);
                 if ($found !== null) { return $found; }
+            }
+        }
+        // `Attribute::TARGET_*` when prelude/attributes.php was NOT injected —
+        // src/ compiles without it, and a program may name a target constant
+        // without ever reflecting. Same values the prelude declares.
+        if ($className === 'Attribute') {
+            $v = \Compile\BuiltinAttributes::constValue($name);
+            if ($v !== null) {
+                return \Parser\Ast\Expr::int($v, new \Parser\Ast\Span(0, 0));
             }
         }
         return null;

@@ -1,0 +1,18 @@
+start
+
+Deprecated: Function bare() is deprecated in deprecated_function.php on line 21
+1
+
+Deprecated: Function sinceOnly() is deprecated since 1.5 in deprecated_function.php on line 22
+2
+
+Deprecated: Function messageOnly() is deprecated, use bare() instead in deprecated_function.php on line 23
+3
+
+Deprecated: Function both() is deprecated since 1.5, use bare() instead in deprecated_function.php on line 24
+4
+5
+
+Deprecated: Function bare() is deprecated in deprecated_function.php on line 27
+1
+end

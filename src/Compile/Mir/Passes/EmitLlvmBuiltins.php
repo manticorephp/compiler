@@ -181,11 +181,15 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_name')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET, true, \Compile\MemoryAbi::RMETA_ROW_SIZE); }
         if ($name === '__mc_refl_class_nattrs')       { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NATTRS_OFFSET, false); }
         if ($name === '__mc_refl_class_attrs')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ATTRS_OFFSET, true); }
+        if ($name === '__mc_refl_row_flags')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_FLAGS_OFFSET, false); }
         if ($name === '__mc_refl_row_nattrs')         { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_NATTRS_OFFSET, false); }
         if ($name === '__mc_refl_row_attrs')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_ATTRS_OFFSET, true); }
         if ($name === '__mc_refl_attr_name')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NAME_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_args')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ARGS_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_new')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NEW_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_target')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_TARGET_OFFSET, false, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_repeated')      { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_REPEATED_OFFSET, false, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_err')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ERR_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_call0')              { return $this->biMcReflCall0($args); }
         if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
         if ($name === '__mc_refl_ifaces_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_IFACES_FN_OFFSET, true); }
@@ -3748,26 +3752,28 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
-    /** @param Node[] $args  get_class($o) — the operand's class name. Uses
-     * the static type (matches `::class`); the compiler's lone call site
-     * has a precisely-typed receiver. */
-    /** A receiver whose static type names no class but which DOES hold one at
-     *  run time: a cell / mixed / union slot, or a classless `object` hint. */
+    /**
+     * A receiver whose static type names no class but which DOES hold one at
+     * run time: a cell / mixed / union slot, or a classless `object` hint
+     * (what `ReflectionAttribute::newInstance()` and friends hand back).
+     *
+     * `Type::$class` is only meaningful on an OBJ type. Reading it off a
+     * cell/unknown type used to go through `?? ''`, and a null `?string` field
+     * does NOT read back as null natively — the raw 0 came back as a non-empty
+     * string that rendered empty, so the class-known path fired for a receiver
+     * that had no class at all and get_class() returned ''. Green under Zend,
+     * wrong in every self-built compiler. Decide on the KIND.
+     */
     private function getClassReceiverIsErased(Type $t): bool
     {
-        $k = $t->kind;
-        return $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN
-            || $k === Type::KIND_UNION || $k === Type::KIND_OBJ;
+        return !($t->kind === Type::KIND_OBJ && ($t->class ?? '') !== '');
     }
 
+    /** @param Node[] $args  get_class($o) — the operand's class name. Uses the
+     * static type when there is one (matches `::class`), else dispatches on the
+     * runtime class id. */
     private function biGetClass(array $args): string
     {
-        // NEVER read `->class` off a non-obj type here. A `?string` property
-        // holding null does NOT read back as null under the self-host, so the
-        // `?? ''` did not fire on a cell/unknown receiver and `$cls` came back
-        // as garbage — non-empty, matching no class, so the candidate set was
-        // empty and get_class() emitted the empty string as a LITERAL. Green
-        // under Zend, wrong in every self-built compiler. Decide on the KIND.
         $t = $args[0]->type;
         $erased = $this->getClassReceiverIsErased($t);
         $cls = $erased ? '' : ($t->class ?? '');
@@ -3783,15 +3789,19 @@ trait EmitLlvmBuiltins
             foreach ($this->classes as $cd) {
                 if ($cd->name !== $cls && $this->classIsA($cd->name, $cls)) { $cands[] = $cd->name; }
             }
-        } elseif ($erased) {
-            // An ERASED receiver — a cell / mixed / `object|string` param, a
-            // classless `object` hint. `type->class` is null there, and the
-            // `?? ''` used to fall straight through to the monomorphic path,
-            // which emits the STATIC name as a literal: get_class() returned the
-            // EMPTY STRING for every such receiver, silently. Nothing about it
-            // is unknowable at run time — the object header carries the class_id
-            // — so switch over every class exactly like a polymorphic receiver.
-            foreach ($this->classes as $cd) { $cands[] = $cd->name; }
+        } else {
+            // An ERASED receiver — a cell / mixed / `object|string` param, or a
+            // bare `object` hint. `type->class` is null there, and the `?? ''`
+            // used to fall straight through to the monomorphic path, which emits
+            // the STATIC name as a literal: get_class() returned the EMPTY STRING
+            // for every such receiver, silently. Nothing about it is unknowable at
+            // run time — the object header carries the class_id — so switch over
+            // every class exactly like a polymorphic receiver. Only reached where
+            // the type is genuinely unknown, so the switch is not on a hot path.
+            foreach ($this->classes as $cd) {
+                if ($cd->isStruct) { continue; }
+                $cands[] = $cd->name;
+            }
         }
         // Unknown class, or a monomorphic one (no subclass) — the static type
         // is exact, so emit the name literal directly. An ERASED receiver never
@@ -3808,17 +3818,33 @@ trait EmitLlvmBuiltins
         // runtime class, not the static type — matters inside an inherited
         // method on a subclass instance).
         $out = $this->emitNode($args[0]);
-        // A boxed receiver carries the NaN tag — mask it off before the header
-        // read, or the class_id load dereferences the tag bits.
-        $out .= $args[0]->type->kind === Type::KIND_CELL
-            ? $this->cellToPtr() : $this->coerceToPtr();
-        $objp = $this->lastValue;
-        $out .= $this->emitLoadClassId($objp);
-        $cid = $this->classIdReg;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca ptr\n";
         $endL = $this->ssa->allocLabel('gc.end');
         $defL = $this->ssa->allocLabel('gc.def');
+        if ($args[0]->type->kind === Type::KIND_CELL) {
+            // A cell carries the object POINTER in its low 48 bits behind tag 8.
+            // Handing the tagged word straight to inttoptr reads the class id
+            // from a wild address — the default arm then printed ''. Check the
+            // tag, then unbox.
+            $out .= $this->coerceToI64();
+            $raw = $this->lastValue;
+            $out .= $this->cellTagIr($raw);
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $objL = $this->ssa->allocLabel('gc.obj');
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $defL . "\n";
+            $out .= $objL . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $raw . ", 281474976710655\n";
+            $objp = $this->ssa->allocReg();
+            $out .= '  ' . $objp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+        } else {
+            $out .= $this->coerceToPtr();
+            $objp = $this->lastValue;
+        }
+        $out .= $this->emitLoadClassId($objp);
+        $cid = $this->classIdReg;
         $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
         $bodies = '';
         foreach ($cands as $c) {

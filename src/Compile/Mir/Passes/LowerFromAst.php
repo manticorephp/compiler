@@ -98,6 +98,7 @@ final class LowerFromAst implements Pass
     use LowerReify;
     use LowerTypeDefs;
     use LowerSuperglobals;
+    use LowerAttrChecks;
 
     public const NAME = 'lower-from-ast';
 
@@ -346,6 +347,13 @@ final class LowerFromAst implements Pass
     public bool $includeReflection = false;
     /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
     public string $reflectionSrc = '';
+    /** Inject PHP's reserved attribute classes (Attribute / Deprecated / Override
+     *  / …). Gated on a mention AND on reflection, since their only runtime role
+     *  is `getAttributes()->newInstance()`; the SEMANTICS are compiler-side and
+     *  need none of this. See Main.php. */
+    public bool $includeAttributes = false;
+    /** Reserved-attribute prelude source, read by Main from `prelude/attributes.php`. */
+    public string $attributesSrc = '';
     /** Inject the DateTime class family (gated on the program MENTIONING one —
      *  see Main.php). Gating is possible only because no stdlib signature names
      *  a DateTime* class: the family talks to the stdlib through scalars. */
@@ -530,6 +538,11 @@ final class LowerFromAst implements Pass
         // earlier may already name one in a property or parameter hint, and
         // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
         $this->registerTypeDefs($stmts);
+        // PHP's reserved attributes: #[Override] against the (now complete) decl
+        // table, plus target / repeat validation. Before any ClassDef is built,
+        // so a fatal aborts ahead of the expensive work — and interfaces are
+        // visible only here, since they never get a ClassDef.
+        $this->checkAttributes($stmts, $preludeCount);
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.
@@ -912,7 +925,9 @@ final class LowerFromAst implements Pass
         return new \Compile\Mir\MethodMeta(
             $fn, 'public', false, false, false,
             $decl->returnType === null ? '' : $decl->returnType,
-            $params, [], '');
+            // Attributes were dropped here, so ReflectionFunction::isDeprecated()
+            // could never see a #[\Deprecated] on a free function.
+            $params, $this->attrNames($this->fnDeclAttrs($decl)), '');
     }
 
     /**
@@ -979,12 +994,18 @@ final class LowerFromAst implements Pass
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
                 [], 'array', $argsBody, $span);
             // new factory: return new <AttrClass>(<original args, named preserved>);
+            // Declared `mixed`, NOT `object`: the only caller is the indirect
+            // `__mc_refl_call0`, which is typed CELL. An `object` return handed
+            // it a RAW pointer with no cell tag, so the instance came back
+            // untagged — is_object() was false, instanceof false, get_class ''
+            // and var_dump printed the pointer as a float. `mixed` makes the
+            // return box (tag 8) and the cell honest.
             $newBody = new \Parser\Ast\Block([
                 \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::new_($attr->name, $attr->args, $span), $span),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
-                [], 'object', $newBody, $span);
+                [], 'mixed', $newBody, $span);
         }
     }
 
@@ -1198,10 +1219,8 @@ final class LowerFromAst implements Pass
     private function hasDynamicPropsAttr(array $attributes): bool
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name === 'AllowDynamicProperties'
-                || $name === 'Manticore\\Attr\\AllowDynamicProperties'
-                || $name === 'Attr\\AllowDynamicProperties') {
+            if ($this->attrIsOneOf($attr, ['AllowDynamicProperties',
+                'Manticore\\Attr\\AllowDynamicProperties', 'Attr\\AllowDynamicProperties'])) {
                 return true;
             }
         }
@@ -1216,10 +1235,8 @@ final class LowerFromAst implements Pass
     private function hasStructAttr(array $attributes): bool
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name === 'Struct'
-                || $name === 'Manticore\\Attr\\Struct'
-                || $name === 'Attr\\Struct') {
+            if ($this->attrIsOneOf($attr, ['Struct',
+                'Manticore\\Attr\\Struct', 'Attr\\Struct'])) {
                 return true;
             }
         }
@@ -1448,9 +1465,8 @@ final class LowerFromAst implements Pass
     {
         $out = [];
         foreach ($attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name !== 'RefOut' && $name !== 'Attr\\RefOut'
-                && $name !== 'Manticore\\Attr\\RefOut') { continue; }
+            if (!$this->attrIsOneOf($attr, ['RefOut', 'Attr\\RefOut',
+                'Manticore\\Attr\\RefOut'])) { continue; }
             foreach ($this->attrArgs($attr) as $arg) {
                 if ($arg->kind === 'StringLiteral') { $out[$this->strLitValue($arg)] = true; }
             }
@@ -1458,20 +1474,13 @@ final class LowerFromAst implements Pass
         return $out;
     }
 
-    /** AttributeNode fields via a typed param — a base-typed read resolves by
-     *  OFFSET under self-host and picks the wrong slot. */
-    private function attrName(\Parser\Ast\AttributeNode $a): string { return $a->name; }
-    /** @return \Parser\Ast\Expr[] */
-    private function attrArgs(\Parser\Ast\AttributeNode $a): array { return $a->args; }
-
     /** A param-position `#[RefOut]` (no arg — marks THIS param). Read through a
      *  typed `$p` so `->attributes` resolves by name, not a base offset. */
     private function paramHasRefOutAttr(\Parser\Ast\Param $p): bool
     {
         foreach ($p->attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name === 'RefOut' || $name === 'Attr\\RefOut'
-                || $name === 'Manticore\\Attr\\RefOut') { return true; }
+            if ($this->attrIsOneOf($attr, ['RefOut', 'Attr\\RefOut',
+                'Manticore\\Attr\\RefOut'])) { return true; }
         }
         return false;
     }
@@ -1482,9 +1491,8 @@ final class LowerFromAst implements Pass
     {
         $out = [];
         foreach ($attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name !== 'CellArg' && $name !== 'Attr\\CellArg'
-                && $name !== 'Manticore\\Attr\\CellArg') { continue; }
+            if (!$this->attrIsOneOf($attr, ['CellArg', 'Attr\\CellArg',
+                'Manticore\\Attr\\CellArg'])) { continue; }
             foreach ($this->attrArgs($attr) as $arg) {
                 if ($arg->kind === 'StringLiteral') { $out[$this->strLitValue($arg)] = true; }
             }
@@ -1496,9 +1504,8 @@ final class LowerFromAst implements Pass
     private function paramHasCellArgAttr(\Parser\Ast\Param $p): bool
     {
         foreach ($p->attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name === 'CellArg' || $name === 'Attr\\CellArg'
-                || $name === 'Manticore\\Attr\\CellArg') { return true; }
+            if ($this->attrIsOneOf($attr, ['CellArg', 'Attr\\CellArg',
+                'Manticore\\Attr\\CellArg'])) { return true; }
         }
         return false;
     }
@@ -1509,10 +1516,10 @@ final class LowerFromAst implements Pass
     private function ffiSymbolOf(array $attributes): ?string
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name !== 'Symbol' && $name !== 'Ffi\\Symbol') { continue; }
-            if ($attr->args === []) { continue; }
-            $arg = $attr->args[0];
+            if (!$this->attrIsOneOf($attr, ['Symbol', 'Ffi\\Symbol'])) { continue; }
+            $args = $this->attrArgs($attr);
+            if ($args === []) { continue; }
+            $arg = $args[0];
             // Read `->value` through a StringLiteral-typed param: `$arg` is a
             // base-`Expr` here, and the subclass `value` field sits past the
             // base fields, so a base-typed read picks the wrong offset under
@@ -1527,8 +1534,7 @@ final class LowerFromAst implements Pass
     private function ffiIsWeak(array $attributes): bool
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name === 'Weak' || $name === 'Ffi\\Weak') { return true; }
+            if ($this->attrIsOneOf($attr, ['Weak', 'Ffi\\Weak'])) { return true; }
         }
         return false;
     }
@@ -1961,7 +1967,7 @@ final class LowerFromAst implements Pass
      * predefined constants the compiler source uses; `true`/`false`/
      * `null` too (the parser sometimes hands them through as identifiers).
      */
-    private function lowerIdentifier(string $rawName): Node
+    private function lowerIdentifier(string $rawName, int $line = 0): Node
     {
         // An unqualified constant resolves in the current namespace
         // first, then the global one — so `Compile\PHP_INT_MAX` is really
@@ -1970,6 +1976,7 @@ final class LowerFromAst implements Pass
         $pre = $this->predefinedConstant($name);
         if ($pre !== null) { return $pre; }
         if (isset($this->userConstants[$name])) {
+            $this->noteDeprecatedConstUse($name, $line);
             return $this->lowerExpr($this->userConstants[$name]);
         }
         $low = \strtolower($name);
@@ -2032,6 +2039,11 @@ final class LowerFromAst implements Pass
     {
         $operand = $this->lowerExpr($expr->operand);
         $c = \strtolower($expr->cast);
+        // `(void) f()` evaluates and discards. Lowering it AWAY (rather than
+        // minting a Cast node) keeps the call node in statement position, which
+        // is what emitDiscardedCallRelease keys on — a Cast wrapper would hide
+        // the call from it and LEAK the discarded result.
+        if ($c === 'void') { return $operand; }
         $target = 'int';
         $type = Type::int_();
         if ($c === 'float' || $c === 'double') { $target = 'float'; $type = Type::float_(); }

@@ -15,5 +15,8 @@ final class EnumCase
     public function __construct(
         public readonly string $name,
         public readonly ?Expr $value,
+        /** @var AttributeNode[] `#[\Deprecated]` and friends on the case. */
+        public readonly array $attributes = [],
+        public readonly ?Span $span = null,
     ) {}
 }

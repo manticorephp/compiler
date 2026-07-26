@@ -164,13 +164,16 @@ trait InferCalls
             || $n === '__mc_refl_nmethods' || $n === '__mc_refl_methods_base'
             || $n === '__mc_refl_class_nattrs' || $n === '__mc_refl_class_attrs'
             || $n === '__mc_refl_row_nattrs' || $n === '__mc_refl_row_attrs'
+            || $n === '__mc_refl_row_flags'
             || $n === '__mc_refl_attr_args' || $n === '__mc_refl_attr_new'
+            || $n === '__mc_refl_attr_target' || $n === '__mc_refl_attr_repeated'
             || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn'
             || $n === '__mc_refl_fn_find' || $n === '__mc_refl_row_tramp'
             || $n === '__mc_refl_param_flags') { return Type::int_(); }
         if ($n === '__mc_refl_name'
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
             || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name'
+            || $n === '__mc_refl_attr_err'
             || $n === '__mc_refl_row_rettype'
             || $n === '__mc_refl_prow_type') { return Type::string_(); }
         // The boxed result of an indirect trampoline call — a mixed cell the

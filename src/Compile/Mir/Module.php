@@ -115,6 +115,31 @@ final class Module
      *  mid-struct shifts later offsets, a self-host layout hazard. */
     public array $reflFnMeta = [];
 
+    /** Free function name → the `#[\Deprecated]` diagnostic body php prints
+     *  ("Function f() is deprecated since 1.5, use g() instead"). Emitted at
+     *  every CALL site, where the file and line are compile-time constants.
+     *  @var array<string, string> */
+    public array $deprecatedFns = [];
+    /** "DeclaringClass::method" → the same, for methods and static methods.
+     *  Keyed by the DECLARING class so an inherited call resolves.
+     *  @var array<string, string> */
+    public array $deprecatedMethods = [];
+    /** Free function name → the `#[\NoDiscard]` warning body.
+     *  @var array<string, string> */
+    public array $noDiscardFns = [];
+    /** "DeclaringClass::method" → the `#[\NoDiscard]` warning body.
+     *  @var array<string, string> */
+    public array $noDiscardMethods = [];
+
+    /** "<declClass>|<kind>|<member>|<k>" → the \Error message
+     *  ReflectionAttribute::newInstance() must throw for that attribute use.
+     *  php validates a USERLAND attribute's target / repeatability only when the
+     *  instance is asked for, so the verdict is computed at lowering (where the
+     *  attribute class's own `#[Attribute(flags)]` is still readable) and baked
+     *  into the metadata row.
+     *  @var array<string, string> */
+    public array $attrSiteErrors = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude → linkonce_odr. */
     public function addGlobalCell(string $name, Node $default, bool $isPrelude = false): void
     {

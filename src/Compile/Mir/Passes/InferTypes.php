@@ -914,6 +914,18 @@ final class InferTypes implements Pass
                     if ($vk !== Type::KIND_INT && $vk !== Type::KIND_FLOAT
                         && $vk !== Type::KIND_BOOL) { $conflict[$key] = true; continue; }
                 } elseif (!$a->type->isVec()) {
+                    // A bare CELL argument is an array whose element repr this
+                    // site cannot show — and it is NOT evidence for the concrete
+                    // refinement another site gave. Record the CELL FLOOR (the
+                    // same ground truth a vec[cell] arg records below): the param
+                    // resolves to a cell element, this site's body reads tags,
+                    // and Monomorphize clones each CONCRETE site off it. Without
+                    // the floor the param kept a sibling's `assoc[string,int]`
+                    // and this site's boxed values were read as raw ints — the
+                    // shape a specialized caller produces when it forwards its
+                    // own erased element (`wrap$mono$…(assoc[string,cell])`
+                    // calling `build($v)`).
+                    if ($a->type->kind === Type::KIND_CELL) { $sawCell[$key] = true; }
                     $conflict[$key] = true; continue;
                 }
                 // All call sites must agree on the shape (all vec, or all assoc
@@ -1272,6 +1284,17 @@ final class InferTypes implements Pass
             $oT = $otherLocals[$name];
             $tOk = $this->isScalarOrCell($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
             $oOk = $this->isScalarOrCell($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
+            // An ARRAY arm merging with a CELL arm is the same problem one level
+            // up: `$t = []; if (is_array($r)) { $t = $r; }` over a `mixed $r`
+            // leaves a slot that holds a RAW buffer pointer on one path and a
+            // NaN-boxed cell on the other, and their union types UNKNOWN — so
+            // the very next `foreach ($t as …)` reads whichever the static type
+            // guessed and faults. Box the array arm so the slot is uniformly
+            // tagged. Only against a CELL sibling: two array arms already agree
+            // on the raw repr, and demoting those would cost every branchy
+            // array local a boxing round-trip.
+            $tOk = $tOk || ($tT->isArray() && $oT->kind === Type::KIND_CELL);
+            $oOk = $oOk || ($oT->isArray() && $tT->kind === Type::KIND_CELL);
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }
@@ -1611,6 +1634,15 @@ final class InferTypes implements Pass
             return $vt->kind === Type::KIND_NULL ? Type::cell() : $vt;
         }
         if ($vt->kind === Type::KIND_UNKNOWN) { return $cur; }
+        // CELL is the TOP of the element lattice — once an array's slots are
+        // NaN-boxed, a later concrete store cannot un-box the ones already
+        // written. unionTypes has no way to know that (it sees two ordinary
+        // types and picks the second when the first is a cell), so a
+        // `$out[$k] = $mixed` followed by `$out['x'] = [1,2]` demoted the
+        // element to `vec[int]` — and the function's whole return type with it,
+        // which is what made a caller rebuild the boxed array as if its values
+        // were raw (SIGSEGV) or read them raw (garbage floats).
+        if ($cur->kind === Type::KIND_CELL) { return $cur; }
         $u = $this->unionTypes($cur, $vt);
         if ($u->kind === Type::KIND_UNKNOWN || $u->kind === Type::KIND_NULL) { return Type::cell(); }
         return $u;

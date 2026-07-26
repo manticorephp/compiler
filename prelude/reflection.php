@@ -202,8 +202,11 @@ function __mc_refl_attrs_of(int $base, int $n, ?string $filter): array
     while ($i < $n) {
         $nm = __mc_refl_attr_name($base, $i);
         if ($want === "" || $nm === $want) {
+            // Every argument passed explicitly: emitNewObj does NOT pad defaults.
             $out[] = new ReflectionAttribute(
-                $nm, __mc_refl_attr_args($base, $i), __mc_refl_attr_new($base, $i));
+                $nm, __mc_refl_attr_args($base, $i), __mc_refl_attr_new($base, $i),
+                __mc_refl_attr_target($base, $i), __mc_refl_attr_repeated($base, $i),
+                __mc_refl_attr_err($base, $i));
         }
         $i = $i + 1;
     }
@@ -639,6 +642,12 @@ class ReflectionMethod
         return ($this->flags() & 16) !== 0;
     }
 
+    /** Whether the method carries `#[\Deprecated]`. */
+    public function isDeprecated(): bool
+    {
+        return ($this->flags() & 64) !== 0;
+    }
+
     public function isPublic(): bool
     {
         return ($this->flags() & 3) === 0;
@@ -998,20 +1007,45 @@ class ReflectionNamedType
  */
 class ReflectionAttribute
 {
+    /** Match the filter by exact class name only — is-a matching is not
+     *  implemented, so a filter naming a PARENT of the attribute class does not
+     *  match. Declared so code passing the flag compiles. */
+    const IS_INSTANCEOF = 2;
+
     private string $name = "";
     private int $argsFn = 0;
     private int $newFn = 0;
+    private int $target = 0;
+    private int $repeated = 0;
+    private string $err = "";
 
-    public function __construct(string $name, int $argsFn, int $newFn)
+    public function __construct(string $name, int $argsFn, int $newFn,
+                                int $target = 0, int $repeated = 0, string $err = "")
     {
         $this->name = $name;
         $this->argsFn = $argsFn;
         $this->newFn = $newFn;
+        $this->target = $target;
+        $this->repeated = $repeated;
+        $this->err = $err;
     }
 
     public function getName(): string
     {
         return $this->name;
+    }
+
+    /** The `Attribute::TARGET_*` bit of the declaration this attribute is on. */
+    public function getTarget(): int
+    {
+        return $this->target;
+    }
+
+    /** Whether the same attribute class appears more than once on that
+     *  declaration. */
+    public function isRepeated(): bool
+    {
+        return $this->repeated !== 0;
     }
 
     /** The attribute's arguments: positional (int keys) then named (string keys).
@@ -1025,6 +1059,13 @@ class ReflectionAttribute
     /** A fresh instance of the attribute class, its arguments applied. */
     public function newInstance(): object
     {
+        // php validates a userland attribute's TARGET and repeatability here,
+        // not at compile time. The verdict was computed while the attribute
+        // class's own #[Attribute(flags)] was still readable and baked into the
+        // metadata row.
+        if ($this->err !== "") {
+            throw new Error($this->err);
+        }
         if ($this->newFn === 0) {
             throw new ReflectionException("Attribute " . $this->name . " is not instantiable");
         }
@@ -1104,6 +1145,12 @@ class ReflectionFunction
     public function getNumberOfRequiredParameters(): int
     {
         return __mc_refl_row_arity($this->row) & 255;
+    }
+
+    /** Whether the function carries `#[\Deprecated]`. */
+    public function isDeprecated(): bool
+    {
+        return (__mc_refl_row_flags($this->row) & 64) !== 0;
     }
 
     public function hasReturnType(): bool

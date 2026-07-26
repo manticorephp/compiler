@@ -733,6 +733,57 @@ trait EmitLlvmCalls
             || $pk === Type::KIND_STRING;
     }
 
+    /**
+     * The `#[\NoDiscard]` warning for a call whose result is thrown away, or ''.
+     *
+     * `(void) f();` and `$_ = f();` both stay quiet — the first via the
+     * `voidCast` marker, the second because an assignment is a StoreLocal and
+     * never reaches this loop's call arms. `if (f()) {}` is a condition, not a
+     * block statement, so it is a USE. All three match php.
+     */
+    private function emitNoDiscardWarn(Node $s): string
+    {
+        $k = $s->kind;
+        $msg = '';
+        if ($k === Node::KIND_CALL) {
+            if ($this->callIsVoidCast($s)) { return ''; }
+            $msg = $this->noDiscardFns[$this->callFunction($s)] ?? '';
+        } elseif ($k === Node::KIND_METHOD_CALL) {
+            if ($this->methodCallIsVoidCast($s)) { return ''; }
+            $msg = $this->noDiscardMethodMsg($this->staticClassOf($this->methodCallObject($s)),
+                $this->methodCallMethod($s));
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            if ($this->staticCallIsVoidCast($s)) { return ''; }
+            $msg = $this->noDiscardMethodMsg(\ltrim($this->staticCallClass($s), '\\'),
+                $this->staticCallMethod($s));
+        } else {
+            return '';
+        }
+        if ($msg === '') { return ''; }
+        return $this->emitDiagnosticLine('Warning', $msg, $s->line);
+    }
+
+    /** Keyed by the DECLARING class — an ABSTRACT or interface declaration never
+     *  registers one, so it does not propagate to the concrete implementation. */
+    private function noDiscardMethodMsg(string $class, string $method): string
+    {
+        if ($class === '') { return ''; }
+        $decl = $this->resolveMethodClass($class, $method);
+        if ($decl === '') { $decl = $class; }
+        return $this->noDiscardMethods[$decl . '::' . $method] ?? '';
+    }
+
+    /** Subclass-typed reads of the call nodes (T5: a base-typed read resolves
+     *  by OFFSET and would pick the wrong slot). */
+    private function callIsVoidCast(Call $n): bool { return $n->voidCast; }
+    private function callFunction(Call $n): string { return $n->function; }
+    private function methodCallIsVoidCast(MethodCall_ $n): bool { return $n->voidCast; }
+    private function methodCallObject(MethodCall_ $n): Node { return $n->object; }
+    private function methodCallMethod(MethodCall_ $n): string { return $n->method; }
+    private function staticCallIsVoidCast(StaticCall_ $n): bool { return $n->voidCast; }
+    private function staticCallClass(StaticCall_ $n): string { return $n->class; }
+    private function staticCallMethod(StaticCall_ $n): string { return $n->method; }
+
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
@@ -834,17 +885,54 @@ trait EmitLlvmCalls
         return $this->byRefAddrOf($a) ?? '';
     }
 
+    /**
+     * One `#[\Deprecated]` / `#[\NoDiscard]` diagnostic, byte-identical to what
+     * php's CLI prints with display_errors=STDOUT and html_errors=Off:
+     *
+     *     "\n<Level>: <body> in <file> on line <N>\n"
+     *
+     * Message, file and line are all compile-time constants, so the whole line
+     * is ONE interned literal and a `write` — no runtime formatting, and it
+     * dead-strips with the call if the call goes away.
+     *
+     * Emitted through the same fflush + write(1, …) pair `echo` uses for a
+     * string. A `dprintf(2, …)` would look right in isolation and INTERLEAVE
+     * WRONG the moment a program mixes echo with a diagnostic.
+     */
+    private function emitDiagnosticLine(string $level, string $body, int $line): string
+    {
+        $text = "\n" . $level . ': ' . $body . ' in ' . $this->sourceFile
+              . ' on line ' . (string)$line . "\n";
+        $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
+        $this->libcExtra['write'] = 'declare i64 @write(i32, ptr, i64)';
+        $ptr = $this->strLitId($this->pool->intern($text));
+        $out = "  call i32 @fflush(ptr null)\n";
+        $wr = $this->ssa->allocReg();
+        $out .= '  ' . $wr . ' = call i64 @write(i32 1, ptr ' . $ptr
+              . ', i64 ' . (string)\strlen($text) . ")\n";
+        return $out;
+    }
+
+    /** The `#[\Deprecated]` line for a free function call, or ''. */
+    private function deprecatedFnDiag(Call $n): string
+    {
+        $msg = $this->deprecatedFns[$n->function] ?? '';
+        if ($msg === '') { return ''; }
+        return $this->emitDiagnosticLine('Deprecated', $msg, $n->line);
+    }
+
     private function emitCall(Call $n): string
     {
         $c = $n;
         $b = $this->emitBuiltin($c);
         if ($b !== null) { return $b; }
-        $out = '';
+        $out = $this->deprecatedFnDiag($c);
         $argList = '';
         $first = true;
         $mask = $this->sigs->refParams[$c->function] ?? [];
         $tmask = $this->sigs->taggedParams[$c->function] ?? [];
         $camask = $this->sigs->cellArgParams[$c->function] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$c->function] ?? [];
         $ptypes = $this->sigs->paramTypes[$c->function] ?? [];
         $ai = 0;
         // Fresh string-temp arg carriers freed after the call: a borrow the
@@ -984,6 +1072,22 @@ trait EmitLlvmCalls
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();
                 $out .= $this->unboxCellArg($a, $ptypes, $ai);
+                // A bare `array` hint lowers to KIND_UNKNOWN, so unboxCellArg
+                // sees no target repr and leaves the tag on — but the callee
+                // reads that slot as a raw buffer pointer (EmitLlvmModule's
+                // array-hint prologue copies through `inttoptr`). Strip it. This
+                // is the boundary a cell-merged local now crosses: `$t = [];
+                // if (is_array($m)) { $t = $m; }` is a cell by the time it is
+                // handed to `f(array $a)`.
+                if (($ahmask[$ai] ?? false) && $a->type->kind === Type::KIND_CELL
+                    && ($ptypes[$ai] ?? null) !== null
+                    && $ptypes[$ai]->kind === Type::KIND_UNKNOWN) {
+                    $sp = $this->ssa->allocReg();
+                    $out .= '  ' . $sp . ' = and i64 ' . $this->lastValue
+                          . ", 281474976710655\n";
+                    $this->lastValue = $sp;
+                    $this->lastValueType = 'i64';
+                }
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($this->isFreshStringTemp($a)) {
                     $argTemps[] = $this->lastValue;

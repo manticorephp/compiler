@@ -264,6 +264,20 @@ final class EmitLlvm implements EmitVisitor
      *  layout hazard (the ClassDef::$isPreludeClass lesson). */
     private array $reflFnMeta = [];
 
+    /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
+     *  Keyed by function name / "DeclaringClass::method".
+     *  @var array<string, string> */
+    private array $deprecatedFns = [];
+    /** @var array<string, string> */
+    private array $deprecatedMethods = [];
+    /** @var array<string, string> */
+    private array $noDiscardFns = [];
+    /** @var array<string, string> */
+    private array $noDiscardMethods = [];
+    /** "<declClass>|<kind>|<member>|<k>" → newInstance()'s baked \Error message.
+     *  @var array<string, string> */
+    private array $attrSiteErrors = [];
+
     public function emit(Module $module): string
     {
         $this->rt = new RuntimeFeatures();
@@ -298,6 +312,11 @@ final class EmitLlvm implements EmitVisitor
         $this->interfaceNames = $module->interfaceNames;
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
+        $this->deprecatedFns = $module->deprecatedFns;
+        $this->deprecatedMethods = $module->deprecatedMethods;
+        $this->noDiscardFns = $module->noDiscardFns;
+        $this->noDiscardMethods = $module->noDiscardMethods;
+        $this->attrSiteErrors = $module->attrSiteErrors;
         $this->closureCaptures = $module->closureCaptures;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
@@ -311,18 +330,21 @@ final class EmitLlvm implements EmitVisitor
             $mask = [];
             $tmask = [];
             $camask = [];
+            $ahmask = [];
             $ptypes = [];
             $pdefs = [];
             foreach ($fn->params as $p) {
                 $mask[] = $p->byRef;
                 $tmask[] = ($p->type->kind === Type::KIND_CELL);
                 $camask[] = $p->cellArg;
+                $ahmask[] = $p->arrayHinted;
                 $ptypes[] = $p->type;
                 $pdefs[] = $p->default;
             }
             $this->sigs->refParams[$fn->name] = $mask;
             $this->sigs->taggedParams[$fn->name] = $tmask;
             $this->sigs->cellArgParams[$fn->name] = $camask;
+            $this->sigs->arrayHintedParams[$fn->name] = $ahmask;
             $this->sigs->paramTypes[$fn->name] = $ptypes;
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;

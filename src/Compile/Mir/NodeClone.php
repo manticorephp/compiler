@@ -73,7 +73,17 @@ final class NodeClone
         // where the closure's captures are already concretely typed at the
         // caller). Freshening the closure fn per specialization is Phase B.
         if ($k === Node::KIND_CLOSURE) { $x = self::asClosure($n); return new Closure_($x->id, self::nodes($x->captures), $n->type, $x->captureByRef); }
-        if ($k === Node::KIND_STORE_LOCAL) { $x = self::asStoreLocal($n); return new StoreLocal($x->name, self::node($x->value), $n->type); }
+        if ($k === Node::KIND_STORE_LOCAL) {
+            $x = self::asStoreLocal($n);
+            $c = new StoreLocal($x->name, self::node($x->value), $n->type);
+            // Carry the inline `/** @var T $x */` binding: it is a SOURCE
+            // annotation, so a specialized copy of the body is bound by it just
+            // as the original is. Dropping it let a clone's rebuild buffer
+            // re-infer from its stores alone (and lose the cell element the
+            // author asked for).
+            $c->declaredType = $x->declaredType;
+            return $c;
+        }
         if ($k === Node::KIND_NULLCOALESCE) { $x = self::asNullCoalesce($n); return new NullCoalesce_(self::node($x->left), self::node($x->right), $n->type); }
         if ($k === Node::KIND_SPREAD) { $x = self::asSpread($n); return new Spread_(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_THROW)  { $x = self::asThrow($n);  return new Throw_(self::node($x->value), $n->type); }

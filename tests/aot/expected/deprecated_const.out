@@ -1,0 +1,14 @@
+start
+
+Deprecated: Constant Holder::OLD is deprecated, gone in deprecated_const.php on line 27
+3
+4
+
+Deprecated: Enum case Suit::Hearts is deprecated, old suit in deprecated_const.php on line 29
+H
+S
+
+Deprecated: Constant TOP_OLD is deprecated since 3.1, konst in deprecated_const.php on line 33
+7
+8
+end
