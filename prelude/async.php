@@ -281,6 +281,15 @@ namespace Async {
         public int $ioFd = -1;
         /** True when the park is for writability (else readability). */
         public bool $ioWrite = false;
+        /**
+         * INTRUSIVE chain of the other tasks parked on the SAME fd (the scheduler's
+         * per-fd slot holds the head). Two readers on one stream are legal — and a
+         * single-Task slot silently OVERWROTE the first one, so it was never woken
+         * and its fread() returned empty while the other got the data. A chain on
+         * the Task avoids a nested `array<int, Task[]>` in prelude code (the known
+         * element-repr hazard) and pushes/pops in O(1).
+         */
+        public ?Task $ioNext = null;
 
         /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
         public bool $timerActive = false;
@@ -1583,23 +1592,37 @@ namespace Async {
             $this->wake($task);
         }
 
-        /** Drop $task's reactor registration, if any. Idempotent. */
+        /**
+         * Drop $task's reactor registration, if any. Idempotent. Unlinks from the
+         * MIDDLE of the fd's waiter chain — a sibling parked on the same fd must
+         * keep its own registration (and must not be reachable through a task that
+         * has left, or the reactor would wake a corpse).
+         */
         private function releaseIo(Task $task): void
         {
             $fd = $task->ioFd;
             if ($fd < 0) { return; }
             $task->ioFd = -1;
             $this->ioWaiters = $this->ioWaiters - 1;
-            if ($task->ioWrite) {
-                if (isset($this->writeWaiter[$fd]) && $this->writeWaiter[$fd] === $task) {
-                    unset($this->writeWaiter[$fd]);
-                    $this->disarmWrite($fd);
+            $write = $task->ioWrite;
+            $head = $write
+                ? (isset($this->writeWaiter[$fd]) ? $this->writeWaiter[$fd] : null)
+                : (isset($this->readWaiter[$fd]) ? $this->readWaiter[$fd] : null);
+            if ($head === null) { $task->ioNext = null; return; }
+            if ($head === $task) {
+                $next = $task->ioNext;
+                if ($next === null) {
+                    if ($write) { unset($this->writeWaiter[$fd]); } else { unset($this->readWaiter[$fd]); }
+                } else {
+                    if ($write) { $this->writeWaiter[$fd] = $next; } else { $this->readWaiter[$fd] = $next; }
                 }
             } else {
-                if (isset($this->readWaiter[$fd]) && $this->readWaiter[$fd] === $task) {
-                    unset($this->readWaiter[$fd]);
-                }
+                $prev = $head;
+                while ($prev !== null && $prev->ioNext !== $task) { $prev = $prev->ioNext; }
+                if ($prev !== null) { $prev->ioNext = $task->ioNext; }
             }
+            $task->ioNext = null;
+            if ($write) { $this->disarmWrite($fd); }
         }
 
         /**
@@ -1798,6 +1821,51 @@ namespace Async {
             }
         }
 
+        /**
+         * Push $me onto the head of $fd's READ waiter chain. Several tasks may
+         * legitimately park on one fd (two readers on a shared stream); each
+         * re-checks its own syscall after the wake, which is the level-triggered
+         * contract this file already relies on.
+         */
+        private function chainRead(int $fd, Task $me): void
+        {
+            $me->ioNext = isset($this->readWaiter[$fd]) ? $this->readWaiter[$fd] : null;
+            $this->readWaiter[$fd] = $me;
+            $me->ioFd = $fd;
+            $me->ioWrite = false;
+            $this->ioWaiters = $this->ioWaiters + 1;
+        }
+
+        /** Push $me onto the head of $fd's WRITE waiter chain. */
+        private function chainWrite(int $fd, Task $me): void
+        {
+            $me->ioNext = isset($this->writeWaiter[$fd]) ? $this->writeWaiter[$fd] : null;
+            $this->writeWaiter[$fd] = $me;
+            $me->ioFd = $fd;
+            $me->ioWrite = true;
+            $this->ioWaiters = $this->ioWaiters + 1;
+        }
+
+        /**
+         * Wake EVERY task on $fd's chain for the given direction and clear the slot.
+         * Waking only the head would strand the rest until the next readiness edge.
+         */
+        private function wakeChain(int $fd, bool $write): void
+        {
+            $t = $write
+                ? (isset($this->writeWaiter[$fd]) ? $this->writeWaiter[$fd] : null)
+                : (isset($this->readWaiter[$fd]) ? $this->readWaiter[$fd] : null);
+            if ($write) { unset($this->writeWaiter[$fd]); } else { unset($this->readWaiter[$fd]); }
+            while ($t !== null) {
+                $next = $t->ioNext;
+                $t->ioNext = null;
+                $t->ioFd = -1;
+                $this->ioWaiters = $this->ioWaiters - 1;
+                $this->wake($t);
+                $t = $next;
+            }
+        }
+
         /** Suspend until $conn is readable. */
         public function waitReadable(\Resource $conn): void
         {
@@ -1805,10 +1873,7 @@ namespace Async {
             $me = $this->running;
             $fd = $conn->addr;
             $this->ensureWatcher($conn, $fd);
-            $this->readWaiter[$fd] = $me;
-            $me->ioFd = $fd;
-            $me->ioWrite = false;
-            $this->ioWaiters = $this->ioWaiters + 1;
+            $this->chainRead($fd, $me);
             \Fiber::suspend();
             $this->releaseIo($me);
         }
@@ -1831,10 +1896,7 @@ namespace Async {
             $me = $this->running;
             $fd = $conn->addr;
             $this->ensureWatcher($conn, $fd);
-            $this->readWaiter[$fd] = $me;
-            $me->ioFd = $fd;
-            $me->ioWrite = false;
-            $this->ioWaiters = $this->ioWaiters + 1;
+            $this->chainRead($fd, $me);
             $me->timerActive = true;
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
             $this->timerPush(\microtime(true) + $seconds, $me);
@@ -1857,14 +1919,11 @@ namespace Async {
             $me = $this->running;
             $fd = $conn->addr;
             $this->ensureWatcher($conn, $fd);
-            $this->writeWaiter[$fd] = $me;
+            $this->chainWrite($fd, $me);
             if (!$this->writeArmed[$fd]) {
                 $this->connWatcher[$fd]->modifyEvents([\Io\Poll\Event::Read, \Io\Poll\Event::Write]);
                 $this->writeArmed[$fd] = true;
             }
-            $me->ioFd = $fd;
-            $me->ioWrite = true;
-            $this->ioWaiters = $this->ioWaiters + 1;
             \Fiber::suspend();
             $this->releaseIo($me);
         }
@@ -1889,22 +1948,10 @@ namespace Async {
                 unset($this->connWatcher[$fd]);
                 unset($this->writeArmed[$fd]);
             }
-            // A task still parked on a closing fd would never be woken — resume it
-            // so its read/write returns rather than wedging the loop.
-            if (isset($this->readWaiter[$fd])) {
-                $t = $this->readWaiter[$fd];
-                unset($this->readWaiter[$fd]);
-                $t->ioFd = -1;
-                $this->ioWaiters = $this->ioWaiters - 1;
-                $this->wake($t);
-            }
-            if (isset($this->writeWaiter[$fd])) {
-                $t = $this->writeWaiter[$fd];
-                unset($this->writeWaiter[$fd]);
-                $t->ioFd = -1;
-                $this->ioWaiters = $this->ioWaiters - 1;
-                $this->wake($t);
-            }
+            // A task still parked on a closing fd would never be woken — resume
+            // EVERY one so their read/write returns rather than wedging the loop.
+            $this->wakeChain($fd, false);
+            $this->wakeChain($fd, true);
         }
 
         // ── the blocking step: wait for fds / the next timer, wake tasks ────
@@ -1928,19 +1975,11 @@ namespace Async {
                         || $watcher->hasTriggered(\Io\Poll\Event::HangUp);
                     if (($hup || $watcher->hasTriggered(\Io\Poll\Event::Read))
                         && isset($this->readWaiter[$fd])) {
-                        $t = $this->readWaiter[$fd];
-                        unset($this->readWaiter[$fd]);
-                        $t->ioFd = -1;
-                        $this->ioWaiters = $this->ioWaiters - 1;
-                        $this->wake($t);
+                        $this->wakeChain($fd, false);
                     }
                     if (($hup || $watcher->hasTriggered(\Io\Poll\Event::Write))
                         && isset($this->writeWaiter[$fd])) {
-                        $t = $this->writeWaiter[$fd];
-                        unset($this->writeWaiter[$fd]);
-                        $t->ioFd = -1;
-                        $this->ioWaiters = $this->ioWaiters - 1;
-                        $this->wake($t);
+                        $this->wakeChain($fd, true);
                         $this->disarmWrite($fd);
                     }
                 }
