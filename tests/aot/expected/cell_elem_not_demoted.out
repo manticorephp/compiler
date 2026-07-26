@@ -1,0 +1,37 @@
+Array
+(
+    [c] => 1
+    [extra] => Array
+        (
+            [0] => 1
+            [1] => 2
+        )
+
+)
+Array
+(
+    [n] => 1
+    [s] => two
+    [a] => Array
+        (
+            [x] => 3
+        )
+
+    [f] => 4.5
+    [z] => 
+)
+bool(true)
+int(1)
+string(3) "two"
+Array
+(
+    [a] => 1
+    [2] => b
+    [7] => seven
+    [tail] => Array
+        (
+            [0] => 8
+            [1] => 9
+        )
+
+)

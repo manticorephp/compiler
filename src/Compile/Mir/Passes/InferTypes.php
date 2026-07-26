@@ -1622,6 +1622,15 @@ final class InferTypes implements Pass
             return $vt->kind === Type::KIND_NULL ? Type::cell() : $vt;
         }
         if ($vt->kind === Type::KIND_UNKNOWN) { return $cur; }
+        // CELL is the TOP of the element lattice — once an array's slots are
+        // NaN-boxed, a later concrete store cannot un-box the ones already
+        // written. unionTypes has no way to know that (it sees two ordinary
+        // types and picks the second when the first is a cell), so a
+        // `$out[$k] = $mixed` followed by `$out['x'] = [1,2]` demoted the
+        // element to `vec[int]` — and the function's whole return type with it,
+        // which is what made a caller rebuild the boxed array as if its values
+        // were raw (SIGSEGV) or read them raw (garbage floats).
+        if ($cur->kind === Type::KIND_CELL) { return $cur; }
         $u = $this->unionTypes($cur, $vt);
         if ($u->kind === Type::KIND_UNKNOWN || $u->kind === Type::KIND_NULL) { return Type::cell(); }
         return $u;
