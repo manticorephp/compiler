@@ -3,7 +3,7 @@
 // A supervised HTTP server that shuts down cleanly — the shape a real service
 // needs, and the point of the pcntl layer.
 //
-//   ./poc/async/server_bin &          # 4 supervised workers on :8081
+//   ./examples/async/server_bin &          # 4 supervised workers on :8081
 //   kill -TERM %1                     # every worker drains and exits 0
 //
 // Nothing here is signal-specific plumbing: shutdownOn() cancels the ROOT scope,

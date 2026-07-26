@@ -38,7 +38,7 @@ trait EmitLlvmFiber
      *  runtime is demanded; the src/Runtime stdlib DOES mention it (AsyncHook
      *  probes `\Fiber::getCurrent`), so the asm was already inside
      *  `lib/manticore_stdlib.o`. Emitting it a SECOND time from the application
-     *  (poc/async/smoke.php uses \Fiber too) then broke the link.
+     *  (examples/async/smoke.php uses \Fiber too) then broke the link.
      *
      *  Gate: emit the module-asm DEFINITIONS only under `--emit-library`
      *  (the stdlib.o build). Applications get the plain `declare` lines and

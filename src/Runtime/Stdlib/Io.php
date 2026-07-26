@@ -380,7 +380,7 @@ function __mc_stream_fill(\Resource $s, int $want): int
     // (stream_set_blocking(false)), so a recv with the next request already
     // buffered in the kernel returns immediately — no reactor round-trip, no
     // fiber park on the (very common) keep-alive case. Mirrors the raw
-    // `Async\read` pattern in poc/async/src/io.php. Plain sockets only: TLS
+    // `Async\read` pattern in the raw Async\read path in prelude/async.php. Plain sockets only: TLS
     // keeps the existing wait/pending flow (SSL_read buffered-plaintext
     // accounting is done inside __mc_wait_read).
     //
