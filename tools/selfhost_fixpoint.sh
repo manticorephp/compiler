@@ -64,4 +64,4 @@ echo "MIR GOLDEN OK"
 # layout-flaky rc/heap bug (crashes ~4/5 rebuilds, survives the lucky one)
 # slips through. Rebuild N times through both front-ends and smoke each.
 echo "── Rebuild-stability ──"
-bash tools/selfhost_stability.sh 5
+bash tools/selfhost_stability.sh "${MC_STABILITY_N:-5}"
