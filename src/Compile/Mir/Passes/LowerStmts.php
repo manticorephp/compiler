@@ -245,20 +245,46 @@ trait LowerStmts
             foreach ($live as $s) { $stmts[] = $this->lowerStmt($s); }
             return new Block($stmts, Type::void());
         }
-        $cond  = $this->lowerExpr($stmt->condition);
-        $then  = $this->lowerBlockNode($stmt->then);
+        // Not every arm folds — but the ones that fold FALSE are still dead, and
+        // dropping them individually matters: symfony guards
+        // `if (function_exists('cli_set_process_title')) … elseif
+        // (function_exists('setproctitle')) … elseif ($runtimeCheck) …`, and the
+        // whole chain used to survive because the LAST arm is not foldable. The
+        // dead arms then referenced functions this build has no definition for
+        // and the link failed on an undefined symbol. Prune arm by arm; only a
+        // chain in which EVERY arm folds is resolved by constIfBranch above.
+        /** @var \Parser\Ast\Expr[] $armConds */
+        $armConds = [];
+        /** @var \Parser\Ast\Block[] $armBodies */
+        $armBodies = [];
+        if ($this->foldGuard($stmt->condition) !== false) {
+            $armConds[] = $stmt->condition;
+            $armBodies[] = $stmt->then;
+        }
+        foreach ($stmt->elseifs as $pair) {
+            if ($this->foldGuard($pair->condition) === false) { continue; }
+            $armConds[] = $pair->condition;
+            $armBodies[] = $pair->body;
+        }
         $else_ = $stmt->else === null ? null : $this->lowerBlockNode($stmt->else);
-        $elseifs = $stmt->elseifs;
-        for ($i = \count($elseifs) - 1; $i >= 0; $i = $i - 1) {
-            $pair = $elseifs[$i];
+        $n = \count($armConds);
+        if ($n === 0) {
+            // Every arm is statically dead — only the `else` can run.
+            return $else_ === null ? new Block([], Type::void()) : $else_;
+        }
+        for ($i = $n - 1; $i >= 1; $i = $i - 1) {
             $nested = new If_(
-                $this->lowerExpr($pair->condition),
-                $this->lowerBlockNode($pair->body),
+                $this->lowerExpr($armConds[$i]),
+                $this->lowerBlockNode($armBodies[$i]),
                 $else_,
             );
             $else_ = new Block([$nested], Type::void());
         }
-        return new If_($cond, $then, $else_);
+        return new If_(
+            $this->lowerExpr($armConds[0]),
+            $this->lowerBlockNode($armBodies[0]),
+            $else_,
+        );
     }
 
     private function lowerWhile(\Parser\Ast\WhileStmt $stmt): While_
