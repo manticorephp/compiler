@@ -128,16 +128,6 @@ function __mc_var_export_cell(mixed $v, int $indent): string
     return 'NULL';
 }
 
-/**
- * `error_get_last()` — always NULL. There is no error handler to record into:
- * a diagnostic that Zend would raise as a warning is an EXCEPTION here, so
- * nothing ever lands in the last-error slot. Callers use it to decide whether a
- * preceding call failed quietly, and here it never did.
- */
-function error_get_last(): ?array
-{
-    return null;
-}
 
 /**
  * `extension_loaded($name)` — the runtime answer for a name only known at run
@@ -153,3 +143,52 @@ function extension_loaded(string $extension): bool
         || $e === 'openssl' || $e === 'core' || $e === 'standard';
 }
 
+
+/**
+ * Resident memory, in bytes.
+ *
+ * php reports its own emalloc arena; this binary allocates from the system
+ * allocator and has no separate arena to report, so BOTH the `$real_usage`
+ * forms answer the process's peak resident size via getrusage(2). It is the
+ * honest number available here, and it is what the only real callers
+ * (progress-bar "memory used" displays) want. Named as a divergence rather than
+ * faked with a counter that would drift.
+ */
+function __mc_rss_bytes(): int
+{
+    $buf = \Runtime\Libc\calloc(1, 256);
+    // struct rusage opens with two struct timeval (16 bytes each on Darwin and
+    // glibc/x86_64 alike), so ru_maxrss is at offset 32 on both.
+    $rc = \Runtime\Libc\sys_getrusage(0, $buf);
+    $maxrss = $rc === 0 ? \peek_i64($buf, 32) : 0;
+    \Runtime\Libc\free($buf);
+    // Darwin counts bytes, Linux kilobytes.
+    return \__mc_host_is_darwin() ? $maxrss : $maxrss * 1024;
+}
+
+function memory_get_usage(bool $real_usage = false): int
+{
+    return \__mc_rss_bytes();
+}
+
+function memory_get_peak_usage(bool $real_usage = false): int
+{
+    return \__mc_rss_bytes();
+}
+
+function memory_reset_peak_usage(): void
+{
+}
+
+/**
+ * php's spl_object_hash: 32 lowercase hex digits, unique among live objects.
+ * Built from spl_object_id (a compiler builtin) so the two agree, which is the
+ * property every caller actually relies on — symfony/console uses it purely as
+ * a map key.
+ */
+function spl_object_hash(object $object): string
+{
+    $id = \spl_object_id($object);
+    $hex = \dechex($id);
+    return \str_pad($hex, 32, "0", STR_PAD_LEFT);
+}

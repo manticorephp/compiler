@@ -145,6 +145,9 @@ trait LowerPrelude
             // whose interfaces DatePeriod implements.
             $src = $src . $this->dateTimeSrc;
         }
+        if ($this->signalsSrc !== '') {
+            $src = $src . $this->signalsSrc;
+        }
         if ($this->binarySrc !== '') {
             $src = $src . $this->binarySrc;
         }

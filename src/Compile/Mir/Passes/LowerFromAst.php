@@ -326,6 +326,8 @@ final class LowerFromAst implements Pass
     public string $errorsSrc = '';
     /** pack/unpack — DEMAND-GATED. */
     public string $binarySrc = '';
+    /** pcntl signals — DEMAND-GATED. */
+    public string $signalsSrc = '';
     /** Nesting depth of the `@` suppression operator around the expression being
      *  lowered — read by the `trigger_error` rewrite ({@see LowerExprs}). */
     private int $silenceDepth = 0;

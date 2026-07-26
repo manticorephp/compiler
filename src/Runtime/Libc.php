@@ -548,3 +548,11 @@ function sys_setlocale(#[CType('int')] int $category, string $locale): Ptr {}
 
 #[Library('c'), Symbol('setlocale')]
 function sys_setlocale_query(#[CType('int')] int $category, Ptr $locale): Ptr {}
+
+// ── Resource usage ─────────────────────────────────────────────────────
+// `int getrusage(int who, struct rusage *usage)` — 0 on success.
+// `struct rusage` opens with two `struct timeval` (16 bytes each on both
+// Darwin and glibc/x86_64), so `ru_maxrss` sits at offset 32 on both. Its UNIT
+// differs: bytes on Darwin, kilobytes on Linux.
+#[Library('c'), Symbol('getrusage')]
+function sys_getrusage(#[CType('int')] int $who, Ptr $usage): int {}

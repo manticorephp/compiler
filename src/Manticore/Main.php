@@ -940,13 +940,15 @@ function cmd_compile(array $args): int {
     // undefined reference without it. `--as-needed` drops it when unreferenced.
     // Io\Poll's epoll backend binds Linux-only symbols with `#[Ffi\Weak]`
     // (extern_weak). On a macOS build those are weak-undefined, which ld64
-    // rejects unless allowed — `-U _epoll_*` permits exactly them (they bind to
+    // rejects unless allowed — `-U` on each permits exactly them (they bind to
     // 0 and the Linux-only branch never calls them). Harmless when unreferenced,
-    // exactly like ___errno_location. kqueue/kevent are present on Darwin (no
-    // flag); on Linux GNU ld auto-binds any weak-undefined to 0.
+    // exactly like ___errno_location. The signal capture in prelude/signals.php
+    // binds Linux-only signalfd the same way. kqueue/kevent are present on
+    // Darwin (no flag); on Linux GNU ld auto-binds any weak-undefined to 0.
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
             . " -Wl,-U,_epoll_create1 -Wl,-U,_epoll_ctl -Wl,-U,_epoll_wait"
+            . " -Wl,-U,_signalfd"
         : " -Wl,--gc-sections -Wl,--as-needed -lm";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
@@ -1589,6 +1591,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
     // cannot cross the stdlib.o boundary.
     $binarySrc = prelude_src_or_empty("binary.php");
+    // pcntl signals — prelude (handlers are callables), demand-gated.
+    $signalsSrc = prelude_src_or_empty("signals.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1599,7 +1603,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // prelude is injected WHOLE — so a miscompile in any function sharing that
     // file breaks generation 2 of the self-host. Nothing in src/ calls these.
     $useArrayFnsExt = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsExtSrc));
-    $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
+    $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
+        // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
+        // file (they drain a Traversable, so they cannot live in the stdlib).
+        // A program may call one without ever naming an SPL array class.
+        || $demand->callsAny(['iterator_to_array', 'iterator_count', 'iterator_apply']);
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);
     // `new \Io\Poll\Context`, a `use Io\Poll\...`, or `new StreamPollHandle` all
@@ -1609,6 +1617,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // lowering rewrites it to `__mc_trigger_error` — the gate reads the SOURCE,
     // which still spells the php name.
     $useBinary = $demand->callsAny(['pack', 'unpack']);
+    $useSignals = $demand->callsAny(['pcntl_signal', 'pcntl_signal_dispatch',
+                                     'pcntl_signal_get_handler', 'pcntl_async_signals',
+                                     'posix_kill', 'posix_getpid', 'getmypid']);
     $useErrors = $demand->callsAny(['set_error_handler', 'restore_error_handler',
                                     'set_exception_handler', 'restore_exception_handler',
                                     'register_shutdown_function', 'trigger_error',
@@ -1738,6 +1749,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
+        $lower->signalsSrc = $useSignals ? $signalsSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -2001,7 +2013,7 @@ function analyze_prelude_files(): array {
     $names = [
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
-        "datetime.php", "errors.php", "binary.php",
+        "datetime.php", "errors.php", "binary.php", "signals.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

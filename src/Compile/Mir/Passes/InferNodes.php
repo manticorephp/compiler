@@ -1348,6 +1348,13 @@ trait InferNodes
                 $keyT = $this->iterMethodReturn($ic, 'key', $keyT);
             }
         }
+        // A GENERATOR yields keys of any type — `yield "a" => 1` beside an
+        // auto-incrementing int — so the key rides a tagged cell, boxed at the
+        // yield ({@see EmitLlvmGenerator}). Typed int (the old default) a string
+        // key came back as its raw POINTER and printed as a large integer.
+        if ($at->kind === Type::KIND_OBJ && ($at->class ?? '') === 'Generator') {
+            $keyT = Type::cell();
+        }
         // Iterating a `mixed` (tagged cell) that holds an array: both the
         // value AND the key come back as tagged cells (a cell array's key is
         // int-OR-string at runtime, so it can't ride a raw i64 carrier).

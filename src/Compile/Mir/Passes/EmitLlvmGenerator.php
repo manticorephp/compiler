@@ -361,14 +361,21 @@ trait EmitLlvmGenerator
             $val = $this->lastValue;
         }
         // Key: explicit `$k =>`, else the auto-increment counter (then bump it).
+        // The key is stored BOXED: a generator's keys have no single static
+        // type (`yield "a" => 1` beside an auto-incrementing int), so a raw
+        // carrier left the reader guessing and a string key came back as its
+        // pointer. The foreach key var is typed cell to match.
         if ($y->key !== null) {
             $out .= $this->emitNode($y->key);
-            $out .= $this->coerceToI64();
+            $out .= $this->boxToCell($y->key->type);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->keyPtr . "\n";
         } else {
             $nk = $this->ssa->allocReg();
             $out .= '  ' . $nk . ' = load i64, ptr ' . $this->gen->nextKeyPtr . "\n";
-            $out .= '  store i64 ' . $nk . ', ptr ' . $this->gen->keyPtr . "\n";
+            $this->rt->needsTagged = true;
+            $nkb = $this->ssa->allocReg();
+            $out .= '  ' . $nkb . ' = call i64 @__manticore_box_int(i64 ' . $nk . ")\n";
+            $out .= '  store i64 ' . $nkb . ', ptr ' . $this->gen->keyPtr . "\n";
             $nk1 = $this->ssa->allocReg();
             $out .= '  ' . $nk1 . ' = add i64 ' . $nk . ", 1\n";
             $out .= '  store i64 ' . $nk1 . ', ptr ' . $this->gen->nextKeyPtr . "\n";
