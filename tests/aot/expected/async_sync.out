@@ -1,0 +1,11 @@
+mutex: aAbB
+tryLock free: yes
+tryLock held: no
+reentrant: Async\Mutex is not reentrant
+unlocked: free
+once: built 1 time(s), all got builtbuiltbuiltbuilt
+once hasRun: yes
+cancelled task: ok=no err=Async\CancelledException
+once after cancel: hasRun=no
+retry: second attempts=1
+done

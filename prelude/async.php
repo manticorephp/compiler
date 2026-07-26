@@ -32,6 +32,15 @@
 // block the whole loop. Network I/O (connect, TLS handshake, read, write,
 // accept) is async; getaddrinfo is still synchronous.
 //
+// ★ THE INVARIANT WORTH KNOWING: the scheduler is cooperative and single-
+// threaded, so nothing else runs between two suspend points. Everything between
+// them is a critical section for free — an ordinary `$x->n = $x->n + 1` is
+// already atomic by construction. That is why this runtime has NO atomics: there
+// is no data race to protect against (the forked workers() are shared-nothing;
+// atomics would only mean something under real shared-memory threading). What
+// DOES need protecting is a section that SUSPENDS in the middle, letting other
+// tasks observe half-updated state — that is what Mutex is for.
+//
 // ⚠ NO `static` LOCALS anywhere in this file: a static local is backed by a
 // module global (Compile\Mir\LocalSlots), i.e. one cell shared by every fiber,
 // so it corrupts under concurrency. Per-task state lives on Task.
@@ -117,6 +126,20 @@ namespace Async {
             public bool $ok,
             public ?Channel $channel,
             public bool $isSend,
+        ) {}
+    }
+
+    /**
+     * How one task turned out, when you asked for the OUTCOME rather than the
+     * value — {@see awaitAllSettled()} / {@see mapSettled()}. `ok` decides which
+     * of `value` / `error` is meaningful.
+     */
+    final class Settled
+    {
+        public function __construct(
+            public bool $ok,
+            public mixed $value,
+            public ?\Throwable $error,
         ) {}
     }
 
@@ -306,6 +329,16 @@ namespace Async {
 
         public function isDone(): bool { return $this->state !== self::PENDING; }
 
+        /**
+         * Ask this task to stop. It is deregistered from whatever it waits on and
+         * raises CancelledException at its suspend point — and at every one after
+         * that. Returns immediately; use {@see await()} to see it out.
+         */
+        public function cancel(): void
+        {
+            Scheduler::instance()->cancelTask($this);
+        }
+
         /** Register $w as a waiter, once. Small lists — a scan beats a map here. */
         public function addWaiter(Task $w): void
         {
@@ -332,6 +365,26 @@ namespace Async {
                 throw $this->error;
             }
             return $this->result;
+        }
+
+        /**
+         * Wait for this task and report HOW it ended, without rethrowing. What
+         * you want after cancelling one yourself: `$t->cancel(); $t->join();`
+         * reads as "stop it and see it out", whereas `await()` would raise the
+         * task's own CancelledException into a caller that is not being
+         * cancelled at all — and that would unwind the caller's scope.
+         */
+        public function join(): Settled
+        {
+            $sched = Scheduler::instance();
+            $this->claimed = true;
+            while ($this->state === self::PENDING) {
+                $this->addWaiter($sched->current());
+                $sched->suspendCurrent();
+            }
+            return $this->state === self::DONE
+                ? new Settled(true, $this->result, null)
+                : new Settled(false, null, $this->error);
         }
 
         /**
@@ -948,6 +1001,163 @@ namespace Async {
     }
 
     /**
+     * A mutual-exclusion lock for a critical section that SPANS A SUSPEND POINT.
+     *
+     * ⚠ Read this before reaching for one. The scheduler is cooperative and
+     * single-threaded: nothing else runs between two suspend points, so an
+     * ordinary read-modify-write —
+     *
+     *     $shared->n = $shared->n + 1;
+     *
+     * — is already atomic by construction. There is no data race to protect
+     * against, and therefore no need for atomics in this runtime at all. (They
+     * would only start to mean something under real shared-memory threading,
+     * which is a separate epic; the forked `workers()` are shared-nothing.)
+     *
+     * What a Mutex protects is INTERLEAVING: a section that suspends in the
+     * middle, so other tasks get to run and can observe or mutate half-updated
+     * state.
+     *
+     *     $mu->withLock(function () use ($store) {
+     *         $a = fetch();          // suspends — another task runs here
+     *         $b = fetch();
+     *         $store->write($a, $b); // must not interleave with another writer
+     *     });
+     *
+     * Not reentrant: locking one you already hold is a deadlock, so it is a
+     * LogicException instead. FIFO, so no waiter starves.
+     */
+    final class Mutex
+    {
+        private bool $held = false;
+        private ?Task $owner = null;
+        /** @var Task[] tasks waiting for the lock, FIFO */
+        private array $waitQ = [];
+
+        public function isLocked(): bool { return $this->held; }
+
+        public function lock(): void
+        {
+            $sched = Scheduler::instance();
+            $me = $sched->current();
+            if ($this->held && $this->owner === $me) {
+                throw new \LogicException('Async\\Mutex is not reentrant');
+            }
+            while ($this->held) {
+                // A wake is a hint: another waiter may have taken the lock first.
+                $sched->checkCancel();
+                $this->waitQ[] = $me;
+                \Fiber::suspend();
+            }
+            $this->held = true;
+            $this->owner = $me;
+        }
+
+        /** Take the lock only if it is free. Never suspends. */
+        public function tryLock(): bool
+        {
+            if ($this->held) { return false; }
+            $this->held = true;
+            $this->owner = Scheduler::instance()->current();
+            return true;
+        }
+
+        public function unlock(): void
+        {
+            if (!$this->held) {
+                throw new \LogicException('unlock() on a mutex that is not held');
+            }
+            $this->held = false;
+            $this->owner = null;
+            // Skip entries whose task died or was cancelled while queued.
+            while (\count($this->waitQ) > 0) {
+                $t = \array_shift($this->waitQ);
+                if ($t->state === Task::PENDING && !$t->cancelRequested) {
+                    Scheduler::instance()->wake($t);
+                    return;
+                }
+            }
+        }
+
+        /** Hold the lock for the duration of $fn, releasing it however $fn ends. */
+        public function withLock(callable $fn): mixed
+        {
+            $this->lock();
+            try {
+                return $fn();
+            } finally {
+                $this->unlock();
+            }
+        }
+    }
+
+    /**
+     * Run something exactly once, however many tasks ask for it — the lazy
+     * initialiser (a connection pool, a parsed config). Needed because the work
+     * suspends: without it two tasks both see "not ready yet" and both build.
+     * Everyone gets the same value, or the same error.
+     *
+     *   $pool = $once->run(fn() => buildPool());
+     *
+     * A CANCELLED initialiser is not a result: the state resets so the next
+     * caller can try again instead of inheriting someone else's cancellation.
+     */
+    final class Once
+    {
+        private const FRESH = 0;
+        private const RUNNING = 1;
+        private const DONE = 2;
+
+        private int $state = self::FRESH;
+        private mixed $result = null;
+        private ?\Throwable $error = null;
+        /** @var Task[] tasks waiting for the in-flight initialiser */
+        private array $waitQ = [];
+
+        public function hasRun(): bool { return $this->state === self::DONE; }
+
+        public function run(callable $fn): mixed
+        {
+            $sched = Scheduler::instance();
+            while ($this->state === self::RUNNING) {
+                $sched->checkCancel();
+                $this->waitQ[] = $sched->current();
+                \Fiber::suspend();
+            }
+            if ($this->state === self::DONE) {
+                if ($this->error !== null) { throw $this->error; }
+                return $this->result;
+            }
+
+            $this->state = self::RUNNING;
+            $failed = null;
+            try {
+                $this->result = $fn();
+            } catch (\Throwable $e) {
+                $failed = $e;
+            }
+            if ($failed instanceof CancelledException) {
+                $this->state = self::FRESH;
+                $this->wakeWaiters();
+                throw $failed;
+            }
+            $this->error = $failed;
+            $this->state = self::DONE;
+            $this->wakeWaiters();
+            if ($this->error !== null) { throw $this->error; }
+            return $this->result;
+        }
+
+        private function wakeWaiters(): void
+        {
+            $q = $this->waitQ;
+            $this->waitQ = [];
+            $sched = Scheduler::instance();
+            foreach ($q as $t) { $sched->wake($t); }
+        }
+    }
+
+    /**
      * The ambient view of the scope the calling task is in: cancellation, the
      * effective deadline, and scoped values.
      */
@@ -1127,6 +1337,15 @@ namespace Async {
             $stuck = $this->live > 0;
             $failure = $root->failure;
             $result = $rootTask->result;
+            // A CancelledException that reached the top WITHOUT the root actually
+            // being cancelled did not come from a shutdown — it leaked out of some
+            // await() and would otherwise end the program silently with rc=0.
+            // Deliberate shutdown ({@see shutdownOn()}) sets cancelRequested, and
+            // that path still returns normally.
+            if ($failure === null && $rootTask->state === Task::FAILED
+                && !$rootTask->cancelRequested) {
+                $failure = $rootTask->error;
+            }
             // Dropping the singleton drops the reactor (Io\Poll\Context::__destruct
             // closes its kqueue/epoll fd) and every queue — the next async() in the
             // same program starts from a clean engine.
@@ -1802,6 +2021,83 @@ namespace Async {
         $results = [];
         foreach ($tasks as $i => $t) { $results[$i] = $t->result; }
         return $results;
+    }
+
+    /**
+     * Wait for every task and report how each one turned out — never throws, and
+     * never cancels anything. The counterpart to {@see awaitAll()} for the
+     * "fetch a hundred of them and tell me which failed" shape.
+     *
+     * @return Settled[] keyed by input position (0..N-1)
+     */
+    function awaitAllSettled(Task ...$tasks): array
+    {
+        $n = \count($tasks);
+        if ($n === 0) { return []; }
+        $sched = Scheduler::instance();
+        // Claiming is what keeps a failure from being escalated to the enclosing
+        // scope behind our back — reporting it IS handling it.
+        foreach ($tasks as $t) { $t->claimed = true; }
+
+        while (true) {
+            $pending = 0;
+            foreach ($tasks as $t) {
+                if ($t->state === Task::PENDING) { $pending = $pending + 1; }
+            }
+            if ($pending === 0) { break; }
+            foreach ($tasks as $t) {
+                if ($t->state === Task::PENDING) { $t->addWaiter($sched->current()); }
+            }
+            $sched->suspendCurrent();
+        }
+
+        /** @var Settled[] $out */
+        $out = [];
+        foreach ($tasks as $i => $t) {
+            $out[$i] = $t->state === Task::DONE
+                ? new Settled(true, $t->result, null)
+                : new Settled(false, null, $t->error);
+        }
+        return $out;
+    }
+
+    /**
+     * {@see mapConcurrent()} that collects outcomes instead of failing fast — at
+     * most $limit in flight, one {@see Settled} per input position.
+     *
+     * Each body is wrapped so a throw never reaches the scope: a child that
+     * actually FAILED would trip the group's fail-fast and cancel its siblings,
+     * which is the opposite of settled semantics.
+     *
+     * @param mixed[] $items
+     * @return Settled[]
+     */
+    function mapSettled(array $items, callable $fn, int $limit): array
+    {
+        if ($limit < 1) { $limit = 1; }
+        $sem = new Semaphore($limit);
+        return TaskGroup::run(function (TaskGroup $g) use ($items, $fn, $sem) {
+            /** @var Task[] $tasks */
+            $tasks = [];
+            foreach ($items as $k => $item) {
+                $tasks[$k] = $g->spawn(function () use ($sem, $fn, $item, $k) {
+                    try {
+                        return new Settled(true, $sem->withPermit(function () use ($fn, $item, $k) {
+                            return $fn($item, $k);
+                        }), null);
+                    } catch (CancelledException $e) {
+                        throw $e;          // our own scope stopping us is not a result
+                    } catch (\Throwable $e) {
+                        return new Settled(false, null, $e);
+                    }
+                });
+            }
+            foreach ($tasks as $t) { $t->claimed = true; }
+            /** @var Settled[] $out */
+            $out = [];
+            foreach ($tasks as $k => $t) { $out[$k] = $t->await(); }
+            return $out;
+        });
     }
 
     /**
