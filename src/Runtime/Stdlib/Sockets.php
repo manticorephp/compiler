@@ -260,6 +260,60 @@ function socket_bind(\Socket $socket, string $address, int $port = 0): bool
     return $rc === 0;
 }
 
+/**
+ * Park the running fiber until $fd is readable (or writable), bounded, and answer
+ * whether readiness arrived. False also means "no scheduler" — callers treat that as
+ * "do the blocking syscall like we always did".
+ *
+ * ext/sockets hands out `\Socket` objects while the netpoller seam speaks
+ * `\Resource`, so a throwaway \Resource carries the fd to the reactor — the same
+ * bridge `__mc_await_connect` uses. It is detached from the reactor and marked
+ * closed before it dies, or its destructor would close the caller's fd.
+ *
+ * Without this the whole socket_* family blocked the LOOP: one `socket_read` stalled
+ * every task, so a program mixing ext/sockets with async got a scheduler in name
+ * only. The stream layer has been netpoller-aware for a while; this closes the
+ * two-tier gap.
+ */
+function __mc_sock_park(int $fd, bool $forWrite, float $timeout): bool
+{
+    if (!\Runtime\AsyncHook::active()) {
+        return false;
+    }
+    $h = $forWrite ? \Runtime\AsyncHook::writableFor() : \Runtime\AsyncHook::readableFor();
+    $tmp = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    $ok = $h($tmp, $timeout > 0.0 ? $timeout : 60.0) === true;
+    $c = \Runtime\AsyncHook::closer();
+    $c($tmp);
+    $tmp->closed = true;
+    $tmp->addr = 0;
+    return $ok;
+}
+
+/**
+ * True when the last syscall on $fd would have blocked (EWOULDBLOCK/EAGAIN/EINTR, or
+ * an errno nobody set). Deliberately the same negative-polarity test the stream layer
+ * uses: treating an unknown errno as fatal ends a transfer early.
+ */
+function __mc_sock_wouldblock(): bool
+{
+    $e = \__mc_errno();
+    return $e === 0 || $e === \__mc_sock_const(10) || $e === \__mc_sock_const(11) || $e === 4;
+}
+
+/** Mark $fd non-blocking under a scheduler, once, so a would-block can be parked. */
+function __mc_sock_async_prep(\Socket $socket): bool
+{
+    if (!\Runtime\AsyncHook::active()) {
+        return false;
+    }
+    if ($socket->blocking) {
+        \__mc_fd_nonblock($socket->fd);
+        $socket->blocking = false;
+    }
+    return true;
+}
+
 function socket_connect(\Socket $socket, string $address, int $port = 0): bool
 {
     $buf = \Runtime\Libc\calloc(128, 1);
@@ -286,7 +340,14 @@ function socket_listen(\Socket $socket, int $backlog = 0): bool
 
 function socket_accept(\Socket $socket): \Socket|false
 {
+    $async = \__mc_sock_async_prep($socket);
     $fd = \Runtime\Libc\sys_accept($socket->fd, \int_to_ptr(0), \int_to_ptr(0));
+    // Under a scheduler a would-block PARKS instead of blocking the loop; a wake is
+    // a hint, so the accept is retried until it lands or the wait expires.
+    while ($fd < 0 && $async && \__mc_sock_wouldblock()) {
+        if (!\__mc_sock_park($socket->fd, false, 0.0)) { break; }
+        $fd = \Runtime\Libc\sys_accept($socket->fd, \int_to_ptr(0), \int_to_ptr(0));
+    }
     if ($fd < 0) {
         \__mc_sock_fail($socket);
         return false;
@@ -306,7 +367,12 @@ function socket_write(\Socket $socket, string $data, ?int $length = null): int|f
         $n = $length;
         $data = \substr($data, 0, $n);
     }
+    $async = \__mc_sock_async_prep($socket);
     $sent = \Runtime\Libc\sys_send($socket->fd, $data, $n, 0);
+    while ($sent < 0 && $async && \__mc_sock_wouldblock()) {
+        if (!\__mc_sock_park($socket->fd, true, 0.0)) { break; }
+        $sent = \Runtime\Libc\sys_send($socket->fd, $data, $n, 0);
+    }
     if ($sent < 0) {
         \__mc_sock_fail($socket);
         return false;
@@ -321,7 +387,12 @@ function socket_send(\Socket $socket, string $data, int $length, int $flags): in
         $n = $length;
         $data = \substr($data, 0, $n);
     }
+    $async = \__mc_sock_async_prep($socket);
     $sent = \Runtime\Libc\sys_send($socket->fd, $data, $n, $flags);
+    while ($sent < 0 && $async && \__mc_sock_wouldblock()) {
+        if (!\__mc_sock_park($socket->fd, true, 0.0)) { break; }
+        $sent = \Runtime\Libc\sys_send($socket->fd, $data, $n, $flags);
+    }
     if ($sent < 0) {
         \__mc_sock_fail($socket);
         return false;
@@ -344,7 +415,12 @@ function socket_recv(\Socket $socket, #[RefOut] string &$buf, int $length, int $
     if ($tmp === null) {
         return false;
     }
+    $async = \__mc_sock_async_prep($socket);
     $n = \Runtime\Libc\sys_recv($socket->fd, $tmp, $length, $flags);
+    while ($n < 0 && $async && \__mc_sock_wouldblock()) {
+        if (!\__mc_sock_park($socket->fd, false, 0.0)) { break; }
+        $n = \Runtime\Libc\sys_recv($socket->fd, $tmp, $length, $flags);
+    }
     if ($n < 0) {
         \__mc_sock_fail($socket);
         \Runtime\Libc\free($tmp);
@@ -365,6 +441,7 @@ function socket_read(\Socket $socket, int $length, int $mode = 2): string|false
     if ($length <= 0) {
         return '';
     }
+    $async = \__mc_sock_async_prep($socket);
     if ($mode === 1) {
         // Read until \n or \r (php stops AT the terminator and drops it).
         $out = '';
@@ -372,6 +449,10 @@ function socket_read(\Socket $socket, int $length, int $mode = 2): string|false
             $one = \Runtime\Libc\calloc(1, 1);
             if ($one === null) { return false; }
             $n = \Runtime\Libc\sys_recv($socket->fd, $one, 1, 0);
+            while ($n < 0 && $async && \__mc_sock_wouldblock()) {
+                if (!\__mc_sock_park($socket->fd, false, 0.0)) { break; }
+                $n = \Runtime\Libc\sys_recv($socket->fd, $one, 1, 0);
+            }
             if ($n < 0) {
                 \__mc_sock_fail($socket);
                 \Runtime\Libc\free($one);
@@ -394,6 +475,10 @@ function socket_read(\Socket $socket, int $length, int $mode = 2): string|false
         return false;
     }
     $n = \Runtime\Libc\sys_recv($socket->fd, $tmp, $length, 0);
+    while ($n < 0 && $async && \__mc_sock_wouldblock()) {
+        if (!\__mc_sock_park($socket->fd, false, 0.0)) { break; }
+        $n = \Runtime\Libc\sys_recv($socket->fd, $tmp, $length, 0);
+    }
     if ($n < 0) {
         \__mc_sock_fail($socket);
         \Runtime\Libc\free($tmp);
@@ -898,6 +983,7 @@ function socket_create_pair(int $domain, int $type, int $protocol, #[RefOut] arr
 
 function socket_set_nonblock(\Socket $socket): bool
 {
+    $socket->blocking = false;
     $fl = \Runtime\Libc\sys_fcntl($socket->fd, \__mc_sock_const(6), 0);   // F_GETFL
     if ($fl < 0) { \__mc_sock_fail($socket); return false; }
     $rc = \Runtime\Libc\sys_fcntl($socket->fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5));
@@ -907,6 +993,7 @@ function socket_set_nonblock(\Socket $socket): bool
 
 function socket_set_block(\Socket $socket): bool
 {
+    $socket->blocking = true;
     $fl = \Runtime\Libc\sys_fcntl($socket->fd, \__mc_sock_const(6), 0);   // F_GETFL
     if ($fl < 0) { \__mc_sock_fail($socket); return false; }
     $rc = \Runtime\Libc\sys_fcntl($socket->fd, \__mc_sock_const(7), $fl & ~\__mc_sock_const(5));
