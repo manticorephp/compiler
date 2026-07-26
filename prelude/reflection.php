@@ -137,6 +137,56 @@ function get_declared_traits(): array
 }
 
 /**
+ * `get_defined_constants($categorize)` — the constants this build defines,
+ * grouped by extension when `$categorize` is true.
+ *
+ * Only the `pcre` group is real: those are the constants a program can actually
+ * reach here, and the one caller that matters reads exactly that group —
+ * symfony/string maps `preg_last_error()` back to its constant NAME through it.
+ * The uncategorized form returns the same names flat. This is deliberately not
+ * the whole constant table: a whole-program build folds constants at compile
+ * time, so there is no runtime registry to enumerate.
+ *
+ * @return array<string, mixed>
+ */
+function get_defined_constants(bool $categorize = false): array
+{
+    $pcre = [
+        'PREG_NO_ERROR' => 0,
+        'PREG_INTERNAL_ERROR' => 1,
+        'PREG_BACKTRACK_LIMIT_ERROR' => 2,
+        'PREG_RECURSION_LIMIT_ERROR' => 3,
+        'PREG_BAD_UTF8_ERROR' => 4,
+        'PREG_BAD_UTF8_OFFSET_ERROR' => 5,
+        'PREG_JIT_STACKLIMIT_ERROR' => 6,
+    ];
+    if (!$categorize) { return $pcre; }
+    $out = [];
+    $out['pcre'] = $pcre;
+
+    return $out;
+}
+
+/**
+ * `class_implements($objectOrClass)` — every interface the class implements,
+ * transitively, as a `name => name` map (php's own shape). False when the class
+ * is unknown; the `$autoload` flag is accepted and ignored, there being nothing
+ * to autoload in a whole-program build.
+ *
+ * @return array<string, string>|false
+ */
+function class_implements(object|string $objectOrClass, bool $autoload = true): array|false
+{
+    $name = \is_object($objectOrClass) ? \get_class($objectOrClass) : $objectOrClass;
+    if (!\class_exists($name) && !\interface_exists($name)) { return false; }
+    $names = (new \ReflectionClass($name))->getInterfaceNames();
+    $out = [];
+    foreach ($names as $iface) { $out[$iface] = $iface; }
+
+    return $out;
+}
+
+/**
  * Build ReflectionAttribute[] off an attribute table (`$base` = its first entry,
  * `$n` = the count), optionally filtered to `$filter`. Shared by every
  * getAttributes(). A leading `\` on the filter is not part of the name.
