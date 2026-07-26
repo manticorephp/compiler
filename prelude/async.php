@@ -51,8 +51,87 @@ namespace Async {
     /** Thrown into a task that its scope cancelled. Never escalated as a failure. */
     final class CancelledException extends \RuntimeException {}
 
+    /** A deadline elapsed before the work finished. Raised by {@see timeout()}. */
+    final class TimeoutException extends \RuntimeException {}
+
     /** The loop ran out of work while tasks were still parked — nothing can wake them. */
     final class DeadlockException extends \RuntimeException {}
+
+    /**
+     * The READ half of cancellation — a handle you can pass anywhere (into a
+     * helper, a library, a long loop) without also handing over the power to
+     * cancel. The WRITE half is the scope itself: `TaskGroup::cancel()`. Keeping
+     * them as one object with two views means there is no second cancellation
+     * mechanism to keep in sync with the scope tree — a token is just a view of a
+     * `TaskGroup`, and cancellation walks the same parent chain the scheduler
+     * already uses.
+     *
+     *   Async\group(function (TaskGroup $g) {
+     *       $tok = $g->token();
+     *       $g->spawn(function () use ($tok) {
+     *           while (!$tok->isCancelled()) { step(); }
+     *       });
+     *       $g->cancel();                 // the write half
+     *   });
+     *
+     * Inside a task, `Context::token()` gives the token of the scope it is in.
+     */
+    final class CancellationToken
+    {
+        public function __construct(private TaskGroup $scope) {}
+
+        /** True once this scope, or any ancestor, was cancelled. */
+        public function isCancelled(): bool
+        {
+            $g = $this->scope;
+            while ($g !== null) {
+                if ($g->cancelled) { return true; }
+                $g = $g->parent;
+            }
+            return false;
+        }
+
+        /**
+         * Cancellation checkpoint. A task that suspends gets a
+         * CancelledException delivered automatically; this is for a CPU-bound
+         * loop that never reaches a suspend point.
+         */
+        public function throwIfCancelled(): void
+        {
+            if ($this->isCancelled()) {
+                throw new CancelledException('task cancelled');
+            }
+        }
+
+        /** The earliest deadline on this scope or an ancestor, as a unix time. */
+        public function deadline(): ?float
+        {
+            return $this->scope->deadlineAt();
+        }
+
+        /** Seconds left before the deadline (never negative); null when unbounded. */
+        public function remaining(): ?float
+        {
+            $d = $this->deadline();
+            if ($d === null) { return null; }
+            $left = $d - \microtime(true);
+            return $left > 0.0 ? $left : 0.0;
+        }
+
+        /**
+         * Run $fn when this scope is cancelled — the hook for releasing a
+         * resource the scheduler knows nothing about (a handle, a lock, a
+         * subprocess). Fires once, synchronously, inside `cancel()`.
+         */
+        public function onCancel(callable $fn): void
+        {
+            if ($this->isCancelled()) {
+                $fn();
+                return;
+            }
+            $this->scope->cancelHandlers[] = $fn;
+        }
+    }
 
     /**
      * Several sibling errors as one throwable. Raised by {@see awaitAny()} when
@@ -182,6 +261,29 @@ namespace Async {
             }
             return $this->result;
         }
+
+        /**
+         * Await with a deadline. On expiry the task is CANCELLED and joined (it
+         * does not keep running unobserved), then {@see TimeoutException} is
+         * thrown — a timeout that leaves the work running is not a timeout.
+         */
+        public function awaitWithin(float $seconds): mixed
+        {
+            $sched = Scheduler::instance();
+            $this->claimed = true;
+            if (!$sched->awaitDeadline($this, \microtime(true) + $seconds)) {
+                $sched->cancelTask($this);
+                while ($this->state === self::PENDING) {
+                    $this->addWaiter($sched->current());
+                    $sched->suspendCurrent();
+                }
+                throw new TimeoutException('await timed out after ' . (string)$seconds . 's');
+            }
+            if ($this->state === self::FAILED) {
+                throw $this->error;
+            }
+            return $this->result;
+        }
     }
 
     /**
@@ -202,7 +304,37 @@ namespace Async {
         public bool $cancelled = false;
         public ?\Throwable $failure = null;
 
+        /** Unix time this scope must finish by, or null. Set by {@see timeout()}. */
+        public ?float $deadline = null;
+
+        /** @var callable[] run once when this scope is cancelled */
+        public array $cancelHandlers = [];
+
         public function __construct(public ?TaskGroup $parent = null) {}
+
+        /** The read-only cancellation handle for this scope. */
+        public function token(): CancellationToken
+        {
+            return new CancellationToken($this);
+        }
+
+        /**
+         * The earliest deadline on this scope or an ancestor. A nested timeout
+         * can only ever TIGHTEN the enclosing one — a 30s inner scope inside a
+         * 2s outer one still dies at 2s.
+         */
+        public function deadlineAt(): ?float
+        {
+            $best = null;
+            $g = $this;
+            while ($g !== null) {
+                if ($g->deadline !== null && ($best === null || $g->deadline < $best)) {
+                    $best = $g->deadline;
+                }
+                $g = $g->parent;
+            }
+            return $best;
+        }
 
         /** Open a scope, run $body($group), then join every child before returning. */
         public static function run(callable $body): mixed
@@ -299,7 +431,15 @@ namespace Async {
          */
         public function cancel(): void
         {
+            if ($this->cancelled) { return; }
             $this->cancelled = true;
+            // Handlers first: they release things the scheduler cannot see, and a
+            // cancelled child may go on to touch them.
+            $handlers = $this->cancelHandlers;
+            $this->cancelHandlers = [];
+            foreach ($handlers as $fn) {
+                $fn();
+            }
             $sched = Scheduler::instance();
             foreach ($this->children as $c) {
                 $sched->cancelTask($c);
@@ -514,6 +654,16 @@ namespace Async {
             return Scheduler::instance()->currentGroup();
         }
 
+        /** The cancellation handle of the scope the calling task is in. */
+        public static function token(): CancellationToken
+        {
+            $group = self::currentScope();
+            if ($group === null) {
+                throw new \LogicException('Context::token() outside Async\\async() — no scope');
+            }
+            return $group->token();
+        }
+
         /** True once the calling task's scope (or an ancestor) has been cancelled. */
         public static function isCancelled(): bool
         {
@@ -531,6 +681,22 @@ namespace Async {
             if (self::isCancelled()) {
                 throw new CancelledException('task cancelled');
             }
+        }
+
+        /** The effective deadline (unix time) of the calling task, or null. */
+        public static function deadline(): ?float
+        {
+            $group = self::currentScope();
+            return $group === null ? null : $group->deadlineAt();
+        }
+
+        /** Seconds left before the deadline; null when unbounded. */
+        public static function remaining(): ?float
+        {
+            $d = self::deadline();
+            if ($d === null) { return null; }
+            $left = $d - \microtime(true);
+            return $left > 0.0 ? $left : 0.0;
         }
     }
 
@@ -619,7 +785,7 @@ namespace Async {
         }
 
         // ── the run entry ──────────────────────────────────────────────────
-        public function run(callable $main): void
+        public function run(callable $main): mixed
         {
             $root = new TaskGroup(null);
             $rootTask = $this->newTask($main, [], $root);
@@ -631,6 +797,7 @@ namespace Async {
 
             $stuck = $this->live > 0;
             $failure = $root->failure;
+            $result = $rootTask->result;
             // Dropping the singleton drops the reactor (Io\Poll\Context::__destruct
             // closes its kqueue/epoll fd) and every queue — the next async() in the
             // same program starts from a clean engine.
@@ -641,6 +808,7 @@ namespace Async {
             if ($stuck) {
                 throw new DeadlockException('async: all tasks are asleep — deadlock');
             }
+            return $result;
         }
 
         // ── transparent I/O seam ───────────────────────────────────────────
@@ -744,13 +912,24 @@ namespace Async {
          */
         public function suspendCurrent(): void
         {
+            $this->checkCancel();
+            \Fiber::suspend();
+        }
+
+        /**
+         * Deliver a pending cancellation BEFORE the caller registers itself
+         * anywhere. Every park site calls this first, then registers, then
+         * suspends — registering and only then throwing would leave a live
+         * reactor slot / timer reservation behind on the way out.
+         */
+        public function checkCancel(): void
+        {
             $me = $this->running;
             if ($me !== null && $me->pendingThrow !== null) {
                 $e = $me->pendingThrow;
                 $me->pendingThrow = null;
                 throw $e;
             }
-            \Fiber::suspend();
         }
 
         public function wake(Task $task): void
@@ -805,10 +984,8 @@ namespace Async {
         // ── timers (binary min-heap, lazy delete) ──────────────────────────
         public function sleep(float $seconds): void
         {
+            $this->checkCancel();
             $me = $this->running;
-            if ($me->pendingThrow !== null) {
-                $e = $me->pendingThrow; $me->pendingThrow = null; throw $e;
-            }
             $me->timerActive = true;
             $this->tmLive = $this->tmLive + 1;
             $this->timerPush(\microtime(true) + $seconds, $me);
@@ -819,6 +996,36 @@ namespace Async {
                 $me->timerActive = false;
                 $this->tmLive = $this->tmLive - 1;
             }
+        }
+
+        /**
+         * Park until $t settles OR $deadline (a unix time) passes. Returns true
+         * when the task settled, false on expiry — it does NOT cancel or throw,
+         * so the caller decides what a timeout means. The one primitive under
+         * {@see Task::awaitWithin()} and {@see timeout()}.
+         */
+        public function awaitDeadline(Task $t, float $deadline): bool
+        {
+            $me = $this->running;
+            $t->claimed = true;   // we are handling its outcome — do not escalate
+            while ($t->state === Task::PENDING) {
+                if (\microtime(true) >= $deadline) {
+                    return false;
+                }
+                $this->checkCancel();
+                $t->addWaiter($me);
+                $me->timerActive = true;
+                $this->tmLive = $this->tmLive + 1;
+                $this->timerPush($deadline, $me);
+                \Fiber::suspend();
+                if ($me->timerActive) {
+                    // The task settled first — drop the reservation (the heap slot
+                    // dies lazily on the next prune).
+                    $me->timerActive = false;
+                    $this->tmLive = $this->tmLive - 1;
+                }
+            }
+            return true;
         }
 
         private function timerPush(float $deadline, Task $t): void
@@ -889,10 +1096,8 @@ namespace Async {
         /** Suspend until $conn is readable. */
         public function waitReadable(\Resource $conn): void
         {
+            $this->checkCancel();
             $me = $this->running;
-            if ($me->pendingThrow !== null) {
-                $e = $me->pendingThrow; $me->pendingThrow = null; throw $e;
-            }
             $fd = $conn->addr;
             $this->ensureWatcher($conn, $fd);
             $this->readWaiter[$fd] = $me;
@@ -906,10 +1111,8 @@ namespace Async {
         /** Suspend until $conn is writable — arms Write only while a writer waits. */
         public function waitWritable(\Resource $conn): void
         {
+            $this->checkCancel();
             $me = $this->running;
-            if ($me->pendingThrow !== null) {
-                $e = $me->pendingThrow; $me->pendingThrow = null; throw $e;
-            }
             $fd = $conn->addr;
             $this->ensureWatcher($conn, $fd);
             $this->writeWaiter[$fd] = $me;
@@ -1024,14 +1227,82 @@ namespace Async {
     // ── public API ─────────────────────────────────────────────────────────
 
     /**
-     * Run $main to completion on the async engine. Opens the implicit ROOT scope,
-     * so a top-level {@see spawn()} is still structured. The single entry point.
-     * Throws whatever escaped the root scope, or a {@see DeadlockException} if the
-     * loop ran dry with tasks still parked.
+     * Run $main to completion on the async engine and RETURN ITS VALUE, so an
+     * async block composes like an ordinary call:
+     *
+     *   $rows = Async\async(fn() => Async\awaitAll($a, $b));
+     *
+     * Opens the implicit ROOT scope, so a top-level {@see spawn()} is still
+     * structured. Throws whatever escaped the root scope, or a
+     * {@see DeadlockException} if the loop ran dry with tasks still parked.
      */
-    function async(callable $main): void
+    function async(callable $main): mixed
     {
-        Scheduler::instance()->run($main);
+        return Scheduler::instance()->run($main);
+    }
+
+    /**
+     * Open a child scope and return the body's value — the thin, everyday form of
+     * {@see TaskGroup::run()}. Returns only once every task spawned inside has
+     * settled; the first failure cancels the rest and propagates.
+     *
+     *   $total = Async\group(function (TaskGroup $g) {
+     *       $a = $g->spawn(fn() => fetch(1));
+     *       $b = $g->spawn(fn() => fetch(2));
+     *       return $a->await() + $b->await();
+     *   });
+     */
+    function group(callable $body): mixed
+    {
+        return TaskGroup::run($body);
+    }
+
+    /**
+     * Run $body in a scope that must finish within $seconds. On expiry the whole
+     * scope — the body AND everything it spawned — is cancelled and joined, then
+     * {@see TimeoutException} is thrown. A timeout that leaves work running is
+     * not a timeout.
+     *
+     *   $page = Async\timeout(2.0, fn() => file_get_contents($url));
+     *
+     * The deadline is visible to the code inside via `Context::remaining()`, and
+     * it only ever TIGHTENS an enclosing one ({@see TaskGroup::deadlineAt()}).
+     */
+    function timeout(float $seconds, callable $body): mixed
+    {
+        $sched = Scheduler::instance();
+        if ($sched->currentGroup() === null) {
+            throw new \LogicException('timeout() outside Async\\async() — no scope');
+        }
+        $cur = $sched->current();
+        $group = new TaskGroup($cur->scope);
+        $deadline = \microtime(true) + $seconds;
+        // An enclosing deadline still wins if it is nearer.
+        $group->deadline = $deadline;
+        $effective = $group->deadlineAt();
+        $prev = $cur->scope;
+        $cur->scope = $group;
+
+        // The body runs as a CHILD, not in this fiber: only a separate task can be
+        // cancelled at its suspend point while we keep the timer.
+        $task = $group->spawn(function () use ($body, $group) { return $body($group); });
+        $settled = $sched->awaitDeadline($task, $effective);
+        if (!$settled) {
+            $group->cancel();
+        }
+        $group->joinAll();
+        $cur->scope = $prev;
+
+        if (!$settled) {
+            throw new TimeoutException('timed out after ' . (string)$seconds . 's');
+        }
+        if ($group->failure !== null) {
+            throw $group->failure;
+        }
+        if ($task->state === Task::FAILED) {
+            throw $task->error;
+        }
+        return $task->result;
     }
 
     /**
