@@ -1580,13 +1580,28 @@ function cmd_dump_ast(array $args): int {
  * @param string[] $sources
  * @param string[] $paths   parallel to $sources; used only for diagnostics
  */
+/**
+ * Absolute path for a source file, for `__FILE__`/`__DIR__`. php reports the
+ * resolved path, so symlinks and `./` segments are collapsed; an unresolvable or
+ * empty path stays as it came (the constants then read '', matching php for sources
+ * with no file).
+ */
+function __mc_abs_source_path(string $path): string {
+    if ($path === '') { return ''; }
+    $real = \realpath($path);
+    return $real === false ? $path : $real;
+}
+
 function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
     $docs = [];
     foreach ($sources as $i => $source) {
         try {
-            $program = Parser::parseSource($source);
+            // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
+            // parse time — statements are flattened across every file right below,
+            // which loses the per-file identity for good.
+            $program = Parser::parseSource($source, __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : ''));
         } catch (\Throwable $e) {
             $where = isset($paths[$i]) ? $paths[$i] : "<source>";
             dprint($where . ": parse failed: " . $e->getMessage());

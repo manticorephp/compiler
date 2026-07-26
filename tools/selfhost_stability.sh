@@ -36,9 +36,38 @@ if [[ ! -x bin/manticore ]]; then
 fi
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 SMOKE="$WORK/smoke.php"
 printf '<?php echo "selfhost-stable\\n";\n' > "$SMOKE"
+
+# ⚠ `bin/compile` REBUILDS THE CHECKOUT'S TOOLCHAIN as a side effect: it writes
+# bin/manticore and lib/manticore_stdlib.{o,sig} even when the binary it is asked
+# for goes to $WORK. Running it N times therefore replaces the compiler this script
+# still needs — the self front-end loop below uses bin/manticore, and `bin/build`
+# afterwards uses it too. One imperfect seed build then poisons every later stage,
+# which is how a green branch (suite 684/684, difftest 0 DIFF, fixpoint + MIR golden
+# OK) still ended a gate at rc=1 with `use of undefined value '@manticore_str_bytes'`
+# — and left the developer's checkout unable to build itself.
+#
+# So: snapshot the toolchain up front and put it back on the way out, whatever
+# happens. The gate stays honest (each rebuild is still smoke-tested on its own) and
+# it stops being destructive.
+SAVE="$WORK/toolchain"
+mkdir -p "$SAVE/lib"
+cp bin/manticore "$SAVE/manticore"
+if compgen -G "lib/manticore_stdlib.*" >/dev/null; then
+    cp lib/manticore_stdlib.* "$SAVE/lib/"
+fi
+restore_toolchain() {
+    cp "$SAVE/manticore" bin/manticore 2>/dev/null || true
+    if compgen -G "$SAVE/lib/manticore_stdlib.*" >/dev/null; then
+        cp "$SAVE"/lib/manticore_stdlib.* lib/ 2>/dev/null || true
+    fi
+}
+trap 'restore_toolchain; rm -rf "$WORK"' EXIT
+
+# The self front-end loop must drive the SNAPSHOT, not whatever the Zend loop last
+# left in bin/ — that is the binary this gate was asked to test.
+STABLE_BIN="$SAVE/manticore"
 
 # Smoke-test one compiler binary: front-end startup + full compile→run.
 # Returns 0 on success; prints a diagnosis and returns 1 on any failure.
@@ -66,13 +95,25 @@ fail=0
 
 echo "── Zend front-end (bin/compile) × $N rebuilds ──"
 for i in $(seq 1 "$N"); do
-    bin/compile "$WORK/zend_$i" >/dev/null 2>&1
+    # Each of these rewrites bin/manticore + lib/ (see the snapshot note above).
+    # `set -e` would kill the script silently on a failed rebuild — the gate then
+    # exits 1 with no diagnosis at all, which is exactly what happened once. Report
+    # it and keep going so the run still says WHICH front-end broke and how.
+    if ! bin/compile "$WORK/zend_$i" >"$WORK/zend_$i.log" 2>&1; then
+        echo "  zend-build$i: FAIL (bin/compile: $(tail -1 "$WORK/zend_$i.log"))"
+        fail=$((fail + 1))
+        continue
+    fi
     smoke "$WORK/zend_$i" "zend-build$i" || fail=$((fail + 1))
 done
 
 echo "── self front-end (tools/selfhost.sh) × $N rebuilds ──"
 for i in $(seq 1 "$N"); do
-    bash tools/selfhost.sh bin/manticore "$WORK/self_$i" >/dev/null 2>&1
+    if ! bash tools/selfhost.sh "$STABLE_BIN" "$WORK/self_$i" >"$WORK/self_$i.log" 2>&1; then
+        echo "  self-build$i: FAIL (tools/selfhost.sh: $(tail -1 "$WORK/self_$i.log"))"
+        fail=$((fail + 1))
+        continue
+    fi
     smoke "$WORK/self_$i" "self-build$i" || fail=$((fail + 1))
 done
 

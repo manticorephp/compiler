@@ -97,10 +97,36 @@ final class Parser
     /**
      * Convenience entry point. Lexes the source and parses it in one call.
      */
-    public static function parseSource(string $source): Program
+    /**
+     * $file is the source's path, used ONLY to resolve `__FILE__`/`__DIR__` — php
+     * folds those at compile time, and by the time statements reach lowering they
+     * have been flattened across every file of the build, so the identity has to be
+     * captured HERE. Empty (stdin, eval-like sources, the prelude blob) leaves both
+     * as '', which is also what php reports for code with no file of its own.
+     */
+    public static function parseSource(string $source, string $file = ''): Program
     {
         $tokens = (new Lexer())->scan($source);
-        return (new self($tokens))->parseProgram();
+        $p = new self($tokens);
+        $p->sourceFile = $file;
+        return $p->parseProgram();
+    }
+
+    /**
+     * Path of the file these tokens came from, for `__FILE__`/`__DIR__`. Public so
+     * {@see parseSource()} can set it without a wider ctor change; '' when the source
+     * has no file (stdin, the prelude blob).
+     */
+    public string $sourceFile = '';
+
+    /** dirname($sourceFile) with no trailing slash, '' when there is no file. */
+    private function sourceDir(): string
+    {
+        if ($this->sourceFile === '') { return ''; }
+        $pos = \strrpos($this->sourceFile, '/');
+        if ($pos === false) { return '.'; }
+        if ($pos === 0) { return '/'; }
+        return \substr($this->sourceFile, 0, $pos);
     }
 
     /**
@@ -2217,6 +2243,12 @@ final class Parser
         }
         if ($tok->kind === TokenKind::MagicConstant) {
             $this->advance();
+            // __FILE__ / __DIR__ fold to string literals right here: they are the two
+            // magic constants whose value is the FILE, and lowering only ever sees a
+            // flattened statement list with no per-file identity left.
+            $mn = \strtoupper($tok->lexeme);
+            if ($mn === '__FILE__') { return Expr::string($this->sourceFile, $span); }
+            if ($mn === '__DIR__')  { return Expr::string($this->sourceDir(), $span); }
             return Expr::magicConstant($tok->lexeme, $span);
         }
         if ($tok->kind === TokenKind::Keyword) {
