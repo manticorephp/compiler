@@ -234,9 +234,12 @@ Ordinary stream calls suspend the fiber instead of the process when a scheduler 
 — `stream_socket_accept`, `fread`/`fgets`/`stream_get_contents`, `fwrite`, `fclose`,
 `stream_select`/`socket_select`, `sleep`/`usleep`, and everything layered on them (including
 `file_get_contents('https://…')`). Network *setup* is async too — **name resolution included**:
-`connect(2)` runs non-blocking, the TLS handshake is driven through `WANT_READ`/`WANT_WRITE`
-parks, and a hostname is resolved over the netpoller (`/etc/hosts`, then an A query over a
-parked UDP exchange, falling back to the blocking `getaddrinfo` walk when it cannot answer).
+`connect(2)` runs non-blocking, BOTH TLS handshake directions are driven through
+`WANT_READ`/`WANT_WRITE` parks (client `SSL_connect` and server `SSL_accept` — so a TLS
+server serves concurrent clients), and a hostname is resolved over the netpoller:
+`/etc/hosts`, a per-run cache held by the scheduler, then A and AAAA queries across
+**every** nameserver in `resolv.conf` (two attempts each, 2 s apiece, TC → retry over
+TCP), falling back to the blocking `getaddrinfo` walk when none of that can answer.
 Two spawned HTTPS fetches to DIFFERENT hosts run 0.17s vs 0.34s sequential.
 
 `stream_set_timeout()` and `stream_socket_accept($srv, $timeout)` are honoured under the
@@ -329,10 +332,18 @@ headers) — legitimate for the TechEmpower `plaintext` case, not a full framewo
 
 ## Not yet
 
-Reactor-native `stream_select` (a per-select waiter record) · `writev`/`io_uring` to break the
-2-syscall floor · a DNS cache (needs somewhere that is not a stdlib static) · off-thread file
-I/O · shared-memory multithreading (a future compiler superset). See the async roadmap memory
-for the full plan.
+**Reactor-native signal delivery.** Signals are BLOCKED and REAPED by a daemon task that
+calls `pcntl_signal_dispatch()` every 50 ms, so handler latency is up to 50 ms. That is
+fine for graceful shutdown and supervision (what the epic uses it for) but it is polling.
+The fix is per-backend, not shared: kqueue has `EVFILT_SIGNAL` (ident = signo, filter -6),
+Linux has `signalfd` (one fd the reactor watches like any other, then read 128-byte
+`signalfd_siginfo` records); the `poll` fallback keeps the pump. Both need their own
+measured constants, which is why it is listed here rather than half-done.
+
+Also: reactor-native `stream_select` (a per-select waiter record) · `writev`/`io_uring` to
+break the 2-syscall floor · DNS search-domain/`ndots` handling (a name needing a suffix
+falls back to the blocking walk today) · off-thread file I/O · shared-memory
+multithreading (a future compiler superset). See the async roadmap memory for the plan.
 
 **`#[Async]`** — an attribute that wraps a function body in `async()` so `spawn()` works at
 its top level, with the call yielding a `Task` of the return type. Unlike everything above it
