@@ -831,6 +831,17 @@ trait InferScans
             $this->scanArrayLitLocals($fn->body, $lits);
             $found = [];
             $this->scanLocalElemNode($fn->body, $found);
+            // The same erasure with two CONCRETE stores instead of a cell one:
+            // `$out[] = $v` in a foreach over a vec[int] and `$out[] = $w` in a
+            // foreach over a vec[string] make a genuinely mixed array, but the
+            // pre-inference coarseValueClass scan sees two variable reads and
+            // classifies neither, so `$out` took the first store's element and
+            // the second landed RAW (a string pointer read back as int).
+            $classes = [];
+            $this->scanLocalElemClasses($fn->body, $classes);
+            foreach ($classes as $name => $seen) {
+                if (\count($seen) >= 2) { $found[$name] = true; }
+            }
             foreach ($found as $name => $unused) {
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
@@ -841,6 +852,42 @@ trait InferScans
         return $changed;
     }
 
+    /**
+     * Post-inference value CLASSES stored into each local array, keyed by local
+     * name. Same classing as the pre-inference {@see coarseValueClass} (int and
+     * float collapse to `num`, they share the numeric-cell discipline) — but
+     * read off the INFERRED type, so a variable read counts too. An erased or
+     * cell value contributes nothing: it is either already right or a different
+     * root cause.
+     *
+     * @param array<string, array<string,bool>> $out
+     */
+    private function scanLocalElemClasses(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
+                $cls = $this->typeValueClass($se->value->type);
+                if ($cls !== '') { $out[$se->array->name][$cls] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanLocalElemClasses($c, $out); }
+    }
+
+    /** The {@see coarseValueClass} class of an INFERRED type, or '' when the type
+     *  carries no repr commitment (unknown / cell / void). */
+    private function typeValueClass(Type $t): string
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT) { return 'num'; }
+        if ($k === Type::KIND_STRING) { return 'string'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_NULL) { return 'null'; }
+        if ($t->isArray()) { return 'array'; }
+        if ($k === Type::KIND_OBJ) { return 'obj'; }
+        return '';
+    }
+
     /** Locals assigned an array LITERAL in this body — the ones whose element
      *  representation this function itself owns. @param array<string,bool> $out */
     private function scanArrayLitLocals(Node $n, array &$out): void
@@ -849,6 +896,337 @@ trait InferScans
             $out[$n->name] = true;
         }
         foreach (Walk::children($n) as $c) { $this->scanArrayLitLocals($c, $out); }
+    }
+
+    /**
+     * A LOCAL array handed BY-REF to a callee that APPENDS a FOREIGN element —
+     * one the caller's buffer has no representation for:
+     *
+     *     function push_str(array &$arr): void { $arr[] = 'tail'; }
+     *     $a = [1,2,3]; push_str($a);          // [3] => 4365925320
+     *
+     * This is NOT erasure. Monomorphize specializes the by-ref param to the
+     * caller's `vec[int]` (by-ref IS specializable — the sorts depend on it),
+     * and the body then writes a RAW string pointer into an int-repr buffer.
+     * A by-ref param is only safely narrowed when the callee MOVES elements the
+     * caller already put there; introducing a new element repr breaks the deal.
+     *
+     * The fix belongs on the CALLER: a local whose buffer is about to receive a
+     * foreign element is a mixed array, so seed its element CELL and both sides
+     * agree (Monomorphize then specializes the param to `vec[cell]`, which is
+     * exactly right). Retyping the callee instead leaves the caller reading its
+     * own buffer as `vec[int]` — the output stays wrong.
+     *
+     * Precision is the whole problem: gating on "callee param is erased" would
+     * widen every array passed to `sort()` to a cell (perf + the rc discipline
+     * of a prelude body). {@see foreignElemStores} answers the narrow question —
+     * does the body store a value that came from NEITHER the array itself nor
+     * another param (which Monomorphize co-specializes)?
+     *
+     * Records into `forcedCellElemLocals` like {@see scanLocalElemFromStores};
+     * true when it found something new — the driver re-infers.
+     */
+    private function scanByRefElemWiden(Module $module): bool
+    {
+        $foreign = $this->buildForeignElemMap($module);
+        if (\count($foreign) === 0) { return false; }
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            // A prelude body is linkonce_odr and shared across modules — never
+            // specialize one from this module's call sites ({@see scanCallSiteRefParams}).
+            if ($fn->isPrelude) { continue; }
+            // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
+            // caller's array and its elements already have a representation.
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            $found = [];
+            $this->collectByRefWidenArgs($fn->body, $foreign, $found);
+            foreach ($found as $name => $unused) {
+                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
+                if (isset($this->byRefCellElemLocals[$fn->name][$name])) { continue; }
+                $this->byRefCellElemLocals[$fn->name][$name] = true;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * What each by-ref array param can have APPENDED to it, as a flat token set
+     * per `"fn#idx"`. Flat on purpose — a nested `array<int, Type>` is a known
+     * self-host miscompile hazard ({@see Monomorphize::specialize}). Tokens:
+     *
+     *   `k:<kind>`      a FIXED kind — a literal, a concat, a call result;
+     *   `p:<idx>:<f>`   the value comes from param `idx` (`f=1`: through an
+     *                   element read, so the caller's ELEMENT kind is what lands);
+     *   `v:<idx>:<f>`   the same for a VARIADIC pack — every trailing arg counts.
+     *
+     * A param source is not a foreign kind by itself: `array_push(array &$arr,
+     * mixed ...$values)` appends whatever the caller passed, so only the call
+     * site can tell whether that fits the caller's buffer.
+     *
+     * Fixpoint, because the hand-off is transitive: `outer(array &$a){ inner($a); }`
+     * appends whatever `inner` appends.
+     *
+     * @return array<string, array<string,bool>>
+     */
+    private function buildForeignElemMap(Module $module): array
+    {
+        $map = [];
+        $guard = 0;
+        $changed = true;
+        while ($changed && $guard < 4) {
+            $changed = false;
+            $guard = $guard + 1;
+            foreach ($module->functions as $fn) {
+                if ($fn->isExtern) { continue; }
+                $idx = -1;
+                foreach ($fn->params as $p) {
+                    $idx = $idx + 1;
+                    if (!$p->byRef || $p->variadic) { continue; }
+                    $key = $fn->name . '#' . (string)$idx;
+                    $tok = $this->foreignElemTokens($fn, $p->name, $map);
+                    if (\count($tok) === 0) { continue; }
+                    if (\count($tok) !== \count($map[$key] ?? [])) { $changed = true; }
+                    $map[$key] = $tok;
+                }
+            }
+        }
+        return $map;
+    }
+
+    /**
+     * The append tokens of ONE by-ref param. A store is EXEMPT when its value
+     * came out of the array itself — directly (`$arr[$k] = $arr[$l]`) or through
+     * a local filled from it (`$tmp[] = $arr[$i]` … `$arr[$k] = $tmp[$l]`, the
+     * merge buffer every sort uses). That exemption is the whole reason the sort
+     * family stays off the widening path.
+     *
+     * @param array<string, array<string,bool>> $map
+     * @return array<string,bool>
+     */
+    private function foreignElemTokens(FunctionDef $fn, string $pname, array $map): array
+    {
+        // local name → "<param name>|<0|1 through an element read>"
+        $origin = [];
+        foreach ($fn->params as $prm) { $origin[$prm->name] = $prm->name . '|0'; }
+        $paramIdx = [];
+        $paramVariadic = [];
+        $i = -1;
+        foreach ($fn->params as $prm) {
+            $i = $i + 1;
+            $paramIdx[$prm->name] = $i;
+            $paramVariadic[$prm->name] = $prm->variadic;
+        }
+        $guard = 0;
+        while ($guard < 3 && $this->spreadElemOrigin($fn->body, $origin)) { $guard = $guard + 1; }
+        $tokens = [];
+        $this->collectForeignTokens($fn->body, $pname, $origin, $paramIdx, $paramVariadic, $map, $tokens);
+        return $tokens;
+    }
+
+    /** One round of origin flow: a local filled out of a param-derived array (or
+     *  bound by a foreach over one) carries that param's elements.
+     *  @param array<string,string> $origin */
+    private function spreadElemOrigin(Node $n, array &$origin): bool
+    {
+        $added = false;
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            if (!isset($origin[$n->name])) {
+                $o = $this->originOf($n->value, $origin);
+                if ($o !== null) { $origin[$n->name] = $o; $added = true; }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL && !isset($origin[$se->array->name])) {
+                $o = $this->originOf($se->value, $origin);
+                if ($o !== null) { $origin[$se->array->name] = $o; $added = true; }
+            }
+        } elseif ($n->kind === Node::KIND_FOREACH) {
+            $fe = $n;
+            $o = $this->originOf($fe->array, $origin);
+            if ($o !== null && !isset($origin[$fe->valueVar])) {
+                $parts = \explode('|', $o);
+                $origin[$fe->valueVar] = $parts[0] . '|1';   // a foreach value IS an element
+                $added = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->spreadElemOrigin($c, $origin)) { $added = true; }
+        }
+        return $added;
+    }
+
+    /** The param a value expression reads, as "<param>|<0|1 via element>", or
+     *  null when it reads none. @param array<string,string> $origin */
+    private function originOf(Node $n, array $origin): ?string
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL) {
+            return $origin[$n->name] ?? null;
+        }
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $o = $this->originOf($n->array, $origin);
+            if ($o === null) { return null; }
+            $parts = \explode('|', $o);
+            return $parts[0] . '|1';
+        }
+        foreach (Walk::children($n) as $c) {
+            $o = $this->originOf($c, $origin);
+            if ($o !== null) { return $o; }
+        }
+        return null;
+    }
+
+    /**
+     * @param array<string,string> $origin
+     * @param array<string,int> $paramIdx
+     * @param array<string,bool> $paramVariadic
+     * @param array<string, array<string,bool>> $map
+     * @param array<string,bool> $tokens
+     */
+    private function collectForeignTokens(
+        Node $n,
+        string $pname,
+        array $origin,
+        array $paramIdx,
+        array $paramVariadic,
+        array $map,
+        array &$tokens,
+    ): void {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $pname) {
+            // A WHOLE-array write-back (`$input = $out;`, the shape every rebuild
+            // takes — array_splice). Judge it by the assigned TYPE, not by origin:
+            // the rebuild buffer is filled from the param AND from elsewhere, so
+            // it counts as param-derived even where it is not. An element kind
+            // equal to the caller's is a no-op here, so a pure move-buffer
+            // write-back still costs nothing.
+            $at = $n->value->type;
+            if ($at->isArray() && $at->element !== null) {
+                $ak = $at->element->kind;
+                if ($ak !== Type::KIND_UNKNOWN && $ak !== Type::KIND_VOID) {
+                    $tokens['k:' . $ak] = true;
+                }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL && $se->array->name === $pname) {
+                $o = $this->originOf($se->value, $origin);
+                if ($o === null) {
+                    $vk = $se->value->type->kind;
+                    if ($vk !== Type::KIND_UNKNOWN && $vk !== Type::KIND_VOID) {
+                        $tokens['k:' . $vk] = true;
+                    }
+                } else {
+                    $t = $this->srcToken($o, $pname, $paramIdx, $paramVariadic);
+                    if ($t !== null) { $tokens[$t] = true; }
+                }
+            }
+        } elseif ($n->kind === Node::KIND_CALL) {
+            // Transitive hand-off: `outer(array &$a){ inner($a); }` appends
+            // whatever `inner` appends. Re-express the callee's tokens in THIS
+            // body's terms — a param source resolves through the argument we
+            // actually pass, and a value we hand over out of our own array is
+            // still a move, not a foreign append.
+            $c = $n;
+            $i = -1;
+            foreach ($c->args as $a) {
+                $i = $i + 1;
+                if ($a->kind !== Node::KIND_LOAD_LOCAL || $a->name !== $pname) { continue; }
+                $ck = $c->function . '#' . (string)$i;
+                foreach ($map[$ck] ?? [] as $tok => $unused) {
+                    if (\str_starts_with($tok, 'k:')) { $tokens[$tok] = true; continue; }
+                    $parts = \explode(':', $tok);
+                    $j = (int)$parts[1];
+                    $flag = $parts[2];
+                    if ($j >= \count($c->args)) { continue; }
+                    $arg = $c->args[$j];
+                    $o = $this->originOf($arg, $origin);
+                    if ($o !== null) {
+                        $ps = \explode('|', $o);
+                        $eff = ($flag === '1' || $ps[1] === '1') ? '1' : '0';
+                        $t = $this->srcToken($ps[0] . '|' . $eff, $pname, $paramIdx, $paramVariadic);
+                        if ($t !== null) { $tokens[$t] = true; }
+                        continue;
+                    }
+                    $at = $arg->type;
+                    $ak = ($flag === '1' && $at->isArray() && $at->element !== null)
+                        ? $at->element->kind
+                        : $at->kind;
+                    if ($ak !== Type::KIND_UNKNOWN && $ak !== Type::KIND_VOID) {
+                        $tokens['k:' . $ak] = true;
+                    }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectForeignTokens($c, $pname, $origin, $paramIdx, $paramVariadic, $map, $tokens);
+        }
+    }
+
+    /** A param-sourced append token, or null when the source IS the by-ref array
+     *  itself (a move, never a widening).
+     *  @param array<string,int> $paramIdx @param array<string,bool> $paramVariadic */
+    private function srcToken(string $origin, string $pname, array $paramIdx, array $paramVariadic): ?string
+    {
+        $parts = \explode('|', $origin);
+        $src = $parts[0];
+        if ($src === $pname) { return null; }
+        if (!isset($paramIdx[$src])) { return null; }
+        $lead = ($paramVariadic[$src] ?? false) ? 'v:' : 'p:';
+        return $lead . (string)$paramIdx[$src] . ':' . $parts[1];
+    }
+
+    /**
+     * Call sites passing a plain local as the by-ref arg of a foreign-appending
+     * param. The local needs widening only when an appended kind has no room in
+     * its element type — an already-cell element boxes correctly, and an UNKNOWN
+     * one is erased (a different root cause, {@see scanLocalElemFromStores}).
+     *
+     * @param array<string, array<string,bool>> $foreign
+     * @param array<string,bool> $found
+     */
+    private function collectByRefWidenArgs(Node $n, array $foreign, array &$found): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $c = $n;
+            $i = -1;
+            foreach ($c->args as $a) {
+                $i = $i + 1;
+                $key = $c->function . '#' . (string)$i;
+                if (!isset($foreign[$key])) { continue; }
+                if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+                $t = $a->type;
+                if (!$t->isArray()) { continue; }
+                $el = $t->element;
+                if ($el === null) { continue; }
+                $ek = $el->kind;
+                if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
+                foreach ($foreign[$key] as $tok => $unused) {
+                    if (\str_starts_with($tok, 'k:')) {
+                        if (\substr($tok, 2) !== $ek) { $found[$a->name] = true; }
+                        continue;
+                    }
+                    $parts = \explode(':', $tok);
+                    $j = (int)$parts[1];
+                    $flag = $parts[2];
+                    $last = \str_starts_with($tok, 'v:') ? \count($c->args) - 1 : $j;
+                    for ($k = $j; $k <= $last; $k = $k + 1) {
+                        if ($k >= \count($c->args)) { break; }
+                        $at = $c->args[$k]->type;
+                        $ak = ($flag === '1' && $at->isArray() && $at->element !== null)
+                            ? $at->element->kind
+                            : $at->kind;
+                        if ($ak === Type::KIND_UNKNOWN || $ak === Type::KIND_VOID) { continue; }
+                        if ($ak !== $ek) { $found[$a->name] = true; }
+                    }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $ch) {
+            $this->collectByRefWidenArgs($ch, $foreign, $found);
+        }
     }
 
     /** A `vec[vec[scalar]]` — element is a concrete inner array whose own leaf is

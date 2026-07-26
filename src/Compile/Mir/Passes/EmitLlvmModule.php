@@ -435,6 +435,9 @@ trait EmitLlvmModule
         if ($this->rt->needsTaggedToStr) {
             $out .= $this->taggedToStrRuntime();
         }
+        if ($this->rt->needsCellToStrPtr) {
+            $out .= $this->cellToStrPtrRuntime();
+        }
         if ($this->rt->needsImplodeCell) {
             $out .= $this->implodeCellRuntime();
         }

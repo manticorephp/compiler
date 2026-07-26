@@ -143,6 +143,12 @@ final class InferTypes implements Pass
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
     private array $forcedCellElemLocals = [];
+    /** fn name => [local name => true]: locals handed BY-REF to a callee that
+     *  appends a FOREIGN element type. Kept apart from {@see $forcedCellElemLocals}
+     *  because this one also disqualifies a RECORD local — an all-string-key
+     *  literal keeps per-field types, and the callee is about to write a field
+     *  the record has no slot repr for. {@see scanByRefElemWiden} */
+    private array $byRefCellElemLocals = [];
     /** @var array<string,bool> array locals whose element is an inner array built
      *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
      *  vec[unknown] (raw). Paired with {@see $nestedScalarStoreLocals}. */
@@ -326,6 +332,23 @@ final class InferTypes implements Pass
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
         }
+        // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
+        // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
+        // MIXED array: left alone, the callee is narrowed to the caller's
+        // vec[int] and then writes a raw string pointer into an int buffer.
+        // Widen the CALLER's local to a cell element so both sides agree.
+        // Runs here, before any call-site param refinement: those scans pin an
+        // erased param to the element they observe, and an ASSOC param never
+        // re-refines afterwards. A second pass runs after the local-element
+        // scans below, for the callees whose foreignness is only visible once
+        // their own rebuild buffer is typed. Bounded: a seed only widens to cell.
+        $guard = 0;
+        while ($guard < 4 && $this->scanByRefElemWiden($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
         // Call-site element inference: refine a bare-`array` param to vec[T]
         // when every call passes an array arg with the SAME scalar element T —
         // a user helper called as `f(["x","y"])`. Without it the element erases
@@ -419,6 +442,29 @@ final class InferTypes implements Pass
         while ($guard < 4 && $this->scanLocalElemFromStores($module)) {
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
+        // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
+        // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
+        // MIXED array: left alone, the callee is narrowed to the caller's
+        // vec[int] and then writes a raw string pointer into an int buffer.
+        // Widen the CALLER's local to a cell element so both sides agree.
+        // Runs LAST of the element scans, because a rebuild-and-assign-back
+        // callee (`$input = $out;`, array_splice) is only foreign once $out's
+        // own element is settled. The callee's param was pinned to the
+        // pre-widening element by the call-site scans above, so re-run the
+        // element observation right here — a vec[cell] argument is ground truth
+        // there and overrides an earlier refinement.
+        $guard = 0;
+        while ($guard < 4 && $this->scanByRefElemWiden($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            if ($this->scanCallSiteArrayElems($module)) {
+                foreach ($module->functions as $fn) {
+                    $this->inferFunction($fn);
+                }
             }
             $guard = $guard + 1;
         }

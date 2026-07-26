@@ -1,0 +1,66 @@
+Array
+(
+    [c] => blue
+)
+Array
+(
+    [a] => green
+    [b] => brown
+    [0] => red
+)
+Array
+(
+    [b] => brown
+    [c] => blue
+    [0] => red
+)
+Array
+(
+    [a] => green
+)
+Array
+(
+    [a] => green
+    [c] => blue
+    [0] => red
+)
+Array
+(
+    [b] => brown
+)
+Array
+(
+    [c] => blue
+    [0] => red
+)
+Array
+(
+    [a] => green
+    [b] => brown
+)
+Array
+(
+    [0] => 1
+    [1] => 5
+)
+Array
+(
+    [2] => 3
+    [3] => 9
+)
+Array
+(
+    [0] => 1
+    [1] => 5
+)
+Array
+(
+    [2] => 3
+    [3] => 9
+)
+Array
+(
+)
+Array
+(
+)

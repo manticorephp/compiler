@@ -26,17 +26,29 @@
  *    (the bare-`array` param's element erases to unknown there) — same reason
  *    array_map/usort live in the prelude.
  *
- * ⚠ STATUS — this file is WORK IN PROGRESS, do NOT merge it as done.
- * Verified against php: array_diff_assoc · array_intersect_assoc · array_all ·
- * array_any · array_find · array_find_key · array_change_key_case ·
- * array_diff_ukey · array_intersect_ukey (string-name AND closure comparators) ·
- * array_walk (by-value AND `&$value` callbacks) · array_walk_recursive.
- * NOT HERE YET, each blocked on a named compiler root cause:
- *  - array_splice — the in-place rebuild appends the replacement into an erased
- *    by-ref array, and a raw string element lands unboxed (prints as a pointer).
- *    Needs the store-side repr fix: an erased element store must stamp/box.
- *  - array_replace_recursive / array_merge_recursive — a recursive self-call
- *    re-enters with a cell-typed arg, so the erased body stays live.
+ * ⚠ STATUS — every function BELOW is exercised against php by an AOT case
+ * (array_callback_byref · array_assoc_set_ops · array_predicate_case ·
+ * array_splice_fn · array_ucompare_family · array_random_fns):
+ * array_diff_assoc · array_intersect_assoc · array_diff_ukey ·
+ * array_intersect_ukey · array_udiff · array_uintersect · array_udiff_assoc ·
+ * array_uintersect_assoc · array_diff_uassoc · array_intersect_uassoc ·
+ * array_udiff_uassoc · array_uintersect_uassoc · array_walk (by-value AND
+ * `&$value`) · array_walk_recursive · array_splice · shuffle · array_rand ·
+ * array_all · array_any · array_find · array_find_key · array_change_key_case.
+ *
+ * NOT HERE, blocked on a named compiler root cause:
+ *  - array_replace_recursive / array_merge_recursive — the RECURSIVE self-call
+ *    re-enters with a cell-typed arg (`$out[$k]` is a cell holding an array), so
+ *    Monomorphize's callKey is '' and the erased body runs for every nested
+ *    level. Rebuilding both sides into literal-bound locals first fixes it in a
+ *    USER function but not in a PRELUDE one: there the rebuild buffer `$out`
+ *    still binds `vec[unknown]` even though scanAssocLocals marks it assoc and
+ *    the empty-literal retype fires (verified by instrumenting inferStoreLocal —
+ *    a later pass re-stamps the binding), so a string key lands under a
+ *    positional index. That is the vec/assoc widening root cause, not these two
+ *    functions. Do NOT re-attempt them before it lands.
+ *  - array_multisort — variadic BY-REF parallel arrays with interleaved SORT_*
+ *    flags; needs by-ref variadic packs first.
  */
 
 /**
@@ -118,6 +130,166 @@ function array_intersect_ukey(array $arr, array $arr2, callable $cb): array
 }
 
 /**
+ * `array_udiff(arr, arr2, cb)` — entries of `$arr` whose VALUE matches no value
+ * of `$arr2` under the user comparator (`$cb($v1,$v2) === 0` ⇒ equal).
+ *
+ * PHP declares the u* family variadic with the callbacks last
+ * (`array_udiff(array $array, array ...$arrays, callable $cb)`); the TWO-array
+ * form is what this file implements throughout, like array_diff_ukey above —
+ * a callback inside a variadic pack never reaches Monomorphize's callable
+ * dimension, so it would degrade to a dynamic invoke.
+ */
+function array_udiff(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($arr2 as $ov) {
+            if ($cb($value, $ov) === 0) { $found = true; break; }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_uintersect(arr, arr2, cb)` — entries of `$arr` whose VALUE matches some
+ * value of `$arr2` under the user comparator.
+ */
+function array_uintersect(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        foreach ($arr2 as $ov) {
+            if ($cb($value, $ov) === 0) { $out[$key] = $value; break; }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_udiff_assoc(arr, arr2, cb)` — keys are compared internally, values with
+ * the user comparator: keep an entry unless `$arr2` holds the SAME key with a
+ * value the comparator calls equal.
+ */
+function array_udiff_assoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $same = false;
+        if (array_key_exists($key, $arr2) && $cb($value, $arr2[$key]) === 0) { $same = true; }
+        if (!$same) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_uintersect_assoc(arr, arr2, cb)` — the same pairing, kept instead of
+ * dropped: the key must exist in `$arr2` and the values compare equal.
+ */
+function array_uintersect_assoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        if (array_key_exists($key, $arr2) && $cb($value, $arr2[$key]) === 0) {
+            $out[$key] = $value;
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_diff_uassoc(arr, arr2, cb)` — the mirror image of array_udiff_assoc:
+ * KEYS are compared with the user comparator, values internally.
+ */
+function array_diff_uassoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($otherKeys as $ok) {
+            if ($cb($key, $ok) === 0 && $arr2[$ok] == $value) { $found = true; break; }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_intersect_uassoc(arr, arr2, cb)` — keep an entry whose key matches some
+ * key of `$arr2` under the comparator AND whose value is equal.
+ */
+function array_intersect_uassoc(array $arr, array $arr2, callable $cb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        foreach ($otherKeys as $ok) {
+            if ($cb($key, $ok) === 0 && $arr2[$ok] == $value) { $out[$key] = $value; break; }
+        }
+    }
+    return $out;
+}
+
+/**
+ * `array_udiff_uassoc(arr, arr2, valueCb, keyCb)` — both halves user-compared:
+ * drop an entry only when `$arr2` holds a key the key-comparator calls equal
+ * whose value the value-comparator also calls equal.
+ */
+function array_udiff_uassoc(array $arr, array $arr2, callable $valueCb, callable $keyCb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        $found = false;
+        foreach ($otherKeys as $ok) {
+            if ($keyCb($key, $ok) === 0 && $valueCb($value, $arr2[$ok]) === 0) {
+                $found = true;
+                break;
+            }
+        }
+        if (!$found) { $out[$key] = $value; }
+    }
+    return $out;
+}
+
+/**
+ * `array_uintersect_uassoc(arr, arr2, valueCb, keyCb)` — the intersecting half of
+ * the same pairing.
+ */
+function array_uintersect_uassoc(array $arr, array $arr2, callable $valueCb, callable $keyCb): array
+{
+    $out = [];
+    $keys = array_keys($arr);
+    $otherKeys = array_keys($arr2);
+    foreach ($keys as $key) {
+        $value = $arr[$key];
+        foreach ($otherKeys as $ok) {
+            if ($keyCb($key, $ok) === 0 && $valueCb($value, $arr2[$ok]) === 0) {
+                $out[$key] = $value;
+                break;
+            }
+        }
+    }
+    return $out;
+}
+
+/**
  * `array_walk(&$arr, cb, extra)` — apply `$cb($value, $key, $extra)` to every
  * entry.
  *
@@ -154,6 +326,126 @@ function array_walk_recursive(array &$arr, callable $cb, mixed $extra = null): b
         }
     }
     return true;
+}
+
+/**
+ * `array_splice(&$input, offset, length, replacement)` — remove a slice and
+ * splice a replacement in its place, returning the removed entries.
+ *
+ * PHP reindexes INT keys on both sides and keeps STRING keys, so the rebuild
+ * walks `array_keys` and re-adds each entry by the kind of its key. The whole
+ * array is rebuilt into a fresh local and assigned back in one store — an
+ * in-place shift would write past the live length of the buffer it is reading.
+ * @param mixed[] $input
+ * @return mixed[]
+ */
+function array_splice(array &$input, int $offset, ?int $length = null, mixed $replacement = []): array
+{
+    $keys = array_keys($input);
+    $n = count($keys);
+    $start = $offset;
+    if ($start < 0) { $start = $n + $start; }
+    if ($start < 0) { $start = 0; }
+    if ($start > $n) { $start = $n; }
+    $len = $n - $start;
+    if ($length !== null) {
+        $len = $length;
+        if ($len < 0) { $len = $n - $start + $len; }
+    }
+    if ($len < 0) { $len = 0; }
+    $end = $start + $len;
+    if ($end > $n) { $end = $n; }
+
+    $out = [];
+    $removed = [];
+    $i = 0;
+    while ($i < $start) {
+        $k = $keys[$i];
+        if (is_string($k)) { $out[$k] = $input[$k]; } else { $out[] = $input[$k]; }
+        $i = $i + 1;
+    }
+    // Branch the LOOP, not the value. TODO(array|cell merge): a local that
+    // merges an array literal with a `mixed` value — `$repl = []; if
+    // (is_array($replacement)) { $repl = $replacement; }` — types `unknown`
+    // (vec[unknown] ∪ cell), so the `[]` store writes a raw buffer pointer into
+    // a slot the foreach then reads as a NaN-boxed cell → SIGSEGV. Pre-existing
+    // and not specific to this function; planMergeShadow boxes such a merge only
+    // for SCALAR kinds today.
+    if (is_array($replacement)) {
+        foreach ($replacement as $rv) { $out[] = $rv; }
+    } else {
+        $out[] = $replacement;
+    }
+    $i = $start;
+    while ($i < $end) {
+        $k = $keys[$i];
+        if (is_string($k)) { $removed[$k] = $input[$k]; } else { $removed[] = $input[$k]; }
+        $i = $i + 1;
+    }
+    $i = $end;
+    while ($i < $n) {
+        $k = $keys[$i];
+        if (is_string($k)) { $out[$k] = $input[$k]; } else { $out[] = $input[$k]; }
+        $i = $i + 1;
+    }
+    $input = $out;
+    return $removed;
+}
+
+/**
+ * `shuffle(&$array)` — randomise the order, dropping the keys (PHP reindexes).
+ * Fisher-Yates over a rebuilt list; entropy comes from `random_int`, the one
+ * generator this runtime has (there is no `mt_srand`, so a shuffle is never
+ * reproducible — a test can only assert the multiset, never the order).
+ * @param mixed[] $array
+ */
+function shuffle(array &$array): bool
+{
+    $values = [];
+    foreach ($array as $v) { $values[] = $v; }
+    $i = count($values) - 1;
+    while ($i > 0) {
+        $j = random_int(0, $i);
+        $tmp = $values[$i];
+        $values[$i] = $values[$j];
+        $values[$j] = $tmp;
+        $i = $i - 1;
+    }
+    $array = $values;
+    return true;
+}
+
+/**
+ * `array_rand(arr, num)` — one random KEY, or a list of `$num` distinct keys in
+ * the array's own order (PHP guarantees that order). Selection sampling: walk
+ * the keys once and take each with probability (still-needed / still-left),
+ * which is uniform without a reject-and-retry loop.
+ */
+function array_rand(array $array, int $num = 1): mixed
+{
+    $keys = array_keys($array);
+    $n = count($keys);
+    if ($n === 0) {
+        throw new \ValueError('array_rand(): Argument #1 ($array) cannot be empty');
+    }
+    if ($num < 1 || $num > $n) {
+        throw new \ValueError(
+            'array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1'
+        );
+    }
+    if ($num === 1) { return $keys[random_int(0, $n - 1)]; }
+    $out = [];
+    $need = $num;
+    $i = 0;
+    while ($i < $n && $need > 0) {
+        $left = $n - $i;
+        if (random_int(1, $left) <= $need) {
+            $out[] = $keys[$i];
+            $need = $need - 1;
+        }
+        $i = $i + 1;
+    }
+    return $out;
 }
 
 /**

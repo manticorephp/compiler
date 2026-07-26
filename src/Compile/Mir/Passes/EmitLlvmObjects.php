@@ -1879,6 +1879,18 @@ trait EmitLlvmObjects
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
                     } elseif ($keyIsString) {
                         $out .= '  call void @__mir_array_unset_str(ptr ' . $arrPtr . ', ptr ' . $key . ")\n";
+                    } elseif ($this->unsetBaseIsWritable($aa->array)) {
+                        // An INT key on a PACKED buffer has to promote to the
+                        // hashed layout first — that is the only one that can
+                        // hold a hole, and PHP's unset never reindexes. The
+                        // promote RELOCATES, so this needs the write-back path
+                        // and therefore a base we can store through; a nested
+                        // base (`$a[0][1]`) keeps the old in-place call, where a
+                        // packed unset is still the historical no-op.
+                        $r = $this->ssa->allocReg();
+                        $out .= '  ' . $r . ' = call ptr @__mir_array_unset_at(ptr '
+                              . $arrPtr . ', i64 ' . $key . ")\n";
+                        $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
                     } else {
                         $out .= '  call void @__mir_array_unset_int(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
                     }
@@ -1904,6 +1916,17 @@ trait EmitLlvmObjects
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** A base {@see vecWriteBack} can store a relocated buffer through: a plain
+     *  local (including a by-ref param or a `global`) or an object property. */
+    private function unsetBaseIsWritable(Node $base): bool
+    {
+        if ($base->kind === Node::KIND_LOAD_LOCAL) {
+            return isset($this->locals->slots[$base->name])
+                || isset($this->locals->globalBacked[$base->name]);
+        }
+        return $base->kind === Node::KIND_PROPERTY_ACCESS;
     }
 
     private function emitStaticProp(\Compile\Mir\StaticProp_ $n): string

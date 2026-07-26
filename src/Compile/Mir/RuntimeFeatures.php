@@ -43,6 +43,9 @@ final class RuntimeFeatures
     public bool $needsTaggedEcho = false;
     public bool $needsTaggedToStr = false;
     public bool $needsImplodeCell = false;
+    /** Cell → raw string pointer at a typed-`string` boundary (renders an
+     *  int/float/bool cell, strips a pointer one, keeps null NULL). */
+    public bool $needsCellToStrPtr = false;
     public bool $needsTaggedToInt = false;
     public bool $needsTaggedToFloat = false;
     public bool $needsTaggedCompare = false;
@@ -90,7 +93,7 @@ final class RuntimeFeatures
     public function needsSnprintf(): bool
     {
         return $this->needsConcat || $this->needsFloatStr
-            || $this->needsIntStr || $this->needsTaggedToStr;
+            || $this->needsIntStr || $this->needsTaggedToStr || $this->needsCellToStrPtr;
     }
 
     /** tagged_to_str (mixed→string) calls int_to_str for the int tag. */
