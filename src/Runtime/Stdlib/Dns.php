@@ -272,7 +272,15 @@ function __mc_dns_exchange(\Resource $sock, string $query): string
     if (\Runtime\Libc\sys_send($fd, $query, \strlen($query), 0) < 0) {
         return '';
     }
-    if (\__mc_poll_readable($fd, 5000) === 0) {
+    // Under a scheduler the 5 s budget is served by the reactor's BOUNDED wait, so
+    // name resolution no longer stops the loop. It must stay BOUNDED: a lost
+    // datagram has no EOF to wake the fiber, and an unbounded park would hang it.
+    if (\Runtime\AsyncHook::active()) {
+        $hf = \Runtime\AsyncHook::readableFor();
+        if ($hf($sock, 5.0) !== true) {
+            return '';   // no reply in time
+        }
+    } elseif (\__mc_poll_readable($fd, 5000) === 0) {
         return '';   // no reply in time
     }
     $buf = \Runtime\Libc\calloc(4096, 1);

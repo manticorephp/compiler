@@ -268,6 +268,86 @@ function __mc_await_connect(int $fd): int
     return $e === 0 ? 0 : -1;
 }
 
+/** True when $host is already a literal address, so no resolution is needed. */
+function __mc_is_numeric_host(string $host): bool
+{
+    if (\strpos($host, ':') !== false) {
+        return true;                       // IPv6 literal
+    }
+    $n = \strlen($host);
+    $digits = 0;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = \ord($host[$i]);
+        if ($c === 46) { continue; }       // '.'
+        if ($c < 48 || $c > 57) { return false; }
+        $digits = $digits + 1;
+    }
+    return $digits > 0;
+}
+
+/** An exact-name IPv4 lookup in /etc/hosts, '' when the name is not listed. */
+function __mc_hosts_lookup(string $host): string
+{
+    $c = \file_get_contents('/etc/hosts');
+    if ($c === false) {
+        return '';
+    }
+    $want = \strtolower($host);
+    foreach (\explode("\n", $c) as $line) {
+        $hash = \strpos($line, '#');
+        if ($hash !== false) {
+            $line = \substr($line, 0, $hash);
+        }
+        $parts = \preg_split('/\s+/', \trim($line));
+        if ($parts === false) {
+            continue;
+        }
+        $ip = '';
+        foreach ($parts as $tok) {
+            $t = (string)$tok;
+            if ($t === '') { continue; }
+            if ($ip === '') { $ip = $t; continue; }
+            if (\strtolower($t) === $want) {
+                // IPv4 only: a v6 answer would need a v6 sockaddr path.
+                return \strpos($ip, ':') === false ? $ip : '';
+            }
+        }
+    }
+    return '';
+}
+
+/**
+ * Resolve $host to an IPv4 literal WITHOUT blocking the scheduler: /etc/hosts
+ * first, then an A query over the netpoller-parked UDP exchange
+ * ({@see __mc_dns_exchange}). '' means "could not answer" — the
+ * caller then falls back to the blocking getaddrinfo walk, which is what keeps
+ * IPv6-only names, mDNS and every other nsswitch source working.
+ *
+ * No cache: it would have to live in a stdlib `static`, and a static array is the
+ * known repr trap. Its natural home is a Scheduler field, once the resolver is
+ * driven from the prelude side.
+ */
+function __mc_resolve_async(string $host): string
+{
+    $viaHosts = \__mc_hosts_lookup($host);
+    if ($viaHosts !== '') {
+        return $viaHosts;
+    }
+    $resp = \__mc_dns_query($host, 1);      // QTYPE A
+    if ($resp === '') {
+        return '';
+    }
+    /** @var array<int,array<string,mixed>> $recs */
+    $recs = \__mc_dns_parse($resp, 1);
+    foreach ($recs as $rec) {
+        $ip = (string)($rec['ip'] ?? '');
+        if ($ip !== '') {
+            return $ip;
+        }
+    }
+    return '';
+}
+
 function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
 {
     // $wantType is the socket type to select from the resolver's list: 1
@@ -279,9 +359,22 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     if ($res === null) {
         return false;
     }
+    // getaddrinfo(3) RESOLVES, and it blocks the whole process while it does — the
+    // last blocking step left in the network path. Under a scheduler, resolve the
+    // name first over the netpoller-parked DNS path and hand getaddrinfo the
+    // literal it produced: a numeric host touches no network, so the entire
+    // addrinfo walk below (socktype filter, ai_addr/ai_addrlen, the offset table)
+    // is reused untouched. An unanswerable name falls back to the blocking walk.
+    $lookup = $host;
+    if (\Runtime\AsyncHook::active() && !\__mc_is_numeric_host($host)) {
+        $ip = \__mc_resolve_async($host);
+        if ($ip !== '') {
+            $lookup = $ip;
+        }
+    }
     // hints = NULL: see the file header. The result list then also carries
     // the OTHER socktypes, which the ai_socktype filter below drops.
-    $rc = \Runtime\Libc\sys_getaddrinfo($host, (string)$port, \int_to_ptr(0), $res);
+    $rc = \Runtime\Libc\sys_getaddrinfo($lookup, (string)$port, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
         return false;
