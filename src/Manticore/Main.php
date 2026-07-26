@@ -1554,14 +1554,34 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     foreach ($sources as $source) { $srcBytes = $srcBytes + \strlen($source); }
     \Compile\Stats::line('input: ' . (string)\count($sources) . ' file(s), '
         . (string)$srcBytes . ' bytes');
+    // Every file's top-level statements are flattened into ONE `__main`, entry
+    // last. A top-level `return` in any file BEFORE the entry is an
+    // include-return — the value `require` hands back — and it must not
+    // terminate the program. This is not an edge case: composer's
+    // `vendor/autoload.php` returns the loader, and every `require`d DATA file
+    // (symfony/string's width tables, polyfill-intl-normalizer's unidata) is
+    // one `return [...]` of a few thousand entries. Flattened, the FIRST of
+    // them ended the program before the entry ran a single statement, with its
+    // truncated array pointer as the exit status.
+    //
+    // `require` is already a no-op here, so its value has no consumer: drop
+    // these returns outright. The ENTRY's own `return $rc` is the script exit
+    // code and is kept — which is why the test is "not the last source".
+    $lastIdx = \count($sources) - 1;
+    $srcIdx = -1;
     foreach ($sources as $source) {
+        $srcIdx = $srcIdx + 1;
         try {
             $program = Parser::parseSource($source);
         } catch (\Throwable $e) {
             dprint("parse failed: " . $e->getMessage());
             return null;
         }
-        foreach ($program->statements as $s) { $stmts[] = $s; }
+        $isEntry = $srcIdx === $lastIdx;
+        foreach ($program->statements as $s) {
+            if (!$isEntry && $s->kind === 'Return') { continue; }
+            $stmts[] = $s;
+        }
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
         foreach ($program->docComments as $d) { $docs[] = $d; }
     }
