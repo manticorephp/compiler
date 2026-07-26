@@ -1,6 +1,8 @@
 # Async — Go-style green threads on Manticore
 
-A **pure-PHP** structured-concurrency runtime over Manticore's two async primitives —
+Part of the standard distribution: the runtime ships in `prelude/async.php` (demand-gated on
+an `Async` mention), the demos live in `examples/async/`. A **pure-PHP** structured-concurrency
+runtime over Manticore's two async primitives —
 **Fibers** (stackful, cheap) and **`Io\Poll`** (kqueue/epoll readiness). No new compiler
 intrinsics: the scheduler, reactor, tasks, channels and I/O are ordinary PHP compiled to
 native.
@@ -207,7 +209,7 @@ Async\async(function () {
 already being structured: the accept loop and every live connection raise
 `CancelledException` at their next suspend point, each scope joins its children, `shield()`
 covers a last write, and `async()` returns normally — a root cancellation is a shutdown, not
-a failure. `poc/async/server.php` is the whole shape: `supervise(4, …)` forks four workers,
+a failure. `examples/async/server.php` is the whole shape: `supervise(4, …)` forks four workers,
 restarts one that crashes, and forwards `SIGTERM` to the group.
 
 ### Bounded concurrency
@@ -288,19 +290,19 @@ write / accept paths use the reactor directly.
 ## Examples
 
 ```bash
-poc/async/build.sh            # compile every demo (single files; no manifest, no library)
+examples/async/build.sh            # compile every demo (single files; no manifest, no library)
 
-poc/async/smoke_bin           # structured concurrency: scopes, cancellation, awaitAll/Any
-poc/async/chan_demo_bin       # channels + select
-poc/async/async-io_bin        # HTTPS fetches: async vs channel vs sync wall time
-poc/async/http_transparent_bin  # HTTP/1.1 keep-alive server on :8080 (prefork, plain streams)
-poc/async/http_server_bin     # the same server on the raw Async\read/write path
-poc/async/load_client_bin     # native async load client
-poc/async/spawncost_bin       # spawn/join microbench
+examples/async/smoke_bin           # structured concurrency: scopes, cancellation, awaitAll/Any
+examples/async/chan_demo_bin       # channels + select
+examples/async/async-io_bin        # HTTPS fetches: async vs channel vs sync wall time
+examples/async/http_transparent_bin  # HTTP/1.1 keep-alive server on :8080 (prefork, plain streams)
+examples/async/http_server_bin     # the same server on the raw Async\read/write path
+examples/async/load_client_bin     # native async load client
+examples/async/spawncost_bin       # spawn/join microbench
 ```
 
 ```bash
-bin/manticore compile poc/async/tls_async_smoke.php -o /tmp/tls_smoke && /tmp/tls_smoke
+bin/manticore compile examples/async/tls_async_smoke.php -o /tmp/tls_smoke && /tmp/tls_smoke
 ```
 is the NETWORK-dependent check (out of the offline suite): two HTTPS fetches to different
 hosts, overlapped, plus `dns_get_record` over the parked UDP exchange.

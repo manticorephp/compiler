@@ -13,8 +13,8 @@ graphify-out/
 !tests/bootstrap/expected/*.out
 !tests/aot/expected/*.out
 
-# PoC async: compiled example binaries (rebuilt via poc/async/manticore.json)
-poc/async/*_bin
+# Compiled example binaries (rebuilt via examples/async/build.sh)
+examples/async/*_bin
 
 # OS
 **/.DS_Store

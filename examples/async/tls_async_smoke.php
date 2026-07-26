@@ -7,7 +7,7 @@
 // It only fired under a scheduler, because a blocking fd never makes SSL_read
 // return -1.
 //
-//   bin/manticore compile poc/async/tls_async_smoke.php -o /tmp/tls_smoke && /tmp/tls_smoke
+//   bin/manticore compile examples/async/tls_async_smoke.php -o /tmp/tls_smoke && /tmp/tls_smoke
 //
 // Run it a handful of times: the pre-fix crash rate was roughly 50%, and 100%
 // once the response was consumed.
