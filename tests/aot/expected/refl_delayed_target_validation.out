@@ -1,0 +1,4 @@
+Override target=1 repeated=n
+DelayedTargetValidation target=1 repeated=n
+E: Attribute "Override" cannot target class (allowed targets: method, property)
+DelayedTargetValidation

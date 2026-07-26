@@ -824,7 +824,8 @@ trait EmitLlvmRuntime
             $retFld = $this->strSymBytes($rsym);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
-                $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false),
+                $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false)
+                    | $this->metaIsDeprecated($mm),
                 $this->methodTrampField($cls, $mm, $mn),
                 $this->methodArity($mm),
                 \count($mm->params),
@@ -964,6 +965,13 @@ trait EmitLlvmRuntime
     {
         $rows = [];
         $defs = '';
+        $target = \Compile\BuiltinAttributes::TARGET_CLASS;
+        if ($kind === 'm') { $target = \Compile\BuiltinAttributes::TARGET_METHOD; }
+        elseif ($kind === 'p') { $target = \Compile\BuiltinAttributes::TARGET_PROPERTY; }
+        // A repeat is a property of the SITE, so it is counted over all names
+        // here, not per surviving row.
+        $counts = [];
+        foreach ($names as $an) { $counts[$an] = ($counts[$an] ?? 0) + 1; }
         $k = -1;
         foreach ($names as $an) {
             $k = $k + 1;
@@ -975,7 +983,24 @@ trait EmitLlvmRuntime
             $argsFld = 'ptr @manticore_' . $this->mangle($argsFn);
             $newFld = isset($this->sigs->paramTypes[$newFn])
                 ? 'ptr @manticore_' . $this->mangle($newFn) : 'ptr null';
-            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaAttrRow($this->strSymBytes($nameSym), $argsFld, $newFld);
+            // The newInstance() verdict, baked at lowering (see
+            // Module::$attrSiteErrors) — php raises it only when the instance is
+            // actually constructed.
+            $err = $this->attrSiteErrors[$declClass . '|' . $kind . '|' . $member . '|' . (string)$k] ?? '';
+            // Emitted as its OWN global beside the name, never interned: the
+            // string pool has already been written out by the time rmeta is
+            // built, so a fresh intern here dangles ("use of undefined value
+            // @.str.N" out of clang). A VALID use still gets a real EMPTY
+            // string rather than null — the prelude reads this field as a
+            // `string` and tests `!== ""`, and a null pointer is not the empty
+            // string object, so every attribute would have thrown.
+            $errSym = $sym . '.e.' . (string)$k;
+            $defs .= $this->strGlobalDef($errSym, $err);
+            $errFld = 'ptr ' . $this->strSymBytes($errSym);
+            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaAttrRow(
+                $this->strSymBytes($nameSym), $argsFld, $newFld,
+                $target, ($counts[$an] ?? 1) > 1 ? 1 : 0, $errFld,
+            );
         }
         $n = \count($rows);
         if ($n === 0) { return [$defs, 0, 'null']; }
@@ -1035,6 +1060,15 @@ trait EmitLlvmRuntime
         return $mm->requiredParams() | ($total << 8) | ($variadic << 16);
     }
 
+    /** Whether a member carries `#[\Deprecated]` (names only reach rmeta). */
+    private function metaIsDeprecated(\Compile\Mir\MethodMeta $mm): int
+    {
+        foreach ($mm->attributes as $an) {
+            if (\ltrim($an, '\\') === 'Deprecated') { return \Compile\MemoryAbi::RMETA_MEM_DEPRECATED; }
+        }
+        return 0;
+    }
+
     /** Pack a member's flags word. Visibility is an enum in the low bits. */
     private function memberFlags(string $vis, bool $static, bool $abstract, bool $final, bool $readonly): int
     {
@@ -1078,7 +1112,7 @@ trait EmitLlvmRuntime
             $trampFld = isset($this->sigs->paramTypes[$trampSym])
                 ? '@manticore_' . $this->mangle($trampSym) : 'null';
             $row = \Compile\Mir\RuntimeLibrary::rmetaRow(
-                $this->strSymBytes($nameSym), 0, $trampFld,
+                $this->strSymBytes($nameSym), $this->metaIsDeprecated($mm), $trampFld,
                 $this->methodArity($mm), \count($mm->params), $pp[1],
                 0, 'null', $this->strSymBytes($rsym));
             $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";

@@ -119,7 +119,10 @@ trait LowerAttrChecks
     /** Every attribute site a class declaration owns, plus the `#[Override]` checks. */
     private function checkClassDeclAttrs(\Parser\Ast\ClassDecl $d): void
     {
+        $cls = \ltrim($this->declName($d), '\\');
         $this->checkAttrSite($d->attributes, \Compile\BuiltinAttributes::TARGET_CLASS, $d->span);
+        $this->bakeAttrSiteErrors($d->attributes, \Compile\BuiltinAttributes::TARGET_CLASS,
+            $cls, 'c', '');
         // Zend rejects #[\Deprecated] on a class outright, even though
         // TARGET_CLASS is in the attribute's own flag set.
         foreach ($d->attributes as $a) {
@@ -131,6 +134,8 @@ trait LowerAttrChecks
         foreach ($d->methods as $m) {
             $this->checkAttrSite($this->methodAttrs($m),
                 \Compile\BuiltinAttributes::TARGET_METHOD, $this->methodSpan($m));
+            $this->bakeAttrSiteErrors($this->methodAttrs($m),
+                \Compile\BuiltinAttributes::TARGET_METHOD, $cls, 'm', $this->methodDeclName($m));
             foreach ($this->methodDeclParams($m) as $p) {
                 $this->checkAttrSite($this->paramAttrs($p),
                     \Compile\BuiltinAttributes::TARGET_PARAMETER, $this->paramSpan($p));
@@ -151,6 +156,8 @@ trait LowerAttrChecks
         foreach ($d->properties as $p) {
             $this->checkAttrSite($this->propAttrs($p),
                 \Compile\BuiltinAttributes::TARGET_PROPERTY, $this->propSpan($p));
+            $this->bakeAttrSiteErrors($this->propAttrs($p),
+                \Compile\BuiltinAttributes::TARGET_PROPERTY, $cls, 'p', $this->propName($p));
             if ($this->hasOverride($this->propAttrs($p))
                 && !$this->ancestorHasProperty($d, $this->propName($p))) {
                 $this->attrFail(\ltrim($d->name, '\\') . '::$' . $this->propName($p)
@@ -158,7 +165,6 @@ trait LowerAttrChecks
                     $this->propSpan($p));
             }
         }
-        $cls = \ltrim($this->declName($d), '\\');
         foreach ($d->consts as $c) {
             $this->checkAttrSite($this->constAttrs($c),
                 \Compile\BuiltinAttributes::TARGET_CLASS_CONSTANT, $this->constSpan($c));
@@ -293,6 +299,117 @@ trait LowerAttrChecks
             \Compile\Mir\Type::void(),
         );
     }
+
+    /**
+     * Bake the newInstance() verdict for every attribute at one site.
+     *
+     * php checks a USERLAND attribute's target and repeatability only when the
+     * instance is constructed, so the answer has to travel to runtime. Here is
+     * the last point where the attribute class's own `#[Attribute(flags)]` is
+     * readable — `ClassDef::$attributes` keeps names only.
+     *
+     * `$kind` / `$member` / the index must match ReflectSynth::attrFn's site key.
+     *
+     * @param \Parser\Ast\AttributeNode[] $attrs
+     */
+    private function bakeAttrSiteErrors(array $attrs, int $target, string $declClass, string $kind, string $member): void
+    {
+        $mod = $this->module;
+        if ($mod === null) { return; }
+        /** @var array<string,int> $counts */
+        $counts = [];
+        foreach ($attrs as $a) {
+            $fqn = $this->attrFqn($a);
+            $counts[$fqn] = ($counts[$fqn] ?? 0) + 1;
+        }
+        $k = -1;
+        /** @var array<string,int> $seen */
+        $seen = [];
+        foreach ($attrs as $a) {
+            $k = $k + 1;
+            $fqn = $this->attrFqn($a);
+            $repeat = isset($seen[$fqn]);
+            $seen[$fqn] = 1;
+            $err = $this->attrUseError($fqn, $target, $repeat);
+            if ($err === '') { continue; }
+            $mod->attrSiteErrors[$declClass . '|' . $kind . '|' . $member . '|' . (string)$k] = $err;
+        }
+    }
+
+    /**
+     * The \Error message php raises for one attribute use, or '' when the use is
+     * valid (or cannot be judged — an attribute class declared elsewhere).
+     */
+    private function attrUseError(string $fqn, int $target, bool $repeat): string
+    {
+        $short = $fqn;
+        $bs = \strrpos($fqn, '\\');
+        if ($bs !== false) { $short = \substr($fqn, $bs + 1); }
+        $flags = -1;
+        if (\Compile\BuiltinAttributes::isReserved($fqn)) {
+            $flags = \Compile\BuiltinAttributes::flagsOf($fqn);
+        } else {
+            $decl = $this->classDecls[$fqn] ?? null;
+            if ($decl === null) { return ''; }
+            $marker = null;
+            foreach ($decl->attributes as $ma) {
+                if ($this->attrFqn($ma) === 'Attribute') { $marker = $ma; }
+            }
+            if ($marker === null) {
+                return 'Attempting to use non-attribute class "' . $short . '" as attribute';
+            }
+            $flags = $this->evalAttrFlags($marker);
+            if ($flags < 0) { return ''; }
+        }
+        if (($flags & $target) === 0) {
+            return 'Attribute "' . $short . '" cannot target '
+                . \Compile\BuiltinAttributes::targetWord($target)
+                . ' (allowed targets: ' . \Compile\BuiltinAttributes::allowedList($flags) . ')';
+        }
+        if ($repeat && ($flags & \Compile\BuiltinAttributes::IS_REPEATABLE) === 0) {
+            return 'Attribute "' . $short . '" must not be repeated';
+        }
+        return '';
+    }
+
+    /**
+     * The flag argument of a `#[Attribute(...)]` marker: an int literal, an
+     * `Attribute::TARGET_*` constant, or any `|` of those. Bare `#[Attribute]`
+     * means TARGET_ALL. -1 when the expression is something else, which makes
+     * the site unjudged rather than wrongly rejected.
+     */
+    private function evalAttrFlags(\Parser\Ast\AttributeNode $marker): int
+    {
+        $args = $this->attrArgs($marker);
+        if ($args === []) { return \Compile\BuiltinAttributes::TARGET_ALL; }
+        $a0 = $args[0];
+        if ($a0->kind === 'NamedArg') { $a0 = $this->namedArgValue($a0); }
+        return $this->evalFlagExpr($a0);
+    }
+
+    private function evalFlagExpr(\Parser\Ast\Expr $e): int
+    {
+        if ($e->kind === 'IntLiteral') { return $this->intLitValue($e); }
+        if ($e->kind === 'StaticAccess') {
+            if (\ltrim($this->staticAccessClass($e), '\\') !== 'Attribute') { return -1; }
+            $v = \Compile\BuiltinAttributes::constValue($this->staticAccessName($e));
+            return $v === null ? -1 : $v;
+        }
+        if ($e->kind === 'BinaryOp' && $this->binaryOp($e) === '|') {
+            $l = $this->evalFlagExpr($this->binaryLeft($e));
+            $r = $this->evalFlagExpr($this->binaryRight($e));
+            if ($l < 0 || $r < 0) { return -1; }
+            return $l | $r;
+        }
+        return -1;
+    }
+
+    private function intLitValue(\Parser\Ast\IntLiteral $e): int { return $e->value; }
+    private function staticAccessClass(\Parser\Ast\StaticAccess $e): string { return $e->class; }
+    private function staticAccessName(\Parser\Ast\StaticAccess $e): string { return $e->name; }
+    private function binaryOp(\Parser\Ast\BinaryOp $e): string { return $e->op; }
+    private function binaryLeft(\Parser\Ast\BinaryOp $e): \Parser\Ast\Expr { return $e->left; }
+    private function binaryRight(\Parser\Ast\BinaryOp $e): \Parser\Ast\Expr { return $e->right; }
 
     /** Whether an AST expression is a `(void)` cast. */
     private function isVoidCastExpr(\Parser\Ast\Expr $e): bool

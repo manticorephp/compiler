@@ -1,0 +1,13 @@
+string(3) "Rep"
+int(4)
+bool(true)
+Rep n=1
+string(3) "Rep"
+int(4)
+bool(true)
+Rep n=2
+string(10) "MethodOnly"
+int(1)
+bool(false)
+E1: Attribute "MethodOnly" cannot target class (allowed targets: method)
+E2: Attempting to use non-attribute class "Plain" as attribute

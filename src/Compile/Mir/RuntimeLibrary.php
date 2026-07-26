@@ -80,10 +80,11 @@ final class RuntimeLibrary
         return '{ ptr, ptr, i64 }';
     }
 
-    /** One attribute entry: `{ ptr name, ptr args_factory, ptr new_factory }`. */
+    /** One attribute entry: `{ ptr name, ptr args_fn, ptr new_fn, i64 target,
+     *  i64 repeated, ptr err }`. */
     public static function rmetaAttrType(): string
     {
-        return '{ ptr, ptr, ptr }';
+        return '{ ptr, ptr, ptr, i64, i64, ptr }';
     }
 
     /**
@@ -106,9 +107,11 @@ final class RuntimeLibrary
 
     /** One attribute row body: name + the two factory pointer fields (each a
      *  `ptr @manticore_…` or `ptr null`). */
-    public static function rmetaAttrRow(string $nameIr, string $argsFld, string $newFld): string
+    public static function rmetaAttrRow(string $nameIr, string $argsFld, string $newFld,
+                                        int $target, int $repeated, string $errFld): string
     {
-        return self::rmetaAttrType() . ' { ptr ' . $nameIr . ', ' . $argsFld . ', ' . $newFld . ' }';
+        return self::rmetaAttrType() . ' { ptr ' . $nameIr . ', ' . $argsFld . ', ' . $newFld
+             . ', i64 ' . (string)$target . ', i64 ' . (string)$repeated . ', ' . $errFld . ' }';
     }
 
     /**

@@ -266,7 +266,16 @@ final class MemoryAbi
     public const RMETA_ATTR_NAME_OFFSET = 0;
     public const RMETA_ATTR_ARGS_OFFSET = 8;
     public const RMETA_ATTR_NEW_OFFSET  = 16;
-    public const RMETA_ATTR_SIZE = 24;
+    /** The usage-site TARGET_* bit ReflectionAttribute::getTarget() reports. */
+    public const RMETA_ATTR_TARGET_OFFSET = 24;
+    /** 1 when the same attribute class appears more than once at this site. */
+    public const RMETA_ATTR_REPEATED_OFFSET = 32;
+    /** The \Error newInstance() must throw (bad target / repeat / non-attribute
+     *  class), or null when the use is valid. Userland attributes are NOT
+     *  validated at compile time by php either — the verdict is baked here and
+     *  raised only when the instance is actually asked for. */
+    public const RMETA_ATTR_ERR_OFFSET = 40;
+    public const RMETA_ATTR_SIZE = 48;
 
     public const RMETA_PARAM_HAS_DEFAULT = 1;
     public const RMETA_PARAM_ALLOWS_NULL = 2;
@@ -291,6 +300,8 @@ final class MemoryAbi
     public const RMETA_MEM_ABSTRACT  = 8;
     public const RMETA_MEM_FINAL     = 16;
     public const RMETA_MEM_READONLY  = 32;
+    /** #[\Deprecated] on the member — ReflectionFunctionAbstract::isDeprecated(). */
+    public const RMETA_MEM_DEPRECATED = 64;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;

@@ -898,7 +898,9 @@ final class LowerFromAst implements Pass
         return new \Compile\Mir\MethodMeta(
             $fn, 'public', false, false, false,
             $decl->returnType === null ? '' : $decl->returnType,
-            $params, [], '');
+            // Attributes were dropped here, so ReflectionFunction::isDeprecated()
+            // could never see a #[\Deprecated] on a free function.
+            $params, $this->attrNames($this->fnDeclAttrs($decl)), '');
     }
 
     /**

@@ -131,6 +131,15 @@ final class Module
      *  @var array<string, string> */
     public array $noDiscardMethods = [];
 
+    /** "<declClass>|<kind>|<member>|<k>" → the \Error message
+     *  ReflectionAttribute::newInstance() must throw for that attribute use.
+     *  php validates a USERLAND attribute's target / repeatability only when the
+     *  instance is asked for, so the verdict is computed at lowering (where the
+     *  attribute class's own `#[Attribute(flags)]` is still readable) and baked
+     *  into the metadata row.
+     *  @var array<string, string> */
+    public array $attrSiteErrors = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude → linkonce_odr. */
     public function addGlobalCell(string $name, Node $default, bool $isPrelude = false): void
     {

@@ -181,11 +181,15 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_name')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET, true, \Compile\MemoryAbi::RMETA_ROW_SIZE); }
         if ($name === '__mc_refl_class_nattrs')       { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NATTRS_OFFSET, false); }
         if ($name === '__mc_refl_class_attrs')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ATTRS_OFFSET, true); }
+        if ($name === '__mc_refl_row_flags')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_FLAGS_OFFSET, false); }
         if ($name === '__mc_refl_row_nattrs')         { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_NATTRS_OFFSET, false); }
         if ($name === '__mc_refl_row_attrs')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_ATTRS_OFFSET, true); }
         if ($name === '__mc_refl_attr_name')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NAME_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_args')          { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ARGS_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_new')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_NEW_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_target')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_TARGET_OFFSET, false, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_repeated')      { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_REPEATED_OFFSET, false, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
+        if ($name === '__mc_refl_attr_err')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ERR_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_call0')              { return $this->biMcReflCall0($args); }
         if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
         if ($name === '__mc_refl_ifaces_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_IFACES_FN_OFFSET, true); }

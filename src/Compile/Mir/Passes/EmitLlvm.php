@@ -274,6 +274,9 @@ final class EmitLlvm implements EmitVisitor
     private array $noDiscardFns = [];
     /** @var array<string, string> */
     private array $noDiscardMethods = [];
+    /** "<declClass>|<kind>|<member>|<k>" → newInstance()'s baked \Error message.
+     *  @var array<string, string> */
+    private array $attrSiteErrors = [];
 
     public function emit(Module $module): string
     {
@@ -313,6 +316,7 @@ final class EmitLlvm implements EmitVisitor
         $this->deprecatedMethods = $module->deprecatedMethods;
         $this->noDiscardFns = $module->noDiscardFns;
         $this->noDiscardMethods = $module->noDiscardMethods;
+        $this->attrSiteErrors = $module->attrSiteErrors;
         $this->closureCaptures = $module->closureCaptures;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
