@@ -917,6 +917,10 @@ final class Foreach_ extends Node
      */
     public string $iterClass = '';
     public bool $iterAggregate = false;
+    /** Synthetic local holding the iterator for the object path, named by
+     *  {@see EmitLlvmLocals::preallocateLocals} so its slot alloca lands in the
+     *  ENTRY block. Emitted lazily (and unhoisted) when still ''. */
+    public string $iterName = '';
 
     public function accept(EmitVisitor $v): string
     {

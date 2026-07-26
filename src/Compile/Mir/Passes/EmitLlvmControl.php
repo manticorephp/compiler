@@ -225,12 +225,22 @@ trait EmitLlvmControl
             $out .= '  ' . $ks . " = alloca i64\n";
         }
         // Hold the iterator in a synthetic local; protocol calls load it from
-        // there so the subject expression is evaluated exactly once.
-        $iterName = "@it." . (string)$this->iterCounter;
-        $this->iterCounter = $this->iterCounter + 1;
-        $iterSlot = $this->ssa->allocReg();
-        $this->locals->slots[$iterName] = $iterSlot;
-        $out .= '  ' . $iterSlot . " = alloca i64\n";
+        // there so the subject expression is evaluated exactly once. The slot
+        // is normally preallocated in the ENTRY block ({@see
+        // EmitLlvmLocals::preallocateLocals}) — an alloca left here dominates
+        // only the branch the foreach sits in, which breaks the moment a
+        // generator's resume switch re-enters the loop past it.
+        $iterName = $fe->iterName;
+        if ($iterName === '' || !isset($this->locals->slots[$iterName])) {
+            if ($iterName === '') {
+                $iterName = "@it." . (string)$this->iterCounter;
+                $this->iterCounter = $this->iterCounter + 1;
+            }
+            $iterSlot = $this->ssa->allocReg();
+            $this->locals->slots[$iterName] = $iterSlot;
+            $out .= '  ' . $iterSlot . " = alloca i64\n";
+        }
+        $iterSlot = $this->locals->slots[$iterName];
         $out .= $this->emitNode($fe->array);
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";

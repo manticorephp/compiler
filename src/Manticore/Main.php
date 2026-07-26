@@ -1054,11 +1054,20 @@ function composer_path_join(string $base, string $rel): string
 }
 
 /**
- * The directories named by one composer `autoload` block — psr-4 / psr-0 roots
- * and classmap DIRECTORY entries — each prefixed with `$base`. `files` and
- * single-`*.php` classmap entries are deferred: whole-program AOT already pulls
- * in every declaration once a directory is scanned, and `files` side effects
- * have no analogue in a compiled program.
+ * The sources named by one composer `autoload` block — psr-4 / psr-0 roots,
+ * classmap entries, and `files` entries — each prefixed with `$base`.
+ *
+ * `files` entries used to be skipped, on the reasoning that their side effects
+ * have no analogue in a compiled program. That reasoning missed what they are
+ * mostly FOR: a `files` entry typically exists to DECLARE something that has no
+ * class to autoload. symfony/deprecation-contracts is exactly one function in
+ * exactly one `files` entry, and skipping it left every
+ * `trigger_deprecation(...)` call in the dependency tree undefined at link time.
+ * Whole-program AOT needs the declaration, so the file is compiled like any
+ * other source.
+ *
+ * A returned path may be a FILE rather than a directory; collect_php_sources
+ * handles both (its `find` accepts either).
  *
  * @param array<string,mixed> $autoload
  * @return string[]
@@ -1079,8 +1088,11 @@ function composer_autoload_dirs(array $autoload, string $base): array
     }
     $cm = isset($autoload["classmap"]) ? $autoload["classmap"] : [];
     foreach ($cm as $p) {
-        $ps = (string)$p;
-        if (\substr($ps, -4) !== ".php") { $out[] = composer_path_join($base, $ps); }
+        $out[] = composer_path_join($base, (string)$p);
+    }
+    $fl = isset($autoload["files"]) ? $autoload["files"] : [];
+    foreach ($fl as $p) {
+        $out[] = composer_path_join($base, (string)$p);
     }
     return $out;
 }

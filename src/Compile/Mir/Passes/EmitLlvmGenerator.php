@@ -330,6 +330,17 @@ trait EmitLlvmGenerator
                     $locals["@fe.1." . (string)$n->genSlotBase] = \count($locals);
                 }
             }
+            // The OBJECT path's synthetic iterator local is created at EMIT
+            // time, so inside a generator it had no frame slot and its alloca
+            // landed in whatever branch the foreach sat in — which the resume
+            // switch jumps straight past, so the loop's own blocks loaded a slot
+            // nothing dominated (invalid IR). Name it here, like every other
+            // generator local, and the emitter finds it already placed.
+            if ($n->iterName === '') {
+                $n->iterName = '@it.' . (string)$this->iterCounter;
+                $this->iterCounter = $this->iterCounter + 1;
+            }
+            if (!isset($locals[$n->iterName])) { $locals[$n->iterName] = \count($locals); }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectGenLocals($c, $locals);

@@ -531,6 +531,48 @@ trait LowerPrelude
             if (isset($lc[$name])) { return new IntConst($lc[$name], Type::int_()); }
         }
 
+        // Signal numbers — host-DIVERGENT. The first sixteen are shared history
+        // (SIGHUP..SIGTERM), but Darwin and Linux disagree on nearly everything
+        // above that: SIGUSR1 is 30 on Darwin and 10 on Linux, SIGCHLD 20 vs 17,
+        // SIGBUS 10 vs 7. Resolved against the build host like LC_* and the
+        // socket constants, and for the same reason kept out of the plain table.
+        // SIG_DFL / SIG_IGN are the dispositions prelude/signals.php passes to
+        // signal(2); a signal with no number on this host resolves to nothing so
+        // the program gets an honest "unknown constant" rather than a wrong one.
+        if (\substr($name, 0, 4) === 'SIG_' || \substr($name, 0, 3) === 'SIG') {
+            $isDarwin = \Manticore\is_darwin();
+            $sig = [
+                'SIG_DFL' => 0, 'SIG_IGN' => 1, 'SIG_ERR' => -1,
+                'SIGHUP' => 1, 'SIGINT' => 2, 'SIGQUIT' => 3, 'SIGILL' => 4,
+                'SIGTRAP' => 5, 'SIGABRT' => 6, 'SIGIOT' => 6, 'SIGFPE' => 8,
+                'SIGKILL' => 9, 'SIGSEGV' => 11, 'SIGPIPE' => 13, 'SIGALRM' => 14,
+                'SIGTERM' => 15,
+                'SIGBUS' => $isDarwin ? 10 : 7,
+                'SIGSYS' => $isDarwin ? 12 : 31,
+                'SIGURG' => $isDarwin ? 16 : 23,
+                'SIGSTOP' => $isDarwin ? 17 : 19,
+                'SIGTSTP' => $isDarwin ? 18 : 20,
+                'SIGCONT' => $isDarwin ? 19 : 18,
+                'SIGCHLD' => $isDarwin ? 20 : 17,
+                'SIGCLD' => $isDarwin ? 20 : 17,
+                'SIGTTIN' => 21, 'SIGTTOU' => 22,
+                'SIGIO' => $isDarwin ? 23 : 29,
+                'SIGPOLL' => $isDarwin ? 23 : 29,
+                'SIGXCPU' => 24, 'SIGXFSZ' => 25, 'SIGVTALRM' => 26,
+                'SIGPROF' => 27, 'SIGWINCH' => 28,
+                'SIGUSR1' => $isDarwin ? 30 : 10,
+                'SIGUSR2' => $isDarwin ? 31 : 12,
+            ];
+            if (!$isDarwin) {
+                $sig['SIGSTKFLT'] = 16;
+                $sig['SIGPWR'] = 30;
+            } else {
+                $sig['SIGEMT'] = 7;
+                $sig['SIGINFO'] = 29;
+            }
+            if (isset($sig[$name])) { return new IntConst($sig[$name], Type::int_()); }
+        }
+
         // ext/sockets — host-DIVERGENT constants. php exposes the host's own
         // <sys/socket.h> / errno values, and Darwin and Linux disagree on nearly
         // every one. Resolved against the build host like PHP_OS / FNM_* above,

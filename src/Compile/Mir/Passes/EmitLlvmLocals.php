@@ -171,6 +171,24 @@ trait EmitLlvmLocals
                 $this->locals->slots[$n->keyVar] = $ks;
                 $out .= '  ' . $ks . " = alloca i64\n";
             }
+            // The OBJECT path also holds the iterator in a synthetic local, and
+            // that slot needs hoisting for the very same reason — more sharply,
+            // in fact: inside a generator the resume switch jumps back into the
+            // loop from `entry`, bypassing whatever branch the foreach sits in,
+            // so an alloca left there dominates none of the loop's own blocks.
+            // Named HERE so emission and preallocation cannot drift apart.
+            // Unconditionally, NOT gated on iterClass: InferTypes and the
+            // emitter reach the object path through two different predicates
+            // and can disagree, so a foreach can take it with iterClass still
+            // ''. An unused 8-byte slot costs nothing — LLVM drops it — while a
+            // missed hoist is an invalid-IR build failure.
+            if ($n->iterName === '') {
+                $n->iterName = '@it.' . (string)$this->iterCounter;
+                $this->iterCounter = $this->iterCounter + 1;
+                $is = $this->ssa->allocReg();
+                $this->locals->slots[$n->iterName] = $is;
+                $out .= '  ' . $is . " = alloca i64\n";
+            }
             return $out . $this->preallocateLocals($n->body);
         }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
