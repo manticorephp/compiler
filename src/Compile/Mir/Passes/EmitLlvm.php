@@ -311,18 +311,21 @@ final class EmitLlvm implements EmitVisitor
             $mask = [];
             $tmask = [];
             $camask = [];
+            $ahmask = [];
             $ptypes = [];
             $pdefs = [];
             foreach ($fn->params as $p) {
                 $mask[] = $p->byRef;
                 $tmask[] = ($p->type->kind === Type::KIND_CELL);
                 $camask[] = $p->cellArg;
+                $ahmask[] = $p->arrayHinted;
                 $ptypes[] = $p->type;
                 $pdefs[] = $p->default;
             }
             $this->sigs->refParams[$fn->name] = $mask;
             $this->sigs->taggedParams[$fn->name] = $tmask;
             $this->sigs->cellArgParams[$fn->name] = $camask;
+            $this->sigs->arrayHintedParams[$fn->name] = $ahmask;
             $this->sigs->paramTypes[$fn->name] = $ptypes;
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;

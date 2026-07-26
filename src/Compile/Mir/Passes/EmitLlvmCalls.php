@@ -845,6 +845,7 @@ trait EmitLlvmCalls
         $mask = $this->sigs->refParams[$c->function] ?? [];
         $tmask = $this->sigs->taggedParams[$c->function] ?? [];
         $camask = $this->sigs->cellArgParams[$c->function] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$c->function] ?? [];
         $ptypes = $this->sigs->paramTypes[$c->function] ?? [];
         $ai = 0;
         // Fresh string-temp arg carriers freed after the call: a borrow the
@@ -984,6 +985,22 @@ trait EmitLlvmCalls
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();
                 $out .= $this->unboxCellArg($a, $ptypes, $ai);
+                // A bare `array` hint lowers to KIND_UNKNOWN, so unboxCellArg
+                // sees no target repr and leaves the tag on — but the callee
+                // reads that slot as a raw buffer pointer (EmitLlvmModule's
+                // array-hint prologue copies through `inttoptr`). Strip it. This
+                // is the boundary a cell-merged local now crosses: `$t = [];
+                // if (is_array($m)) { $t = $m; }` is a cell by the time it is
+                // handed to `f(array $a)`.
+                if (($ahmask[$ai] ?? false) && $a->type->kind === Type::KIND_CELL
+                    && ($ptypes[$ai] ?? null) !== null
+                    && $ptypes[$ai]->kind === Type::KIND_UNKNOWN) {
+                    $sp = $this->ssa->allocReg();
+                    $out .= '  ' . $sp . ' = and i64 ' . $this->lastValue
+                          . ", 281474976710655\n";
+                    $this->lastValue = $sp;
+                    $this->lastValueType = 'i64';
+                }
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($this->isFreshStringTemp($a)) {
                     $argTemps[] = $this->lastValue;

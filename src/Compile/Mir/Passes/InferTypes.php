@@ -1272,6 +1272,17 @@ final class InferTypes implements Pass
             $oT = $otherLocals[$name];
             $tOk = $this->isScalarOrCell($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
             $oOk = $this->isScalarOrCell($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
+            // An ARRAY arm merging with a CELL arm is the same problem one level
+            // up: `$t = []; if (is_array($r)) { $t = $r; }` over a `mixed $r`
+            // leaves a slot that holds a RAW buffer pointer on one path and a
+            // NaN-boxed cell on the other, and their union types UNKNOWN — so
+            // the very next `foreach ($t as …)` reads whichever the static type
+            // guessed and faults. Box the array arm so the slot is uniformly
+            // tagged. Only against a CELL sibling: two array arms already agree
+            // on the raw repr, and demoting those would cost every branchy
+            // array local a boxing round-trip.
+            $tOk = $tOk || ($tT->isArray() && $oT->kind === Type::KIND_CELL);
+            $oOk = $oOk || ($oT->isArray() && $tT->kind === Type::KIND_CELL);
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }

@@ -20,6 +20,11 @@ final class FunctionSignatures
     /** @var array<string, bool[]> fn name → which array params are `#[CellArg]`
      *  (element-consuming): a concrete-element array arg is cellified here. */
     public array $cellArgParams = [];
+    /** @var array<string, bool[]> fn name → which params carry a DECLARED array
+     *  hint. A bare `array` lowers to KIND_UNKNOWN, so the type alone cannot
+     *  tell a call site that the callee reads a raw buffer pointer — and a CELL
+     *  argument must be stripped to that pointer before it crosses. */
+    public array $arrayHintedParams = [];
     /** @var array<string, Type[]> fn name → per-param declared type */
     public array $paramTypes = [];
     /** @var array<string, array<int, ?Node>> fn name → per-param default node */
