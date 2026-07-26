@@ -323,6 +323,56 @@ namespace Async {
         /** Position in owner->children, or -1 once pruned (O(1) removal). */
         public int $idx = -1;
 
+        /** Monotonic id, and an optional label from {@see named()} — diagnostics only. */
+        public int $id = 0;
+        public string $name = '';
+
+        /**
+         * Intrusive doubly-linked list of LIVE tasks, head on the Scheduler. It
+         * exists so {@see Async\dump()} can enumerate what is running when a program
+         * hangs: the scope tree cannot answer that (settled children are pruned, and
+         * a nested group's children hang off the group, not the root). O(1) link on
+         * spawn, O(1) unlink on settle, no array to grow.
+         */
+        public ?Task $allNext = null;
+        public ?Task $allPrev = null;
+
+        /** Label this task for diagnostics: `spawn(…)->named('worker-3')`. */
+        public function named(string $name): Task
+        {
+            $this->name = $name;
+            return $this;
+        }
+
+        /** One line for the diagnostic report: id, label, state, what it waits on. */
+        public function describe(): string
+        {
+            $what = 'ready';
+            if ($this->state === self::DONE) {
+                $what = 'done';
+            } elseif ($this->state === self::FAILED) {
+                $what = 'failed(' . ($this->error === null ? '?' : \get_class($this->error)) . ')';
+            } elseif ($this->ioFd >= 0) {
+                $what = ($this->ioWrite ? 'io-write fd=' : 'io-read fd=') . (string)$this->ioFd
+                      . ($this->timerActive ? ' +deadline' : '');
+            } elseif ($this->chanHost !== null) {
+                $what = 'channel';
+            } elseif ($this->selecting) {
+                $what = 'select(' . (string)\count($this->selectChans) . ' channels)';
+            } elseif ($this->timerActive) {
+                $what = 'timer';
+            }
+            $flags = '';
+            if ($this->daemon) { $flags = $flags . ' daemon'; }
+            if ($this->cancelRequested) { $flags = $flags . ' cancel-requested'; }
+            if ($this->shield > 0) { $flags = $flags . ' shielded'; }
+            // `awaited` (someone is handling its outcome), not `unclaimed` — every
+            // freshly spawned task is unclaimed, so that spelling was pure noise.
+            if ($this->claimed) { $flags = $flags . ' awaited'; }
+            $label = $this->name === '' ? '' : (' "' . $this->name . '"');
+            return '#' . (string)$this->id . $label . ' ' . $what . $flags;
+        }
+
         /**
          * PER-TASK recv scratch buffer. Must not be shared: a read holds the
          * pointer across a suspend, so one global buffer that grows (free +
@@ -1296,6 +1346,10 @@ namespace Async {
         /** Live (non-cancelled) timer count — cancelled slots are deleted lazily. */
         private int $tmLive = 0;
 
+        /** Head of the live-task list + the id counter, both for {@see report()}. */
+        private ?Task $taskHead = null;
+        private int $nextTaskId = 0;
+
         private function __construct()
         {
             $this->reactor = new \Io\Poll\Context(\Io\Poll\Backend::Auto);
@@ -1307,6 +1361,12 @@ namespace Async {
                 self::$instance = new Scheduler();
             }
             return self::$instance;
+        }
+
+        /** Whether a loop is up — {@see Async\dump()} must not CREATE one. */
+        public static function hasInstance(): bool
+        {
+            return self::$instance !== null;
         }
 
         /** The innermost scope open in the RUNNING task. Null outside the loop. */
@@ -1341,10 +1401,40 @@ namespace Async {
             });
             $task = new Task($fiber, $owner, $owner);
             $task->daemon = $daemon;
+            $this->nextTaskId = $this->nextTaskId + 1;
+            $task->id = $this->nextTaskId;
+            // Link into the live-task list (head insert) so dump() can enumerate.
+            $task->allNext = $this->taskHead;
+            if ($this->taskHead !== null) { $this->taskHead->allPrev = $task; }
+            $this->taskHead = $task;
             if (!$daemon) { $this->live = $this->live + 1; }
             $task->queued = true;
             $this->ready[] = $task;
             return $task;
+        }
+
+        /**
+         * A human-readable snapshot of the engine: every live task with what it is
+         * parked on, plus the reactor/timer counters. This is the answer to "the
+         * program hangs and I have no idea why" — print it from a signal handler, or
+         * read it off a DeadlockException, which embeds it.
+         */
+        public function report(): string
+        {
+            $out = 'async: ' . (string)$this->live . ' live task(s), '
+                 . (string)$this->ioWaiters . ' parked on I/O, '
+                 . (string)$this->tmLive . ' on timers, '
+                 . (string)\count($this->ready) . " ready\n";
+            $t = $this->taskHead;
+            if ($t === null) {
+                return $out . "  (no live tasks)\n";
+            }
+            while ($t !== null) {
+                $cur = $t === $this->running ? '* ' : '  ';
+                $out = $out . $cur . $t->describe() . "\n";
+                $t = $t->allNext;
+            }
+            return $out;
         }
 
         // ── the run entry ──────────────────────────────────────────────────
@@ -1371,6 +1461,10 @@ namespace Async {
                 && !$rootTask->cancelRequested) {
                 $failure = $rootTask->error;
             }
+            // The deadlock report must be taken BEFORE the singleton is dropped —
+            // "all tasks are asleep" with no further detail is useless when a real
+            // program hangs, so the message carries the task table.
+            $stuckReport = $stuck ? $this->report() : '';
             // Dropping the singleton drops the reactor (Io\Poll\Context::__destruct
             // closes its kqueue/epoll fd) and every queue — the next async() in the
             // same program starts from a clean engine.
@@ -1379,7 +1473,9 @@ namespace Async {
                 throw $failure;
             }
             if ($stuck) {
-                throw new DeadlockException('async: all tasks are asleep — deadlock');
+                throw new DeadlockException(
+                    "async: every task is asleep and nothing can wake them — deadlock\n"
+                    . $stuckReport);
             }
             return $result;
         }
@@ -1398,6 +1494,7 @@ namespace Async {
                 function (\Resource $s): void { $this->waitWritable($s); },
                 function (\Resource $s): void { $this->closeConn($s); },
                 function (\Resource $s, float $t): bool { return $this->waitReadableWithin($s, $t); },
+                function (\Resource $s, float $t): bool { return $this->waitWritableWithin($s, $t); },
                 function (float $t): void { $this->sleep($t); },
             );
         }
@@ -1515,6 +1612,17 @@ namespace Async {
             $task->result = $result;
             $task->error = $error;
             if (!$task->daemon) { $this->live = $this->live - 1; }
+            // Unlink from the live-task list (diagnostics) — O(1), both directions.
+            if ($task->allPrev !== null) {
+                $task->allPrev->allNext = $task->allNext;
+            } elseif ($this->taskHead === $task) {
+                $this->taskHead = $task->allNext;
+            }
+            if ($task->allNext !== null) {
+                $task->allNext->allPrev = $task->allPrev;
+            }
+            $task->allNext = null;
+            $task->allPrev = null;
             if ($task->rbuf !== null) {
                 \Runtime\Libc\free($task->rbuf);
                 $task->rbuf = null;
@@ -1903,6 +2011,37 @@ namespace Async {
             \Fiber::suspend();
             // The reactor clears ioFd when IT wakes the task; fireTimers clears
             // timerActive when the deadline does. Read both before releasing.
+            $ready = $me->ioFd === -1;
+            $this->releaseIo($me);
+            if ($me->timerActive) {
+                $me->timerActive = false;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive - 1; }
+            }
+            return $ready;
+        }
+
+        /**
+         * Suspend until $conn is WRITABLE or $seconds elapse; true = writable,
+         * false = expired. The writable twin of {@see waitReadableWithin()} — a
+         * non-blocking connect(2) and a TLS handshake both complete on writability,
+         * and without a deadline a peer that accepts the TCP and then goes silent
+         * held the fiber forever (the caller's own connect timeout was ignored).
+         */
+        public function waitWritableWithin(\Resource $conn, float $seconds): bool
+        {
+            $this->checkCancel();
+            $me = $this->running;
+            $fd = $conn->addr;
+            $this->ensureWatcher($conn, $fd);
+            $this->chainWrite($fd, $me);
+            if (!$this->writeArmed[$fd]) {
+                $this->connWatcher[$fd]->modifyEvents([\Io\Poll\Event::Read, \Io\Poll\Event::Write]);
+                $this->writeArmed[$fd] = true;
+            }
+            $me->timerActive = true;
+            if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
+            $this->timerPush(\microtime(true) + $seconds, $me);
+            \Fiber::suspend();
             $ready = $me->ioFd === -1;
             $this->releaseIo($me);
             if ($me->timerActive) {
@@ -2416,6 +2555,24 @@ namespace Async {
         }
         \fclose($h);
         return $off;
+    }
+
+    /**
+     * A snapshot of the engine as text: every live task with its id, label and what
+     * it is parked on (fd + direction, timer, channel, select), plus the live /
+     * io-parked / timer / ready counts. The running task is marked `*`.
+     *
+     *   async(function () {
+     *       Async\spawn(fn() => serve())->named('http');
+     *       pcntl_signal(SIGQUIT, fn() => print Async\dump());   // hung? ask it
+     *   });
+     *
+     * Returns '' when no scheduler is running. A DeadlockException already embeds
+     * this, because "all tasks are asleep" alone tells you nothing.
+     */
+    function dump(): string
+    {
+        return Scheduler::hasInstance() ? Scheduler::instance()->report() : '';
     }
 
     /** Suspend the current task for $seconds without blocking the loop. */

@@ -51,6 +51,7 @@ function __mc_sock_const(int $which): int
     static $eWouldBlock = 0;
     static $eAgain = 0;
     static $eInProgress = 0;
+    static $eTimedOut = 0;
 
     if ($ready === 0) {
         $isDarwin = \__mc_host_is_darwin();
@@ -67,6 +68,9 @@ function __mc_sock_const(int $which): int
         $eWouldBlock = $isDarwin ? 35 : 11;
         $eAgain = $isDarwin ? 35 : 11;
         $eInProgress = $isDarwin ? 36 : 115;
+        // MEASURED: Darwin <sys/errno.h> ETIMEDOUT 60 (cc probe + php SOCKET_ETIMEDOUT);
+        // Linux asm-generic/errno.h 110 (glibc and musl agree).
+        $eTimedOut = $isDarwin ? 60 : 110;
         $ready = 1;
     }
 
@@ -82,7 +86,8 @@ function __mc_sock_const(int $which): int
     if ($which === 9) { return $soReuseAddr; }
     if ($which === 10) { return $eWouldBlock; }
     if ($which === 11) { return $eAgain; }
-    return $eInProgress;
+    if ($which === 12) { return $eInProgress; }
+    return $eTimedOut;
 }
 
 /**
