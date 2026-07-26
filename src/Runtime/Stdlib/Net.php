@@ -722,24 +722,82 @@ function __mc_mark_tls_listener(\Resource $listener, int $ctx): void
 /**
  * Server-side TLS handshake on a freshly accept(2)ed fd, using the listener's
  * shared server ctx. Returns a KIND_TLS \Resource, or false (fd closed).
+ *
+ * Under a scheduler the handshake is DRIVEN, not blocked on: the accepted fd goes
+ * O_NONBLOCK first and each SSL_accept flight parks on the reactor through
+ * {@see __mc_tls_drive_accept()}. A blocking SSL_accept here froze the whole loop for
+ * the duration of every client handshake — and made a single-process TLS loopback
+ * (server task + client task) a hard DEADLOCK: the server sat inside SSL_accept
+ * waiting for a flight that only the parked client task could send.
+ *
  * @return \Resource|false
  */
-function __mc_tls_accept(int $serverCtx, int $fd)
+function __mc_tls_accept(int $serverCtx, int $fd, float $timeout = 0.0)
 {
     $ssl = \Runtime\Openssl\sslNew($serverCtx);   // refs the ctx; freed with the SSL
     if ($ssl === 0) {
         \Runtime\Libc\sys_close($fd);
         return false;
     }
-    if (\Runtime\Openssl\setFd($ssl, $fd) !== 1
-        || \Runtime\Openssl\accept($ssl) !== 1) {
+    if (\Runtime\Openssl\setFd($ssl, $fd) !== 1) {
         \Runtime\Openssl\sslFree($ssl);
         \Runtime\Libc\sys_close($fd);
         return false;
     }
+    // The \Resource must exist BEFORE the handshake: the reactor parks on a
+    // \Resource (StreamPollHandle reads ->addr), and on failure it is marked closed
+    // so its destructor does not double-close the fd we close by hand.
     $r = new \Resource(\Resource::KIND_TLS, 'stream', $fd);
     $r->ssl = $ssl;
+    if (\Runtime\AsyncHook::active()) {
+        \__mc_fd_nonblock($fd);
+        $r->blocking = false;
+    }
+    if (\__mc_tls_drive_accept($r, $ssl, $timeout) !== 1) {
+        \Runtime\Openssl\sslFree($ssl);
+        $r->ssl = 0;
+        $r->closed = true;
+        $r->addr = 0;
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
     return $r;
+}
+
+/**
+ * Drive SSL_accept to completion, parking on the reactor between flights when a
+ * scheduler is running (mirrors {@see __mc_tls_drive_connect()} on the client side).
+ * Returns SSL_accept's final code (1 = handshaken). Bounded by an absolute deadline
+ * so a client that opens a TCP connection and never speaks TLS cannot pin a task —
+ * the classic slowloris-on-handshake shape.
+ */
+function __mc_tls_drive_accept(\Resource $sock, int $ssl, float $timeout = 0.0): int
+{
+    $rc = \Runtime\Openssl\accept($ssl);
+    if ($rc === 1 || !\Runtime\AsyncHook::active()) {
+        return $rc;
+    }
+    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $rf = \Runtime\AsyncHook::readableFor();
+    $wf = \Runtime\AsyncHook::writableFor();
+    while ($rc !== 1) {
+        $err = \Runtime\Openssl\getError($ssl, $rc);
+        if ($err !== 2 && $err !== 3) {
+            return $rc;   // a real handshake failure (no cert, bad client, reset)
+        }
+        $left = $deadline - \__mc_microtime_f();
+        if ($left <= 0.0) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $ready = $err === 2 ? $rf($sock, $left) : $wf($sock, $left);
+        if ($ready !== true) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $rc = \Runtime\Openssl\accept($ssl);
+    }
+    return $rc;
 }
 
 /**
