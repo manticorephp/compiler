@@ -121,8 +121,7 @@ final class NarrowReturns implements Pass
         // ever moves scalar → cell, never the reverse.
         $rt = $fn->returnType;
         $mayWiden = !$this->concreteOnly && $rt->isArray() && $rt->element !== null
-            && $rt->element->kind !== Type::KIND_CELL
-            && $rt->element->kind !== Type::KIND_UNKNOWN;
+            && $rt->element->kind !== Type::KIND_CELL;
         if ($rt->kind !== Type::KIND_UNKNOWN && !$mayWiden) { return false; }
         // Early (concreteOnly) pass: a function with an ERASED param (bare
         // `array` / unknown) has a return that Monomorphize can still re-shape

@@ -28,25 +28,27 @@
  *
  * ⚠ STATUS — every function BELOW is exercised against php by an AOT case
  * (array_callback_byref · array_assoc_set_ops · array_predicate_case ·
- * array_splice_fn · array_ucompare_family · array_random_fns):
+ * array_splice_fn · array_ucompare_family · array_random_fns ·
+ * array_recursive_merges):
  * array_diff_assoc · array_intersect_assoc · array_diff_ukey ·
  * array_intersect_ukey · array_udiff · array_uintersect · array_udiff_assoc ·
  * array_uintersect_assoc · array_diff_uassoc · array_intersect_uassoc ·
  * array_udiff_uassoc · array_uintersect_uassoc · array_walk (by-value AND
- * `&$value`) · array_walk_recursive · array_splice · shuffle · array_rand ·
- * array_all · array_any · array_find · array_find_key · array_change_key_case.
+ * `&$value`) · array_walk_recursive · array_splice · array_replace_recursive ·
+ * shuffle · array_rand · array_all · array_any · array_find · array_find_key ·
+ * array_change_key_case.
+ *
+ * A RECURSIVE function here rebuilds both sides into literal-bound locals with
+ * an `@var array<array-key, mixed>` docblock binding before the self-call: the
+ * values arrive as CELLS, a cell argument gives Monomorphize an empty callKey,
+ * and without a definite repr the erased body runs for every nested level.
  *
  * NOT HERE, blocked on a named compiler root cause:
- *  - array_replace_recursive / array_merge_recursive — the RECURSIVE self-call
- *    re-enters with a cell-typed arg (`$out[$k]` is a cell holding an array), so
- *    Monomorphize's callKey is '' and the erased body runs for every nested
- *    level. Rebuilding both sides into literal-bound locals first fixes it in a
- *    USER function but not in a PRELUDE one: there the rebuild buffer `$out`
- *    still binds `vec[unknown]` even though scanAssocLocals marks it assoc and
- *    the empty-literal retype fires (verified by instrumenting inferStoreLocal —
- *    a later pass re-stamps the binding), so a string key lands under a
- *    positional index. That is the vec/assoc widening root cause, not these two
- *    functions. Do NOT re-attempt them before it lands.
+ *  - array_merge_recursive — correct for its normal shapes, but an argument
+ *    carrying BOTH int and string keys mangles a collision (`['color'=>[…], 5]`
+ *    merged with `[10, 'color'=>[…]]`): the appended entries come back under a
+ *    `(null)` key and a boxed string reads raw. Same family as the remaining
+ *    element-repr tail — do not ship it until that repro is green.
  *  - array_multisort — variadic BY-REF parallel arrays with interleaved SORT_*
  *    flags; needs by-ref variadic packs first.
  */
@@ -390,6 +392,40 @@ function array_splice(array &$input, int $offset, ?int $length = null, mixed $re
     }
     $input = $out;
     return $removed;
+}
+
+/**
+ * `array_replace_recursive(arr, ...others)` — later arrays overwrite earlier
+ * ones key by key; two ARRAY values at the same key merge instead of replacing.
+ */
+function array_replace_recursive(array $arr, array ...$others): array
+{
+    /** @var array<array-key, mixed> $out */
+    $out = [];
+    foreach ($arr as $k => $v) { $out[$k] = $v; }
+    foreach ($others as $other) {
+        foreach ($other as $k => $v) {
+            if (\is_array($v) && array_key_exists($k, $out) && \is_array($out[$k])) {
+                // Rebuild both sides into LITERAL-bound locals before recursing:
+                // `$out[$k]` and `$v` are CELLS holding arrays, and a cell arg
+                // gives Monomorphize an empty callKey, so the erased body would
+                // run for every nested level. A rebuilt local carries a definite
+                // repr — and the `@var` says which one, so the copy loop cannot
+                // narrow it to whatever the first entry happened to be.
+                $inner = $out[$k];
+                /** @var array<array-key, mixed> $left */
+                $left = [];
+                foreach ($inner as $ik => $iv) { $left[$ik] = $iv; }
+                /** @var array<array-key, mixed> $right */
+                $right = [];
+                foreach ($v as $rk => $rv) { $right[$rk] = $rv; }
+                $out[$k] = array_replace_recursive($left, $right);
+            } else {
+                $out[$k] = $v;
+            }
+        }
+    }
+    return $out;
 }
 
 /**

@@ -914,6 +914,18 @@ final class InferTypes implements Pass
                     if ($vk !== Type::KIND_INT && $vk !== Type::KIND_FLOAT
                         && $vk !== Type::KIND_BOOL) { $conflict[$key] = true; continue; }
                 } elseif (!$a->type->isVec()) {
+                    // A bare CELL argument is an array whose element repr this
+                    // site cannot show — and it is NOT evidence for the concrete
+                    // refinement another site gave. Record the CELL FLOOR (the
+                    // same ground truth a vec[cell] arg records below): the param
+                    // resolves to a cell element, this site's body reads tags,
+                    // and Monomorphize clones each CONCRETE site off it. Without
+                    // the floor the param kept a sibling's `assoc[string,int]`
+                    // and this site's boxed values were read as raw ints — the
+                    // shape a specialized caller produces when it forwards its
+                    // own erased element (`wrap$mono$…(assoc[string,cell])`
+                    // calling `build($v)`).
+                    if ($a->type->kind === Type::KIND_CELL) { $sawCell[$key] = true; }
                     $conflict[$key] = true; continue;
                 }
                 // All call sites must agree on the shape (all vec, or all assoc
