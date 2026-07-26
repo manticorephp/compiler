@@ -157,6 +157,14 @@ for name in "${cases[@]}"; do
         || cp "$expected" "$expected_norm"
     awk 'NR==1{prev=$0; next} {print prev; prev=$0} END{printf "%s", prev}' "$actual" > "$actual_norm" 2>/dev/null \
         || cp "$actual" "$actual_norm"
+    # Optional `cases/<name>.sed` sidecar: applied to BOTH sides before the
+    # diff. Diagnostics (`Deprecated:` / `Warning:`) carry the absolute source
+    # path the compiler was handed, which differs per checkout — the sidecar
+    # normalises it away so the same `expected/` file works everywhere.
+    if [[ -f "$CASES/$name.sed" ]]; then
+        sed -f "$CASES/$name.sed" "$expected_norm" > "$expected_norm.s" && mv "$expected_norm.s" "$expected_norm"
+        sed -f "$CASES/$name.sed" "$actual_norm"   > "$actual_norm.s"   && mv "$actual_norm.s"   "$actual_norm"
+    fi
     if diff -q "$expected_norm" "$actual_norm" > /dev/null 2>&1; then
         passed=$((passed + 1))
         printf 'PASS %s\n' "$name"
