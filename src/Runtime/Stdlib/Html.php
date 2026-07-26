@@ -559,7 +559,7 @@ function htmlspecialchars_decode(string $string, int $flags = 3): string
             continue;
         }
         $semi = \strpos($string, ";", $i);
-        if ($semi < 0 || $semi - $i > 8) {
+        if ($semi === false || $semi - $i > 8) {
             $out = $out . "&";
             $i = $i + 1;
             continue;
@@ -606,7 +606,7 @@ function htmlentities(string $string, int $flags = 3, string $encoding = "UTF-8"
         if (!$double_encode && $ch === "&") {
             // Leave an existing entity alone: copy through to its `;`.
             $semi = \strpos($string, ";", $i);
-            if ($semi > 0 && $semi - $i <= 10) {
+            if ($semi !== false && $semi - $i <= 10) {
                 $out = $out . \substr($string, $i, $semi - $i + 1);
                 $i = $semi + 1;
                 continue;
@@ -658,7 +658,7 @@ function html_entity_decode(string $string, int $flags = 3, string $encoding = "
             continue;
         }
         $semi = \strpos($string, ";", $i);
-        if ($semi < 0 || $semi - $i > 32) {
+        if ($semi === false || $semi - $i > 32) {
             $out = $out . "&";
             $i = $i + 1;
             continue;
@@ -726,7 +726,7 @@ function strip_tags(string $string, string $allowed_tags = ""): string
         // A comment runs to `-->`.
         if (\substr($string, $i, 4) === "<!--") {
             $end = \strpos($string, "-->", $i + 4);
-            $i = $end < 0 ? $n : $end + 3;
+            $i = $end === false ? $n : $end + 3;
             continue;
         }
         // Scan to the closing `>`, skipping quoted regions.

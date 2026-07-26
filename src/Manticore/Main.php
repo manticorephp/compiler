@@ -316,6 +316,17 @@ function openssl_link_flags(): string {
 }
 
 /**
+ * Linker flags for the host iconv. Unlike pcre2 and openssl this is NOT a
+ * uniform `-l`: glibc implements iconv INSIDE libc, so `-liconv` there fails to
+ * resolve, while Darwin (and musl with gnu-libiconv) needs it. Host-conditional
+ * by construction rather than probed, because the answer is a property of the C
+ * library, not of what happens to be installed.
+ */
+function iconv_link_flags(): string {
+    return \Manticore\host_os() === "Darwin" ? "-liconv" : "";
+}
+
+/**
  * Parse the bundled stdlib sources and collect every GLOBAL-namespace
  * function declaration, for signature-only extern injection (so user code
  * can call `str_starts_with`, `ctype_*`, `file_get_contents`, … with the
@@ -905,6 +916,10 @@ function cmd_compile(array $args): int {
         // program that opens no TLS stream, same as pcre2 above.
         $ssl = openssl_link_flags();
         if ($ssl !== "") { $linkExtra .= " " . $ssl; }
+        // …and the iconv_* wrappers, which reference host libiconv on Darwin and
+        // libc itself on glibc (hence the empty flag there).
+        $icv = iconv_link_flags();
+        if ($icv !== "") { $linkExtra .= " " . $icv; }
     }
     // Dead-strip unreferenced functions at link time — the prebuilt stdlib.o
     // is one object (linked wholesale), so without this a tiny program carries
@@ -1222,6 +1237,8 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         if ($pcre !== "") { $linkExtra = $linkExtra . " " . $pcre; }
         $ssl = openssl_link_flags();
         if ($ssl !== "") { $linkExtra = $linkExtra . " " . $ssl; }
+        $icv = iconv_link_flags();
+        if ($icv !== "") { $linkExtra = $linkExtra . " " . $icv; }
     }
     // Link via the stub-generating tail: the no-Rust bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to

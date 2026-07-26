@@ -28,9 +28,13 @@ their canonical PHP names.
   resolves directly here.
 - Compiler `tryCompileBuiltin` fires first for inlinable builtins; these
   PHP-level versions catch the fall-through path.
-- `strpos` / `strrpos` return **`-1`** for "not found", not PHP's `false`.
-  Compiler union-typing for return values is still in flight; callers
-  wanting PHP-strict semantics wrap.
+- `strpos` / `strrpos` return PHP's **`false`** for "not found". (They once
+  returned `-1`; code written against that reads `false` as 0 through a
+  `< 0` test and silently takes the found path.)
+- A **variadic** cannot cross the `stdlib.o` boundary — the `.sig` carries no
+  variadic-ness, so the callee reads its arguments from the wrong place and
+  returns garbage. `pack` lives in `prelude/binary.php` for exactly that
+  reason, as `array_map` lives in `prelude/array_fns.php` for the callback one.
 - Empty-string predicates match Zend: `ctype_digit('')` → `false`,
   `str_starts_with('', '')` → `true`.
 - Integer args to `ctype_*` in `[-128, 255]` treated as a single byte
