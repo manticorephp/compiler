@@ -1169,8 +1169,40 @@ trait EmitLlvmModule
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $out .= $this->retainCellPayload($v);
             }
-            $out .= $this->boxToCell($v->type);
+            // An UNKNOWN value may ALREADY be a tagged cell (an element read out
+            // of a bare-`array` slot). boxToCell would int-box it a second time.
+            if ($v->type->kind === Type::KIND_UNKNOWN) {
+                // …and being a cell, the caller's `__mir_cell_drop` of a
+                // discarded result would free a payload this function only
+                // BORROWED. retainCellPayload can't see it (an unknown names no
+                // rc kind), so retain by runtime tag — a no-op for a scalar cell.
+                if ($this->isBorrowedCellReturn($v, $returnedLocal)) {
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                    $out .= $this->coerceToI64();
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                }
+                $out .= $this->boxUnknownIfRaw();
+            } else {
+                $out .= $this->boxToCell($v->type);
+            }
         } else {
+            // A BORROWED cell handed back from a `: mixed` fn — `return
+            // self::$stack[$n-1]` off a `/** @var array<int,mixed> */` static
+            // prop. The value is already a cell so the boxing branch above never
+            // ran, and isBorrowedObjReturn names no rc kind for a cell, so
+            // nothing retained it: the caller's `__mir_cell_drop` of a DISCARDED
+            // result then freed an element still in the array (use-after-free on
+            // the next read). Retain by runtime tag — a no-op for a scalar cell.
+            if ($this->frame->returnType !== null
+                && $this->frame->returnType->kind === Type::KIND_CELL
+                && $v->type->kind === Type::KIND_CELL
+                && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= $this->coerceToI64();
+                $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+            }
             // A cell value returned where the declared type is concrete
             // (`return $mixed[$i]` from a `: int` fn) must be unboxed — else the
             // tagged bits flow back as the result (a boxed int read as a raw
@@ -1275,6 +1307,29 @@ trait EmitLlvmModule
     }
 
     /** Whether an obj/vec return value is a borrowed reference (needs +1). */
+    /**
+     * Whether an UNKNOWN-typed value returned as a cell is BORROWED — the same
+     * producer test {@see isBorrowedObjReturn} applies, minus the type test it
+     * cannot make (an `unknown` names no rc kind, so that predicate always said
+     * "not borrowed" and the caller's cell_drop freed a live array element).
+     */
+    private function isBorrowedCellReturn(Node $v, ?string $returnedLocal): bool
+    {
+        $k = $v->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+            || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
+            || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST) {
+            return false; // owned producer (+1 already) or immortal
+        }
+        if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
+            && isset($this->frame->rcObjLocals[$returnedLocal])) {
+            return false; // transfer of an owned local
+        }
+        return true;
+    }
+
     private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
     {
         $t = $this->ownershipReturnType($v);

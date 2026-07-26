@@ -387,6 +387,16 @@ trait InferCalls
             $node->type = Type::cell();
             return $node->type;
         }
+        // An ERASED callee — a `mixed`/`callable` param, an element out of a
+        // vec[cell], a static-prop slot. {@see EmitLlvmCalls::emitErasedInvoke}
+        // branches on the runtime tag and BOTH arms leave a tagged cell, so the
+        // invoke is a cell. Typing it `unknown` (the old fall-through) meant a
+        // `: string` caller returned the tagged word raw and the reader took the
+        // length header off the tag bits.
+        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // callee type obj<__closure_N> → that fn's return type.
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];

@@ -1838,6 +1838,49 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * Box the current lastValue (i64 carrier) into a tagged cell UNLESS it
+     * already is one. For an UNKNOWN-typed value the static type cannot say:
+     * `return self::$stack[0]` from a `: mixed` method reads an element out of a
+     * bare-`array` static prop, which is `unknown` statically but a tagged cell
+     * at run time — box_int then re-boxed it, and because a cell word does not
+     * fit box_int's inline 48-bit form it took the HEAP arm, so unmasking later
+     * yielded a pointer to the box instead of the payload (a closure invoked
+     * that way called into a heap cell → segfault).
+     *
+     * "Already a cell" = the NaN header is present AND the tag nibble is one the
+     * ABI actually assigns (1..8). A raw negative int has nibble 15 and is still
+     * boxed; a raw int whose bit pattern spells a valid tag stays ambiguous —
+     * that ambiguity IS what `unknown` means. lastValue ← the i64 cell.
+     */
+    private function boxUnknownIfRaw(): string
+    {
+        $this->rt->needsTagged = true;
+        $out = $this->coerceToI64();
+        $v = $this->lastValue;
+        $hdr = $this->ssa->allocReg();
+        $out .= '  ' . $hdr . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $v . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $lo = $this->ssa->allocReg();
+        $out .= '  ' . $lo . ' = icmp uge i64 ' . $nib . ", 1\n";
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = icmp ule i64 ' . $nib . ", 8\n";
+        $rng = $this->ssa->allocReg();
+        $out .= '  ' . $rng . ' = and i1 ' . $lo . ', ' . $hi . "\n";
+        $istag = $this->ssa->allocReg();
+        $out .= '  ' . $istag . ' = and i1 ' . $hdr . ', ' . $rng . "\n";
+        $bx = $this->ssa->allocReg();
+        $out .= '  ' . $bx . ' = call i64 @__manticore_box_int(i64 ' . $v . ")\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $istag . ', i64 ' . $v . ', i64 ' . $bx . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
         $nc = $n;

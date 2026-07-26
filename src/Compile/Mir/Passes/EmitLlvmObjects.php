@@ -1366,8 +1366,7 @@ trait EmitLlvmObjects
     private function emitDynPropDispatch(DynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
     {
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
+        $out = $this->emitDynMemberKey($n->name);
         $keyP = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -1476,6 +1475,25 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * The runtime NAME of a dynamic member (`$o->$m`, `$o->$m()`, `$o->$m = v`)
+     * as a `ptr` fit for strcmp. lastValue ← ptr.
+     *
+     * A name read out of an erased slot — `$cb = [$obj, "hi"]; $m = $cb[1];` —
+     * is a NaN-boxed CELL, and coerceToPtr is a bare inttoptr: strcmp then
+     * dereferenced the tag bits and the program segfaulted. Mask the payload out
+     * whenever the static type is not already a concrete string. Masking is
+     * identity for a raw heap pointer (user-space VAs fit in the payload bits),
+     * so the erased/unknown case is safe from both directions.
+     */
+    private function emitDynMemberKey(Node $name): string
+    {
+        $out = $this->emitNode($name);
+        $out .= $name->type->kind === Type::KIND_STRING
+            ? $this->coerceToPtr() : $this->cellToPtr();
+        return $out;
+    }
+
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
         $recv = $dp->object;
@@ -1490,8 +1508,7 @@ trait EmitLlvmObjects
             return $out;
         }
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($nameNode);
-        $out .= $this->coerceToPtr();
+        $out = $this->emitDynMemberKey($nameNode);
         $keyP = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -1574,8 +1591,7 @@ trait EmitLlvmObjects
     private function emitStoreDynPropDispatch(StoreDynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
     {
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
+        $out = $this->emitDynMemberKey($n->name);
         $keyP = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";

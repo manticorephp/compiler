@@ -315,12 +315,19 @@ trait EmitLlvmCalls
      *  cell; an unmatched name yields null. Method keys (`Class__method`) and
      *  `__main` are excluded (the `__` marker). One arm runs, so re-emitting
      *  args per arm evaluates them once at runtime. */
-    private function emitDynFnCall(Invoke_ $iv): string
+    private function emitDynFnCall(Invoke_ $iv, string $keyPtr = ''): string
     {
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($iv->callee);
-        $out .= $this->coerceToPtr();
-        $keyP = $this->lastValue;
+        // A caller that already materialized the name (the erased-callee tag
+        // dispatch) passes it in — re-emitting the callee there would evaluate
+        // it twice and, worse, hand this chain the still-boxed word.
+        $out = '';
+        $keyP = $keyPtr;
+        if ($keyPtr === '') {
+            $out = $this->emitNode($iv->callee);
+            $out .= $this->coerceToPtr();
+            $keyP = $this->lastValue;
+        }
         $argc = \count($iv->args);
         // A `...$arr` spread makes the runtime arg count unknown. HOIST the
         // fixed-prefix arg values and the spread array pointer ONCE, before the
@@ -447,11 +454,89 @@ trait EmitLlvmCalls
             $call = new \Compile\Mir\MethodCall_($iv->callee, '__invoke', $iv->args, $n->type);
             return $this->emitMethodCall($call);
         }
+        // An ERASED callee — a `mixed`/`callable` param, an element read out of a
+        // vec[cell], a static-prop slot. The value is NaN-boxed, so the struct
+        // path's bare inttoptr called through the TAG BITS (segfault), and a
+        // function-NAME string held in the same slot never reached the by-name
+        // dispatch at all. Decide on the runtime tag instead.
+        $ck = $iv->callee->type->kind;
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+            return $this->emitErasedInvoke($n);
+        }
         // The closure struct is the env: the __closure fn unpacks its own
         // captures from it (slot 1+), so the call passes only `env + args`.
         $out = $this->emitNode($iv->callee);
         $out .= $this->coerceToPtr();
-        $struct = $this->lastValue;
+        return $out . $this->emitClosureStructInvoke($n, $this->lastValue);
+    }
+
+    /**
+     * `$cb(args)` with `$cb` an erased (cell / unknown) slot. One evaluation of
+     * the callee, then a branch on its cell tag: a STRING cell (tag 4) is a
+     * function name → the by-name dispatch; anything else is a closure struct
+     * whose payload is masked out of the box. Both arms leave a boxed cell, so
+     * the merged result matches the invoke's inferred cell type.
+     */
+    private function emitErasedInvoke(Invoke_ $n): string
+    {
+        $out = $this->emitNode($n->callee);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->cellTagIr($raw);
+        $isStr = $this->ssa->allocReg();
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $nameL = $this->ssa->allocLabel('erinv.name');
+        $closL = $this->ssa->allocLabel('erinv.clos');
+        $endL = $this->ssa->allocLabel('erinv.end');
+        $out .= '  br i1 ' . $isStr . ', label %' . $nameL . ', label %' . $closL . "\n";
+
+        $out .= $nameL . ":\n";
+        $keyM = $this->ssa->allocReg();
+        $out .= '  ' . $keyM . ' = and i64 ' . $raw . ", 281474976710655\n";
+        $keyP = $this->ssa->allocReg();
+        $out .= '  ' . $keyP . ' = inttoptr i64 ' . $keyM . " to ptr\n";
+        $out .= $this->emitDynFnCall($n, $keyP);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $closL . ":\n";
+        $stM = $this->ssa->allocReg();
+        $out .= '  ' . $stM . ' = and i64 ' . $raw . ", 281474976710655\n";
+        $struct = $this->ssa->allocReg();
+        $out .= '  ' . $struct . ' = inttoptr i64 ' . $stM . " to ptr\n";
+        // No boxing here: the uniform closure ABI ALREADY returns a scalar as a
+        // tagged cell, so re-boxing turned a string cell into an int cell whose
+        // payload was then dereferenced as a char* (segfault). The join unboxes
+        // once, exactly as the direct closure path does.
+        $out .= $this->emitClosureStructInvoke($n, $struct, false);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        if ($this->isCellScalarParam($n->type)) {
+            $out .= $this->unboxCellToType($n->type);
+        }
+        return $out;
+    }
+
+    /**
+     * The closure-struct call itself, given the already-materialized env `ptr`.
+     * Split out of {@see emitInvoke} so an erased callee can reach it with a
+     * payload masked out of a NaN-boxed cell. `$unboxResult` is false when the
+     * caller merges arms and unboxes once at the join.
+     */
+    private function emitClosureStructInvoke(Invoke_ $n, string $struct, bool $unboxResult = true): string
+    {
+        $iv = $n;
+        $out = '';
+        $fn = $iv->callee->type->class ?? '';
         $argList = 'ptr ' . $struct;
         $argTypes = 'ptr';
         // Uniform closure ABI: box each scalar arg into a tagged cell so the
@@ -595,7 +680,7 @@ trait EmitLlvmCalls
         // to the invoke's static type — a known closure types it from the sig
         // (string/int/float/…); a dynamic one is cell ({@see inferInvoke}) and
         // stays boxed. A non-scalar (array/obj) result rode raw → no unbox.
-        if ($this->isCellScalarParam($n->type)) {
+        if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
         return $out;
