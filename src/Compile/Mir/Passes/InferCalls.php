@@ -390,6 +390,23 @@ trait InferCalls
             $node->type = Type::cell();
             return $node->type;
         }
+        // A CELL/UNKNOWN-typed callee is a closure parked in an untyped slot —
+        // `\Runtime\AsyncHook::readable()` is the canonical one. It says nothing
+        // about its return type, but the uniform closure ABI BOXES whatever the
+        // callee returns, so leaving the invoke untyped made every caller read a
+        // tagged word RAW: `$h = Hook::get(); $b = $h(…);` var_dumped a bool as
+        // int(-3940649673949183), `$b === true` was false, and an array/object
+        // return failed is_array()/is_object(). Type it by its actual repr.
+        // ⚠ An OBJECT return still rides RAW (the ABI note in {@see
+        // EmitLlvm::isCellBoxableArg}), so `is_object()`/`get_debug_type()` on the
+        // result of an untyped callable that returns an object still lie. Property
+        // and method access work — the cell path masks the low 48 bits, which is
+        // identity for a real heap pointer. Boxing objects at the closure return
+        // would have to be matched by an unmask in every typed callee path.
+        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // callee type obj<__closure_N> → that fn's return type.
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];
