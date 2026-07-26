@@ -24,13 +24,20 @@ $r = async(function () use ($server,$port): string {
         $c = fsockopen('127.0.0.1', $port);
         if ($c === false) { return 'no'; }
         // Two tasks reading the SAME resource.
-        $r1 = spawn(function () use ($c): string { $d = fread($c, 5); return 'r1=' . ($d === false ? 'F' : $d); });
-        $r2 = spawn(function () use ($c): string { $d = fread($c, 5); return 'r2=' . ($d === false ? 'F' : $d); });
-        $res = \Async\awaitAll($r1, $r2);
-        $a = (string)$res[0];
-        $b = (string)$res[1];
+        $r1 = spawn(function () use ($c): string { $d = fread($c, 5); return $d === false ? 'FAIL' : $d; });
+        $r2 = spawn(function () use ($c): string { $d = fread($c, 5); return $d === false ? 'FAIL' : $d; });
+        // WHICH reader gets which half is not promised — the per-fd waiter chain is
+        // LIFO and the reactor decides the wake order (kqueue and epoll need not
+        // agree). What IS promised: both readers are served and between them they see
+        // every byte exactly once, so assert the SET, not an interleaving. Awaited one
+        // at a time (no array indexing) and reported verbatim on a mismatch, so a
+        // failure on another platform says what it actually saw.
+        $one = $r1->await();
+        $two = $r2->await();
         fclose($c);
-        return $a . ' ' . $b;
+        $ok = (($one === 'hello' && $two === 'world')
+            || ($one === 'world' && $two === 'hello'));
+        return $ok ? 'both-halves' : ('unexpected[' . $one . '|' . $two . ']');
     });
     return $srv->await() . ' ' . $cli->await();
 });
