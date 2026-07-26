@@ -1030,15 +1030,17 @@ trait EmitLlvmModule
     }
 
     /**
-     * Release every owned RcHeap obj local of the current function except
-     * `$returnedLocal` (transferred). Slots are null-inited, so releasing
-     * an unassigned one is a no-op.
+     * Release every owned RcHeap obj local of the current function except the ones the
+     * returned VALUE may alias (their ownership transfers to the caller). Slots are
+     * null-inited, so releasing an unassigned one is a no-op.
+     *
+     * @param array<string,bool> $exempt {@see returnedLocalNames()}
      */
-    private function emitRcReturnCleanup(?string $returnedLocal): string
+    private function emitRcReturnCleanup(array $exempt): string
     {
         $out = '';
         foreach ($this->frame->rcObjLocals as $name => $mo) {
-            if ($name === $returnedLocal) { continue; }
+            if (isset($exempt[$name])) { continue; }
             if (isset($this->frame->transferredLocals[$name])) { continue; }
             if (!isset($this->locals->slots[$name])) { continue; }
             $out .= $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
@@ -1057,6 +1059,50 @@ trait EmitLlvmModule
             ? (string)\Compile\MemoryAbi::CELL_NULL
             : '0';
     }
+
+    /**
+     * Local names the returned value MAY BE, so the return-path cleanup does not free
+     * what it is handing back.
+     *
+     * Only a bare `return $x;` used to be recognised, so `return $cond ? 'lit' : $x;`
+     * released $x AND returned it — a use-after-free that stayed invisible whenever the
+     * caller read the value before anything else allocated. A closure return was enough
+     * to expose it (`$fn = function (): string { $d = str_repeat('x', 5);
+     * return $d === false ? 'F' : $d; }` handed back the bytes of an unrelated
+     * allocation), and it is the canonical `string|false` idiom, so it is everywhere.
+     *
+     * Conservative BY DESIGN: a name kept here leaks at worst, a name missed corrupts.
+     * @return array<string,bool>
+     */
+    private function returnedLocalNames(?Node $v): array
+    {
+        if ($v === null) { return []; }
+        if ($v->kind === Node::KIND_LOAD_LOCAL) {
+            return [$this->asLoadLocalNode($v)->name => true];
+        }
+        // Both arms of a ternary (`?:` leaves `then` null — the cond IS that arm, and
+        // it is evaluated into the result, so include it too).
+        if ($v->kind === Node::KIND_TERNARY) {
+            $t = $this->asTernaryNode($v);
+            $out = $this->returnedLocalNames($t->else_);
+            $arm = $t->then === null ? $t->cond : $t->then;
+            foreach ($this->returnedLocalNames($arm) as $k => $ignored) { $out[$k] = true; }
+            return $out;
+        }
+        // `$a ?? $b` yields one of its operands, exactly like a ternary.
+        if ($v->kind === Node::KIND_NULLCOALESCE) {
+            $c = $this->asNullCoalesceNode($v);
+            $out = $this->returnedLocalNames($c->left);
+            foreach ($this->returnedLocalNames($c->right) as $k => $ignored) { $out[$k] = true; }
+            return $out;
+        }
+        return [];
+    }
+
+    /** Typed reads — a base-`Node` field access resolves by OFFSET under self-host. */
+    private function asLoadLocalNode(\Compile\Mir\LoadLocal $n): \Compile\Mir\LoadLocal { return $n; }
+    private function asTernaryNode(\Compile\Mir\Ternary $n): \Compile\Mir\Ternary { return $n; }
+    private function asNullCoalesceNode(\Compile\Mir\NullCoalesce_ $n): \Compile\Mir\NullCoalesce_ { return $n; }
 
     private function emitReturn(Return_ $n): string
     {
@@ -1089,9 +1135,12 @@ trait EmitLlvmModule
         // Drop every owned RcHeap obj local on this return path, except
         // the one being returned (ownership transfers to the caller). The
         // trailing fall-through release covers paths with no `return`.
+        // The exempt SET drives the cleanup; the single name below is a different
+        // question ("is this a bare passthrough of a borrowed obj local?") and stays
+        // restricted to a direct `return $x;`.
+        $leave .= $this->emitRcReturnCleanup($this->returnedLocalNames($v));
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
-            ? $v->name : null;
-        $leave .= $this->emitRcReturnCleanup($returnedLocal);
+            ? $this->asLoadLocalNode($v)->name : null;
         if ($v === null) {
             return $this->finishReturn('', $this->implicitReturnValue(), $leave);
         }
