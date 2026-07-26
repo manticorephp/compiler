@@ -25,6 +25,26 @@
  *  - Element-typed / callback-taking functions can NOT live in the stdlib .o
  *    (the bare-`array` param's element erases to unknown there) — same reason
  *    array_map/usort live in the prelude.
+ *
+ * ⚠ STATUS — this file is WORK IN PROGRESS, do NOT merge it as done.
+ * Verified against php:  array_diff_assoc · array_intersect_assoc (case
+ * array_assoc_set_ops) · array_all · array_any · array_find · array_find_key ·
+ * array_change_key_case (case array_predicate_case) · array_walk with a
+ * BY-VALUE callback.
+ * KNOWN BROKEN, each with its cause:
+ *  - array_splice — SIGSEGV. A by-ref `array &$arr` prelude param cannot be
+ *    narrowed per call site (InferScans::scanCallSiteRefParams, linkonce_odr),
+ *    so the whole-array reassignment `$arr = $new` runs against an erased slot.
+ *  - array_diff_ukey / array_intersect_ukey — SIGSEGV. The comparator crosses
+ *    the closure ABI: EmitLlvmCalls::emitInvoke boxes every argument and never
+ *    consults the callee's by-ref/param mask, and indexes paramTypes from 0
+ *    while a closure's params are prefixed by its captures.
+ *  - array_walk_recursive — clang "invalid redefinition of
+ *    array_walk_recursive$mono$p1_obj___closure_1": a RECURSIVE prelude fn with
+ *    a callable dimension emits its mono clone twice (Monomorphize repoints the
+ *    self-call into the clone being cloned).
+ *  - array_walk with a `&$value` callback silently drops the mutation (see the
+ *    TODO on the function itself).
  */
 
 /**
