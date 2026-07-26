@@ -1175,9 +1175,12 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     $module = lower_module($sources);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
     try {
+        $statT = \Compile\Stats::now();
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $ir = $emit->emit($module);
+        \Compile\Stats::step('EmitLlvm', $statT, \count($module->functions), -1);
+        \Compile\Stats::line('IR: ' . (string)\strlen($ir) . ' bytes');
     } catch (\Throwable $e) {
         dprint("build: emit failed for " . $output . ": " . $e->getMessage());
         return 65;
@@ -1199,7 +1202,9 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         return 0;
     }
     $objPath = $base . ".o";
+    $statT = \Compile\Stats::now();
     $rc1 = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
+    \Compile\Stats::step('clang -O' . CompileArgs::$optLevel . ' -c', $statT, -1, -1);
     if ($rc1 !== 0) { dprint("build: clang -c failed for " . $output); return 75; }
     $linkExtra = "";
     foreach ($linkObjs as $obj) { $linkExtra = $linkExtra . " " . $obj; }
@@ -1222,11 +1227,14 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
+    $statT = \Compile\Stats::now();
     if ($stubs !== "") {
         $rc2 = system("bash " . $stubs . " " . $output . " " . $objPath . $linkExtra);
     } else {
         $rc2 = system("cc " . $objPath . $linkExtra . " -o " . $output);
     }
+    \Compile\Stats::step('link', $statT, -1, -1);
+    \Compile\Stats::dumpCounters();
     if ($rc2 !== 0) { dprint("build: link failed for " . $output); return 76; }
     return 0;
 }
@@ -1510,6 +1518,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $stmts = [];
     $aliases = [];
     $docs = [];
+    $statT = \Compile\Stats::now();
+    $srcBytes = 0;
+    foreach ($sources as $source) { $srcBytes = $srcBytes + \strlen($source); }
+    \Compile\Stats::line('input: ' . (string)\count($sources) . ' file(s), '
+        . (string)$srcBytes . ' bytes');
     foreach ($sources as $source) {
         try {
             $program = Parser::parseSource($source);
@@ -1521,12 +1534,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
         foreach ($program->docComments as $d) { $docs[] = $d; }
     }
+    \Compile\Stats::step('parse', $statT, \count($stmts), -1);
+    $statT = \Compile\Stats::now();
     // What the program DEMANDS of the prelude, asked of the tokens. A substring
     // gate cannot tell a call from a mention, and this compiler is made of the
     // names it implements — `var_dump(` in a doc comment used to pull the whole
     // var_dump runtime (per-class __mir_dump_object, ~58k IR lines) into the
     // compiler's own binary. See Compile\Mir\PreludeDemand.
     $demand = new \Compile\Mir\PreludeDemand($sources);
+    \Compile\Stats::step('prelude-demand (re-lex)', $statT, -1, -1);
 
     // The on-disk prelude sources. Reading them goes through the libc fopen
     // binding (a throwing stub under the Zend cold-seed), so guard: an
@@ -1683,14 +1699,22 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // linked from stdlib.o. Collected by cmd_compile on the native path;
         // empty during the Zend bootstrap build and for --emit-library.
         $lower->externDecls = CompileArgs::$externDecls;
+        $statT = \Compile\Stats::now();
         $module = $lower->run($module);
+        \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         CompileArgs::$linkStdlib = $lower->externInjected;
+        $statT = \Compile\Stats::now();
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
+        \Compile\Stats::step('ConstFold', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $dse = new \Compile\Mir\Passes\DeadStore();
         $module = $dse->run($module);
+        \Compile\Stats::step('DeadStore', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $infer = new \Compile\Mir\Passes\InferTypes();
         $module = $infer->run($module);
+        \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
         // Narrow CONCRETE, param-independent bare-`array` returns now (a literal
         // `mk(){ return ["x"=>1]; }` → assoc[string,int]) so a call-site
         // `array_filter(mk(), …)` fuses on a concrete element and its result is
@@ -1698,26 +1722,38 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // as cells across a boxing boundary). Erased-param helpers (whose return
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\NarrowReturns(true))->run($module);
+        \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
+        \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
         // Eliminate the boxed-cell closure ABI where it's avoidable: inline
         // captureless single-expr arrow closures at known invoke sites, and
         // fuse array_map/array_filter/array_reduce over a concrete array with a
         // literal closure into a native typed loop. Re-infer so the spliced /
         // fused expressions type from their (now concrete) operands.
+        $statT = \Compile\Stats::now();
         $inlineCl = new \Compile\Mir\Passes\InlineClosures();
         $module = $inlineCl->run($module);
+        \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
+        \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
+        $statT = \Compile\Stats::now();
         $mono = new \Compile\Mir\Passes\Monomorphize();
         $module = $mono->run($module);
+        \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
         // Fuse implode(explode()) split-join round-trips into one native
         // str_replace (zero intermediate array/segment allocs). After Mono so
         // types + explode arg-counts are settled; before InferEffects so the
         // analysis sees the fused form.
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\FuseSplitJoin())->run($module);
+        \Compile\Stats::step('FuseSplitJoin', $statT, \count($module->functions), -1);
         // Gated compile-time type checker (MANTICORE_TYPECHECK=1). Off by
         // default — it never runs during a normal build / self-host. When on,
         // any genuinely-incompatible type use (array↔scalar / object↔scalar at
@@ -1745,9 +1781,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
         $tcOn = $collect !== null || (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0");
         {
+            $statT = \Compile\Stats::now();
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
             $module = $tc->run($module);
+            \Compile\Stats::step('TypeCheck', $statT, \count($module->functions), -1);
             if ($collect !== null) {
                 foreach ($tc->errors as $te) { $collect->lines[] = $te; }
             } elseif (\count($tc->errors) > 0) {
@@ -1755,16 +1793,20 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
                 return null;
             }
         }
+        $statT = \Compile\Stats::now();
         $narrow = new \Compile\Mir\Passes\NarrowReturns();
         $module = $narrow->run($module);
+        \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         // The `#[TypeDef]` soundness gate: an erased value must never reach a
         // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a
         // `mixed` slot). Runs once types are final and before any memory pass —
         // a boxed cell downstream has already lost the marker. Throws; the catch
         // below turns it into a compile error.
+        $statT = \Compile\Stats::now();
         $checkTypeDefs = new \Compile\Mir\Passes\CheckTypeDefs();
         if ($collect !== null) { $checkTypeDefs->collectMode = true; }
         $module = $checkTypeDefs->run($module);
+        \Compile\Stats::step('CheckTypeDefs', $statT, \count($module->functions), -1);
         if ($collect !== null) {
             foreach ($checkTypeDefs->errors as $te) { $collect->lines[] = $te; }
             // Analysis needs nothing past the type checks; the memory passes are
@@ -1775,8 +1817,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
         // never sees the strings that are no longer created.
+        $statT = \Compile\Stats::now();
         $refl = new \Compile\Mir\Passes\ReflectAnalysis();
         $refl->run($module);
+        \Compile\Stats::step('ReflectAnalysis', $statT, -1, \count($module->classes));
         $module->reflectAll = $refl->all;
         $module->reflectNames = $refl->names;
         if (\Compile\Debug::$reflectReport) {
@@ -1795,17 +1839,29 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
             dprint('reflect: ' . (string)\count($rnames) . ' class(es) carry metadata: '
                 . \implode(', ', $rnames));
         }
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
+        \Compile\Stats::step('DemoteCharLocals', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
+        \Compile\Stats::step('InferEffects', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
         $module = $allocKind->run($module);
+        \Compile\Stats::step('InferAllocKind', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
         $module = $memMode->run($module);
+        \Compile\Stats::step('ApplyMemoryMode', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
         $module = $memOps->run($module);
+        \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
+        \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
         return $module;
     } catch (\Throwable $e) {
         dprint("compile failed: " . $e->getMessage());

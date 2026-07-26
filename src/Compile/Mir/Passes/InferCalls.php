@@ -601,6 +601,10 @@ trait InferCalls
             // result as a float, so a string came out as a double's bit pattern.
             if ($cls === '') {
                 $recvIface = $objType->class;
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('inferCalls.iface_scan_sites', 1);
+                    \Compile\Stats::bump('inferCalls.iface_scan_classes', \count($this->classes));
+                }
                 foreach ($this->classes as $cd) {
                     if (!isset($cd->methodNames[$node->method])) { continue; }
                     if ($this->classImplementsT($cd->name, $recvIface)) { $cls = $cd->name; break; }

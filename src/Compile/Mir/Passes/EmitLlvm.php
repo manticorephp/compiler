@@ -383,17 +383,30 @@ final class EmitLlvm implements EmitVisitor
         // it is emitted — the last line printed before a codegen SIGSEGV names the
         // offending function. Off by default (one env read, not per-function).
         $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
+        // Under MANTICORE_STATS, report every function whose IR crosses
+        // FAT_FN_IR bytes. A megamorphic dispatch site (one switch arm per
+        // implementing class) shows up here by name — the IR-size explosion is
+        // per-function, so a top-N list beats a total.
+        $fatFn = 262144;
         foreach ($module->functions as $fn) {
             if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
-            $functionBodies .= $this->emitFunction($fn);
+            $body = $this->emitFunction($fn);
+            if (\Compile\Stats::$on && \strlen($body) >= $fatFn) {
+                \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
+            }
+            $functionBodies .= $body;
         }
+        \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
         // is linked against the prebuilt `stdlib.o` — both objects carry the
         // same preamble. Only the preamble block is rewritten; user / stdlib
         // PHP functions stay external (unique) and `@main` lives in the
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
+        $statT = \Compile\Stats::now();
         $preamble = $this->linkonceRuntime($this->emitPreamble());
+        \Compile\Stats::step('  emit preamble', $statT, -1, -1);
+        \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         return $preamble . $functionBodies;
     }
 

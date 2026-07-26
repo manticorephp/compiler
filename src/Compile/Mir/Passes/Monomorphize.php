@@ -104,7 +104,17 @@ final class Monomorphize implements Pass
         $round = 0;
         while ($round < $maxRounds) {
             $round = $round + 1;
-            if (!$this->runOnce($module)) { break; }
+            $roundT = \Compile\Stats::now();
+            $before = \count($module->functions);
+            $more = $this->runOnce($module);
+            \Compile\Stats::step('  mono round ' . (string)$round, $roundT,
+                \count($module->functions), -1);
+            \Compile\Stats::bump('mono.rounds', 1);
+            \Compile\Stats::bump('mono.fns_added', \count($module->functions) - $before);
+            if (!$more) { break; }
+        }
+        if ($round >= $maxRounds) {
+            \Compile\Stats::line('mono: HIT THE ROUND CAP (' . (string)$maxRounds . ')');
         }
         $module->markPassApplied(self::NAME);
         return $module;

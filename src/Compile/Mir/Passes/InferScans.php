@@ -147,6 +147,10 @@ trait InferScans
                 // keeps each $cfn / $param class resolvable under self-host;
                 // a `name → Param[]` map would erase it through the assoc.
                 $pnames = [];
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('scanCtorProp.new_sites', 1);
+                    \Compile\Stats::bump('scanCtorProp.fns_scanned', \count($module->functions));
+                }
                 foreach ($module->functions as $cfn) {
                     if ($cfn->name === $ctorName) {
                         // The ctor's first param is the implicit `$this`;

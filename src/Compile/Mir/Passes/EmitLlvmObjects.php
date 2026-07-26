@@ -2709,6 +2709,8 @@ trait EmitLlvmObjects
         // object's runtime class_id selects the right impl.
         if (!$isUnion && !isset($this->classes[$static])) {
             $firstImpl = '';
+            \Compile\Stats::bump('dispatch.iface_sites', 1);
+            \Compile\Stats::bump('dispatch.iface_classes_scanned', \count($this->classes));
             foreach ($this->classes as $cd) {
                 if ($this->resolveMethodClass($cd->name, $mc->method) !== '') {
                     $cands[] = $cd->name;
@@ -2759,8 +2761,10 @@ trait EmitLlvmObjects
             if (!isset($this->sigs->paramTypes[$full])) { continue; }
             $liveCands[] = $c;
             $targets[$c] = $full;
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('dispatch.in_array_probes', \count($distinct)); }
             if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
         }
+        \Compile\Stats::bump('dispatch.arms_emitted', \count($distinct));
         $fallbackFull = $this->lsbTarget($fallback, $mc->method, $static);
         // The static receiver's own method may be abstract (`$this->m()` inside
         // an abstract base) — fall back to a concrete implementation.
