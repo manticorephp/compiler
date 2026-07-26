@@ -211,6 +211,13 @@ trait EmitLlvmCalls
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = zext i1 ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
+            } elseif ($ret === 'i32') {
+                // A C `int` return: SIGN-extend. The callee wrote only w0, so its
+                // -1 has a zero upper half and an i64 read would answer
+                // 4294967295. {@see LowerFromAst::ffiRetIsInt32}
+                $ri = $this->ssa->allocReg();
+                $out .= '  ' . $ri . ' = sext i32 ' . $r . " to i64\n";
+                $out .= '  ret i64 ' . $ri . "\n";
             } else {
                 $out .= '  ret i64 ' . $r . "\n";
             }

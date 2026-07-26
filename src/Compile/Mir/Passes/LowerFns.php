@@ -143,7 +143,13 @@ trait LowerFns
             $ctypes = [];
             foreach ($decl->params as $p) { $ctypes[] = $this->ffiCType($p->typeHint); }
             $fn->ffiParamCTypes = $ctypes;
-            $fn->ffiRetCType = $this->ffiCType($decl->returnType);
+            // A FUNCTION-level `#[CType('int')]` states that the C RETURN is a
+            // 32-bit int, so the wrapper sign-extends it. Without that, a C
+            // function returning -1 in w0 (`mov w0, #-1` zeroes the top half)
+            // reads as 4294967295 through an i64 declare.
+            $fn->ffiRetCType = $this->ffiRetIsInt32($decl->attributes)
+                ? 'i32'
+                : $this->ffiCType($decl->returnType);
             return $fn;
         }
         $savedSawYield = $this->sawYield;
