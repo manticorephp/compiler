@@ -1539,6 +1539,16 @@ trait EmitLlvmExpr
         if ($self->type->isNumericCell()) {
             return $this->emitTaggedArith($left, $right, $intOp);
         }
+        // Array `+` is PHP's UNION operator (left keys win, right fills the
+        // gaps), not a numeric add — without this the integer path below emits
+        // `add i64 ptr, ptr` and the result reads back as a bogus int. Only
+        // `add` can land here with an array type: `-`/`*` on arrays is a
+        // TypeError in PHP. InferNodes::inferAdd types the node KIND_ARRAY,
+        // which is also what makes InferAllocKind/InsertMemoryOps own+release
+        // the fresh result.
+        if ($intOp === 'add' && $self->type->kind === Type::KIND_ARRAY) {
+            return $this->emitArrayUnion($left, $right);
+        }
         $isFloat = $self->type->kind === Type::KIND_FLOAT;
         $target = $isFloat ? 'double' : 'i64';
         $op = $isFloat ? $floatOp : $intOp;
@@ -1552,6 +1562,27 @@ trait EmitLlvmExpr
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = $target;
+        return $out;
+    }
+
+    /**
+     * `$a + $b` on arrays → `__mir_array_union(a, b)` (see the runtime helper in
+     * UnifiedArrayRuntime). Both operands are coerced to a raw array pointer: an
+     * operand that arrives as a CELL (an erased/`mixed` local holding an array)
+     * is unboxed by coerceToPtr, so a boxed and a raw side union alike.
+     */
+    private function emitArrayUnion(Node $left, Node $right): string
+    {
+        $out = $this->emitNode($left);
+        $out .= $this->coerceToPtr();
+        $l = $this->lastValue;
+        $out .= $this->emitNode($right);
+        $out .= $this->coerceToPtr();
+        $r = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_array_union(ptr ' . $l . ', ptr ' . $r . ")\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
         return $out;
     }
 

@@ -1,0 +1,73 @@
+array(3) {
+  ["x"]=>
+  int(1)
+  ["y"]=>
+  int(2)
+  ["z"]=>
+  int(3)
+}
+array(3) {
+  ["y"]=>
+  int(99)
+  ["z"]=>
+  int(3)
+  ["x"]=>
+  int(1)
+}
+Array
+(
+    [0] => a
+    [1] => b
+    [2] => C
+    [3] => D
+)
+Array
+(
+    [0] => A
+    [1] => B
+    [2] => C
+    [3] => D
+)
+Array
+(
+    [0] => a
+    [1] => b
+)
+Array
+(
+    [0] => a
+    [1] => b
+)
+int(0)
+Array
+(
+    [k] => keep
+    [new] => added
+)
+str|7|1.5|2
+Array
+(
+    [s] => str
+    [i] => 7
+)
+Array
+(
+    [i] => 0
+    [f] => 1.5
+    [arr] => Array
+        (
+            [0] => 1
+            [1] => 2
+        )
+
+)
+Array
+(
+    [one] => 1
+    [5] => five
+    [6] => six
+    [two] => 2
+)
+9
+x=1 y=2 z=3 
+3

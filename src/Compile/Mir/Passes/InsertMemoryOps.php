@@ -236,7 +236,10 @@ final class InsertMemoryOps implements Pass
         if ($value->allocKind !== AllocationKind::RC_HEAP) { return false; }
         if ($tk === Type::KIND_OBJ) { return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE; }
         if ($tk === Type::KIND_STRING) { return $k === Node::KIND_CONCAT; }
-        return $k === Node::KIND_ARRAY_LIT;
+        // An array-typed `+` is the union operator — __mir_array_union returns a
+        // FRESH +1 array, so it is owned exactly like a literal.
+        return $k === Node::KIND_ARRAY_LIT
+            || ($tk === Type::KIND_ARRAY && $k === Node::KIND_ADD);
     }
 
     /**

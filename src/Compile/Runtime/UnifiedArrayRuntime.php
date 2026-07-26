@@ -75,6 +75,7 @@ final class UnifiedArrayRuntime
         $this->emitRefSlot();
         $this->emitRefSlotStr();
         $this->emitValueAt();
+        $this->emitArrayUnion();
         $this->emitKeyAt();
         $this->emitKeyCellAt();
         $this->emitSpreadInto();
@@ -1060,6 +1061,109 @@ final class UnifiedArrayRuntime
         $body->br($head);
 
         $ret->ret($ret->load(Type::ptr(), $copySlot));
+    }
+
+    /**
+     * `__mir_array_union(a, b) -> ptr` — PHP's array `+` operator: a copy of
+     * `$a`, with every key of `$b` that `$a` does NOT already have appended in
+     * `$b`'s order. The left side always wins; nothing is ever renumbered (that
+     * is what separates `+` from array_merge).
+     *
+     * Emitted here rather than written in PHP because the operator is not
+     * lexically gateable: `PreludeDemand` scans for `name(` tokens, and `$a + $b`
+     * mentions no function, so a demand-gated prelude helper would never be
+     * injected. A stdlib `.o` function is equally impossible — the bare-`array`
+     * param's element erases there.
+     *
+     * The element VALUES are copied as raw 8-byte slots and co-owned through
+     * `__mir_retain_by_repr` using the SOURCE array's repr bits, so a string /
+     * object / nested-array element is retained exactly once for its new home.
+     *
+     * LIMITATION (documented, not silent): when `$a` and `$b` carry DIFFERENT
+     * repr bits — say a raw-string buffer unioned with a boxed-cell one — the
+     * result keeps `$a`'s stamp, so the elements contributed by `$b` are dropped
+     * under the wrong repr at free time. Equal reprs (both cell, both raw of one
+     * kind, or both unstamped scalars) are exact, which is every shape the type
+     * checker's array-repr-conflict rule allows to meet in one value.
+     */
+    private function emitArrayUnion(): void
+    {
+        $fn = $this->module->func('__mir_array_union', Type::ptr());
+        $a = $fn->param(Type::ptr(), 'a');
+        $b = $fn->param(Type::ptr(), 'b');
+        $e = $fn->block('entry');
+        $za = $fn->block('za');
+        $go = $fn->block('go');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $strk = $fn->block('strk');
+        $intk = $fn->block('intk');
+        $sset = $fn->block('sset');
+        $iset = $fn->block('iset');
+        $next = $fn->block('next');
+        $ret = $fn->block('ret');
+
+        // A null left side yields a copy of the right (and null+null → null).
+        $e->brIf($e->icmp('eq', $a, Value::null()), $za, $go);
+        $za->ret($za->call('__mir_array_copy', Type::ptr(), [$b]));
+
+        // live_len compacts tombstones out of BOTH sides first, so the walk sees
+        // a clean 0..len range and the copy carries no holes.
+        $go->call('__mir_array_live_len', Type::i64(), [$a]);
+        $res0 = $go->call('__mir_array_copy', Type::ptr(), [$a]);
+        $resSlot = $go->alloca(Type::ptr(), 'res');
+        $go->store($res0, $resSlot);
+        $nb = $go->call('__mir_array_live_len', Type::i64(), [$b]);
+        $iSlot = $go->alloca(Type::i64(), 'i');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $bflags = $go->load(Type::i64(), $this->hdr($go, $b, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $brepr = $go->and_($bflags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $bhashed = $go->icmp('ne', $this->hashedBit($go, $bflags), Value::int(Type::i64(), 0));
+        $go->brIf($go->icmp('eq', $b, Value::null()), $ret, $head);
+
+        $hi = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $hi, $nb), $ret, $body);
+
+        $bi = $body->load(Type::i64(), $iSlot);
+        // A PACKED source has implicit int keys; a HASHED one carries the kind
+        // per entry.
+        $kind = $body->select($bhashed,
+            $body->load(Type::i64(), $this->entryAddr($body, $b, $bi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT));
+        $body->brIf($body->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $strk, $intk);
+
+        // ── string key ──
+        $sres = $strk->load(Type::ptr(), $resSlot);
+        $sk = $strk->load(Type::i64(), $this->entryAddr($strk, $b, $bi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $skp = $strk->inttoptr($sk, Type::ptr());
+        $shas = $strk->call('__mir_array_isset_str', Type::i64(), [$sres, $skp]);
+        $strk->brIf($strk->icmp('ne', $shas, Value::int(Type::i64(), 0)), $next, $sset);
+        $sv = $sset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
+        $sset->call('__mir_retain_by_repr', Type::void(), [$sv, $brepr]);
+        // The key string gains a second owner (the result's entry).
+        $sset->call('__mir_rc_retain_str', Type::void(), [$skp]);
+        $snew = $sset->call('__mir_array_set_str', Type::ptr(),
+            [$sset->load(Type::ptr(), $resSlot), $skp, $sv]);
+        $sset->store($snew, $resSlot);
+        $sset->br($next);
+
+        // ── int key ──
+        $ires = $intk->load(Type::ptr(), $resSlot);
+        $ik = $intk->call('__mir_array_key_at', Type::i64(), [$b, $bi]);
+        $ihas = $intk->call('__mir_array_isset_int', Type::i64(), [$ires, $ik]);
+        $intk->brIf($intk->icmp('ne', $ihas, Value::int(Type::i64(), 0)), $next, $iset);
+        $iv = $iset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
+        $iset->call('__mir_retain_by_repr', Type::void(), [$iv, $brepr]);
+        $inew = $iset->call('__mir_array_set_int', Type::ptr(),
+            [$iset->load(Type::ptr(), $resSlot), $ik, $iv]);
+        $iset->store($inew, $resSlot);
+        $iset->br($next);
+
+        $ni = $next->load(Type::i64(), $iSlot);
+        $next->store($next->add($ni, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+
+        $ret->ret($ret->load(Type::ptr(), $resSlot));
     }
 
     /**

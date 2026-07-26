@@ -780,7 +780,65 @@ trait InferNodes
         return $t;
     }
 
-    private function inferAdd(Add $n): Type { $t = $this->arithType($n->left, $n->right); $n->type = $t; return $t; }
+    private function inferAdd(Add $n): Type
+    {
+        // `+` on arrays is PHP's UNION operator, not arithmetic: the left
+        // array's keys win and the right fills the gaps. Only `+` has this
+        // meaning (`-`/`*` on arrays is a TypeError), so it lives here and not
+        // in the shared arithType. Typing the node KIND_ARRAY is what makes
+        // InferAllocKind treat it as a fresh allocation, InsertMemoryOps release
+        // it, and emitArith route to __mir_array_union instead of `add i64`.
+        $t = $this->arrayUnionType($n->left, $n->right);
+        if ($t === null) { $t = $this->arithType($n->left, $n->right); }
+        $n->type = $t;
+        return $t;
+    }
+
+    /** An array's element type when it carries real evidence, else null (an
+     *  absent or UNKNOWN element — e.g. the `[]` literal — proves nothing). */
+    private function elemEvidence(Type $t): ?Type
+    {
+        $e = $t->element;
+        if ($e === null || $e->kind === Type::KIND_UNKNOWN) { return null; }
+        return $e;
+    }
+
+    /**
+     * The result type of an array `+`, or null when neither side is an array.
+     * The union keeps the LEFT shape and merges the right's element/key — a
+     * differing element on either side floors to a cell, since the result
+     * carries both.
+     */
+    private function arrayUnionType(Node $left, Node $right): ?Type
+    {
+        $lt = $this->inferNode($left);
+        $rt = $this->inferNode($right);
+        if (!$lt->isArray() && !$rt->isArray()) { return null; }
+        // Only one side typed as an array: the other is erased (unknown/cell),
+        // so nothing narrower than the known side is provable.
+        if (!$rt->isArray()) { return $lt; }
+        if (!$lt->isArray()) { return $rt; }
+        // An absent / UNKNOWN element is NO EVIDENCE, not a conflict: `[] + $l`
+        // copies `$l`'s slots verbatim, so the result has exactly `$l`'s element
+        // repr. Flooring that to a cell made the reader unbox raw string
+        // pointers and print denormal floats.
+        $le = $this->elemEvidence($lt);
+        $re = $this->elemEvidence($rt);
+        $elem = $le === null ? $re : ($re === null ? $le
+            : ($this->sameElemShape($le, $re) ? $le : Type::cell()));
+        if ($elem === null) { $elem = Type::unknown(); }
+        // An assoc on either side wins: a union NEVER renumbers, so a vec+assoc
+        // result keeps the string keys the assoc side contributes.
+        if ($lt->isAssoc() || $rt->isAssoc()) {
+            $lk = $lt->isAssoc() ? $lt->key : null;
+            $rk = $rt->isAssoc() ? $rt->key : null;
+            $key = $lk === null ? $rk : ($rk === null ? $lk
+                : ($this->sameElemShape($lk, $rk) ? $lk : Type::cell()));
+            if ($key === null) { $key = Type::string_(); }
+            return Type::assoc($key, $elem);
+        }
+        return Type::vec($elem);
+    }
 
     private function inferSub(Sub $n): Type { $t = $this->arithType($n->left, $n->right); $n->type = $t; return $t; }
 

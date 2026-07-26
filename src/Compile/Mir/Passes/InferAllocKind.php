@@ -184,7 +184,12 @@ final class InferAllocKind implements Pass
             // rc-managed or it leaks every call (isOwnedObj only releases
             // RC_HEAP). Force RC_HEAP for ALL array literals (incl. an empty
             // `[]` that grows via set/append and carries no alloc effect node).
-            $uniArr = $k === Node::KIND_ARRAY_LIT;
+            // An array-typed `+` is the UNION operator: __mir_array_union hands
+            // back a FRESH malloc'd array, exactly like a literal, so it needs
+            // the same RC_HEAP treatment or every union leaks.
+            $unionArr = $k === Node::KIND_ADD
+                && $n->type->kind === \Compile\Mir\Type::KIND_ARRAY;
+            $uniArr = $k === Node::KIND_ARRAY_LIT || $unionArr;
             if (($e !== null && $e->alloc) || $uniArr) {
                 // Objects are ALWAYS heap-allocated (emitNewObj has no arena
                 // path), so a confined `new X()` local must still be rc-managed
@@ -200,7 +205,9 @@ final class InferAllocKind implements Pass
                 // element. Arrays with string / cell / nested-array / object
                 // elements stay RC_HEAP (an arena outer whose release bails
                 // would leak those owned heap payloads).
-                $arenaArr = $uniArr && !$escCtx && $this->isArenaScalarArray($n);
+                // NEVER arena for a union: __mir_array_union allocates through
+                // __mir_alloc_array_tagged (an rc-tagged buffer), not the arena.
+                $arenaArr = $uniArr && !$unionArr && !$escCtx && $this->isArenaScalarArray($n);
                 $forceHeap = $escCtx || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
                     || ($uniArr && !$arenaArr);
                 $n->allocKind = $forceHeap
