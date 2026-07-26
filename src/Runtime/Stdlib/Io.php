@@ -327,11 +327,21 @@ function __mc_wait_read(\Resource $s): int
     }
     // Netpoller: inside a scheduler+fiber, suspend on the reactor until the fd is
     // readable instead of blocking the process (or, on a non-blocking stream,
-    // returning empty). The hook returns once readable; the recv below proceeds.
+    // returning empty). The park is BOUNDED by the same deadline the synchronous
+    // branch below uses — stream_set_timeout()'s value, else 60 s. An unbounded
+    // park (what this did) left a fiber wedged forever on a peer that never
+    // answers, and stream_get_meta_data()['timed_out'] could never become true
+    // under a scheduler.
     if (\Runtime\AsyncHook::active()) {
-        $h = \Runtime\AsyncHook::readable();
-        $h($s);
-        return 1;
+        $hf = \Runtime\AsyncHook::readableFor();
+        $secs = ($s->rtimeoutMs > 0 ? (float)$s->rtimeoutMs : 60000.0) / 1000.0;
+        // `=== true`: the hook is an untyped slot, so its result arrives as a
+        // tagged cell and is read by tag, never as a raw word.
+        if ($hf($s, $secs) === true) {
+            return 1;
+        }
+        $s->timedOut = true;
+        return 0;
     }
     // Non-blocking (stream_set_blocking(false)): never wait — a 0 timeout means a
     // read with no data ready returns immediately (fill sees 0), matching php.
@@ -373,20 +383,36 @@ function __mc_stream_fill(\Resource $s, int $want): int
     // `Async\read` pattern in poc/async/src/io.php. Plain sockets only: TLS
     // keeps the existing wait/pending flow (SSL_read buffered-plaintext
     // accounting is done inside __mc_wait_read).
+    //
+    // A WAKE IS A HINT, NOT A PROMISE: the reactor may hand this task back with
+    // nothing to read (a bounded wait that also armed a timer, a stale waiter, a
+    // sibling that drained the fd first), so the recv is retried in a loop and
+    // each would-block parks again. Reporting 0 on the first EWOULDBLOCK — what
+    // this did — read as end-of-stream and truncated the response. Any OTHER
+    // errno is a real error (ECONNRESET/EPIPE) and stops the reader.
     if ($s->kind === \Resource::KIND_SOCKET && \Runtime\AsyncHook::active()) {
-        $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
-        if ($got > 0) {
-            __mc_buf_compact($s);
-            $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
-            \Runtime\Libc\free($buf);
-            return $got;
+        while (true) {
+            $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
+            if ($got > 0) {
+                __mc_buf_compact($s);
+                $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
+                \Runtime\Libc\free($buf);
+                return $got;
+            }
+            if ($got === 0) {
+                $s->eof = true;
+                \Runtime\Libc\free($buf);
+                return 0;
+            }
+            if (\__mc_errno() !== \__mc_sock_const(10)) {
+                \Runtime\Libc\free($buf);
+                return 0;
+            }
+            if (\__mc_wait_read($s) === 0) {
+                \Runtime\Libc\free($buf);
+                return 0;   // timed out ($timedOut recorded) — do not block on recv
+            }
         }
-        if ($got === 0) {
-            $s->eof = true;
-            \Runtime\Libc\free($buf);
-            return 0;
-        }
-        // got < 0 → EWOULDBLOCK; fall through to park + retry via __mc_wait_read.
     }
     if (\__mc_wait_read($s) === 0) {
         \Runtime\Libc\free($buf);
@@ -1222,8 +1248,11 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
     if (\__mc_stream_is_net($stream)) {
         // Netpoller: in a scheduler+fiber, write ALL of $data, suspending on the
         // reactor whenever send() reports back-pressure — blocking-looking, but the
-        // process never blocks. A <=0 right after a writability wake is a hard error
-        // (EPIPE/reset), not would-block, so we stop instead of spinning.
+        // process never blocks. A writability wake is a HINT: the retry may report
+        // back-pressure again (another writer drained the window first), so a
+        // would-block parks again instead of ending the write short. Only a real
+        // errno (EPIPE/ECONNRESET) stops us. TLS keeps the retry-once shape — errno
+        // says nothing about SSL_write's WANT_WRITE.
         if (\Runtime\AsyncHook::active()) {
             $h = \Runtime\AsyncHook::writable();
             $total = 0;
@@ -1232,9 +1261,15 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
                 $n = \__mc_transport_send($stream, $chunk, $len - $total);
                 if ($n > 0) { $total = $total + $n; continue; }
                 if ($n === 0) { break; }
+                if ($stream->kind === \Resource::KIND_SOCKET
+                    && \__mc_errno() !== \__mc_sock_const(10)) {
+                    break;
+                }
                 $h($stream);
-                $n = \__mc_transport_send($stream, $chunk, $len - $total);
-                if ($n > 0) { $total = $total + $n; } else { break; }
+                if ($stream->kind !== \Resource::KIND_SOCKET) {
+                    $n = \__mc_transport_send($stream, $chunk, $len - $total);
+                    if ($n > 0) { $total = $total + $n; } else { break; }
+                }
             }
             return $total;
         }

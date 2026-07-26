@@ -1388,6 +1388,8 @@ namespace Async {
                 function (\Resource $s): void { $this->waitReadable($s); },
                 function (\Resource $s): void { $this->waitWritable($s); },
                 function (\Resource $s): void { $this->closeConn($s); },
+                function (\Resource $s, float $t): bool { return $this->waitReadableWithin($s, $t); },
+                function (float $t): void { $this->sleep($t); },
             );
         }
 
@@ -1811,6 +1813,43 @@ namespace Async {
             $this->releaseIo($me);
         }
 
+        /**
+         * Suspend until $conn is readable OR $seconds elapse. Returns true when
+         * the reactor reported readiness, false on expiry — it throws nothing, so
+         * the caller decides what a timeout means (stream_set_timeout reports
+         * `timed_out`, stream_socket_accept answers false, the DNS exchange gives
+         * up on the datagram).
+         *
+         * Both reservations are taken and both are released on either exit path:
+         * a bounded wait that woke from the reactor must still drop its heap slot,
+         * and one that expired must still leave the fd's waiter slot. cancelTask()
+         * already releases io AND timer, so a cancelled bounded wait leaks neither.
+         */
+        public function waitReadableWithin(\Resource $conn, float $seconds): bool
+        {
+            $this->checkCancel();
+            $me = $this->running;
+            $fd = $conn->addr;
+            $this->ensureWatcher($conn, $fd);
+            $this->readWaiter[$fd] = $me;
+            $me->ioFd = $fd;
+            $me->ioWrite = false;
+            $this->ioWaiters = $this->ioWaiters + 1;
+            $me->timerActive = true;
+            if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
+            $this->timerPush(\microtime(true) + $seconds, $me);
+            \Fiber::suspend();
+            // The reactor clears ioFd when IT wakes the task; fireTimers clears
+            // timerActive when the deadline does. Read both before releasing.
+            $ready = $me->ioFd === -1;
+            $this->releaseIo($me);
+            if ($me->timerActive) {
+                $me->timerActive = false;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive - 1; }
+            }
+            return $ready;
+        }
+
         /** Suspend until $conn is writable — arms Write only while a writer waits. */
         public function waitWritable(\Resource $conn): void
         {
@@ -1906,6 +1945,9 @@ namespace Async {
                     }
                 }
             } elseif ($timeout > 0) {
+                // Safe despite usleep() now being fiber-aware: this runs in the
+                // LOOP, outside every fiber, and AsyncHook::active() requires
+                // \Fiber::getCurrent() — so it cannot re-enter the scheduler.
                 \usleep((int)($timeout * 1000000));
             }
             $this->fireTimers();
