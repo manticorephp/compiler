@@ -468,15 +468,13 @@ trait LowerFns
                 return $this->lowerConstCallable($vn, $this->constCallables[$vn], $expr->args);
             }
             // A body-stable `str_set` (`$fn = cond ? 'preg_match_all' : 'preg_match'`)
-            // that survived an intervening if/try. Keep the plain dynamic invoke
-            // (structurally safe), but auto-vivify the candidates' #[RefOut]
-            // out-params — both names share the layout — so a by-ref out-arg like
-            // preg_match's `$matches` is a defined local (the value isn't filled
-            // through dynamic dispatch: a documented gap).
-            $stable = $this->stableCallables[$vn] ?? null;
-            if ($stable !== null && $stable['kind'] === 'str_set') {
-                $decl = $this->fnDecls[$this->resolveCallName($stable['names'][0])] ?? null;
-                if ($decl !== null) { $this->collectRefOutInits($decl, $expr->args); }
+            // that survived an intervening if/try. Dispatch on `$fn`'s runtime
+            // value into the two DIRECT calls — a dynamic invoke cannot carry a
+            // by-ref out-param, so preg_match's `$matches` came back undefined.
+            $stableName = $this->stableCallables[$vn] ?? '';
+            if ($stableName !== '') {
+                return $this->lowerStrSetCallable($vn, $stableName,
+                    $this->stableCallablesAlt[$vn] ?? '', $expr->args);
             }
         }
         $callee = $this->lowerExpr($calleeAst);

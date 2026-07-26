@@ -249,9 +249,21 @@ final class LowerFromAst implements Pass
      * invoke resolves to a direct call even across an intervening `if`/`try`
      * (which clears the straight-line {@see $constCallables}). Populated per body
      * by {@see scanStableCallables}.
-     * @var array<string, array<string, mixed>>
+     *
+     * FLAT `var → first candidate name`, never a nested info array: the value is
+     * read back inside the compiler's own hot path, and a nested assoc read out
+     * of a property erases natively — the lookup then silently missed and the
+     * out-param it exists to define stayed dangling (green under Zend, broken
+     * self-hosted). Both str_set arms share the by-ref layout, so one name is
+     * all this needs.
+     * @var array<string, string>
      */
     private array $stableCallables = [];
+
+    /** The str_set's SECOND candidate name, keyed the same way. Two flat maps,
+     *  not one map of pairs — see {@see $stableCallables}.
+     *  @var array<string, string> */
+    private array $stableCallablesAlt = [];
 
     /** `$var = new C(...)` → C, for a linear body — lets a later `$var->m(a,b)`
      *  pack its variadic against C's exact signature (a same-named variadic
@@ -1314,14 +1326,18 @@ final class LowerFromAst implements Pass
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
         $this->sawStaticUse = false;
+        $deadTail = false;
         foreach ($m->body->statements as $bodyStmt) {
+            // A label heads live code even after a terminator — `goto` reaches it.
+            if ($deadTail && $bodyStmt->kind !== 'Label') { continue; }
+            $deadTail = false;
             $lowered = $this->lowerStmt($bodyStmt);
             $stmts[] = $lowered;
-            // Same dead-code cut as lowerBlockNode: stop after an unconditional
+            // Same dead-code cut as lowerBlockNode: skip after an unconditional
             // terminator so trailing code behind a folded static guard (a
             // `if (!function_exists('pcntl_signal')) return;` reducing to a bare
             // return, then `[\SIGINT, …]`) is never lowered.
-            if ($this->nodeAlwaysTerminates($lowered)) { break; }
+            if ($this->nodeAlwaysTerminates($lowered)) { $deadTail = true; }
         }
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
@@ -1841,6 +1857,30 @@ final class LowerFromAst implements Pass
         return new Call($resolved, $this->lowerCallArgs($resolved, $astArgs), Type::unknown());
     }
 
+    /**
+     * A `str_set` callable (`$fn = cond ? 'preg_match_all' : 'preg_match'`)
+     * applied to `$astArgs`: dispatch on `$fn`'s RUNTIME VALUE into the two
+     * DIRECT calls rather than emitting a dynamic invoke.
+     *
+     * A dynamic invoke passes every argument by value, so the callee's
+     * `#[RefOut]` out-param (preg_match's `$matches`) was never filled — the
+     * caller read an undefined local and printed denormal floats. Only a direct
+     * call carries the by-ref ABI, and only one arm ever executes, so the
+     * duplicated argument lowering costs nothing at run time.
+     */
+    private function lowerStrSetCallable(string $var, string $n1, string $n2, array $astArgs): Node
+    {
+        $c1 = $this->lowerStringCallable($n1, $astArgs);
+        if ($n2 === '' || $n2 === $n1) { return $c1; }
+        $c2 = $this->lowerStringCallable($n2, $astArgs);
+        $cond = new Cmp(
+            new LoadLocal($var, Type::string_()),
+            new StringConst($n1, Type::string_()),
+            '==='
+        );
+        return new Ternary($cond, $c1, $c2, Type::unknown());
+    }
+
     /** An array callable `[$o,"m"]` / `["C","m"]` applied to `$astArgs`, or
      *  null when the literal isn't a `[receiver, methodName]` shape. */
     private function lowerArrayCallable(\Parser\Ast\ArrayLit $arr, array $astArgs): ?Node
@@ -2094,7 +2134,12 @@ final class LowerFromAst implements Pass
                 $n1 = $this->strLitValue($thenE);
                 $n2 = $this->strLitValue($elseE);
                 if ($this->functionIsKnown($n1) && $this->functionIsKnown($n2)) {
-                    return ['kind' => 'str_set', 'names' => [$n1, $n2]];
+                    // Two FLAT string slots, never a nested `['names' => [...]]`:
+                    // this map's other arms are all `array<string, string>`, and a
+                    // single array-valued slot makes the whole return MIXED — the
+                    // reader then unboxes a raw string pointer as a cell and the
+                    // compiler SIGSEGVs on the unrelated `arr_obj` path.
+                    return ['kind' => 'str_set', 'name' => $n1, 'name2' => $n2];
                 }
             }
         }
@@ -2132,6 +2177,7 @@ final class LowerFromAst implements Pass
     private function scanStableCallables(array $stmts): void
     {
         $this->stableCallables = [];
+        $this->stableCallablesAlt = [];
         foreach ($stmts as $s) {
             if ($s->kind !== 'Expression') { continue; }
             $e = $this->expressionStmtExpr($s);
@@ -2140,7 +2186,9 @@ final class LowerFromAst implements Pass
             if ($t->kind !== 'Variable') { continue; }
             $info = $this->callableLiteralInfo($this->assignValue($e));
             if ($info !== null && $info['kind'] === 'str_set') {
-                $this->stableCallables[$this->varName($t)] = $info;
+                $vn = $this->varName($t);
+                $this->stableCallables[$vn] = $info['name'];
+                $this->stableCallablesAlt[$vn] = $info['name2'];
             }
         }
     }
