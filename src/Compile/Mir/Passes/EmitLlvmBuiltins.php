@@ -3739,12 +3739,19 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
-    /** @param Node[] $args  get_class($o) — the operand's class name. Uses
-     * the static type (matches `::class`); the compiler's lone call site
-     * has a precisely-typed receiver. */
+    /** @param Node[] $args  get_class($o) — the operand's class name. Uses the
+     * static type when there is one (matches `::class`), else dispatches on the
+     * runtime class id. */
     private function biGetClass(array $args): string
     {
-        $cls = $args[0]->type->class ?? '';
+        // `Type::$class` is only meaningful on an OBJ type. Reading it off a
+        // cell/unknown type used to go through `?? ''`, and a null ?string field
+        // does NOT read as null natively — the raw 0 came back as a non-empty
+        // string that rendered empty, so `$cls !== ''` took the class-known path
+        // for a receiver that had no class at all and get_class() returned ''.
+        $ty = $args[0]->type;
+        $cls = '';
+        if ($ty->kind === Type::KIND_OBJ) { $cls = $ty->class ?? ''; }
         // Candidate runtime classes = every class that IS-A $cls — extends AND
         // implements. selfAndDescendants only walks `parent`, so an INTERFACE
         // static type (e.g. `Throwable`, from a catch var or a `: Throwable`
@@ -3756,6 +3763,17 @@ trait EmitLlvmBuiltins
             if (isset($this->classes[$cls])) { $cands[] = $cls; }
             foreach ($this->classes as $cd) {
                 if ($cd->name !== $cls && $this->classIsA($cd->name, $cls)) { $cands[] = $cd->name; }
+            }
+        } else {
+            // No static class at all — a bare `object` (what
+            // ReflectionAttribute::newInstance() and friends hand back) or an
+            // erased receiver. The static-name path would emit the empty string,
+            // so dispatch on the runtime class_id over EVERY class instead. Only
+            // reached where the type is genuinely unknown, so the switch is not
+            // on any hot path.
+            foreach ($this->classes as $cd) {
+                if ($cd->isStruct) { continue; }
+                $cands[] = $cd->name;
             }
         }
         // Unknown class, or a monomorphic one (no subclass) — the static type
@@ -3771,14 +3789,33 @@ trait EmitLlvmBuiltins
         // runtime class, not the static type — matters inside an inherited
         // method on a subclass instance).
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
-        $objp = $this->lastValue;
-        $out .= $this->emitLoadClassId($objp);
-        $cid = $this->classIdReg;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca ptr\n";
         $endL = $this->ssa->allocLabel('gc.end');
         $defL = $this->ssa->allocLabel('gc.def');
+        if ($args[0]->type->kind === Type::KIND_CELL) {
+            // A cell carries the object POINTER in its low 48 bits behind tag 8.
+            // Handing the tagged word straight to inttoptr reads the class id
+            // from a wild address — the default arm then printed ''. Check the
+            // tag, then unbox.
+            $out .= $this->coerceToI64();
+            $raw = $this->lastValue;
+            $out .= $this->cellTagIr($raw);
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $objL = $this->ssa->allocLabel('gc.obj');
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $defL . "\n";
+            $out .= $objL . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $raw . ", 281474976710655\n";
+            $objp = $this->ssa->allocReg();
+            $out .= '  ' . $objp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+        } else {
+            $out .= $this->coerceToPtr();
+            $objp = $this->lastValue;
+        }
+        $out .= $this->emitLoadClassId($objp);
+        $cid = $this->classIdReg;
         $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
         $bodies = '';
         foreach ($cands as $c) {

@@ -134,6 +134,11 @@ trait LowerPrelude
             // the sources are concatenated then parsed as one unit.
             $src = $src . $this->reflectionSrc;
         }
+        if ($this->includeAttributes) {
+            // Depends on nothing (and nothing depends on it) — placed beside
+            // reflection because that is what gates it.
+            $src = $src . $this->attributesSrc;
+        }
         if ($this->includeDateTime) {
             // After exceptions.php (DateMalformedStringException extends
             // Exception, DateError extends Error) and after spl_arrays.php,

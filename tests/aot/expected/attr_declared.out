@@ -1,0 +1,24 @@
+1
+2
+4
+8
+16
+32
+64
+127
+128
+Attribute final=y
+AllowDynamicProperties final=y
+ReturnTypeWillChange final=y
+SensitiveParameter final=y
+SensitiveParameterValue final=y
+Override final=y
+Deprecated final=y
+NoDiscard final=y
+DelayedTargetValidation final=y
+use g() instead / 1.5
+NULL
+NULL
+because
+127
+12

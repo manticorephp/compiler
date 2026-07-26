@@ -789,6 +789,15 @@ trait LowerClasses
                 if ($found !== null) { return $found; }
             }
         }
+        // `Attribute::TARGET_*` when prelude/attributes.php was NOT injected —
+        // src/ compiles without it, and a program may name a target constant
+        // without ever reflecting. Same values the prelude declares.
+        if ($className === 'Attribute') {
+            $v = \Compile\BuiltinAttributes::constValue($name);
+            if ($v !== null) {
+                return \Parser\Ast\Expr::int($v, new \Parser\Ast\Span(0, 0));
+            }
+        }
         return null;
     }
 }

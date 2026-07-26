@@ -1538,6 +1538,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     $printRSrc = prelude_src_or_empty("print_r.php");
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
     $reflectionSrc = prelude_src_or_empty("reflection.php");
+    $attributesSrc = prelude_src_or_empty("attributes.php");
     $dateTimeSrc = prelude_src_or_empty("datetime.php");
     // Fiber (stackful coroutines) — DEMAND-GATED. Must NOT be unconditional:
     // the preamble emits arch-branched `module asm` under needsFibers, and
@@ -1582,6 +1583,20 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // rather than failing).
         || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
                               'get_declared_traits']);
+    // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
+    // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely
+    // compiler-side — the declarations matter only so reflection can hand back a
+    // real instance. Hence the `$useReflection &&`: src/Ffi/*.php and
+    // src/Manticore/Attr/*.php MENTION `Attribute` in code, so a bare mention
+    // gate would inject 9 classes into the compiler's own build and shift every
+    // stableClassId with them, for no runtime benefit.
+    // SensitiveParameterValue is exempt — it is a plain value class a program can
+    // construct without reflecting on anything.
+    $useAttributes = ($useReflection
+            && $demand->mentionsAny(['Attribute', 'Deprecated', 'NoDiscard', 'Override',
+                                     'SensitiveParameter', 'ReturnTypeWillChange',
+                                     'AllowDynamicProperties', 'DelayedTargetValidation']))
+        || $demand->mentions('SensitiveParameterValue');
     // The DateTime family gates on a MENTION, like the array and Reflection
     // classes. It can be gated at all only because NO stdlib signature names a
     // DateTime* class — the whole family talks to the stdlib through scalars —
@@ -1659,6 +1674,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->includePrintR = $usePrintR;
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeReflection = $useReflection;
+        $lower->includeAttributes = $useAttributes;
         $lower->includeDateTime = $useDateTime;
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeArrayFnsExt = $useArrayFnsExt;
@@ -1671,6 +1687,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
         $lower->reflectionSrc = $reflectionSrc;
+        $lower->attributesSrc = $attributesSrc;
         $lower->dateTimeSrc = $dateTimeSrc;
         $lower->arrayFnsSrc = $arrayFnsSrc;
         $lower->arrayFnsExtSrc = $arrayFnsExtSrc;

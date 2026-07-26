@@ -320,6 +320,13 @@ final class LowerFromAst implements Pass
     public bool $includeReflection = false;
     /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
     public string $reflectionSrc = '';
+    /** Inject PHP's reserved attribute classes (Attribute / Deprecated / Override
+     *  / …). Gated on a mention AND on reflection, since their only runtime role
+     *  is `getAttributes()->newInstance()`; the SEMANTICS are compiler-side and
+     *  need none of this. See Main.php. */
+    public bool $includeAttributes = false;
+    /** Reserved-attribute prelude source, read by Main from `prelude/attributes.php`. */
+    public string $attributesSrc = '';
     /** Inject the DateTime class family (gated on the program MENTIONING one —
      *  see Main.php). Gating is possible only because no stdlib signature names
      *  a DateTime* class: the family talks to the stdlib through scalars. */
@@ -953,12 +960,18 @@ final class LowerFromAst implements Pass
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
                 [], 'array', $argsBody, $span);
             // new factory: return new <AttrClass>(<original args, named preserved>);
+            // Declared `mixed`, NOT `object`: the only caller is the indirect
+            // `__mc_refl_call0`, which is typed CELL. An `object` return handed
+            // it a RAW pointer with no cell tag, so the instance came back
+            // untagged — is_object() was false, instanceof false, get_class ''
+            // and var_dump printed the pointer as a float. `mixed` makes the
+            // return box (tag 8) and the cell honest.
             $newBody = new \Parser\Ast\Block([
                 \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::new_($attr->name, $attr->args, $span), $span),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
-                [], 'object', $newBody, $span);
+                [], 'mixed', $newBody, $span);
         }
     }
 
