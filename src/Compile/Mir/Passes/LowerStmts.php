@@ -260,12 +260,12 @@ trait LowerStmts
         $armConds = [];
         /** @var \Parser\Ast\Block[] $armBodies */
         $armBodies = [];
-        if ($this->foldGuard($stmt->condition) !== false) {
+        if ($this->foldGuard($stmt->condition) !== self::GUARD_FALSE) {
             $armConds[] = $stmt->condition;
             $armBodies[] = $stmt->then;
         }
         foreach ($stmt->elseifs as $pair) {
-            if ($this->foldGuard($pair->condition) === false) { continue; }
+            if ($this->foldGuard($pair->condition) === self::GUARD_FALSE) { continue; }
             $armConds[] = $pair->condition;
             $armBodies[] = $pair->body;
         }

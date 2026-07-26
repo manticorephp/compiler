@@ -2286,12 +2286,12 @@ final class LowerFromAst implements Pass
     private function constIfBranch(\Parser\Ast\IfStmt $s): ?array
     {
         $c = $this->foldGuard($s->condition);
-        if ($c === null) { return null; }
-        if ($c === true) { return $s->then->statements; }
+        if ($c === self::GUARD_UNKNOWN) { return null; }
+        if ($c === self::GUARD_TRUE) { return $s->then->statements; }
         foreach ($s->elseifs as $arm) {
             $ac = $this->foldGuard($arm->condition);
-            if ($ac === null) { return null; }
-            if ($ac === true) { return $arm->body->statements; }
+            if ($ac === self::GUARD_UNKNOWN) { return null; }
+            if ($ac === self::GUARD_TRUE) { return $arm->body->statements; }
         }
         return $s->else !== null ? $s->else->statements : [];
     }
@@ -2309,45 +2309,92 @@ final class LowerFromAst implements Pass
         }
     }
 
+    /** foldGuard: not statically foldable — the guard stays for runtime. */
+    private const GUARD_UNKNOWN = -1;
+    private const GUARD_FALSE = 0;
+    private const GUARD_TRUE = 1;
+
     /**
-     * Compile-time truth of a declaration guard, or null when not statically
-     * foldable: `function_exists('X')` (same test the expression fold uses — the
-     * known user / stdlib-extern functions), bool literals, and `!` / `&&` / `||`
-     * over them. Anything else leaves the `if` for runtime (unexpanded).
+     * Compile-time truth of a declaration guard as a TRI-STATE:
+     * GUARD_TRUE / GUARD_FALSE / GUARD_UNKNOWN. Folds `function_exists('X')`
+     * (the same test the expression fold uses), `defined`, the `class_exists`
+     * family, `extension_loaded`, a constant `===`/`!==`, bool literals, and
+     * `!` / `&&` / `||` over any of those.
+     *
+     * The tri-state is an int ON PURPOSE. This used to return `?bool`, and a
+     * nullable scalar's null does NOT read back as null under the self-host
+     * (invisible under Zend, where the same code is correct) — so UNKNOWN
+     * arrived at the call sites as FALSE and folded away live branches: the
+     * compiler built by the compiler dropped `$n > 1` from
+     * `function_exists('have') && $n > 1`. Never widen this back to `?bool`.
      */
-    private function foldGuard(\Parser\Ast\Expr $e): ?bool
+    private function foldGuard(\Parser\Ast\Expr $e): int
     {
-        if ($e->kind === 'BoolLiteral') { return $e->value; }
-        if ($e->kind === 'UnaryOp' && $e->op === '!') {
-            $v = $this->foldGuard($e->operand);
-            return $v === null ? null : !$v;
-        }
-        if ($e->kind === 'BinaryOp' && ($e->op === '&&' || $e->op === 'and')) {
+        // Dispatch by kind into TYPED helpers. A subclass field read off a
+        // base-`Expr` receiver resolves by the wrong offset under the self-host
+        // (Expr declares only kind/span), so every access below happens behind a
+        // concrete parameter type.
+        $k = $e->kind;
+        if ($k === 'BoolLiteral') { return $this->boolLitValue($e) ? self::GUARD_TRUE : self::GUARD_FALSE; }
+        if ($k === 'UnaryOp')     { return $this->foldGuardUnary($e); }
+        if ($k === 'BinaryOp')    { return $this->foldGuardBinary($e); }
+        if ($k === 'Call')        { return $this->foldGuardCall($e); }
+        return self::GUARD_UNKNOWN;
+    }
+
+    private function boolLitValue(\Parser\Ast\BoolLiteral $b): bool { return $b->value; }
+
+    private function intLitValue(\Parser\Ast\IntLiteral $i): int { return $i->value; }
+
+    private function identifierName(\Parser\Ast\Identifier $i): string { return $i->name; }
+
+    private function guardOf(bool $v): int { return $v ? self::GUARD_TRUE : self::GUARD_FALSE; }
+
+    private function foldGuardUnary(\Parser\Ast\UnaryOp $e): int
+    {
+        if ($e->op !== '!') { return self::GUARD_UNKNOWN; }
+        $v = $this->foldGuard($e->operand);
+        if ($v === self::GUARD_UNKNOWN) { return self::GUARD_UNKNOWN; }
+        return $v === self::GUARD_TRUE ? self::GUARD_FALSE : self::GUARD_TRUE;
+    }
+
+    private function foldGuardBinary(\Parser\Ast\BinaryOp $e): int
+    {
+        $op = $e->op;
+        if ($op === '&&' || $op === 'and') {
             $l = $this->foldGuard($e->left);
-            if ($l === false) { return false; }
+            if ($l === self::GUARD_FALSE) { return self::GUARD_FALSE; }
             $r = $this->foldGuard($e->right);
-            if ($r === false) { return false; }
-            return ($l === null || $r === null) ? null : true;
+            if ($r === self::GUARD_FALSE) { return self::GUARD_FALSE; }
+            return ($l === self::GUARD_UNKNOWN || $r === self::GUARD_UNKNOWN)
+                ? self::GUARD_UNKNOWN : self::GUARD_TRUE;
         }
-        if ($e->kind === 'BinaryOp' && ($e->op === '||' || $e->op === 'or')) {
+        if ($op === '||' || $op === 'or') {
             $l = $this->foldGuard($e->left);
-            if ($l === true) { return true; }
+            if ($l === self::GUARD_TRUE) { return self::GUARD_TRUE; }
             $r = $this->foldGuard($e->right);
-            if ($r === true) { return true; }
-            return ($l === null || $r === null) ? null : false;
+            if ($r === self::GUARD_TRUE) { return self::GUARD_TRUE; }
+            return ($l === self::GUARD_UNKNOWN || $r === self::GUARD_UNKNOWN)
+                ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
         }
         // Constant strict comparison — `'\\' === DIRECTORY_SEPARATOR`,
         // `PHP_OS_FAMILY === 'Windows'`. Both sides compile-time scalars ⇒ a
         // definite bool, so the Windows / platform-specific dead branch (which
         // often calls functions this target lacks) drops before lowering.
-        if ($e->kind === 'BinaryOp' && ($e->op === '===' || $e->op === '!==')) {
+        if ($op === '===' || $op === '!==') {
             $lk = $this->constScalarKey($e->left);
             $rk = $this->constScalarKey($e->right);
-            if ($lk === null || $rk === null) { return null; }
+            if ($lk === null || $rk === null) { return self::GUARD_UNKNOWN; }
             $eq = $lk === $rk;
-            return $e->op === '===' ? $eq : !$eq;
+            return $this->guardOf($op === '===' ? $eq : !$eq);
         }
-        if ($e->kind === 'Call' && \count($e->args) === 1) {
+        return self::GUARD_UNKNOWN;
+    }
+
+    private function foldGuardCall(\Parser\Ast\CallExpr $e): int
+    {
+        if (\count($e->args) !== 1) { return self::GUARD_UNKNOWN; }
+        if (true) {
             // An unqualified builtin call inside a namespace resolves to
             // `Ns\class_exists` in the AST (PHP falls back to the global at
             // runtime); match on the trailing segment so the guard folds
@@ -2361,8 +2408,8 @@ final class LowerFromAst implements Pass
                 // `function_exists(u::class)` — a `::class` constant resolving to
                 // the fully-qualified function name. guardClassArgName handles both.
                 $cn = $this->guardClassArgName($a0);
-                if ($cn === null) { return null; }
-                return $this->functionIsKnown($cn);
+                if ($cn === null) { return self::GUARD_UNKNOWN; }
+                return $this->guardOf($this->functionIsKnown($cn));
             }
             // `defined('NAME')` — whole-program AOT knows every constant, so an
             // unknown name is definitively false (mirrors the expression fold in
@@ -2370,7 +2417,7 @@ final class LowerFromAst implements Pass
             // undefined constant drop before that name reaches lowering.
             if ($fn === 'defined' && $a0->kind === 'StringLiteral') {
                 $nm = $this->constBareName($this->stringLitValue($a0));
-                return $this->predefinedConstant($nm) !== null || isset($this->userConstants[$nm]);
+                return $this->guardOf($this->predefinedConstant($nm) !== null || isset($this->userConstants[$nm]));
             }
             // `class_exists(X)` / interface_ / trait_ / enum_exists guarding an
             // OPTIONAL-dependency branch (`if (class_exists(CliDumper::class)) {
@@ -2382,9 +2429,9 @@ final class LowerFromAst implements Pass
             if ($fn === 'class_exists' || $fn === 'interface_exists'
                 || $fn === 'trait_exists' || $fn === 'enum_exists') {
                 $cn = $this->guardClassArgName($a0);
-                if ($cn === null) { return null; }
+                if ($cn === null) { return self::GUARD_UNKNOWN; }
                 $known = isset($this->knownClassNames[$cn]) || isset($this->traitTable[$cn]);
-                return $known ? null : false;
+                return $known ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
             }
             // `extension_loaded('X')`. A whole-program build has a FIXED set of
             // built-in extensions — nothing can be dlopen'd later — so the answer
@@ -2394,10 +2441,10 @@ final class LowerFromAst implements Pass
             // implementation is the one that compiles, and pcntl's absence must
             // drop a branch that names functions this build has no definition for.
             if ($fn === 'extension_loaded' && $a0->kind === 'StringLiteral') {
-                return $this->extensionIsBuiltIn(\strtolower($this->stringLitValue($a0)));
+                return $this->guardOf($this->extensionIsBuiltIn(\strtolower($this->stringLitValue($a0))));
             }
         }
-        return null;
+        return self::GUARD_UNKNOWN;
     }
 
     /**
@@ -2420,11 +2467,11 @@ final class LowerFromAst implements Pass
         if ($depth > 8) { return null; }   // guard mutually-recursive `define`s
         $k = $e->kind;
         if ($k === 'StringLiteral') { return 's:' . $this->stringLitValue($e); }
-        if ($k === 'IntLiteral')    { return 'i:' . (string)$e->value; }
-        if ($k === 'BoolLiteral')   { return 'b:' . ($e->value ? '1' : '0'); }
+        if ($k === 'IntLiteral')    { return 'i:' . (string)$this->intLitValue($e); }
+        if ($k === 'BoolLiteral')   { return 'b:' . ($this->boolLitValue($e) ? '1' : '0'); }
         if ($k === 'NullLiteral')   { return 'n:'; }
         if ($k === 'Identifier') {
-            $nm = $this->constBareName($e->name);
+            $nm = $this->constBareName($this->identifierName($e));
             if (isset($this->userConstants[$nm])) {
                 return $this->constScalarKey($this->userConstants[$nm], $depth + 1);
             }
@@ -2462,6 +2509,26 @@ final class LowerFromAst implements Pass
         return null;
     }
 
+    /**
+     * Functions the stdlib DEFINES but that must read as ABSENT.
+     *
+     * A guard the folder cannot reach still emits its call — `if ($cp) {
+     * sapi_windows_cp_set($cp); }` is guarded by a VALUE, not a predicate, so
+     * the symbol has to exist or the link fails. But letting `function_exists`
+     * see it would send the program down the Windows path it was trying to
+     * avoid. So: the body links, and every observer says it is not there — which
+     * is exactly true of this target.
+     *
+     * These four belong to the per-OS symbol table the target-abi work will own;
+     * until then the set is small enough to name.
+     */
+    private const HIDDEN_FNS = [
+        'sapi_windows_cp_conv' => true,
+        'sapi_windows_cp_get' => true,
+        'sapi_windows_cp_set' => true,
+        'sapi_windows_vt100_support' => true,
+    ];
+
     /** Whether a function name is already declared (user or stdlib extern / alias)
      *  — the same predicate the `function_exists` expression fold uses. */
     private function functionIsKnown(string $name): bool
@@ -2469,6 +2536,7 @@ final class LowerFromAst implements Pass
         $nm = \ltrim($name, '\\');
         $pos = \strrpos($nm, '\\');
         $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
+        if (isset(self::HIDDEN_FNS[$bare])) { return false; }
         return isset($this->fnDecls[$nm]) || isset($this->fnDecls[$bare])
             || (($this->fnAliasByBare[$bare] ?? '') !== '');
     }
@@ -2775,6 +2843,13 @@ final class LowerFromAst implements Pass
 
     private function lowerTernary(\Parser\Ast\Ternary $expr): Node
     {
+        // A compile-time condition lowers ONLY the live arm — the dead one must
+        // not reach codegen. `$cp = \function_exists('sapi_windows_cp_set')
+        // ? sapi_windows_cp_get() : 0;` otherwise emitted a call to a function
+        // that exists on no unix target. Same purity argument as lowerBinary.
+        $cf = $this->foldGuard($expr->condition);
+        if ($cf === self::GUARD_TRUE && $expr->then !== null) { return $this->lowerExpr($expr->then); }
+        if ($cf === self::GUARD_FALSE) { return $this->lowerExpr($expr->else); }
         $cond = $this->lowerExpr($expr->condition);
         $else = $this->lowerExpr($expr->else);
         $type = $cond->type;
@@ -3259,16 +3334,45 @@ final class LowerFromAst implements Pass
         // side lives in a conditionally-emitted branch. Result is the
         // i64 0/1 bool manticore echoes as "0"/"1".
         if ($op === '&&' || $op === 'and') {
-            $left  = $this->lowerExpr($e->left);
-            $right = $this->lowerExpr($e->right);
+            // A statically-FALSE operand kills the expression, and the other
+            // side must then never be LOWERED — not merely never executed. This
+            // is the expression-position twin of the compile-time `if`: without
+            // it `\function_exists('sapi_windows_vt100_support') &&
+            // sapi_windows_vt100_support($h)` still emitted the call and the
+            // link failed on a branch that provably cannot run. foldGuard only
+            // answers for PURE predicates, so dropping the arm drops no effect.
+            $lf = $this->foldGuard($e->left);
+            if ($lf === self::GUARD_FALSE) { return new BoolConst(false, Type::bool_()); }
+            $rf = $this->foldGuard($e->right);
+            if ($rf === self::GUARD_FALSE && $lf !== self::GUARD_UNKNOWN) {
+                return new BoolConst(false, Type::bool_());
+            }
+            // A folded operand is replaced by its constant rather than dropped
+            // outright: the Ternary shape is what keeps the result BOOL through
+            // InferTypes (a bare Not_ chain widens and echoes "0").
+            $left = $lf === self::GUARD_UNKNOWN
+                ? $this->lowerExpr($e->left) : new BoolConst($lf === self::GUARD_TRUE, Type::bool_());
+            $right = $rf === self::GUARD_UNKNOWN
+                ? $this->truthy($this->lowerExpr($e->right))
+                : new BoolConst($rf === self::GUARD_TRUE, Type::bool_());
+            return new Ternary($left, $right, new BoolConst(false, Type::bool_()), Type::bool_());
             // Both arms bool so the Ternary stays bool through InferTypes
             // (a bool/int arm mismatch widens it to unknown → echoes "0").
             return new Ternary($left, $this->truthy($right), new BoolConst(false, Type::bool_()), Type::bool_());
         }
         if ($op === '||' || $op === 'or') {
-            $left  = $this->lowerExpr($e->left);
-            $right = $this->lowerExpr($e->right);
-            return new Ternary($left, new BoolConst(true, Type::bool_()), $this->truthy($right), Type::bool_());
+            $lf = $this->foldGuard($e->left);
+            if ($lf === self::GUARD_TRUE) { return new BoolConst(true, Type::bool_()); }
+            $rf = $this->foldGuard($e->right);
+            if ($rf === self::GUARD_TRUE && $lf !== self::GUARD_UNKNOWN) {
+                return new BoolConst(true, Type::bool_());
+            }
+            $left = $lf === self::GUARD_UNKNOWN
+                ? $this->lowerExpr($e->left) : new BoolConst($lf === self::GUARD_TRUE, Type::bool_());
+            $right = $rf === self::GUARD_UNKNOWN
+                ? $this->truthy($this->lowerExpr($e->right))
+                : new BoolConst($rf === self::GUARD_TRUE, Type::bool_());
+            return new Ternary($left, new BoolConst(true, Type::bool_()), $right, Type::bool_());
         }
         return $this->buildBinop($op, $this->lowerExpr($e->left), $this->lowerExpr($e->right));
     }

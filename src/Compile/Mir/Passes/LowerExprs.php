@@ -391,18 +391,15 @@ trait LowerExprs
             // `function_exists("Name")` → compile-time 1/0 against the
             // declared functions (incl. FFI externs / use-function
             // aliases). A non-literal arg conservatively folds to false.
+            // Shares functionIsKnown with the statement-position guard fold, so
+            // the two can never disagree — and so a HIDDEN function (a
+            // link-only Windows stub) reads absent in both.
             if ($fn === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 $known = 0;
-                if ($a0->kind === 'StringLiteral') {
-                    $nm = \ltrim($this->stringLitValue($a0), '\\');
-                    $pos = \strrpos($nm, '\\');
-                    $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
-                    if (isset($this->fnDecls[$nm])
-                        || isset($this->fnDecls[$bare])
-                        || (($this->fnAliasByBare[$bare] ?? '') !== '')) {
-                        $known = 1;
-                    }
+                if ($a0->kind === 'StringLiteral'
+                    && $this->functionIsKnown($this->stringLitValue($a0))) {
+                    $known = 1;
                 }
                 return new IntConst($known, Type::bool_());
             }
