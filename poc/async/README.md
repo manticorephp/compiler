@@ -72,10 +72,11 @@ async(function () {
 | `Async\select(array $cases): Selected` | wait for the first ready case (recv or send) |
 | `Async\selectNow(array $cases): ?Selected` | …non-blocking (Go's `default:`) |
 | `Async\selectWithin(float, array): ?Selected` | …with a deadline (Go's `time.After`) |
-| `Async\onSignal(int, callable)` | run a handler at a safe point inside the loop |
 | `Async\shutdownOn(int ...$signals)` | graceful shutdown — cancel the root scope |
-| `Async\supervise(int $n, callable)` | fork N workers, restart the dead, forward SIGTERM |
-| `Async\workers(int $n): int` | fork N shared-nothing workers, unsupervised |
+| `pcntl_signal(int, callable)` | ordinary php; inside `async()` it runs as a task |
+| `Process\supervise(int $n, callable)` | fork N workers, restart the dead, forward SIGTERM |
+| `Process\workers(int $n): int` | fork N shared-nothing workers, unsupervised |
+| `Process\fork/pid/ppid` | the process model — deliberately NOT in `Async\` |
 | `Mutex` — `lock/tryLock/unlock/withLock` | a critical section that SUSPENDS in the middle |
 | `Once::run(callable)` | build a lazy thing exactly once under contention |
 | `Async\awaitAllSettled` / `mapSettled` | collect outcomes instead of failing fast |
@@ -187,7 +188,13 @@ feature.
 
 Inside `async()` the dispatch runs in a **daemon task** in the root scope, so a handler is
 ordinary async code — it can allocate, throw, `spawn()` and suspend. Being a daemon, it does
-not keep the program alive once the real work is done.
+not keep the program alive once the real work is done. There is no async-specific way to
+register one: the scheduler notices a non-empty registry and starts pumping, so plain
+`pcntl_signal()` is all you write.
+
+Process control — `Process\fork`, `Process\workers`, `Process\supervise` — lives beside
+pcntl rather than in `Async\`, because none of it runs a scheduler. The process model sits
+under concurrency, not inside it.
 
 ```php
 Async\async(function () {
