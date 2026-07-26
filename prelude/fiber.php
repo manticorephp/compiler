@@ -40,8 +40,13 @@ class Fiber
     private mixed $valueIn = null;   // resume($v) -> returned by suspend()
     private mixed $valueOut = null;  // suspend($v) -> returned by resume()/start()
     private mixed $ret = null;       // the callback's return value
-    private mixed $pendingEx = null; // uncaught throwable from the callback, re-raised in the resumer
-    private mixed $injectEx = null;  // throw()-injected throwable, raised at the suspend point
+    // ⚠ These two MUST be \Throwable-typed, never `mixed`. A `mixed` property
+    // holds the object NaN-boxed (a CELL); `throw $cell` then reaches a
+    // `catch (SomeClass $e)` whose class-id test dereferences the boxed word as
+    // an object header → SIGSEGV. `catch (\Throwable)` hides it (a catch-all
+    // needs no deref), which is why the plain fiber_throw test never saw it.
+    private ?\Throwable $pendingEx = null; // uncaught throwable from the callback, re-raised in the resumer
+    private ?\Throwable $injectEx = null;  // throw()-injected throwable, raised at the suspend point
 
     public function __construct(callable $callback)
     {

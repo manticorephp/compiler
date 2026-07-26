@@ -292,6 +292,9 @@ final class LowerFromAst implements Pass
     /** Io\Poll — DEMAND-GATED (empty unless the program mentions it). Namespaced
      *  class tree in braced `namespace {}` blocks. */
     public string $ioPollSrc = '';
+    /** Async\ (scheduler / tasks / channels) — DEMAND-GATED. Braced-namespace
+     *  tree like io_poll.php; implies fiberSrc + ioPollSrc. */
+    public string $asyncSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
