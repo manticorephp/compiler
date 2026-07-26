@@ -35,7 +35,7 @@ function __mc_sock_fd(\Socket $s): int
  * boundary. $which:
  *   0 SOL_SOCKET  1 SO_ERROR  2 SO_RCVTIMEO  3 SO_SNDTIMEO  4 AF_INET6
  *   5 O_NONBLOCK  6 F_GETFL   7 F_SETFL      8 SO_LINGER    9 SO_REUSEADDR
- *  10 EWOULDBLOCK 11 EAGAIN  12 EINPROGRESS
+ *  10 EWOULDBLOCK 11 EAGAIN  12 EINPROGRESS 13 ETIMEDOUT
  */
 function __mc_sock_const(int $which): int
 {
