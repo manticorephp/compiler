@@ -97,3 +97,19 @@ class InvalidArgumentException extends LogicException {}
 class OutOfRangeException extends LogicException {}
 class TypeError extends Error {}
 class ValueError extends Error {}
+class AssertionError extends Error {}
+
+/**
+ * `assert($cond, $description)` — php CLI ships zend.assertions=1, so the
+ * assertion is EVALUATED and a falsy result throws AssertionError. (The
+ * `zend.assertions=-1` production mode, where the call compiles away entirely,
+ * has no equivalent here: there is no php.ini.) A string description becomes
+ * the message; a Throwable description is thrown as-is, exactly as php does.
+ */
+function assert(mixed $assertion, mixed $description = null): bool
+{
+    if ($assertion) { return true; }
+    if ($description instanceof Throwable) { throw $description; }
+    if (is_string($description) && $description !== '') { throw new AssertionError($description); }
+    throw new AssertionError('assert(false)');
+}
