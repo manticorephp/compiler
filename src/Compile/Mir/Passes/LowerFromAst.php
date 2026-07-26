@@ -3106,9 +3106,59 @@ final class LowerFromAst implements Pass
     private function receiverClassHint(\Parser\Ast\Expr $obj): string
     {
         if ($obj->kind === 'New') { return \ltrim($obj->class, '\\'); }
-        if ($obj->kind === 'MethodCall') { return $this->methodReturnClassByName($obj->method); }
-        if ($obj->kind === 'Variable') { return $this->localNewClasses[$this->varName($obj)] ?? ''; }
+        if ($obj->kind === 'MethodCall') {
+            // A FLUENT method returns `static` / `self` — the receiver of the
+            // next link is the same class as its own receiver, so recurse
+            // instead of giving up. Without this, the second and later calls of
+            // `$this->addOption(…)->addOption(…)` resolved no params, so their
+            // OMITTED arguments were never filled from the defaults: symfony's
+            // `mixed $default = null` arrived as raw 0, read back as 0.0, and
+            // every VALUE_NONE option threw "Cannot set a default value".
+            //
+            // Resolved against the INNER RECEIVER's class, not by method name:
+            // `addArgument` is fluent on Command and `: void` on
+            // InputDefinition, so any name-wide answer is no answer. The static
+            // class is right even for `static` — all this decides is which
+            // parameter list to pad against, and those are inherited.
+            $inner = $this->receiverClassHint($obj->object);
+            if ($inner !== '') {
+                $rt = $this->methodReturnTypeOn($inner, $obj->method);
+                if ($rt !== null) {
+                    $low = \strtolower(\ltrim($rt, '\\?'));
+                    if ($low === 'self' || $low === 'static') { return $inner; }
+                    $cls = \ltrim($rt, '\\?');
+                    if (isset($this->classDecls[$cls])) { return $cls; }
+                    return '';
+                }
+            }
+            return $this->methodReturnClassByName($obj->method);
+        }
+        if ($obj->kind === 'Variable') {
+            $vn = $this->varName($obj);
+            // `$this` is the class being lowered — the commonest fluent root.
+            if ($vn === 'this') { return $this->currentLowerClass; }
+            return $this->localNewClasses[$vn] ?? '';
+        }
         return '';
+    }
+
+    /** The declared return type of `$method` as resolved from `$class` (walking
+     *  the parent chain, like resolveMethodParams), or null when neither the
+     *  class nor an ancestor declares it. */
+    private function methodReturnTypeOn(string $class, string $method): ?string
+    {
+        $c = $class;
+        while ($c !== '' && isset($this->classDecls[$c])) {
+            $cd = $this->classDecls[$c];
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) === $method) {
+                    return $this->methodDeclReturnType($m);
+                }
+            }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return null;
     }
 
     /**
