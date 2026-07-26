@@ -39,8 +39,9 @@ final class Lexer
     /**
      * Token lexeme - no need for kind narrowing; the keyword text is the
      * lookup. Keywords are recognised by exact lowercase match.
+     * @var array<string>
      */
-    private const KEYWORDS = [
+    private const array KEYWORDS = [
         'abstract', 'and', 'array', 'as', 'break', 'callable', 'case',
         'catch', 'class', 'clone', 'const', 'continue', 'declare',
         'default', 'do', 'echo', 'else', 'elseif', 'empty', 'enddeclare',
