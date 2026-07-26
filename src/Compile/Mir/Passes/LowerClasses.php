@@ -151,14 +151,16 @@ trait LowerClasses
         return null;
     }
 
-    /** Attribute NAMES as written. No namespace resolution — the compiler's own
-     *  attribute lookups are raw string matches, and this inherits that.
+    /** Canonical attribute NAMES. The parser already resolves an attribute name
+     *  to an FQN (`resolveClassName`: leading `\` stripped, `use ... as` aliases
+     *  expanded, current namespace prepended); `attrFqn` only drops the leading
+     *  backslash a `\Foo` spelling would still carry.
      *  @param \Parser\Ast\AttributeNode[] $attrs
      *  @return string[] */
     private function attrNames(array $attrs): array
     {
         $out = [];
-        foreach ($attrs as $at) { $out[] = $at->name; }
+        foreach ($attrs as $at) { $out[] = $this->attrFqn($at); }
         return $out;
     }
 

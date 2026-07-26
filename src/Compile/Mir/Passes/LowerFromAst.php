@@ -98,6 +98,7 @@ final class LowerFromAst implements Pass
     use LowerReify;
     use LowerTypeDefs;
     use LowerSuperglobals;
+    use LowerAttrChecks;
 
     public const NAME = 'lower-from-ast';
 
@@ -1171,10 +1172,8 @@ final class LowerFromAst implements Pass
     private function hasDynamicPropsAttr(array $attributes): bool
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name === 'AllowDynamicProperties'
-                || $name === 'Manticore\\Attr\\AllowDynamicProperties'
-                || $name === 'Attr\\AllowDynamicProperties') {
+            if ($this->attrIsOneOf($attr, ['AllowDynamicProperties',
+                'Manticore\\Attr\\AllowDynamicProperties', 'Attr\\AllowDynamicProperties'])) {
                 return true;
             }
         }
@@ -1189,10 +1188,8 @@ final class LowerFromAst implements Pass
     private function hasStructAttr(array $attributes): bool
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name === 'Struct'
-                || $name === 'Manticore\\Attr\\Struct'
-                || $name === 'Attr\\Struct') {
+            if ($this->attrIsOneOf($attr, ['Struct',
+                'Manticore\\Attr\\Struct', 'Attr\\Struct'])) {
                 return true;
             }
         }
@@ -1409,9 +1406,8 @@ final class LowerFromAst implements Pass
     {
         $out = [];
         foreach ($attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name !== 'RefOut' && $name !== 'Attr\\RefOut'
-                && $name !== 'Manticore\\Attr\\RefOut') { continue; }
+            if (!$this->attrIsOneOf($attr, ['RefOut', 'Attr\\RefOut',
+                'Manticore\\Attr\\RefOut'])) { continue; }
             foreach ($this->attrArgs($attr) as $arg) {
                 if ($arg->kind === 'StringLiteral') { $out[$this->strLitValue($arg)] = true; }
             }
@@ -1419,20 +1415,13 @@ final class LowerFromAst implements Pass
         return $out;
     }
 
-    /** AttributeNode fields via a typed param — a base-typed read resolves by
-     *  OFFSET under self-host and picks the wrong slot. */
-    private function attrName(\Parser\Ast\AttributeNode $a): string { return $a->name; }
-    /** @return \Parser\Ast\Expr[] */
-    private function attrArgs(\Parser\Ast\AttributeNode $a): array { return $a->args; }
-
     /** A param-position `#[RefOut]` (no arg — marks THIS param). Read through a
      *  typed `$p` so `->attributes` resolves by name, not a base offset. */
     private function paramHasRefOutAttr(\Parser\Ast\Param $p): bool
     {
         foreach ($p->attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name === 'RefOut' || $name === 'Attr\\RefOut'
-                || $name === 'Manticore\\Attr\\RefOut') { return true; }
+            if ($this->attrIsOneOf($attr, ['RefOut', 'Attr\\RefOut',
+                'Manticore\\Attr\\RefOut'])) { return true; }
         }
         return false;
     }
@@ -1443,9 +1432,8 @@ final class LowerFromAst implements Pass
     {
         $out = [];
         foreach ($attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name !== 'CellArg' && $name !== 'Attr\\CellArg'
-                && $name !== 'Manticore\\Attr\\CellArg') { continue; }
+            if (!$this->attrIsOneOf($attr, ['CellArg', 'Attr\\CellArg',
+                'Manticore\\Attr\\CellArg'])) { continue; }
             foreach ($this->attrArgs($attr) as $arg) {
                 if ($arg->kind === 'StringLiteral') { $out[$this->strLitValue($arg)] = true; }
             }
@@ -1457,9 +1445,8 @@ final class LowerFromAst implements Pass
     private function paramHasCellArgAttr(\Parser\Ast\Param $p): bool
     {
         foreach ($p->attributes as $attr) {
-            $name = \ltrim($this->attrName($attr), '\\');
-            if ($name === 'CellArg' || $name === 'Attr\\CellArg'
-                || $name === 'Manticore\\Attr\\CellArg') { return true; }
+            if ($this->attrIsOneOf($attr, ['CellArg', 'Attr\\CellArg',
+                'Manticore\\Attr\\CellArg'])) { return true; }
         }
         return false;
     }
@@ -1470,10 +1457,10 @@ final class LowerFromAst implements Pass
     private function ffiSymbolOf(array $attributes): ?string
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name !== 'Symbol' && $name !== 'Ffi\\Symbol') { continue; }
-            if ($attr->args === []) { continue; }
-            $arg = $attr->args[0];
+            if (!$this->attrIsOneOf($attr, ['Symbol', 'Ffi\\Symbol'])) { continue; }
+            $args = $this->attrArgs($attr);
+            if ($args === []) { continue; }
+            $arg = $args[0];
             // Read `->value` through a StringLiteral-typed param: `$arg` is a
             // base-`Expr` here, and the subclass `value` field sits past the
             // base fields, so a base-typed read picks the wrong offset under
@@ -1488,8 +1475,7 @@ final class LowerFromAst implements Pass
     private function ffiIsWeak(array $attributes): bool
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name === 'Weak' || $name === 'Ffi\\Weak') { return true; }
+            if ($this->attrIsOneOf($attr, ['Weak', 'Ffi\\Weak'])) { return true; }
         }
         return false;
     }
