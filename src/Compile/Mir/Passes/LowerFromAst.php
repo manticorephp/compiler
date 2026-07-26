@@ -260,6 +260,11 @@ final class LowerFromAst implements Pass
      */
     private array $stableCallables = [];
 
+    /** Declared parameter names of the body being lowered, in order. Backs the
+     *  `func_num_args()` / `func_get_arg($k)` fold.
+     *  @var string[] */
+    private array $currentLowerParams = [];
+
     /** The str_set's SECOND candidate name, keyed the same way. Two flat maps,
      *  not one map of pairs — see {@see $stableCallables}.
      *  @var array<string, string> */
@@ -1249,6 +1254,7 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
+        $this->setCurrentLowerParams($m->params);
         $this->scanStableCallables($m->body->statements);
         $this->localNewClasses = [];
         // Inside a `#[TypeDef]` body `$this` IS the carrier: there is no object to
@@ -2174,6 +2180,18 @@ final class LowerFromAst implements Pass
      *
      * @param \Parser\Ast\Stmt[] $stmts
      */
+    /**
+     * Record the DECLARED parameter names of the body being lowered, in order,
+     * so `func_num_args()` / `func_get_arg($k)` resolve against them.
+     *
+     * @param \Parser\Ast\Param[] $params
+     */
+    private function setCurrentLowerParams(array $params): void
+    {
+        $this->currentLowerParams = [];
+        foreach ($params as $p) { $this->currentLowerParams[] = $p->name; }
+    }
+
     private function scanStableCallables(array $stmts): void
     {
         $this->stableCallables = [];
@@ -2356,8 +2374,30 @@ final class LowerFromAst implements Pass
                 $known = isset($this->knownClassNames[$cn]) || isset($this->traitTable[$cn]);
                 return $known ? null : false;
             }
+            // `extension_loaded('X')`. A whole-program build has a FIXED set of
+            // built-in extensions — nothing can be dlopen'd later — so the answer
+            // is a compile-time constant. It matters because the polyfills gate
+            // on it: `if (extension_loaded('mbstring')) { … }` in
+            // symfony/polyfill-mbstring must fold FALSE so the polyfill's own
+            // implementation is the one that compiles, and pcntl's absence must
+            // drop a branch that names functions this build has no definition for.
+            if ($fn === 'extension_loaded' && $a0->kind === 'StringLiteral') {
+                return $this->extensionIsBuiltIn(\strtolower($this->stringLitValue($a0)));
+            }
         }
         return null;
+    }
+
+    /**
+     * The extensions a compiled binary genuinely carries. `pcre` is linked
+     * (pcre2), `json` / `ctype` are built in, `openssl` rides the TLS stack.
+     * Everything else — mbstring, intl, pcntl, dom — is absent, and a program
+     * that asks gets the honest answer rather than a link-time surprise.
+     */
+    private function extensionIsBuiltIn(string $ext): bool
+    {
+        return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
+            || $ext === 'openssl' || $ext === 'core' || $ext === 'standard';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),

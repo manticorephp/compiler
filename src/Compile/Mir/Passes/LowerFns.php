@@ -93,6 +93,7 @@ trait LowerFns
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->constCallables = [];
+        $this->setCurrentLowerParams($decl->params);
         $this->scanStableCallables($decl->body->statements);
         // `#[RefOut('a', 'b')]` names the pure-output by-ref params (portable
         // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side

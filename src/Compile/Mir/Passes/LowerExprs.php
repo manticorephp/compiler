@@ -354,6 +354,36 @@ trait LowerExprs
                 }
                 return new NullConst(Type::null_());
             }
+            // `func_num_args()` / `func_get_arg($k)` — resolved against the
+            // enclosing function's DECLARED parameters.
+            //
+            // Zend counts what the caller actually PASSED, which a compiled
+            // binary cannot know: an omitted optional arrives already filled
+            // from its default, indistinguishable from one passed explicitly.
+            // Answering with the declared count reads every call as "all
+            // arguments given". That is the useful direction — symfony's
+            // `if (1 > \func_num_args()) { trigger_deprecation(...) }` guards are
+            // BC shims for callers that omit a new parameter, and this build
+            // always fills it — and it is the only one that keeps
+            // `func_get_arg($k)` a real value rather than a stub.
+            // Matched on the BARE name: a namespaced file qualifies an
+            // unqualified call, so `func_get_arg(` inside
+            // `namespace Symfony\…;` arrives as `Symfony\…\func_get_arg`.
+            $fnBarePos = \strrpos($fn, '\\');
+            $fnBare = $fnBarePos === false ? $fn : \substr($fn, $fnBarePos + 1);
+            if ($fnBare === 'func_num_args' && \count($expr->args) === 0) {
+                return new IntConst(\count($this->currentLowerParams), Type::int_());
+            }
+            if ($fnBare === 'func_get_arg' && \count($expr->args) === 1
+                && $expr->args[0]->kind === 'IntLiteral') {
+                $idx = (int)$expr->args[0]->value;
+                if ($idx >= 0 && $idx < \count($this->currentLowerParams)) {
+                    return new LoadLocal($this->currentLowerParams[$idx], Type::unknown());
+                }
+                // Out of range: php throws ArgumentCountError. Nothing here can
+                // hold that value, so hand back null rather than a wild read.
+                return new NullConst(Type::null_());
+            }
             // `function_exists("Name")` → compile-time 1/0 against the
             // declared functions (incl. FFI externs / use-function
             // aliases). A non-literal arg conservatively folds to false.
