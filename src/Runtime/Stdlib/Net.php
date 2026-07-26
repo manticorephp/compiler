@@ -345,19 +345,64 @@ function __mc_resolve_async(string $host): string
     if ($viaHosts !== '') {
         return $viaHosts;
     }
-    $resp = \__mc_dns_query($host, 1);      // QTYPE A
+    // A cache lives in the SCHEDULER (prelude), reached through the hook: a stdlib
+    // static holding an assoc is the known repr trap, and the scheduler's lifetime is
+    // exactly the right scope for a per-run cache. Entries carry their TTL.
+    $cached = \__mc_resolve_cache_get($host);
+    if ($cached !== '') {
+        return $cached;
+    }
+    $ip = \__mc_resolve_query($host, 1);        // A
+    if ($ip === '') {
+        // AAAA next: an IPv6-only name is common enough (and the literal we return
+        // goes straight back into getaddrinfo, which takes v6 literals as happily as
+        // v4 — so nothing downstream needs to know).
+        $ip = \__mc_resolve_query($host, 28);   // AAAA
+    }
+    return $ip;
+}
+
+/**
+ * One QTYPE's worth of resolution: query, take the first address record, and cache it
+ * under its own TTL. '' when the type has no answer.
+ */
+function __mc_resolve_query(string $host, int $qtype): string
+{
+    $resp = \__mc_dns_query($host, $qtype);
     if ($resp === '') {
         return '';
     }
     /** @var array<int,array<string,mixed>> $recs */
-    $recs = \__mc_dns_parse($resp, 1);
+    $recs = \__mc_dns_parse($resp, $qtype);
     foreach ($recs as $rec) {
-        $ip = (string)($rec['ip'] ?? '');
+        $ip = $qtype === 28 ? (string)($rec['ipv6'] ?? '') : (string)($rec['ip'] ?? '');
         if ($ip !== '') {
+            $ttl = (int)($rec['ttl'] ?? 0);
+            \__mc_resolve_cache_put($host, $ip, $ttl > 0 ? $ttl : 30);
             return $ip;
         }
     }
     return '';
+}
+
+/** Cached address for $host, or '' — see {@see __mc_resolve_async()} on the home. */
+function __mc_resolve_cache_get(string $host): string
+{
+    $g = \Runtime\AsyncHook::dnsGetter();
+    if ($g === null) {
+        return '';
+    }
+    return (string)$g($host);
+}
+
+/** Remember $host → $ip for $ttl seconds (no-op with no scheduler). */
+function __mc_resolve_cache_put(string $host, string $ip, int $ttl): void
+{
+    $p = \Runtime\AsyncHook::dnsPutter();
+    if ($p === null) {
+        return;
+    }
+    $p($host, $ip, $ttl);
 }
 
 function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $timeout = 0.0)

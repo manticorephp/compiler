@@ -1350,6 +1350,18 @@ namespace Async {
         private ?Task $taskHead = null;
         private int $nextTaskId = 0;
 
+        /**
+         * Resolver cache, host → address and host → expiry (two parallel assocs, so
+         * neither holds a nested array). It lives HERE because the stdlib cannot own
+         * an assoc in a static, and because a scheduler run is exactly the lifetime a
+         * per-program DNS cache wants: `async()` drops the singleton on the way out,
+         * so nothing survives into the next run to go stale.
+         * @var array<string,string> $dnsIp
+         * @var array<string,float>  $dnsExp
+         */
+        private array $dnsIp = [];
+        private array $dnsExp = [];
+
         private function __construct()
         {
             $this->reactor = new \Io\Poll\Context(\Io\Poll\Backend::Auto);
@@ -1411,6 +1423,40 @@ namespace Async {
             $task->queued = true;
             $this->ready[] = $task;
             return $task;
+        }
+
+        /**
+         * Cached address for $host, or '' when absent or expired. Called from the
+         * stdlib resolver through the netpoller hook.
+         */
+        public function dnsLookup(string $host): string
+        {
+            if (!isset($this->dnsIp[$host])) {
+                return '';
+            }
+            $exp = $this->dnsExp[$host] ?? 0.0;
+            if ($exp <= \microtime(true)) {
+                unset($this->dnsIp[$host]);
+                unset($this->dnsExp[$host]);
+                return '';
+            }
+            return $this->dnsIp[$host];
+        }
+
+        /**
+         * Remember $host → $ip for $ttl seconds. The TTL is the record's own, capped
+         * at 5 minutes: a long TTL on a value we cannot invalidate would outlive a
+         * real deployment change, and a resolver cache is a latency optimisation, not
+         * a source of truth.
+         */
+        public function dnsStore(string $host, string $ip, int $ttl): void
+        {
+            if ($host === '' || $ip === '') {
+                return;
+            }
+            $secs = $ttl > 300 ? 300 : $ttl;
+            $this->dnsIp[$host] = $ip;
+            $this->dnsExp[$host] = \microtime(true) + (float)$secs;
         }
 
         /**
@@ -1496,6 +1542,8 @@ namespace Async {
                 function (\Resource $s, float $t): bool { return $this->waitReadableWithin($s, $t); },
                 function (\Resource $s, float $t): bool { return $this->waitWritableWithin($s, $t); },
                 function (float $t): void { $this->sleep($t); },
+                function (string $host): string { return $this->dnsLookup($host); },
+                function (string $host, string $ip, int $ttl): void { $this->dnsStore($host, $ip, $ttl); },
             );
         }
 
