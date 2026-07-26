@@ -35,7 +35,7 @@ function __mc_sock_fd(\Socket $s): int
  * boundary. $which:
  *   0 SOL_SOCKET  1 SO_ERROR  2 SO_RCVTIMEO  3 SO_SNDTIMEO  4 AF_INET6
  *   5 O_NONBLOCK  6 F_GETFL   7 F_SETFL      8 SO_LINGER    9 SO_REUSEADDR
- *  10 EWOULDBLOCK 11 EAGAIN
+ *  10 EWOULDBLOCK 11 EAGAIN  12 EINPROGRESS
  */
 function __mc_sock_const(int $which): int
 {
@@ -50,6 +50,7 @@ function __mc_sock_const(int $which): int
     static $soReuseAddr = 0;
     static $eWouldBlock = 0;
     static $eAgain = 0;
+    static $eInProgress = 0;
 
     if ($ready === 0) {
         $isDarwin = \__mc_host_is_darwin();
@@ -65,6 +66,7 @@ function __mc_sock_const(int $which): int
         $soReuseAddr = $isDarwin ? 4 : 2;
         $eWouldBlock = $isDarwin ? 35 : 11;
         $eAgain = $isDarwin ? 35 : 11;
+        $eInProgress = $isDarwin ? 36 : 115;
         $ready = 1;
     }
 
@@ -79,7 +81,8 @@ function __mc_sock_const(int $which): int
     if ($which === 8) { return $soLinger; }
     if ($which === 9) { return $soReuseAddr; }
     if ($which === 10) { return $eWouldBlock; }
-    return $eAgain;
+    if ($which === 11) { return $eAgain; }
+    return $eInProgress;
 }
 
 /**

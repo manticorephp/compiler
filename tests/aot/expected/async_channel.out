@@ -1,0 +1,5 @@
+unbuffered sum: 15
+buffered: abcde
+fan-in total: 120
+select sum: 10
+done

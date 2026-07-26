@@ -444,7 +444,23 @@ trait LowerClasses
             // The origin already owns the one slot (see above) — a second global
             // per specialization is exactly the bug.
             if ($this->isReifiedDecl($decl)) { continue; }
-            $def = $prop->default !== null ? $this->lowerExpr($prop->default) : new IntConst(0, Type::int_());
+            // A CELL-typed cell (`mixed`) carries its type in a NaN tag, so its
+            // null must be the BOXED null, not raw 0 — otherwise the untouched
+            // property reads back as int 0 and `=== null` is FALSE for a value
+            // nobody ever assigned. {@see MemoryAbi::CELL_NULL}
+            $spt = $this->staticPropTypes[$decl->name . '::' . $prop->name] ?? null;
+            $isCellProp = $spt !== null
+                && ($spt->kind === Type::KIND_CELL || $spt->kind === Type::KIND_UNKNOWN);
+            if ($prop->default === null) {
+                $def = $isCellProp
+                    ? new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_())
+                    : new IntConst(0, Type::int_());
+            } else {
+                $def = $this->lowerExpr($prop->default);
+                if ($isCellProp && $def->kind === Node::KIND_NULL_CONST) {
+                    $def = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
+                }
+            }
             // A PRELUDE class's cell must coalesce, not collide: the prelude is
             // compiled into every module, so stdlib.o and the user's .o both
             // define this symbol ({@see Module::$globalIsPrelude}).
