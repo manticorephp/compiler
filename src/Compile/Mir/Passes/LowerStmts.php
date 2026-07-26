@@ -111,16 +111,24 @@ trait LowerStmts
     private function lowerBlockNode(\Parser\Ast\Block $block): Block
     {
         $stmts = [];
+        $dead = false;
         foreach ($block->statements as $stmt) {
+            // A LABEL re-enters the flow: `goto` may jump straight to it, so the
+            // statements it heads are live no matter what precedes them (the
+            // canonical early-exit idiom `return "pos"; neg: return "neg";`).
+            // Skipping a label emitted a `br` to a block that was never defined.
+            if ($dead && $stmt->kind !== 'Label') { continue; }
+            $dead = false;
             $lowered = $this->lowerStmt($stmt);
             $stmts[] = $lowered;
             // Drop statements after an UNCONDITIONAL terminator (php treats
-            // them as dead too). Critical when a folded static guard —
-            // `if (!function_exists('pcntl_signal')) { return; }` — reduces to a
-            // bare `return`, leaving trailing code that names symbols this build
-            // has no definition for (`[\SIGINT, …]`): never lowering it avoids a
-            // spurious "unknown constant" on a branch that can never run.
-            if ($this->nodeAlwaysTerminates($lowered)) { break; }
+            // them as dead too), up to the next label. Critical when a folded
+            // static guard — `if (!function_exists('pcntl_signal')) { return; }`
+            // — reduces to a bare `return`, leaving trailing code that names
+            // symbols this build has no definition for (`[\SIGINT, …]`): never
+            // lowering it avoids a spurious "unknown constant" on a branch that
+            // can never run.
+            if ($this->nodeAlwaysTerminates($lowered)) { $dead = true; }
         }
         return new Block($stmts, Type::void());
     }
