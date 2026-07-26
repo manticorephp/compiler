@@ -404,7 +404,12 @@ function __mc_stream_fill(\Resource $s, int $want): int
                 \Runtime\Libc\free($buf);
                 return 0;
             }
-            if (\__mc_errno() !== \__mc_sock_const(10)) {
+            // Park on would-block. The errno test is deliberately NEGATIVE: only a
+            // RECOGNISED hard error stops the reader. errno is not reliably set by
+            // every recv(2) failure path, and treating an unknown value as fatal
+            // ended a read at zero bytes with the data still in flight.
+            $e = \__mc_errno();
+            if ($e !== 0 && $e !== \__mc_sock_const(10) && $e !== \__mc_sock_const(11) && $e !== 4) {
                 \Runtime\Libc\free($buf);
                 return 0;
             }
@@ -1261,9 +1266,12 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
                 $n = \__mc_transport_send($stream, $chunk, $len - $total);
                 if ($n > 0) { $total = $total + $n; continue; }
                 if ($n === 0) { break; }
-                if ($stream->kind === \Resource::KIND_SOCKET
-                    && \__mc_errno() !== \__mc_sock_const(10)) {
-                    break;
+                if ($stream->kind === \Resource::KIND_SOCKET) {
+                    $we = \__mc_errno();
+                    if ($we !== 0 && $we !== \__mc_sock_const(10)
+                        && $we !== \__mc_sock_const(11) && $we !== 4) {
+                        break;   // EPIPE / ECONNRESET — a real error, not back-pressure
+                    }
                 }
                 $h($stream);
                 if ($stream->kind !== \Resource::KIND_SOCKET) {
