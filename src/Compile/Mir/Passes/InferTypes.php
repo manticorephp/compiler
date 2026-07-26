@@ -143,6 +143,12 @@ final class InferTypes implements Pass
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
     private array $forcedCellElemLocals = [];
+    /** fn name => [local name => true]: locals handed BY-REF to a callee that
+     *  appends a FOREIGN element type. Kept apart from {@see $forcedCellElemLocals}
+     *  because this one also disqualifies a RECORD local — an all-string-key
+     *  literal keeps per-field types, and the callee is about to write a field
+     *  the record has no slot repr for. {@see scanByRefElemWiden} */
+    private array $byRefCellElemLocals = [];
     /** @var array<string,bool> array locals whose element is an inner array built
      *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
      *  vec[unknown] (raw). Paired with {@see $nestedScalarStoreLocals}. */
@@ -325,6 +331,22 @@ final class InferTypes implements Pass
         $this->scanCellElemProps($module);
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
+        }
+        // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
+        // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
+        // MIXED array: left alone, the callee is narrowed to the caller's
+        // vec[int] and then writes a raw string pointer into an int buffer.
+        // Widen the CALLER's local to a cell element so both sides agree.
+        // Runs FIRST, before any call-site param refinement below: those scans
+        // pin an erased param to the element they observe ONCE — after that the
+        // param is concrete, no longer a candidate, and never re-refines to the
+        // widened type. Bounded: a seed only widens toward cell.
+        $guard = 0;
+        while ($guard < 4 && $this->scanByRefElemWiden($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
         }
         // Call-site element inference: refine a bare-`array` param to vec[T]
         // when every call passes an array arg with the SAME scalar element T —

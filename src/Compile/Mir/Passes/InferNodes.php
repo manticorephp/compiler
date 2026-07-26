@@ -239,6 +239,29 @@ trait InferNodes
                 $this->localTypes[$name] = Type::vec(Type::cell());
             }
         }
+        // A local handed BY-REF to a callee that APPENDS a foreign element
+        // ({@see scanByRefElemWiden}). Unlike the store-driven force above this
+        // one overrides a RECORD: `$b = ['a' => 1]` is an untouched all-string-key
+        // literal HERE, so the record shape survives — but the callee is about to
+        // write `$b['note'] = 'hi'` through the by-ref param, and the record's
+        // per-field int slot has no room for the string. A record is a shape
+        // claim about the WHOLE local, and a by-ref callee is part of that whole.
+        foreach ($this->byRefCellElemLocals[$fn->name] ?? [] as $name => $unused) {
+            unset($this->recordLocals[$name]);
+            // A record literal is string-keyed by definition; once it stops being
+            // a record it is a plain ASSOC. Say so, because the literal-binding
+            // retype ({@see inferStoreLocal}) reads assocLocals for the container
+            // shape — without this `['a'=>1]` re-emerges as a vec[cell] and the
+            // string key lands under a positional index.
+            if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
+            $this->cellElemLocals[$name] = true;
+            if (isset($this->assocLocals[$name])) {
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+                $this->localTypes[$name] = Type::assoc($key, Type::cell());
+            } else {
+                $this->localTypes[$name] = Type::vec(Type::cell());
+            }
+        }
         // Nested-subscript mixed array: a local whose element is an inner array
         // built from an empty `[]` (→ vec[unknown]) that then receives a nested
         // SCALAR store (`$a[k][…] = "v"`) — the scalar would be written raw into
