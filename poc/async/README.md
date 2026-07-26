@@ -54,18 +54,66 @@ async(function () {
 
 | symbol | role |
 |---|---|
-| `Async\async(callable)` | run a program on the engine; the only entry point |
+| `Async\async(callable): mixed` | run a program on the engine and return its value |
+| `Async\group(callable): mixed` | open a child scope, join it, return the body's value |
 | `Async\spawn(callable, ...$args): Task` | start a task in the calling task's scope |
+| `Async\timeout(float, callable): mixed` | run a scope under a deadline; `TimeoutException` on expiry |
 | `Async\awaitAll(Task ...): array` | all results by input position; fail-fast |
 | `Async\awaitAny(Task ...): mixed` | first success, else `AggregateError` |
 | `Async\delay(float $seconds)` | suspend without blocking the loop |
 | `Async\channel(int $cap = 0): Channel` | CSP channel; 0 = unbuffered rendezvous |
 | `Async\select(Channel[]): [idx, value, ok]` | receive from whichever is ready first |
 | `Async\workers(int $n): int` | fork N shared-nothing workers (call before `async()`) |
-| `TaskGroup::run(callable)` | open a scope, join every child before returning |
 | `Task::await(): mixed` | wait for one task |
-| `Context::throwIfCancelled()` | cancellation checkpoint for a non-suspending loop |
+| `Task::awaitWithin(float): mixed` | …with a deadline; cancels the task on expiry |
+| `TaskGroup::run(callable)` | what `group()` wraps |
+| `TaskGroup::token(): CancellationToken` | the read-only half of this scope's cancellation |
+| `TaskGroup::cancel()` | the write half |
+| `Context::token()/isCancelled()/throwIfCancelled()` | the calling task's scope, ambiently |
+| `Context::deadline()/remaining()` | the effective deadline, ambiently |
 | `Async\accept/read/write/connect/close` | raw fd-level socket I/O (the hot path) |
+
+### Scopes, deadlines, cancellation
+
+`async()` and `group()` both return the body's value, so a concurrent block reads like an
+ordinary call:
+
+```php
+$rows = Async\async(fn() => Async\group(function (TaskGroup $g) {
+    $a = $g->spawn(fn() => fetch(1));
+    $b = $g->spawn(fn() => fetch(2));
+    return [$a->await(), $b->await()];
+}));
+```
+
+`timeout()` is a scope with a deadline. On expiry the body **and everything it spawned** is
+cancelled and joined before `TimeoutException` is thrown — a timeout that leaves work running
+is not a timeout. Nesting only ever tightens: a 30 s inner scope inside a 2 s outer one still
+dies at 2 s.
+
+```php
+$page = Async\timeout(2.0, fn() => file_get_contents($url));
+$row  = $task->awaitWithin(0.5);          // per-task deadline
+Async\Context::remaining();               // seconds left, ambiently; null = unbounded
+```
+
+Cancellation has two halves of one object rather than a second mechanism to keep in sync with
+the scope tree: the **scope is the source** (`$g->cancel()`), and a **`CancellationToken` is
+its read-only view** (`$g->token()`, or `Context::token()` from inside a task). Pass the token
+into a helper to let it observe cancellation without granting it the power to cancel.
+
+```php
+Async\group(function (TaskGroup $g) {
+    $tok = $g->token();
+    $tok->onCancel(fn() => $handle->release());   // fires once, inside cancel()
+    $g->spawn(function () use ($tok) {
+        while (!$tok->isCancelled()) { step(); }  // CPU-bound: no suspend point to throw at
+    });
+});
+```
+
+A task that *does* suspend needs none of that — cancellation is delivered as a
+`CancelledException` at its suspend point.
 
 ## Transparent I/O
 
@@ -138,3 +186,9 @@ headers) — legitimate for the TechEmpower `plaintext` case, not a full framewo
 Async `getaddrinfo` · send-`select` (receive-select only so far) · `writev`/`io_uring` to
 break the 2-syscall floor · off-thread file I/O · shared-memory multithreading (a future
 compiler superset). See the async roadmap memory for the full plan.
+
+**`#[Async]`** — an attribute that wraps a function body in `async()` so `spawn()` works at
+its top level, with the call yielding a `Task` of the return type. Unlike everything above it
+is *not* implementable as a library: it needs the compiler to rewrite the function and to
+carry a generic `Task<T>` through inference, which today has no way to express the binding.
+Worth doing after the runtime settles, not before.
