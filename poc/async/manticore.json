@@ -41,6 +41,27 @@
       "output": "poc/async/http_transparent_bin",
       "entry": "poc/async/http_transparent.php",
       "exclude": []
+    },
+    {
+      "name": "async-capture",
+      "src": "poc/async/src",
+      "output": "poc/async/capture_bin",
+      "entry": "poc/async/capture.php",
+      "exclude": []
+    },
+    {
+      "name": "async-spawn",
+      "src": "poc/async/src",
+      "output": "poc/async/spawn_bin",
+      "entry": "poc/async/spawncost.php",
+      "exclude": []
+    },
+    {
+      "name": "async-io",
+      "src": "poc/async/src",
+      "output": "poc/async/async_io",
+      "entry": "poc/async/async-io.php",
+      "exclude": []
     }
   ]
 }
