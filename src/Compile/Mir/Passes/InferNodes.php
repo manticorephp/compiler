@@ -127,6 +127,22 @@ trait InferNodes
         return false;
     }
 
+    /**
+     * Whether every atom of a union is an object — the one union shape that
+     * rides as a bare pointer. Any other mix (a string beside an array, an
+     * object beside a string, a scalar beside anything) has no common machine
+     * representation and travels NaN-boxed.
+     */
+    private function unionIsAllObj(Type $t): bool
+    {
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return false; }
+        foreach ($atoms as $a) {
+            if ($a->kind !== Type::KIND_OBJ) { return false; }
+        }
+        return true;
+    }
+
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
@@ -137,8 +153,23 @@ trait InferNodes
         $this->kindAliasOf = [];
         $this->currentParamTypes = [];
         foreach ($fn->params as $p) {
-            $this->localTypes[$p->name] = $p->type;
-            $this->currentParamTypes[$p->name] = $p->type;
+            // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
+            // arrives NaN-BOXED — the call site emits __manticore_box_array /
+            // box_ptr for it, because no single machine representation covers the
+            // atoms. The slot is therefore a CELL and every read has to unbox by
+            // tag. Left typed KIND_UNION the readers took the all-object path
+            // (EmitLlvmMemory: "a union value is a bare object pointer") and
+            // inttoptr'd the tag bits: `count($m)` on a `string|array` param
+            // SIGSEGV'd, `implode()` produced nothing, and a raw `$m = [$m]` store
+            // left the slot sometimes-cell / sometimes-raw. An ALL-OBJECT union
+            // (`A|B`) genuinely is a bare pointer and keeps its union type — the
+            // virtual-dispatch path reads its atoms.
+            $pt = $p->type;
+            if ($pt->kind === Type::KIND_UNION && !$this->unionIsAllObj($pt)) {
+                $pt = Type::cell();
+            }
+            $this->localTypes[$p->name] = $pt;
+            $this->currentParamTypes[$p->name] = $pt;
         }
         // Closure body: seed its capture params (the first N) with the value
         // types observed at the capture site (recorded in pass 1). Safe — this
@@ -643,6 +674,27 @@ trait InferNodes
             $this->localTypes[$node->name] = $pt;
             $node->type = $pt;
             return $pt;
+        }
+        // A CONCRETE value stored into a CELL param slot. The caller NaN-boxed
+        // that argument (a `string|array` / `mixed` param has no single machine
+        // representation), so the slot is a cell on every path the store does not
+        // take. Re-typing the local to the stored value's concrete type made the
+        // two paths disagree: the reader took the raw path and inttoptr'd the tag
+        // bits of the boxed value. Keep the slot a cell and let emitStoreLocal's
+        // box-back tag the stored value.
+        //
+        //     function f(string|array $m) {          // symfony FormatterHelper
+        //         if (!is_array($m)) { $m = [$m]; }  // raw vec into a cell slot
+        //         return implode('|', $m);           // read the array arg as a ptr
+        //     }
+        //
+        // count() SIGSEGV'd, implode() returned ''.
+        if ($pt !== null && $pt->kind === Type::KIND_CELL
+            && $valueType->kind !== Type::KIND_CELL
+            && $valueType->kind !== Type::KIND_UNKNOWN) {
+            $this->localTypes[$node->name] = Type::cell();
+            $node->type = Type::cell();
+            return $node->type;
         }
         // An inline `/** @var T $x */` on the binding is authoritative: seed the
         // slot with the declared type (retyping an array-literal init to match
