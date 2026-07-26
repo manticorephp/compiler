@@ -12,7 +12,7 @@ try {
     $ctx = new Context(Backend::Kqueue);
 } catch (\Io\Poll\BackendUnavailableException $e) {
     echo "kqueue: unavailable on this host\n";
-    exit;
+    exit(0);   // NB: bare `exit;` does not lower yet — "unknown constant exit"
 }
 echo "backend: ", $ctx->getBackend()->name, "\n";
 echo "edge: ", ($ctx->getBackend()->supportsEdgeTriggering() ? "yes" : "no"), "\n";
