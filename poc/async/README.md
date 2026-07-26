@@ -229,14 +229,22 @@ Async\Context::withValue('request-id', $id, function () {
 ## Transparent I/O
 
 Ordinary stream calls suspend the fiber instead of the process when a scheduler is running
-— `stream_socket_accept`, `fread`/`fgets`/`stream_get_contents`, `fwrite`, `fclose`, and
-everything layered on them (including `file_get_contents('https://…')`). Network *setup* is
-async too: DNS aside, `connect(2)` runs non-blocking and the TLS handshake is driven through
-`WANT_READ`/`WANT_WRITE` parks, so two spawned HTTPS fetches overlap end-to-end rather than
-serialising on their handshakes.
+— `stream_socket_accept`, `fread`/`fgets`/`stream_get_contents`, `fwrite`, `fclose`,
+`stream_select`/`socket_select`, `sleep`/`usleep`, and everything layered on them (including
+`file_get_contents('https://…')`). Network *setup* is async too — **name resolution included**:
+`connect(2)` runs non-blocking, the TLS handshake is driven through `WANT_READ`/`WANT_WRITE`
+parks, and a hostname is resolved over the netpoller (`/etc/hosts`, then an A query over a
+parked UDP exchange, falling back to the blocking `getaddrinfo` walk when it cannot answer).
+Two spawned HTTPS fetches to DIFFERENT hosts run 0.17s vs 0.34s sequential.
 
-The seam is `\Runtime\AsyncHook` (three callbacks installed by the scheduler; one null check
-per would-block when no scheduler is running).
+`stream_set_timeout()` and `stream_socket_accept($srv, $timeout)` are honoured under the
+scheduler: the wait is BOUNDED, so a hung peer no longer wedges the fiber forever (an
+unbounded park was the old behaviour, and a timeout used to fall back to a blocking `poll(2)`
+that stalled every other task).
+
+The seam is `\Runtime\AsyncHook` (five callbacks installed by the scheduler — readable,
+writable, close, bounded-readable, sleep; one null check per would-block when no scheduler is
+running).
 
 Plain streams **are** the API. `Async\read/write/accept/connect/close` also exist, bypassing
 the stream layer for raw `recv`/`send` on the fd — worth roughly 2× when you are counting
@@ -257,13 +265,25 @@ async(function () {
 
 **Regular-file I/O.** `O_NONBLOCK` is a no-op for regular files on both Linux and macOS, and
 there is no thread pool / POSIX aio / io_uring here — so `file_get_contents('/path')`,
-`fopen()` + `fread()` on a file handle, `stat`, and directory walks block the whole loop.
-Keep them off the hot path. (Go hides this behind extra OS threads; doing the same needs a
-thread-safe arena + rc, which is its own epic.)
+`fopen()` + `fread()` on a file handle, `stat`, and directory walks block the whole loop for
+the duration of the call. Measured on a 64 MB page-cache-hot file: one `fread($h, 64MB)`
+stalls every other task **15-25 ms**; reading it in 1 MB chunks with a yield between them
+keeps the worst gap at **~2 ms**. So for anything big use
 
-Blocking DNS is the remaining network gap: `getaddrinfo(3)` still runs synchronously. The
-pieces for an async resolver already exist (`__mc_dns_query` in `src/Runtime/Stdlib/Dns.php`
-speaks DNS over a UDP `\Resource`, which the netpoller already suspends on).
+```php
+$data = Async\readFile('/path/to/big');       // chunked + yields, cancellation-aware
+Async\writeFile('/path/out', $data);
+```
+
+A fork+socketpair worker pool was measured against this and rejected: it copies every byte
+through a socket, which for a hot read costs more than the read, and it only pays off on a
+genuinely blocking (cold / networked) filesystem. Threads stay out entirely — non-atomic rc,
+a non-thread-safe arena and a process-global exception slot.
+
+`stream_select` under the scheduler is a POLLING park (poll(2) with a zero timeout plus an
+exponential-backoff fiber sleep, 0.2 ms → 10 ms), not a reactor registration: a task holds one
+per-fd waiter slot while a select waits on N fds. Nothing hot goes through it — the read /
+write / accept paths use the reactor directly.
 
 ## Examples
 
@@ -278,6 +298,12 @@ poc/async/http_server_bin     # the same server on the raw Async\read/write path
 poc/async/load_client_bin     # native async load client
 poc/async/spawncost_bin       # spawn/join microbench
 ```
+
+```bash
+bin/manticore compile poc/async/tls_async_smoke.php -o /tmp/tls_smoke && /tmp/tls_smoke
+```
+is the NETWORK-dependent check (out of the offline suite): two HTTPS fetches to different
+hosts, overlapped, plus `dns_get_record` over the parked UDP exchange.
 
 Regression coverage lives in the suite: `tests/aot/cases/async_*.php`
 (`bash tests/aot/run.sh -k async`). They are manticore-only — `php` has no `Io\Poll`, so
@@ -301,9 +327,10 @@ headers) — legitimate for the TechEmpower `plaintext` case, not a full framewo
 
 ## Not yet
 
-Async `getaddrinfo` · send-`select` (receive-select only so far) · `writev`/`io_uring` to
-break the 2-syscall floor · off-thread file I/O · shared-memory multithreading (a future
-compiler superset). See the async roadmap memory for the full plan.
+Reactor-native `stream_select` (a per-select waiter record) · `writev`/`io_uring` to break the
+2-syscall floor · a DNS cache (needs somewhere that is not a stdlib static) · off-thread file
+I/O · shared-memory multithreading (a future compiler superset). See the async roadmap memory
+for the full plan.
 
 **`#[Async]`** — an attribute that wraps a function body in `async()` so `spawn()` works at
 its top level, with the call yielding a `Task` of the return type. Unlike everything above it
