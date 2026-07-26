@@ -443,3 +443,192 @@ function escapeshellcmd(string $cmd): string
 
     return $out;
 }
+
+/**
+ * Reverse of addcslashes: interpret C-style escapes. Octal (`\101`), hex
+ * (`\x41`), the named set, and `\<other>` → `<other>`, exactly as php does.
+ */
+function stripcslashes(string $string): string
+{
+    $out = "";
+    $n = \strlen($string);
+    $i = 0;
+    while ($i < $n) {
+        $c = $string[$i];
+        if ($c !== "\\" || $i + 1 >= $n) {
+            $out = $out . $c;
+            $i = $i + 1;
+            continue;
+        }
+        $d = $string[$i + 1];
+        if ($d === "n") { $out = $out . "\n"; $i = $i + 2; continue; }
+        if ($d === "t") { $out = $out . "\t"; $i = $i + 2; continue; }
+        if ($d === "r") { $out = $out . "\r"; $i = $i + 2; continue; }
+        if ($d === "a") { $out = $out . "\x07"; $i = $i + 2; continue; }
+        if ($d === "v") { $out = $out . "\x0B"; $i = $i + 2; continue; }
+        if ($d === "b") { $out = $out . "\x08"; $i = $i + 2; continue; }
+        if ($d === "f") { $out = $out . "\x0C"; $i = $i + 2; continue; }
+        if ($d === "x") {
+            $j = $i + 2;
+            $hex = "";
+            while ($j < $n && \strlen($hex) < 2 && \ctype_xdigit($string[$j])) {
+                $hex = $hex . $string[$j];
+                $j = $j + 1;
+            }
+            if ($hex === "") { $out = $out . "x"; $i = $i + 2; continue; }
+            $out = $out . \chr(\hexdec($hex));
+            $i = $j;
+            continue;
+        }
+        if ($d >= "0" && $d <= "7") {
+            $j = $i + 1;
+            $oct = "";
+            while ($j < $n && \strlen($oct) < 3 && $string[$j] >= "0" && $string[$j] <= "7") {
+                $oct = $oct . $string[$j];
+                $j = $j + 1;
+            }
+            $out = $out . \chr(\octdec($oct) & 255);
+            $i = $j;
+            continue;
+        }
+        $out = $out . $d;
+        $i = $i + 2;
+    }
+    return $out;
+}
+
+/**
+ * Binary-safe comparison of a slice of `$haystack` against `$needle`.
+ * Returns <0 / 0 / >0. `$length` null means "to the end of the longer of the
+ * two", which is what symfony's startsWith/endsWith helpers rely on.
+ */
+function substr_compare(string $haystack, string $needle, int $offset, ?int $length = null, bool $case_insensitive = false): int
+{
+    $hl = \strlen($haystack);
+    if ($offset < 0) {
+        $offset = $hl + $offset;
+        if ($offset < 0) { $offset = 0; }
+    }
+    if ($offset > $hl) { return 1; }
+    $nl = \strlen($needle);
+    $rest = $hl - $offset;
+    $len = $length === null ? ($rest > $nl ? $rest : $nl) : $length;
+    if ($len < 0) { $len = 0; }
+    $a = \substr($haystack, $offset, $len);
+    $b = \substr($needle, 0, $len);
+    if ($case_insensitive) {
+        $a = \strtolower($a);
+        $b = \strtolower($b);
+    }
+    // php returns the strcmp DIFFERENCE, not a normalised -1/1: symfony
+    // compares against 0, but the oracle prints the real value.
+    $la = \strlen($a);
+    $lb = \strlen($b);
+    $m = $la < $lb ? $la : $lb;
+    $i = 0;
+    while ($i < $m) {
+        $da = \ord($a[$i]);
+        $db = \ord($b[$i]);
+        if ($da !== $db) { return $da - $db; }
+        $i = $i + 1;
+    }
+    return $la - $lb;
+}
+
+/** php's version ordering rank for one canonicalised part. */
+function __mc_version_order(string $part): int
+{
+    if ($part === "dev") { return 0; }
+    if ($part === "alpha" || $part === "a") { return 1; }
+    if ($part === "beta" || $part === "b") { return 2; }
+    if ($part === "RC" || $part === "rc") { return 3; }
+    if ($part === "#") { return 4; }
+    if ($part === "pl" || $part === "p") { return 6; }
+    if ($part !== "" && \ctype_digit($part)) { return 5; }
+    return -1;                                   // any other string sorts first
+}
+
+/**
+ * php's version canonicaliser: insert `.` around every run-boundary between
+ * digits and non-digits, and treat `-`, `_`, `+` as `.`.
+ * @return string[]
+ */
+function __mc_version_parts(string $v): array
+{
+    $s = "";
+    $n = \strlen($v);
+    $i = 0;
+    while ($i < $n) {
+        $c = $v[$i];
+        if ($c === "-" || $c === "_" || $c === "+") {
+            $s = $s . ".";
+        } elseif ($c === ".") {
+            $s = $s . ".";
+        } else {
+            if ($i > 0) {
+                $p = $v[$i - 1];
+                $pd = \ctype_digit($p);
+                $cd = \ctype_digit($c);
+                if ($p !== "." && $p !== "-" && $p !== "_" && $p !== "+" && $pd !== $cd) {
+                    $s = $s . ".";
+                }
+            }
+            $s = $s . $c;
+        }
+        $i = $i + 1;
+    }
+    $raw = \explode(".", $s);
+    $out = [];
+    foreach ($raw as $p) {
+        if ($p !== "") { $out[] = $p; }
+    }
+    return $out;
+}
+
+/** -1 / 0 / 1 for two canonicalised version parts. */
+function __mc_version_cmp_part(string $a, string $b): int
+{
+    $oa = __mc_version_order($a);
+    $ob = __mc_version_order($b);
+    if ($oa !== $ob) { return $oa < $ob ? -1 : 1; }
+    if ($oa === 5) {
+        $ia = (int)$a;
+        $ib = (int)$b;
+        if ($ia === $ib) { return 0; }
+        return $ia < $ib ? -1 : 1;
+    }
+    if ($a === $b) { return 0; }
+    return $a < $b ? -1 : 1;
+}
+
+/**
+ * php's version_compare. With `$operator` it returns a bool; without, -1/0/1.
+ * The `$operator` form is what symfony/console's CompleteCommand uses.
+ */
+function version_compare(string $version1, string $version2, ?string $operator = null): mixed
+{
+    $a = __mc_version_parts($version1);
+    $b = __mc_version_parts($version2);
+    $na = \count($a);
+    $nb = \count($b);
+    $n = $na > $nb ? $na : $nb;
+    $r = 0;
+    $i = 0;
+    while ($i < $n) {
+        // A missing part compares as "#" — php's neutral filler, which ranks
+        // above dev/alpha/beta/RC and below a number.
+        $pa = $i < $na ? $a[$i] : "#";
+        $pb = $i < $nb ? $b[$i] : "#";
+        $c = __mc_version_cmp_part($pa, $pb);
+        if ($c !== 0) { $r = $c; break; }
+        $i = $i + 1;
+    }
+    if ($operator === null) { return $r; }
+    if ($operator === "<" || $operator === "lt") { return $r < 0; }
+    if ($operator === "<=" || $operator === "le") { return $r <= 0; }
+    if ($operator === ">" || $operator === "gt") { return $r > 0; }
+    if ($operator === ">=" || $operator === "ge") { return $r >= 0; }
+    if ($operator === "==" || $operator === "eq") { return $r === 0; }
+    if ($operator === "!=" || $operator === "ne" || $operator === "<>") { return $r !== 0; }
+    return null;
+}

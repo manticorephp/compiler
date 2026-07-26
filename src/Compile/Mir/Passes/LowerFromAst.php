@@ -324,6 +324,8 @@ final class LowerFromAst implements Pass
      *  also means main() gets the atexit trampoline and the uncaught path
      *  consults a user handler; {@see needsErrorHandlers}. */
     public string $errorsSrc = '';
+    /** pack/unpack — DEMAND-GATED. */
+    public string $binarySrc = '';
     /** Nesting depth of the `@` suppression operator around the expression being
      *  lowered — read by the `trigger_error` rewrite ({@see LowerExprs}). */
     private int $silenceDepth = 0;

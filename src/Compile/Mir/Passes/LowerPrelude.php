@@ -145,6 +145,9 @@ trait LowerPrelude
             // whose interfaces DatePeriod implements.
             $src = $src . $this->dateTimeSrc;
         }
+        if ($this->binarySrc !== '') {
+            $src = $src . $this->binarySrc;
+        }
         if ($this->errorsSrc !== '') {
             // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
             $src = $src . $this->errorsSrc;

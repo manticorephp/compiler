@@ -1569,6 +1569,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // stdlib .o, and a program that never touches them must not carry the
     // static registries (nor the atexit hook that drains them).
     $errorsSrc = prelude_src_or_empty("errors.php");
+    // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
+    // cannot cross the stdlib.o boundary.
+    $binarySrc = prelude_src_or_empty("binary.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1588,6 +1591,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // The error/shutdown family. `trigger_error` is included even though the
     // lowering rewrites it to `__mc_trigger_error` — the gate reads the SOURCE,
     // which still spells the php name.
+    $useBinary = $demand->callsAny(['pack', 'unpack']);
     $useErrors = $demand->callsAny(['set_error_handler', 'restore_error_handler',
                                     'set_exception_handler', 'restore_exception_handler',
                                     'register_shutdown_function', 'trigger_error',
@@ -1716,6 +1720,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
+        $lower->binarySrc = $useBinary ? $binarySrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -1979,7 +1984,7 @@ function analyze_prelude_files(): array {
     $names = [
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
-        "datetime.php", "errors.php",
+        "datetime.php", "errors.php", "binary.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

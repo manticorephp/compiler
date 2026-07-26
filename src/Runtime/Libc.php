@@ -534,3 +534,17 @@ function sys_dup(#[CType('int')] int $fd): int {}
 // random_bytes/random_int (getrandom is Linux-only, arc4random_buf BSD-only).
 #[Library('c'), Symbol('getentropy')]
 function sys_getentropy(Ptr $buf, #[CType('size_t')] int $buflen): int {}
+
+// ── Locale ─────────────────────────────────────────────────────────────
+// `char *setlocale(int category, const char *locale)` — sets (or, with a NULL
+// locale, reads) the process locale and returns the resulting name, or NULL on
+// failure. symfony/string saves LC_CTYPE, switches to "C" for a transliteration
+// and restores it, which needs the READ form as much as the write form.
+// Two PHP names for the one C symbol — the fwrite/fwrite_buf idiom — because
+// the locale argument is either a real string or a NULL, and those are carried
+// differently across the FFI boundary.
+#[Library('c'), Symbol('setlocale')]
+function sys_setlocale(#[CType('int')] int $category, string $locale): Ptr {}
+
+#[Library('c'), Symbol('setlocale')]
+function sys_setlocale_query(#[CType('int')] int $category, Ptr $locale): Ptr {}

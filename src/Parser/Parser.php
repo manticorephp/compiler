@@ -2732,6 +2732,21 @@ final class Parser
     /** chars consumed AFTER the backslash by the last {@see decodeEscapeSeq}. */
     private int $escapeLen = 0;
 
+    /** One code point as UTF-8 bytes, for the `\u{…}` escape. */
+    private function utf8Encode(int $cp): string
+    {
+        if ($cp < 0x80) { return \chr($cp); }
+        if ($cp < 0x800) {
+            return \chr(0xC0 | ($cp >> 6)) . \chr(0x80 | ($cp & 0x3F));
+        }
+        if ($cp < 0x10000) {
+            return \chr(0xE0 | ($cp >> 12)) . \chr(0x80 | (($cp >> 6) & 0x3F))
+                . \chr(0x80 | ($cp & 0x3F));
+        }
+        return \chr(0xF0 | ($cp >> 18)) . \chr(0x80 | (($cp >> 12) & 0x3F))
+            . \chr(0x80 | (($cp >> 6) & 0x3F)) . \chr(0x80 | ($cp & 0x3F));
+    }
+
     /**
      * Decode the double-quote escape whose backslash sits at `$i-1` (so `$i`
      * indexes the char right after it) and set {@see $escapeLen} to how many
@@ -2763,6 +2778,20 @@ final class Parser
             if ($got === 0) { return '\\x'; }
             $this->escapeLen = 1 + $got;
             return \chr($val & 255);
+        }
+        if ($c === 'u' && \substr($body, $i + 1, 1) === '{') {
+            // `\u{HHH}` (PHP 7.0) — a UTF-8 code point, not a byte. An
+            // unterminated or empty brace group is NOT an escape in php: the
+            // whole `\u` stays literal.
+            $val = 0; $got = 0; $j = $i + 2;
+            while ($j < $n) {
+                $hv = $this->hexDigitVal(\substr($body, $j, 1));
+                if ($hv < 0) { break; }
+                $val = $val * 16 + $hv; $got = $got + 1; $j = $j + 1;
+            }
+            if ($got === 0 || \substr($body, $j, 1) !== '}') { return '\\u'; }
+            $this->escapeLen = ($j - $i) + 1;
+            return $this->utf8Encode($val);
         }
         $o0 = \ord($c);
         if ($o0 >= 48 && $o0 <= 55) {
