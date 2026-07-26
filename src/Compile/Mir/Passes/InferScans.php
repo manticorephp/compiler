@@ -831,6 +831,17 @@ trait InferScans
             $this->scanArrayLitLocals($fn->body, $lits);
             $found = [];
             $this->scanLocalElemNode($fn->body, $found);
+            // The same erasure with two CONCRETE stores instead of a cell one:
+            // `$out[] = $v` in a foreach over a vec[int] and `$out[] = $w` in a
+            // foreach over a vec[string] make a genuinely mixed array, but the
+            // pre-inference coarseValueClass scan sees two variable reads and
+            // classifies neither, so `$out` took the first store's element and
+            // the second landed RAW (a string pointer read back as int).
+            $classes = [];
+            $this->scanLocalElemClasses($fn->body, $classes);
+            foreach ($classes as $name => $seen) {
+                if (\count($seen) >= 2) { $found[$name] = true; }
+            }
             foreach ($found as $name => $unused) {
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
@@ -839,6 +850,42 @@ trait InferScans
             }
         }
         return $changed;
+    }
+
+    /**
+     * Post-inference value CLASSES stored into each local array, keyed by local
+     * name. Same classing as the pre-inference {@see coarseValueClass} (int and
+     * float collapse to `num`, they share the numeric-cell discipline) — but
+     * read off the INFERRED type, so a variable read counts too. An erased or
+     * cell value contributes nothing: it is either already right or a different
+     * root cause.
+     *
+     * @param array<string, array<string,bool>> $out
+     */
+    private function scanLocalElemClasses(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
+                $cls = $this->typeValueClass($se->value->type);
+                if ($cls !== '') { $out[$se->array->name][$cls] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanLocalElemClasses($c, $out); }
+    }
+
+    /** The {@see coarseValueClass} class of an INFERRED type, or '' when the type
+     *  carries no repr commitment (unknown / cell / void). */
+    private function typeValueClass(Type $t): string
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT) { return 'num'; }
+        if ($k === Type::KIND_STRING) { return 'string'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_NULL) { return 'null'; }
+        if ($t->isArray()) { return 'array'; }
+        if ($k === Type::KIND_OBJ) { return 'obj'; }
+        return '';
     }
 
     /** Locals assigned an array LITERAL in this body — the ones whose element
@@ -1048,7 +1095,21 @@ trait InferScans
         array $map,
         array &$tokens,
     ): void {
-        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $pname) {
+            // A WHOLE-array write-back (`$input = $out;`, the shape every rebuild
+            // takes — array_splice). Judge it by the assigned TYPE, not by origin:
+            // the rebuild buffer is filled from the param AND from elsewhere, so
+            // it counts as param-derived even where it is not. An element kind
+            // equal to the caller's is a no-op here, so a pure move-buffer
+            // write-back still costs nothing.
+            $at = $n->value->type;
+            if ($at->isArray() && $at->element !== null) {
+                $ak = $at->element->kind;
+                if ($ak !== Type::KIND_UNKNOWN && $ak !== Type::KIND_VOID) {
+                    $tokens['k:' . $ak] = true;
+                }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_LOAD_LOCAL && $se->array->name === $pname) {
                 $o = $this->originOf($se->value, $origin);

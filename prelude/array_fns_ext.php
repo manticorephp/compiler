@@ -157,6 +157,70 @@ function array_walk_recursive(array &$arr, callable $cb, mixed $extra = null): b
 }
 
 /**
+ * `array_splice(&$input, offset, length, replacement)` — remove a slice and
+ * splice a replacement in its place, returning the removed entries.
+ *
+ * PHP reindexes INT keys on both sides and keeps STRING keys, so the rebuild
+ * walks `array_keys` and re-adds each entry by the kind of its key. The whole
+ * array is rebuilt into a fresh local and assigned back in one store — an
+ * in-place shift would write past the live length of the buffer it is reading.
+ * @param mixed[] $input
+ * @return mixed[]
+ */
+function array_splice(array &$input, int $offset, ?int $length = null, mixed $replacement = []): array
+{
+    $keys = array_keys($input);
+    $n = count($keys);
+    $start = $offset;
+    if ($start < 0) { $start = $n + $start; }
+    if ($start < 0) { $start = 0; }
+    if ($start > $n) { $start = $n; }
+    $len = $n - $start;
+    if ($length !== null) {
+        $len = $length;
+        if ($len < 0) { $len = $n - $start + $len; }
+    }
+    if ($len < 0) { $len = 0; }
+    $end = $start + $len;
+    if ($end > $n) { $end = $n; }
+
+    $out = [];
+    $removed = [];
+    $i = 0;
+    while ($i < $start) {
+        $k = $keys[$i];
+        if (is_string($k)) { $out[$k] = $input[$k]; } else { $out[] = $input[$k]; }
+        $i = $i + 1;
+    }
+    // Branch the LOOP, not the value. TODO(array|cell merge): a local that
+    // merges an array literal with a `mixed` value — `$repl = []; if
+    // (is_array($replacement)) { $repl = $replacement; }` — types `unknown`
+    // (vec[unknown] ∪ cell), so the `[]` store writes a raw buffer pointer into
+    // a slot the foreach then reads as a NaN-boxed cell → SIGSEGV. Pre-existing
+    // and not specific to this function; planMergeShadow boxes such a merge only
+    // for SCALAR kinds today.
+    if (is_array($replacement)) {
+        foreach ($replacement as $rv) { $out[] = $rv; }
+    } else {
+        $out[] = $replacement;
+    }
+    $i = $start;
+    while ($i < $end) {
+        $k = $keys[$i];
+        if (is_string($k)) { $removed[$k] = $input[$k]; } else { $removed[] = $input[$k]; }
+        $i = $i + 1;
+    }
+    $i = $end;
+    while ($i < $n) {
+        $k = $keys[$i];
+        if (is_string($k)) { $out[$k] = $input[$k]; } else { $out[] = $input[$k]; }
+        $i = $i + 1;
+    }
+    $input = $out;
+    return $removed;
+}
+
+/**
  * `array_all(a, predicate)` — true when every value satisfies `$predicate`.
  * The empty array is vacuously true, as in PHP 8.4.
  */

@@ -337,10 +337,11 @@ final class InferTypes implements Pass
         // MIXED array: left alone, the callee is narrowed to the caller's
         // vec[int] and then writes a raw string pointer into an int buffer.
         // Widen the CALLER's local to a cell element so both sides agree.
-        // Runs FIRST, before any call-site param refinement below: those scans
-        // pin an erased param to the element they observe ONCE — after that the
-        // param is concrete, no longer a candidate, and never re-refines to the
-        // widened type. Bounded: a seed only widens toward cell.
+        // Runs here, before any call-site param refinement: those scans pin an
+        // erased param to the element they observe, and an ASSOC param never
+        // re-refines afterwards. A second pass runs after the local-element
+        // scans below, for the callees whose foreignness is only visible once
+        // their own rebuild buffer is typed. Bounded: a seed only widens to cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
             foreach ($module->functions as $fn) {
@@ -441,6 +442,29 @@ final class InferTypes implements Pass
         while ($guard < 4 && $this->scanLocalElemFromStores($module)) {
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
+        // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
+        // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
+        // MIXED array: left alone, the callee is narrowed to the caller's
+        // vec[int] and then writes a raw string pointer into an int buffer.
+        // Widen the CALLER's local to a cell element so both sides agree.
+        // Runs LAST of the element scans, because a rebuild-and-assign-back
+        // callee (`$input = $out;`, array_splice) is only foreign once $out's
+        // own element is settled. The callee's param was pinned to the
+        // pre-widening element by the call-site scans above, so re-run the
+        // element observation right here — a vec[cell] argument is ground truth
+        // there and overrides an earlier refinement.
+        $guard = 0;
+        while ($guard < 4 && $this->scanByRefElemWiden($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            if ($this->scanCallSiteArrayElems($module)) {
+                foreach ($module->functions as $fn) {
+                    $this->inferFunction($fn);
+                }
             }
             $guard = $guard + 1;
         }
