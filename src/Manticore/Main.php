@@ -1601,7 +1601,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
             // parse time — statements are flattened across every file right below,
             // which loses the per-file identity for good.
-            $program = Parser::parseSource($source, \__mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : ''));
+            $program = Parser::parseSource($source, __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : ''));
         } catch (\Throwable $e) {
             $where = isset($paths[$i]) ? $paths[$i] : "<source>";
             dprint($where . ": parse failed: " . $e->getMessage());
