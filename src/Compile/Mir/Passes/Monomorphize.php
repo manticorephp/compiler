@@ -213,7 +213,8 @@ final class Monomorphize implements Pass
         // concrete sites genuinely need their own body — specialize from ONE key.
         $hasCallableDim = $this->hasCallableDim($fn, $dims);
         $hasConflictedConcrete = $this->hasConflictedConcreteDim($fn, $dims, $calls);
-        $hasCellDim = $this->hasCellElemDim($fn, $dims);
+        $hasCellDim = $this->hasCellElemDim($fn, $dims)
+            || $this->hasCellElemArgDim($fn, $dims, $calls);
         if (!$hasCallableDim && !$fn->isPrelude && !$hasConflictedConcrete
             && !$hasCellDim && \count($calls) < 2) { return []; }
 
@@ -297,7 +298,16 @@ final class Monomorphize implements Pass
             // erases its element (all-agree conflict) -> the string case does a
             // pointer compare. cloneWith keeps `byRef` and the call keeps passing
             // the lvalue, so in-place mutation is preserved.
-            if ($p->variadic) { continue; }
+            // A VARIADIC pack is specializable: the caller has already built it
+            // as an array_lit whose type is known at the call site
+            // (`vec[assoc[string,cell]]`), while the declared param is
+            // `vec[unknown]`. Left erased, `foreach ($others as $o)` bound `$o`
+            // as unknown and the inner `foreach ($o as $k => $v)` read the
+            // buffer with no type — the copy loop in array_replace_recursive /
+            // array_merge_recursive returned garbage for every string key.
+            // cloneWith substitutes the pack type wholesale, so the pack ABI is
+            // unchanged — only its element type gets sharper.
+            if ($p->variadic && !$this->isSpecializableVariadicPack($p, $idx, $calls)) { continue; }
             // A dimension is either an erased-array param receiving a concrete
             // array, or a bare `callable` param receiving a concrete closure at
             // >=1 site. Retyping the callable param to the closure's obj type
@@ -305,7 +315,7 @@ final class Monomorphize implements Pass
             if ($this->isErasedArrayParam($p->type)) {
                 foreach ($calls as $call) {
                     if ($idx < \count($call->args)
-                        && $this->isConcreteArray($call->args[$idx]->type)) {
+                        && $this->isSpecializableArray($call->args[$idx]->type)) {
                         $dims[] = $idx;
                         break;
                     }
@@ -400,6 +410,40 @@ final class Monomorphize implements Pass
     }
 
     /**
+     * The mirror of {@see hasCellElemDim} on the ARGUMENT side: an erased
+     * (bare-`array` → KIND_UNKNOWN) param receiving a CELL-element array at some
+     * call site. That also specializes from a SINGLE key.
+     *
+     * The ≥2-distinct-keys rule exists for the genuinely-erased case, where one
+     * call shape means the body's own inference already reads the elements
+     * right. A cell-element argument breaks that assumption: the erased body
+     * reads element slots RAW while the caller's slots are NaN-boxed, so a
+     * lone call site still needs its own clone. Without this,
+     * `function f(array $a): array { return $a; }` called once with
+     * `['a'=>'x','b'=>7]` returns a raw pointer through an `unknown` result —
+     * `is_array()` says false and `var_dump` prints an int.
+     *
+     * @param int[] $dims
+     * @param Call[] $calls
+     */
+    private function hasCellElemArgDim(FunctionDef $fn, array $dims, array $calls): bool
+    {
+        foreach ($dims as $di) {
+            if (!$this->isErasedArrayParam($fn->params[$di]->type)) { continue; }
+            foreach ($calls as $call) {
+                if ($di >= \count($call->args)) { continue; }
+                $at = $call->args[$di]->type;
+                if (!$at->isArray()) { continue; }
+                $e = $at->element;
+                if ($e !== null && $e->kind === Type::KIND_CELL) { return true; }
+                $k = $at->key;
+                if ($at->isAssoc() && $k !== null && $k->kind === Type::KIND_CELL) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Specialization key for a call over `$dims` — a token per dimension
      * built from the concrete argument type at that position. Returns ''
      * when any dimension's argument is not a concrete array (the site is
@@ -416,7 +460,7 @@ final class Monomorphize implements Pass
             // A dim's arg is specializable when it is a concrete array OR a
             // concrete closure (the callable dimension). typeToken renders both
             // (a closure arg is KIND_OBJ<__closure_N> → `obj_...`).
-            if (!$this->isConcreteArray($t) && !$this->isConcreteClosure($t)) { return ''; }
+            if (!$this->isSpecializableArray($t) && !$this->isConcreteClosure($t)) { return ''; }
             $parts[] = 'p' . $di . '_' . $this->typeToken($t);
         }
         return \implode('_', $parts);
@@ -574,6 +618,65 @@ final class Monomorphize implements Pass
         }
         // A nested array element must itself be concrete.
         if ($k === Type::KIND_ARRAY) { return $this->isConcreteArray($t); }
+        return true;
+    }
+
+    /**
+     * An array ARGUMENT worth specializing on: its key/element REPRESENTATION is
+     * definite. Wider than {@see isConcreteArray} by exactly one case — a CELL
+     * element (`assoc[string,cell]`, what any mixed-value literal like
+     * `['a'=>'x','b'=>7]` types as) is a definite repr: every slot is a uniformly
+     * NaN-boxed i64. Only UNKNOWN is indefinite.
+     *
+     * Without this a mixed-value array passed to a bare-`array` (KIND_UNKNOWN)
+     * param specialized NOTHING, so the raw array pointer rode an `unknown`
+     * param and an `unknown` return with no tag — and every tag-dispatching
+     * consumer downstream misread it (`is_array()` false, `var_dump` printing
+     * the pointer as int/denormal-float, a string element read as garbage).
+     * That is the erasure the prelude array functions kept hitting: it reproduces
+     * on a two-line `function f(array $a): array { return $a; }`, not just on the
+     * exotic ones. A homogeneous array was always fine — it IS concrete, so it
+     * specialized and stayed typed.
+     */
+    private function isSpecializableArray(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $e = $t->element;
+        if ($e === null || !$this->isDefiniteElem($e)) { return false; }
+        if ($t->isAssoc()) {
+            $key = $t->key;
+            if ($key === null || !$this->isDefiniteElem($key)) { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * A variadic pack worth specializing: the declared pack element is erased
+     * (`vec[unknown]`) while EVERY call site passes a pack with a definite
+     * element repr. Requiring every site to agree keeps the single clone sound —
+     * a site that disagrees would otherwise be repointed to a body typed for
+     * someone else's pack.
+     *
+     * @param Call[] $calls
+     */
+    private function isSpecializableVariadicPack(Param $p, int $idx, array $calls): bool
+    {
+        if (!$this->isErasedArrayParam($p->type)) { return false; }
+        $seen = false;
+        foreach ($calls as $call) {
+            if ($idx >= \count($call->args)) { return false; }
+            if (!$this->isSpecializableArray($call->args[$idx]->type)) { return false; }
+            $seen = true;
+        }
+        return $seen;
+    }
+
+    /** {@see isConcreteElem}, but a CELL is a definite repr. */
+    private function isDefiniteElem(Type $t): bool
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_VOID) { return false; }
+        if ($k === Type::KIND_ARRAY) { return $this->isSpecializableArray($t); }
         return true;
     }
 

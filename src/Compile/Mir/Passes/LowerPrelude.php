@@ -120,6 +120,9 @@ trait LowerPrelude
         if ($this->includeArrayFns) {
             $src = $src . $this->arrayFnsSrc;
         }
+        if ($this->includeArrayFnsExt) {
+            $src = $src . $this->arrayFnsExtSrc;
+        }
         if ($this->includeCli) {
             $src = $src . $this->cliSrc;
         }

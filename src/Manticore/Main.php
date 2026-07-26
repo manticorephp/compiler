@@ -1533,6 +1533,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // unreadable file provides nothing, and LowerFromAst falls back to its
     // embedded copy for the classes the bootstrap cannot live without.
     $arrayFnsSrc = prelude_src_or_empty("array_fns.php");
+    $arrayFnsExtSrc = prelude_src_or_empty("array_fns_ext.php");
     $cliSrc = prelude_src_or_empty("cli.php");
     $printRSrc = prelude_src_or_empty("print_r.php");
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
@@ -1551,6 +1552,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
     $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
+    // The EXTENDED array functions are a SEPARATE gate on purpose: array_fns is
+    // injected into the compiler's own build (src/ calls array_map/sort), and a
+    // prelude is injected WHOLE — so a miscompile in any function sharing that
+    // file breaks generation 2 of the self-host. Nothing in src/ calls these.
+    $useArrayFnsExt = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsExtSrc));
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);
@@ -1655,6 +1661,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->includeReflection = $useReflection;
         $lower->includeDateTime = $useDateTime;
         $lower->includeArrayFns = $useArrayFns;
+        $lower->includeArrayFnsExt = $useArrayFnsExt;
         $lower->includeCli = $useCli;
         $lower->exceptionsSrc = $exceptionsSrc;
         $lower->resourceSrc = $resourceSrc;
@@ -1666,6 +1673,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->reflectionSrc = $reflectionSrc;
         $lower->dateTimeSrc = $dateTimeSrc;
         $lower->arrayFnsSrc = $arrayFnsSrc;
+        $lower->arrayFnsExtSrc = $arrayFnsExtSrc;
         $lower->cliSrc = $cliSrc;
         $lower->printRSrc = $printRSrc;
         // Bundled-stdlib signatures (declare-only externs) so user calls

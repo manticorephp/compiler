@@ -333,6 +333,14 @@ final class LowerFromAst implements Pass
     /** Array-functions prelude source, read by Main from `prelude/array_fns.php`.
      *  Empty → not injected (the compiler itself never uses these). */
     public string $arrayFnsSrc = '';
+    /** Inject the EXTENDED array functions (`prelude/array_fns_ext.php`) — the
+     *  ref.array surface beyond the hot core. A SEPARATE file from array_fns so
+     *  the compiler's own build (which calls array_map/sort) never pulls them
+     *  in: a prelude is injected whole-file, so one miscompiled helper in
+     *  array_fns.php breaks generation 2 of the self-host. */
+    public bool $includeArrayFnsExt = false;
+    /** Extended array-functions prelude source, from `prelude/array_fns_ext.php`. */
+    public string $arrayFnsExtSrc = '';
     /** Inject the CLI prelude (__mc_argv / getopt) — compiled WITH the user
      *  program so the bare-`array` returns narrow at the call site. Gated on a
      *  source reference to $argv / $argc / getopt( (see Main.php). */

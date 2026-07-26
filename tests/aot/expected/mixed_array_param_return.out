@@ -1,0 +1,22 @@
+yes 2
+x 7
+array(2) {
+  ["a"]=>
+  string(1) "x"
+  ["b"]=>
+  int(7)
+}
+array(2) {
+  ["a"]=>
+  string(1) "x"
+  ["b"]=>
+  string(1) "y"
+}
+array(3) {
+  ["name"]=>
+  string(3) "new"
+  ["keep"]=>
+  int(7)
+  ["added"]=>
+  int(9)
+}
