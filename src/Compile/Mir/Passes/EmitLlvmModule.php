@@ -829,7 +829,11 @@ trait EmitLlvmModule
             $body .= $this->btNameFix($this->methodDisplay[$fn->name]);
         }
         $body .= $this->emitNode($fn->body);
-        $body .= "  ret i64 0\n";
+        // Uniform closure ABI: a closure's IMPLICIT return (fall off the end, or a
+        // bare `return;`) must be a BOXED null, not raw 0 — a dynamic `callable`
+        // caller reads the result by tag, so raw 0 decoded as float and
+        // `$h(…) === null` was false for a void callback. {@see emitReturn}
+        $body .= '  ret i64 ' . $this->implicitReturnValue() . "\n";
         return $header . $body . "}\n\n";
     }
 
@@ -1042,6 +1046,18 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /**
+     * The i64 a value-less return yields. A closure/trampoline hands back a BOXED
+     * null (its caller may be dynamic and read the word by tag); everything else
+     * keeps the historical raw 0, which its typed caller ignores.
+     */
+    private function implicitReturnValue(): string
+    {
+        return ($this->frame->isClosure || $this->frame->isTrampoline)
+            ? (string)\Compile\MemoryAbi::CELL_NULL
+            : '0';
+    }
+
     private function emitReturn(Return_ $n): string
     {
         $r = $n;
@@ -1077,7 +1093,7 @@ trait EmitLlvmModule
             ? $v->name : null;
         $leave .= $this->emitRcReturnCleanup($returnedLocal);
         if ($v === null) {
-            return $this->finishReturn('', '0', $leave);
+            return $this->finishReturn('', $this->implicitReturnValue(), $leave);
         }
         // By-ref return: yield the *address* of the returned lvalue as i64.
         // `return $n` (a by-ref param forwards its held address, a plain local
