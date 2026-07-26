@@ -1,0 +1,5 @@
+sticky: raised=2 prompt=yes
+not-an-exception: caught-by-Exception=no by-Cancelled=1
+shield: cleanup-ran=1 completed=yes
+group-unwinds: ran-past-scope=no caught=1
+done
