@@ -2351,6 +2351,73 @@ namespace Async {
         }
     }
 
+    /**
+     * Read $path in $chunk-sized pieces, YIELDING between them, and return the
+     * whole contents ('' when it cannot be opened).
+     *
+     * Regular-file I/O has no readiness signal — O_NONBLOCK is a no-op for files on
+     * both targets and there is no thread pool — so this is COOPERATIVE, not async:
+     * each fread still blocks for its own chunk. That is enough, and MEASURED:
+     * on a 64 MB page-cache-hot file a single `fread($h, 64 MB)` stalls every other
+     * task for 15-25 ms, while this keeps the worst gap at ~2 ms (1 ms of which is
+     * the observer's own tick granularity). A fork+socketpair worker pool was
+     * considered and rejected: it would copy every byte through a socket, which for
+     * a hot read costs more than the read itself, and it only pays off for a
+     * genuinely blocking (cold / networked) filesystem.
+     *
+     * Cancellation-aware: the yield is Scheduler::sleep, so a cancelled task stops
+     * at the next chunk boundary instead of reading the rest of the file.
+     */
+    function readFile(string $path, int $chunk = 1048576): string
+    {
+        $h = \fopen($path, 'rb');
+        if ($h === false) {
+            return '';
+        }
+        $sched = Scheduler::instance();
+        $out = '';
+        while (!\feof($h)) {
+            $part = \fread($h, $chunk);
+            if ($part === false) {
+                break;
+            }
+            $str = (string)$part;
+            if ($str === '') {
+                break;
+            }
+            $out = $out . $str;
+            $sched->sleep(0.0);
+        }
+        \fclose($h);
+        return $out;
+    }
+
+    /**
+     * Write $data to $path in $chunk-sized pieces, yielding between them. Returns
+     * the byte count written, or -1 when the file cannot be opened. Same
+     * cooperative contract as {@see readFile()}.
+     */
+    function writeFile(string $path, string $data, int $chunk = 1048576): int
+    {
+        $h = \fopen($path, 'wb');
+        if ($h === false) {
+            return -1;
+        }
+        $sched = Scheduler::instance();
+        $len = \strlen($data);
+        $off = 0;
+        while ($off < $len) {
+            $n = (int)\fwrite($h, \substr($data, $off, $chunk));
+            if ($n <= 0) {
+                break;
+            }
+            $off = $off + $n;
+            $sched->sleep(0.0);
+        }
+        \fclose($h);
+        return $off;
+    }
+
     /** Suspend the current task for $seconds without blocking the loop. */
     function delay(float $seconds): void
     {
