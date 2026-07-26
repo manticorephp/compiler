@@ -13,8 +13,10 @@ This directory holds the examples and benchmarks.
 
 ## Model (not Promises)
 
-Go concurrency, not `async`/`await`. Blocking-*looking* I/O that transparently suspends the
-current fiber onto the reactor and resumes it when the fd is ready.
+The concurrency *model* is Go's — cheap tasks, channels, a netpoller, blocking-*looking* I/O
+that transparently suspends the current fiber and resumes it when the fd is ready. The
+*spelling* is PHP's: objects instead of multi-return tuples, `foreach` instead of a comma-ok
+loop, typed exceptions instead of sentinels, plain streams instead of a hand-rolled fd layer.
 
 ```php
 use function Async\async;
@@ -35,11 +37,14 @@ async(function () {
   top-level `spawn()` is joined — there is no fire-and-forget.
 - **The scope lives on the task**, not in a global stack: nested `TaskGroup::run()` calls in
   concurrently-running tasks never adopt each other's children.
-- **Cancellation is real.** The first failure in a scope cancels its siblings by
-  deregistering them from the reactor/timer and resuming them with an
-  `Async\CancelledException` *at their suspend point* — not by setting a flag and hoping.
-  `Context::throwIfCancelled()` is the extra checkpoint for a CPU-bound loop that never
-  suspends.
+- **Cancellation is real, and sticky.** The first failure in a scope cancels its siblings by
+  deregistering them from the reactor, the timer heap and every channel queue, then resuming
+  them with an `Async\CancelledException` *at their suspend point* — not by setting a flag and
+  hoping. It is re-raised at **every** subsequent suspend point, so a blanket
+  `catch (\Throwable)` buys a task one more suspend, not immunity; and
+  `CancelledException extends \Error`, so the far more common `catch (\Exception)` cannot see
+  it at all. `Context::throwIfCancelled()` is the extra checkpoint for a CPU-bound loop that
+  never suspends; `Async\shield()` is the escape hatch for cleanup that must itself suspend.
 - **No failure is silently dropped.** A task whose outcome nobody claimed escalates to its
   owning scope. Conversely, a failure you *did* catch stays caught — it is not re-thrown at
   program exit.
@@ -58,20 +63,28 @@ async(function () {
 | `Async\group(callable): mixed` | open a child scope, join it, return the body's value |
 | `Async\spawn(callable, ...$args): Task` | start a task in the calling task's scope |
 | `Async\timeout(float, callable): mixed` | run a scope under a deadline; `TimeoutException` on expiry |
+| `Async\shield(callable): mixed` | hold cancellation back for cleanup that must suspend |
 | `Async\awaitAll(Task ...): array` | all results by input position; fail-fast |
 | `Async\awaitAny(Task ...): mixed` | first success, else `AggregateError` |
+| `Async\mapConcurrent(array, callable, int): array` | map with at most N in flight; fail-fast |
 | `Async\delay(float $seconds)` | suspend without blocking the loop |
 | `Async\channel(int $cap = 0): Channel` | CSP channel; 0 = unbuffered rendezvous |
-| `Async\select(Channel[]): [idx, value, ok]` | receive from whichever is ready first |
+| `Async\select(array $cases): Selected` | wait for the first ready case (recv or send) |
+| `Async\selectNow(array $cases): ?Selected` | …non-blocking (Go's `default:`) |
+| `Async\selectWithin(float, array): ?Selected` | …with a deadline (Go's `time.After`) |
 | `Async\workers(int $n): int` | fork N shared-nothing workers (call before `async()`) |
 | `Task::await(): mixed` | wait for one task |
 | `Task::awaitWithin(float): mixed` | …with a deadline; cancels the task on expiry |
+| `Channel` (`IteratorAggregate`) | `foreach ($ch as $v)` — ends when closed and drained |
+| `Channel::send/next/recv/close` | `next(): Received` is the comma-ok form |
+| `SelectCase::recv(Channel)` / `::send(Channel, $v)` | one arm of a `select()` |
+| `Semaphore(int)` — `acquire/release/withPermit` | "N at a time" |
 | `TaskGroup::run(callable)` | what `group()` wraps |
 | `TaskGroup::token(): CancellationToken` | the read-only half of this scope's cancellation |
 | `TaskGroup::cancel()` | the write half |
 | `Context::token()/isCancelled()/throwIfCancelled()` | the calling task's scope, ambiently |
 | `Context::deadline()/remaining()` | the effective deadline, ambiently |
-| `Async\accept/read/write/connect/close` | raw fd-level socket I/O (the hot path) |
+| `Context::value(string)` / `::withValue(string, $v, callable)` | scoped values (request-id) |
 
 ### Scopes, deadlines, cancellation
 
@@ -113,7 +126,63 @@ Async\group(function (TaskGroup $g) {
 ```
 
 A task that *does* suspend needs none of that — cancellation is delivered as a
-`CancelledException` at its suspend point.
+`CancelledException` at its suspend point, and again at the next one, and the one after that.
+Cleanup that must itself suspend goes in a `shield()`, which is the only thing that holds it
+back:
+
+```php
+try {
+    Async\delay(30.0);
+} catch (Async\CancelledException $e) {
+    Async\shield(fn() => $conn->sendCloseFrame());   // needs I/O; keep it short
+    throw $e;
+}
+```
+
+### Channels
+
+Consumption is a `foreach` — the loop ends when the channel is closed and drained:
+
+```php
+$ch = Async\channel();
+Async\spawn(function () use ($ch) { $ch->send(1); $ch->send(2); $ch->close(); });
+foreach ($ch as $value) { … }
+```
+
+`next(): Received` is the explicit form when `null` is a legal payload (`->value`, `->ok`);
+`recv(): mixed` is the terse one that cannot tell a null payload from a closed channel.
+Sending to a closed channel throws `Async\ChannelClosedException`.
+
+`select()` takes `SelectCase`s — a bare `Channel` is shorthand for a receive — and returns a
+`Selected` (`->index`, `->value`, `->ok`, `->channel`, `->isSend`), because PHP has no
+multi-return and a positional array is not worth pretending otherwise:
+
+```php
+$r = Async\select([$a, Async\SelectCase::send($b, $v)]);
+if ($r->isSend) { … } else { echo $r->value; }
+
+Async\selectNow([$a, $b]);            // null when nothing is ready
+Async\selectWithin(0.5, [$a, $b]);    // null on expiry
+```
+
+Exactly one case fires: a waiter parked across several channels is won by the first channel to
+reach it, and the losers see the claim and skip it.
+
+### Bounded concurrency
+
+```php
+$pages = Async\mapConcurrent($urls, fn($u) => file_get_contents($u), 10);   // 10 at a time
+$sem = new Async\Semaphore(4);
+$sem->withPermit(fn() => work());
+```
+
+### Scoped values
+
+```php
+Async\Context::withValue('request-id', $id, function () {
+    Async\spawn(fn() => log(Async\Context::value('request-id')));   // visible in every child
+});
+```
 
 ## Transparent I/O
 
@@ -126,6 +195,13 @@ serialising on their handshakes.
 
 The seam is `\Runtime\AsyncHook` (three callbacks installed by the scheduler; one null check
 per would-block when no scheduler is running).
+
+Plain streams **are** the API. `Async\read/write/accept/connect/close` also exist, bypassing
+the stream layer for raw `recv`/`send` on the fd — worth roughly 2× when you are counting
+syscalls, which is why the benchmark servers use them — but they carry no buffering and no
+TLS, and mixing them with `fread`/`fwrite` on the same resource loses whatever the stream
+layer had buffered. They live in an `@internal` section at the bottom of `prelude/async.php`;
+reach for them only after measuring.
 
 ```php
 async(function () {

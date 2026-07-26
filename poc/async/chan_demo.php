@@ -15,7 +15,7 @@ async(function () {
         $ch->close();
     });
     $sum = 0;
-    while (($v = $ch->recv()) !== null) {
+    foreach ($ch as $v) {
         $sum += $v;
     }
     echo "unbuffered sum: ", $sum, "\n";
@@ -29,7 +29,7 @@ async(function () {
         $b->close();
     });
     $out = "";
-    while (($v = $b->recv()) !== null) {
+    foreach ($b as $v) {
         $out .= $v;
     }
     echo "buffered: ", $out, "\n";
@@ -47,7 +47,7 @@ async(function () {
         $c->close();
     });
     $total = 0;
-    while (($v = $c->recv()) !== null) {
+    foreach ($c as $v) {
         $total += $v;
     }
     echo "fan-in total: ", $total, "\n";
@@ -73,14 +73,14 @@ async(function () {
         $chans = [];
         if ($openA) { $chans[] = $a; }
         if ($openD) { $chans[] = $d; }
-        [$idx, $val, $ok] = select($chans);
-        $fired = $chans[$idx];
-        if (!$ok) {
+        $r = select($chans);
+        $fired = $r->channel;
+        if (!$r->ok) {
             if ($fired === $a) { $openA = false; }
             if ($fired === $d) { $openD = false; }
             continue;
         }
-        $acc += $val;
+        $acc += $r->value;
     }
     echo "select sum: ", $acc, "\n";
 });
