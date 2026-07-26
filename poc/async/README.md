@@ -72,7 +72,14 @@ async(function () {
 | `Async\select(array $cases): Selected` | wait for the first ready case (recv or send) |
 | `Async\selectNow(array $cases): ?Selected` | …non-blocking (Go's `default:`) |
 | `Async\selectWithin(float, array): ?Selected` | …with a deadline (Go's `time.After`) |
-| `Async\workers(int $n): int` | fork N shared-nothing workers (call before `async()`) |
+| `Async\onSignal(int, callable)` | run a handler at a safe point inside the loop |
+| `Async\shutdownOn(int ...$signals)` | graceful shutdown — cancel the root scope |
+| `Async\supervise(int $n, callable)` | fork N workers, restart the dead, forward SIGTERM |
+| `Async\workers(int $n): int` | fork N shared-nothing workers, unsupervised |
+| `Mutex` — `lock/tryLock/unlock/withLock` | a critical section that SUSPENDS in the middle |
+| `Once::run(callable)` | build a lazy thing exactly once under contention |
+| `Async\awaitAllSettled` / `mapSettled` | collect outcomes instead of failing fast |
+| `Task::join(): Settled` | wait without rethrowing (what you want after `cancel()`) |
 | `Task::await(): mixed` | wait for one task |
 | `Task::awaitWithin(float): mixed` | …with a deadline; cancels the task on expiry |
 | `Channel` (`IteratorAggregate`) | `foreach ($ch as $v)` — ends when closed and drained |
@@ -167,6 +174,34 @@ Async\selectWithin(0.5, [$a, $b]);    // null on expiry
 
 Exactly one case fires: a waiter parked across several channels is won by the first channel to
 reach it, and the losers see the claim and skip it.
+
+### Signals and graceful shutdown
+
+There is a real `pcntl` layer under this — `pcntl_signal`, `pcntl_signal_dispatch`,
+`pcntl_sigprocmask`, `pcntl_fork`, `pcntl_waitpid`, `posix_kill`, the `SIG*` constants — and
+it works with or without the scheduler, matching the interpreter (`pcntl_signal.php` is
+difftested against it). A C handler cannot be a PHP closure, so a handled signal is *blocked*
+and collected at a dispatch point instead. That is php's own deferred model; the difference
+is only that a blocked signal never interrupts a syscall, which for a cooperative loop is a
+feature.
+
+Inside `async()` the dispatch runs in a **daemon task** in the root scope, so a handler is
+ordinary async code — it can allocate, throw, `spawn()` and suspend. Being a daemon, it does
+not keep the program alive once the real work is done.
+
+```php
+Async\async(function () {
+    Async\shutdownOn(SIGTERM, SIGINT);
+    serveForever();                       // unwinds cleanly on the signal
+});
+```
+
+`shutdownOn()` cancels the **root scope**, and everything else falls out of cancellation
+already being structured: the accept loop and every live connection raise
+`CancelledException` at their next suspend point, each scope joins its children, `shield()`
+covers a last write, and `async()` returns normally — a root cancellation is a shutdown, not
+a failure. `poc/async/server.php` is the whole shape: `supervise(4, …)` forks four workers,
+restarts one that crashes, and forwards `SIGTERM` to the group.
 
 ### Bounded concurrency
 

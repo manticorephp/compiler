@@ -1622,6 +1622,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // Async\ (scheduler / tasks / channels / netpoller seam) — DEMAND-GATED,
     // braced-namespace tree. Built ON Fiber + Io\Poll, so it forces both on.
     $asyncSrc = prelude_src_or_empty("async.php");
+    // ext/pcntl + posix process control — DEMAND-GATED, braced-namespace tree.
+    $pcntlSrc = prelude_src_or_empty("pcntl.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1644,11 +1646,17 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // module provides read/write/close/select/connect, names any program may own.
     $useAsync = $demand->mentionsAny(['Async', 'TaskGroup', 'CancelledException',
                                       'DeadlockException']);
+    // ext/pcntl gates on the functions the FILE defines (pcntl_* / posix_*) —
+    // unlike async.php these are names no program would own, so definedFunctions
+    // is exactly right here.
+    $usePcntl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($pcntlSrc));
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
-        // without either, whatever the program itself mentions.
+        // without either, whatever the program itself mentions. It also dispatches
+        // signals every tick, so the pcntl layer has to be there too.
         $useFiber = true;
         $useIoPoll = true;
+        $usePcntl = true;
     }
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
@@ -1770,6 +1778,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
+        $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -2000,7 +2009,7 @@ function analyze_prelude_files(): array {
         // so they need every prelude class the user program can name. Without
         // these, `new \Fiber(...)`, an `\Io\Poll\Context` hint, or the
         // `StreamPollHandle` handle read as unknown classes.
-        "fiber.php", "io_poll.php", "async.php",
+        "fiber.php", "io_poll.php", "async.php", "pcntl.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

@@ -155,6 +155,12 @@ trait LowerPrelude
             $ip = \Parser\Parser::parseSource("<?php\n" . $this->ioPollSrc);
             foreach ($ip->statements as $s) { $stmts[] = $s; }
         }
+        // ext/pcntl — braced namespaces too, and BEFORE async: the scheduler
+        // calls pcntl_signal_dispatch().
+        if ($this->pcntlSrc !== '') {
+            $pc = \Parser\Parser::parseSource("<?php\n" . $this->pcntlSrc);
+            foreach ($pc->statements as $s) { $stmts[] = $s; }
+        }
         // Async\ — same deal (braced `namespace Async {}`), and AFTER io_poll:
         // the Scheduler holds an \Io\Poll\Context and a \StreamPollHandle.
         if ($this->asyncSrc !== '') {
@@ -463,6 +469,56 @@ trait LowerPrelude
                 'FNM_NOMATCH' => 1,
             ];
             if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
+        }
+
+        // ext/pcntl signal numbers + the wait/mask flags. Host-DIVERGENT, and
+        // resolved here for the same reason as FNM_* / SO_* below: php exposes
+        // the host's own <signal.h>, and a compile-time host probe must not be
+        // reachable from a path the stdlib walks (the Zend seed has stub libc
+        // bindings). So NO stdlib source may name these — Stdlib/Pcntl.php uses
+        // the numeric __mc_sig_const() selector instead.
+        //
+        // MEASURED, not recalled: a C probe compiled and run on Darwin arm64, on
+        // gcc:13 (glibc) and on alpine:3.20 (musl). The two Linux libcs agree on
+        // every value; Darwin differs on eleven of them, and on the SIG_BLOCK
+        // family — the classic silent-on-one-host bug if guessed.
+        if (\substr($name, 0, 4) === 'SIG_' || \substr($name, 0, 3) === 'SIG'
+            || $name === 'WNOHANG' || $name === 'WUNTRACED') {
+            $isDarwin = \Manticore\is_darwin();
+            $sig = [
+                // php's own handler sentinels, not the host's.
+                'SIG_DFL' => 0, 'SIG_IGN' => 1, 'SIG_ERR' => -1,
+                // how-argument to sigprocmask — DIFFERENT on the two hosts.
+                'SIG_BLOCK' => $isDarwin ? 1 : 0,
+                'SIG_UNBLOCK' => $isDarwin ? 2 : 1,
+                'SIG_SETMASK' => $isDarwin ? 3 : 2,
+                // Agreed by every host measured.
+                'SIGHUP' => 1, 'SIGINT' => 2, 'SIGQUIT' => 3, 'SIGILL' => 4,
+                'SIGTRAP' => 5, 'SIGABRT' => 6, 'SIGIOT' => 6, 'SIGFPE' => 8,
+                'SIGKILL' => 9, 'SIGSEGV' => 11, 'SIGPIPE' => 13, 'SIGALRM' => 14,
+                'SIGTERM' => 15, 'SIGTTIN' => 21, 'SIGTTOU' => 22, 'SIGXCPU' => 24,
+                'SIGXFSZ' => 25, 'SIGVTALRM' => 26, 'SIGPROF' => 27, 'SIGWINCH' => 28,
+                // Darwin / Linux disagree.
+                'SIGBUS' => $isDarwin ? 10 : 7,
+                'SIGUSR1' => $isDarwin ? 30 : 10,
+                'SIGUSR2' => $isDarwin ? 31 : 12,
+                'SIGCHLD' => $isDarwin ? 20 : 17,
+                'SIGCLD' => $isDarwin ? 20 : 17,
+                'SIGCONT' => $isDarwin ? 19 : 18,
+                'SIGSTOP' => $isDarwin ? 17 : 19,
+                'SIGTSTP' => $isDarwin ? 18 : 20,
+                'SIGURG' => $isDarwin ? 16 : 23,
+                'SIGSYS' => $isDarwin ? 12 : 31,
+                'SIGIO' => $isDarwin ? 23 : 29,
+                'SIGPOLL' => $isDarwin ? 23 : 29,
+                'WNOHANG' => 1, 'WUNTRACED' => 2,
+            ];
+            // Linux-only signals: php does not define them on Darwin either.
+            if (!$isDarwin) {
+                $sig['SIGPWR'] = 30;
+                $sig['SIGSTKFLT'] = 16;
+            }
+            if (isset($sig[$name])) { return new IntConst($sig[$name], Type::int_()); }
         }
 
         // ext/sockets — host-DIVERGENT constants. php exposes the host's own

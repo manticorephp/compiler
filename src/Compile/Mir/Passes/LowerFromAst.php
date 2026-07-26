@@ -296,6 +296,9 @@ final class LowerFromAst implements Pass
     /** Async\ (scheduler / tasks / channels) — DEMAND-GATED. Braced-namespace
      *  tree like io_poll.php; implies fiberSrc + ioPollSrc. */
     public string $asyncSrc = '';
+    /** ext/pcntl + posix process control — DEMAND-GATED. Braced-namespace tree;
+     *  Async\ implies it (the scheduler dispatches signals every tick). */
+    public string $pcntlSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external

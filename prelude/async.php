@@ -285,6 +285,15 @@ namespace Async {
         /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
         public bool $timerActive = false;
 
+        /**
+         * A DAEMON task is work the program must not be kept alive for — the
+         * signal pump is the only one today. It is owned and cancelled like any
+         * other task, but it does not count towards "is there still work?", so a
+         * program whose real tasks have all finished exits instead of being
+         * pinned open by the pump's own timer.
+         */
+        public bool $daemon = false;
+
         /** A value handed to this task while it was parked on a {@see Channel}. */
         public mixed $chanValue = null;
         /** False when the delivering channel was closed (recv/select report !ok). */
@@ -1254,6 +1263,11 @@ namespace Async {
         /** Tasks created and not yet settled — deadlock detection. */
         private int $live = 0;
 
+        /** The implicit root scope — what {@see cancelRoot()} stops. */
+        private ?TaskGroup $root = null;
+        /** True once the signal pump daemon task exists ({@see pollSignals()}). */
+        private bool $signalPolling = false;
+
         private \Io\Poll\Context $reactor;
         /** @var array<int, \Io\Poll\Watcher> fd → its PERSISTENT reactor watcher */
         private array $connWatcher = [];
@@ -1311,13 +1325,14 @@ namespace Async {
         }
 
         /** @param mixed[] $args */
-        public function newTask(callable $fn, array $args, TaskGroup $owner): Task
+        public function newTask(callable $fn, array $args, TaskGroup $owner, bool $daemon = false): Task
         {
             $fiber = new \Fiber(function () use ($fn, $args) {
                 return $fn(...$args);
             });
             $task = new Task($fiber, $owner, $owner);
-            $this->live = $this->live + 1;
+            $task->daemon = $daemon;
+            if (!$daemon) { $this->live = $this->live + 1; }
             $task->queued = true;
             $this->ready[] = $task;
             return $task;
@@ -1327,6 +1342,7 @@ namespace Async {
         public function run(callable $main): mixed
         {
             $root = new TaskGroup(null);
+            $this->root = $root;
             $rootTask = $this->newTask($main, [], $root);
             $rootTask->idx = 0;
             $root->children[] = $rootTask;
@@ -1380,6 +1396,47 @@ namespace Async {
             \Runtime\AsyncHook::clear();
         }
 
+        /**
+         * Stop the whole program's root scope — graceful shutdown. Everything
+         * unwinds through the machinery already there: the accept loop and every
+         * live connection get CancelledException at their suspend point, scopes
+         * join their children, and shield() covers a final flush. A root
+         * cancellation is not a failure, so async() then returns normally.
+         */
+        public function cancelRoot(): void
+        {
+            if ($this->root !== null) {
+                $this->root->cancel();
+            }
+        }
+
+        /**
+         * Start pumping signals. The dispatch runs inside a DAEMON TASK in the
+         * root scope, not at the loop level — a handler that ran between tasks
+         * would have no scope, so it could not spawn(), and `$this->running`
+         * would be null under it. As a task it is ordinary async code: it can
+         * spawn, suspend and be cancelled with everything else at shutdown, and
+         * its own delay() bounds the latency without the reactor needing to know
+         * anything about signals.
+         */
+        public function pollSignals(): void
+        {
+            if ($this->signalPolling || $this->root === null) {
+                return;
+            }
+            $this->signalPolling = true;
+            $pump = $this->newTask(function () {
+                $sched = Scheduler::instance();
+                while (true) {
+                    \pcntl_signal_dispatch();
+                    $sched->sleep(0.05);
+                }
+            }, [], $this->root, true);
+            $pump->claimed = true;      // it only ever ends by cancellation
+            $pump->idx = \count($this->root->children);
+            $this->root->children[] = $pump;
+        }
+
         private function loop(): void
         {
             while (true) {
@@ -1431,7 +1488,7 @@ namespace Async {
             $task->state = $state;
             $task->result = $result;
             $task->error = $error;
-            $this->live = $this->live - 1;
+            if (!$task->daemon) { $this->live = $this->live - 1; }
             if ($task->rbuf !== null) {
                 \Runtime\Libc\free($task->rbuf);
                 $task->rbuf = null;
@@ -1502,7 +1559,7 @@ namespace Async {
             $this->releaseIo($task);
             if ($task->timerActive) {
                 $task->timerActive = false;
-                $this->tmLive = $this->tmLive - 1;
+                if (!$task->daemon) { $this->tmLive = $this->tmLive - 1; }
             }
             $this->releaseChannel($task);
             $task->selecting = false;
@@ -1598,14 +1655,17 @@ namespace Async {
             $this->checkCancel();
             $me = $this->running;
             $me->timerActive = true;
-            $this->tmLive = $this->tmLive + 1;
+            // A DAEMON's timer must not read as "there is still work to do", or
+            // the signal pump would keep every program alive forever. It still
+            // rides the heap, so the loop wakes for it while other work exists.
+            if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
             $this->timerPush(\microtime(true) + $seconds, $me);
             \Fiber::suspend();
             if ($me->timerActive) {
                 // Woken by something other than the timer (cancel already cleared
                 // the flag) — drop the reservation; the heap slot dies lazily.
                 $me->timerActive = false;
-                $this->tmLive = $this->tmLive - 1;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive - 1; }
             }
         }
 
@@ -1846,7 +1906,7 @@ namespace Async {
                 $t = $this->tmTask[0];
                 $this->timerPop();
                 $t->timerActive = false;
-                $this->tmLive = $this->tmLive - 1;
+                if (!$t->daemon) { $this->tmLive = $this->tmLive - 1; }
                 $this->wake($t);
             }
         }
@@ -2305,12 +2365,147 @@ namespace Async {
         return new Selected($idx, $isSend ? null : $me->chanValue, $me->chanOk, $fired, $isSend);
     }
 
+    // ── signals ────────────────────────────────────────────────────────────
+
+    /**
+     * Run $fn when $signo arrives. The handler is ordinary PHP running on the
+     * scheduler's own thread at a safe point — it may allocate, throw, spawn and
+     * suspend, none of which a real signal handler could do — because the signal
+     * is blocked and collected rather than handled ({@see pcntl_signal()}).
+     *
+     * Registering one bounds the reactor's wait at 100 ms, since a blocked signal
+     * cannot interrupt kevent/epoll. A program that registers none pays nothing.
+     */
+    function onSignal(int $signo, callable $fn): void
+    {
+        \pcntl_signal($signo, $fn);
+        Scheduler::instance()->pollSignals();
+    }
+
+    /**
+     * Graceful shutdown: on any of $signals, cancel the ROOT scope.
+     *
+     *   Async\async(function () {
+     *       Async\shutdownOn(SIGTERM, SIGINT);
+     *       serveForever();                 // unwinds cleanly on the signal
+     *   });
+     *
+     * Everything follows from cancellation already being real and structured: the
+     * accept loop and every live connection raise CancelledException at their
+     * next suspend point, each scope joins its children, `shield()` covers a
+     * final flush, and async() returns normally — a root cancellation is a
+     * shutdown, not a failure.
+     */
+    function shutdownOn(int ...$signals): void
+    {
+        $sched = Scheduler::instance();
+        foreach ($signals as $s) {
+            onSignal($s, function () use ($sched) { $sched->cancelRoot(); });
+        }
+    }
+
     // ── shared-nothing multi-process ───────────────────────────────────────
+
+    /**
+     * Fork $n workers and KEEP them running: reap the dead, restart them, and
+     * forward a shutdown to the whole group. The supervisor itself runs no
+     * scheduler — each child calls $worker($index), which is where async() goes.
+     *
+     *   Async\supervise(8, function (int $i) {
+     *       Async\async(function () { Async\shutdownOn(SIGTERM); serve($i); });
+     *   });
+     *
+     * Returns once every child has exited. Fork happens BEFORE any scheduler
+     * exists, which is the only safe order — a fork inside a running loop would
+     * hand the child a copy of the reactor fd and the run queue.
+     */
+    function supervise(int $n, callable $worker): void
+    {
+        (new Supervisor())->run($n, $worker);
+    }
+
+    /** @internal the state {@see supervise()} needs across its reap loop */
+    final class Supervisor
+    {
+        private bool $stopping = false;
+        /** @var array<int, int> worker index → live pid */
+        private array $pids = [];
+
+        public function run(int $n, callable $worker): void
+        {
+            if ($n < 1) { $n = 1; }
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                $this->start($i, $worker);
+            }
+            \pcntl_signal(\SIGTERM, function () { $this->stop(\SIGTERM); });
+            \pcntl_signal(\SIGINT, function () { $this->stop(\SIGINT); });
+
+            while (\count($this->pids) > 0) {
+                \pcntl_signal_dispatch();
+                $status = 0;
+                $pid = \pcntl_waitpid(-1, $status, \WNOHANG);
+                if ($pid > 0) {
+                    $idx = $this->forget($pid);
+                    if ($idx >= 0 && !$this->stopping) {
+                        // Died while we are NOT shutting down: that is a crash,
+                        // not an exit — put the worker back.
+                        $this->start($idx, $worker);
+                    }
+                    continue;
+                }
+                \usleep(50000);
+            }
+        }
+
+        private function start(int $idx, callable $worker): void
+        {
+            $pid = \pcntl_fork();
+            if ($pid === 0) {
+                $worker($idx);
+                exit(0);
+            }
+            if ($pid > 0) {
+                $this->pids[$idx] = $pid;
+            }
+            // pid < 0: fork failed — carry on with fewer workers.
+        }
+
+        /** Forward the shutdown to every child; the reap loop then drains. */
+        private function stop(int $signo): void
+        {
+            $this->stopping = true;
+            foreach ($this->pids as $pid) {
+                \posix_kill($pid, $signo);
+            }
+        }
+
+        /**
+         * Drop $pid and return the worker index it held, or -1.
+         *
+         * ⚠ Rebuilt rather than `unset($this->pids[$idx])`: unset on a VEC
+         * element is still unimplemented (it needs hole / shift semantics) and
+         * SILENTLY does nothing, so the map never shrank and the reap loop below
+         * spun forever waiting for a count that could not fall.
+         */
+        private function forget(int $pid): int
+        {
+            $idx = -1;
+            /** @var array<int, int> $kept */
+            $kept = [];
+            foreach ($this->pids as $i => $p) {
+                if ($p === $pid && $idx < 0) { $idx = $i; continue; }
+                $kept[$i] = $p;
+            }
+            $this->pids = $kept;
+            return $idx;
+        }
+    }
 
     /**
      * Fork into $n workers. Returns THIS worker's index: 0 for the original
      * process, 1..$n-1 for the forks. Call BEFORE async() — each worker then runs
-     * its own scheduler. A failed fork degrades to fewer workers.
+     * its own scheduler. A failed fork degrades to fewer workers. Unsupervised:
+     * {@see supervise()} is the form that restarts a worker that dies.
      */
     function workers(int $n): int
     {
