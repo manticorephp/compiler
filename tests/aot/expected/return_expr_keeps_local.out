@@ -1,0 +1,14 @@
+string(5) "xxxxx"
+string(6) "yyyyyy"
+bool(true)
+string(7) "ZZZZZZ!"
+bool(true)
+string(7) "QQQQQQ?"
+string(4) "ssss"
+string(3) "ccc"
+string(5) "given"
+string(2) "aa"
+string(3) "bbb"
+string(5) "aabbb"
+string(9) "mmm|mmm|3"
+done
