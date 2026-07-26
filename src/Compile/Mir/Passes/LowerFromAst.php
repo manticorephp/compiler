@@ -1506,6 +1506,35 @@ final class LowerFromAst implements Pass
         return false;
     }
 
+    /**
+     * True when a FUNCTION-level `#[CType('int')]` declares the C RETURN as a
+     * 32-bit int, so the FFI wrapper must SIGN-EXTEND it into the i64 carrier.
+     *
+     * This is not cosmetic. A C-compiled callee returning -1 does `mov w0, #-1`,
+     * which zeroes x0's upper half, so an `i64` declare reads 4294967295. That is
+     * how SSL_read's WANT_READ (-1) became a 4 GB length in __mc_stream_fill and
+     * memmove'd off the end of the heap. Hand-written libc syscall stubs happen to
+     * sign-extend (they write the full x0), which is why only the C libraries —
+     * OpenSSL, PCRE2 — were exposed.
+     *
+     * ⚠ Only for a callee whose C prototype really returns `int`. Never put it on
+     * one that returns a POINTER or a long/ssize_t carried as PHP `int`
+     * (SSL_CTX_new, SSL_new, recv, …) — the sext would truncate the value.
+     */
+    private function ffiRetIsInt32(array $attributes): bool
+    {
+        foreach ($attributes as $attr) {
+            $name = \ltrim($attr->name, '\\');
+            if ($name !== 'CType' && $name !== 'Ffi\\CType') { continue; }
+            if ($attr->args === []) { continue; }
+            $arg = $attr->args[0];
+            if ($arg->kind === 'StringLiteral' && $this->strLitValue($arg) === 'int') {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Subclass-typed read of a StringLiteral's value (correct offset). */
     private function strLitValue(\Parser\Ast\StringLiteral $s): string { return $s->value; }
 
