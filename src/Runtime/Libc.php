@@ -536,6 +536,69 @@ function sys_sockatmark(#[CType('int')] int $fd): int {}
 #[Library('c'), Symbol('dup')]
 function sys_dup(#[CType('int')] int $fd): int {}
 
+// ── Signals + process control (ext/pcntl, ext/posix) ───────────────────
+// A C signal HANDLER cannot be installed from PHP, so the pcntl layer never
+// tries: it BLOCKS the signals it handles (they stay pending instead of firing
+// their default action) and reaps them at a safe point with sigpending(2) +
+// sigwait(2). That is pcntl's own deferred model, and it is the reason
+// sigtimedwait is not bound — it does not exist on Darwin, while sigwait is
+// POSIX on both. See src/Runtime/Stdlib/Pcntl.php.
+//
+// `sigset_t` is 4 bytes on Darwin and 128 on Linux (MEASURED, both libcs) —
+// callers allocate the 128-byte superset and let the host's own
+// sigemptyset/sigaddset write into it.
+
+#[Library('c'), Symbol('sigemptyset')]
+function sys_sigemptyset(Ptr $set): int {}
+
+#[Library('c'), Symbol('sigaddset')]
+function sys_sigaddset(Ptr $set, #[CType('int')] int $signo): int {}
+
+// 1 = member, 0 = not, -1 = error.
+#[Library('c'), Symbol('sigismember')]
+function sys_sigismember(Ptr $set, #[CType('int')] int $signo): int {}
+
+// `int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)` — how is
+// SIG_BLOCK/UNBLOCK/SETMASK, whose VALUES DIFFER between hosts (1/2/3 Darwin vs
+// 0/1/2 Linux), so callers take them from __mc_sig_const(), never a literal.
+#[Library('c'), Symbol('sigprocmask')]
+function sys_sigprocmask(#[CType('int')] int $how, Ptr $set, Ptr $old): int {}
+
+#[Library('c'), Symbol('sigpending')]
+function sys_sigpending(Ptr $set): int {}
+
+// `int sigwait(const sigset_t *set, int *sig)` — blocks until one of $set is
+// delivered. Only ever called on a signal already known to be BLOCKED AND
+// PENDING, so it returns immediately.
+#[Library('c'), Symbol('sigwait')]
+function sys_sigwait(Ptr $set, Ptr $sig): int {}
+
+// `sighandler_t signal(int signum, sighandler_t handler)` — used ONLY to set
+// SIG_DFL (0) / SIG_IGN (1); a PHP callback can never be the handler. Returns
+// the previous handler, or SIG_ERR (-1).
+#[Library('c'), Symbol('signal')]
+function sys_signal(#[CType('int')] int $signo, Ptr $handler): int {}
+
+#[Library('c'), Symbol('kill')]
+function sys_kill(#[CType('int')] int $pid, #[CType('int')] int $sig): int {}
+
+#[Library('c'), Symbol('fork')]
+function sys_fork(): int {}
+
+// `pid_t waitpid(pid_t pid, int *status, int options)` — $status is a 4-byte
+// out slot. The W* macros are pure bit math on it and live in the PHP layer.
+#[Library('c'), Symbol('waitpid')]
+function sys_waitpid(#[CType('int')] int $pid, Ptr $status, #[CType('int')] int $options): int {}
+
+#[Library('c'), Symbol('getpid')]
+function sys_getpid(): int {}
+
+#[Library('c'), Symbol('getppid')]
+function sys_getppid(): int {}
+
+#[Library('c'), Symbol('alarm')]
+function sys_alarm(#[CType('unsigned int')] int $seconds): int {}
+
 // ── Randomness ─────────────────────────────────────────────────────────
 // `int getentropy(void *buf, size_t buflen)` — fill $buf with $buflen (<= 256)
 // cryptographically-secure random bytes; 0 on success, -1 on error. Present on

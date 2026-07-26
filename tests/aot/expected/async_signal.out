@@ -1,0 +1,4 @@
+handler: usr1(ok)+spawned
+async returned: main-done
+shutdown: ticked=yes drained=yes returned=null
+done
