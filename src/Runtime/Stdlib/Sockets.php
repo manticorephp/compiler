@@ -717,8 +717,10 @@ function socket_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     }
 
     // Timeout: null seconds = block forever (-1); otherwise sec*1000 + usec/1000.
+    // The wait goes through __mc_select_wait so that inside a scheduler it parks the
+    // FIBER instead of blocking every other task for the whole timeout.
     $timeoutMs = $seconds === null ? -1 : ($seconds * 1000 + \intdiv($microseconds, 1000));
-    $rc = \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
+    $rc = \__mc_select_wait($pfds, $count, $timeoutMs);
     if ($rc < 0) {
         \__mc_sock_errno(true, \__mc_errno());
         \Runtime\Libc\free($pfds);

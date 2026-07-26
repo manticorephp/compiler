@@ -1575,6 +1575,51 @@ function __mc_stream_fd(\Resource $s): int
 }
 
 /**
+ * The WAIT step of stream_select / socket_select: poll $count pollfds for
+ * $timeoutMs (-1 = forever) and return poll(2)'s count.
+ *
+ * Under a scheduler this must not block the PROCESS — every other task would stall
+ * for the whole timeout, and the common `stream_select($r, $w, $e, null)` would
+ * stall them forever. So it polls with a ZERO timeout and parks the FIBER between
+ * attempts (Scheduler::sleep through the netpoller's sleeper hook), backing off
+ * 0.2 ms → 10 ms: an idle select costs little and a ready fd is still seen promptly.
+ *
+ * ⚠ A POLLING park, not a reactor registration. One task holds a single per-fd
+ * waiter-chain slot while a select waits on N fds at once, so a reactor-native
+ * version needs a per-select waiter record in the Scheduler. Worth doing when a
+ * real workload leans on select — the transparent read/write/accept paths use the
+ * reactor directly and never come through here.
+ */
+function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
+{
+    if (!\Runtime\AsyncHook::active()) {
+        return \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
+    }
+    $sleeper = \Runtime\AsyncHook::sleeper();
+    $deadline = $timeoutMs < 0 ? -1.0 : \__mc_microtime_f() + (float)$timeoutMs / 1000.0;
+    $step = 0.0002;
+    while (true) {
+        $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
+        if ($rc !== 0) {
+            return $rc;   // ready fds, or a poll error for the caller to report
+        }
+        if ($deadline >= 0.0) {
+            $left = $deadline - \__mc_microtime_f();
+            if ($left <= 0.0) {
+                return 0;
+            }
+            if ($left < $step) {
+                $step = $left;
+            }
+        }
+        $sleeper($step);
+        if ($step < 0.01) {
+            $step = $step * 2.0;
+        }
+    }
+}
+
+/**
  * stream_select(&$read, &$write, &$except, $sec, $usec) over poll(2) — the stream
  * twin of socket_select (the codebase avoids fd_set / FD_SETSIZE). The three arrays
  * are rewritten in place to hold only the ready streams; returns the ready count, 0
@@ -1634,7 +1679,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     // null $sec = block forever (-1); otherwise sec*1000 + usec/1000.
     $um = $usec === null ? 0 : $usec;
     $timeoutMs = $sec === null ? -1 : ($sec * 1000 + \intdiv($um, 1000));
-    $rc = \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
+    $rc = \__mc_select_wait($pfds, $count, $timeoutMs);
     if ($rc < 0) {
         \Runtime\Libc\free($pfds);
         return false;
