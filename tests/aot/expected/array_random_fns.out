@@ -1,0 +1,39 @@
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 5
+    [5] => 6
+)
+6
+Array
+(
+    [0] => apple
+    [1] => fig
+    [2] => pear
+)
+Array
+(
+    [0] => 10
+    [1] => 20
+    [2] => 30
+)
+array(0) {
+}
+bool(true)
+bool(true)
+2
+bool(true)
+Array
+(
+    [0] => x
+    [1] => y
+    [2] => z
+)
+bool(true)
+bool(true)
+empty rejected
+num rejected
+zero rejected

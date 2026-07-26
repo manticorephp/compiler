@@ -26,17 +26,29 @@
  *    (the bare-`array` param's element erases to unknown there) — same reason
  *    array_map/usort live in the prelude.
  *
- * ⚠ STATUS — this file is WORK IN PROGRESS, do NOT merge it as done.
- * Verified against php: array_diff_assoc · array_intersect_assoc · array_all ·
- * array_any · array_find · array_find_key · array_change_key_case ·
- * array_diff_ukey · array_intersect_ukey (string-name AND closure comparators) ·
- * array_walk (by-value AND `&$value` callbacks) · array_walk_recursive.
- * NOT HERE YET, each blocked on a named compiler root cause:
- *  - array_splice — the in-place rebuild appends the replacement into an erased
- *    by-ref array, and a raw string element lands unboxed (prints as a pointer).
- *    Needs the store-side repr fix: an erased element store must stamp/box.
- *  - array_replace_recursive / array_merge_recursive — a recursive self-call
- *    re-enters with a cell-typed arg, so the erased body stays live.
+ * ⚠ STATUS — every function BELOW is exercised against php by an AOT case
+ * (array_callback_byref · array_assoc_set_ops · array_predicate_case ·
+ * array_splice_fn · array_ucompare_family · array_random_fns):
+ * array_diff_assoc · array_intersect_assoc · array_diff_ukey ·
+ * array_intersect_ukey · array_udiff · array_uintersect · array_udiff_assoc ·
+ * array_uintersect_assoc · array_diff_uassoc · array_intersect_uassoc ·
+ * array_udiff_uassoc · array_uintersect_uassoc · array_walk (by-value AND
+ * `&$value`) · array_walk_recursive · array_splice · shuffle · array_rand ·
+ * array_all · array_any · array_find · array_find_key · array_change_key_case.
+ *
+ * NOT HERE, blocked on a named compiler root cause:
+ *  - array_replace_recursive / array_merge_recursive — the RECURSIVE self-call
+ *    re-enters with a cell-typed arg (`$out[$k]` is a cell holding an array), so
+ *    Monomorphize's callKey is '' and the erased body runs for every nested
+ *    level. Rebuilding both sides into literal-bound locals first fixes it in a
+ *    USER function but not in a PRELUDE one: there the rebuild buffer `$out`
+ *    still binds `vec[unknown]` even though scanAssocLocals marks it assoc and
+ *    the empty-literal retype fires (verified by instrumenting inferStoreLocal —
+ *    a later pass re-stamps the binding), so a string key lands under a
+ *    positional index. That is the vec/assoc widening root cause, not these two
+ *    functions. Do NOT re-attempt them before it lands.
+ *  - array_multisort — variadic BY-REF parallel arrays with interleaved SORT_*
+ *    flags; needs by-ref variadic packs first.
  */
 
 /**
@@ -378,6 +390,62 @@ function array_splice(array &$input, int $offset, ?int $length = null, mixed $re
     }
     $input = $out;
     return $removed;
+}
+
+/**
+ * `shuffle(&$array)` — randomise the order, dropping the keys (PHP reindexes).
+ * Fisher-Yates over a rebuilt list; entropy comes from `random_int`, the one
+ * generator this runtime has (there is no `mt_srand`, so a shuffle is never
+ * reproducible — a test can only assert the multiset, never the order).
+ * @param mixed[] $array
+ */
+function shuffle(array &$array): bool
+{
+    $values = [];
+    foreach ($array as $v) { $values[] = $v; }
+    $i = count($values) - 1;
+    while ($i > 0) {
+        $j = random_int(0, $i);
+        $tmp = $values[$i];
+        $values[$i] = $values[$j];
+        $values[$j] = $tmp;
+        $i = $i - 1;
+    }
+    $array = $values;
+    return true;
+}
+
+/**
+ * `array_rand(arr, num)` — one random KEY, or a list of `$num` distinct keys in
+ * the array's own order (PHP guarantees that order). Selection sampling: walk
+ * the keys once and take each with probability (still-needed / still-left),
+ * which is uniform without a reject-and-retry loop.
+ */
+function array_rand(array $array, int $num = 1): mixed
+{
+    $keys = array_keys($array);
+    $n = count($keys);
+    if ($n === 0) {
+        throw new \ValueError('array_rand(): Argument #1 ($array) cannot be empty');
+    }
+    if ($num < 1 || $num > $n) {
+        throw new \ValueError(
+            'array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1'
+        );
+    }
+    if ($num === 1) { return $keys[random_int(0, $n - 1)]; }
+    $out = [];
+    $need = $num;
+    $i = 0;
+    while ($i < $n && $need > 0) {
+        $left = $n - $i;
+        if (random_int(1, $left) <= $need) {
+            $out[] = $keys[$i];
+            $need = $need - 1;
+        }
+        $i = $i + 1;
+    }
+    return $out;
 }
 
 /**
