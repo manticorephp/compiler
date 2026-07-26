@@ -1766,6 +1766,11 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
         if ($sock === false) {
             return false;
         }
+
+        if (\Runtime\AsyncHook::active()) {
+            \stream_set_blocking($sock, false);
+        }
+
         // Default request mirrors php: no User-Agent, no Accept. `Connection: close`
         // ends the body at EOF when there is no Content-Length. Context adds the
         // method, extra headers, and a body (with its Content-Length) when given.
