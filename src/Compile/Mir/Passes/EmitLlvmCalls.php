@@ -834,12 +834,48 @@ trait EmitLlvmCalls
         return $this->byRefAddrOf($a) ?? '';
     }
 
+    /**
+     * One `#[\Deprecated]` / `#[\NoDiscard]` diagnostic, byte-identical to what
+     * php's CLI prints with display_errors=STDOUT and html_errors=Off:
+     *
+     *     "\n<Level>: <body> in <file> on line <N>\n"
+     *
+     * Message, file and line are all compile-time constants, so the whole line
+     * is ONE interned literal and a `write` — no runtime formatting, and it
+     * dead-strips with the call if the call goes away.
+     *
+     * Emitted through the same fflush + write(1, …) pair `echo` uses for a
+     * string. A `dprintf(2, …)` would look right in isolation and INTERLEAVE
+     * WRONG the moment a program mixes echo with a diagnostic.
+     */
+    private function emitDiagnosticLine(string $level, string $body, int $line): string
+    {
+        $text = "\n" . $level . ': ' . $body . ' in ' . $this->sourceFile
+              . ' on line ' . (string)$line . "\n";
+        $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
+        $this->libcExtra['write'] = 'declare i64 @write(i32, ptr, i64)';
+        $ptr = $this->strLitId($this->pool->intern($text));
+        $out = "  call i32 @fflush(ptr null)\n";
+        $wr = $this->ssa->allocReg();
+        $out .= '  ' . $wr . ' = call i64 @write(i32 1, ptr ' . $ptr
+              . ', i64 ' . (string)\strlen($text) . ")\n";
+        return $out;
+    }
+
+    /** The `#[\Deprecated]` line for a free function call, or ''. */
+    private function deprecatedFnDiag(Call $n): string
+    {
+        $msg = $this->deprecatedFns[$n->function] ?? '';
+        if ($msg === '') { return ''; }
+        return $this->emitDiagnosticLine('Deprecated', $msg, $n->line);
+    }
+
     private function emitCall(Call $n): string
     {
         $c = $n;
         $b = $this->emitBuiltin($c);
         if ($b !== null) { return $b; }
-        $out = '';
+        $out = $this->deprecatedFnDiag($c);
         $argList = '';
         $first = true;
         $mask = $this->sigs->refParams[$c->function] ?? [];

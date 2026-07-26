@@ -97,11 +97,17 @@ trait LowerAttrChecks
                 if ($attrs !== []) {
                     $this->checkAttrSite($attrs, \Compile\BuiltinAttributes::TARGET_CONSTANT,
                         $this->stmtSpan($stmt));
+                    $cn = $this->definedConstName($stmt);
+                    if ($cn !== '') {
+                        $dep = $this->deprecatedText($attrs, 'Constant ' . $cn);
+                        if ($dep !== '') { $this->deprecatedConsts[$cn] = $dep; }
+                    }
                 }
             } elseif ($stmt->kind === 'Function') {
                 $decl = $this->fnStmtDecl($stmt);
                 $this->checkAttrSite($this->fnDeclAttrs($decl),
                     \Compile\BuiltinAttributes::TARGET_FUNCTION, $this->fnDeclSpan($decl));
+                $this->recordFnDiagnostics($decl);
                 foreach ($this->fnDeclParams($decl) as $p) {
                     $this->checkAttrSite($this->paramAttrs($p),
                         \Compile\BuiltinAttributes::TARGET_PARAMETER, $this->paramSpan($p));
@@ -134,6 +140,7 @@ trait LowerAttrChecks
                         \Compile\BuiltinAttributes::TARGET_PROPERTY, $this->paramSpan($p));
                 }
             }
+            $this->recordMethodDiagnostics($d, $m);
             if ($this->hasOverride($this->methodAttrs($m))
                 && !$this->ancestorHasMethod($d, $this->methodDeclName($m))) {
                 $this->attrFail(\ltrim($d->name, '\\') . '::' . $this->methodDeclName($m)
@@ -151,9 +158,13 @@ trait LowerAttrChecks
                     $this->propSpan($p));
             }
         }
+        $cls = \ltrim($this->declName($d), '\\');
         foreach ($d->consts as $c) {
             $this->checkAttrSite($this->constAttrs($c),
                 \Compile\BuiltinAttributes::TARGET_CLASS_CONSTANT, $this->constSpan($c));
+            $cn = $this->constDeclName($c);
+            $dep = $this->deprecatedText($this->constAttrs($c), 'Constant ' . $cls . '::' . $cn);
+            if ($dep !== '') { $this->deprecatedConsts[$cls . '::' . $cn] = $dep; }
         }
         // An enum case reports TARGET_CLASS_CONSTANT, not TARGET_CLASS (probed).
         foreach ($d->cases as $c) {
@@ -161,6 +172,9 @@ trait LowerAttrChecks
             $this->checkAttrSite($this->enumCaseAttrs($c),
                 \Compile\BuiltinAttributes::TARGET_CLASS_CONSTANT,
                 $cspan === null ? $d->span : $cspan);
+            $en = $this->enumCaseName($c);
+            $dep = $this->deprecatedText($this->enumCaseAttrs($c), 'Enum case ' . $cls . '::' . $en);
+            if ($dep !== '') { $this->deprecatedConsts[$cls . '::' . $en] = $dep; }
         }
     }
 
@@ -196,6 +210,117 @@ trait LowerAttrChecks
             }
             $seen[$name] = true;
         }
+    }
+
+    // ── #[\Deprecated] / #[\NoDiscard] message tables ───────────────────────
+
+    /**
+     * The tail php appends after "… is deprecated": ` since <v>` then
+     * `, <message>`, each optional. Constructor order is
+     * `(?string $message, ?string $since)`, so positional 0 is the MESSAGE.
+     * Only string literals are read; anything else is ignored.
+     */
+    private function attrStrArgs(\Parser\Ast\AttributeNode $a): array
+    {
+        /** @var string[] $pos */
+        $pos = [];
+        /** @var array<string,string> $named */
+        $named = [];
+        foreach ($this->attrArgs($a) as $arg) {
+            if ($arg->kind === 'NamedArg') {
+                $v = $this->namedArgValue($arg);
+                if ($v->kind === 'StringLiteral') { $named[$this->namedArgName($arg)] = $this->strLitValue($v); }
+                continue;
+            }
+            if ($arg->kind === 'StringLiteral') { $pos[] = $this->strLitValue($arg); }
+        }
+        $message = $named['message'] ?? ($pos[0] ?? '');
+        $since = $named['since'] ?? ($pos[1] ?? '');
+        return ['message' => $message, 'since' => $since];
+    }
+
+    /** @param \Parser\Ast\AttributeNode[] $attrs */
+    private function deprecatedText(array $attrs, string $subject): string
+    {
+        foreach ($attrs as $a) {
+            if ($this->reservedAttr($a) !== 'Deprecated') { continue; }
+            $parts = $this->attrStrArgs($a);
+            $out = $subject . ' is deprecated';
+            if ($parts['since'] !== '') { $out = $out . ' since ' . $parts['since']; }
+            if ($parts['message'] !== '') { $out = $out . ', ' . $parts['message']; }
+            return $out;
+        }
+        return '';
+    }
+
+    /** @param \Parser\Ast\AttributeNode[] $attrs */
+    private function noDiscardText(array $attrs, string $subject): string
+    {
+        foreach ($attrs as $a) {
+            if ($this->reservedAttr($a) !== 'NoDiscard') { continue; }
+            $parts = $this->attrStrArgs($a);
+            $out = 'The return value of ' . $subject
+                 . ' should either be used or intentionally ignored by casting it as (void)';
+            if ($parts['message'] !== '') { $out = $out . ', ' . $parts['message']; }
+            return $out;
+        }
+        return '';
+    }
+
+    /** "Class::NAME" (class const / enum case) or "NAME" (global const) → the
+     *  `#[\Deprecated]` body. Constants inline at LOWERING, so unlike calls they
+     *  have no node left at emit time to hang a diagnostic on.
+     *  @var array<string, string> */
+    private array $deprecatedConsts = [];
+
+    /**
+     * Queue the diagnostic for a deprecated constant USE. It rides
+     * `$pendingCallInits`, which `lowerStmt` flushes immediately before the
+     * enclosing statement — matching php, which prints the notice before the
+     * statement's own output.
+     */
+    private function noteDeprecatedConstUse(string $key, int $line): void
+    {
+        $text = $this->deprecatedConsts[$key] ?? '';
+        if ($text === '') { return; }
+        $mod = $this->module;
+        $file = $mod === null ? '' : $mod->sourceFile;
+        $this->pendingCallInits[] = new \Compile\Mir\Echo_(
+            [new \Compile\Mir\StringConst(
+                "\nDeprecated: " . $text . ' in ' . $file . ' on line ' . (string)$line . "\n",
+                \Compile\Mir\Type::string_(),
+            )],
+            \Compile\Mir\Type::void(),
+        );
+    }
+
+    private function recordFnDiagnostics(\Parser\Ast\FunctionDecl $d): void
+    {
+        $mod = $this->module;
+        if ($mod === null) { return; }
+        $name = \ltrim($this->fnDeclName($d), '\\');
+        $attrs = $this->fnDeclAttrs($d);
+        $dep = $this->deprecatedText($attrs, 'Function ' . $name . '()');
+        if ($dep !== '') { $mod->deprecatedFns[$name] = $dep; }
+        $nd = $this->noDiscardText($attrs, 'function ' . $name . '()');
+        if ($nd !== '') { $mod->noDiscardFns[$name] = $nd; }
+    }
+
+    private function recordMethodDiagnostics(\Parser\Ast\ClassDecl $c, \Parser\Ast\MethodDecl $m): void
+    {
+        $mod = $this->module;
+        if ($mod === null) { return; }
+        $cls = \ltrim($this->declName($c), '\\');
+        $mn = $this->methodDeclName($m);
+        $attrs = $this->methodAttrs($m);
+        $dep = $this->deprecatedText($attrs, 'Method ' . $cls . '::' . $mn . '()');
+        if ($dep !== '') { $mod->deprecatedMethods[$cls . '::' . $mn] = $dep; }
+        // An ABSTRACT or interface declaration does NOT propagate #[\NoDiscard]
+        // to the concrete implementation — php warns from the declaration that
+        // actually runs.
+        if ($this->methodDeclBodyIsNull($m)) { return; }
+        $nd = $this->noDiscardText($attrs, 'method ' . $cls . '::' . $mn . '()');
+        if ($nd !== '') { $mod->noDiscardMethods[$cls . '::' . $mn] = $nd; }
     }
 
     /** @param \Parser\Ast\AttributeNode[] $attrs */
@@ -320,6 +445,27 @@ trait LowerAttrChecks
     private function paramAttrs(\Parser\Ast\Param $p): array { return $p->attributes; }
     private function paramPromoted(\Parser\Ast\Param $p): string { return $p->promoted; }
     private function paramSpan(\Parser\Ast\Param $p): \Parser\Ast\Span { return $p->span; }
+    private function fnDeclName(\Parser\Ast\FunctionDecl $d): string { return $d->name; }
+    private function constDeclName(\Parser\Ast\ConstDecl $c): string { return $c->name; }
+    private function enumCaseName(\Parser\Ast\EnumCase $c): string { return $c->name; }
+
+    /** The NAME a top-level `const X = …;` defines — the statement desugars to
+     *  `define('X', …)`, so it is the call's first string-literal argument. */
+    private function definedConstName(\Parser\Ast\ExpressionStmt $s): string
+    {
+        $e = $s->expr;
+        if ($e->kind !== 'Call') { return ''; }
+        $args = $this->callExprArgs($e);
+        if ($args === []) { return ''; }
+        $a0 = $args[0];
+        if ($a0->kind !== 'StringLiteral') { return ''; }
+        return $this->strLitValue($a0);
+    }
+    /** @return \Parser\Ast\Expr[] */
+    private function callExprArgs(\Parser\Ast\CallExpr $c): array { return $c->args; }
+    private function namedArgName(\Parser\Ast\NamedArg $a): string { return $a->name; }
+    private function namedArgValue(\Parser\Ast\NamedArg $a): \Parser\Ast\Expr { return $a->value; }
+    private function methodDeclBodyIsNull(\Parser\Ast\MethodDecl $m): bool { return $m->body === null; }
     /** @return \Parser\Ast\AttributeNode[] */
     private function enumCaseAttrs(\Parser\Ast\EnumCase $c): array { return $c->attributes; }
     private function enumCaseSpan(\Parser\Ast\EnumCase $c): ?\Parser\Ast\Span { return $c->span; }

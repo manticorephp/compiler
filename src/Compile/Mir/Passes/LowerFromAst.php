@@ -1891,7 +1891,7 @@ final class LowerFromAst implements Pass
      * predefined constants the compiler source uses; `true`/`false`/
      * `null` too (the parser sometimes hands them through as identifiers).
      */
-    private function lowerIdentifier(string $rawName): Node
+    private function lowerIdentifier(string $rawName, int $line = 0): Node
     {
         // An unqualified constant resolves in the current namespace
         // first, then the global one — so `Compile\PHP_INT_MAX` is really
@@ -1900,6 +1900,7 @@ final class LowerFromAst implements Pass
         $pre = $this->predefinedConstant($name);
         if ($pre !== null) { return $pre; }
         if (isset($this->userConstants[$name])) {
+            $this->noteDeprecatedConstUse($name, $line);
             return $this->lowerExpr($this->userConstants[$name]);
         }
         $low = \strtolower($name);

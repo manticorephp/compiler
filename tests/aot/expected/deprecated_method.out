@@ -1,0 +1,12 @@
+start
+
+Deprecated: Method Legacy::instance() is deprecated since 2.0 in deprecated_method.php on line 21
+i
+
+Deprecated: Method Legacy::stat() is deprecated in deprecated_method.php on line 22
+s
+f
+
+Deprecated: Method Legacy::instance() is deprecated since 2.0 in deprecated_method.php on line 25
+i
+end

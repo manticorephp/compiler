@@ -2133,7 +2133,39 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** A receiver's static class name, or '' when it has none. `Type::$class` is
+     *  meaningful only on an OBJ type — reading it off a cell through `?? ''`
+     *  hands back a raw 0 that does not compare equal to null natively. */
+    private function staticClassOf(\Compile\Mir\Node $recv): string
+    {
+        $t = $recv->type;
+        if ($t->kind !== Type::KIND_OBJ) { return ''; }
+        return \ltrim($t->class ?? '', '\\');
+    }
+
+    /**
+     * The `#[\Deprecated]` line for a method / static-method call, or ''.
+     * Keyed by the DECLARING class, so an inherited call resolves to the
+     * declaration that actually runs — exactly what php reports.
+     */
+    private function deprecatedMethodDiag(string $class, string $method, int $line): string
+    {
+        if ($class === '') { return ''; }
+        $decl = $this->resolveMethodClass($class, $method);
+        if ($decl === '') { $decl = $class; }
+        $msg = $this->deprecatedMethods[$decl . '::' . $method] ?? '';
+        if ($msg === '') { return ''; }
+        return $this->emitDiagnosticLine('Deprecated', $msg, $line);
+    }
+
     private function emitStaticCall(\Compile\Mir\StaticCall_ $n): string
+    {
+        $depDiag = $this->deprecatedMethodDiag(\ltrim($n->class, '\\'), $n->method, $n->line);
+        if ($depDiag !== '') { return $depDiag . $this->emitStaticCallInner($n); }
+        return $this->emitStaticCallInner($n);
+    }
+
+    private function emitStaticCallInner(\Compile\Mir\StaticCall_ $n): string
     {
         // Closure::bind($fn, $obj, $scope?) → a copy of $fn's env with the
         // `$this` slot rebound to $obj (scope resolved by class_id dispatch).
@@ -2515,6 +2547,13 @@ trait EmitLlvmObjects
     }
 
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
+    {
+        $depDiag = $this->deprecatedMethodDiag($this->staticClassOf($n->object), $n->method, $n->line);
+        if ($depDiag !== '') { return $depDiag . $this->emitMethodCallInner($n); }
+        return $this->emitMethodCallInner($n);
+    }
+
+    private function emitMethodCallInner(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
         // A method on a `#[TypeDef]` receiver: a direct call with the scalar as

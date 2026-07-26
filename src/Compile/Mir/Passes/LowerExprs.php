@@ -177,7 +177,10 @@ trait LowerExprs
             $ecls = \ltrim($saClass, '\\');
             if (isset($this->enumTable[$ecls])) {
                 $ord = $this->enumTable[$ecls]->ordinalOf($saName);
-                if ($ord >= 0) { return new IntConst($ord, Type::obj($ecls)); }
+                if ($ord >= 0) {
+                    $this->noteDeprecatedConstUse($ecls . '::' . $saName, $expr->span->line);
+                    return new IntConst($ord, Type::obj($ecls));
+                }
             }
             // Class::$prop → load the static-property global.
             $sp = $this->staticPropRef($saClass, $saName);
@@ -189,6 +192,7 @@ trait LowerExprs
             $cname = $this->resolveStaticClass($saClass);
             $cv = $this->findClassConst($cname, $saName);
             if ($cv !== null) {
+                $this->noteDeprecatedConstUse($cname . '::' . $saName, $expr->span->line);
                 $prevC = $this->currentLowerClass;
                 $this->currentLowerClass = $cname;
                 $lowered = $this->lowerExpr($cv);
@@ -382,7 +386,7 @@ trait LowerExprs
         // Unwrap positionally for now — full reordering against the
         // callee's params on those paths is a TODO.
         if ($expr->kind === 'NamedArg')       { return $this->lowerExpr($this->namedArgValue($expr)); }
-        if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name); }
+        if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name, $expr->span->line); }
         if ($expr->kind === 'Yield') {
             // Read subclass fields through a YieldExpr-typed param (the kind
             // check above proves the shape) — a base-`Expr` read picks the

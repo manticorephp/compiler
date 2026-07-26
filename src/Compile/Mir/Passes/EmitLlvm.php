@@ -264,6 +264,17 @@ final class EmitLlvm implements EmitVisitor
      *  layout hazard (the ClassDef::$isPreludeClass lesson). */
     private array $reflFnMeta = [];
 
+    /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
+     *  Keyed by function name / "DeclaringClass::method".
+     *  @var array<string, string> */
+    private array $deprecatedFns = [];
+    /** @var array<string, string> */
+    private array $deprecatedMethods = [];
+    /** @var array<string, string> */
+    private array $noDiscardFns = [];
+    /** @var array<string, string> */
+    private array $noDiscardMethods = [];
+
     public function emit(Module $module): string
     {
         $this->rt = new RuntimeFeatures();
@@ -298,6 +309,10 @@ final class EmitLlvm implements EmitVisitor
         $this->interfaceNames = $module->interfaceNames;
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
+        $this->deprecatedFns = $module->deprecatedFns;
+        $this->deprecatedMethods = $module->deprecatedMethods;
+        $this->noDiscardFns = $module->noDiscardFns;
+        $this->noDiscardMethods = $module->noDiscardMethods;
         $this->closureCaptures = $module->closureCaptures;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
