@@ -155,6 +155,12 @@ trait LowerPrelude
             $ip = \Parser\Parser::parseSource("<?php\n" . $this->ioPollSrc);
             foreach ($ip->statements as $s) { $stmts[] = $s; }
         }
+        // Async\ — same deal (braced `namespace Async {}`), and AFTER io_poll:
+        // the Scheduler holds an \Io\Poll\Context and a \StreamPollHandle.
+        if ($this->asyncSrc !== '') {
+            $as = \Parser\Parser::parseSource("<?php\n" . $this->asyncSrc);
+            foreach ($as->statements as $s) { $stmts[] = $s; }
+        }
         return $stmts;
     }
 
