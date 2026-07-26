@@ -30,10 +30,12 @@ final class AsyncHook
     public static mixed $waitReadableFor = null;
     public static mixed $waitWritableFor = null;
     public static mixed $sleeper = null;
+    public static mixed $dnsGet = null;
+    public static mixed $dnsPut = null;
 
     public static function install(mixed $waitReadable, mixed $waitWritable, mixed $onClose,
                                    mixed $waitReadableFor, mixed $waitWritableFor,
-                                   mixed $sleeper): void
+                                   mixed $sleeper, mixed $dnsGet, mixed $dnsPut): void
     {
         self::$waitReadable = $waitReadable;
         self::$waitWritable = $waitWritable;
@@ -41,6 +43,8 @@ final class AsyncHook
         self::$waitReadableFor = $waitReadableFor;
         self::$waitWritableFor = $waitWritableFor;
         self::$sleeper = $sleeper;
+        self::$dnsGet = $dnsGet;
+        self::$dnsPut = $dnsPut;
     }
 
     public static function clear(): void
@@ -51,6 +55,8 @@ final class AsyncHook
         self::$waitReadableFor = null;
         self::$waitWritableFor = null;
         self::$sleeper = null;
+        self::$dnsGet = null;
+        self::$dnsPut = null;
     }
 
     /** True while a scheduler is driving I/O and a fiber is running. */
@@ -68,4 +74,12 @@ final class AsyncHook
     public static function writableFor(): mixed { return self::$waitWritableFor; }
     /** Fiber-aware sleep: `fn(float $seconds): void`. */
     public static function sleeper(): mixed { return self::$sleeper; }
+    /**
+     * Resolver cache, held by the SCHEDULER because a stdlib static cannot own an
+     * assoc (the array-repr trap) and a per-run lifetime is the right scope anyway.
+     * `dnsGet: fn(string $host): string` ('' = miss/expired) ·
+     * `dnsPut: fn(string $host, string $ip, int $ttl): void`.
+     */
+    public static function dnsGetter(): mixed { return self::$dnsGet; }
+    public static function dnsPutter(): mixed { return self::$dnsPut; }
 }
