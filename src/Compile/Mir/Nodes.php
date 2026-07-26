@@ -482,7 +482,16 @@ final class StaticProp_ extends Node
 
 final class StoreStaticProp_ extends Node
 {
-    public function __construct(public string $global, public Node $value, Type $type)
+    /**
+     * `$declared` is the property's DECLARED type, which `$type` cannot carry —
+     * InferTypes overwrites `$type` with the assigned value's type (an assignment
+     * is an expression). The emitter needs the declared one to decide whether the
+     * slot is a self-describing cell that must be boxed on store; it has no
+     * static-prop type table of its own. Trailing + nullable, so the field ORDER
+     * of every node before it is untouched ({@see NodeClone}).
+     */
+    public function __construct(public string $global, public Node $value, Type $type,
+                                public ?Type $declared = null)
     {
         parent::__construct(Node::KIND_STORE_STATIC_PROP, $type);
     }

@@ -1,0 +1,19 @@
+int(42)
+bool(true)
+string(4) "text"
+bool(true)
+bool(true)
+bool(true)
+float(1.5)
+bool(true)
+NULL
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+int(42)
+bool(true)
+guard holds
+int(1099511627776)
+bool(true)

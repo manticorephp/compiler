@@ -1925,10 +1925,41 @@ trait EmitLlvmObjects
     private function emitStoreStaticProp(\Compile\Mir\StoreStaticProp_ $n): string
     {
         $out = $this->emitNode($n->value);
+        // A CELL-declared slot (`public static mixed $x`) is self-describing: the
+        // READ side decodes it by tag, so the store must NaN-box. Storing raw made
+        // every scalar come back as a denormal float — `C::$s = 42; C::$s === 42`
+        // was false, and `AsyncHook::clear()`'s `= null` left every hook reading as
+        // NON-null, so fclose() after async() called through a null closure.
+        // Arrays/objects/closures ride raw here exactly as they do at a call
+        // boundary ({@see EmitLlvm::isCellBoxableArg}) and exactly as an INSTANCE
+        // cell-property does — so `is_array()`/`get_debug_type()` on an array in a
+        // `mixed` static prop still lie (count() and the element reads work). That
+        // is the repr-consistency epic's cell-array-backing-slot problem, not this
+        // store's: boxing would rebuild the array and change its identity.
+        $dk = $n->declared === null ? null : $n->declared->kind;
+        $box = ($dk === Type::KIND_CELL || $dk === Type::KIND_UNKNOWN)
+            && $this->isCellBoxableArg($n->value->type);
+        // A float is boxed from the DOUBLE register: coercing to i64 first would
+        // hand box_float the bit pattern as an integer (1.5 stored as 4.6e18).
+        // Floats are not rc-managed, so nothing is owed to the retain below.
+        if ($box && $n->value->type->kind === Type::KIND_FLOAT) {
+            $out .= $this->boxToCell($n->value->type);
+            $val = $this->lastValue;
+            $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
-        // A static prop is a program-lifetime owner of an obj value.
+        // A static prop is a program-lifetime owner of an obj value. The retain
+        // happens on the RAW pointer, BEFORE any boxing — a tagged cell would
+        // mis-locate the rc header (same rule as the instance-property store).
         $out .= $this->rcRetainByType($n->value, $val, null, 5);
+        if ($box) {
+            $out .= $this->boxToCell($n->value->type);
+            $val = $this->lastValue;
+        }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
         $this->lastValue = $val;
         $this->lastValueType = 'i64';

@@ -455,7 +455,7 @@ trait LowerExprs
         if ($target->kind === 'StaticAccess') {
             $ref = $this->staticPropRef($this->staticAccessClass($target), $this->staticAccessName($target));
             if ($ref !== null) {
-                return new StoreStaticProp_($ref->global, $value, $value->type);
+                return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
             }
         }
         if ($target->kind === 'ArrayLit') {
