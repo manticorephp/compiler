@@ -10,6 +10,11 @@
 //      poll(2) blocked the WHOLE scheduler instead of just the caller.
 //
 // The port is scanned rather than read back — see net_tcp_loopback for why.
+//
+// ⚠ Nothing may be printed before the first async() call: tools/difftest.sh treats
+// a file as manticore-only when php produces NO stdout for it, and php cannot run
+// this one (no Io\Poll). A leading var_dump made difftest report a DIFF instead of
+// a skip. Everything asserted here is therefore folded into the reports below.
 
 use function Async\async;
 use function Async\spawn;
@@ -24,7 +29,6 @@ for ($p = 49380; $p < 49460; $p = $p + 1) {
         break;
     }
 }
-var_dump($server !== false);
 
 $report = async(function () use ($server, $port): string {
     // A silent peer: accept the connection and never write to it.
@@ -71,6 +75,7 @@ $report = async(function () use ($server, $port): string {
     $silent->await();
     return $r . ' ticks=' . (string)$ticks;
 });
+echo "listening: ", ($server !== false ? 'yes' : 'no'), "\n";
 echo $report, "\n";
 
 // accept() with a deadline and nobody connecting: false, and the scheduler stays

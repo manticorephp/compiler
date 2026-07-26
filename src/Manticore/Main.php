@@ -954,34 +954,38 @@ function cmd_compile(array $args): int {
 }
 
 /**
- * Host OS sysname ("Darwin" / "Linux") via libc uname(2). The `sysname`
- * member is at offset 0, NUL-terminated; a generously zeroed buffer covers
- * macOS's ~1.3 KB utsname.
+ * Host OS sysname ("Darwin" / "Linux").
+ *
+ * Goes through `php_uname()`, the ONE primitive that exists in BOTH worlds: php's
+ * own builtin while the compiler runs under the Zend cold seed, and the stdlib's
+ * uname(2) wrapper in a native build. The calloc+uname FFI pair this used to call
+ * is a STUB under Zend (an empty body with a `: \Ffi\Ptr` return type), so any
+ * emitter reaching it killed `bin/compile` with
+ * "Manticore\calloc(): Return value must be of type Ffi\Ptr, none returned".
+ *
+ * That stopped being hypothetical when the compiler's own source began demanding
+ * fibers: `src/Runtime/AsyncHook.php` mentions `\Fiber`, so the demand gate turns
+ * fibers on for the compiler itself, and the fiber preamble needs the host arch.
+ * Routing through php_uname removes the hazard class — and with it the old
+ * "never call host_os() from an emitter" rule.
  */
 function host_os(): string {
-    $buf = calloc(2048, 1);
-    uname($buf);
-    // `$buf` is a raw calloc block (no header). cstr_to_str copies to the NUL
-    // into an owned, headered MIR string — the single raw→string boundary.
-    return \cstr_to_str($buf);
+    return \php_uname('s');
 }
 
 /**
- * Host CPU arch, normalized to the codegen names ("arm64" / "x86_64"), via
- * the `machine` member of libc uname(2). Unlike sysname (offset 0), `machine`
- * is the 5th utsname field, so its offset depends on the per-field stride —
- * and the stride itself is OS-divergent: Darwin's _SYS_NAMELEN is 256, glibc/
- * musl's _UTSNAME_LENGTH is 65. So read sysname first to pick the stride, then
- * read machine at 4*stride. Same compile-time host==target assumption as
- * host_os(): the arch the compiler runs on IS the arch it emits for (no
- * cross-compile), so this must only be reached from a compiler pass, never a
- * path the stdlib itself walks (libc bindings are stubs under the Zend seed).
+ * Host CPU arch, normalized to the codegen names ("arm64" / "x86_64").
+ *
+ * Same both-worlds reasoning as {@see host_os()} — and this one mattered more: it
+ * hand-walked utsname with an OS-divergent field stride (Darwin's _SYS_NAMELEN 256
+ * vs glibc/musl's _UTSNAME_LENGTH 65) to reach `machine`. php_uname('m') answers
+ * that directly, under Zend and natively.
+ *
+ * The compile-time host==target assumption stands: the arch the compiler runs on IS
+ * the arch it emits for (no cross-compile yet).
  */
 function host_arch(): string {
-    $buf = calloc(2048, 1);
-    uname($buf);
-    $stride = \substr(\cstr_to_str($buf), 0, 6) === 'Darwin' ? 256 : 65;
-    $machine = \cstr_to_str(\ptr_offset($buf, 4 * $stride));
+    $machine = \php_uname('m');
     if ($machine === 'arm64' || $machine === 'aarch64') { return 'arm64'; }
     if ($machine === 'x86_64' || $machine === 'amd64') { return 'x86_64'; }
     return $machine;
