@@ -46,7 +46,12 @@ is_known_divergence() {
 }
 
 match=0 diff=0 compile=0 phpskip=0
-declare -a DIFFS COMPILES
+# Assigned EMPTY, not just declared: under `set -u` some bashes treat a declared-but-
+# never-assigned array as unbound, so the summary below died with
+# "COMPILES: unbound variable" on a run that had no compile failures — i.e. exactly
+# when everything passed.
+DIFFS=()
+COMPILES=()
 
 for f in "${FILES[@]}"; do
     [[ -f "$f" ]] || continue
