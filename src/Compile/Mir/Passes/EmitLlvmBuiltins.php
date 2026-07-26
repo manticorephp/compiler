@@ -2998,6 +2998,15 @@ trait EmitLlvmBuiltins
      * conversions): pack the individual arg nodes into a packed cell array and
      * drive the stdlib {@see \__mc_format} engine. `sprintf($f, ...$arr)` passes
      * the spread's array straight through. printf echoes the result.
+     *
+     * `@param Node[]` is LOAD-BEARING, not documentation: a bare `array` param
+     * carries an UNKNOWN element, so `$args[$k]` reads the slot raw and the
+     * frame epilogue releases that value under the wrong representation —
+     * libmalloc aborts with "pointer being freed was not allocated" the moment
+     * a program calls sprintf() with a non-literal format. Every other bi* entry
+     * point already annotates this; this one did not.
+     *
+     * @param Node[] $args
      */
     private function biFormatRuntime(array $args, bool $toStdout): string
     {

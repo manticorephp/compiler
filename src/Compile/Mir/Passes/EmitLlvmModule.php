@@ -1081,18 +1081,27 @@ trait EmitLlvmModule
             $out .= $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
+        // Drop every owned RcHeap obj local on this return path, except
+        // the one being returned (ownership transfers to the caller). The
+        // trailing fall-through release covers paths with no `return`.
+        //
+        // RELEASES FIRST, arena_leave AFTER — the order the fall-through
+        // cleanup already uses. A local that was arena-allocated still carries
+        // a release here; before the bulk free its header reads as arena and
+        // the release is a no-op, but AFTER the bulk free the header is freed
+        // memory, so the release read garbage and handed libmalloc a pointer it
+        // never allocated ("pointer being freed was not allocated", abort). It
+        // took a function with both an arena-confined string local and an early
+        // `return` — sprintf() with a non-literal format was one.
+        $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
+            ? $v->name : null;
+        $leave = $this->emitRcReturnCleanup($returnedLocal);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
         // arena_leave only covers fall-through). The return value is
         // escaping (RcHeap, heap-allocated), never arena, so freeing
         // the arena here can't touch it.
-        $leave = $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
-        // Drop every owned RcHeap obj local on this return path, except
-        // the one being returned (ownership transfers to the caller). The
-        // trailing fall-through release covers paths with no `return`.
-        $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
-            ? $v->name : null;
-        $leave .= $this->emitRcReturnCleanup($returnedLocal);
+        $leave .= $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         if ($v === null) {
             return $this->finishReturn('', '0', $leave);
         }
