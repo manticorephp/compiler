@@ -1944,6 +1944,9 @@ final class Parser
             || $kw === 'float' || $kw === 'double' || $kw === 'real'
             || $kw === 'string'
             || $kw === 'bool'  || $kw === 'boolean'
+            // PHP 8.5 `(void) f()` — evaluate and discard, the sanctioned way to
+            // silence a #[\NoDiscard].
+            || $kw === 'void'
             || $kw === 'array' || $kw === 'object';
     }
 

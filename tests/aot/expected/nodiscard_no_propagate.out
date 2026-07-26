@@ -1,0 +1,4 @@
+start
+
+Warning: The return value of method Impl::own() should either be used or intentionally ignored by casting it as (void) in nodiscard_no_propagate.php on line 13
+end

@@ -1,0 +1,11 @@
+start
+
+Warning: The return value of function bulk() should either be used or intentionally ignored by casting it as (void), as processing might fail in nodiscard_basic.php on line 11
+
+Warning: The return value of function plain() should either be used or intentionally ignored by casting it as (void) in nodiscard_basic.php on line 12
+
+Warning: The return value of method C::m() should either be used or intentionally ignored by casting it as (void) in nodiscard_basic.php on line 13
+
+Warning: The return value of method C::s() should either be used or intentionally ignored by casting it as (void) in nodiscard_basic.php on line 14
+used
+end

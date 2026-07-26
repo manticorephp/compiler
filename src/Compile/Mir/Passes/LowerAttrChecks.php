@@ -294,6 +294,31 @@ trait LowerAttrChecks
         );
     }
 
+    /** Whether an AST expression is a `(void)` cast. */
+    private function isVoidCastExpr(\Parser\Ast\Expr $e): bool
+    {
+        if ($e->kind !== 'Cast') { return false; }
+        return \strtolower($this->castTarget($e)) === 'void';
+    }
+
+    private function castTarget(\Parser\Ast\Cast $c): string { return $c->cast; }
+
+    /** Mark a lowered call as `(void)`-discarded (no-op for anything else). */
+    private function markVoidCast(\Compile\Mir\Node $n): void
+    {
+        if ($n->kind === \Compile\Mir\Node::KIND_CALL) {
+            $this->setCallVoidCast($n);
+        } elseif ($n->kind === \Compile\Mir\Node::KIND_METHOD_CALL) {
+            $this->setMethodCallVoidCast($n);
+        } elseif ($n->kind === \Compile\Mir\Node::KIND_STATIC_CALL) {
+            $this->setStaticCallVoidCast($n);
+        }
+    }
+
+    private function setCallVoidCast(\Compile\Mir\Call $n): void { $n->voidCast = true; }
+    private function setMethodCallVoidCast(\Compile\Mir\MethodCall_ $n): void { $n->voidCast = true; }
+    private function setStaticCallVoidCast(\Compile\Mir\StaticCall_ $n): void { $n->voidCast = true; }
+
     private function recordFnDiagnostics(\Parser\Ast\FunctionDecl $d): void
     {
         $mod = $this->module;

@@ -323,6 +323,12 @@ final class Call extends Node
         parent::__construct(Node::KIND_CALL, $type);
     }
 
+    /** Set when this call is the operand of a `(void)` cast in statement
+     *  position — php's sanctioned way to silence a #[\Override]-style
+     *  #[\NoDiscard] warning. Declared LAST: a field added mid-struct shifts
+     *  every later offset, a self-host layout hazard. */
+    public bool $voidCast = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCall($this);
@@ -1201,6 +1207,9 @@ final class MethodCall_ extends Node
         parent::__construct(Node::KIND_METHOD_CALL, $type);
     }
 
+    /** See {@see Call::$voidCast}. Declared LAST. */
+    public bool $voidCast = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitMethodCall($this);
@@ -1227,6 +1236,9 @@ final class StaticCall_ extends Node
     ) {
         parent::__construct(Node::KIND_STATIC_CALL, $type);
     }
+
+    /** See {@see Call::$voidCast}. Declared LAST. */
+    public bool $voidCast = false;
 
     public function accept(EmitVisitor $v): string
     {

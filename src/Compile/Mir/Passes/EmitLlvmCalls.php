@@ -733,6 +733,57 @@ trait EmitLlvmCalls
             || $pk === Type::KIND_STRING;
     }
 
+    /**
+     * The `#[\NoDiscard]` warning for a call whose result is thrown away, or ''.
+     *
+     * `(void) f();` and `$_ = f();` both stay quiet — the first via the
+     * `voidCast` marker, the second because an assignment is a StoreLocal and
+     * never reaches this loop's call arms. `if (f()) {}` is a condition, not a
+     * block statement, so it is a USE. All three match php.
+     */
+    private function emitNoDiscardWarn(Node $s): string
+    {
+        $k = $s->kind;
+        $msg = '';
+        if ($k === Node::KIND_CALL) {
+            if ($this->callIsVoidCast($s)) { return ''; }
+            $msg = $this->noDiscardFns[$this->callFunction($s)] ?? '';
+        } elseif ($k === Node::KIND_METHOD_CALL) {
+            if ($this->methodCallIsVoidCast($s)) { return ''; }
+            $msg = $this->noDiscardMethodMsg($this->staticClassOf($this->methodCallObject($s)),
+                $this->methodCallMethod($s));
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            if ($this->staticCallIsVoidCast($s)) { return ''; }
+            $msg = $this->noDiscardMethodMsg(\ltrim($this->staticCallClass($s), '\\'),
+                $this->staticCallMethod($s));
+        } else {
+            return '';
+        }
+        if ($msg === '') { return ''; }
+        return $this->emitDiagnosticLine('Warning', $msg, $s->line);
+    }
+
+    /** Keyed by the DECLARING class — an ABSTRACT or interface declaration never
+     *  registers one, so it does not propagate to the concrete implementation. */
+    private function noDiscardMethodMsg(string $class, string $method): string
+    {
+        if ($class === '') { return ''; }
+        $decl = $this->resolveMethodClass($class, $method);
+        if ($decl === '') { $decl = $class; }
+        return $this->noDiscardMethods[$decl . '::' . $method] ?? '';
+    }
+
+    /** Subclass-typed reads of the call nodes (T5: a base-typed read resolves
+     *  by OFFSET and would pick the wrong slot). */
+    private function callIsVoidCast(Call $n): bool { return $n->voidCast; }
+    private function callFunction(Call $n): string { return $n->function; }
+    private function methodCallIsVoidCast(MethodCall_ $n): bool { return $n->voidCast; }
+    private function methodCallObject(MethodCall_ $n): Node { return $n->object; }
+    private function methodCallMethod(MethodCall_ $n): string { return $n->method; }
+    private function staticCallIsVoidCast(StaticCall_ $n): bool { return $n->voidCast; }
+    private function staticCallClass(StaticCall_ $n): string { return $n->class; }
+    private function staticCallMethod(StaticCall_ $n): string { return $n->method; }
+
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;

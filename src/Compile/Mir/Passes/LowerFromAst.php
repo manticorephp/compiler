@@ -1960,6 +1960,11 @@ final class LowerFromAst implements Pass
     {
         $operand = $this->lowerExpr($expr->operand);
         $c = \strtolower($expr->cast);
+        // `(void) f()` evaluates and discards. Lowering it AWAY (rather than
+        // minting a Cast node) keeps the call node in statement position, which
+        // is what emitDiscardedCallRelease keys on — a Cast wrapper would hide
+        // the call from it and LEAK the discarded result.
+        if ($c === 'void') { return $operand; }
         $target = 'int';
         $type = Type::int_();
         if ($c === 'float' || $c === 'double') { $target = 'float'; $type = Type::float_(); }
