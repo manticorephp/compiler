@@ -511,6 +511,11 @@ final class LowerFromAst implements Pass
         // earlier may already name one in a property or parameter hint, and
         // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
         $this->registerTypeDefs($stmts);
+        // PHP's reserved attributes: #[Override] against the (now complete) decl
+        // table, plus target / repeat validation. Before any ClassDef is built,
+        // so a fatal aborts ahead of the expensive work — and interfaces are
+        // visible only here, since they never get a ClassDef.
+        $this->checkAttributes($stmts, $preludeCount);
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.

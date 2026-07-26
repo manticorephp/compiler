@@ -1698,7 +1698,13 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         // linked from stdlib.o. Collected by cmd_compile on the native path;
         // empty during the Zend bootstrap build and for --emit-library.
         $lower->externDecls = CompileArgs::$externDecls;
+        // Reserved-attribute errors (#[Override] with no parent, a bad target, a
+        // repeat) abort the build by default; analysis collects them instead.
+        if ($collect !== null) { $lower->attrCollectMode = true; }
         $module = $lower->run($module);
+        if ($collect !== null) {
+            foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
+        }
         CompileArgs::$linkStdlib = $lower->externInjected;
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
@@ -1935,6 +1941,11 @@ function mir_line_to_diag(string $line, string $fileLabel): \Analyze\Diagnostic 
     $ep = \strpos($line, "error: ");
     if ($ep !== false) { $msg = \substr($line, $ep + 7, \strlen($line) - ($ep + 7)); }
     $code = \str_starts_with($line, "#[TypeDef]") ? "repr.typedef" : "repr.type";
+    // Reserved-attribute findings, keyed off the message Zend itself prints.
+    if (\str_contains($msg, "#[\\Override] attribute")) { $code = "attr.override"; }
+    elseif (\str_contains($msg, "must not be repeated")) { $code = "attr.repeat"; }
+    elseif (\str_contains($msg, "cannot target")) { $code = "attr.target"; }
+    elseif (\str_starts_with($msg, "Cannot apply #[\\Deprecated]")) { $code = "attr.deprecated"; }
     return \Analyze\Diagnostic::error($fileLabel, $ln, 0, $code, $msg);
 }
 
