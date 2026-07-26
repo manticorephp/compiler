@@ -5,7 +5,6 @@
 
 use function Async\async;
 use function Async\delay;
-use function Async\onSignal;
 use function Async\shield;
 use function Async\shutdownOn;
 use function Async\spawn;
@@ -23,7 +22,7 @@ $t = new Trace();
 // A signal handler may do things a real one never could — allocate, spawn,
 // suspend — because it runs at a dispatch point, not in signal context.
 $out = async(function () use ($t) {
-    onSignal(SIGUSR1, function (int $s) use ($t) {
+    pcntl_signal(SIGUSR1, function (int $s) use ($t) {
         $t->log = $t->log . "usr1(" . ($s === SIGUSR1 ? "ok" : "bad") . ")";
         spawn(function () use ($t) { delay(0.01); $t->log = $t->log . "+spawned"; });
     });

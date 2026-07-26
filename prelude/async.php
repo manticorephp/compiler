@@ -1411,15 +1411,18 @@ namespace Async {
         }
 
         /**
-         * Start pumping signals. The dispatch runs inside a DAEMON TASK in the
-         * root scope, not at the loop level — a handler that ran between tasks
-         * would have no scope, so it could not spawn(), and `$this->running`
-         * would be null under it. As a task it is ordinary async code: it can
-         * spawn, suspend and be cancelled with everything else at shutdown, and
-         * its own delay() bounds the latency without the reactor needing to know
-         * anything about signals.
+         * Start pumping signals. Called by the loop itself the moment any handler
+         * is registered, so plain `pcntl_signal(SIGHUP, …)` just works inside
+         * async() — there is no async-specific way to register one.
+         *
+         * The dispatch runs inside a DAEMON TASK in the root scope, not at the
+         * loop level: a handler running between tasks would have no scope, so it
+         * could not spawn(), and `$this->running` would be null under it. As a
+         * task it is ordinary async code — it can spawn, suspend and be cancelled
+         * with everything else at shutdown — and its own delay() bounds the
+         * latency, so the reactor needs to know nothing about signals.
          */
-        public function pollSignals(): void
+        private function pollSignals(): void
         {
             if ($this->signalPolling || $this->root === null) {
                 return;
@@ -1449,6 +1452,18 @@ namespace Async {
                     $this->step($task);
                 }
                 if (\count($this->ready) > 0) { continue; }
+                // Someone registered a signal handler (through plain
+                // pcntl_signal, from anywhere) — start the pump. Checked HERE,
+                // immediately before the blocking wait, and not at the top of the
+                // loop: a server parked in accept() reaches the top again only
+                // once the reactor returns, so an idle worker would have started
+                // no pump and never seen its SIGTERM. The pump lands in the ready
+                // queue, so `continue` runs it and its delay() then bounds the
+                // wait below.
+                if (!$this->signalPolling && \Runtime\Signals::instance()->any()) {
+                    $this->pollSignals();
+                    continue;
+                }
                 if ($this->ioWaiters === 0 && $this->tmLive === 0) { return; }
                 $this->pollAndTick();
             }
@@ -2226,6 +2241,35 @@ namespace Async {
         });
     }
 
+    /**
+     * Graceful shutdown: on any of $signals, cancel the ROOT scope.
+     *
+     *   Async\async(function () {
+     *       Async\shutdownOn(SIGTERM, SIGINT);
+     *       serveForever();                 // unwinds cleanly on the signal
+     *   });
+     *
+     * This is the ONLY signal-aware thing in Async\, and it earns its place by
+     * being about SCOPES, not about signals: everything else follows from
+     * cancellation already being structured. The accept loop and every live
+     * connection raise CancelledException at their next suspend point, each
+     * scope joins its children, `shield()` covers a final flush, and async()
+     * returns normally — a root cancellation is a shutdown, not a failure.
+     *
+     * Registering a handler is plain `pcntl_signal()`; the scheduler notices a
+     * non-empty registry and starts pumping by itself, so an ordinary
+     * `pcntl_signal(SIGHUP, …)` works inside async() with no async-specific
+     * spelling. Process control (fork / workers / supervision) is NOT here —
+     * it is under `Process\`, because none of it involves a scheduler.
+     */
+    function shutdownOn(int ...$signals): void
+    {
+        $sched = Scheduler::instance();
+        foreach ($signals as $s) {
+            \pcntl_signal($s, function () use ($sched) { $sched->cancelRoot(); });
+        }
+    }
+
     /** Suspend the current task for $seconds without blocking the loop. */
     function delay(float $seconds): void
     {
@@ -2363,168 +2407,6 @@ namespace Async {
             if ($c->channel === $fired && $wantSend === $isSend) { $idx = $i; break; }
         }
         return new Selected($idx, $isSend ? null : $me->chanValue, $me->chanOk, $fired, $isSend);
-    }
-
-    // ── signals ────────────────────────────────────────────────────────────
-
-    /**
-     * Run $fn when $signo arrives. The handler is ordinary PHP running on the
-     * scheduler's own thread at a safe point — it may allocate, throw, spawn and
-     * suspend, none of which a real signal handler could do — because the signal
-     * is blocked and collected rather than handled ({@see pcntl_signal()}).
-     *
-     * Registering one bounds the reactor's wait at 100 ms, since a blocked signal
-     * cannot interrupt kevent/epoll. A program that registers none pays nothing.
-     */
-    function onSignal(int $signo, callable $fn): void
-    {
-        \pcntl_signal($signo, $fn);
-        Scheduler::instance()->pollSignals();
-    }
-
-    /**
-     * Graceful shutdown: on any of $signals, cancel the ROOT scope.
-     *
-     *   Async\async(function () {
-     *       Async\shutdownOn(SIGTERM, SIGINT);
-     *       serveForever();                 // unwinds cleanly on the signal
-     *   });
-     *
-     * Everything follows from cancellation already being real and structured: the
-     * accept loop and every live connection raise CancelledException at their
-     * next suspend point, each scope joins its children, `shield()` covers a
-     * final flush, and async() returns normally — a root cancellation is a
-     * shutdown, not a failure.
-     */
-    function shutdownOn(int ...$signals): void
-    {
-        $sched = Scheduler::instance();
-        foreach ($signals as $s) {
-            onSignal($s, function () use ($sched) { $sched->cancelRoot(); });
-        }
-    }
-
-    // ── shared-nothing multi-process ───────────────────────────────────────
-
-    /**
-     * Fork $n workers and KEEP them running: reap the dead, restart them, and
-     * forward a shutdown to the whole group. The supervisor itself runs no
-     * scheduler — each child calls $worker($index), which is where async() goes.
-     *
-     *   Async\supervise(8, function (int $i) {
-     *       Async\async(function () { Async\shutdownOn(SIGTERM); serve($i); });
-     *   });
-     *
-     * Returns once every child has exited. Fork happens BEFORE any scheduler
-     * exists, which is the only safe order — a fork inside a running loop would
-     * hand the child a copy of the reactor fd and the run queue.
-     */
-    function supervise(int $n, callable $worker): void
-    {
-        (new Supervisor())->run($n, $worker);
-    }
-
-    /** @internal the state {@see supervise()} needs across its reap loop */
-    final class Supervisor
-    {
-        private bool $stopping = false;
-        /** @var array<int, int> worker index → live pid */
-        private array $pids = [];
-
-        public function run(int $n, callable $worker): void
-        {
-            if ($n < 1) { $n = 1; }
-            for ($i = 0; $i < $n; $i = $i + 1) {
-                $this->start($i, $worker);
-            }
-            \pcntl_signal(\SIGTERM, function () { $this->stop(\SIGTERM); });
-            \pcntl_signal(\SIGINT, function () { $this->stop(\SIGINT); });
-
-            while (\count($this->pids) > 0) {
-                \pcntl_signal_dispatch();
-                $status = 0;
-                $pid = \pcntl_waitpid(-1, $status, \WNOHANG);
-                if ($pid > 0) {
-                    $idx = $this->forget($pid);
-                    if ($idx >= 0 && !$this->stopping) {
-                        // Died while we are NOT shutting down: that is a crash,
-                        // not an exit — put the worker back.
-                        $this->start($idx, $worker);
-                    }
-                    continue;
-                }
-                \usleep(50000);
-            }
-        }
-
-        private function start(int $idx, callable $worker): void
-        {
-            $pid = \pcntl_fork();
-            if ($pid === 0) {
-                $worker($idx);
-                exit(0);
-            }
-            if ($pid > 0) {
-                $this->pids[$idx] = $pid;
-            }
-            // pid < 0: fork failed — carry on with fewer workers.
-        }
-
-        /** Forward the shutdown to every child; the reap loop then drains. */
-        private function stop(int $signo): void
-        {
-            $this->stopping = true;
-            foreach ($this->pids as $pid) {
-                \posix_kill($pid, $signo);
-            }
-        }
-
-        /**
-         * Drop $pid and return the worker index it held, or -1.
-         *
-         * ⚠ Rebuilt rather than `unset($this->pids[$idx])`: unset on a VEC
-         * element is still unimplemented (it needs hole / shift semantics) and
-         * SILENTLY does nothing, so the map never shrank and the reap loop below
-         * spun forever waiting for a count that could not fall.
-         */
-        private function forget(int $pid): int
-        {
-            $idx = -1;
-            /** @var array<int, int> $kept */
-            $kept = [];
-            foreach ($this->pids as $i => $p) {
-                if ($p === $pid && $idx < 0) { $idx = $i; continue; }
-                $kept[$i] = $p;
-            }
-            $this->pids = $kept;
-            return $idx;
-        }
-    }
-
-    /**
-     * Fork into $n workers. Returns THIS worker's index: 0 for the original
-     * process, 1..$n-1 for the forks. Call BEFORE async() — each worker then runs
-     * its own scheduler. A failed fork degrades to fewer workers. Unsupervised:
-     * {@see supervise()} is the form that restarts a worker that dies.
-     */
-    function workers(int $n): int
-    {
-        for ($i = 1; $i < $n; $i++) {
-            $pid = \Async\sys_fork();
-            if ($pid === 0) {
-                return $i;              // child → worker $i
-            }
-            if ($pid < 0) {
-                return 0;               // fork failed — carry on with what we have
-            }
-        }
-        return 0;                       // the original process = worker 0
-    }
-
-    /** This process's pid — handy for a per-worker log line. */
-    function pid(): int
-    {
-        return \Async\sys_getpid();
     }
 
     // ═══════════════════════════════════════════════════════════════════════

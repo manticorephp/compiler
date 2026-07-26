@@ -273,3 +273,153 @@ namespace {
         return \__mc_proc_getppid();
     }
 }
+
+namespace Process {
+
+    // The process model, which is NOT part of the concurrency model — none of
+    // this runs a scheduler. It lives beside pcntl rather than in Async\ because
+    // forking, reaping and restarting a worker are things you do UNDER a
+    // runtime, not with one: Async\supervise() would have implied a scheduler
+    // that supervision never has.
+    //
+    // These are a superset (php has no such functions), so there is no Zend
+    // oracle for them — the pcntl_*/posix_* primitives underneath are the part
+    // that difftest checks.
+
+    /** This process's pid. */
+    function pid(): int
+    {
+        return \posix_getpid();
+    }
+
+    /** The parent's pid. */
+    function ppid(): int
+    {
+        return \posix_getppid();
+    }
+
+    /**
+     * fork(2): 0 in the child, the child's pid in the parent, -1 on failure.
+     * ⚠ Never from inside a running scheduler — see pcntl_fork().
+     */
+    function fork(): int
+    {
+        return \pcntl_fork();
+    }
+
+    /**
+     * Fork into $n workers and return THIS worker's index: 0 for the original
+     * process, 1..$n-1 for the forks. UNSUPERVISED — a worker that dies stays
+     * dead; {@see supervise()} is the form that restarts it. A failed fork
+     * degrades to fewer workers.
+     */
+    function workers(int $n): int
+    {
+        for ($i = 1; $i < $n; $i = $i + 1) {
+            $pid = \pcntl_fork();
+            if ($pid === 0) {
+                return $i;              // child → worker $i
+            }
+            if ($pid < 0) {
+                return 0;               // fork failed — carry on with what we have
+            }
+        }
+        return 0;                       // the original process = worker 0
+    }
+
+    /**
+     * Fork $n workers and KEEP them running: reap the dead, restart them, and
+     * forward a shutdown to the whole group. The supervisor runs no scheduler of
+     * its own — each child calls $worker($index), which is where Async\async()
+     * goes.
+     *
+     *   Process\supervise(8, function (int $i) {
+     *       Async\async(function () { Async\shutdownOn(SIGTERM); serve($i); });
+     *   });
+     *
+     * Returns once every child has exited. Forking happens BEFORE any scheduler
+     * exists, which is the only safe order — a fork inside a running loop hands
+     * the child a copy of the reactor fd and the run queue.
+     */
+    function supervise(int $n, callable $worker): void
+    {
+        (new Supervisor())->run($n, $worker);
+    }
+
+    /** @internal the state {@see supervise()} needs across its reap loop */
+    final class Supervisor
+    {
+        private bool $stopping = false;
+        /** @var array<int, int> worker index → live pid */
+        private array $pids = [];
+
+        public function run(int $n, callable $worker): void
+        {
+            if ($n < 1) { $n = 1; }
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                $this->start($i, $worker);
+            }
+            \pcntl_signal(\SIGTERM, function () { $this->stop(\SIGTERM); });
+            \pcntl_signal(\SIGINT, function () { $this->stop(\SIGINT); });
+
+            while (\count($this->pids) > 0) {
+                \pcntl_signal_dispatch();
+                $status = 0;
+                $pid = \pcntl_waitpid(-1, $status, \WNOHANG);
+                if ($pid > 0) {
+                    $idx = $this->forget($pid);
+                    if ($idx >= 0 && !$this->stopping) {
+                        // Died while we are NOT shutting down: that is a crash,
+                        // not an exit — put the worker back.
+                        $this->start($idx, $worker);
+                    }
+                    continue;
+                }
+                \usleep(50000);
+            }
+        }
+
+        private function start(int $idx, callable $worker): void
+        {
+            $pid = \pcntl_fork();
+            if ($pid === 0) {
+                $worker($idx);
+                exit(0);
+            }
+            if ($pid > 0) {
+                $this->pids[$idx] = $pid;
+            }
+            // pid < 0: fork failed — carry on with fewer workers.
+        }
+
+        /** Forward the shutdown to every child; the reap loop then drains. */
+        private function stop(int $signo): void
+        {
+            $this->stopping = true;
+            foreach ($this->pids as $pid) {
+                \posix_kill($pid, $signo);
+            }
+        }
+
+        /**
+         * Drop $pid and return the worker index it held, or -1.
+         *
+         * ⚠ Rebuilt rather than `unset($this->pids[$idx])`: unset on a VEC
+         * element is still unimplemented (it needs hole / shift semantics) and
+         * SILENTLY does nothing, so the map never shrank and the reap loop above
+         * spun forever waiting for a count that could not fall.
+         */
+        private function forget(int $pid): int
+        {
+            $idx = -1;
+            /** @var array<int, int> $kept */
+            $kept = [];
+            foreach ($this->pids as $i => $p) {
+                if ($p === $pid && $idx < 0) { $idx = $i; continue; }
+                $kept[$i] = $p;
+            }
+            $this->pids = $kept;
+            return $idx;
+        }
+    }
+}

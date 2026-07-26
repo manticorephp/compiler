@@ -1645,10 +1645,16 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // module provides read/write/close/select/connect, names any program may own.
     $useAsync = $demand->mentionsAny(['Async', 'TaskGroup', 'CancelledException',
                                       'DeadlockException']);
-    // ext/pcntl gates on the functions the FILE defines (pcntl_* / posix_*) —
-    // unlike async.php these are names no program would own, so definedFunctions
-    // is exactly right here.
-    $usePcntl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($pcntlSrc));
+    // ext/pcntl gates on the `pcntl_*` / `posix_*` names the FILE defines — those
+    // are prefixed, so no program owns them. The file ALSO defines a `Process\`
+    // namespace whose members are fork/pid/workers/supervise; those are gated on
+    // the `Process` qualifier instead, exactly as async.php is on `Async`,
+    // because a program may very well own a function called `workers()`.
+    $pcntlFns = [];
+    foreach (\Compile\Mir\PreludeDemand::definedFunctions($pcntlSrc) as $fn) {
+        if (\str_starts_with($fn, 'pcntl_') || \str_starts_with($fn, 'posix_')) { $pcntlFns[] = $fn; }
+    }
+    $usePcntl = $demand->callsAny($pcntlFns) || $demand->mentions('Process');
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
         // without either, whatever the program itself mentions. It also dispatches

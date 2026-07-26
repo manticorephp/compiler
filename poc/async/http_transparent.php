@@ -21,7 +21,7 @@ if ($server === false) {
     echo "listen failed: ", $errstr, "\n";
 } else {
     stream_set_blocking($server, false);
-    $worker = Async\workers(WORKERS);
+    $worker = \Process\workers(WORKERS);
     if ($worker === 0) {
         echo "transparent http on :8080 (", WORKERS, " workers)\n";
     }

@@ -23,7 +23,7 @@ if ($server === false) {
     echo "listen failed: ", $errstr, "\n";
 } else {
     stream_set_blocking($server, false);
-    $worker = Async\workers(WORKERS);    // fork; children inherit the listener fd
+    $worker = \Process\workers(WORKERS);    // fork; children inherit the listener fd
     if ($worker === 0) {
         echo "http on :8080 (", WORKERS, " workers, prefork)\n";
     }

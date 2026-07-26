@@ -17,7 +17,7 @@ use function Async\group;
 use function Async\shield;
 use function Async\shutdownOn;
 use function Async\spawn;
-use function Async\supervise;
+use function Process\supervise;
 use Async\CancelledException;
 use Async\TaskGroup;
 
@@ -38,7 +38,7 @@ function serveConnection(\Resource $conn, Stats $stats): void
             if ($req === '') {
                 return;                       // peer closed
             }
-            $body = "worker " . (string)\Async\pid() . " served " . (string)($stats->served + 1) . "\n";
+            $body = "worker " . (string)\Process\pid() . " served " . (string)($stats->served + 1) . "\n";
             \fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Length: " . (string)\strlen($body)
                 . "\r\nConnection: keep-alive\r\n\r\n" . $body);
             $stats->served = $stats->served + 1;
@@ -89,7 +89,7 @@ function worker(int $index): void
             // Expected: this is what SIGTERM does.
         }
         \fclose($server);
-        \fwrite(\STDOUT, "worker " . (string)$index . " (pid " . (string)\Async\pid()
+        \fwrite(\STDOUT, "worker " . (string)$index . " (pid " . (string)\Process\pid()
             . ") drained: served " . (string)$stats->served . ", " . (string)$stats->open . " still open\n");
     });
 }
