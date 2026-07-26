@@ -410,6 +410,7 @@ trait EmitLlvmModule
             $this->rt->needsStrRc = true;
         }
         $out .= $this->profileRuntime();
+        $out .= $this->shutdownRuntime();
         $out .= $this->allocRuntime();
         if ($this->rt->needsFloatStr) {
             $out .= $this->floatToStrImpl('@__mir_float_to_str', '@__mir_str_alloc');
@@ -835,6 +836,23 @@ trait EmitLlvmModule
     }
 
     /** The @__prof array + bump + atexit dump (preamble, profile mode only). */
+    /**
+     * The `atexit` trampoline for register_shutdown_function's queue.
+     *
+     * atexit takes a nullary C function, and the drain itself is PHP
+     * (`__mc_run_shutdown` in prelude/errors.php) because it invokes user
+     * callables. So the trampoline is the one-line bridge between the two —
+     * the same shape `@__manticore_profile_dump` uses.
+     */
+    private function shutdownRuntime(): string
+    {
+        if (!$this->needsErrorHandlers) { return ''; }
+        $out  = "define void @__manticore_shutdown() {\nentry:\n";
+        $out .= "  %r = call i64 @manticore___mc_run_shutdown()\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
     private function profileRuntime(): string
     {
         if (!\Compile\Debug::$profile) { return ''; }
@@ -941,6 +959,23 @@ trait EmitLlvmModule
         $out .= "  %cn = alloca ptr\n";
         $out .= '  store ptr ' . $this->strSymBytes('@__mir_ucn_def') . ", ptr %cn\n";
         $out .= "  %e = load ptr, ptr @__mir_thrown\n";
+        // A set_exception_handler() gets the Throwable first, exactly as php
+        // does — and when one ran, php prints NOTHING of its own AND EXITS 0
+        // (verified against the oracle: 255 is the status of an exception that
+        // reached nobody). So the handler's return short-circuits the "PHP Fatal
+        // error: Uncaught …" line below. Shutdown functions still run — the exit
+        // is libc's, so the atexit hook fires on this path too.
+        if ($this->needsErrorHandlers) {
+            $out .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
+            $out .= "  %handled = call i64 @manticore___mc_dispatch_uncaught(i64 %eb)\n";
+            $out .= "  %washandled = icmp ne i64 %handled, 0\n";
+            $out .= "  br i1 %washandled, label %uc_handled, label %uc_print\n";
+            $out .= "uc_handled:\n";
+            $out .= "  call void @exit(i32 0)\n";
+            $out .= "  unreachable\n";
+            $out .= "uc_print:\n";
+            $this->rt->needsTagged = true;
+        }
         $out .= "  %z = icmp eq ptr %e, null\n";
         $out .= "  br i1 %z, label %named, label %have\n";
         $out .= "have:\n";
@@ -988,6 +1023,15 @@ trait EmitLlvmModule
         }
         if (\Compile\Debug::$profile) {
             $header .= "  call i32 @atexit(ptr @__manticore_profile_dump)\n";
+        }
+        // register_shutdown_function's queue runs from an atexit hook, which is
+        // what makes php's rule ("on a normal return, on exit(), and after an
+        // uncaught exception") true by construction here: `ret i32 0` runs
+        // atexit handlers, biExit calls libc exit(), and the uncaught path ends
+        // in exit(255). One registration covers all three.
+        if ($this->needsErrorHandlers) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";
         }
         // Capture argc/argv into module globals so the FFI-bound
         // manticore_cli_argc/argv (Main.php #[Symbol]) can read them.

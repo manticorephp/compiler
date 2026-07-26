@@ -1916,11 +1916,16 @@ final class Parser
             $this->advance();
             return Expr::unary('~', $this->parseUnary(), $span);
         }
-        // `@expr` error suppression — Manticore emits no diagnostics, so it is
-        // a transparent no-op pass-through (same observable result as PHP here).
+        // `@expr` error suppression. Kept as a real node: `trigger_error` now
+        // PRINTS, and `@trigger_error(…)` — every symfony deprecation — must
+        // stay silent. The lowering consumes the marker (it never reaches MIR),
+        // so for everything else `@` is still the transparent pass-through it
+        // has always been: nothing else in this runtime emits a diagnostic to
+        // suppress.
         if ($tok->kind === TokenKind::AtSign) {
+            $span = $this->span();
             $this->advance();
-            return $this->parseUnary();
+            return Expr::unary('@', $this->parseUnary(), $span);
         }
         if ($tok->kind === TokenKind::PlusPlus) {
             $span = $this->span();

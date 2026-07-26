@@ -1564,6 +1564,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // Io\Poll (PHP 8.6 fd-readiness multiplexer) — DEMAND-GATED, namespaced class
     // tree (braced namespaces isolate it in the prelude blob).
     $ioPollSrc = prelude_src_or_empty("io_poll.php");
+    // Error / exception handlers + the shutdown queue. Gated on a CALL, like
+    // array_fns: the handlers hold CALLABLES, so the file cannot live in the
+    // stdlib .o, and a program that never touches them must not carry the
+    // static registries (nor the atexit hook that drains them).
+    $errorsSrc = prelude_src_or_empty("errors.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1580,6 +1585,13 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // `new \Io\Poll\Context`, a `use Io\Poll\...`, or `new StreamPollHandle` all
     // mention one of these identifiers.
     $useIoPoll = $demand->mentionsAny(['StreamPollHandle', 'Poll', 'IoException']);
+    // The error/shutdown family. `trigger_error` is included even though the
+    // lowering rewrites it to `__mc_trigger_error` — the gate reads the SOURCE,
+    // which still spells the php name.
+    $useErrors = $demand->callsAny(['set_error_handler', 'restore_error_handler',
+                                    'set_exception_handler', 'restore_exception_handler',
+                                    'register_shutdown_function', 'trigger_error',
+                                    'error_reporting', 'error_get_last']);
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
     // ReflectionException. A program that never reflects carries none of it.
@@ -1687,6 +1699,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     try {
         $module = new \Compile\Mir\Module();
         $module->needsBacktrace = $useBacktrace;
+        $module->needsErrorHandlers = $useErrors;
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
@@ -1702,6 +1715,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->resourceSrc = $resourceSrc;
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
+        $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -1965,7 +1979,7 @@ function analyze_prelude_files(): array {
     $names = [
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
-        "datetime.php",
+        "datetime.php", "errors.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

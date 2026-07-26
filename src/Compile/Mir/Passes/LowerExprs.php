@@ -388,6 +388,27 @@ trait LowerExprs
                 // hold that value, so hand back null rather than a wild read.
                 return new NullConst(Type::null_());
             }
+            // `trigger_error($msg[, $level])` → `__mc_trigger_error($msg,
+            // $level, <file>, <line>, <silenced>)`. A prelude function cannot
+            // see its caller's position, and php's diagnostic names the CALL
+            // SITE, so the file and line are threaded in from the span here.
+            // The last argument is 1 when the call was written `@trigger_error`
+            // ({@see lowerUnary}) — the one thing `@` has to mean now that a
+            // diagnostic can actually be printed.
+            if ($fnBare === 'trigger_error' && \count($expr->args) >= 1
+                && \count($expr->args) <= 2) {
+                $msg = $this->lowerExpr($expr->args[0]);
+                $lvl = \count($expr->args) > 1
+                    ? $this->lowerExpr($expr->args[1])
+                    : new IntConst(1024, Type::int_());   // E_USER_NOTICE
+                return new Call('__mc_trigger_error', [
+                    $msg,
+                    $lvl,
+                    new StringConst($this->lowerSourceFile, Type::string_()),
+                    new IntConst($expr->span->line, Type::int_()),
+                    new IntConst($this->silenceDepth > 0 ? 1 : 0, Type::int_()),
+                ], Type::bool_());
+            }
             // `function_exists("Name")` → compile-time 1/0 against the
             // declared functions (incl. FFI externs / use-function
             // aliases). A non-literal arg conservatively folds to false.

@@ -320,6 +320,15 @@ final class LowerFromAst implements Pass
     /** Io\Poll — DEMAND-GATED (empty unless the program mentions it). Namespaced
      *  class tree in braced `namespace {}` blocks. */
     public string $ioPollSrc = '';
+    /** Error / exception handlers + the shutdown queue — DEMAND-GATED. Non-empty
+     *  also means main() gets the atexit trampoline and the uncaught path
+     *  consults a user handler; {@see needsErrorHandlers}. */
+    public string $errorsSrc = '';
+    /** Nesting depth of the `@` suppression operator around the expression being
+     *  lowered — read by the `trigger_error` rewrite ({@see LowerExprs}). */
+    private int $silenceDepth = 0;
+    /** The file name a diagnostic names, for the `trigger_error` rewrite. */
+    private string $lowerSourceFile = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
@@ -427,6 +436,7 @@ final class LowerFromAst implements Pass
     public function run(Module $module): Module
     {
         $this->module = $module;
+        $this->lowerSourceFile = $module->sourceFile;
         // Built-in Exception hierarchy (parsed prelude) is lowered like
         // any user class, so `throw` / `catch` / `getMessage` resolve
         // through the normal class machinery.
@@ -1597,6 +1607,18 @@ final class LowerFromAst implements Pass
 
     private function lowerUnary(\Parser\Ast\UnaryOp $e): Node
     {
+        // `@expr` — suppression. Nothing in this runtime emits a diagnostic
+        // except an explicit `trigger_error`, so `@` is a marker the operand's
+        // lowering reads rather than a runtime state change: no counter, no
+        // cost, and no depth to leak when the operand throws. The marker is
+        // COUNTED, not set, so nested `@` (or `@` around an expression holding
+        // several calls) behaves.
+        if ($e->op === '@') {
+            $this->silenceDepth = $this->silenceDepth + 1;
+            $inner = $this->lowerExpr($e->operand);
+            $this->silenceDepth = $this->silenceDepth - 1;
+            return $inner;
+        }
         $operand = $this->lowerExpr($e->operand);
         $op = $e->op;
         if ($op === '-') {

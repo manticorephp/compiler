@@ -204,6 +204,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** Program source path (exception file() / trace frames). */
     private string $sourceFile = '';
+    /** The error/shutdown prelude is compiled in: main() gets the atexit
+     *  trampoline and the uncaught path consults set_exception_handler. */
+    private bool $needsErrorHandlers = false;
 
     /** True while emitting a `$r = &fn()` bind (suppress call-result deref). */
     private bool $rawRefCall = false;
@@ -324,6 +327,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalVarNames = $module->globalVarNames;
         $this->rt->needsBacktrace = $module->needsBacktrace;
+        $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {

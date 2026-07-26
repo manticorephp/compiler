@@ -145,6 +145,10 @@ trait LowerPrelude
             // whose interfaces DatePeriod implements.
             $src = $src . $this->dateTimeSrc;
         }
+        if ($this->errorsSrc !== '') {
+            // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
+            $src = $src . $this->errorsSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).

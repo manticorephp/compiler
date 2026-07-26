@@ -2875,8 +2875,11 @@ trait EmitLlvmExpr
         }
 
         // `cell === false` / `!== false` (e.g. `strpos(...) === false`).
-        // A NaN-boxed `int|false` is false iff its tag is BOOL(2); a
-        // boxed int never equals false. Compare the tag, skip payload.
+        // A NaN-boxed value is false iff its tag is BOOL(2) AND its payload bit
+        // is 0 — box_bool packs the value into bit 0. Testing the tag ALONE was
+        // right for the `int|false` cells this was written for (their only bool
+        // IS false) and wrong for every real `mixed`: a boxed TRUE has tag 2 as
+        // well, so `$r !== false` read false for a handler that returned true.
         $lCell = $c->left->type->kind === Type::KIND_CELL;
         $rCell = $c->right->type->kind === Type::KIND_CELL;
         $lFalse = $c->left->kind === Node::KIND_BOOL_CONST && !$c->left->value;
@@ -2888,9 +2891,19 @@ trait EmitLlvmExpr
             $v = $this->lastValue;
             $out .= $this->cellTagIr($v);
             $tag = $this->cellTagReg;
-            $cmpReg = $this->ssa->allocReg();
-            $pred = $isEq ? 'eq' : 'ne';
-            $out .= '  ' . $cmpReg . ' = icmp ' . $pred . ' i64 ' . $tag . ", 2\n";
+            $isBool = $this->ssa->allocReg();
+            $out .= '  ' . $isBool . ' = icmp eq i64 ' . $tag . ", 2\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $v . ", 1\n";
+            $isZero = $this->ssa->allocReg();
+            $out .= '  ' . $isZero . ' = icmp eq i64 ' . $payload . ", 0\n";
+            $isFalse = $this->ssa->allocReg();
+            $out .= '  ' . $isFalse . ' = and i1 ' . $isBool . ', ' . $isZero . "\n";
+            $cmpReg = $isFalse;
+            if ($isNe) {
+                $cmpReg = $this->ssa->allocReg();
+                $out .= '  ' . $cmpReg . ' = xor i1 ' . $isFalse . ", true\n";
+            }
             $extReg = $this->ssa->allocReg();
             $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;

@@ -15,7 +15,22 @@
  * is heavy, and a program that never calls getTrace() should not carry it.
  */
 
-interface Throwable {}
+/**
+ * php's Throwable DECLARES the accessor set, and code typed against the
+ * interface (`function (\Throwable $e) { $e->getMessage(); }` — every
+ * set_exception_handler) resolves through it. An empty marker made that an
+ * "unknown method" error.
+ */
+interface Throwable
+{
+    public function getMessage(): string;
+    public function getCode(): int;
+    public function getPrevious(): ?Throwable;
+    public function getFile(): string;
+    public function getLine(): int;
+    public function getTrace(): array;
+    public function getTraceAsString(): string;
+}
 
 class Exception implements Throwable
 {
