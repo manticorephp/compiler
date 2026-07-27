@@ -557,17 +557,34 @@ trait EmitLlvmLocals
         // string, wrote rc into the string (the enum backing "int"→"jnt").
         $aliasObjStr = $v->kind === Node::KIND_LOAD_LOCAL
             && ($v->type->kind === Type::KIND_OBJ || $v->type->kind === Type::KIND_STRING);
-        // `$saved = $this->map` — a snapshot of an assoc PROPERTY. Co-own it
-        // too (rc>1) so a later `$this->map[$k]=…` copy-on-writes instead of
+        // `$saved = $this->map` — a snapshot of an array PROPERTY. Co-own it
+        // (rc>1) so a later mutation of the property copy-on-writes instead of
         // clobbering the snapshot's shared buffer (the InferTypes localTypes
-        // snapshot UAF). Restricted to assoc — obj/string property reads have
-        // their own retain discipline elsewhere.
-        $aliasAssocProp = $v->kind === Node::KIND_PROPERTY_ACCESS
-            && $v->type->isAssoc();
-        if ($aliasObjStr || $aliasAssocProp) {
+        // snapshot UAF). Obj/string property reads have their own retain
+        // discipline elsewhere.
+        //
+        // VEC as well as assoc: `$tokens = $this->tokens;` then
+        // `array_shift($tokens)` is symfony's ArgvInput::getParameterOption, and
+        // with rc stuck at 1 the shift's copy-on-write saw a unique buffer, so
+        // it drained the PROPERTY and then freed a buffer the property still
+        // held. A refcount-based COW is inert unless the alias co-owns.
+        // A bare `array` hint erases to KIND_UNKNOWN, so isArray() alone misses
+        // exactly the declaration symfony uses (`private array $tokens = []`) —
+        // ask the slot, the same way the store path does.
+        $aliasArrayProp = $v->kind === Node::KIND_PROPERTY_ACCESS
+            && ($v->type->isArray()
+                || $this->slotIsArrayHinted($v->object, $v->property, $v->type));
+        if ($aliasObjStr || $aliasArrayProp) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;
-            $out .= $this->rcRetainByType($v, $aliasV, null, 0);
+            // An array-HINTED slot whose type erased to unknown carries no kind
+            // for rcRetainByType to dispatch on, so it emitted nothing at all —
+            // name the array explicitly for that case.
+            $fallback = null;
+            if ($aliasArrayProp && !$v->type->isArray()) {
+                $fallback = Type::vec(Type::unknown());
+            }
+            $out .= $this->rcRetainByType($v, $aliasV, $fallback, 0);
             $this->lastValue = $aliasV;
             $this->lastValueType = 'i64';
         }
