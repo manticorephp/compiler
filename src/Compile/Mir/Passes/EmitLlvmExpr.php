@@ -2928,9 +2928,37 @@ trait EmitLlvmExpr
                 $this->lastValueType = 'i64';
                 return $out;
             }
+            // An ERASED operand carries EITHER shape, so both have to be tested:
+            // a raw 0 pointer and a NaN-boxed NULL (tag 3). Testing only the
+            // carrier said "not null" for every boxed null — `array_shift` on an
+            // empty array answers one, and symfony's
+            // `while (null !== $token = array_shift($this->parsed))` therefore
+            // ran forever past the end of its token list.
+            if (!($leftNull && $rightNull) && $ok === Type::KIND_UNKNOWN) {
+                $out = $this->emitNode($other);
+                $out .= $this->coerceToI64();
+                $cv = $this->lastValue;
+                $zc = $this->ssa->allocReg();
+                $out .= '  ' . $zc . ' = icmp eq i64 ' . $cv . ", 0\n";
+                $out .= $this->cellTagIr($cv);
+                $nc = $this->ssa->allocReg();
+                $out .= '  ' . $nc . ' = icmp eq i64 ' . $this->cellTagReg . ", 3\n";
+                $any = $this->ssa->allocReg();
+                $out .= '  ' . $any . ' = or i1 ' . $zc . ', ' . $nc . "\n";
+                $r = $any;
+                if ($isNe) {
+                    $r = $this->ssa->allocReg();
+                    $out .= '  ' . $r . ' = xor i1 ' . $any . ", true\n";
+                }
+                $z = $this->ssa->allocReg();
+                $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+                $this->lastValue = $z;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
             $ptrCarried = $ok === Type::KIND_STRING || $ok === Type::KIND_OBJ
                 || $ok === Type::KIND_ARRAY
-                || $ok === Type::KIND_CLOSURE || $ok === Type::KIND_UNKNOWN;
+                || $ok === Type::KIND_CLOSURE;
             if (!($leftNull && $rightNull) && $ptrCarried) {
                 $out = $this->emitNode($other);
                 $out .= $this->coerceToI64();

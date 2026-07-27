@@ -38,6 +38,12 @@ final class UnifiedArrayRuntime
      */
     private const INDEX_THRESHOLD = 8;
 
+    /** NaN-box carriers: header 0xFFF0.. | tag<<48 (NULL 3, PTR 4, ARRAY 7, OBJECT 8). */
+    private const CELL_NULL = -3659174697238528;
+    private const CELL_STR = -3377699720527872;
+    private const CELL_ARR = -2533274790395904;
+    private const CELL_OBJ = -2251799813685248;
+
     public function __construct(
         private Module $module,
         private RuntimeHost $host,
@@ -81,6 +87,9 @@ final class UnifiedArrayRuntime
         $this->emitSpreadInto();
         $this->emitPop();
         $this->emitShift();
+        $this->emitBoxByRepr();
+        $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
+        $this->emitTakeCell('__mir_array_shift_cell', '__mir_array_shift');
         $this->emitUnshift();
         $this->emitImplode();
         $this->emitImplodeInt();
@@ -3104,6 +3113,76 @@ final class UnifiedArrayRuntime
         $go->store($tail, $arr);
         $go->ret($first);
         $z->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_array_shift_cell(arr) -> i64` / `__mir_array_pop_cell(arr)` — the
+     * same removal, but the result is a self-describing CELL.
+     *
+     * The raw variants answer 0 on an empty array. PHP answers NULL, and the
+     * difference is not cosmetic: symfony drains its token list with
+     * `while (null !== $token = array_shift($this->parsed))`, and against an
+     * erased element type the 0 compared unequal to null, so the loop ran one
+     * extra time on an empty array and every command reported "Too many
+     * arguments". The element is boxed by the array's own repr bits for the same
+     * reason — an erased consumer cannot read a raw carrier.
+     */
+    private function emitTakeCell(string $name, string $inner): void
+    {
+        $fn = $this->module->func($name, Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $go = $fn->block('go');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $len = $chk->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $chk->brIf($chk->icmp('sle', $len, Value::int(Type::i64(), 0)), $z, $go);
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $repr = $go->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $v = $go->call($inner, Type::i64(), [$arr]);
+        $go->ret($go->call('__mir_box_by_repr', Type::i64(), [$v, $repr]));
+        $z->ret(Value::int(Type::i64(), self::CELL_NULL));
+    }
+
+    /** NaN-box a raw pointer carrier under $tag, keeping a 0 pointer NULL. */
+    private function tagPtr(Block $b, Value $val, int $tag): Value
+    {
+        return $b->select(
+            $b->icmp('eq', $val, Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), self::CELL_NULL),
+            $b->or_($val, Value::int(Type::i64(), $tag)),
+        );
+    }
+
+    /**
+     * `__mir_box_by_repr(val, repr) -> i64` — NaN-box one element by the repr
+     * code its array stamped. Repr 0 means "the static type says", which an
+     * erased caller does not have; the carrier is passed through untouched
+     * there, exactly as a CELL element is.
+     */
+    private function emitBoxByRepr(): void
+    {
+        $fn = $this->module->func('__mir_box_by_repr', Type::i64());
+        $val = $fn->param(Type::i64(), 'val');
+        $repr = $fn->param(Type::i64(), 'repr');
+        $e = $fn->block('entry');
+        $chkobj = $fn->block('chkobj');
+        $chkarr = $fn->block('chkarr');
+        $dostr = $fn->block('dostr');
+        $doobj = $fn->block('doobj');
+        $doarr = $fn->block('doarr');
+        $asis = $fn->block('asis');
+        // Tagged inline rather than through __manticore_box_*: those live in the
+        // tagged PRELUDE, which is demand-gated and need not be linked into a
+        // module that only ever shifts an array.
+        $e->brIf($e->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_STR)), $dostr, $chkobj);
+        $dostr->ret($this->tagPtr($dostr, $val, self::CELL_STR));
+        $chkobj->brIf($chkobj->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_OBJ)), $doobj, $chkarr);
+        $doobj->ret($this->tagPtr($doobj, $val, self::CELL_OBJ));
+        $chkarr->brIf($chkarr->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_ARR)), $doarr, $asis);
+        $doarr->ret($this->tagPtr($doarr, $val, self::CELL_ARR));
+        $asis->ret($val);
     }
 
     /**

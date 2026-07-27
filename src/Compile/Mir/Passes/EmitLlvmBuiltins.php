@@ -2660,7 +2660,12 @@ trait EmitLlvmBuiltins
                 $out .= '  call i32 (ptr, ...) @printf(ptr @.fmt.vdfloat, ptr ' . $fs . ")\n";
             } else {
                 $out .= $this->emitNode($a);
-                $out .= $this->boxToCell($a->type);
+                // An erased value may already BE a cell (array_shift over a
+                // bare-`array` answers a boxed NULL on empty); box_int would
+                // re-box it and print the carrier as an integer.
+                $out .= $a->type->kind === Type::KIND_UNKNOWN
+                    ? $this->boxUnknownIfRaw()
+                    : $this->boxToCell($a->type);
                 $bv = $this->lastValue;
                 $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $bv . ', i64 0)' . "\n";
             }
@@ -3940,8 +3945,21 @@ trait EmitLlvmBuiltins
         $out .= $this->mutArrayCow($c->args[0], $arr);
         $arr = $this->lastValue;
         $v = $this->ssa->allocReg();
-        $out .= '  ' . $v . ' = call i64 @__mir_array_pop(ptr ' . $arr . ")\n";
+        $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'pop') . '(ptr ' . $arr . ")\n";
         return $out . $this->finishElem($c, $v);
+    }
+
+    /**
+     * `__mir_array_pop` / `_shift` answer a RAW carrier and 0 on empty; the
+     * `_cell` variants answer a self-describing cell and NULL. An erased
+     * consumer needs the latter — `while (null !== $t = array_shift($a))` never
+     * terminated against the raw 0, since a 0 is not a null cell.
+     */
+    private function takeSymbol(Call $c, string $which): string
+    {
+        $k = $c->type->kind;
+        $cellish = $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN;
+        return '__mir_array_' . $which . ($cellish ? '_cell' : '');
     }
 
     /**
@@ -3988,7 +4006,7 @@ trait EmitLlvmBuiltins
         $out .= $this->mutArrayCow($c->args[0], $arr);
         $arr = $this->lastValue;
         $v = $this->ssa->allocReg();
-        $out .= '  ' . $v . ' = call i64 @__mir_array_shift(ptr ' . $arr . ")\n";
+        $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift') . '(ptr ' . $arr . ")\n";
         return $out . $this->finishElem($c, $v);
     }
 
