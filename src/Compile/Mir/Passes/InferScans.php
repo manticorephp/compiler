@@ -541,6 +541,13 @@ trait InferScans
         $cand = [];                       // param name → index
         foreach ($fn->params as $idx => $p) {
             if ($p->variadic) { continue; }
+            // arrayHinted, not just an erased type: isUnknownArrayElem is also
+            // true for KIND_UNKNOWN, which is what an UNTYPED (`mixed`) param
+            // erases to — and narrowing one of those to vec[T] is a lie. It is
+            // how symfony's `StreamOutput::__construct($stream)` became
+            // `array`, so is_resource($stream) folded false and every console
+            // app threw "needs a stream as its first argument".
+            if (!$p->arrayHinted) { continue; }
             if ($this->isUnknownArrayElem($p->type)) { $cand[$p->name] = $idx; }
         }
         if (\count($cand) === 0) { return; }
@@ -598,7 +605,11 @@ trait InferScans
                 // that properly means encoding the param types into the prelude
                 // SYMBOL, which is a separate change.
                 if ($fn->isPrelude && $p->byRef) { $idx = $idx + 1; continue; }
-                if (!$p->variadic && $this->isUnknownArrayElem($p->type)) {
+                // Same rule as scanParamElemUse: an UNTYPED param erases to
+                // KIND_UNKNOWN, which isUnknownArrayElem also answers true for.
+                // Only a param the source actually hinted `array` may be
+                // narrowed from its call sites; `mixed` stays mixed.
+                if (!$p->variadic && $p->arrayHinted && $this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
                 } elseif (!$p->variadic && $p->type->isArray()) {
                     // A param the per-fn heuristic already refined (e.g. vec[string]
