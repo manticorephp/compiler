@@ -390,8 +390,10 @@ Also: `writev`/`io_uring` to break the 2-syscall floor · DNS search-domain/`ndo
 shared-memory multithreading (a future compiler superset). See the async roadmap memory for
 the plan.
 
-**`#[Async]`** — an attribute that wraps a function body in `async()` so `spawn()` works at
-its top level, with the call yielding a `Task` of the return type. Unlike everything above it
-is *not* implementable as a library: it needs the compiler to rewrite the function and to
-carry a generic `Task<T>` through inference, which today has no way to express the binding.
-Worth doing after the runtime settles, not before.
+**`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
+return type. The only piece here that cannot be a library: it needs the compiler to split
+the function and to type the call site. Designed, not built — `docs/design/async-attribute.md`
+has the whole shape, including the finding that the typing half is already possible
+(`Type::typeArgs` + `InferCalls::genericReturnType()` resolve `Task<T>` with no
+reification), so what is left is a contained lowering pass plus three decisions about
+methods, inheritance and calling one outside `async()`.
