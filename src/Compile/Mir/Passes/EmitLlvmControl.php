@@ -295,6 +295,41 @@ trait EmitLlvmControl
         return $label . ":\n";
     }
 
+    /**
+     * A string-typed conditional yields an OWNED (+1) value from EVERY arm, so a
+     * borrowed arm — an alias, a property / element read — is retained here.
+     *
+     * Without it `$out = $out === '' ? $s : ($out . ',' . $s);` stored $s's buffer
+     * BORROWED: the next iteration's `$s = trim(...)` freed it and the allocator
+     * handed the same block back, so the accumulated value silently became the
+     * newest element repeated. Assignment retains a bare alias ($x = $s) but never
+     * looked inside a conditional, and the mixed shape — one owned arm, one
+     * borrowed — is the `string|false` idiom, so it is everywhere. Its return-path
+     * twin is {@see EmitLlvmModule::returnedLocalNames}.
+     *
+     * Making every arm owned is what lets the consumers stay uniform: the value is
+     * a fresh temp ({@see isFreshStringTemp}), an owned local
+     * ({@see InsertMemoryOps::isOwnedObj}) and needs no co-owner retain at a store
+     * ({@see rcRetainByType}) — exactly like a concat or a call return.
+     *
+     * A CELL-typed conditional is excluded: its arms are boxed, and a cell's
+     * ownership is the tag-guarded __mir_cell_drop discipline, not this one.
+     */
+    private function retainBorrowedStrArm(Ternary $n, ?Node $arm, string $i64reg): string
+    {
+        if ($arm === null || $n->type->kind !== Type::KIND_STRING) { return ''; }
+        if ($arm->type->kind !== Type::KIND_STRING) { return ''; }
+        // A fresh temp already carries the +1; a literal is immortal (its retain is
+        // a sentinel no-op, but skip the call rather than emit a useless one).
+        if ($this->isFreshStringTemp($arm) || $arm->kind === Node::KIND_STRING_CONST) {
+            return '';
+        }
+        $this->rt->needsStrRc = true;
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n"
+            . '  call void @__mir_rc_retain_str(ptr ' . $p . ")\n";
+    }
+
     private function emitTernary(Ternary $n): string
     {
         $t = $n;
@@ -341,11 +376,13 @@ trait EmitLlvmControl
         } else {
             $thenVal = $rawCond;
         }
+        $out .= $this->retainBorrowedStrArm($n, $t->then ?? $t->cond, $thenVal);
         $out .= '  store i64 ' . $thenVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $elseLabel . ":\n";
         $out .= $this->emitNode($t->else_);
         $out .= $wantCell ? $this->boxToCell($t->else_->type) : $this->coerceToI64();
+        $out .= $this->retainBorrowedStrArm($n, $t->else_, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";

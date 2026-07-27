@@ -356,26 +356,46 @@ function __mc_resolve_async(string $host): string
     if ($cached !== '') {
         return $cached;
     }
-    $ip = \__mc_resolve_query($host, 1);        // A
-    if ($ip === '') {
+    // resolv.conf is read ONCE per lookup and its pieces threaded down — the search
+    // walk would otherwise re-read and re-parse it for every candidate and qtype.
+    $text = \__mc_resolv_text();
+    $ns = \__mc_resolv_nameservers($text);
+    if ($ns === '') { $ns = '8.8.8.8'; }
+    $cands = \__mc_dns_candidates($host, \__mc_resolv_search($text), \__mc_resolv_ndots($text));
+    foreach (\explode(',', $cands) as $cRaw) {
+        $qname = (string)$cRaw;
+        if ($qname === '') { continue; }
+        $ip = \__mc_resolve_query($qname, 1, $host, $ns);        // A
+        if ($ip !== '') { return $ip; }
         // AAAA next: an IPv6-only name is common enough (and the literal we return
         // goes straight back into getaddrinfo, which takes v6 literals as happily as
         // v4 — so nothing downstream needs to know).
-        $ip = \__mc_resolve_query($host, 28);   // AAAA
+        $ip = \__mc_resolve_query($qname, 28, $host, $ns);       // AAAA
+        if ($ip !== '') { return $ip; }
+        // Keep walking on NXDOMAIN *and* on a NOERROR with no address (a name with
+        // only MX/TXT is not an address, and a search list exists to keep going).
+        // Stop when NOBODY answered: a timeout must not be multiplied by the number
+        // of suffixes — that turns one dead resolver into a minutes-long lookup.
+        if (\__mc_dns_rcode_last() < 0) { break; }
     }
-    return $ip;
+    return '';
 }
 
 /**
- * One QTYPE's worth of resolution: query, take the first address record, and cache it
- * under its own TTL. '' when the type has no answer.
+ * One QTYPE's worth of resolution: query $qname, take the first address record, and
+ * cache it under its own TTL. '' when the type has no answer.
+ *
+ * $cacheKey is the name the CALLER asked for, never the expanded candidate: caching
+ * each suffix separately would fill the table with per-suffix duplicates and miss on
+ * the next lookup of the same short name.
  */
-function __mc_resolve_query(string $host, int $qtype): string
+function __mc_resolve_query(string $qname, int $qtype, string $cacheKey, string $nsCsv): string
 {
-    $resp = \__mc_dns_query($host, $qtype);
+    $resp = \__mc_dns_query_via($qname, $qtype, $nsCsv);
     if ($resp === '') {
         return '';
     }
+    $host = $cacheKey;
     /** @var array<int,array<string,mixed>> $recs */
     $recs = \__mc_dns_parse($resp, $qtype);
     foreach ($recs as $rec) {

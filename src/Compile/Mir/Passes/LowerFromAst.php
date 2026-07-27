@@ -1971,12 +1971,19 @@ final class LowerFromAst implements Pass
      * each backed by a module global cell `@<fn>__sl_<name>`. A binding
      * with an initialiser also gets a once-init guard cell so the init
      * runs on the first call only.
+     *
+     * The name is SANITIZED, like a static property's: inside a namespaced
+     * function the cell would otherwise be `@Ns\fn__sl_x`, and a backslash in
+     * an unquoted LLVM identifier is a parse error ("expected '=' in global
+     * variable"). Every static local in this tree happened to sit in a
+     * global-namespace file, so the whole class of function was unbuildable
+     * without anyone finding out.
      */
     private function lowerStaticLocal(\Parser\Ast\StaticLocalStmt $stmt): Node
     {
         $base = $this->currentLowerClass !== ''
-            ? '@' . $this->currentLowerClass . '__' . $this->currentLowerFn
-            : '@' . $this->currentLowerFn;
+            ? '@' . $this->sanitizeSym($this->currentLowerClass . '__' . $this->currentLowerFn)
+            : '@' . $this->sanitizeSym($this->currentLowerFn);
         $nodes = [];
         foreach ($stmt->decls as $d) {
             $cell = $base . '__sl_' . $d->name;
