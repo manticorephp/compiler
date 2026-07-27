@@ -2108,7 +2108,17 @@ trait EmitLlvmBuiltins
         // An obj value may be a null (0) pointer at runtime (a plain-ternary null
         // arm keeps the obj type) — runtime-select "NULL" over the object name.
         elseif ($k === Type::KIND_OBJ) {
-            $objName = $debug && ($a->type->class ?? '') !== '' ? $a->type->class : $nObj;
+            // php's get_debug_type of an object is its RUNTIME class, not the
+            // static type: inside `add(Command $c)` it must answer
+            // App\GreetCommand, not Command. Folding the static name is why
+            // symfony's "The command defined in %s" named the base class for
+            // every subclass. get_class already resolves this off the class id —
+            // reuse it, with the null-pointer arm a KIND_OBJ slot can still hold.
+            if ($debug && ($a->type->class ?? '') !== ''
+                && ($a->type->class ?? '') !== 'Resource') {
+                return $this->biGetClass([$a], $nNull);
+            }
+            $objName = $nObj;
             // A statically-typed \Resource: the class is known here, so fold the
             // name rather than call the prelude helper — the helper would have to
             // run unconditionally under the null-select below and would deref a
@@ -3771,8 +3781,13 @@ trait EmitLlvmBuiltins
 
     /** @param Node[] $args  get_class($o) — the operand's class name. Uses the
      * static type when there is one (matches `::class`), else dispatches on the
-     * runtime class id. */
-    private function biGetClass(array $args): string
+     * runtime class id.
+     *
+     * `$nullName` (get_debug_type) names the arm for a KIND_OBJ slot holding a
+     * NULL pointer — a plain-ternary null arm keeps the obj type, and the class
+     * id would be read off address 0. Empty (get_class) keeps the unguarded
+     * load, which is what every existing caller already relies on. */
+    private function biGetClass(array $args, string $nullName = ''): string
     {
         $t = $args[0]->type;
         $erased = $this->getClassReceiverIsErased($t);
@@ -3809,7 +3824,19 @@ trait EmitLlvmBuiltins
         // class, so the literal would be the empty string.
         if (!$erased && \count($cands) <= 1) {
             $out = $this->emitNode($args[0]);
-            $this->lastValue = $this->strLitId($this->pool->intern($this->displayClassName($cls)));
+            $lit = $this->strLitId($this->pool->intern($this->displayClassName($cls)));
+            if ($nullName !== '') {
+                $out .= $this->coerceToI64();
+                $isN = $this->ssa->allocReg();
+                $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $isN . ', ptr '
+                      . $this->strRef($nullName) . ', ptr ' . $lit . "\n";
+                $this->lastValue = $sel;
+                $this->lastValueType = 'ptr';
+                return $out;
+            }
+            $this->lastValue = $lit;
             $this->lastValueType = 'ptr';
             return $out;
         }
@@ -3842,6 +3869,17 @@ trait EmitLlvmBuiltins
         } else {
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
+        }
+        if ($nullName !== '') {
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp eq ptr ' . $objp . ", null\n";
+            $nullL = $this->ssa->allocLabel('gc.null');
+            $liveL = $this->ssa->allocLabel('gc.live');
+            $out .= '  br i1 ' . $nz . ', label %' . $nullL . ', label %' . $liveL . "\n";
+            $out .= $nullL . ":\n";
+            $out .= '  store ptr ' . $this->strRef($nullName) . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $liveL . ":\n";
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
