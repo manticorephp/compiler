@@ -307,10 +307,15 @@ trait EmitLlvmControl
      * borrowed — is the `string|false` idiom, so it is everywhere. Its return-path
      * twin is {@see EmitLlvmModule::returnedLocalNames}.
      *
-     * Making every arm owned is what lets the consumers stay uniform: the value is
-     * a fresh temp ({@see isFreshStringTemp}), an owned local
-     * ({@see InsertMemoryOps::isOwnedObj}) and needs no co-owner retain at a store
-     * ({@see rcRetainByType}) — exactly like a concat or a call return.
+     * ⚠ The retain is NOT paired with a release: the consumers still treat a
+     * conditional as borrowed ({@see EmitLlvm::isFreshStringTemp},
+     * {@see InsertMemoryOps::isOwnedObj}). Teaching them it is owned was tried and
+     * reverted — an arm that is not itself string-TYPED (a cell/unknown carrier
+     * that coerces to the string) gets no retain here, so the release side then
+     * freed what nobody owned and preg/socket cases read freed bytes. Retaining
+     * without releasing leaks a string; releasing without retaining corrupts one,
+     * and the concat arm already leaked before this. Pairing them needs every arm
+     * covered regardless of its static type — worth doing, not worth guessing at.
      *
      * A CELL-typed conditional is excluded: its arms are boxed, and a cell's
      * ownership is the tag-guarded __mir_cell_drop discipline, not this one.

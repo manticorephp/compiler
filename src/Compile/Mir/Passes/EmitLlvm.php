@@ -1502,12 +1502,16 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($node->type->kind !== Type::KIND_STRING) { return false; }
         $k = $node->kind;
-        // A string-typed conditional owns its result too: every arm is normalised
-        // to +1 in {@see EmitLlvmControl::retainBorrowedStrArm}, so the value is a
-        // fresh temp whichever arm ran.
+        // ⚠ A TERNARY is deliberately NOT here, even though
+        // {@see EmitLlvmControl::retainBorrowedStrArm} gives its borrowed arms a
+        // +1: an arm that is not itself string-TYPED (a cell/unknown carrier that
+        // coerces to the string) gets no retain, so treating the result as a fresh
+        // temp released what nobody owned — preg_full and socket_sendmsg read
+        // freed bytes. Retaining without releasing leaks; releasing without
+        // retaining corrupts.
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_INVOKE || $k === Node::KIND_TERNARY;
+            || $k === Node::KIND_INVOKE;
     }
 
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */

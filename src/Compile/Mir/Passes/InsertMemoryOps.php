@@ -246,12 +246,6 @@ final class InsertMemoryOps implements Pass
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return true;
         }
-        // A string-typed conditional is an owned producer too: every arm is
-        // normalised to +1 ({@see EmitLlvmControl::retainBorrowedStrArm}), so the
-        // local that receives it must release at scope exit like any concat.
-        // Tested BEFORE the RcHeap gate: a Ternary node carries no allocKind of
-        // its own (InferAllocKind only descends into its arms).
-        if ($tk === Type::KIND_STRING && $k === Node::KIND_TERNARY) { return true; }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so

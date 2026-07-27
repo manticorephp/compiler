@@ -506,12 +506,9 @@ trait EmitLlvmMemory
         // borrowed arrays (alias / read) need a co-owner retain.
         if ($tk === Type::KIND_ARRAY && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return ''; }
         // String owned producer: a concat is a fresh +1; a literal is
-        // immortal (retain is a sentinel no-op — skip it). A string-typed
-        // conditional is owned as well — every arm is normalised to +1 in
-        // {@see EmitLlvmControl::retainBorrowedStrArm}.
+        // immortal (retain is a sentinel no-op — skip it).
         if ($tk === Type::KIND_STRING
-            && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST
-                || $k === Node::KIND_TERNARY)) { return ''; }
+            && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return ''; }
         $p = $this->ssa->allocReg();
         $out  = $this->profBump(7 + $cat);
         $out .= '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
