@@ -1998,8 +1998,20 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $sp . ' = and i64 ' . $v . ", 281474976710655\n";
             $spp = $this->ssa->allocReg();
             $out .= '  ' . $spp . ' = inttoptr i64 ' . $sp . " to ptr\n";
+            // The result was masked by the tag AFTER the call, but the call
+            // still ran: a NULL cell has payload 0, and symfony's
+            // `is_numeric($statusCode)` in Command::run dereferenced it.
+            // Feed the scanner the empty string (never numeric) unless the tag
+            // really says string — a non-string payload is not a C string.
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp ne i64 ' . $sp . ", 0\n";
+            $can = $this->ssa->allocReg();
+            $out .= '  ' . $can . ' = and i1 ' . $isS . ', ' . $nz . "\n";
+            $safe = $this->ssa->allocReg();
+            $out .= '  ' . $safe . ' = select i1 ' . $can . ', ptr ' . $spp
+                  . ', ptr getelementptr inbounds (i8, ptr @.cstr.empty, i64 32)' . "\n";
             $sn = $this->ssa->allocReg();
-            $out .= '  ' . $sn . ' = call i1 @__mir_is_numeric_str(ptr ' . $spp . ")\n";
+            $out .= '  ' . $sn . ' = call i1 @__mir_is_numeric_str(ptr ' . $safe . ")\n";
             $strNum = $this->ssa->allocReg();
             $out .= '  ' . $strNum . ' = and i1 ' . $isS . ', ' . $sn . "\n";
             $r = $this->ssa->allocReg();

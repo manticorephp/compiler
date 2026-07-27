@@ -1160,6 +1160,10 @@ trait EmitLlvmExpr
         $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
         // __mir_is_numeric_str(s) -> i1
         $out  = "\ndefine i1 @__mir_is_numeric_str(ptr %s) {\nentry:\n";
+        // A null carrier is `is_numeric(null)` — false, not a fault.
+        $out .= "  %nul = icmp eq ptr %s, null\n";
+        $out .= "  br i1 %nul, label %no, label %read\n";
+        $out .= "read:\n";
         $out .= "  %c0 = load i8, ptr %s\n";
         $out .= "  %empty = icmp eq i8 %c0, 0\n";
         $out .= "  br i1 %empty, label %no, label %parse\n";
