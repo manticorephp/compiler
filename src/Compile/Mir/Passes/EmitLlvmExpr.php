@@ -2270,12 +2270,18 @@ trait EmitLlvmExpr
                 $isArr = $this->ssa->allocReg();
                 $out .= '  ' . $isArr . ' = icmp eq i64 ' . $tag . ", 7\n";
                 $out .= '  br i1 ' . $isArr . ', label %' . $arrL . ', label %' . $objChk . "\n";
-                // ARRAY → itself, tag stripped.
+                // ARRAY → itself, tag stripped. RETAINED: the null / scalar arms
+                // hand back a FRESH array, so the result has to be owned on
+                // every path or the consumer cannot have one ownership rule —
+                // releasing a borrowed operand buffer is an invalid free, which
+                // is what `(array) $values` in getParameterOption tripped.
                 $out .= $arrL . ":\n";
                 $ap = $this->ssa->allocReg();
                 $out .= '  ' . $ap . ' = and i64 ' . $v . ", 281474976710655\n";
                 $app = $this->ssa->allocReg();
                 $out .= '  ' . $app . ' = inttoptr i64 ' . $ap . " to ptr\n";
+                $this->rt->needsRc = true;
+                $out .= '  call void @__mir_array_retain(ptr ' . $app . ")\n";
                 $out .= '  store ptr ' . $app . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 // OBJECT → its property bag, as before.
@@ -2294,6 +2300,8 @@ trait EmitLlvmExpr
                 $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
                 $bagP = $this->ssa->allocReg();
                 $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+                // Borrowed like the array arm above — co-own it.
+                $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
                 $out .= '  store ptr ' . $bagP . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 // NULL → the empty array.

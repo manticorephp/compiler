@@ -3937,9 +3937,42 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($c->args[0]);
         $out .= $this->arrayArgToPtr($c->args[0]);
         $arr = $this->lastValue;
+        $out .= $this->mutArrayCow($c->args[0], $arr);
+        $arr = $this->lastValue;
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = call i64 @__mir_array_pop(ptr ' . $arr . ")\n";
         return $out . $this->finishElem($c, $v);
+    }
+
+    /**
+     * Copy-on-write before an IN-PLACE array mutation, and thread the (possibly
+     * new) buffer back into the variable's slot. Leaves the buffer to mutate in
+     * `lastValue`.
+     *
+     * array_pop / array_shift mutate the header directly and used to skip this
+     * entirely, which is only sound while the buffer is uniquely owned. PHP
+     * arrays are VALUES: `$tokens = $this->tokens; array_shift($tokens);` must
+     * not touch the property — symfony's ArgvInput::getParameterOption does
+     * exactly that and drained `$this->tokens`, then freed a buffer the property
+     * still pointed at. COW only copies when the buffer is actually shared, so
+     * a uniquely-owned worklist (the self-host source's usage) is unaffected.
+     */
+    private function mutArrayCow(Node $arrNode, string $arr): string
+    {
+        $k = $arrNode->kind;
+        if ($k !== Node::KIND_LOAD_LOCAL && $k !== Node::KIND_PROPERTY_ACCESS
+            && $k !== Node::KIND_STATIC_PROP) {
+            $this->lastValue = $arr;
+            $this->lastValueType = 'ptr';
+            return '';
+        }
+        $cow = $this->ssa->allocReg();
+        $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type)
+             . '(ptr ' . $arr . ")\n";
+        $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
+        $this->lastValue = $cow;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /**
@@ -3951,6 +3984,8 @@ trait EmitLlvmBuiltins
         $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
         $out = $this->emitNode($c->args[0]);
         $out .= $this->arrayArgToPtr($c->args[0]);
+        $arr = $this->lastValue;
+        $out .= $this->mutArrayCow($c->args[0], $arr);
         $arr = $this->lastValue;
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = call i64 @__mir_array_shift(ptr ' . $arr . ")\n";
