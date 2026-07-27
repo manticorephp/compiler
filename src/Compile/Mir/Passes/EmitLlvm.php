@@ -247,6 +247,15 @@ final class EmitLlvm implements EmitVisitor
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */
     private string $vdResult = '';
+    /**
+     * @var array<string,bool> params of the function being emitted whose
+     * DECLARED hint was a bare `array`. The lowered type erased to unknown
+     * (LowerTypes has no branch for a bare `array`), so the hint is the only
+     * remaining evidence that the i64 in the slot is an array pointer — which
+     * truthiness has to know, an empty array being falsy but its pointer
+     * non-null. Reset per function by emitFunction.
+     */
+    private array $arrayHintedParams = [];
     /** @var string[] module global cell names (static props/locals/global) */
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */

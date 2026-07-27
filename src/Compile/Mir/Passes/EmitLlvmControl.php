@@ -319,7 +319,7 @@ trait EmitLlvmControl
             $out .= $this->emitNode($t->cond);
             $out .= $this->coerceToI64();
             $rawCond = $this->lastValue;
-            $out .= $this->truthinessOf($t->cond->type);
+            $out .= $this->truthinessOf($t->cond->type, $t->cond);
             $cond = $this->lastValue;
         } else {
             $out .= $this->emitCondVal($t->cond);
@@ -845,7 +845,7 @@ trait EmitLlvmControl
     private function emitCondVal(Node $cond): string
     {
         $out = $this->emitNode($cond);
-        return $out . $this->truthinessOf($cond->type);
+        return $out . $this->truthinessOf($cond->type, $cond);
     }
 
     private function emitIf(If_ $n): string

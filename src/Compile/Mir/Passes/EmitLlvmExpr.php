@@ -3813,8 +3813,19 @@ trait EmitLlvmExpr
      * Split from emitCondVal so the short-ternary (`?:`) can compute truthiness
      * WITHOUT clobbering the raw operand it reuses as its then-value.
      */
-    private function truthinessOf(Type $t): string
+    private function truthinessOf(Type $t, ?Node $n = null): string
     {
+        // A bare `array` param erased to KIND_UNKNOWN would fall through to the
+        // raw `icmp ne 0` below — and `[]` lowers to the non-null empty-array
+        // singleton, so EVERY empty array read as TRUE. `if (!$aliases) return;`
+        // in symfony's AsCommand ctor therefore did not return, and the body it
+        // guards rewrote $this->name from an erased array. The declared hint is
+        // the only surviving evidence that the slot holds an array pointer.
+        if ($t->kind === Type::KIND_UNKNOWN && $n !== null
+            && $n->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->arrayHintedParams[$n->name])) {
+            return $this->truthinessOf(Type::vec(Type::unknown()));
+        }
         if ($t->kind === Type::KIND_CELL) {
             $this->rt->needsTaggedTruthy = true;
             $out = $this->coerceToI64();

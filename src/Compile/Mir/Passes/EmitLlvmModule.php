@@ -629,6 +629,10 @@ trait EmitLlvmModule
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
         $this->frame->mutatedVecLocals = [];
+        $this->arrayHintedParams = [];
+        foreach ($fn->params as $ahp) {
+            if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
+        }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
