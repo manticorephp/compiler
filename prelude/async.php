@@ -357,6 +357,26 @@ namespace Async {
             return $this;
         }
 
+        /**
+         * Longest stretch this task has held the loop, in seconds — the watchdog's
+         * rate limit: report the first breach, then only a doubling, so a genuinely
+         * CPU-bound worker cannot turn the log into its own bottleneck.
+         */
+        public float $wdWorst = 0.0;
+
+        /** Just the identity — `#id "label" at file:line`, no state. */
+        public function label(): string
+        {
+            $name = $this->name === '' ? '' : (' "' . $this->name . '"');
+            // `near …` is already a preposition — `at near x` reads as a typo.
+            $where = '';
+            if ($this->origin !== '') {
+                $where = \substr($this->origin, 0, 5) === 'near '
+                    ? (' ' . $this->origin) : (' at ' . $this->origin);
+            }
+            return '#' . (string)$this->id . $name . $where;
+        }
+
         /** One line for the diagnostic report: id, label, state, what it waits on. */
         public function describe(): string
         {
@@ -382,14 +402,7 @@ namespace Async {
             // `awaited` (someone is handling its outcome), not `unclaimed` — every
             // freshly spawned task is unclaimed, so that spelling was pure noise.
             if ($this->claimed) { $flags = $flags . ' awaited'; }
-            $label = $this->name === '' ? '' : (' "' . $this->name . '"');
-            // `near …` is already a preposition — `at near x` reads as a typo.
-            $where = '';
-            if ($this->origin !== '') {
-                $where = \substr($this->origin, 0, 5) === 'near '
-                    ? (' ' . $this->origin) : (' at ' . $this->origin);
-            }
-            return '#' . (string)$this->id . $label . $where . ' ' . $what . $flags;
+            return $this->label() . ' ' . $what . $flags;
         }
 
         /**
@@ -1402,6 +1415,29 @@ namespace Async {
         private int $nextTaskId = 0;
 
         /**
+         * Loop-hog watchdog: how long one task may hold the loop, in SECONDS.
+         * 0.0 = off, and off costs one float compare per resume — {@see step()} is
+         * the 150k-rps path.
+         *
+         * A cooperative loop cannot preempt, so this reports AFTER the fact — which
+         * is the whole point: the failure mode it catches (regular-file I/O, a
+         * CPU-bound stretch with no suspend point, a blocking fallback) is invisible
+         * otherwise. Every other task simply stops for that long.
+         *
+         * Set by `MANTICORE_ASYNC_WATCHDOG` (milliseconds) or {@see watchdog()}.
+         */
+        private float $watchdog = 0.0;
+
+        /** @var int[] monotonic engine counters, exposed by {@see Async\stats()} */
+        private int $nSpawned = 0;
+        private int $nSettled = 0;
+        private int $nCancelled = 0;
+        private int $nWakes = 0;
+        private int $nReactorWaits = 0;
+        private int $nTimerFires = 0;
+        private int $nWatchdog = 0;
+
+        /**
          * Resolver cache, host → address and host → expiry (two parallel assocs, so
          * neither holds a nested array). It lives HERE because the stdlib cannot own
          * an assoc in a static, and because a scheduler run is exactly the lifetime a
@@ -1416,6 +1452,17 @@ namespace Async {
         private function __construct()
         {
             $this->reactor = new \Io\Poll\Context(\Io\Poll\Backend::Auto);
+            // getenv is `string|false` (a cell) — unbox before comparing.
+            $ms = \getenv('MANTICORE_ASYNC_WATCHDOG');
+            if ($ms !== false && $ms !== '') {
+                $this->setWatchdog((float)(string)$ms);
+            }
+        }
+
+        /** Threshold in MILLISECONDS; <= 0 turns it off. {@see $watchdog} */
+        public function setWatchdog(float $milliseconds): void
+        {
+            $this->watchdog = $milliseconds > 0.0 ? $milliseconds / 1000.0 : 0.0;
         }
 
         public static function instance(): Scheduler
@@ -1471,6 +1518,7 @@ namespace Async {
             if ($this->taskHead !== null) { $this->taskHead->allPrev = $task; }
             $this->taskHead = $task;
             if (!$daemon) { $this->live = $this->live + 1; }
+            $this->nSpawned = $this->nSpawned + 1;
             $task->queued = true;
             $this->ready[] = $task;
             return $task;
@@ -1683,6 +1731,8 @@ namespace Async {
             $task->queued = false;
             $prev = $this->running;
             $this->running = $task;
+            // One float compare when the watchdog is off; microtime only when it is on.
+            $t0 = $this->watchdog > 0.0 ? \microtime(true) : 0.0;
             try {
                 if (!$task->fiber->isStarted()) {
                     $task->fiber->start();
@@ -1695,15 +1745,52 @@ namespace Async {
                 }
             } catch (\Throwable $e) {
                 $this->running = $prev;
+                if ($t0 > 0.0) { $this->watchdogCheck($task, $t0); }
                 $this->settle($task, Task::FAILED, null, $e);
                 $task->fiber->reclaim();      // terminated via exception → free stack now
                 return;
             }
             $this->running = $prev;
+            if ($t0 > 0.0) { $this->watchdogCheck($task, $t0); }
             if ($task->fiber->isTerminated()) {
                 $this->settle($task, Task::DONE, $task->fiber->getReturn(), null);
                 $task->fiber->reclaim();      // free+pool the stack now, not at __destruct
             }
+        }
+
+        /**
+         * Did that resume hold the loop too long? Reported after the fact, on
+         * STDERR, naming the task and where it was spawned — the answer to "why
+         * did everything else stall", which is otherwise invisible.
+         */
+        private function watchdogCheck(Task $task, float $t0): void
+        {
+            $held = \microtime(true) - $t0;
+            if ($held < $this->watchdog) { return; }
+            // First breach, then only a doubling: see Task::$wdWorst.
+            if ($task->wdWorst > 0.0 && $held < $task->wdWorst * 2.0) { return; }
+            $task->wdWorst = $held;
+            $this->nWatchdog = $this->nWatchdog + 1;
+            \fwrite(\STDERR, 'async: watchdog — task ' . $task->label() . ' held the loop '
+                . __ms($held) . ' ms (limit ' . __ms($this->watchdog) . " ms)\n");
+        }
+
+        /** @return array<string,int> monotonic counters + the current gauges */
+        public function stats(): array
+        {
+            $out = [];
+            $out['spawned'] = $this->nSpawned;
+            $out['settled'] = $this->nSettled;
+            $out['cancelled'] = $this->nCancelled;
+            $out['wakes'] = $this->nWakes;
+            $out['reactor_waits'] = $this->nReactorWaits;
+            $out['timer_fires'] = $this->nTimerFires;
+            $out['watchdog'] = $this->nWatchdog;
+            $out['live'] = $this->live;
+            $out['ready'] = \count($this->ready);
+            $out['io_parked'] = $this->ioWaiters;
+            $out['timers'] = $this->tmLive;
+            return $out;
         }
 
         private function settle(Task $task, int $state, mixed $result, ?\Throwable $error): void
@@ -1711,6 +1798,7 @@ namespace Async {
             $task->state = $state;
             $task->result = $result;
             $task->error = $error;
+            $this->nSettled = $this->nSettled + 1;
             if (!$task->daemon) { $this->live = $this->live - 1; }
             // Unlink from the live-task list (diagnostics) — O(1), both directions.
             if ($task->allPrev !== null) {
@@ -1774,6 +1862,7 @@ namespace Async {
         {
             if ($task->state === Task::PENDING && !$task->queued) {
                 $task->queued = true;
+                $this->nWakes = $this->nWakes + 1;
                 $this->ready[] = $task;
             }
         }
@@ -1789,6 +1878,7 @@ namespace Async {
             if ($task->state !== Task::PENDING) { return; }
             if ($task->cancelRequested) { return; }
             $task->cancelRequested = true;
+            $this->nCancelled = $this->nCancelled + 1;
             if ($task === $this->running) { return; }
             $this->releaseIo($task);
             if ($task->timerActive) {
@@ -2207,6 +2297,7 @@ namespace Async {
                 $sec = $timeout < 0 ? null : (int)$timeout;
                 $usec = $timeout < 0 ? 0 : (int)(($timeout - (int)$timeout) * 1000000);
                 /** @var \Io\Poll\Watcher[] $ready */
+                $this->nReactorWaits = $this->nReactorWaits + 1;
                 $ready = $this->reactor->wait($sec, $usec, null);
                 foreach ($ready as $watcher) {
                     $fd = $watcher->getData();
@@ -2242,6 +2333,7 @@ namespace Async {
                 $this->timerPop();
                 $t->timerActive = false;
                 if (!$t->daemon) { $this->tmLive = $this->tmLive - 1; }
+                $this->nTimerFires = $this->nTimerFires + 1;
                 $this->wake($t);
             }
         }
@@ -2703,6 +2795,48 @@ namespace Async {
     function dump(): string
     {
         return Scheduler::hasInstance() ? Scheduler::instance()->report() : '';
+    }
+
+    /**
+     * Watch for a task that HOLDS THE LOOP longer than $milliseconds, and name it
+     * on STDERR when one does. 0 turns it off; `MANTICORE_ASYNC_WATCHDOG=<ms>`
+     * does the same thing without touching the program.
+     *
+     *   async: watchdog — task #4 "report" at app.php:88 held the loop 214.3 ms (limit 50 ms)
+     *
+     * This is the answer to "everything stalled and nothing says why". A
+     * cooperative loop cannot preempt, so the report necessarily comes AFTER the
+     * stall — but the failure modes it catches are otherwise invisible: regular
+     * file I/O (blocking BY DESIGN here, see Async\readFile), a CPU-bound stretch
+     * with no suspend point, a third-party library falling back to a blocking
+     * call. Each task reports its first breach and then only a doubling, so a
+     * knowingly CPU-heavy worker does not flood the log.
+     */
+    function watchdog(float $milliseconds): void
+    {
+        Scheduler::instance()->setWatchdog($milliseconds);
+    }
+
+    /**
+     * Engine counters — monotonic totals (`spawned`, `settled`, `cancelled`,
+     * `wakes`, `reactor_waits`, `timer_fires`, `watchdog`) plus the current gauges
+     * (`live`, `ready`, `io_parked`, `timers`). Empty outside a scheduler.
+     *
+     * For benchmarks and for asserting engine BEHAVIOUR in a test — e.g. that a
+     * run did not silently fall back to polling (`reactor_waits`), or that the
+     * watchdog fired exactly once.
+     *
+     * @return array<string,int>
+     */
+    function stats(): array
+    {
+        return Scheduler::hasInstance() ? Scheduler::instance()->stats() : [];
+    }
+
+    /** @internal milliseconds, one decimal, for the watchdog line. */
+    function __ms(float $seconds): string
+    {
+        return (string)\round($seconds * 1000.0, 1);
     }
 
     /** Suspend the current task for $seconds without blocking the loop. */
