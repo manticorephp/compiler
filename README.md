@@ -181,7 +181,9 @@ echo '<?php echo "hi\n";' | bin/manticore compile -o /tmp/hi && /tmp/hi
 Flags: `-o <out>`, `-O<0|1|2|3|s|z>` (clang opt level, default `-O2`),
 `--emit-library` (compile to a standalone `.o` with no `@main`),
 `--memory=rc|arena|hybrid`. `build` also takes `--libs-only` (build the
-library targets and stop).
+library targets and stop) and `--keep-ir` (leave the generated
+`<output>.dbg.ll` / `.dbg.o` next to the target instead of staging them in
+`/tmp` and deleting them — pair with `-O0` to get a binary lldb can walk).
 
 ## Module system (`manticore.json`)
 

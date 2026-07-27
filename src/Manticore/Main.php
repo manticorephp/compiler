@@ -578,6 +578,15 @@ final class CompileArgs
     public static string $optLevel = '2';
 
     /**
+     * `--keep-ir` — write the intermediate `.ll`/`.o` next to the target
+     * (`<output>.dbg.ll` / `<output>.dbg.o`) and leave them there instead of
+     * staging them under a pid-derived /tmp path and deleting them. The one
+     * way to read the IR of a manifest build; pairs with `-O0` for a binary
+     * lldb can actually walk.
+     */
+    public static bool $keepIr = false;
+
+    /**
      * `--emit-library` — build the bundled stdlib as a standalone `.o`
      * (no `@main`, no stdlib linking). Used by bin/compile / bin/build to
      * produce `lib/manticore_stdlib.o` once after the compiler is built.
@@ -1215,13 +1224,20 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         return 65;
     }
     if (\strlen($ir) === 0) { dprint("build: empty IR for " . $output); return 65; }
-    $pid = getpid();
-    $base = "/tmp/manticore_buildobj_" . (string)$pid;
+    // Staging path for the IR and the intermediate object. Under --keep-ir they
+    // sit next to the target (stable, one per target, and not swept from /tmp);
+    // otherwise a pid-derived /tmp base, removed once the target links. The
+    // staged files are deliberately LEFT BEHIND on failure — they are the only
+    // record of what the compiler emitted for a build that did not finish.
+    $keep = CompileArgs::$keepIr;
+    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
     if (!write_file($llPath, $ir)) { dprint("build: cannot write " . $llPath); return 73; }
+    if ($keep) { dprint("build: kept IR " . $llPath); }
     if ($emitLibrary) {
         $rc = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }
+        if (!$keep) { system("rm -f " . $llPath); }
         // Emit the module-interface .sig next to the object so dependents
         // import this library's exported symbols without re-parsing it.
         if (!write_file($output . ".sig", Sig::emitModule($module))) {
@@ -1267,6 +1283,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     \Compile\Stats::step('link', $statT, -1, -1);
     \Compile\Stats::dumpCounters();
     if ($rc2 !== 0) { dprint("build: link failed for " . $output); return 76; }
+    if (!$keep) { system("rm -f " . $llPath . " " . $objPath); }
     return 0;
 }
 
@@ -1302,16 +1319,26 @@ function find_link_stubs_script(): string
  */
 function cmd_build(array $args): int
 {
-    // Parse: first non-flag arg = manifest path; `--libs-only` builds the
-    // library targets and stops (used by the cold seed to refresh stdlib.o
-    // without re-linking the applications).
-    $manifestPath = "manticore.json";
-    $libsOnly = false;
-    foreach ($args as $a) {
-        if ($a === "--libs-only") { $libsOnly = true; continue; }
-        if (\strlen($a) > 0 && $a[0] === '-') { dprint("build: unknown flag: " . $a); return 64; }
-        $manifestPath = $a;
-    }
+    // Parse: last positional = manifest path; `--libs-only` builds the library
+    // targets and stops (used by the cold seed to refresh stdlib.o without
+    // re-linking the applications). The shared compile spec rides along so a
+    // manifest build accepts `-O0` / `--memory` like `compile` does — same
+    // shape cmd_analyze uses.
+    $spec = compile_arg_spec();
+    $spec["libs-only"] = \Cli\ArgParse::FLAG;
+    $spec["keep-ir"] = \Cli\ArgParse::FLAG;
+    $p = \Cli\ArgParse::parse($args, $spec);
+    if ($p->error !== null) { dprint("build: " . $p->error); return 64; }
+    if (!apply_compile_args($p)) { return 64; }
+    // apply_compile_args fills $files from the positionals, and lower_module
+    // bakes $files[0] into $module->sourceFile — the text behind
+    // Throwable::getFile() and every "… in <file> on line N" diagnostic. A
+    // manifest path is not a source file, so clear it.
+    CompileArgs::$files = [];
+    $nPos = \count($p->positional);
+    $manifestPath = $nPos > 0 ? $p->positional[$nPos - 1] : "manticore.json";
+    $libsOnly = $p->flag("libs-only");
+    CompileArgs::$keepIr = $p->flag("keep-ir");
     $src = read_file($manifestPath);
     if ($src === null) {
         dprint("build: cannot read manifest: " . $manifestPath);
