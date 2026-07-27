@@ -797,7 +797,14 @@ trait EmitLlvmObjects
         }
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
-        $out .= $this->unboxCellToType($pt);
+        // A bare `array` hint erased to KIND_UNKNOWN still holds a RAW pointer —
+        // unbox it as an array, or the tag rides into a slot the readers deref.
+        // Same rule as the class-typed store path (see slotIsArrayHinted).
+        $out .= $this->unboxCellToType(
+            (!$pt->isArray() && ($cd->propertyArrayHinted[$prop] ?? false))
+                ? Type::vec(Type::unknown())
+                : $pt,
+        );
         $val = $this->lastValue;
         if ($this->lastValueType === 'double') {
             $bits = $this->ssa->allocReg();
@@ -1126,8 +1133,20 @@ trait EmitLlvmObjects
             // property-slot analogue of the cell unboxing already done on the
             // `return` path and per-element in emitStoreElementUnified;
             // unboxCellToType no-ops for a non-concrete target.
-            if ($n->value->type->kind === Type::KIND_CELL && $propType !== null) {
-                $out .= $this->unboxCellToType($propType);
+            if ($n->value->type->kind === Type::KIND_CELL) {
+                if ($this->slotIsArrayHinted($n->object, $n->property, $propType)) {
+                    // A bare `array` hint erases to KIND_UNKNOWN (LowerTypes has no
+                    // branch for it), so unboxCellToType would no-op and the TAGGED
+                    // word would land in a slot every reader treats as a raw
+                    // pointer — `$this->aliases = is_array($a) ? $a : $list;` with
+                    // an `iterable` param stored a cell, and the getter's caller
+                    // inttoptr'd 0xFFF7… straight into the array runtime. Strip to
+                    // the payload, the same repr `clone` already assumes for an
+                    // array-hinted slot.
+                    $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+                } elseif ($propType !== null) {
+                    $out .= $this->unboxCellToType($propType);
+                }
             }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
@@ -3076,6 +3095,25 @@ trait EmitLlvmObjects
         }
         $sub = $this->subclassPropHolder($cls, $prop);
         return $sub;
+    }
+
+    /**
+     * Whether the slot behind `$objExpr->$prop` holds a RAW array pointer.
+     *
+     * True for a declared array type AND for a bare `array` hint that erased to
+     * KIND_UNKNOWN — the latter is the case the store path has to know about,
+     * since `unboxCellToType` has nothing to unbox an `unknown` to and would
+     * leave a NaN-tagged word in a slot every reader inttoptr's directly. The
+     * hint is read from the SAME ClassDef the offset and width come from
+     * ({@see slotHolder}), and `emitObjClone` uses the identical predicate to
+     * decide that an array property is copied rather than co-owned.
+     */
+    private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool
+    {
+        if ($propType !== null && $propType->isArray()) { return true; }
+        $cd = $this->slotHolder($objExpr, $prop);
+        if ($cd === null) { return false; }
+        return $cd->propertyArrayHinted[$prop] ?? false;
     }
 
     /**

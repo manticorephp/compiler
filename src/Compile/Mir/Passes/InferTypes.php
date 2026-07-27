@@ -535,6 +535,23 @@ final class InferTypes implements Pass
 
     private function findCellElemStores(Node $n, string $cls): void
     {
+        // A WHOLE-property store of a CELL into an array-hinted slot. The only
+        // way a cell reaches such a slot is as a boxed array, and the boxing
+        // (boxToCell / a concrete array bound to a `mixed`|`iterable` param)
+        // cellifies the ELEMENTS on the way in. So the slot holds cells even
+        // though the bare `array` hint erased to unknown — symfony's
+        // `$this->aliases = is_array($aliases) ? $aliases : $list;` off an
+        // `iterable` param, whose readers then took the raw-element path and
+        // handed a boxed string straight to strlen.
+        if ($n->kind === Node::KIND_STORE_PROPERTY
+            && $n->object->kind === Node::KIND_LOAD_LOCAL
+            && $n->object->name === 'this'
+            && $n->value->type->kind === Type::KIND_CELL) {
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
+                $this->cellElemPropsFound[$cls . '::' . $n->property] = true;
+            }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS

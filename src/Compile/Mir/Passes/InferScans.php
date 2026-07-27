@@ -268,7 +268,19 @@ trait InferScans
             $cd = $this->classes[$cls] ?? null;
             if ($cd === null) { continue; }
             $cur = $cd->propertyTypes[$prop] ?? null;
-            if ($cur === null || !$cur->isArray()) { continue; }
+            if ($cur !== null && !$cur->isArray()) {
+                // A bare `array` hint erases to KIND_UNKNOWN, so the slot is not
+                // yet an array Type at all — but it IS an array at runtime, and
+                // the store above proved its elements are cells. vec[cell] is the
+                // honest shape: the unified runtime picks packed vs hashed on the
+                // flags word, and inferForeach already tags a cell-element vec's
+                // KEY as a cell, so a hashed one still reads its string keys.
+                if ($cur->kind !== Type::KIND_UNKNOWN
+                    || !($cd->propertyArrayHinted[$prop] ?? false)) { continue; }
+                $cd->propertyTypes[$prop] = Type::vec(Type::cell());
+                continue;
+            }
+            if ($cur === null) { continue; }
             if (($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
             // Preserve the key shape (assoc vs vec); only the element → cell.
             $cd->propertyTypes[$prop] = ($cur->key !== null)
