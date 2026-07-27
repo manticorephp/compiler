@@ -560,10 +560,18 @@ final class LowerFromAst implements Pass
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.
-        $clsIdx = 0;
-        foreach ($stmts as $stmt) {
+        // Build classes PARENT-FIRST, not in source order. buildClassDef copies
+        // the parent's slots to give the subclass the same field offsets, and it
+        // can only do that if the parent is already in classTable — source order
+        // used to be assumed. A composer app breaks that assumption immediately:
+        // `src/App\GreetCommand` sorts before `vendor/symfony/…/Command`, so the
+        // three probe commands were built with ZERO inherited slots and
+        // allocated 16 bytes (header only) while every inherited Command method
+        // wrote at +24…+136 — an out-of-bounds write on every command object,
+        // which corrupted malloc's own metadata and crashed far from the cause.
+        foreach ($this->classBuildOrder($stmts) as $clsIdx) {
+            $stmt = $stmts[$clsIdx];
             $this->inPreludeClass = $clsIdx < $preludeCount;
-            $clsIdx = $clsIdx + 1;
             if ($stmt->kind === 'Class') {
                 $decl = $stmt->decl;
                 $dkind = $decl->kind ?? 'class';
@@ -2799,6 +2807,71 @@ final class LowerFromAst implements Pass
     private function classDeclMethods(\Parser\Ast\ClassDecl $d): array { return $d->methods; }
     /** @return string[] */
     private function classDeclExtends(\Parser\Ast\ClassDecl $d): array { return $d->extends; }
+
+    /**
+     * Indices of the `Class` statements in `$stmts`, ordered so a class is
+     * always built AFTER the class it extends. Bucketed by inheritance depth,
+     * source order preserved inside a bucket; non-class statements are dropped
+     * (the build loop ignores them anyway).
+     *
+     * buildClassDef prepends the parent's properties so a subclass shares the
+     * parent's field offsets, and it can only do that once the parent is in
+     * classTable. Source order happens to satisfy that in a single file and
+     * does NOT for a composer app, where `src/` sorts before `vendor/`.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @return int[]
+     */
+    private function classBuildOrder(array $stmts): array
+    {
+        /** @var int[] $idx */
+        $idx = [];
+        /** @var int[] $depths */
+        $depths = [];
+        $maxDepth = 0;
+        $i = -1;
+        foreach ($stmts as $stmt) {
+            $i = $i + 1;
+            if ($stmt->kind !== 'Class') { continue; }
+            $cdecl = $stmt->decl;
+            $d = $this->classDeclDepth($this->classDeclName($cdecl));
+            $idx[] = $i;
+            $depths[] = $d;
+            if ($d > $maxDepth) { $maxDepth = $d; }
+        }
+        /** @var int[] $out */
+        $out = [];
+        $lvl = 0;
+        while ($lvl <= $maxDepth) {
+            $k = 0;
+            foreach ($idx as $ix) {
+                if ($depths[$k] === $lvl) { $out[] = $ix; }
+                $k = $k + 1;
+            }
+            $lvl = $lvl + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * How many `extends` hops separate `$name` from a root. 0 for a class with
+     * no parent, or one whose parent is not declared in this module (nothing to
+     * wait for). Capped so a cyclic `extends` cannot spin.
+     */
+    private function classDeclDepth(string $name): int
+    {
+        $d = 0;
+        $cur = \ltrim($name, '\\');
+        while ($d < 64) {
+            $decl = $this->classDecls[$cur] ?? null;
+            if ($decl === null) { return $d; }
+            $ext = $this->classDeclExtends($decl);
+            if ($ext === []) { return $d; }
+            $cur = \ltrim($ext[0], '\\');
+            $d = $d + 1;
+        }
+        return $d;
+    }
     private function methodDeclName(\Parser\Ast\MethodDecl $m): string { return $m->name; }
     /** @return \Parser\Ast\Param[] */
     private function methodDeclParams(\Parser\Ast\MethodDecl $m): array { return $m->params; }

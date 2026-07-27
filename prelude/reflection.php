@@ -764,11 +764,19 @@ class ReflectionProperty
         // already carries its inherited rows, so the lookup succeeds right away
         // and it is the CLIMB that finds the declaring class: keep going while
         // the parent still has the member.
+        // Whether a subclass's rmeta repeats its inherited rows is not
+        // guaranteed — it does for a plain declared property, it does NOT for an
+        // untyped `protected static` like symfony's Command::$defaultName — so
+        // search UP first, then climb.
         $owner = $h;
         $fl = __mc_refl_member($owner, $property, 0);
-        if ($fl === 0) {
-            throw new ReflectionException(
-                "Property " . __mc_refl_name($h) . "::$" . $property . " does not exist");
+        while ($fl === 0) {
+            $owner = __mc_refl_parent($owner);
+            if ($owner === 0) {
+                throw new ReflectionException(
+                    "Property " . __mc_refl_name($h) . "::$" . $property . " does not exist");
+            }
+            $fl = __mc_refl_member($owner, $property, 0);
         }
         $p = __mc_refl_parent($owner);
         while ($p !== 0 && __mc_refl_member($p, $property, 0) !== 0) {
