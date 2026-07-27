@@ -247,6 +247,8 @@ final class EmitLlvm implements EmitVisitor
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */
     private string $vdResult = '';
+    /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
+    private string $vdArmList = '';
     /**
      * @var array<string,bool> params of the function being emitted whose
      * DECLARED hint was a bare `array`. The lowered type erased to unknown

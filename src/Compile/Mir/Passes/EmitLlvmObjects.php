@@ -2357,6 +2357,56 @@ trait EmitLlvmObjects
     }
 
     /**
+     * Re-coerce the shared dispatch argument list for ONE arm, and leave the
+     * arm's list in {@see $vdArmList}. Returns the fixup IR to emit inside that
+     * arm's block (empty when the arm already agrees).
+     *
+     * The call site coerces its arguments once, against the FALLBACK's
+     * signature. Candidates reached through an ERASED receiver are matched by
+     * method NAME, so they can be entirely unrelated classes whose parameter
+     * REPRS differ — a raw `string` in one, a `string|int` CELL in another. The
+     * arm that disagrees then reads the other's representation.
+     *
+     * Only the cell-vs-raw axis is fixed here: that is the one that mis-reads a
+     * value outright. An UNKNOWN on either side is left alone — there is nothing
+     * to box by, and guessing is what put a raw pointer in a cell slot before.
+     *
+     * @param array<int, Type> $fbTypes the signature $argList was built for
+     * @param array<int, Type> $cTypes  this arm's own signature
+     */
+    private function vdArmArgs(string $argList, array $fbTypes, array $cTypes): string
+    {
+        $this->vdArmList = $argList;
+        if (\count($cTypes) === 0 || \count($fbTypes) === 0) { return ''; }
+        $parts = \explode(', ', $argList);
+        $out = '';
+        $changed = false;
+        $n = \count($parts);
+        $i = 1;                       // index 0 is the implicit `$this`
+        while ($i < $n) {
+            $fb = $fbTypes[$i] ?? null;
+            $ct = $cTypes[$i] ?? null;
+            if ($fb !== null && $ct !== null
+                && $fb->kind !== Type::KIND_UNKNOWN && $ct->kind !== Type::KIND_UNKNOWN
+                && \str_starts_with($parts[$i], 'i64 ')) {
+                $fbCell = $fb->kind === Type::KIND_CELL;
+                $ctCell = $ct->kind === Type::KIND_CELL;
+                if ($fbCell !== $ctCell) {
+                    $this->lastValue = \substr($parts[$i], 4);
+                    $this->lastValueType = 'i64';
+                    $out .= $ctCell ? $this->boxToCell($fb) : $this->unboxCellToType($ct);
+                    $out .= $this->coerceToI64();
+                    $parts[$i] = 'i64 ' . $this->lastValue;
+                    $changed = true;
+                }
+            }
+            $i = $i + 1;
+        }
+        if ($changed) { $this->vdArmList = \implode(', ', $parts); }
+        return $out;
+    }
+
+    /**
      * Emit a class_id switch for a polymorphic method call. Returns the
      * IR and leaves the i64 result reg in `$this->vdResult` (avoids a
      * `&$out` accumulator — self-host drops by-ref writes). Args are
@@ -2368,6 +2418,7 @@ trait EmitLlvmObjects
      */
     private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = []): string
     {
+        $fbTypes = $this->sigs->paramTypes[$fallback] ?? [];
         $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
         $out .= $this->emitLoadClassId($objp);
@@ -2385,8 +2436,16 @@ trait EmitLlvmObjects
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseLabel . "\n";
             $r = $this->ssa->allocReg();
             $bodies .= $caseLabel . ":\n";
+            // The shared $argList was coerced ONCE, to the FALLBACK's signature.
+            // Candidates reached through an erased receiver need not agree on it:
+            // symfony's closure sees `Input::getArgument(string)` and
+            // `InputDefinition::getArgument(string|int)` — six raw-string arms and
+            // one CELL arm — so the single `cell_to_strptr` the call site emitted
+            // handed the InputDefinition arm a raw pointer in a cell parameter.
+            // Re-coerce per arm where the repr disagrees.
+            $bodies .= $this->vdArmArgs($argList, $fbTypes, $this->sigs->paramTypes[$targets[$c]] ?? []);
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
-                     . '(' . $argList . ")\n";
+                     . '(' . $this->vdArmList . ")\n";
             // Cell-typed result over candidates whose declared returns DISAGREE:
             // box each arm's raw return by its OWN return type so the merged value
             // is a uniform, self-describing cell (a mixed-repr raw merge would read
