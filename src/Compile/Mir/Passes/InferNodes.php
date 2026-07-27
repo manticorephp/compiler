@@ -851,6 +851,13 @@ trait InferNodes
                 && isset($this->globalVarTypes[$n->name])) {
             $t = $this->globalVarTypes[$n->name];
         }
+        // `static $x;` — no initialiser to type it from, and its value survives
+        // the call, so the read at the top of the NEXT call is not reachable
+        // from the store that filled it. Seed from the join of every store in
+        // this function ({@see scanStaticLocalTypes}).
+        elseif (isset($this->staticLocalTypes[$n->cell])) {
+            $t = $this->staticLocalTypes[$n->cell];
+        }
         $this->localTypes[$n->name] = $t;
         $n->type = $t;
         return $t;

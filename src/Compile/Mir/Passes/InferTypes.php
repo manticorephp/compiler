@@ -240,6 +240,15 @@ final class InferTypes implements Pass
      *  from here so cross-scope reads carry the real type. */
     private array $globalVarTypes = [];
 
+    /** @var array<string, Type> static-local CELL name → the type joined from
+     *  every store to it in its function. A `static $x;` with no initialiser is
+     *  hard-lowered `int` like a global-backed decl, and its value SURVIVES the
+     *  call, so the read at the top of the next call (`if ($x) return $x;`) is
+     *  not flow-reachable from the store that filled it — the join is the only
+     *  way to type it. Keyed by cell, which is already unique per function+var.
+     *  {@see scanStaticLocalTypes}. */
+    private array $staticLocalTypes = [];
+
     /** @var array<string,bool> every `global $x` name in the module. In `__main`
      *  these are global-backed WITHOUT a decl node ({@see EmitLlvmModule::
      *  emitFunction}), so a top-level store to one must not undo the unified
@@ -395,6 +404,21 @@ final class InferTypes implements Pass
         // makes string/array ops misread it as a NaN-boxed value. Refine it to
         // the concrete type every call site passes (a TYPED `&$p` already works).
         if ($this->scanCallSiteRefParams($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
+        // An uninitialised `static $x;` is hard-lowered `int` and its value
+        // outlives the call, so the read that OPENS the next call is not
+        // reachable from the store that filled it and keeps the int. Join every
+        // store and re-infer, exactly as the global unification below does.
+        if ($this->scanStaticLocalTypes($module)) {
+            foreach ($module->functions as $fn) {
+                if (isset($this->undeclaredReturnFns[$fn->name])) {
+                    $fn->returnType = Type::unknown();
+                    $this->sigs[$fn->name] = Type::unknown();
+                }
+            }
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
             }

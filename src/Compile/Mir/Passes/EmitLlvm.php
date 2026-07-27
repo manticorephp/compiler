@@ -1167,6 +1167,13 @@ final class EmitLlvm implements EmitVisitor
                 // paired retain-on-entry for the same reason; excluding the
                 // param here kills the release too, keeping them balanced.
                 if (isset($this->locals->refLocals[$mo->target->name])) { return; }
+                // A GLOBAL-BACKED name (`static $x;` / `global $g`) does not live
+                // in this frame: its storage is a module cell and its value
+                // outlives the call. There is no entry retain to balance, so a
+                // scope-exit release is a pure over-release — `static $out; …
+                // return $out = \STDOUT;` released the cached resource once per
+                // call and the teardown drop then trapped. The cell owns it.
+                if (isset($this->locals->globalBacked[$mo->target->name])) { return; }
                 // Store the MemoryOp node, not its flavor string — the
                 // self-host backend corrupts a short string round-tripped
                 // through an assoc value (a `'str'` read back mis-compares),

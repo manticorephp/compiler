@@ -1,0 +1,17 @@
+defined(STDOUT)=Y
+is_resource=Y gettype=resource
+2nd is_resource=Y gettype=resource
+fn1=Y fn2=Y
+cached! cached!
+array(2) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  int(2)
+}
+array(2) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  int(2)
+}

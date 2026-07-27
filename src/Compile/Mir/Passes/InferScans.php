@@ -749,6 +749,66 @@ trait InferScans
      * it so pure-read scopes carry the real type. Returns true if any global
      * gained a non-int type (→ re-infer).
      */
+    /**
+     * Type each uninitialised `static $x;` from the stores it receives.
+     *
+     * `static $x;` lowers hard to `int` (there is no initialiser to type it
+     * from), and unlike an ordinary local its value SURVIVES the call — so the
+     * read at the top of the next call is not flow-reachable from the store
+     * that filled it and keeps the int. symfony's ConsoleOutput is exactly
+     * this: `static $stdout; if ($stdout) return $stdout; return $stdout =
+     * \STDOUT;` handed the second caller the resource POINTER as an int, and
+     * StreamOutput's is_resource() check threw.
+     *
+     * The join is per FUNCTION, keyed by the decl's cell (already unique per
+     * function+var). Same shape as {@see scanGlobalTypes}; a global-backed decl
+     * is skipped, that scan owns it.
+     */
+    private function scanStaticLocalTypes(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            /** @var array<string,bool> $active */
+            $active = [];
+            /** @var array<string,string> $cells */
+            $cells = [];
+            $this->collectPlainStaticLocals($fn->body, $active, $cells);
+            if (\count($active) === 0) { continue; }
+            /** @var array<string,Type> $observed */
+            $observed = [];
+            /** @var array<string,Type> $elems */
+            $elems = [];
+            $elemBad = [];
+            $strKey = [];
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            foreach ($observed as $name => $t) {
+                if ($t->kind === Type::KIND_UNKNOWN) { continue; }
+                $cell = $cells[$name] ?? '';
+                if ($cell === '') { continue; }
+                $prev = $this->staticLocalTypes[$cell] ?? null;
+                if ($prev !== null && $prev->kind === $t->kind) { continue; }
+                $this->staticLocalTypes[$cell] = $t;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Uninitialised, non-global-backed static locals: name → true, name → cell.
+     *  @param array<string,bool>   $active
+     *  @param array<string,string> $cells */
+    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $d = $n;
+            if ($d->init === null && !\str_starts_with($d->cell, '@g_')) {
+                $active[$d->name] = true;
+                $cells[$d->name] = $d->cell;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells); }
+    }
+
     private function scanGlobalTypes(Module $module): bool
     {
         if (\count($module->globalVarNames) === 0) { return false; }
