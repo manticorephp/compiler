@@ -2367,34 +2367,40 @@ trait EmitLlvmObjects
      * REPRS differ — a raw `string` in one, a `string|int` CELL in another. The
      * arm that disagrees then reads the other's representation.
      *
+     * Re-coercion runs from the repr the site ACTUALLY emitted, never from the
+     * fallback's declared type: symfony reaches `InputDefinition::hasArgument`
+     * (`string|int`) through a fallback declaring plain `string`, so boxing
+     * `$c - 1` by the declaration tagged an int -1 as a POINTER and the callee
+     * dereferenced 0xffffffffffff.
+     *
      * Only the cell-vs-raw axis is fixed here: that is the one that mis-reads a
      * value outright. An UNKNOWN on either side is left alone — there is nothing
      * to box by, and guessing is what put a raw pointer in a cell slot before.
      *
-     * @param array<int, Type> $fbTypes the signature $argList was built for
-     * @param array<int, Type> $cTypes  this arm's own signature
+     * @param array<int, Type> $srcTypes the repr each arg was emitted in
+     * @param array<int, Type> $cTypes   this arm's own signature
      */
-    private function vdArmArgs(string $argList, array $fbTypes, array $cTypes): string
+    private function vdArmArgs(string $argList, array $srcTypes, array $cTypes): string
     {
         $this->vdArmList = $argList;
-        if (\count($cTypes) === 0 || \count($fbTypes) === 0) { return ''; }
+        if (\count($cTypes) === 0 || \count($srcTypes) === 0) { return ''; }
         $parts = \explode(', ', $argList);
         $out = '';
         $changed = false;
         $n = \count($parts);
         $i = 1;                       // index 0 is the implicit `$this`
         while ($i < $n) {
-            $fb = $fbTypes[$i] ?? null;
+            $src = $srcTypes[$i] ?? null;
             $ct = $cTypes[$i] ?? null;
-            if ($fb !== null && $ct !== null
-                && $fb->kind !== Type::KIND_UNKNOWN && $ct->kind !== Type::KIND_UNKNOWN
+            if ($src !== null && $ct !== null
+                && $src->kind !== Type::KIND_UNKNOWN && $ct->kind !== Type::KIND_UNKNOWN
                 && \str_starts_with($parts[$i], 'i64 ')) {
-                $fbCell = $fb->kind === Type::KIND_CELL;
+                $srcCell = $src->kind === Type::KIND_CELL;
                 $ctCell = $ct->kind === Type::KIND_CELL;
-                if ($fbCell !== $ctCell) {
+                if ($srcCell !== $ctCell) {
                     $this->lastValue = \substr($parts[$i], 4);
                     $this->lastValueType = 'i64';
-                    $out .= $ctCell ? $this->boxToCell($fb) : $this->unboxCellToType($ct);
+                    $out .= $ctCell ? $this->boxToCell($src) : $this->unboxCellToType($ct);
                     $out .= $this->coerceToI64();
                     $parts[$i] = 'i64 ' . $this->lastValue;
                     $changed = true;
@@ -2416,9 +2422,8 @@ trait EmitLlvmObjects
      * @param array<string, string> $targets    candidate class → declaring class
      * @param array<string, bool>   $erasedSyms symbol → emitted-as-erased
      */
-    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = []): string
+    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
-        $fbTypes = $this->sigs->paramTypes[$fallback] ?? [];
         $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
         $out .= $this->emitLoadClassId($objp);
@@ -2443,7 +2448,7 @@ trait EmitLlvmObjects
             // one CELL arm — so the single `cell_to_strptr` the call site emitted
             // handed the InputDefinition arm a raw pointer in a cell parameter.
             // Re-coerce per arm where the repr disagrees.
-            $bodies .= $this->vdArmArgs($argList, $fbTypes, $this->sigs->paramTypes[$targets[$c]] ?? []);
+            $bodies .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$targets[$c]] ?? []);
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
                      . '(' . $this->vdArmList . ")\n";
             // Cell-typed result over candidates whose declared returns DISAGREE:
@@ -2464,8 +2469,11 @@ trait EmitLlvmObjects
         $out .= $switch . $bodies;
         $rd = $this->ssa->allocReg();
         $out .= $defLabel . ":\n";
+        // The default arm is a candidate like any other — it too can declare a
+        // repr the site did not emit.
+        $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$fallback] ?? []);
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
-              . '(' . $argList . ")\n";
+              . '(' . $this->vdArmList . ")\n";
         if ($boxCell) {
             $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
             $rd = $this->lastValue;
@@ -2773,6 +2781,14 @@ trait EmitLlvmObjects
         $mask = $this->sigs->refParams[$fallback . '__' . $mc->method] ?? [];
         $ptypes = $this->sigs->paramTypes[$fallback . '__' . $mc->method] ?? [];
         $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
+        // The repr each argument is ACTUALLY emitted in, indexed like the
+        // parameter list (0 is `$this`). A virtual-dispatch arm that disagrees
+        // with the fallback's signature has to re-coerce, and it can only do
+        // that from what the site really produced — the fallback's DECLARED
+        // type is a different thing, and reading `$c - 1` as the `string` the
+        // fallback declares is how an int -1 became a pointer. An index left
+        // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
+        $argOutTypes = [];
         $ai = 0;
         foreach ($mc->args as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
@@ -2799,6 +2815,7 @@ trait EmitLlvmObjects
                 $out .= $this->emitNode($a);
                 $out .= $this->boxToCell($a->type);
                 $argList .= ', i64 ' . $this->lastValue;
+                $argOutTypes[$ai + 1] = Type::cell();
             } elseif ($this->cellArrayParamNeedsBoxing($ptypes[$ai + 1] ?? null, $a->type)) {
                 // A concrete-element array (vec[int] …) passed to a cell-element
                 // array param (`mixed[]`): rebuild it with each element boxed,
@@ -2819,6 +2836,11 @@ trait EmitLlvmObjects
                 $out .= $this->coerceToI64();
                 $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
                 $argList .= ', i64 ' . $this->lastValue;
+                // unboxCellArg lowers a CELL arg to the param's repr; everything
+                // else crosses in the argument's own.
+                $pt = $ptypes[$ai + 1] ?? null;
+                $argOutTypes[$ai + 1] = ($a->type->kind === Type::KIND_CELL && $pt !== null)
+                    ? $pt : $a->type;
                 if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
             }
             $ai = $ai + 1;
@@ -2955,16 +2977,20 @@ trait EmitLlvmObjects
                 $this->lastValueType = 'i64';
                 return $out;
             }
+            // The single resolved target need not be the one the arguments were
+            // coerced for either (an erased receiver picks the fallback by
+            // method name, then resolves exactly one live candidate).
+            $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? []);
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
-                  . '(' . $argList . ")\n";
+                  . '(' . $this->vdArmList . ")\n";
             // An erased thunk already returns a cell; boxing it again double-boxes.
             if ($boxCell && !isset($erasedSyms[$sym])) {
                 $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
                 $reg = $this->lastValue;
             }
         } else {
-            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms);
+            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms, $argOutTypes);
             $reg = $this->vdResult;
         }
         if ($btName !== '') { $out .= $this->btPop(); }

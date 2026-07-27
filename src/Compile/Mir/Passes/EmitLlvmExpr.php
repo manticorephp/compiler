@@ -3082,20 +3082,45 @@ trait EmitLlvmExpr
         // non-string cell is never strictly ===. (Loose ==/!= juggles types and
         // is left to the fallthrough.)
         $strictEq = $op === '===' || $op === '!==';
+        // UNKNOWN joins CELL here. An erased slot holds EITHER a NaN-boxed cell
+        // or a raw string pointer, and the raw fallthrough below inttoptr'd the
+        // carrier as-is: symfony's mbstring polyfill reassigns its untyped
+        // `$fromEncoding` from a `string|false` call and then compares it to
+        // 'BASE64', which dereferenced the tag bits. The carrier is classified
+        // at RUNTIME instead, so neither shape is guessed at.
+        $lCellish = $lk === Type::KIND_CELL || $lk === Type::KIND_UNKNOWN;
+        $rCellish = $rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN;
         if ($strictEq
-            && (($lk === Type::KIND_STRING && $rk === Type::KIND_CELL)
-                || ($lk === Type::KIND_CELL && $rk === Type::KIND_STRING))) {
+            && (($lk === Type::KIND_STRING && $rCellish)
+                || ($lCellish && $rk === Type::KIND_STRING))) {
             $this->rt->needsStrcmp = true;
-            $cellI = ($lk === Type::KIND_CELL) ? $l : $r;
-            $cellT = ($lk === Type::KIND_CELL) ? $lt : $rt;
-            $strV  = ($lk === Type::KIND_CELL) ? $r : $l;
-            $strT  = ($lk === Type::KIND_CELL) ? $rt : $lt;
+            $leftIsStr = $lk === Type::KIND_STRING;
+            $cellI = $leftIsStr ? $r : $l;
+            $cellT = $leftIsStr ? $rt : $lt;
+            $cellK = $leftIsStr ? $rk : $lk;
+            $strV  = $leftIsStr ? $l : $r;
+            $strT  = $leftIsStr ? $lt : $rt;
             $ci = $cellI;
             if ($cellT === 'ptr') { $ci = $this->ssa->allocReg(); $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cellI . " to i64\n"; }
             $sp = $strV;
             if ($strT !== 'ptr') { $sp = $this->ssa->allocReg(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $strV . " to ptr\n"; }
             $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
             $isStr = $this->ssa->allocReg(); $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
+            $payload = $this->ssa->allocReg(); $payIr = '  ' . $payload . ' = and i64 ' . $ci . ", 281474976710655\n";
+            if ($cellK === Type::KIND_UNKNOWN) {
+                // Boxed carriers all sit above the NaN header; anything below is
+                // the raw pointer itself, comparable when non-null.
+                $isBox = $this->ssa->allocReg();
+                $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
+                $nn = $this->ssa->allocReg();
+                $out .= '  ' . $nn . ' = icmp ne i64 ' . $ci . ", 0\n";
+                $ok = $this->ssa->allocReg();
+                $out .= '  ' . $ok . ' = select i1 ' . $isBox . ', i1 ' . $isStr . ', i1 ' . $nn . "\n";
+                $isStr = $ok;
+                $raw = $this->ssa->allocReg();
+                $payIr .= '  ' . $raw . ' = select i1 ' . $isBox . ', i64 ' . $payload . ', i64 ' . $ci . "\n";
+                $payload = $raw;
+            }
             // Guard a null string carrier (a `?string` operand) — skip the deref.
             $stri = $strV;
             if ($strT === 'ptr') { $stri = $this->ssa->allocReg(); $out .= '  ' . $stri . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
@@ -3106,7 +3131,7 @@ trait EmitLlvmExpr
             $jnL = $this->ssa->allocLabel('streqc.join');
             $out .= '  br i1 ' . $can . ', label %' . $cmpL . ', label %' . $nsL . "\n";
             $out .= $cmpL . ":\n";
-            $payload = $this->ssa->allocReg(); $out .= '  ' . $payload . ' = and i64 ' . $ci . ", 281474976710655\n";
+            $out .= $payIr;
             $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = inttoptr i64 ' . $payload . " to ptr\n";
             $eqc = $this->ssa->allocReg(); $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
             $out .= '  br label %' . $jnL . "\n";
