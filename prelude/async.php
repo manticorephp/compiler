@@ -2713,6 +2713,34 @@ namespace Async {
     }
 
     /**
+     * Print {@see dump()} to STDERR whenever one of $signals arrives — Go's
+     * SIGQUIT-dumps-every-goroutine, which is how you interrogate a process that
+     * is ALREADY hung and that you cannot restart:
+     *
+     *   async(function () {
+     *       Async\dumpOn(SIGQUIT);      // then: kill -QUIT <pid>
+     *       serveForever();
+     *   });
+     *
+     * SIGQUIT is the natural choice — it is not used for anything else here, and
+     * the default disposition (core dump) is replaced by this. It is one line
+     * rather than a default because a signal handler is the program's to own.
+     *
+     * The handler is ordinary async code: the scheduler runs the signal pump as a
+     * daemon task, so this allocates and writes from inside the loop, and the
+     * report it takes is a consistent snapshot rather than a half-updated one.
+     */
+    function dumpOn(int ...$signals): void
+    {
+        $sched = Scheduler::instance();
+        foreach ($signals as $s) {
+            \pcntl_signal($s, function () use ($sched) {
+                \fwrite(\STDERR, $sched->report());
+            });
+        }
+    }
+
+    /**
      * Read $path in $chunk-sized pieces, YIELDING between them, and return the
      * whole contents ('' when it cannot be opened).
      *

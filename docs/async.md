@@ -95,6 +95,10 @@ async(function () {
 | `Context::token()/isCancelled()/throwIfCancelled()` | the calling task's scope, ambiently |
 | `Context::deadline()/remaining()` | the effective deadline, ambiently |
 | `Context::value(string)` / `::withValue(string, $v, callable)` | scoped values (request-id) |
+| `Async\dump(): string` | every live task, what it is parked on, and where it was spawned |
+| `Async\dumpOn(int ...$signals)` | print that on a signal — `kill -QUIT <pid>` on a hung process |
+| `Async\watchdog(float $ms)` | name the task that HOLDS the loop longer than $ms |
+| `Async\stats(): array` | engine counters (spawned/wakes/reactor_waits/…) |
 
 ### Scopes, deadlines, cancellation
 
@@ -211,6 +215,47 @@ already being structured: the accept loop and every live connection raise
 covers a last write, and `async()` returns normally — a root cancellation is a shutdown, not
 a failure. `examples/async/server.php` is the whole shape: `supervise(4, …)` forks four workers,
 restarts one that crashes, and forwards `SIGTERM` to the group.
+
+### When it hangs, or stalls
+
+Three questions, three answers — none of which needs a rebuild:
+
+```php
+echo Async\dump();
+// async: 3 live task(s), 2 parked on I/O, 1 on timers, 0 ready
+// * #1 at server.php:14 ready
+//   #4 "http" at server.php:31 io-read fd=9 +deadline awaited
+//   #7 near server.php:44 timer
+```
+
+Every task line carries **where it was spawned**. The compiler folds `file:line`
+into the `Async\` call that created it, so this works with no annotation at all;
+`->named('http')` only adds a label on top. `$g->spawn(…)` inside a scope cannot be
+pinned exactly (the receiver's class is not known until type inference), so it
+reports the scope's line as `near …`. A `DeadlockException` embeds the whole table.
+
+```php
+Async\dumpOn(SIGQUIT);        // then `kill -QUIT <pid>` on an ALREADY-hung process
+```
+
+And for the opposite failure — nothing hangs, everything is just *slow*, because one
+task is holding the loop:
+
+```php
+Async\watchdog(50.0);         // or MANTICORE_ASYNC_WATCHDOG=50, no code change
+// async: watchdog — task #3 "report" at app.php:88 held the loop 214.3 ms (limit 50 ms)
+```
+
+That is the failure mode a cooperative loop cannot report by itself: regular-file
+I/O (blocking by design here), a CPU-bound stretch with no suspend point, a library
+falling back to a blocking call. It is reported *after* the stall — a cooperative
+loop has no way to preempt — and each task reports its first breach and then only a
+doubling, so a knowingly CPU-heavy worker cannot flood the log. Off costs one float
+compare per resume.
+
+`Async\stats()` is the machine-readable half — `spawned`, `settled`, `cancelled`,
+`wakes`, `reactor_waits`, `timer_fires`, `watchdog`, plus the `live` / `ready` /
+`io_parked` / `timers` gauges.
 
 ### Bounded concurrency
 
