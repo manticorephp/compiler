@@ -548,10 +548,13 @@ namespace Io\Poll {
 
         private function handleFd(Handle $handle): int
         {
-            if (!($handle instanceof \StreamPollHandle)) {
-                throw new InvalidHandleException("Unsupported handle type");
+            if ($handle instanceof \StreamPollHandle) {
+                return $handle->__fd();
             }
-            return $handle->__fd();
+            if ($handle instanceof \FdPollHandle) {
+                return $handle->__fd();
+            }
+            throw new InvalidHandleException("Unsupported handle type");
         }
     }
 
@@ -607,5 +610,25 @@ namespace {
 
         // ── internal: the underlying fd ──
         public function __fd(): int { return $this->stream->addr; }
+    }
+
+    /**
+     * A pollable BARE descriptor, owning nothing.
+     *
+     * StreamPollHandle keeps the \Resource alive, which is what you want when the
+     * watcher outlives the call that made it — but `stream_select()` is handed fds
+     * whose resources belong to the caller, and wrapping one of those would either
+     * close the caller's fd when the wrapper dies or leave the watcher pointing at
+     * a neutered resource. This wrapper has no lifetime of its own: the caller
+     * guarantees the fd is open for as long as the watcher is registered.
+     */
+    final class FdPollHandle implements \Io\Poll\Handle
+    {
+        public function __construct(private int $fd) {}
+
+        public function isValid(): bool { return $this->fd >= 0; }
+
+        // ── internal: the underlying fd ──
+        public function __fd(): int { return $this->fd; }
     }
 }

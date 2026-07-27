@@ -1724,13 +1724,64 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
     if (!\Runtime\AsyncHook::active()) {
         return \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
     }
-    $sleeper = \Runtime\AsyncHook::sleeper();
+    // Ready already? Answer without touching the reactor — a select in a busy loop
+    // is the common shape, and this is also the whole implementation of the
+    // non-blocking `stream_select($r, $w, $e, 0, 0)` form.
+    $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
+    if ($rc !== 0 || $timeoutMs === 0) {
+        return $rc;
+    }
     $deadline = $timeoutMs < 0 ? -1.0 : \__mc_microtime_f() + (float)$timeoutMs / 1000.0;
+    if (!\Runtime\AsyncHook::selectReady()) {
+        return \__mc_select_poll_park($pfds, $count, $deadline);
+    }
+    $POLLIN = \__mc_net_const(1);
+    $POLLOUT = \__mc_net_const(2);
+    $add = \Runtime\AsyncHook::selectAdder();
+    $wait = \Runtime\AsyncHook::selectWaiter();
+    $done = \Runtime\AsyncHook::selectFinisher();
+    while (true) {
+        for ($i = 0; $i < $count; $i = $i + 1) {
+            $fd = \peek_i32($pfds, $i * 8);
+            $ev = \peek_i16($pfds, $i * 8 + 4);
+            // Register READ interest for a POLLPRI-only entry too: the reactor has
+            // no out-of-band notion, and re-polling is what decides the answer.
+            if (($ev & $POLLOUT) !== 0) { $add($fd, true); }
+            if (($ev & $POLLOUT) === 0 || ($ev & $POLLIN) !== 0) { $add($fd, false); }
+        }
+        $left = -1.0;
+        if ($deadline >= 0.0) {
+            $left = $deadline - \__mc_microtime_f();
+            if ($left <= 0.0) { $done(); return 0; }
+        }
+        $wait($left);
+        $done();
+        $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
+        if ($rc !== 0) {
+            return $rc;   // ready fds, or a poll error for the caller to report
+        }
+        if ($deadline >= 0.0 && $deadline - \__mc_microtime_f() <= 0.0) {
+            return 0;
+        }
+        // A wake with nothing ready is a HINT, not an answer (level-triggered, and
+        // several selects can share one fd) — go round again.
+    }
+}
+
+/**
+ * The fallback when the scheduler predates the select hooks: poll(2) with a zero
+ * timeout plus a fiber sleep backing off 0.2 ms → 10 ms. Kept because a hook slot
+ * may be absent (an older engine, a program that installed its own), never
+ * because it is good: it costs up to 10 ms of latency per readiness edge.
+ */
+function __mc_select_poll_park(\Ffi\Ptr $pfds, int $count, float $deadline): int
+{
+    $sleeper = \Runtime\AsyncHook::sleeper();
     $step = 0.0002;
     while (true) {
         $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
         if ($rc !== 0) {
-            return $rc;   // ready fds, or a poll error for the caller to report
+            return $rc;
         }
         if ($deadline >= 0.0) {
             $left = $deadline - \__mc_microtime_f();

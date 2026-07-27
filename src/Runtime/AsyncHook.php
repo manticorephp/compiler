@@ -33,6 +33,19 @@ final class AsyncHook
     public static mixed $dnsGet = null;
     public static mixed $dnsPut = null;
 
+    /**
+     * select(2) over N fds at once. Registration is per-fd and separate from the
+     * wait because a select waiter sits in MANY fd chains, which the single
+     * `Task->ioNext` link the read/write paths use cannot express:
+     * `selectAdd: fn(\Resource, bool $forWrite): void` ·
+     * `selectWait: fn(float $seconds): bool` (< 0 = unbounded; true = a watched fd
+     * fired) · `selectDone: fn(): void` releases every registration.
+     * Installed separately from the eight above only to keep install() readable.
+     */
+    public static mixed $selectAdd = null;
+    public static mixed $selectWait = null;
+    public static mixed $selectDone = null;
+
     public static function install(mixed $waitReadable, mixed $waitWritable, mixed $onClose,
                                    mixed $waitReadableFor, mixed $waitWritableFor,
                                    mixed $sleeper, mixed $dnsGet, mixed $dnsPut): void
@@ -47,8 +60,18 @@ final class AsyncHook
         self::$dnsPut = $dnsPut;
     }
 
+    public static function installSelect(mixed $add, mixed $wait, mixed $done): void
+    {
+        self::$selectAdd = $add;
+        self::$selectWait = $wait;
+        self::$selectDone = $done;
+    }
+
     public static function clear(): void
     {
+        self::$selectAdd = null;
+        self::$selectWait = null;
+        self::$selectDone = null;
         self::$waitReadable = null;
         self::$waitWritable = null;
         self::$onClose = null;
@@ -82,4 +105,10 @@ final class AsyncHook
      */
     public static function dnsGetter(): mixed { return self::$dnsGet; }
     public static function dnsPutter(): mixed { return self::$dnsPut; }
+
+    /** True when the scheduler can park a select on the reactor. */
+    public static function selectReady(): bool { return self::$selectWait !== null; }
+    public static function selectAdder(): mixed { return self::$selectAdd; }
+    public static function selectWaiter(): mixed { return self::$selectWait; }
+    public static function selectFinisher(): mixed { return self::$selectDone; }
 }

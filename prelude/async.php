@@ -242,6 +242,29 @@ namespace Async {
      * {@see spawn()} / {@see TaskGroup::spawn()}, never constructed directly.
      * Its public fields are scheduler bookkeeping, not API.
      */
+    /**
+     * One task's interest in one fd, for `stream_select`/`socket_select`.
+     *
+     * The read/write paths chain waiters through `Task->ioNext` — ONE link, which
+     * is all a task parked on a single fd needs. A select waiter sits in N chains
+     * at once, so it gets a record per fd instead: `fdNext` chains the records
+     * watching the same fd, `ownNext` chains the records owned by the same task,
+     * and both are unlinked in one pass when the select ends. Records, not a
+     * nested `array<int, Task[]>` — the element-repr hazard that shaped the
+     * read/write chains applies here too.
+     */
+    final class SelectReg
+    {
+        public ?SelectReg $fdNext = null;
+        public ?SelectReg $ownNext = null;
+
+        public function __construct(
+            public Task $task,
+            public int $fd,
+            public bool $write,
+        ) {}
+    }
+
     final class Task
     {
         public const PENDING = 0;
@@ -293,6 +316,12 @@ namespace Async {
 
         /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
         public bool $timerActive = false;
+
+        /** Head of this task's own {@see SelectReg} list, and how many it holds. */
+        public ?SelectReg $selHead = null;
+        public int $selFds = 0;
+        /** Set by the reactor when one of those fds fired — select's "why did I wake". */
+        public bool $selWoken = false;
 
         /**
          * A DAEMON task is work the program must not be kept alive for — the
@@ -387,6 +416,9 @@ namespace Async {
                 $what = 'failed(' . ($this->error === null ? '?' : \get_class($this->error)) . ')';
             } elseif ($this->ioFd >= 0) {
                 $what = ($this->ioWrite ? 'io-write fd=' : 'io-read fd=') . (string)$this->ioFd
+                      . ($this->timerActive ? ' +deadline' : '');
+            } elseif ($this->selFds > 0) {
+                $what = 'select(' . (string)$this->selFds . ' fds)'
                       . ($this->timerActive ? ' +deadline' : '');
             } elseif ($this->chanHost !== null) {
                 $what = 'channel';
@@ -1400,6 +1432,8 @@ namespace Async {
         private array $writeWaiter = [];
         /** @var array<int, bool> fd → is Write currently armed on its watcher */
         private array $writeArmed = [];
+        /** @var array<int, SelectReg> fd → head of the select-interest chain */
+        private array $selWaiter = [];
         /** Parked-on-I/O task count (NOT registered-fd count: an idle fd is not work). */
         private int $ioWaiters = 0;
 
@@ -1645,6 +1679,11 @@ namespace Async {
                 function (string $host): string { return $this->dnsLookup($host); },
                 function (string $host, string $ip, int $ttl): void { $this->dnsStore($host, $ip, $ttl); },
             );
+            \Runtime\AsyncHook::installSelect(
+                function (int $fd, bool $write): void { $this->selectAdd($fd, $write); },
+                function (float $t): bool { return $this->selectWait($t); },
+                function (): void { $this->selectDone(); },
+            );
         }
 
         private function clearNetpoller(): void
@@ -1886,6 +1925,12 @@ namespace Async {
                 if (!$task->daemon) { $this->tmLive = $this->tmLive - 1; }
             }
             $this->releaseChannel($task);
+            // A cancelled select must drop its per-fd records too, or the reactor
+            // keeps a path to a task that has left and the write arm never lowers.
+            if ($task->selFds > 0) {
+                $this->ioWaiters = $this->ioWaiters - 1;
+                $this->releaseSelect($task);
+            }
             $task->selecting = false;
             $this->wake($task);
         }
@@ -2257,15 +2302,145 @@ namespace Async {
             $this->releaseIo($me);
         }
 
+        // ── select(2): one task, many fds ──────────────────────────────────
+        //
+        // stream_select/socket_select used to POLL under the scheduler: poll(2)
+        // with a zero timeout plus a fiber sleep backing off 0.2 ms → 10 ms. That
+        // was correct but it cost up to 10 ms of latency per readiness edge and
+        // burned a wake-up per backoff step — and it consumed one of the per-fd
+        // waiter slots, so a select and a real reader on the same fd interfered.
+        // These three register the task on EVERY fd it is interested in, park it
+        // on the reactor once, and release the lot on the way out.
+
+        /** Register the running task's interest in $fd. Registration only — no park. */
+        public function selectAdd(int $fd, bool $write): void
+        {
+            $me = $this->running;
+            $this->ensureWatcherFd($fd);
+            if ($write && !$this->writeArmed[$fd]) {
+                $this->connWatcher[$fd]->modifyEvents([\Io\Poll\Event::Read, \Io\Poll\Event::Write]);
+                $this->writeArmed[$fd] = true;
+            }
+            $reg = new SelectReg($me, $fd, $write);
+            $reg->fdNext = isset($this->selWaiter[$fd]) ? $this->selWaiter[$fd] : null;
+            $this->selWaiter[$fd] = $reg;
+            $reg->ownNext = $me->selHead;
+            $me->selHead = $reg;
+            $me->selFds = $me->selFds + 1;
+        }
+
+        /**
+         * Park until one of the registered fds fires or $seconds elapse (< 0 =
+         * unbounded). True = a watched fd fired. The caller re-polls to find WHICH,
+         * so a spurious wake is harmless — the same level-triggered contract the
+         * read/write chains run on.
+         */
+        public function selectWait(float $seconds): bool
+        {
+            $me = $this->running;
+            if ($me->selFds === 0) { return false; }
+            $this->checkCancel();
+            $me->selWoken = false;
+            // One I/O waiter per parked TASK, not per fd: the count answers "is
+            // there still work", and a select is one piece of work.
+            $this->ioWaiters = $this->ioWaiters + 1;
+            if ($seconds >= 0.0) {
+                $me->timerActive = true;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
+                $this->timerPush(\microtime(true) + $seconds, $me);
+            }
+            \Fiber::suspend();
+            // cancelTask() releases the records AND the waiter count for a select
+            // it interrupted, so only decrement when they are still ours.
+            if ($me->selFds > 0) { $this->ioWaiters = $this->ioWaiters - 1; }
+            if ($me->timerActive) {
+                $me->timerActive = false;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive - 1; }
+            }
+            return $me->selWoken;
+        }
+
+        /** Drop every registration this task holds. */
+        public function selectDone(): void
+        {
+            $this->releaseSelect($this->running);
+        }
+
+        /**
+         * Unlink $task's records from their fd chains. O(total registrations) —
+         * a select's fd count is its own scale, and nothing hot goes through here.
+         */
+        private function releaseSelect(Task $task): void
+        {
+            $reg = $task->selHead;
+            while ($reg !== null) {
+                $next = $reg->ownNext;
+                $fd = $reg->fd;
+                $head = isset($this->selWaiter[$fd]) ? $this->selWaiter[$fd] : null;
+                if ($head === $reg) {
+                    if ($reg->fdNext === null) { unset($this->selWaiter[$fd]); }
+                    else { $this->selWaiter[$fd] = $reg->fdNext; }
+                } else {
+                    $p = $head;
+                    while ($p !== null && $p->fdNext !== $reg) { $p = $p->fdNext; }
+                    if ($p !== null) { $p->fdNext = $reg->fdNext; }
+                }
+                $reg->fdNext = null;
+                $reg->ownNext = null;
+                if ($reg->write) { $this->disarmWrite($fd); }
+                $reg = $next;
+            }
+            $task->selHead = null;
+            $task->selFds = 0;
+        }
+
+        /** Wake every select waiting on $fd (all directions — the caller re-polls). */
+        private function wakeSelect(int $fd): void
+        {
+            $reg = isset($this->selWaiter[$fd]) ? $this->selWaiter[$fd] : null;
+            while ($reg !== null) {
+                $reg->task->selWoken = true;
+                $this->wake($reg->task);
+                $reg = $reg->fdNext;
+            }
+        }
+
+        /**
+         * A watcher for a BARE fd — {@see \FdPollHandle}, which owns nothing. The
+         * caller (a select over the user's own streams) guarantees the fd outlives
+         * the registration, and wrapping their \Resource would either close it when
+         * the wrapper died or leave the watcher pointing at a neutered one.
+         */
+        private function ensureWatcherFd(int $fd): void
+        {
+            if (!isset($this->connWatcher[$fd])) {
+                $this->connWatcher[$fd] = $this->reactor->add(
+                    new \FdPollHandle($fd), [\Io\Poll\Event::Read], $fd);
+                $this->writeArmed[$fd] = false;
+            }
+        }
+
         /** Disarm Write once no writer is parked on $fd. */
         private function disarmWrite(int $fd): void
         {
-            if (isset($this->writeArmed[$fd]) && $this->writeArmed[$fd] && !isset($this->writeWaiter[$fd])) {
+            if (isset($this->writeArmed[$fd]) && $this->writeArmed[$fd]
+                && !isset($this->writeWaiter[$fd]) && !$this->selectWantsWrite($fd)) {
                 if (isset($this->connWatcher[$fd])) {
                     $this->connWatcher[$fd]->modifyEvents([\Io\Poll\Event::Read]);
                 }
                 $this->writeArmed[$fd] = false;
             }
+        }
+
+        /** Is any select still watching $fd for writability? */
+        private function selectWantsWrite(int $fd): bool
+        {
+            $reg = isset($this->selWaiter[$fd]) ? $this->selWaiter[$fd] : null;
+            while ($reg !== null) {
+                if ($reg->write) { return true; }
+                $reg = $reg->fdNext;
+            }
+            return false;
         }
 
         /** Drop $conn's persistent watcher (call before fclose so it stops firing). */
@@ -2281,6 +2456,7 @@ namespace Async {
             // EVERY one so their read/write returns rather than wedging the loop.
             $this->wakeChain($fd, false);
             $this->wakeChain($fd, true);
+            $this->wakeSelect($fd);
         }
 
         // ── the blocking step: wait for fds / the next timer, wake tasks ────
@@ -2311,6 +2487,11 @@ namespace Async {
                         && isset($this->writeWaiter[$fd])) {
                         $this->wakeChain($fd, true);
                         $this->disarmWrite($fd);
+                    }
+                    // A select waiter takes any edge on any of its fds and re-polls
+                    // to find out which — direction included.
+                    if (isset($this->selWaiter[$fd])) {
+                        $this->wakeSelect($fd);
                     }
                 }
             } elseif ($timeout > 0) {

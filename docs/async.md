@@ -330,10 +330,10 @@ through a socket, which for a hot read costs more than the read, and it only pay
 genuinely blocking (cold / networked) filesystem. Threads stay out entirely — non-atomic rc,
 a non-thread-safe arena and a process-global exception slot.
 
-`stream_select` under the scheduler is a POLLING park (poll(2) with a zero timeout plus an
-exponential-backoff fiber sleep, 0.2 ms → 10 ms), not a reactor registration: a task holds one
-per-fd waiter slot while a select waits on N fds. Nothing hot goes through it — the read /
-write / accept paths use the reactor directly.
+`stream_select` / `socket_select` are reactor-native: the task registers a record per fd,
+parks once, and releases the lot on the way out — so a readiness edge costs one wake-up
+instead of up to 10 ms of backoff, and a select no longer competes for the per-fd waiter slot
+that a real reader holds. The non-blocking form (`0, 0`) never touches the reactor at all.
 
 ## Examples
 
@@ -385,10 +385,10 @@ Linux has `signalfd` (one fd the reactor watches like any other, then read 128-b
 `signalfd_siginfo` records); the `poll` fallback keeps the pump. Both need their own
 measured constants, which is why it is listed here rather than half-done.
 
-Also: reactor-native `stream_select` (a per-select waiter record) · `writev`/`io_uring` to
-break the 2-syscall floor · DNS search-domain/`ndots` handling (a name needing a suffix
-falls back to the blocking walk today) · off-thread file I/O · shared-memory
-multithreading (a future compiler superset). See the async roadmap memory for the plan.
+Also: `writev`/`io_uring` to break the 2-syscall floor · DNS search-domain/`ndots` handling
+(a name needing a suffix falls back to the blocking walk today) · off-thread file I/O ·
+shared-memory multithreading (a future compiler superset). See the async roadmap memory for
+the plan.
 
 **`#[Async]`** — an attribute that wraps a function body in `async()` so `spawn()` works at
 its top level, with the call yielding a `Task` of the return type. Unlike everything above it
