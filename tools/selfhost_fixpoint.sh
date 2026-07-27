@@ -35,12 +35,21 @@ else
 fi
 
 echo "── functional: AOT suite through the self-built Stage-2 ──"
+# A binary swap must be a RENAME, never an in-place overwrite: macOS caches a
+# mach-o's code signature per vnode, so `cp` over a compiler that has already run
+# leaves every later exec SIGKILLed ("Killed: 9"). That made this stage report the
+# WHOLE SUITE as failing — 710 cases, none of them actually run — and the restore
+# below then handed the checkout back a compiler that could not start either.
+install_binary() {
+    cp "$1" "$2.swap.$$" && mv -f "$2.swap.$$" "$2"
+}
+
 cp bin/manticore /tmp/manticore_stage1.bak
-cp /tmp/manticore_g2 bin/manticore
+install_binary /tmp/manticore_g2 bin/manticore
 set +e
 SUITE="$(bash tests/aot/run.sh 2>&1 | tail -1)"
 set -e
-cp /tmp/manticore_stage1.bak bin/manticore
+install_binary /tmp/manticore_stage1.bak bin/manticore
 echo "$SUITE"
 case "$SUITE" in
     *"failed: 0"*) echo "SELF-HOST OK: self-built compiler passes the suite" ;;

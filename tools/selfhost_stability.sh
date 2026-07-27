@@ -51,6 +51,15 @@ printf '<?php echo "selfhost-stable\\n";\n' > "$SMOKE"
 # So: snapshot the toolchain up front and put it back on the way out, whatever
 # happens. The gate stays honest (each rebuild is still smoke-tested on its own) and
 # it stops being destructive.
+# Swapping a compiler binary must be a RENAME, never an in-place overwrite: on
+# macOS the kernel caches a mach-o's code signature per vnode, so `cp` over a
+# binary that has already run leaves every later exec SIGKILLed ("Killed: 9") —
+# including the RESTORE, which would hand the developer back a checkout whose
+# compiler cannot start. Writing beside it and renaming gives a fresh inode.
+install_binary() {
+    cp "$1" "$2.swap.$$" && mv -f "$2.swap.$$" "$2"
+}
+
 SAVE="$WORK/toolchain"
 mkdir -p "$SAVE/lib"
 cp bin/manticore "$SAVE/manticore"
@@ -58,7 +67,7 @@ if compgen -G "lib/manticore_stdlib.*" >/dev/null; then
     cp lib/manticore_stdlib.* "$SAVE/lib/"
 fi
 restore_toolchain() {
-    cp "$SAVE/manticore" bin/manticore 2>/dev/null || true
+    install_binary "$SAVE/manticore" bin/manticore 2>/dev/null || true
     if compgen -G "$SAVE/lib/manticore_stdlib.*" >/dev/null; then
         cp "$SAVE"/lib/manticore_stdlib.* lib/ 2>/dev/null || true
     fi
