@@ -250,6 +250,7 @@ trait InferScans
     private function scanCellElemProps(Module $module): void
     {
         $this->cellElemPropsFound = [];
+        $this->propElemStoreCats = [];
         foreach ($module->functions as $fn) {
             $cls = '';
             if (\count($fn->params) > 0 && $fn->params[0]->name === 'this'

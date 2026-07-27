@@ -2091,7 +2091,12 @@ trait EmitLlvmExpr
         // class_id load behind the tag check (a non-object cell's payload is
         // not an object ptr) and unbox the payload before reading the id. A
         // result slot avoids a phi.
-        if ($io->operand->type->kind === Type::KIND_CELL) {
+        // UNKNOWN takes the same path: an erased slot holds either a boxed cell
+        // or a raw object pointer, and the raw fallthrough below inttoptr'd the
+        // carrier whatever it was — `$row instanceof TableSeparator` over
+        // symfony's rows read a class id out of an ARRAY cell's tag bits.
+        $opk = $io->operand->type->kind;
+        if ($opk === Type::KIND_CELL || $opk === Type::KIND_UNKNOWN) {
             $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $slot . "\n";
@@ -2099,12 +2104,25 @@ trait EmitLlvmExpr
             $tag = $this->cellTagReg;
             $isObj = $this->ssa->allocReg();
             $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
+            $payload = $this->ssa->allocReg();
+            $payIr = '  ' . $payload . ' = and i64 ' . $obj . ", 281474976710655\n";
+            if ($opk === Type::KIND_UNKNOWN) {
+                $isBox = $this->ssa->allocReg();
+                $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $obj . ", -4503599627370496\n";
+                $nn = $this->ssa->allocReg();
+                $out .= '  ' . $nn . ' = icmp ne i64 ' . $obj . ", 0\n";
+                $use = $this->ssa->allocReg();
+                $out .= '  ' . $use . ' = select i1 ' . $isBox . ', i1 ' . $isObj . ', i1 ' . $nn . "\n";
+                $isObj = $use;
+                $raw = $this->ssa->allocReg();
+                $payIr .= '  ' . $raw . ' = select i1 ' . $isBox . ', i64 ' . $payload . ', i64 ' . $obj . "\n";
+                $payload = $raw;
+            }
             $objL = $this->ssa->allocLabel('io.obj');
             $doneL = $this->ssa->allocLabel('io.done');
             $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
             $out .= $objL . ":\n";
-            $payload = $this->ssa->allocReg();
-            $out .= '  ' . $payload . ' = and i64 ' . $obj . ", 281474976710655\n";
+            $out .= $payIr;
             $objpc = $this->ssa->allocReg();
             $out .= '  ' . $objpc . ' = inttoptr i64 ' . $payload . " to ptr\n";
             $out .= $this->emitLoadClassId($objpc);

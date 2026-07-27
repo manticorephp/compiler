@@ -563,6 +563,30 @@ final class InferTypes implements Pass
      *  or the whole cell-element ARRAY type stored into it */
     private array $cellElemPropsFound = [];
 
+    /** @var array<string,string> "Class::prop" → the repr category of its element stores */
+    private array $propElemStoreCats = [];
+
+    /**
+     * The runtime REPRESENTATION class of a stored element — what the array's
+     * repr nibble would have to say. '' for a kind that carries no repr of its
+     * own (unknown/cell/void: a cell already self-describes, an unknown makes no
+     * claim), so it never counts as a conflict.
+     */
+    private function elemStoreCategory(Type $t): string
+    {
+        if ($t->isArray()) { return 'arr'; }
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE || $k === Type::KIND_UNION) {
+            // An enum case rides as an ORDINAL, not a pointer.
+            $cn = $t->class ?? '';
+            return ($cn !== '' && isset($this->enums[$cn])) ? 'num' : 'obj';
+        }
+        if ($k === Type::KIND_STRING) { return 'str'; }
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL) { return 'num'; }
+        return '';
+    }
+
     private function findCellElemStores(Node $n, string $cls): void
     {
         // A WHOLE-property store of a CELL into an array-hinted slot. The only
@@ -603,14 +627,30 @@ final class InferTypes implements Pass
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS
-                && $se->index->kind !== Node::KIND_NULL_CONST) {
-                if ($se->array->object->kind === Node::KIND_LOAD_LOCAL
-                    && $se->array->object->name === 'this') {
-                    // A definitely-mixed stored value (a `mixed` param / cell):
-                    // the slot holds NaN-boxed cells.
-                    $vk = $se->value->type->kind;
-                    if ($vk === Type::KIND_CELL) {
-                        $this->cellElemPropsFound[$cls . '::' . $se->array->property] = true;
+                && $se->array->object->kind === Node::KIND_LOAD_LOCAL
+                && $se->array->object->name === 'this') {
+                $key = $cls . '::' . $se->array->property;
+                $vk = $se->value->type->kind;
+                // A definitely-mixed stored value (a `mixed` param / cell):
+                // the slot holds NaN-boxed cells.
+                if ($vk === Type::KIND_CELL && $se->index->kind !== Node::KIND_NULL_CONST) {
+                    $this->cellElemPropsFound[$key] = true;
+                }
+                // Element stores of DIFFERENT representations (append included):
+                // no single raw repr can describe the slot, and the runtime repr
+                // nibble holds one value — the last store's kind silently
+                // overwrote the earlier one, so a reader mis-read every element
+                // of the other kind. symfony's Table::addRow appends both a
+                // TableSeparator and an array_values() array to `$this->rows`,
+                // and `$row instanceof TableSeparator` then read a class id out
+                // of an array's length word. Cells are the only honest shape.
+                $cat = $this->elemStoreCategory($se->value->type);
+                if ($cat !== '') {
+                    $prev = $this->propElemStoreCats[$key] ?? '';
+                    if ($prev === '') {
+                        $this->propElemStoreCats[$key] = $cat;
+                    } elseif ($prev !== $cat) {
+                        $this->cellElemPropsFound[$key] = true;
                     }
                 }
             }
