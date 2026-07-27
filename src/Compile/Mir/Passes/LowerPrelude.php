@@ -581,6 +581,10 @@ trait LowerPrelude
                 'SOCKET_EBADF' => 9,
                 'SOCKET_EINVAL' => $isDarwin ? 22 : 22,
                 'SOCKET_EMFILE' => $isDarwin ? 24 : 24,
+                'SOCKET_ENFILE' => $isDarwin ? 23 : 23,
+                'SOCKET_ENOBUFS' => $isDarwin ? 55 : 105,
+                'SOCKET_ENOMEM' => $isDarwin ? 12 : 12,
+                'SOCKET_EPROTO' => $isDarwin ? 100 : 71,
                 'SOCKET_EACCES' => $isDarwin ? 13 : 13,
             ];
             if (isset($sock[$name])) { return new IntConst($sock[$name], Type::int_()); }

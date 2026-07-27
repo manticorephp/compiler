@@ -1,0 +1,15 @@
+nobody-set => park
+EWOULDBLOCK => park
+EAGAIN => park
+EINTR => retry
+ECONNABORTED => retry
+EPROTO => retry
+EMFILE => backoff
+ENFILE => backoff
+ENOBUFS => backoff
+ENOMEM => backoff
+bogus => fatal
+emfile-is-overload: yes
+unknown-is-fatal: yes
+backoff-ms: 1,2,4,8,16,32,50,50
+done

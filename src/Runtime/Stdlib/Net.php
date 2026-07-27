@@ -1263,29 +1263,63 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
         // (the listener is non-blocking, so a lost race is EWOULDBLOCK, not a stall).
         // A $timeout is honoured by the reactor's BOUNDED wait; it used to fall into
         // the branch below, whose poll(2) blocked the whole scheduler. The deadline
-        // is absolute, so a re-park after a lost race cannot extend it.
+        // is absolute, so a re-park after a lost race cannot extend it — a deadline
+        // of -1.0 means there is none.
+        //
+        // WHY THE FAILURE IS CLASSIFIED ({@see __mc_accept_class}): this loop used to
+        // re-park on ANY accept failure. Out of descriptors that is a hot spin, not a
+        // wait — accept(2) fails while the pending connection stays queued, so the
+        // listener stays readable and the park returns immediately, forever. It does
+        // not even trip the watchdog (it suspends every iteration); it shows only as
+        // an exploding `wakes` counter, while every sibling task starves.
+        $deadline = ($timeout !== null && $timeout >= 0.0)
+            ? \__mc_microtime_f() + $timeout : -1.0;
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-        if ($fd < 0 && $timeout !== null && $timeout >= 0.0) {
-            $hf = \Runtime\AsyncHook::readableFor();
-            $deadline = \__mc_microtime_f() + $timeout;
-            while ($fd < 0) {
-                $left = $deadline - \__mc_microtime_f();
-                if ($left <= 0.0) {
-                    return false;
+        $backoff = 0.0;
+        $fast = 0;
+        while ($fd < 0) {
+            $e = \__mc_errno();
+            $cls = \__mc_accept_class($e);
+            if ($cls === 3) {
+                \__mc_net_errno(true, $e);   // never a SILENT false
+                return false;
+            }
+            if ($cls === 1 && $fast < 8) {
+                $fast = $fast + 1;
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+                continue;
+            }
+            if ($cls === 2) {
+                // Sleep, do NOT re-arm readiness: the listener stays readable until
+                // an accept succeeds, so readiness carries no information here.
+                \__mc_net_errno(true, $e);
+                $backoff = \__mc_accept_backoff($backoff);
+                if ($deadline >= 0.0) {
+                    $left = $deadline - \__mc_microtime_f();
+                    if ($left <= 0.0) { return false; }
+                    if ($backoff > $left) { $backoff = $left; }
                 }
+                $sleep = \Runtime\AsyncHook::sleeper();
+                $sleep($backoff);
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+                continue;
+            }
+            if ($deadline >= 0.0) {
+                $left = $deadline - \__mc_microtime_f();
+                if ($left <= 0.0) { return false; }
+                $hf = \Runtime\AsyncHook::readableFor();
                 // `=== true`: the hook is an untyped slot, so its result arrives as
                 // a tagged cell and is read by tag, never as a raw word.
-                if ($hf($server, $left) !== true) {
-                    return false;
-                }
-                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-            }
-        } else {
-            $h = \Runtime\AsyncHook::readable();
-            while ($fd < 0) {
+                if ($hf($server, $left) !== true) { return false; }
+            } else {
+                $h = \Runtime\AsyncHook::readable();
                 $h($server);
-                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
             }
+            // Readiness reached ⇒ the overload episode (if any) is over. Both
+            // counters must reset, or one EMFILE burst slows the loop for good.
+            $backoff = 0.0;
+            $fast = 0;
+            $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
         }
     } else {
         if ($timeout !== null && $timeout >= 0.0) {
@@ -1296,6 +1330,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
         }
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
         if ($fd < 0) {
+            \__mc_net_errno(true, \__mc_errno());
             return false;
         }
     }
