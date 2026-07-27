@@ -319,7 +319,6 @@ function __mc_stream_sendv(\Resource $s, array $chunks): int
         \poke_i64($iov, $i * 16 + 8, \strlen($sc));
     }
     if (\Runtime\AsyncHook::active()) {
-        $h = \Runtime\AsyncHook::writable();
         $sent = 0;
         while ($sent < $total) {
             $w = \Runtime\Libc\sys_writev($s->addr, $iov, $n);
@@ -332,15 +331,9 @@ function __mc_stream_sendv(\Resource $s, array $chunks): int
             if ($w === 0) { break; }
             // -1 → EWOULDBLOCK (the plain-socket write path never sees a hard
             // error here: EPIPE/ECONNRESET surface as 0 after the next park).
-            $h($s);
-            $w = \Runtime\Libc\sys_writev($s->addr, $iov, $n);
-            if ($w > 0) {
-                $sent = $sent + $w;
-                if ($sent >= $total) { break; }
-                \__mc_iov_advance($iov, $n, $w);
-                continue;
-            }
-            break;
+            // The park is BOUNDED: on expiry this reports what it managed to send.
+            // No post-park retry — a wake is a hint, so the loop head re-writes anyway.
+            if (\__mc_wait_write($s) === 0) { break; }
         }
         \Runtime\Libc\free($iov);
         return $sent;
@@ -390,6 +383,40 @@ function __mc_wait_read(\Resource $s): int
         return 0;
     }
     return 1;   // readable, POLLHUP (recv drains + reports EOF), or poll error
+}
+
+/**
+ * The writable twin of {@see __mc_wait_read}: wait (bounded) for a network stream to
+ * drain before a send. Returns 1 to proceed, 0 on expiry (records $timedOut).
+ *
+ * An UNBOUNDED writable park — what every write site did — wedged the writing fiber
+ * forever on a peer that stops reading (a zero TCP window, the reverse-slowloris):
+ * the task never settles, its scope never closes, the fd is never released, and
+ * nothing says why, because from the scheduler's side that task is legitimately
+ * waiting on I/O. Expiry here is a SHORT WRITE, never an exception — php's fwrite
+ * reports the byte count and leaves timed_out to say what happened.
+ */
+function __mc_wait_write(\Resource $s): int
+{
+    if (\Runtime\AsyncHook::active()) {
+        $hf = \Runtime\AsyncHook::writableFor();
+        $secs = ($s->wtimeoutMs > 0 ? (float)$s->wtimeoutMs : 60000.0) / 1000.0;
+        // `=== true`: an untyped hook slot returns a tagged cell, read by tag.
+        if ($hf($s, $secs) === true) {
+            return 1;
+        }
+        $s->timedOut = true;
+        return 0;
+    }
+    $to = $s->blocking ? ($s->wtimeoutMs > 0 ? $s->wtimeoutMs : 60000) : 0;
+    $rc = \__mc_poll_one($s->addr, true, $to);
+    if ($rc === 0) {
+        $s->timedOut = $s->blocking;   // a non-blocking full buffer is not a timeout
+        return 0;
+    }
+    // POLLERR/POLLHUP (__mc_poll_one folds both into -1): stop, but do NOT record a
+    // timeout — a dead fd is not a slow peer, and $timedOut is sticky.
+    return $rc < 0 ? 0 : 1;
 }
 
 /**
@@ -467,17 +494,32 @@ function __mc_stream_fill(\Resource $s, int $want): int
     // / WANT_WRITE (3) whenever a record is only partly on the wire. That is NOT
     // end-of-stream — reporting 0 here truncated the response at a record
     // boundary. Park on the reactor and read the rest.
+    //
+    // BOUNDED by an ABSOLUTE deadline (the caller's rtimeoutMs, else 60 s), the way
+    // __mc_tls_drive_connect bounds the handshake. Both directions parked unbounded
+    // here, and the loop can ALTERNATE between them — so a per-park budget would let
+    // a peer that sends half a record and stops live twice-forever, with timed_out
+    // false. __mc_wait_read above already honours the deadline; this loop must not
+    // then hand it away.
     if ($got <= 0 && $s->kind === \Resource::KIND_TLS && \Runtime\AsyncHook::active()) {
+        $deadline = \__mc_microtime_f()
+            + ($s->rtimeoutMs > 0 ? (float)$s->rtimeoutMs : 60000.0) / 1000.0;
+        $rf = \Runtime\AsyncHook::readableFor();
+        $wf = \Runtime\AsyncHook::writableFor();
         while ($got <= 0) {
             $err = \Runtime\Openssl\getError($s->ssl, $got);
-            if ($err === 2) {
-                $h = \Runtime\AsyncHook::readable();
-                $h($s);
-            } elseif ($err === 3) {
-                $h = \Runtime\AsyncHook::writable();
-                $h($s);
-            } else {
+            if ($err !== 2 && $err !== 3) {
                 break;   // clean shutdown (SSL_ERROR_ZERO_RETURN) or a hard error
+            }
+            $left = $deadline - \__mc_microtime_f();
+            if ($left <= 0.0) {
+                $s->timedOut = true;
+                break;
+            }
+            $ready = $err === 2 ? $rf($s, $left) : $wf($s, $left);
+            if ($ready !== true) {
+                $s->timedOut = true;
+                break;
             }
             $got = __mc_transport_recv($s, $buf, $want);
         }
@@ -1295,10 +1337,14 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         // process never blocks. A writability wake is a HINT: the retry may report
         // back-pressure again (another writer drained the window first), so a
         // would-block parks again instead of ending the write short. Only a real
-        // errno (EPIPE/ECONNRESET) stops us. TLS keeps the retry-once shape — errno
-        // says nothing about SSL_write's WANT_WRITE.
+        // errno (EPIPE/ECONNRESET) — or the stream's WRITE DEADLINE — stops us. TLS
+        // keeps the retry-once shape: errno says nothing about SSL_write's WANT_WRITE.
+        //
+        // The deadline is PER PARK, exactly as on the read side (each fill gets a
+        // whole rtimeoutMs). A peer draining slowly but steadily is alive and php
+        // keeps writing to it; an absolute per-call budget would fail a big fwrite
+        // over a slow link where php succeeds.
         if (\Runtime\AsyncHook::active()) {
-            $h = \Runtime\AsyncHook::writable();
             $total = 0;
             while ($total < $len) {
                 $chunk = $total === 0 ? $data : \substr($data, $total);
@@ -1312,7 +1358,7 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
                         break;   // EPIPE / ECONNRESET — a real error, not back-pressure
                     }
                 }
-                $h($stream);
+                if (\__mc_wait_write($stream) === 0) { break; }   // deadline: short write
                 if ($stream->kind !== \Resource::KIND_SOCKET) {
                     $n = \__mc_transport_send($stream, $chunk, $len - $total);
                     if ($n > 0) { $total = $total + $n; } else { break; }

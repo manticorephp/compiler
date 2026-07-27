@@ -142,15 +142,19 @@ function __mc_poll_one(int $fd, bool $forWrite, int $timeoutMs): int
 }
 
 /**
- * php.net's stream_set_timeout: bound how long a read on $stream waits for data.
+ * php.net's stream_set_timeout: bound how long an operation on $stream waits.
  * 0/0 keeps the default (php's default_socket_timeout, 60s); a positive value caps
  * each read at that long, after which the read returns empty and
  * stream_get_meta_data()['timed_out'] is true.
+ *
+ * The value is the STREAM's timeout, not the read's — php applies it to writes too,
+ * so a peer that stops draining bounds the send instead of wedging it forever.
  */
 function stream_set_timeout(\Resource $stream, int $seconds, int $microseconds = 0): bool
 {
     $ms = $seconds * 1000 + \intdiv($microseconds, 1000);
     $stream->rtimeoutMs = $ms > 0 ? $ms : 0;
+    $stream->wtimeoutMs = $ms > 0 ? $ms : 0;
     return true;
 }
 

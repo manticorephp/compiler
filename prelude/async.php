@@ -3324,7 +3324,13 @@ namespace Async {
         return $conn;
     }
 
-    /** @internal Accept the next connection, suspending until one arrives. */
+    /**
+     * @internal Accept the next connection, suspending until one arrives.
+     *
+     * Deliberately UNBOUNDED, unlike read/write below: an idle listener is not a
+     * stalled peer. Bounding it would force every `while (true) { accept(); }` loop
+     * to tell "no client yet" apart from "listener broken" on the same return.
+     */
     function accept(\Resource $server): \Resource
     {
         while (true) {
@@ -3361,7 +3367,13 @@ namespace Async {
         // watcher a <= 0 AFTER a readability wake is EOF or a hard error
         // (ECONNRESET) rather than would-block, so we report closed instead of
         // spinning forever on a reset connection (no errno binding to tell apart).
-        $sched->waitReadable($conn);
+        // The park is BOUNDED (stream_set_timeout's value, else 60 s): raw is not a
+        // licence to wedge a fiber on a peer that never answers.
+        $rsecs = $conn->rtimeoutMs > 0 ? (float)$conn->rtimeoutMs / 1000.0 : 60.0;
+        if ($sched->waitReadableWithin($conn, $rsecs) !== true) {
+            $conn->timedOut = true;
+            return '';
+        }
         $buf = $sched->readBuf($length);
         $n = \Async\sys_recv($fd, $buf, $length, 0);
         if ($n > 0) {
@@ -3388,8 +3400,14 @@ namespace Async {
                 break;
             }
             // n < 0 = back-pressure. Wait for writability, retry ONCE; a second
-            // <= 0 is a hard error (EPIPE / reset), not would-block.
-            $sched->waitWritable($conn);
+            // <= 0 is a hard error (EPIPE / reset), not would-block. The wait is
+            // BOUNDED — a peer that stops reading must end the write short, not
+            // park this fiber for the life of the process.
+            $wsecs = $conn->wtimeoutMs > 0 ? (float)$conn->wtimeoutMs / 1000.0 : 60.0;
+            if ($sched->waitWritableWithin($conn, $wsecs) !== true) {
+                $conn->timedOut = true;
+                break;
+            }
             $n = \Async\sys_send($fd, $chunk, $len - $total, 0);
             if ($n > 0) {
                 $total = $total + $n;
