@@ -20,6 +20,7 @@ use Ffi\Ptr;
 use Ffi\Symbol;
 use Ffi\Take;
 use Ffi\Variadic;
+use Ffi\Weak;
 
 // ── Memory ─────────────────────────────────────────────────────────────
 
@@ -583,6 +584,16 @@ function sys_sigpending(Ptr $set): int {}
 // PENDING, so it returns immediately.
 #[Library('c'), Symbol('sigwait')]
 function sys_sigwait(Ptr $set, Ptr $sig): int {}
+
+// `int signalfd(int fd, const sigset_t *mask, int flags)` — LINUX ONLY, hence
+// #[Weak] (extern_weak resolves to null on Darwin, where kqueue's EVFILT_SIGNAL
+// is the equivalent and is reached through Io\Poll instead). Turns "one of these
+// BLOCKED signals is pending" into an ordinary readable fd, so the netpoller can
+// wait on it beside every socket instead of a task polling sigpending() on a
+// timer. Pass -1 as $fd to create; pass an existing one to replace its mask.
+// Flags MEASURED on glibc+musl aarch64: SFD_NONBLOCK=2048 SFD_CLOEXEC=524288.
+#[Library('c'), Symbol('signalfd'), CType('int'), \Ffi\Weak]
+function sys_signalfd(#[CType('int')] int $fd, Ptr $mask, #[CType('int')] int $flags): int {}
 
 // `sighandler_t signal(int signum, sighandler_t handler)` — used ONLY to set
 // SIG_DFL (0) / SIG_IGN (1); a PHP callback can never be the handler. Returns

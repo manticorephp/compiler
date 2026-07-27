@@ -375,15 +375,15 @@ Caveats: the load generator shares the box (the server used only ~2.7/10 cores �
 ceiling needs an off-box client); this server does minimal HTTP (single-byte routing, fixed
 headers) — legitimate for the TechEmpower `plaintext` case, not a full framework.
 
-## Not yet
+Signal delivery is reactor-native: a blocked-and-pending signal is a readiness event on
+both hosts — `EVFILT_SIGNAL` on kqueue, `signalfd(2)` on Linux — so the dispatch task parks
+on the reactor instead of ticking every 50 ms, and an idle process with a handler
+registered wakes up never. Nothing reads the signalfd: its readability is the hint, and
+`pcntl_signal_dispatch()`'s own `sigwait(2)` consumes the signal, so there is one dispatch
+path on both hosts. Where neither is available (the portable `poll` backend) the 50 ms tick
+is still there.
 
-**Reactor-native signal delivery.** Signals are BLOCKED and REAPED by a daemon task that
-calls `pcntl_signal_dispatch()` every 50 ms, so handler latency is up to 50 ms. That is
-fine for graceful shutdown and supervision (what the epic uses it for) but it is polling.
-The fix is per-backend, not shared: kqueue has `EVFILT_SIGNAL` (ident = signo, filter -6),
-Linux has `signalfd` (one fd the reactor watches like any other, then read 128-byte
-`signalfd_siginfo` records); the `poll` fallback keeps the pump. Both need their own
-measured constants, which is why it is listed here rather than half-done.
+## Not yet
 
 Also: `writev`/`io_uring` to break the 2-syscall floor · DNS search-domain/`ndots` handling
 (a name needing a suffix falls back to the blocking walk today) · off-thread file I/O ·

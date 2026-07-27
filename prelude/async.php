@@ -1422,6 +1422,11 @@ namespace Async {
         private ?TaskGroup $root = null;
         /** True once the signal pump daemon task exists ({@see pollSignals()}). */
         private bool $signalPolling = false;
+        /** The parked pump, the signalfd (Linux) and how many signos are armed. */
+        private ?Task $sigTask = null;
+        private int $sigFd = -1;
+        private bool $sigKqueue = false;
+        private int $sigArmed = 0;
 
         private \Io\Poll\Context $reactor;
         /** @var array<int, \Io\Poll\Watcher> fd → its PERSISTENT reactor watcher */
@@ -1645,6 +1650,11 @@ namespace Async {
             // "all tasks are asleep" with no further detail is useless when a real
             // program hangs, so the message carries the task table.
             $stuckReport = $stuck ? $this->report() : '';
+            // The signalfd belongs to this run, like the reactor itself.
+            if ($this->sigFd >= 0) {
+                \__mc_iopoll_close($this->sigFd);
+                $this->sigFd = -1;
+            }
             // Dropping the singleton drops the reactor (Io\Poll\Context::__destruct
             // closes its kqueue/epoll fd) and every queue — the next async() in the
             // same program starts from a clean engine.
@@ -1714,8 +1724,9 @@ namespace Async {
          * loop level: a handler running between tasks would have no scope, so it
          * could not spawn(), and `$this->running` would be null under it. As a
          * task it is ordinary async code — it can spawn, suspend and be cancelled
-         * with everything else at shutdown — and its own delay() bounds the
-         * latency, so the reactor needs to know nothing about signals.
+         * with everything else at shutdown. What it parks on is
+         * {@see awaitSignal()}: the reactor where the host can do it, a 50 ms tick
+         * where it cannot.
          */
         private function pollSignals(): void
         {
@@ -1727,12 +1738,87 @@ namespace Async {
                 $sched = Scheduler::instance();
                 while (true) {
                     \pcntl_signal_dispatch();
-                    $sched->sleep(0.05);
+                    $sched->awaitSignal();
                 }
             }, [], $this->root, true);
             $pump->claimed = true;      // it only ever ends by cancellation
             $pump->idx = \count($this->root->children);
             $this->root->children[] = $pump;
+        }
+
+        /**
+         * Park the signal pump until a signal can be reaped.
+         *
+         * The signals we care about are BLOCKED (a C handler cannot be a PHP
+         * closure, so pcntl blocks and reaps at a dispatch point) — and a blocked
+         * pending signal is exactly what both kernels can report as a readiness
+         * event: kqueue with EVFILT_SIGNAL, Linux with signalfd(2). Where that
+         * works the pump costs NOTHING while idle; where it does not, it falls
+         * back to the 50 ms tick, which is correct but wakes 20×/s forever and
+         * bounds handler latency at 50 ms.
+         *
+         * Nothing READS the signalfd: its readability is the hint, and
+         * `pcntl_signal_dispatch()`'s own sigwait(2) is what consumes the pending
+         * signal — so there is one dispatch path on both hosts, and a spurious
+         * wake just dispatches nothing.
+         */
+        public function awaitSignal(): void
+        {
+            $me = $this->running;
+            if (!$this->armSignalWatch()) {
+                $this->sleep(0.05);
+                return;
+            }
+            $this->sigTask = $me;
+            \Fiber::suspend();
+            $this->sigTask = null;
+        }
+
+        /**
+         * Make sure the host is watching every registered signal. Returns false
+         * when this host cannot (the Poll/epoll backend without signalfd), which
+         * is the caller's cue to tick instead. Re-checked on every park because
+         * `pcntl_signal()` can register another one at any time.
+         */
+        private function armSignalWatch(): bool
+        {
+            $signos = \Runtime\Signals::instance()->signos();
+            $n = \count($signos);
+            if ($n === 0) { return false; }
+            if ($n === $this->sigArmed) { return $this->sigFd >= 0 || $this->sigKqueue; }
+
+            if ($this->reactor->getBackend() === \Io\Poll\Backend::Kqueue) {
+                foreach ($signos as $s) {
+                    if (!$this->reactor->watchSignal($s)) { return false; }
+                }
+                $this->sigKqueue = true;
+                $this->sigArmed = $n;
+                return true;
+            }
+            // Linux: one fd for the whole set; signalfd() with an existing fd
+            // REPLACES its mask, so growing the set is the same call.
+            $set = \Runtime\Libc\calloc(1, 128);
+            if ($set === null) { return false; }
+            \Runtime\Libc\sys_sigemptyset($set);
+            foreach ($signos as $s) { \Runtime\Libc\sys_sigaddset($set, $s); }
+            // SFD_NONBLOCK|SFD_CLOEXEC, MEASURED on glibc + musl aarch64.
+            $fd = \Runtime\Libc\sys_signalfd($this->sigFd, $set, 2048 | 524288);
+            \Runtime\Libc\free($set);
+            if ($fd < 0) { return false; }
+            if ($this->sigFd < 0) {
+                $this->sigFd = $fd;
+                $this->ensureWatcherFd($fd);
+            }
+            $this->sigArmed = $n;
+            return true;
+        }
+
+        /** Wake the pump — a watched signal is pending. */
+        private function wakeSignalPump(): void
+        {
+            if ($this->sigTask !== null) {
+                $this->wake($this->sigTask);
+            }
         }
 
         private function loop(): void
@@ -2469,14 +2555,28 @@ namespace Async {
                 if ($timeout < 0) { $timeout = 0.0; }
             }
 
-            if ($this->ioWaiters > 0) {
+            // A parked signal pump is a reason to use the reactor even with no
+            // task waiting on I/O: otherwise the usleep() below would swallow the
+            // signal for as long as the next timer, which is unbounded.
+            if ($this->ioWaiters > 0 || $this->sigTask !== null) {
                 $sec = $timeout < 0 ? null : (int)$timeout;
                 $usec = $timeout < 0 ? 0 : (int)(($timeout - (int)$timeout) * 1000000);
                 /** @var \Io\Poll\Watcher[] $ready */
                 $this->nReactorWaits = $this->nReactorWaits + 1;
                 $ready = $this->reactor->wait($sec, $usec, null);
+                // kqueue reports a signal as an event with no fd behind it.
+                if ($this->sigKqueue && $this->reactor->takeSignal()) {
+                    $this->wakeSignalPump();
+                }
                 foreach ($ready as $watcher) {
                     $fd = $watcher->getData();
+                    if ($fd === $this->sigFd) {
+                        // Linux signalfd: readability is the hint; sigwait(2) inside
+                        // pcntl_signal_dispatch() is what consumes the signal, so we
+                        // deliberately do NOT read it here.
+                        $this->wakeSignalPump();
+                        continue;
+                    }
                     $hup = $watcher->hasTriggered(\Io\Poll\Event::Error)
                         || $watcher->hasTriggered(\Io\Poll\Event::HangUp);
                     if (($hup || $watcher->hasTriggered(\Io\Poll\Event::Read))
