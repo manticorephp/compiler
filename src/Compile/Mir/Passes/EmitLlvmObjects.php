@@ -2722,7 +2722,13 @@ trait EmitLlvmObjects
         // A `mixed`/cell receiver carries a NaN-boxed object — strip the tag to
         // the raw object pointer so both the `$this` arg and the class_id
         // virtual dispatch read the object, not the boxed bits (else SIGSEGV).
-        if ($mc->object->type->kind === Type::KIND_CELL) {
+        // UNKNOWN counts: an untyped property (`public $defn;`) is stored boxed
+        // but reads back as unknown, and the class_id load then dereferenced the
+        // OBJECT tag itself. Masking a raw pointer is a no-op — every userspace
+        // address fits in the 48 payload bits, which is why the `$this` slot is
+        // masked unconditionally too.
+        if ($mc->object->type->kind === Type::KIND_CELL
+            || $mc->object->type->kind === Type::KIND_UNKNOWN) {
             $unb = $this->ssa->allocReg();
             $out .= '  ' . $unb . ' = and i64 ' . $thisArg . ", 281474976710655\n";
             $thisArg = $unb;
@@ -2743,6 +2749,21 @@ trait EmitLlvmObjects
                     $r = $this->resolveMethodClass($cd->name, $mc->method);
                     if ($r !== '') { $fallback = $r; break; }
                 }
+            }
+        }
+        // A fully ERASED receiver (`public $defn;` with no declared type) leaves
+        // $static empty, so neither branch above ran and the parameter tables
+        // below were looked up under an empty key: the site coerced its args
+        // against an EMPTY signature and handed a `string|int` CELL param a RAW
+        // int. symfony's ArgvInput reaches InputDefinition::hasArgument that way
+        // and the -1 of `hasArgument($c - 1)` was read as a NaN-boxed pointer.
+        // The class_id switch below already scans every class for the method,
+        // and in the same order — resolve here too, so the ONE coercion the call
+        // site emits speaks the ABI the arms were selected for.
+        if ($static === '' && $fallback === '') {
+            foreach ($this->classes as $cd) {
+                $r = $this->resolveMethodClass($cd->name, $mc->method);
+                if ($r !== '') { $fallback = $r; break; }
             }
         }
         // By-ref mask of the resolved callee. A method's param 0 is the
