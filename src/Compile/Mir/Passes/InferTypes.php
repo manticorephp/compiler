@@ -1765,7 +1765,32 @@ final class InferTypes implements Pass
             // enough for virtual dispatch (`[new D, new C]` of two `A`s →
             // obj<A>, so `$arr[0]->m()` resolves through A).
             $iface = $this->commonInterface($a->class, $b->class);
-            return $iface === '' ? Type::unknown() : Type::obj($iface);
+            if ($iface !== '') { return Type::obj($iface); }
+            // Nothing in common: the honest top for "an object of one of several
+            // unrelated classes" is a CELL, not `unknown`. A cell is
+            // self-describing — it carries the object tag, so `instanceof` /
+            // get_class / gettype dispatch on it — while `unknown` rides RAW and
+            // is indistinguishable from an int at every consumer.
+            //
+            // This is what broke symfony: `[new InputArgument(…), new
+            // InputOption(…), …]` typed its element `unknown`, so the literal
+            // stored RAW pointers and stamped no repr bits, while the `mixed[]`
+            // parameter it was passed to said cells. The foreach then bound
+            // `$item` as a cell and `instanceof`, which requires the OBJECT tag,
+            // answered false for EVERY element — every option was sorted into
+            // $arguments and every argument lookup missed.
+            return Type::cell();
+        }
+        // A CELL joined with an OBJECT stays a CELL. The cell already describes
+        // any object at runtime (it carries the tag), so collapsing to `unknown`
+        // throws away strictly more than it keeps — and it happened on the THIRD
+        // element of a heterogeneous literal, undoing the cell the first two had
+        // just established: `[new A, new B]` was vec[cell] but
+        // `[new A, new B, new B]` was vec[unknown]. symfony's default input
+        // definitions are 3–7 elements long, so they always took the bad path.
+        if (($a->kind === Type::KIND_CELL && $b->kind === Type::KIND_OBJ)
+            || ($a->kind === Type::KIND_OBJ && $b->kind === Type::KIND_CELL)) {
+            return Type::cell();
         }
         // Two arrays join element-/key-wise through THIS hierarchy-aware union so
         // a vec of two object subclasses lifts to vec[common-base] instead of
