@@ -13,6 +13,11 @@ install, nothing to link — `use function Async\spawn;` is enough.
 
 This directory holds the examples and benchmarks.
 
+Everything here is **superset**: `php` has `Fiber` and nothing else of it, so `difftest` cannot
+check a single line — these cases carry hand-written expected output instead.
+[docs/superset.md](superset.md) catalogues that whole surface (concurrency, attributes, FFI,
+modules, types, memory) and the rules it lives under.
+
 ## Model (not Promises)
 
 The concurrency *model* is Go's — cheap tasks, channels, a netpoller, blocking-*looking* I/O
@@ -310,15 +315,32 @@ Ordinary stream calls suspend the fiber instead of the process when a scheduler 
 `connect(2)` runs non-blocking, BOTH TLS handshake directions are driven through
 `WANT_READ`/`WANT_WRITE` parks (client `SSL_connect` and server `SSL_accept` — so a TLS
 server serves concurrent clients), and a hostname is resolved over the netpoller:
-`/etc/hosts`, a per-run cache held by the scheduler, then A and AAAA queries across
-**every** nameserver in `resolv.conf` (two attempts each, 2 s apiece, TC → retry over
-TCP), falling back to the blocking `getaddrinfo` walk when none of that can answer.
+`/etc/hosts`, a per-run cache held by the scheduler, the `search` list and `ndots` rule from
+`resolv.conf` (so `db`, `redis`, `service.namespace` — the names compose and kubernetes hand
+you — resolve here instead of falling through to the blocking walk), then A and AAAA queries
+across **every** nameserver (two attempts each, 2 s apiece, TC → retry over TCP), falling
+back to the blocking `getaddrinfo` walk when none of that can answer. A search walk stops the
+moment NO server answers: a dead resolver must not be multiplied by the suffix count.
 Two spawned HTTPS fetches to DIFFERENT hosts run 0.17s vs 0.34s sequential.
 
-`stream_set_timeout()` and `stream_socket_accept($srv, $timeout)` are honoured under the
-scheduler: the wait is BOUNDED, so a hung peer no longer wedges the fiber forever (an
-unbounded park was the old behaviour, and a timeout used to fall back to a blocking `poll(2)`
-that stalled every other task).
+**Every wait is bounded.** `stream_set_timeout()` is the STREAM's timeout, as in php — reads
+*and* writes — and `stream_socket_accept($srv, $timeout)` is honoured under the scheduler.
+On expiry the operation reports a short read/write with `stream_get_meta_data()['timed_out']`
+true, never an exception. Unbounded parks were the old behaviour on both sides, and each was
+a liveness hole rather than a missing feature: a peer that stops reading wedged the writing
+fiber forever — the task never settled, its scope never closed, the fd was never released —
+and a timeout used to fall back to a blocking `poll(2)` that stalled every other task. The
+default when nothing is set is 60 s, php's `default_socket_timeout`.
+
+**`accept(2)` failures are classified.** A would-block parks; a peer that vanished between its
+SYN and our accept (`ECONNABORTED`/`EPROTO`/`EINTR`) retries immediately, since no readiness
+edge is coming for a connection that is already gone; resource exhaustion
+(`EMFILE`/`ENFILE`/`ENOBUFS`/`ENOMEM`) backs off on a timer and keeps serving what is already
+open; anything else is reported. The overload case is why this matters: `accept(2)` fails
+while the pending connection **stays queued**, so a level-triggered listener stays readable —
+re-arming readiness is a hot spin that starves every sibling task and never even trips the
+watchdog, because it suspends on every iteration. It shows up only as `stats()['wakes']`
+climbing with wall time instead of with connections.
 
 The seam is `\Runtime\AsyncHook` (five callbacks installed by the scheduler — readable,
 writable, close, bounded-readable, sleep; one null check per would-block when no scheduler is
@@ -413,10 +435,13 @@ is still there.
 
 ## Not yet
 
-Also: `writev`/`io_uring` to break the 2-syscall floor · DNS search-domain/`ndots` handling
-(a name needing a suffix falls back to the blocking walk today) · off-thread file I/O ·
-shared-memory multithreading (a future compiler superset). See the async roadmap memory for
-the plan.
+Also: `writev`/`io_uring` to break the 2-syscall floor · `resolv.conf`'s `timeout:`/`attempts:`
+options (the search list and `ndots` are in; those two still hard-code 2 s × 2) · the search
+list applied to `/etc/hosts` the way glibc does · off-thread file I/O · shared-memory
+multithreading (a future compiler superset) · **fiber stack sizing**: 8 MiB of *virtual*
+address space per task with a `PROT_NONE` guard page, pooled and reclaimed promptly, but
+nobody has measured where 10 000 concurrent tasks actually hits `vm.max_map_count` or a
+container's `ulimit -v`. See the async roadmap memory for the plan.
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
 return type. The only piece here that cannot be a library: it needs the compiler to split

@@ -17,7 +17,11 @@
 // manticore-only when php produces NO stdout, and php has no __mc_resolv_search.
 
 $multi = "# a comment\n; another\nnameserver 10.0.0.1\nnameserver fe80::1\n\tnameserver 10.0.0.2\nsearch a.example b.example\noptions edns0 ndots:2 timeout:1\n";
-echo 'ns: ', __mc_resolv_nameservers($multi), "\n";
+// ⚠ The first manticore-only call must come BEFORE any echo, or php prints that
+// leading literal, difftest sees stdout and reclassifies the file from PHP-SKIP to
+// a DIFF. `echo 'ns: ', __mc_resolv_nameservers(...)` flushed "ns: " and then died.
+$ns = __mc_resolv_nameservers($multi);
+echo 'ns: ', $ns, "\n";
 echo 'search: ', __mc_resolv_search($multi), "\n";
 echo 'ndots: ', __mc_resolv_ndots($multi), "\n";
 

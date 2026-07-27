@@ -231,6 +231,33 @@ opt out with `"stdlib": false` (only the self-contained compiler, which embeds
 attributes compile to direct C calls; declare them as manifest `extensions`.
 Mechanism + type mapping: [`docs/ffi.md`](docs/ffi.md).
 
+## Beyond PHP — the superset
+
+Parity with the interpreter is the north star, and `tools/difftest.sh` is how it is
+enforced. The rest — the surface `php` cannot run at all, and difftest therefore
+cannot check — is catalogued in **[`docs/superset.md`](docs/superset.md)**:
+concurrency, compile-time attributes, FFI, the module system, the type system and
+the memory model, each with what it buys and what Zend does instead.
+
+The headline is **structured concurrency** — Go's model, PHP's spelling, written in
+PHP over two primitives of ours (native `Fiber` on `fcontext`, and `Io\Poll` over
+kqueue/epoll):
+
+```php
+Async\async(function () {
+    $a = Async\spawn(fn() => file_get_contents('https://example.com/one'));
+    $b = Async\spawn(fn() => file_get_contents('https://example.com/two'));
+    [$x, $y] = Async\awaitAll($a, $b);      // ~1 RTT, not 2
+});
+```
+
+Ordinary `fread`/`fwrite`/`stream_socket_accept`/`sleep` suspend the fiber instead of
+the process — plain streams *are* the async API, TLS and DNS included. Every task is
+owned by a scope, cancellation is delivered at the suspend point, a deadlock is
+reported rather than exited, and `Async\dump()` names every live task and where it was
+spawned. An 8-worker prefork HTTP server does **150–160k rps** (`wrk`, plaintext
+keep-alive) — see [`docs/async.md`](docs/async.md).
+
 ## Standard library
 
 **~228 PHP standard-library functions** are implemented across three tiers, all
