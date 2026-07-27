@@ -1,0 +1,16 @@
+int(42)
+bool(true)
+float(1.75)
+bool(true)
+bool(true)
+bool(true)
+string(2) "n9"
+bool(true)
+int(3)
+string(1) "x"
+int(5)
+bool(true)
+bool(true)
+NULL
+string(3) "ABC"
+bool(true)

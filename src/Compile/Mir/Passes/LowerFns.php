@@ -143,7 +143,13 @@ trait LowerFns
             $ctypes = [];
             foreach ($decl->params as $p) { $ctypes[] = $this->ffiCType($p->typeHint); }
             $fn->ffiParamCTypes = $ctypes;
-            $fn->ffiRetCType = $this->ffiCType($decl->returnType);
+            // A FUNCTION-level `#[CType('int')]` states that the C RETURN is a
+            // 32-bit int, so the wrapper sign-extends it. Without that, a C
+            // function returning -1 in w0 (`mov w0, #-1` zeroes the top half)
+            // reads as 4294967295 through an i64 declare.
+            $fn->ffiRetCType = $this->ffiRetIsInt32($decl->attributes)
+                ? 'i32'
+                : $this->ffiCType($decl->returnType);
             return $fn;
         }
         $savedSawYield = $this->sawYield;
@@ -264,7 +270,7 @@ trait LowerFns
             || $n === 'strcspn'
             || $n === '__float_bits' || $n === '__ugt' || $n === '__ryu_msp'
             || $n === 'substr' || $n === 'str_repeat'
-            || $n === 'str_from_buffer' || $n === 'cstr_to_str'
+            || $n === 'str_from_buffer' || $n === 'cstr_to_str' || $n === 'str_bytes'
             || $n === '__mir_stdin' || $n === '__mir_stdout' || $n === '__mir_stderr'
             || $n === '__mir_argc' || $n === '__mir_argv_at' || $n === '__mir_to_cell'
             || $n === '__mir_env_count' || $n === '__mir_env_at'

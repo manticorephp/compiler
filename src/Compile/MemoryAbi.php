@@ -56,6 +56,21 @@ final class MemoryAbi
      */
     public const ASSOC_TAG_MAGIC = 0x7E66000000000001;
 
+    /**
+     * The NaN-boxed NULL cell — header | tag(NULL=3), i.e. what
+     * `@__manticore_box_null` returns. A cell carries its type in the tag, so a
+     * cell-typed value that is null is NOT i64 0: `$x === null` on a
+     * `mixed` compiles to a tag==3 test ({@see EmitLlvmExpr::emitCmp}).
+     *
+     * ⚠ This is why it must also be the LINK-TIME initialiser of a cell-typed
+     * module global (`public static mixed $cb = null;`, or one with no default
+     * at all). Leaving such a cell at raw 0 makes it read back as int 0, so
+     * `=== null` answers FALSE for a property nobody ever assigned — and code
+     * that guards an optional callback that way then calls through a null
+     * pointer. {@see LowerClasses} registers this constant for those cells.
+     */
+    public const CELL_NULL = -3659174697238528;
+
     // ─── String header (24 bytes) ─────────────────────────────────
 
     /**

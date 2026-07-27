@@ -1,0 +1,12 @@
+unbuffered sum: 15
+buffered: abcde
+next: ok=1 value-is-null=1 then ok=0
+fan-in total: 120
+select sum: 10
+select send got: 99
+select send: index=0 isSend=1
+selectNow idle: null
+selectNow ready: index=1 value=7
+selectWithin: timeout
+closed send: send on a closed channel
+done

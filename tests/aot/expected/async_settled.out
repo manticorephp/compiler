@@ -1,0 +1,8 @@
+settled[0]: ok one
+settled[1]: err nope
+settled[2]: ok three
+survivors: both
+map: 10 [even 2] 30 [even 4] 50 
+map max-inflight: 2
+empty: 0
+done

@@ -30,11 +30,21 @@ re-measure, e.g. before changing one of those ABI tables.
 ## Build + run the suite
 
 ```bash
-bash tools/docker/run_tests.sh            # arm64
+bash tools/docker/run_tests.sh            # arm64: cold seed + full suite
 bash tools/docker/run_tests.sh --amd64    # amd64 (emulated, slow)
 bash tools/docker/run_tests.sh --both
 bash tools/docker/run_tests.sh --shell    # interactive container
+bash tools/docker/run_tests.sh --gate     # the HEAVY gate, on Linux
 ```
+
+`--gate` adds `tools/difftest.sh` (php is in the image) and
+`tools/selfhost_fixpoint.sh` (fixpoint, self-host suite, MIR golden,
+rebuild-stability) after the suite, and exits non-zero if any of the three fails.
+That is the only honest gate for anything touching the epoll path, the Linux
+socket/errno constants or a glibc `free()` — macOS green proves nothing about them
+(see the invalid-free that only glibc caught). Stability defaults to 2x2 rebuilds
+in a container because each cold seed is minutes; `MC_STABILITY_N=5` for the full
+sweep.
 
 The image is the **root `Dockerfile`'s `toolchain` target** -- the same one an
 end user builds (see `docs/install.md`). It carries **PHP 8.5** (sury.org) and

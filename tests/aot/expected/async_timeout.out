@@ -1,0 +1,12 @@
+async returns: 42
+group: 7
+timeout ok: fast
+timeout expiry: caught, child-cancelled: yes
+deadline tightens: yes
+no deadline outside: null
+token before: no
+token after: yes
+onCancel fired: 1
+awaitWithin: timed out, task settled: yes
+done
+exit clean

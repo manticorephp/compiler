@@ -79,6 +79,7 @@ final class Builtins
             'method_exists', 'property_exists', 'is_a', 'is_subclass_of',
             'exit', 'die', 'error_log', 'gc_collect_cycles',
             'ptr_offset', 'int_to_ptr', 'ptr_to_int', 'str_from_buffer', 'cstr_to_str',
+            'str_bytes',
             'peek_i64', 'peek_i32', 'peek_i16', 'peek_i8', 'peek_u32', 'peek_u16',
             'peek_u8', 'poke_i64', 'poke_i32', 'poke_i16', 'poke_i8',
             '__ryu_msp', '__mir_to_cell', '__float_bits', '__mir_clock_ns', '__ugt',

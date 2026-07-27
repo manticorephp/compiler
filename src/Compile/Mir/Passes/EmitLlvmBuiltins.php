@@ -41,6 +41,8 @@ trait EmitLlvmBuiltins
         if ($name === 'strlen')                       { return $this->biStrlen($args); }
         if ($name === '__str_byte_at')                { return $this->biStrByteAt($args); }
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
+        if ($name === 'str_bytes')                    { return $this->biStrBytes($args); }
+        if ($name === 'manticore_str_bytes')                    { return $this->biStrBytes($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
         if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
         if ($name === 'int_to_ptr')                   { return $this->biIntToPtr($args); }
@@ -782,6 +784,24 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $r . ' = call ptr @__mir_str_new(ptr ' . $p . ', i64 ' . $n . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `str_bytes(string $s): int` — the raw address of $s's DATA bytes as an
+     * i64. A headered string's runtime pointer already points AT the data (the
+     * rc/len header sits at negative offsets, see `__mir_strlen`), so this is a
+     * representation-level ptr→i64 cast. Purpose: fill an `iovec.iov_base` in a
+     * PHP-built `writev()` iov array without allocating a `\Ffi\Ptr` handle for
+     * every string. Analogous to `ptr_to_int(\Ffi\Ptr)` but with a string input
+     * that the type system would otherwise reject there.
+     * @param Node[] $args
+     */
+    private function biStrBytes(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $out .= $this->coerceToI64();
+        $this->lastValueType = 'i64';
         return $out;
     }
 

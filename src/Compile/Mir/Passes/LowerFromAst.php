@@ -296,6 +296,12 @@ final class LowerFromAst implements Pass
     /** Io\Poll — DEMAND-GATED (empty unless the program mentions it). Namespaced
      *  class tree in braced `namespace {}` blocks. */
     public string $ioPollSrc = '';
+    /** Async\ (scheduler / tasks / channels) — DEMAND-GATED. Braced-namespace
+     *  tree like io_poll.php; implies fiberSrc + ioPollSrc. */
+    public string $asyncSrc = '';
+    /** ext/pcntl + posix process control — DEMAND-GATED. Braced-namespace tree;
+     *  Async\ implies it (the scheduler dispatches signals every tick). */
+    public string $pcntlSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
@@ -1499,6 +1505,35 @@ final class LowerFromAst implements Pass
     {
         foreach ($attributes as $attr) {
             if ($this->attrIsOneOf($attr, ['Weak', 'Ffi\\Weak'])) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * True when a FUNCTION-level `#[CType('int')]` declares the C RETURN as a
+     * 32-bit int, so the FFI wrapper must SIGN-EXTEND it into the i64 carrier.
+     *
+     * This is not cosmetic. A C-compiled callee returning -1 does `mov w0, #-1`,
+     * which zeroes x0's upper half, so an `i64` declare reads 4294967295. That is
+     * how SSL_read's WANT_READ (-1) became a 4 GB length in __mc_stream_fill and
+     * memmove'd off the end of the heap. Hand-written libc syscall stubs happen to
+     * sign-extend (they write the full x0), which is why only the C libraries —
+     * OpenSSL, PCRE2 — were exposed.
+     *
+     * ⚠ Only for a callee whose C prototype really returns `int`. Never put it on
+     * one that returns a POINTER or a long/ssize_t carried as PHP `int`
+     * (SSL_CTX_new, SSL_new, recv, …) — the sext would truncate the value.
+     */
+    private function ffiRetIsInt32(array $attributes): bool
+    {
+        foreach ($attributes as $attr) {
+            $name = \ltrim($attr->name, '\\');
+            if ($name !== 'CType' && $name !== 'Ffi\\CType') { continue; }
+            if ($attr->args === []) { continue; }
+            $arg = $attr->args[0];
+            if ($arg->kind === 'StringLiteral' && $this->strLitValue($arg) === 'int') {
+                return true;
+            }
         }
         return false;
     }
@@ -2917,6 +2952,19 @@ final class LowerFromAst implements Pass
             foreach ($this->defaultFillArgs($params, $expr->args) as $f) { $args[] = $f; }
         } else {
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
+        }
+        // `TaskGroup::run(…)` carries its call site too — see asyncSiteCallee().
+        // The class is syntactic here, so this needs no inference; a program that
+        // declares its own `TaskGroup` already collides with the prelude's (the
+        // demand gate keys on that very name).
+        if ($this->asyncSrc !== '' && $expr->method === 'run'
+            && ($class === 'Async\\TaskGroup' || $class === 'TaskGroup')) {
+            $site = $this->callSite($expr->span);
+            if ($site !== '') {
+                $sited = [new StringConst($site, Type::string_())];
+                foreach ($args as $a) { $sited[] = $a; }
+                return new StaticCall_($class, 'runAt', $sited, Type::unknown(), $scope);
+            }
         }
         return new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
     }

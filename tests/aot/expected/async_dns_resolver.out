@@ -1,0 +1,10 @@
+hosts: loopback
+unknown host: miss
+bool(false)
+bool(true)
+bool(false)
+hit=10.1.2.3 miss=empty expired=empty blank=empty
+next run: empty
+bool(true)
+bool(true)
+done

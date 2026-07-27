@@ -191,7 +191,7 @@ trait EmitLlvmExpr
         // box_null: pure header + tag(NULL=3)
         $out .= "define i64 @__manticore_box_null() {\n";
         $out .= "entry:\n";
-        $out .= "  ret i64 -3659174697238528\n";
+        $out .= '  ret i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
         $out .= "}\n";
         // box_ptr: (ptrtoint(p) & PAYLOAD_MASK) | tagBits(PTR=4). A 0 pointer
         // can only be a `?string` null (a real string ptr is never 0) → box as

@@ -183,6 +183,12 @@ trait InferCalls
         if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }
+        // str_bytes: the raw address of a headered string's DATA bytes (i.e. the
+        // same pointer C sees when a `string` is passed through an FFI `char *`
+        // parameter). Used to poke an iovec.iov_base for a writev syscall
+        // without materialising a Ptr handle. Returns i64.
+        if ($n === 'str_bytes') { return Type::int_(); }
+
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'
@@ -393,6 +399,23 @@ trait InferCalls
         // dispatches on the name and boxes each arm's result, so the invoke is a
         // cell (echo / var_dump read the tag instead of a raw pointer).
         if ($ct->kind === Type::KIND_STRING) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
+        // A CELL/UNKNOWN-typed callee is a closure parked in an untyped slot —
+        // `\Runtime\AsyncHook::readable()` is the canonical one. It says nothing
+        // about its return type, but the uniform closure ABI BOXES whatever the
+        // callee returns, so leaving the invoke untyped made every caller read a
+        // tagged word RAW: `$h = Hook::get(); $b = $h(…);` var_dumped a bool as
+        // int(-3940649673949183), `$b === true` was false, and an array/object
+        // return failed is_array()/is_object(). Type it by its actual repr.
+        // ⚠ An OBJECT return still rides RAW (the ABI note in {@see
+        // EmitLlvm::isCellBoxableArg}), so `is_object()`/`get_debug_type()` on the
+        // result of an untyped callable that returns an object still lie. Property
+        // and method access work — the cell path masks the low 48 bits, which is
+        // identity for a real heap pointer. Boxing objects at the closure return
+        // would have to be matched by an unmask in every typed callee path.
+        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN) {
             $node->type = Type::cell();
             return $node->type;
         }

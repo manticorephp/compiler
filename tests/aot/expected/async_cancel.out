@@ -1,0 +1,5 @@
+fail-fast: bad cancelled: yes
+scope-body: body cancelled: yes
+sibling: child cancelled: yes
+done
+exit clean

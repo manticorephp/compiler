@@ -1,0 +1,8 @@
+tests/analyze/cases/async_hazards.php:9:1: warning: mutable `static $n` in nextId() is shared by every fiber — under a scheduler two tasks in this function clobber each other; hold it on the task, or in Async\Context::withValue()
+tests/analyze/cases/async_hazards.php:15:1: warning: table(): return type is bare `array` — annotate its element type (`@return T[]`)
+tests/analyze/cases/async_hazards.php:25:1: warning: mutable `static $hits` in counter() is shared by every fiber — under a scheduler two tasks in this function clobber each other; hold it on the task, or in Async\Context::withValue()
+tests/analyze/cases/async_hazards.php:34:14: warning: file_get_contents() reads '/etc/hostname' on the filesystem, which BLOCKS the whole scheduler (regular files have no readiness signal on either target) — Async\readFile() chunks and yields
+tests/analyze/cases/async_hazards.php:37:9: warning: file_put_contents() writes '/tmp/out' on the filesystem, which BLOCKS the whole scheduler (regular files have no readiness signal on either target) — Async\writeFile() chunks and yields
+tests/analyze/cases/async_hazards.php:38:14: warning: scandir() walks the filesystem, which BLOCKS the whole scheduler (regular files have no readiness signal on either target)
+
+Found 0 error(s), 6 warning(s).

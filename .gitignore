@@ -13,6 +13,9 @@ graphify-out/
 !tests/bootstrap/expected/*.out
 !tests/aot/expected/*.out
 
+# Compiled example binaries (rebuilt via examples/async/build.sh)
+examples/async/*_bin
+
 # OS
 **/.DS_Store
 .fuzz-findings/

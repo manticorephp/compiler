@@ -48,10 +48,51 @@ function __mc_hrtime_i(): int
     return __mir_clock_ns(1);
 }
 
-/** Suspend execution for $microseconds (libc usleep). */
+/**
+ * Suspend execution for $seconds. Returns 0 (php returns the remaining seconds
+ * only when a signal cut the sleep short, which the blocked-and-reaped signal
+ * model never does).
+ *
+ * Under a scheduler this suspends the FIBER, not the process — see
+ * {@see __mc_async_sleep()}.
+ */
+function sleep(int $seconds): int
+{
+    if (!\__mc_async_sleep((float)$seconds)) {
+        \Runtime\Libc\sys_usleep($seconds * 1000000);
+    }
+    return 0;
+}
+
+/** Suspend execution for $microseconds (libc usleep, or a fiber park). */
 function usleep(int $microseconds): void
 {
-    \Runtime\Libc\sys_usleep($microseconds);
+    if (!\__mc_async_sleep((float)$microseconds / 1000000.0)) {
+        \Runtime\Libc\sys_usleep($microseconds);
+    }
+}
+
+/**
+ * Park the CURRENT FIBER for $seconds when a scheduler is driving it, so plain
+ * `sleep()`/`usleep()` — the shape every retry/backoff loop in third-party code
+ * is written in — stops freezing every other task. Returns false when there is
+ * no scheduler, and the caller falls back to the libc sleep.
+ *
+ * The scheduler's own idle `usleep()` runs OUTSIDE any fiber, and
+ * AsyncHook::active() requires \Fiber::getCurrent(), so this cannot recurse into
+ * the loop it is called from.
+ */
+function __mc_async_sleep(float $seconds): bool
+{
+    if (!\Runtime\AsyncHook::active()) {
+        return false;
+    }
+    $h = \Runtime\AsyncHook::sleeper();
+    if ($h === null) {
+        return false;
+    }
+    $h($seconds);
+    return true;
 }
 
 /**
@@ -61,6 +102,9 @@ function usleep(int $microseconds): void
  */
 function time_nanosleep(int $seconds, int $nanoseconds): bool
 {
+    if (\__mc_async_sleep((float)$seconds + (float)$nanoseconds / 1000000000.0)) {
+        return true;
+    }
     $req = \Runtime\Libc\calloc(1, 16);          // struct timespec {tv_sec@0; tv_nsec@8}
     \poke_i64($req, 0, $seconds);
     \poke_i64($req, 8, $nanoseconds);
