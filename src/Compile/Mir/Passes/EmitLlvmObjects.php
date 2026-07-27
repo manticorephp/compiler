@@ -222,9 +222,19 @@ trait EmitLlvmObjects
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
             $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
+            // A ctor takes by-ref params like any other method, and this loop
+            // did not honour them: `new ConsoleSectionOutput($s, $this->sections,
+            // …)` against `array &$sections` handed over the array POINTER, and
+            // the callee's array_unshift wrote the relocated buffer back through
+            // it — into the empty-array singleton's LENGTH field, which every
+            // later `= []` then copied as a length of 0xa77…, so the first
+            // append to any such array wrote off the end of the world.
+            $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
             foreach ($n->args as $a) {
-                if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
+                if ($this->argIsByRef($mask, $ai + 1, $a)) {
+                    $out .= $this->emitByRefArg($a);
+                } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
                     // static type so the ctor reads the runtime tag.
                     $out .= $this->emitNode($a);
