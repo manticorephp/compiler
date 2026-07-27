@@ -298,10 +298,50 @@ trait LowerPrelude
         // src/ never does, which is what keeps the Zend cold-seed alive (see
         // EmitLlvmModule's needsStdStreams block). A stdlib fn that mentioned
         // them would make src/ itself use a stream and kill the bootstrap.
-        if ($name === 'STDIN')  { return new Call('__mc_std_res', [new IntConst(0, Type::int_()), new Call('__mir_stdin',  [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
-        if ($name === 'STDOUT') { return new Call('__mc_std_res', [new IntConst(1, Type::int_()), new Call('__mir_stdout', [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
-        if ($name === 'STDERR') { return new Call('__mc_std_res', [new IntConst(2, Type::int_()), new Call('__mir_stderr', [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
+        if ($name === 'STDIN')  { return $this->stdStreamNode(0); }
+        if ($name === 'STDOUT') { return $this->stdStreamNode(1); }
+        if ($name === 'STDERR') { return $this->stdStreamNode(2); }
 
+        return $this->preludeConstInt($name);
+    }
+
+    /**
+     * The cached `\Resource` for standard stream `$which` (0 in, 1 out, 2 err).
+     * The FILE* comes from the `__mir_std*` builtin emitted right here, at the
+     * mention — see the note above on why it must not come from the stdlib.
+     */
+    private function stdStreamNode(int $which): Node
+    {
+        $builtin = '__mir_stderr';
+        if ($which === 0) { $builtin = '__mir_stdin'; }
+        elseif ($which === 1) { $builtin = '__mir_stdout'; }
+        return new Call(
+            '__mc_std_res',
+            [
+                new IntConst($which, Type::int_()),
+                new Call($builtin, [], Type::obj('Ffi\\Ptr')),
+            ],
+            Type::obj('Resource'),
+        );
+    }
+
+    /**
+     * `php://stdout` / `php://output` / `php://stderr` / `php://stdin` (any
+     * case) → the standard-stream resource, so `fopen()` on the literal every
+     * console app uses answers the same handle the constant does. Null for any
+     * other target, which leaves the stdlib's fopen to handle it.
+     */
+    private function stdStreamResource(string $target): ?Node
+    {
+        $t = \strtolower($target);
+        if ($t === 'php://stdin')  { return $this->stdStreamNode(0); }
+        if ($t === 'php://stdout' || $t === 'php://output') { return $this->stdStreamNode(1); }
+        if ($t === 'php://stderr') { return $this->stdStreamNode(2); }
+        return null;
+    }
+
+    private function preludeConstInt(string $name): ?Node
+    {
         $ints = [
             // string padding
             'STR_PAD_RIGHT' => 1, 'STR_PAD_LEFT' => 0, 'STR_PAD_BOTH' => 2,

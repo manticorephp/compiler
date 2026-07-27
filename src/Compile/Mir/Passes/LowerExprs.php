@@ -433,6 +433,20 @@ trait LowerExprs
                 foreach ($expr->args as $a) { $vdArgs[] = $this->lowerExpr($a); }
                 return new Call('var_dump', $vdArgs, Type::void());
             }
+            // `fopen('php://stdout', …)` → the same cached \Resource the STDOUT
+            // constant lowers to. It cannot be done in the stdlib's fopen: the
+            // FILE* has to come from the `__mir_std*` BUILTIN emitted at the
+            // MENTION, because resolving those platform globals needs host_os(),
+            // and a stdlib function that mentioned them would make the
+            // compiler's own src/ use a stream and kill the Zend cold seed (see
+            // LowerPrelude's STDIN/STDOUT/STDERR). Doing it here keeps that
+            // invariant and still answers the literal every console app opens
+            // with — symfony's ConsoleOutput is fopen('php://stdout', 'w').
+            if ($fn === 'fopen' && \count($expr->args) >= 1
+                && $expr->args[0]->kind === 'StringLiteral') {
+                $stdRes = $this->stdStreamResource($this->stringLitValue($expr->args[0]));
+                if ($stdRes !== null) { return $stdRes; }
+            }
             // First-class callable: `foo(...)` → a closure wrapping foo.
             if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
                 return $this->lowerFcc($expr->function);
