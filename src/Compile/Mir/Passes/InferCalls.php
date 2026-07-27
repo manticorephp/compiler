@@ -676,7 +676,16 @@ trait InferCalls
         // that declares it agrees, so `$cell->name()` reads its string result
         // correctly instead of as a raw pointer. Dispatch unboxes + class_id's
         // at runtime (EmitLlvm); a disagreement leaves the type unresolved.
-        if ($objType->kind === Type::KIND_CELL) {
+        // KIND_UNKNOWN is the same situation with less evidence — the element of
+        // a HETEROGENEOUS literal (`[new Arg(…), new Opt(…)]`) lands there, and
+        // `$item->getName()` then typed unknown even though every candidate
+        // declares `: string`. The caller read the result through the integer
+        // channel, so `$m[$item->getName()] = …` stored the string POINTER as an
+        // int key — symfony's InputDefinition::setDefinition, which is why every
+        // argument lookup missed. Dispatch is unaffected; only the caller's view
+        // of the result changes, and the per-arm boxing already agrees when the
+        // candidates agree.
+        if ($objType->kind === Type::KIND_CELL || $objType->kind === Type::KIND_UNKNOWN) {
             $rt = $this->cellMethodReturn($node->method);
             if ($rt !== null) { $node->type = $rt; }
         }
