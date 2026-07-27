@@ -38,10 +38,12 @@ $report = async(function () use ($server): string {
 $lines = explode("\n", trim($report));
 var_dump(count($lines) >= 5);
 var_dump(str_contains($lines[0], 'live task(s)'));
-var_dump(str_contains($report, '"acceptor" io-read fd='));
+// Each line is `#id "label" at file:line <what>` — the spawn site is folded in
+// by the compiler, so it is machine-specific and only its PRESENCE is asserted.
+var_dump(str_contains($report, '"acceptor" at ') && str_contains($report, 'io-read fd='));
 var_dump(str_contains($report, '+deadline'));
-var_dump(str_contains($report, '"sleeper" timer'));
-var_dump(str_contains($report, '"receiver" channel'));
+var_dump(str_contains($report, '"sleeper" at ') && str_contains($report, ' timer'));
+var_dump(str_contains($report, '"receiver" at ') && str_contains($report, ' channel'));
 var_dump(substr_count($report, '*') === 1);          // exactly one running task
 
 // Outside a scheduler there is nothing to report.
@@ -58,7 +60,7 @@ try {
 } catch (\Async\DeadlockException $e) {
     $m = $e->getMessage();
     var_dump(str_contains($m, 'deadlock'));
-    var_dump(str_contains($m, '"blocked-receiver" channel'));
+    var_dump(str_contains($m, '"blocked-receiver" at ') && str_contains($m, ' channel'));
 }
 
 fclose($server);

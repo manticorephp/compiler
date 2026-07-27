@@ -2977,7 +2977,7 @@ final class Parser
     private function span(): Span
     {
         $tok = $this->tokens[$this->pos];
-        return new Span($tok->line, $tok->column);
+        return new Span($tok->line, $tok->column, $this->sourceFile);
     }
 
     private function error(string $message): ParseError

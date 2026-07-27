@@ -328,6 +328,19 @@ namespace Async {
         public string $name = '';
 
         /**
+         * `file:line` of the spawn that created this task — filled in by the
+         * COMPILER, which rewrites `Async\spawn(…)` to the internal `…At` form
+         * carrying a folded literal (the same place `__FILE__` is folded, since
+         * lowering sees a statement list flattened across every file).
+         *
+         * It is the difference between `#3 io-read fd=7` and a line of code when
+         * a program hangs, and nobody remembers to call {@see named()} BEFORE the
+         * hang. '' when the spawn came from somewhere the rewrite does not reach
+         * (a dynamic callable, a spawn inside the prelude itself).
+         */
+        public string $origin = '';
+
+        /**
          * Intrusive doubly-linked list of LIVE tasks, head on the Scheduler. It
          * exists so {@see Async\dump()} can enumerate what is running when a program
          * hangs: the scope tree cannot answer that (settled children are pruned, and
@@ -370,7 +383,13 @@ namespace Async {
             // freshly spawned task is unclaimed, so that spelling was pure noise.
             if ($this->claimed) { $flags = $flags . ' awaited'; }
             $label = $this->name === '' ? '' : (' "' . $this->name . '"');
-            return '#' . (string)$this->id . $label . ' ' . $what . $flags;
+            // `near …` is already a preposition — `at near x` reads as a typo.
+            $where = '';
+            if ($this->origin !== '') {
+                $where = \substr($this->origin, 0, 5) === 'near '
+                    ? (' ' . $this->origin) : (' at ' . $this->origin);
+            }
+            return '#' . (string)$this->id . $label . $where . ' ' . $what . $flags;
         }
 
         /**
@@ -503,6 +522,16 @@ namespace Async {
         /** @var array<string, mixed> scoped values, inherited down the chain */
         public array $values = [];
 
+        /**
+         * `file:line` where this scope was opened, folded in by the compiler
+         * ({@see Task::$origin}). It is what gives `$g->spawn(…)` a location: the
+         * receiver's class is not known until InferTypes, so that call cannot be
+         * rewritten at lowering, and the scope it spawns into is the next best
+         * answer — reported as `near <site>` so it is never mistaken for the exact
+         * spawn line.
+         */
+        public string $site = '';
+
         public function __construct(public ?TaskGroup $parent = null) {}
 
         /** The read-only cancellation handle for this scope. */
@@ -546,9 +575,16 @@ namespace Async {
          */
         public static function run(callable $body): mixed
         {
+            return self::runAt('', $body);
+        }
+
+        /** {@see run()} with the compiler-folded call site. @internal */
+        public static function runAt(string $site, callable $body): mixed
+        {
             $sched = Scheduler::instance();
             $cur = $sched->current();
             $group = new TaskGroup($cur->scope);
+            $group->site = $site;
             $cur->scope = $group;
             $result = null;
             $thrown = null;
@@ -582,7 +618,22 @@ namespace Async {
         /** Spawn a child task into this group. Returns a handle to await. */
         public function spawn(callable $fn, mixed ...$args): Task
         {
+            return $this->spawnAt('', $fn, ...$args);
+        }
+
+        /**
+         * {@see spawn()} with the call site the compiler folded in — see
+         * {@see Task::$origin}. `@internal`: written by the lowering rewrite, not
+         * by hand (`$g->spawn(…)` is the API and picks this up automatically when
+         * the receiver is statically a TaskGroup).
+         */
+        public function spawnAt(string $site, callable $fn, mixed ...$args): Task
+        {
             $task = Scheduler::instance()->newTask($fn, $args, $this);
+            // No exact site (`$g->spawn(…)`, a dynamic callable) ⇒ fall back to the
+            // scope's own line, flagged as approximate.
+            if ($site === '' && $this->site !== '') { $site = 'near ' . $this->site; }
+            $task->origin = $site;
             $task->idx = \count($this->children);
             $this->children[] = $task;
             if ($this->cancelled) {
@@ -1484,11 +1535,12 @@ namespace Async {
         }
 
         // ── the run entry ──────────────────────────────────────────────────
-        public function run(callable $main): mixed
+        public function run(callable $main, string $site = ''): mixed
         {
             $root = new TaskGroup(null);
             $this->root = $root;
             $rootTask = $this->newTask($main, [], $root);
+            $rootTask->origin = $site;
             $rootTask->idx = 0;
             $root->children[] = $rootTask;
             $this->installNetpoller();
@@ -2209,7 +2261,13 @@ namespace Async {
      */
     function async(callable $main): mixed
     {
-        return Scheduler::instance()->run($main);
+        return Scheduler::instance()->run($main, '');
+    }
+
+    /** @internal {@see async()} with the compiler-folded call site. */
+    function __asyncAt(string $site, callable $main): mixed
+    {
+        return Scheduler::instance()->run($main, $site);
     }
 
     /**
@@ -2225,7 +2283,13 @@ namespace Async {
      */
     function group(callable $body): mixed
     {
-        return TaskGroup::run($body);
+        return TaskGroup::runAt('', $body);
+    }
+
+    /** @internal {@see group()} with the compiler-folded call site. */
+    function __groupAt(string $site, callable $body): mixed
+    {
+        return TaskGroup::runAt($site, $body);
     }
 
     /**
@@ -2235,11 +2299,22 @@ namespace Async {
      */
     function spawn(callable $fn, mixed ...$args): Task
     {
+        return __spawnAt('', $fn, ...$args);
+    }
+
+    /**
+     * @internal {@see spawn()} carrying the `file:line` the compiler folded at the
+     * call site (see {@see Task::$origin}). Never write this by hand — the
+     * lowering rewrite produces it, and a hand-written `''` is what plain
+     * `spawn()` already does.
+     */
+    function __spawnAt(string $site, callable $fn, mixed ...$args): Task
+    {
         $group = Scheduler::instance()->currentGroup();
         if ($group === null) {
             throw new \LogicException('spawn() outside Async\\async() — no scope to own the task');
         }
-        return $group->spawn($fn, ...$args);
+        return $group->spawnAt($site, $fn, ...$args);
     }
 
     /**
@@ -2270,12 +2345,19 @@ namespace Async {
      */
     function timeout(float $seconds, callable $body): mixed
     {
+        return __timeoutAt('', $seconds, $body);
+    }
+
+    /** @internal {@see timeout()} with the compiler-folded call site. */
+    function __timeoutAt(string $site, float $seconds, callable $body): mixed
+    {
         $sched = Scheduler::instance();
         if ($sched->currentGroup() === null) {
             throw new \LogicException('timeout() outside Async\\async() — no scope');
         }
         $cur = $sched->current();
         $group = new TaskGroup($cur->scope);
+        $group->site = $site;
         $group->deadline = \microtime(true) + $seconds;
         $effective = $group->deadlineAt();   // an enclosing deadline still wins if nearer
         $prev = $cur->scope;
@@ -2283,7 +2365,7 @@ namespace Async {
 
         // The body runs as a CHILD, not in this fiber: only a separate task can be
         // cancelled at its suspend point while we keep holding the timer.
-        $task = $group->spawn(function () use ($body, $group) { return $body($group); });
+        $task = $group->spawnAt($site, function () use ($body, $group) { return $body($group); });
         $settled = false;
         try {
             $settled = $sched->awaitDeadline($task, $effective);

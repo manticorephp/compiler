@@ -2950,6 +2950,19 @@ final class LowerFromAst implements Pass
         } else {
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
         }
+        // `TaskGroup::run(…)` carries its call site too — see asyncSiteCallee().
+        // The class is syntactic here, so this needs no inference; a program that
+        // declares its own `TaskGroup` already collides with the prelude's (the
+        // demand gate keys on that very name).
+        if ($this->asyncSrc !== '' && $expr->method === 'run'
+            && ($class === 'Async\\TaskGroup' || $class === 'TaskGroup')) {
+            $site = $this->callSite($expr->span);
+            if ($site !== '') {
+                $sited = [new StringConst($site, Type::string_())];
+                foreach ($args as $a) { $sited[] = $a; }
+                return new StaticCall_($class, 'runAt', $sited, Type::unknown(), $scope);
+            }
+        }
         return new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
     }
 

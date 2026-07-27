@@ -360,6 +360,15 @@ trait LowerExprs
             }
             $callee = $this->resolveCallName($expr->function);
             $args = $this->lowerCallArgs($callee, $expr->args);
+            $sited = $this->asyncSiteCallee($callee);
+            if ($sited !== '') {
+                $site = $this->callSite($expr->span);
+                if ($site !== '') {
+                    $withSite = [new StringConst($site, Type::string_())];
+                    foreach ($args as $a) { $withSite[] = $a; }
+                    return new Call($sited, $withSite, Type::unknown());
+                }
+            }
             return new Call($callee, $args, Type::unknown());
         }
         if ($expr->kind === 'Spread')         { return new Spread_($this->lowerExpr($expr->value), Type::unknown()); }
@@ -424,6 +433,58 @@ trait LowerExprs
             . ' at line ' . (string)$expr->span->line
         );
     }
+
+    /**
+     * The internal twin that carries a call site, for the three `Async\` entry
+     * points that CREATE a task — or '' for everything else.
+     *
+     * A parked task otherwise reports `#3 io-read fd=7`: an fd number, when what
+     * a hang needs is a line of code. `Task::named()` exists but nobody annotates
+     * before the hang, so the site is folded in at the one stage that still knows
+     * which file a call came from (lowering sees statements flattened across the
+     * whole build — the same reason `__FILE__` folds at parse time).
+     *
+     * Only the NAMESPACED functions are rewritten, so a program's own `spawn()`
+     * is untouched; `resolveCallName` has already mapped `use function
+     * Async\spawn` to its FQN by the time we get here.
+     */
+    private function asyncSiteCallee(string $callee): string
+    {
+        // No async prelude in this build ⇒ the twins do not exist to call.
+        if ($this->asyncSrc === '') { return ''; }
+        if ($callee === 'Async\\spawn')   { return 'Async\\__spawnAt'; }
+        if ($callee === 'Async\\async')   { return 'Async\\__asyncAt'; }
+        if ($callee === 'Async\\timeout') { return 'Async\\__timeoutAt'; }
+        if ($callee === 'Async\\group')   { return 'Async\\__groupAt'; }
+        return '';
+    }
+
+    /**
+     * `file:line` for a call, relative to the compiling directory when it sits
+     * under it — an absolute path is machine-specific noise in a task dump, and
+     * the relative form is what the test expectations can pin.
+     *
+     * '' when the span has no file: a synthesized node, or the prelude blob,
+     * which is parsed as one source with no path. That is also what keeps the
+     * rewrite from firing on `prelude/async.php`'s own internal calls.
+     */
+    private function callSite(\Parser\Ast\Span $span): string
+    {
+        $file = $span->file;
+        if ($file === '') { return ''; }
+        if ($this->siteCwd === '') {
+            $cwd = \getcwd();
+            $this->siteCwd = $cwd === false ? '-' : ($cwd . '/');
+        }
+        $n = \strlen($this->siteCwd);
+        if ($this->siteCwd !== '-' && \substr($file, 0, $n) === $this->siteCwd) {
+            $file = \substr($file, $n);
+        }
+        return $file . ':' . (string)$span->line;
+    }
+
+    /** Cached `getcwd()` with a trailing slash for {@see callSite()}; '-' = none. */
+    private string $siteCwd = '';
 
     /** Build the store node for an assignment target + already-lowered value. */
     private function storeToTarget(\Parser\Ast\Expr $target, Node $value): Node
