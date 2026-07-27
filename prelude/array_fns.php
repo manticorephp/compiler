@@ -225,11 +225,7 @@ function __mc_sort_cmp(mixed $a, mixed $b, int $flags): int
     if ($base === 2 || $base === 5) {
         $sa = (string)$a;
         $sb = (string)$b;
-        // NOT strcasecmp: the libc bind returns a C `int` that this tree does
-        // not sign-extend, so a negative comes back as 4294967295 and every
-        // case-insensitive compare read as "greater". strtolower + strcmp is
-        // exact and stays clear of the broken binding.
-        $r = $ci ? \strcmp(\strtolower($sa), \strtolower($sb)) : \strcmp($sa, $sb);
+        $r = $ci ? \strcasecmp($sa, $sb) : \strcmp($sa, $sb);
         if ($r < 0) { return -1; }
         if ($r > 0) { return 1; }
         return 0;

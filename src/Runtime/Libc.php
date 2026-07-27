@@ -42,7 +42,13 @@ function memcpy(Ptr $dst, Ptr $src, #[CType('size_t')] int $n): Ptr {}
 #[Library('c'), Symbol('memset')]
 function memset(Ptr $dst, #[CType('int')] int $byte, #[CType('size_t')] int $n): Ptr {}
 
-#[Library('c'), Symbol('memcmp')]
+// The COMPARISON family returns a C `int` whose SIGN is the whole answer, so
+// each one needs the fn-level #[CType('int')] sext. Without it a negative
+// result reads as ~4.29e9 on any target whose libc leaves the upper half of the
+// return register undefined — glibc/x86_64 does, arm64 (Darwin and Linux) does
+// not, which is why every string sort was correct on arm64 and reversed on
+// amd64 (closure_string_abi, sort_usort_reduce, uasort_int_arith, ...).
+#[Library('c'), Symbol('memcmp'), CType('int')]
 function memcmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
 #[Library('c'), Symbol('memchr')]
@@ -53,7 +59,7 @@ function memchr(Ptr $hay, #[CType('int')] int $byte, #[CType('size_t')] int $n):
 #[Library('c'), Symbol('strlen')]
 function strlen(string $s): int {}
 
-#[Library('c'), Symbol('strcmp')]
+#[Library('c'), Symbol('strcmp'), CType('int')]
 function strcmp(string $a, string $b): int {}
 
 // `char *strerror(int errnum)` — the message for an errno. The returned buffer is
@@ -61,13 +67,13 @@ function strcmp(string $a, string $b): int {}
 #[Library('c'), Symbol('strerror')]
 function strerror(#[CType('int')] int $errnum): Ptr {}
 
-#[Library('c'), Symbol('strncmp')]
+#[Library('c'), Symbol('strncmp'), CType('int')]
 function strncmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
-#[Library('c'), Symbol('strcasecmp')]
+#[Library('c'), Symbol('strcasecmp'), CType('int')]
 function strcasecmp(string $a, string $b): int {}
 
-#[Library('c'), Symbol('strncasecmp')]
+#[Library('c'), Symbol('strncasecmp'), CType('int')]
 function strncasecmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
 #[Library('c'), Symbol('strchr')]
