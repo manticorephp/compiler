@@ -25,6 +25,10 @@ if ($server === false) {
     if ($worker === 0) {
         echo "transparent http on :8080 (", WORKERS, " workers)\n";
     }
+    // DELIBERATELY UNBOUNDED — this file exists to produce a `wrk` number, and an
+    // acquire/release on the hot path muddies it. A real server needs a ceiling:
+    // examples/async/server.php shows the shape (a Semaphore taken BEFORE the
+    // accept). Note the ceiling is PER WORKER — WORKERS multiplies it.
     async(function () use ($server) {
         while (true) {
             $conn = stream_socket_accept($server);      // plain accept — auto-suspends

@@ -265,6 +265,34 @@ $sem = new Async\Semaphore(4);
 $sem->withPermit(fn() => work());
 ```
 
+**An accept loop needs one.** It is the one place a scheduler will happily let you
+spawn without bound: `while (true) { $g->spawn(serve(accept())); }` turns a
+connection burst into unbounded tasks, fds and memory, and the first thing to fail is
+something unrelated. Take the permit **before** the accept — then the queue stays in
+the kernel backlog, where it belongs, instead of in your heap.
+
+```php
+$gate = new Async\Semaphore(256);
+Async\group(function (Async\TaskGroup $g) use ($server, $gate) {
+    while (true) {
+        $gate->acquire();                                  // BEFORE the accept
+        $conn = stream_socket_accept($server);
+        if ($conn === false) { $gate->release(); continue; }
+        $g->spawn(function () use ($conn, $gate) {
+            try { serve($conn); } finally { $gate->release(); }   // in the CHILD
+        });
+    }
+});
+```
+
+`Async\stats()['live']` is the gauge to alert on, and `Async\dump()` names the tasks
+when it climbs. There is deliberately **no built-in ceiling on tasks per scope**:
+`spawn()` is the wrong place to fail (the exception would land in the acceptor, the
+one task that has to survive an overload), a hard error turns overload into a crash
+instead of flow control, and `live` counts timers and reporters that share nothing
+with the work being limited. The policy — park, shed, or answer 503 — belongs to the
+application, and a Semaphore owned by the scope that owns the work already expresses it.
+
 ### Scoped values
 
 ```php
