@@ -1,0 +1,4 @@
+count=3 [zero|one|two]
+shift='zero' left=2 [one|two]
+pop='two' left=2 [zero|one]
+argv_is_array=Y argv0_nonempty=Y argc_matches=Y

@@ -3908,6 +3908,24 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * The array-buffer pointer for a builtin's array argument, whatever repr it
+     * arrived in. A CELL base carries the pointer NaN-boxed, so the tag has to
+     * be stripped — a bare `coerceToPtr` inttoptr's the tagged word and the
+     * runtime walks a wild address. Mirrors the read/write paths in
+     * {@see EmitLlvmArrays::emitArrayAccessUnified}.
+     *
+     * `array_shift($_SERVER['argv'])` is exactly this shape — the value read out
+     * of a mixed assoc is a cell — and it SIGSEGV'd every console app on its
+     * first line.
+     */
+    private function arrayArgToPtr(Node $arg): string
+    {
+        return $arg->type->kind === Type::KIND_CELL
+            ? $this->cellToPtr()
+            : $this->coerceToPtr();
+    }
+
+    /**
      * `array_pop($v)` — shrink the vec length in place (header[0]) and
      * return the last element. No realloc; the slot still points at the
      * same buffer so the caller sees the new length. A 0-length pop reads
@@ -3917,7 +3935,7 @@ trait EmitLlvmBuiltins
     private function biArrayPop(Call $c): string
     {
         $out = $this->emitNode($c->args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->arrayArgToPtr($c->args[0]);
         $arr = $this->lastValue;
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = call i64 @__mir_array_pop(ptr ' . $arr . ")\n";
@@ -3932,7 +3950,7 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
         $out = $this->emitNode($c->args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->arrayArgToPtr($c->args[0]);
         $arr = $this->lastValue;
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = call i64 @__mir_array_shift(ptr ' . $arr . ")\n";

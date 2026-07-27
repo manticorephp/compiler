@@ -306,6 +306,13 @@ trait InferCalls
             if (\count($args) >= 1 && $args[0]->type->element !== null) {
                 return $args[0]->type->element;
             }
+            // A CELL container (a `mixed` slot holding an array, e.g.
+            // `$_SERVER['argv']`) has no static element, but its slots DO carry
+            // NaN-boxed cells — so the popped value is a cell, not a raw i64.
+            // Left unknown it read back as the tagged word's integer value.
+            if (\count($args) >= 1 && $args[0]->type->kind === Type::KIND_CELL) {
+                return Type::cell();
+            }
             return null;
         }
         // strpos is `int|false` — a tagged cell (Zend-faithful miss).
