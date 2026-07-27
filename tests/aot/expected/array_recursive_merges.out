@@ -63,3 +63,103 @@ Array
 Array
 (
 )
+Array
+(
+    [color] => Array
+        (
+            [favorite] => Array
+                (
+                    [0] => red
+                    [1] => blue
+                )
+
+        )
+
+    [0] => 5
+    [1] => 10
+)
+Array
+(
+    [color] => Array
+        (
+            [favorite] => Array
+                (
+                    [0] => red
+                    [1] => green
+                )
+
+            [0] => blue
+        )
+
+    [0] => 5
+    [1] => 10
+)
+Array
+(
+    [a] => Array
+        (
+            [0] => 1
+            [1] => 2
+        )
+
+)
+Array
+(
+    [a] => Array
+        (
+            [0] => x
+            [1] => y
+            [2] => z
+        )
+
+)
+Array
+(
+    [a] => Array
+        (
+            [0] => y
+            [1] => z
+            [2] => x
+        )
+
+)
+Array
+(
+    [x] => Array
+        (
+            [y] => Array
+                (
+                    [z] => 1
+                    [keep] => me
+                    [w] => 2
+                )
+
+        )
+
+)
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [k] => v
+    [3] => 4
+)
+Array
+(
+    [a] => Array
+        (
+            [0] => 1
+            [1] => 2
+            [2] => 3
+        )
+
+)
+Array
+(
+    [keep] => me
+    [0] => 7
+)
+Array
+(
+)

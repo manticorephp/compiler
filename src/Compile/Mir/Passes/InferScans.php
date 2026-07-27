@@ -582,7 +582,15 @@ trait InferScans
                 // that properly means encoding the param types into the prelude
                 // SYMBOL, which is a separate change.
                 if ($fn->isPrelude && $p->byRef) { $idx = $idx + 1; continue; }
-                if (!$p->variadic && $this->isUnknownArrayElem($p->type)) {
+                // A VARIADIC pack is refinable on the same terms as a by-value
+                // array param. The caller already built the pack as one
+                // array_lit whose type is known (`vec[assoc[cell,cell]]`) while
+                // the declared param says `vec[unknown]`; Monomorphize only
+                // closes that gap when it actually clones, so a callee it
+                // declines to clone (a lone user call site) read every pack
+                // element off an untyped buffer. Only the ELEMENT is refined —
+                // the pack ABI is one vec param either way.
+                if ($this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
                 } elseif (!$p->variadic && $p->type->isArray()) {
                     // A param the per-fn heuristic already refined (e.g. vec[string]

@@ -1558,6 +1558,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // prelude is injected WHOLE — so a miscompile in any function sharing that
     // file breaks generation 2 of the self-host. Nothing in src/ calls these.
     $useArrayFnsExt = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsExtSrc));
+    // `array_multisort` is DESUGARED at the call site (LowerExprs) into
+    // __mc_multisort_order + __mc_multisort_apply, so the user's source never
+    // names either helper and the definedFunctions gate above cannot see the
+    // demand. Gate on the name the program actually writes.
+    if ($demand->callsAny(['array_multisort'])) { $useArrayFnsExt = true; }
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);

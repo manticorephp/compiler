@@ -260,6 +260,15 @@ trait InferCalls
         // {@see EmitLlvmBuiltins::biDebugBacktrace}). Cell values match the frame
         // assoc's mixed int/string layout.
         if ($n === 'debug_backtrace') { return Type::vec(Type::assoc(Type::string_(), Type::cell())); }
+        // The internal-pointer family (codegen builtin
+        // {@see EmitLlvmBuiltins::biArrayCursor}). Every one yields a tagged
+        // cell: the element value, or `false` past the end — and `key` the
+        // int|string key or null. Only the 1-arg array forms are builtins.
+        if (($n === 'current' || $n === 'pos' || $n === 'key' || $n === 'next'
+            || $n === 'prev' || $n === 'reset' || $n === 'end')
+            && \count($args) === 1) {
+            return Type::cell();
+        }
         // array_first/array_last (8.5) + array_key_first/array_key_last — the
         // first/last value or key as a tagged cell, null on empty (codegen
         // builtin {@see EmitLlvmBuiltins::biArrayEndpoint}). A cell result lets

@@ -500,6 +500,48 @@ final class MemoryAbi
     public const ARRAY_REPR_ARR  = 6;   // 3<<1 — raw nested arrays → __mir_array_release
     public const ARRAY_REPR_CELL = 8;   // 4<<1 — boxed cells → __mir_cell_drop (tag dispatch)
 
+    /**
+     * Bits 8-35 of the flags word: the TOMBSTONE COUNTER (how many KIND_DELETED
+     * entries the buffer carries). It used to run to bit 63; it is now bounded
+     * so the INTERNAL POINTER can live above it. Every read must mask — an
+     * unmasked `flags >> 8` sees the pointer as tombstones, and
+     * `__mir_array_live_len` COMPACTS whenever that is non-zero, so a moved
+     * pointer would compact the array on every foreach/count.
+     *
+     * 2^28 tombstones is ~268M dead entries in ONE buffer; live_len compacts
+     * long before that.
+     */
+    public const ARRAY_TOMB_SHIFT = 8;
+    public const ARRAY_TOMB_BITS  = 28;
+    /** `((1 << 28) - 1)` — apply AFTER shifting right by {@see ARRAY_TOMB_SHIFT}. */
+    public const ARRAY_TOMB_VALUE_MASK = 268435455;
+    /** The tombstone field in place, for clearing it without touching the rest. */
+    public const ARRAY_TOMB_FIELD_MASK = 68719476480;   // 0xFFFFFFF << 8
+
+    /**
+     * Bits 36-63 of the flags word: the INTERNAL POINTER (php's
+     * `HashTable::nInternalPointer`) — the PHYSICAL entry index that
+     * `current`/`key`/`next`/`prev`/`reset`/`end` walk. Stored +1 so that a
+     * zeroed header (and every array built by an older generation) reads as
+     * "position 0", and so the whole field being 0 is a valid initial state.
+     *
+     * It rides the HEADER, not a side table, because php's pointer is part of
+     * the array VALUE: a COW clone memcpy's the header, so the position copies
+     * with the value exactly as Zend's does, and a write separates first.
+     */
+    public const ARRAY_PTR_SHIFT = 36;
+    /** `((1 << 28) - 1)` — apply AFTER shifting right by {@see ARRAY_PTR_SHIFT}. */
+    public const ARRAY_PTR_VALUE_MASK = 268435455;
+    /** The pointer field in place. */
+    public const ARRAY_PTR_FIELD_MASK = -68719476736;   // 0xFFFFFFF << 36
+
+    /**
+     * Everything BELOW the pointer field — what compaction keeps. Compaction
+     * renumbers entries, so it resets the tombstone count AND the pointer,
+     * which is why the old `and flags, 255` is still the right reset.
+     */
+    public const ARRAY_FLAGS_LOW_MASK = 255;
+
     /** PACKED mode: each value is one i64 slot at data+i*8. */
     public const ARRAY_PACKED_ELEMENT_SIZE = 8;
 

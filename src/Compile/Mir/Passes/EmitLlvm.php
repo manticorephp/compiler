@@ -1706,6 +1706,30 @@ final class EmitLlvm implements EmitVisitor
         $el = $value->type->element ?? null;
         $borrowedCellArray = $k === Type::KIND_ARRAY
             && ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN);
+        // An ALREADY-BOXED cell moved into a cell slot (`$out[$k] = $v` where
+        // `$v` is a foreach value off another cell array) is stored by its
+        // tagged payload — the destination's release runs __mir_cell_drop on
+        // it, so a borrowed source needs the mirror retain or the payload is
+        // freed while the destination still points at it. rcRetainByType bails
+        // on KIND_CELL (it is a raw i64 there, never inttoptr'd), so route it
+        // through the tag-dispatched helper directly; it no-ops on an
+        // int/float/bool/null cell. An OWNED producer's +1 transfers.
+        if ($k === Type::KIND_CELL) {
+            $vk = $value->kind;
+            if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
+                || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
+                || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
+                || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT) {
+                return '';
+            }
+            $sv = $this->lastValue;
+            $st = $this->lastValueType;
+            $o = $this->coerceToI64();
+            $o .= $this->rcRetainReg($this->lastValue, 'cell');
+            $this->lastValue = $sv;
+            $this->lastValueType = $st;
+            return $o;
+        }
         if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
             && !$borrowedCellArray) {
             return '';

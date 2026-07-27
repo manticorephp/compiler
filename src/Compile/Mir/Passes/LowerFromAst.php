@@ -257,6 +257,9 @@ final class LowerFromAst implements Pass
     /** Counter for unique `yield from` desugar loop variables. */
     private int $yieldFromCounter = 0;
 
+    /** Counter for the permutation temp of each `array_multisort` desugar. */
+    private int $multisortSeq = 0;
+
     /** @var array<string, EnumDef> enum name → case table (pre-pass) */
     private array $enumTable = [];
 
