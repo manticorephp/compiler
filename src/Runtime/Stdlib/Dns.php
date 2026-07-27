@@ -492,24 +492,6 @@ function __mc_dns_rcode(string $msg): int
 }
 
 /**
- * Last query outcome holder, the {@see __mc_net_errno} idiom (an int static: the
- * stdlib cannot own an assoc, and a string static's repr across the boundary is
- * untested). -1 = no server answered at all, which is what stops a search walk.
- */
-function __mc_dns_rcode_hold(bool $write, int $val): int
-{
-    static $r = -1;
-    if ($write) { $r = $val; }
-    return $r;
-}
-
-/** The RCODE of the last query, or -1 when nobody answered. */
-function __mc_dns_rcode_last(): int
-{
-    return \__mc_dns_rcode_hold(false, 0);
-}
-
-/**
  * {@see __mc_dns_query} against an explicit nameserver list, so a caller walking a
  * search list parses resolv.conf ONCE instead of once per candidate. Records the
  * reply's RCODE for that walk to read back.

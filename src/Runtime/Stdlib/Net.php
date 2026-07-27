@@ -939,6 +939,32 @@ function __mc_net_errno(bool $write, int $val): int
     return $e;
 }
 
+/**
+ * The RCODE of the last DNS query, same idiom, -1 when NO server answered — which
+ * is what stops a search-list walk before a dead resolver is multiplied by the
+ * suffix count.
+ *
+ * ⚠ It lives HERE, in a global-namespace file, rather than beside the resolver in
+ * Dns.php: a `static` inside a NAMESPACED function used to emit `@Ns\fn__sl_x`,
+ * which is not valid LLVM. That is fixed in the compiler
+ * ({@see \Compile\Mir\Passes\LowerFromAst::lowerStaticLocal}) — but a compiler
+ * generation WITHOUT the fix cannot build a tree that needs it, so `bin/build`
+ * on any older binary would die here and only a cold seed could recover. The
+ * tree stays buildable by every generation; the fix stays for user code.
+ */
+function __mc_dns_rcode_hold(bool $write, int $val): int
+{
+    static $r = -1;
+    if ($write) { $r = $val; }
+    return $r;
+}
+
+/** The RCODE of the last query, or -1 when nobody answered. */
+function __mc_dns_rcode_last(): int
+{
+    return \__mc_dns_rcode_hold(false, 0);
+}
+
 /** strerror($errno) as an owned string ('' for 0). */
 function __mc_errno_msg(int $errno): string
 {
