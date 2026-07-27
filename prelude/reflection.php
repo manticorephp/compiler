@@ -750,21 +750,34 @@ class ReflectionProperty
     public function __construct(object|string $objectOrClass, string $property)
     {
         if (\is_string($objectOrClass)) {
-            $cls = __mc_refl_unqualify($objectOrClass);
-            $h = __mc_refl_find($cls);
+            $h = __mc_refl_find(__mc_refl_unqualify($objectOrClass));
         } else {
             $h = __mc_refl_of($objectOrClass);
-            $cls = __mc_refl_name($h);
         }
         if ($h === 0) {
             throw new ReflectionException("Class does not exist");
         }
-        $fl = __mc_refl_member($h, $property, 0);
+        // php reports the class that DECLARES the property in `->class`, not the
+        // one asked about. symfony's Command::getDefaultName() keys off exactly
+        // that difference — `$class !== $r->class` means "the static was
+        // inherited, so it is not this command's name". A subclass's rmeta
+        // already carries its inherited rows, so the lookup succeeds right away
+        // and it is the CLIMB that finds the declaring class: keep going while
+        // the parent still has the member.
+        $owner = $h;
+        $fl = __mc_refl_member($owner, $property, 0);
         if ($fl === 0) {
-            throw new ReflectionException("Property " . $property . " does not exist");
+            throw new ReflectionException(
+                "Property " . __mc_refl_name($h) . "::$" . $property . " does not exist");
         }
+        $p = __mc_refl_parent($owner);
+        while ($p !== 0 && __mc_refl_member($p, $property, 0) !== 0) {
+            $owner = $p;
+            $p = __mc_refl_parent($p);
+        }
+        $h = $owner;
         $this->h = $h;
-        $this->class = $cls;
+        $this->class = __mc_refl_name($h);
         $this->name = $property;
         $this->flags = $fl - 1;
         $this->row = __mc_refl_prow($h, $property);
