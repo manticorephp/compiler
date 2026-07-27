@@ -2238,23 +2238,113 @@ trait EmitLlvmExpr
             return $out;
         }
         if ($c->target === 'array') {
-            // `(array)$cell` — a tagged OBJECT cell → its bag assoc.
-            if ($ok === Type::KIND_CELL) {
-                $out .= $this->cellToPtr();
+            // A value whose kind is only known at runtime: php's rules are
+            // per-kind (array → itself, null → [], object → its properties,
+            // scalar → [$v]) so the dispatch has to happen at runtime. Reading
+            // EVERY cell as an object and returning its property bag — what this
+            // did — walked a string as an object: `(array) $values` on
+            // symfony's `string|array $values` faulted on the first line of a
+            // run. Also covers a raw scalar, which fell through to the
+            // pass-through below and handed back the value AS an array pointer.
+            if ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN
+                || $ok === Type::KIND_UNION || $ok === Type::KIND_STRING
+                || $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_BOOL || $ok === Type::KIND_NULL) {
+                $out .= $this->boxToCell($c->operand->type);
+                $out .= $this->coerceToI64();
+                $v = $this->lastValue;
+                $this->rt->needsTagged = true;
                 $std = $this->classes['stdClass'] ?? null;
                 $bagOff = $std === null ? 16 : $std->bagOffset();
+                $slot = $this->ssa->allocReg();
+                $out .= '  ' . $slot . " = alloca ptr\n";
+                $out .= $this->cellTagIr($v);
+                $tag = $this->cellTagReg;
+                $arrL = $this->ssa->allocLabel('ca.arr');
+                $objChk = $this->ssa->allocLabel('ca.chkobj');
+                $objL = $this->ssa->allocLabel('ca.obj');
+                $nullChk = $this->ssa->allocLabel('ca.chknull');
+                $nullL = $this->ssa->allocLabel('ca.null');
+                $scalarL = $this->ssa->allocLabel('ca.scalar');
+                $endL = $this->ssa->allocLabel('ca.end');
+                $isArr = $this->ssa->allocReg();
+                $out .= '  ' . $isArr . ' = icmp eq i64 ' . $tag . ", 7\n";
+                $out .= '  br i1 ' . $isArr . ', label %' . $arrL . ', label %' . $objChk . "\n";
+                // ARRAY → itself, tag stripped.
+                $out .= $arrL . ":\n";
+                $ap = $this->ssa->allocReg();
+                $out .= '  ' . $ap . ' = and i64 ' . $v . ", 281474976710655\n";
+                $app = $this->ssa->allocReg();
+                $out .= '  ' . $app . ' = inttoptr i64 ' . $ap . " to ptr\n";
+                $out .= '  store ptr ' . $app . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                // OBJECT → its property bag, as before.
+                $out .= $objChk . ":\n";
+                $isObj = $this->ssa->allocReg();
+                $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
+                $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $nullChk . "\n";
+                $out .= $objL . ":\n";
+                $op = $this->ssa->allocReg();
+                $out .= '  ' . $op . ' = and i64 ' . $v . ", 281474976710655\n";
+                $opp = $this->ssa->allocReg();
+                $out .= '  ' . $opp . ' = inttoptr i64 ' . $op . " to ptr\n";
                 $bg = $this->ssa->allocReg();
-                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $this->lastValue . ', i64 ' . (string)$bagOff . "\n";
+                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $opp . ', i64 ' . (string)$bagOff . "\n";
                 $bagI = $this->ssa->allocReg();
                 $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
                 $bagP = $this->ssa->allocReg();
                 $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-                $this->lastValue = $bagP; $this->lastValueType = 'ptr';
+                $out .= '  store ptr ' . $bagP . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                // NULL → the empty array.
+                $out .= $nullChk . ":\n";
+                $isNull = $this->ssa->allocReg();
+                $out .= '  ' . $isNull . ' = icmp eq i64 ' . $tag . ", 3\n";
+                $out .= '  br i1 ' . $isNull . ', label %' . $nullL . ', label %' . $scalarL . "\n";
+                $out .= $nullL . ":\n";
+                $e0 = $this->ssa->allocReg();
+                $out .= '  ' . $e0 . " = call ptr @__mir_array_alloc(i64 0)\n";
+                $out .= '  store i64 0, ptr ' . $e0 . "\n";
+                $out .= '  store ptr ' . $e0 . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                // Any SCALAR → the one-element list `[$v]`, php's rule.
+                $out .= $scalarL . ":\n";
+                $one = $this->ssa->allocReg();
+                $out .= '  ' . $one . " = call ptr @__mir_array_alloc(i64 1)\n";
+                $sg = $this->ssa->allocReg();
+                $out .= '  ' . $sg . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE . "\n";
+                $out .= '  store i64 ' . $v . ', ptr ' . $sg . "\n";
+                $out .= '  store i64 1, ptr ' . $one . "\n";
+                $ni = $this->ssa->allocReg();
+                $out .= '  ' . $ni . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_NEXT_INT_OFFSET . "\n";
+                $out .= '  store i64 1, ptr ' . $ni . "\n";
+                // The slot holds a boxed cell, so stamp the element repr.
+                $fg = $this->ssa->allocReg();
+                $out .= '  ' . $fg . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+                $out .= '  store i64 ' . (string)\Compile\MemoryAbi::ARRAY_REPR_CELL . ', ptr ' . $fg . "\n";
+                $out .= '  store ptr ' . $one . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $endL . ":\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+                $this->lastValue = $res;
+                $this->lastValueType = 'ptr';
                 return $out;
             }
-            // `(array)$stdClass` → its bag assoc; an array stays itself.
+            // `(array)$obj` → its properties. Only stdClass keeps them in a
+            // dynamic bag; a class with DECLARED properties holds them in slots,
+            // and reading the bag offset there returned garbage. That is exactly
+            // what get_object_vars already walks, so reuse it — for stdClass it
+            // resolves to the same bag.
             if ($ok === Type::KIND_OBJ) {
                 $std = $this->classes['stdClass'] ?? null;
+                $cls = $c->operand->type->class ?? '';
+                if ($cls !== 'stdClass') {
+                    return $this->biGetObjectVars([$c->operand]);
+                }
                 $bagOff = $std === null ? 16 : $std->bagOffset();
                 $out .= $this->coerceToPtr();
                 $bg = $this->ssa->allocReg();

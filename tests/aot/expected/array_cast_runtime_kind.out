@@ -1,0 +1,15 @@
+string: count=1 [greet]
+array:  count=2 [--version|-V]
+int:    array (
+  0 => 7,
+)
+float:  array (
+  0 => 1.5,
+)
+bool:   array (
+  0 => true,
+)
+null:   count=0
+object: a=1 b='two'
+bool(false)
+bool(true)
