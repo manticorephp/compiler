@@ -329,7 +329,6 @@ final class InferTypes implements Pass
         // borrowed-element return isn't +1-retained (isBorrowedObjReturn
         // sees `unknown`), so the caller over-releases the shared element —
         // e.g. peek() freeing the Parser token vec out from under itself.
-        $this->scanPropElementReturns($module);
         // Module pre-scan: an array property that ever receives a MIXED/cell
         // value element store (`$this->prop[$k] = $mixed`, e.g. an ArrayAccess
         // `offsetSet(mixed $v)`) physically holds NaN-boxed cells, so its element
@@ -337,7 +336,13 @@ final class InferTypes implements Pass
         // is typed scalar, and a `mixed`-return / `??` re-boxes it → double-box
         // (previously MASKED by the 48-bit truncation; see
         // representation_consistency_root).
+        //
+        // BEFORE the getter scan below: a heterogeneous slot is heterogeneous no
+        // matter what one getter's return type says, and the getter scan only
+        // fires on a still-unknown/bare property, so running this first is what
+        // keeps it off. symfony's TableCell has both.
         $this->scanCellElemProps($module);
+        $this->scanPropElementReturns($module);
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
         }
@@ -554,7 +559,8 @@ final class InferTypes implements Pass
     /** @var ?Type accumulated union of the current generator's explicit keys */
     private ?Type $genKeyType = null;
 
-    /** @var array<string,bool> "Class::prop" → receives a mixed-value elem store */
+    /** @var array<string,bool|Type> "Class::prop" → receives a mixed-value elem store,
+     *  or the whole cell-element ARRAY type stored into it */
     private array $cellElemPropsFound = [];
 
     private function findCellElemStores(Node $n, string $cls): void
@@ -574,6 +580,24 @@ final class InferTypes implements Pass
             $cd = $this->classes[$cls] ?? null;
             if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
                 $this->cellElemPropsFound[$cls . '::' . $n->property] = true;
+            }
+        }
+        // A whole-property store of a CELL-ELEMENT ARRAY — a heterogeneous
+        // literal default is the common one. It is the strongest statement
+        // available about what the slot holds, and without it a single
+        // `getStyle(): ?TableCellStyle { return $this->options['style']; }`
+        // retyped symfony's `['rowspan' => 1, 'colspan' => 1, 'style' => null]`
+        // to vec[TableCellStyle], so the boxed int 1 was rc-retained as an
+        // object pointer. The stored type is kept whole so the assoc key shape
+        // survives too.
+        if ($n->kind === Node::KIND_STORE_PROPERTY
+            && $n->object->kind === Node::KIND_LOAD_LOCAL
+            && $n->object->name === 'this'
+            && $n->value->type->isArray()
+            && ($n->value->type->element->kind ?? '') === Type::KIND_CELL) {
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
+                $this->cellElemPropsFound[$cls . '::' . $n->property] = $n->value->type;
             }
         }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {

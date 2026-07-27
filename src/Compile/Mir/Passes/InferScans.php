@@ -260,7 +260,7 @@ trait InferScans
             if ($cls === '') { continue; }
             $this->findCellElemStores($fn->body, $cls);
         }
-        foreach ($this->cellElemPropsFound as $key => $_) {
+        foreach ($this->cellElemPropsFound as $key => $seen) {
             $cut = \strpos($key, '::');
             if ($cut === false || $cut < 0) { continue; }
             $cls = \substr($key, 0, $cut);
@@ -269,6 +269,13 @@ trait InferScans
             if ($cd === null) { continue; }
             $cur = $cd->propertyTypes[$prop] ?? null;
             if ($cur !== null && !$cur->isArray()) {
+                // A whole cell-element ARRAY was stored: that type is exact —
+                // keep its key shape rather than flattening to a vec.
+                if ($seen instanceof Type && $cur->kind === Type::KIND_UNKNOWN
+                    && ($cd->propertyArrayHinted[$prop] ?? false)) {
+                    $cd->propertyTypes[$prop] = $seen;
+                    continue;
+                }
                 // A bare `array` hint erases to KIND_UNKNOWN, so the slot is not
                 // yet an array Type at all — but it IS an array at runtime, and
                 // the store above proved its elements are cells. vec[cell] is the
