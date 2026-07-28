@@ -765,6 +765,17 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($arg);
         if ($arg->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
+        } elseif ($arg->type->kind === Type::KIND_UNKNOWN) {
+            // An ERASED arg may carry a boxed cell, and `inttoptr` of the tagged
+            // word is what a string builtin then walked: `strlen($name)` /
+            // `sprintf('%s', $name)` over an element of an erased array faulted
+            // in libc strlen. Route it through the string unbox, which strips a
+            // pointer-shaped payload and RENDERS a scalar tag — the same
+            // treatment the call-arg boundary gives an erased arg bound to a
+            // string param ({@see EmitLlvmExpr::unboxCellArg}). It is the
+            // identity on a value that was already a raw string pointer.
+            $out .= $this->unboxCellToType(Type::string_());
+            $out .= $this->coerceToPtr();
         } else {
             $out .= $this->coerceToPtr();
         }
@@ -3085,6 +3096,17 @@ trait EmitLlvmBuiltins
                     $s = $this->ssa->allocReg();
                     $out .= '  ' . $s . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
                     $this->lastValue = $s; $this->lastValueType = 'ptr';
+                } elseif ($argNode->type->kind === Type::KIND_UNKNOWN) {
+                    // An ERASED `%s` arg may be boxed or raw, and `inttoptr` of a
+                    // tagged word is what printf then walked — symfony's
+                    // `sprintf('  <info>%s</info>…', $name)` over an element of an
+                    // erased array faulted in libc strlen. cell_to_strptr strips a
+                    // pointer-shaped payload and renders a scalar tag, so it is
+                    // the identity on an already-raw string.
+                    // (%d / %f keep the plain coercion: neither answer is right for
+                    // both shapes there, and today's is right for the raw one.)
+                    $out .= $this->unboxCellToType(Type::string_());
+                    $out .= $this->coerceToPtr();
                 } else {
                     $out .= $this->coerceToPtr();
                 }
@@ -5206,7 +5228,7 @@ trait EmitLlvmBuiltins
                     && $arrNode->array->type->element->kind === Type::KIND_CELL);
             $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
-            $keyIsCell = $arrNode->index->type->kind === Type::KIND_CELL;
+            $keyIsCell = $this->keyRidesCellChannel($arrNode->index);
             $keyIsString = !$keyIsCell
                 && ($arrNode->index->type->kind === Type::KIND_STRING
                     || $arrNode->index->kind === Node::KIND_STRING_CONST);

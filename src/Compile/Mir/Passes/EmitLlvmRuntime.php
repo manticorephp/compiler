@@ -1973,6 +1973,19 @@ trait EmitLlvmRuntime
             // empty delim yields [subj] (matches the prelude explode). Replaces the
             // PHP-level prelude explode's 8×(strpos-cell + substr-malloc + append)
             // per call with one C loop.
+            //
+            // A NEGATIVE limit is a different operation: php returns every
+            // component EXCEPT the last -limit, and those are whole components,
+            // not the "rest of the string" the positive form's final element
+            // carries. `sgt %lim, 1` was false for one, so it fell straight to
+            // the tail and answered [subj] — symfony's
+            // `explode(':', $name, -1)` in Application::extractNamespace put
+            // every command in a namespace of its own, so `list` printed a
+            // header per command instead of grouping under `config` / `list`.
+            // Handle it with a counting pre-pass: the segment total is
+            // occurrences+1, so `keep = total - (-limit)` is known before the
+            // split, and the same loop then emits exactly that many components
+            // with the tail append suppressed.
             $out .= "\ndefine ptr @__mir_str_explode(ptr %delim, ptr %subj, i64 %limit) {\n";
             $out .= "entry:\n";
             $out .= "  %dlen = call i64 @__mir_strlen(ptr %delim)\n";
@@ -1983,9 +1996,56 @@ trait EmitLlvmRuntime
             $out .= "  %posp = alloca i64\n";
             $out .= "  store i64 0, ptr %posp\n";
             $out .= "  %limp = alloca i64\n";
-            $out .= "  store i64 %limit, ptr %limp\n";
+            $out .= "  %cntp = alloca i64\n";
+            $out .= "  store i64 0, ptr %cntp\n";
+            $out .= "  %isneg = icmp slt i64 %limit, 0\n";
             $out .= "  %de0 = icmp eq i64 %dlen, 0\n";
-            $out .= "  br i1 %de0, label %tail, label %loop\n";
+            // An empty delimiter answers [subj] whatever the limit says (php
+            // raises there, so any answer is outside the oracle) — go straight
+            // to the tail append, never the negative early-out.
+            $out .= "  br i1 %de0, label %dotail, label %setup\n";
+            $out .= "setup:\n";
+            $out .= "  br i1 %isneg, label %cloop, label %setpos\n";
+            // php treats limit 0 as 1.
+            $out .= "setpos:\n";
+            $out .= "  %z0 = icmp eq i64 %limit, 0\n";
+            $out .= "  %l1 = select i1 %z0, i64 1, i64 %limit\n";
+            $out .= "  store i64 %l1, ptr %limp\n";
+            $out .= "  br label %loop\n";
+            // Counting pre-pass — delimiter occurrences, no allocation.
+            $out .= "cloop:\n";
+            $out .= "  %cpos = load i64, ptr %posp\n";
+            $out .= "  %chs = getelementptr inbounds i8, ptr %subj, i64 %cpos\n";
+            $out .= "  %chit = call ptr @strstr(ptr %chs, ptr %delim)\n";
+            $out .= "  %cmiss = icmp eq ptr %chit, null\n";
+            $out .= "  br i1 %cmiss, label %cdone, label %cnext\n";
+            $out .= "cnext:\n";
+            $out .= "  %chiti = ptrtoint ptr %chit to i64\n";
+            $out .= "  %csubji = ptrtoint ptr %subj to i64\n";
+            $out .= "  %coff = sub i64 %chiti, %csubji\n";
+            $out .= "  %cnewpos = add i64 %coff, %dlen\n";
+            $out .= "  store i64 %cnewpos, ptr %posp\n";
+            $out .= "  %cn = load i64, ptr %cntp\n";
+            $out .= "  %cn1 = add i64 %cn, 1\n";
+            $out .= "  store i64 %cn1, ptr %cntp\n";
+            $out .= "  br label %cloop\n";
+            $out .= "cdone:\n";
+            $out .= "  %occ = load i64, ptr %cntp\n";
+            $out .= "  %segtotal = add i64 %occ, 1\n";
+            $out .= "  %drop = sub i64 0, %limit\n";
+            $out .= "  %keep = sub i64 %segtotal, %drop\n";
+            $out .= "  %kle = icmp sle i64 %keep, 0\n";
+            $out .= "  br i1 %kle, label %kempty, label %kok\n";
+            $out .= "kempty:\n";
+            $out .= "  %earr = load ptr, ptr %arrp\n";
+            $out .= "  ret ptr %earr\n";
+            // keep+1 makes the shared loop stop after `keep` components; the
+            // tail append is then skipped, which is what drops the remainder.
+            $out .= "kok:\n";
+            $out .= "  %kp1 = add i64 %keep, 1\n";
+            $out .= "  store i64 %kp1, ptr %limp\n";
+            $out .= "  store i64 0, ptr %posp\n";
+            $out .= "  br label %loop\n";
             $out .= "loop:\n";
             $out .= "  %lim = load i64, ptr %limp\n";
             $out .= "  %limok = icmp sgt i64 %lim, 1\n";
@@ -2018,6 +2078,11 @@ trait EmitLlvmRuntime
             $out .= "  store i64 %lim3, ptr %limp\n";
             $out .= "  br label %loop\n";
             $out .= "tail:\n";
+            $out .= "  br i1 %isneg, label %notail, label %dotail\n";
+            $out .= "notail:\n";
+            $out .= "  %narr = load ptr, ptr %arrp\n";
+            $out .= "  ret ptr %narr\n";
+            $out .= "dotail:\n";
             $out .= "  %fpos = load i64, ptr %posp\n";
             $out .= "  %tstart = getelementptr inbounds i8, ptr %subj, i64 %fpos\n";
             $out .= "  %tlen = sub i64 %slen, %fpos\n";

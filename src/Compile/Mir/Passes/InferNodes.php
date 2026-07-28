@@ -1661,7 +1661,7 @@ trait InferNodes
     private function inferStoreElement(StoreElement $node): Type
     {
         $at = $this->inferNode($node->array);
-        $this->inferNode($node->index);
+        $it = $this->inferNode($node->index);
         $vt = $this->inferNode($node->value);
         // `$out[] = v` on a vec local refines its element type, so a
         // freshly-`[]`-built vec picks up its element shape (e.g. cell
@@ -1693,7 +1693,23 @@ trait InferNodes
                 $key = isset($this->cellKeyLocals[$name]) ? Type::cell()
                     : ($at->isAssoc() ? ($at->key ?? Type::string_()) : Type::string_());
                 $this->localTypes[$name] = Type::assoc($key, $elem);
-            } elseif ($at->isVec() || $at->kind === Type::KIND_UNKNOWN) {
+            } elseif ($at->isVec()
+                || ($at->kind === Type::KIND_UNKNOWN && $it->kind !== Type::KIND_STRING)) {
+                // A STRING-keyed store into an ERASED local says nothing about the
+                // container, and this arm would claim two things at once: that it is
+                // a VEC (it is not — the key is a string) and that its element type
+                // is the one value just stored. `arrayElemMerge(null, $vt)` returns
+                // $vt verbatim, so ONE store retypes the WHOLE local, which is only
+                // sound for a homogeneous container. symfony's TextDescriptor walks
+                // an erased `getNamespaces(): array` and writes
+                // `$namespace['commands'] = array_filter(...)` — that retyped
+                // $namespace to vec[array], so the SIBLING `$namespace['id']`, a
+                // string, became statically an ARRAY and rendered as its raw carrier
+                // word. Leaving the local UNKNOWN routes every subscript through the
+                // runtime render/classify path, which is what already works for the
+                // elements the same function reads without storing.
+                // A vec local (`$out[] = v` on a real vec) still refines: there the
+                // container shape is known, only the element is being learned.
                 $cur = $at->element ?? null;
                 $elem = isset($this->nestedCellVecLocals[$name])
                     ? Type::vec(Type::cell())

@@ -166,6 +166,25 @@ trait EmitLlvmArrays
         return null;
     }
 
+    /**
+     * Does this subscript key have to ride the CELL key channel — the one that
+     * dispatches int-vs-string on the NaN tag at runtime?
+     *
+     * A cell key obviously does. So does an ERASED one: a key read out of an
+     * erased container comes back NaN-boxed, and the int channel then hashed the
+     * tag bits. symfony's `$commands[$name]`, where `$name` is an element of an
+     * erased `$namespace['commands']`, missed every entry — `isset` answered
+     * false and the lookup returned null, which the next `->getName()` faulted on.
+     * The cell helpers treat an untagged word as an int key ({@see
+     * EmitLlvmExpr::cellKeyRuntime} → `__mir_ckey_unbox_int`), so this is the
+     * identity on a key that really was a raw int.
+     */
+    private function keyRidesCellChannel(Node $index): bool
+    {
+        $k = $index->type->kind;
+        return $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN;
+    }
+
     private function emitArrayLit(ArrayLit $n): string
     {
         $this->arena->vecAllocated = false;
@@ -546,7 +565,7 @@ trait EmitLlvmArrays
         }
         $arrPtr = $this->lastValue;
         // A `mixed`/cell index (int-OR-string at runtime) → dispatch helper.
-        $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         $out .= $this->emitNode($aa->index);
@@ -741,7 +760,7 @@ trait EmitLlvmArrays
             $arrPtr = $cow;
         }
         $isAppend = $se->index->kind === Node::KIND_NULL_CONST;
-        $keyIsCell = !$isAppend && $se->index->type->kind === Type::KIND_CELL;
+        $keyIsCell = !$isAppend && $this->keyRidesCellChannel($se->index);
         $keyIsString = !$isAppend && !$keyIsCell
             && ($se->index->type->kind === Type::KIND_STRING
                 || $se->index->kind === Node::KIND_STRING_CONST);

@@ -2871,8 +2871,17 @@ trait EmitLlvmExpr
         // "-3377656686641632" where the namespace name belonged, because
         // `$namespace` is an element of an erased array and the subscript is a
         // cell. Decide at runtime — a NaN-boxed word goes through the tag
-        // dispatch, anything else keeps the integer rendering it had.
-        if ($operand->type->kind === Type::KIND_UNKNOWN) {
+        // dispatch, a raw one that the allocator stamped as an array renders
+        // "Array" like php, and anything else keeps the integer rendering.
+        //
+        // An ARRAY-typed operand takes the same path rather than the int
+        // formatter below. Nothing about an array is integer-ish, so reaching
+        // that formatter only ever means the static type was wrong about the
+        // carrier — the same symfony line, where one string-keyed store had
+        // retyped the whole erased local to vec[array] ({@see
+        // \Compile\Mir\Passes\InferNodes::inferStoreElement}). A static claim
+        // must not be enough to format a word as a decimal.
+        if ($operand->type->kind === Type::KIND_UNKNOWN || $operand->type->isArray()) {
             $this->rt->needsTaggedToStr = true;
             $this->rt->needsIntStr = true;
             if ($arena) { $this->rt->needsArena = true; }
@@ -2884,6 +2893,8 @@ trait EmitLlvmExpr
             $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
             $boxL = $this->ssa->allocLabel('cs.box');
             $rawL = $this->ssa->allocLabel('cs.raw');
+            $probeL = $this->ssa->allocLabel('cs.probe');
+            $intL = $this->ssa->allocLabel('cs.int');
             $endL = $this->ssa->allocLabel('cs.end');
             $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
             $out .= $boxL . ":\n";
@@ -2891,7 +2902,37 @@ trait EmitLlvmExpr
             $out .= '  ' . $bs . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
             $out .= '  store ptr ' . $bs . ', ptr ' . $slot . "\n";
             $out .= '  br label %' . $endL . "\n";
+            // Raw: only a container stamps an allocator magic at ptr-8, so an
+            // array is the one non-scalar a raw word can be identified as. The
+            // bounds are the house predicate — a small int would dereference
+            // 0xFFFF…F9 and a raw double is above every userspace address.
             $out .= $rawL . ":\n";
+            $out .= $this->plausiblePtrIr($v);
+            $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $probeL
+                  . ', label %' . $intL . "\n";
+            $out .= $probeL . ":\n";
+            $rp = $this->ssa->allocReg();
+            $out .= '  ' . $rp . ' = inttoptr i64 ' . $v . " to ptr\n";
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+            $tw = $this->ssa->allocReg();
+            $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+            $isArr = null;
+            foreach ([\Compile\MemoryAbi::ARRAY_TAG_MAGIC, \Compile\MemoryAbi::ARRAY_TAG_ARENA,
+                      \Compile\MemoryAbi::ASSOC_TAG_MAGIC] as $magic) {
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i64 ' . $tw . ', ' . (string)$magic . "\n";
+                if ($isArr === null) { $isArr = $eq; continue; }
+                $or = $this->ssa->allocReg();
+                $out .= '  ' . $or . ' = or i1 ' . $isArr . ', ' . $eq . "\n";
+                $isArr = $or;
+            }
+            $asel = $this->ssa->allocReg();
+            $out .= '  ' . $asel . ' = select i1 ' . $isArr . ', ptr '
+                  . $this->strSymBytes('@.ts.array') . ', ptr null' . "\n";
+            $out .= '  store ptr ' . $asel . ', ptr ' . $slot . "\n";
+            $out .= '  br i1 ' . $isArr . ', label %' . $endL . ', label %' . $intL . "\n";
+            $out .= $intL . ":\n";
             $ifn = $arena ? '@__mir_int_to_str_arena' : '@__mir_int_to_str';
             $rs = $this->ssa->allocReg();
             $out .= '  ' . $rs . ' = call ptr ' . $ifn . '(i64 ' . $v . ")\n";
@@ -3996,6 +4037,33 @@ trait EmitLlvmExpr
                       . $this->lastValue . ")\n";
                 continue;
             }
+            // An ERASED operand may carry a boxed cell or a raw i64, and the
+            // integer printf at the bottom rendered the tagged word itself —
+            // `echo $namespace['id']` over an erased array printed
+            // "-3377695414385432" where the name belonged. Same decision the
+            // concat path makes ({@see coerceToStr}), one branch: NaN-boxed goes
+            // to the tag dispatch, anything else keeps the integer rendering.
+            if ($kind === Type::KIND_UNKNOWN) {
+                $out .= $this->coerceToI64();
+                $this->rt->needsTaggedEcho = true;
+                $v = $this->lastValue;
+                $isBox = $this->ssa->allocReg();
+                $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+                $boxL = $this->ssa->allocLabel('ec.box');
+                $rawL = $this->ssa->allocLabel('ec.raw');
+                $endL = $this->ssa->allocLabel('ec.end');
+                $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+                $out .= $boxL . ":\n";
+                $out .= '  call void @__manticore_echo_tagged(i64 ' . $v . ")\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $rawL . ":\n";
+                $er = $this->ssa->allocReg();
+                $out .= '  ' . $er . ' = call i32 (ptr, ...) @printf(ptr @.fmt.d, i64 '
+                      . $v . ")\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $endL . ":\n";
+                continue;
+            }
             // Coerce the cursor to the printf arg type — a string
             // local arrives as the i64 slot payload and must be
             // inttoptr'd; a float bitcast back to double.
@@ -4104,6 +4172,21 @@ trait EmitLlvmExpr
         if ($pt !== null && ($ahmask[$pi] ?? false) && $pt->kind === Type::KIND_UNKNOWN
             && ($ak === Type::KIND_CELL || $ak === Type::KIND_UNKNOWN)) {
             return $this->unboxCellToType(Type::vec(Type::unknown())) . $this->coerceToI64();
+        }
+        // The same for an erased arg reaching a POINTER-shaped param. An element
+        // read out of an erased container comes back boxed, and the callee reads
+        // its slot as a raw pointer: symfony's `Helper::width($name)`, where
+        // `$name` is an element of an erased `$namespace['commands']`, handed
+        // preg_match a tag-4 word and it dereferenced the tag bits.
+        // Only the kinds whose unbox is the IDENTITY on an already-raw value
+        // qualify — a string strips to its payload (and a scalar tag renders),
+        // an array/vec/assoc masks 48 bits, and every userspace address fits
+        // those. int/bool/float must NOT be listed: unboxing a raw one corrupts
+        // it. Objects are out too — an ENUM cell unboxes to an ordinal, which is
+        // not the identity on a raw one.
+        if ($pt !== null && $ak === Type::KIND_UNKNOWN
+            && ($pt->kind === Type::KIND_STRING || $pt->isArray())) {
+            return $this->unboxCellToType($pt) . $this->coerceToI64();
         }
         if ($ak !== Type::KIND_CELL) { return ''; }
         if ($pt === null) { return ''; }

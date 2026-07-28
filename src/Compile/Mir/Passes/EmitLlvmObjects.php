@@ -1752,7 +1752,7 @@ trait EmitLlvmObjects
                     $out .= $this->coerceToPtr();
                 }
                 $arr = $this->lastValue;
-                $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+                $keyIsCell = $this->keyRidesCellChannel($aa->index);
                 $keyIsString = $aa->index->type->kind === Type::KIND_STRING
                     || $aa->index->kind === Node::KIND_STRING_CONST;
                 $out .= $this->emitNode($aa->index);
@@ -1930,7 +1930,7 @@ trait EmitLlvmObjects
                     $out .= $this->emitNode($aa->array);
                     $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
                     $arrPtr = $this->lastValue;
-                    $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+                    $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
                         || $aa->index->kind === Node::KIND_STRING_CONST;
                     $out .= $this->emitNode($aa->index);
