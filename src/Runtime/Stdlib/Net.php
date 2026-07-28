@@ -311,18 +311,19 @@ function __mc_poll_connect(int $fd, float $timeout): int
     $ms = (int)($timeout * 1000.0);
     if ($ms < 1) { $ms = 1; }
     $rc = \__mc_poll_one($fd, true, $ms);
-    if ($rc <= 0) {
-        // 0 = the deadline passed with the handshake still in flight; <0 = the
-        // fd reported POLLERR/POLLHUP.
-        \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
-        return -1;
+    if ($rc === 0) {
+        \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT — the deadline
+        return -1;                                     // passed, still in flight
     }
+    // rc < 0 is POLLERR/POLLHUP, which is how a REFUSED connect arrives here — and
+    // SO_ERROR, not the deadline, is what says so. Reporting ETIMEDOUT for it turned
+    // "Connection refused" into "Operation timed out".
     $e = \__mc_so_error($fd);
-    if ($e !== 0) {
+    if ($e > 0) {
         \__mc_net_errno(true, $e);
         return -1;
     }
-    return 0;
+    return $rc < 0 ? -1 : 0;
 }
 
 /** True when $host is already a literal address, so no resolution is needed. */
@@ -536,11 +537,14 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $tim
                     \__mc_fd_nonblock($cand);
                 }
                 $rc = \Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen);
+                $waited = false;
                 if ($rc !== 0 && \__mc_errno() === \__mc_sock_const(12)) {
                     if ($async) {
                         $rc = \__mc_await_connect($cand, $timeout);
+                        $waited = true;
                     } elseif ($bounded) {
                         $rc = \__mc_poll_connect($cand, $timeout);
+                        $waited = true;
                     }
                 }
                 if ($bounded) {
@@ -550,7 +554,14 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $tim
                     $fd = $cand;
                     break;
                 }
-                \__mc_net_errno(true, \__mc_errno());   // capture BEFORE close clobbers errno
+                // Capture BEFORE close clobbers errno — but ONLY when the connect
+                // failed outright. After a wait, the live errno is the EINPROGRESS
+                // that started it; the real cause came from SO_ERROR and is already
+                // recorded, and overwriting it reported "Operation now in progress"
+                // where php says "Connection refused".
+                if (!$waited) {
+                    \__mc_net_errno(true, \__mc_errno());
+                }
                 \Runtime\Libc\sys_close($cand);
             }
         }
