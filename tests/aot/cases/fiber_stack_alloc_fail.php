@@ -17,12 +17,23 @@
 
 \Fiber::setStackSize(262144);
 
+// Docker Desktop translates x86_64 through Rosetta, and Rosetta cannot express a
+// failed mapping AT ALL: an RLIMIT_AS cap kills the translator outright, a 1 TiB
+// stack maps successfully, and 128 TiB kills it again. Detect that and say so
+// rather than assert something the platform cannot produce — the `.sed` sidecar
+// folds the two lines into one. Native arm64, macOS and real x86 all probe for real.
+$maps = @file_get_contents('/proc/self/maps');
+if ($maps !== false && stripos((string)$maps, 'rosetta') !== false) {
+    echo "mapping failure: not probed (translated host)\n";
+    $pid = -1;
+} else {
 $pid = pcntl_fork();
 if ($pid === 0) {
-    // 96 MiB of address space, then ask for a 64 MiB stack: the mapping cannot
-    // fit, and nothing has to reserve an impossible range for us to find out.
-    posix_setrlimit(POSIX_RLIMIT_AS, 100663296, 100663296);
-    \Fiber::setStackSize(67108864);
+    // 512 MiB of address space — comfortably above what the program already maps —
+    // then ask for a 2 GiB stack: it cannot fit, and nothing has to reserve an
+    // impossible range for us to find out.
+    posix_setrlimit(POSIX_RLIMIT_AS, 536870912, 536870912);
+    \Fiber::setStackSize(2147483648);
     try {
         $f = new \Fiber(function () { return 1; });
         $f->start();
@@ -45,7 +56,8 @@ if ($pid === 0) {
 
 $status = 0;
 pcntl_waitpid($pid, $status);
-echo 'reported as FiberError: ', pcntl_wexitstatus($status) === 7 ? 'yes' : 'no', "\n";
+echo 'mapping failure: ', pcntl_wexitstatus($status) === 7 ? 'FiberError' : 'NOT reported', "\n";
+}
 
 // The parent is untouched: a normal size still works, and it is the one that was set.
 echo \Fiber::stackSize(), "\n";
