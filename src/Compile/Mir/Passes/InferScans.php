@@ -923,7 +923,24 @@ trait InferScans
             // A prelude local that needs a cell element says so at the source,
             // with a `/** @var mixed[] */` on its binding. See the prelude-linkage
             // note in docs/.
-            if ($fn->isPrelude) { continue; }
+            //
+            // EXCEPT a `$mono$` specialization. The whole hazard above is that a
+            // shared symbol would be specialized from information another module
+            // does not have — but a specialization's NAME encodes its parameter
+            // shape, so every module that emits `f$mono$p0_vec_cell` infers it
+            // from the same parameter types and arrives at the same body. That is
+            // exactly the contract that lets Monomorphize exist at all.
+            //
+            // Without this, `array_merge$mono$p0_vec_cell` left `$out` a
+            // `vec[unknown]`, so `$out[] = $v` took the plain `__mir_array_cow`
+            // instead of `_cell` and skipped the co-owning retain — every merged
+            // element was freed while the result still pointed at it (`$r[0]` read
+            // back `is_array` true, `count` 0, and every symfony Table cell was
+            // blank). The `@var mixed[]` annotation is NOT a substitute here: it
+            // would force cell elements on the CONCRETE clones too, and the
+            // compiler's own `array_merge(Type[], Type[])` sites then read boxed
+            // cells as raw object pointers.
+            if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
             // A PARAM is the CALLER's array — its elements keep whatever
             // representation the caller built, and storing a cell into it can't
             // retroactively make them cells. Forcing vec[cell] on one made the

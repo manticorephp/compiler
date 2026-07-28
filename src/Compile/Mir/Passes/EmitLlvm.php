@@ -1768,7 +1768,18 @@ final class EmitLlvm implements EmitVisitor
         // on KIND_CELL (it is a raw i64 there, never inttoptr'd), so route it
         // through the tag-dispatched helper directly; it no-ops on an
         // int/float/bool/null cell. An OWNED producer's +1 transfers.
-        if ($k === Type::KIND_CELL) {
+        // KIND_UNKNOWN travels the same way and must retain for the same reason:
+        // the destination is a cell container, so its release runs
+        // `__mir_cell_drop` on this slot regardless of what the STATIC type
+        // called it. The identical body typed `$v` a cell as a module function
+        // and `unknown` as a monomorphised PRELUDE clone, so `array_merge`
+        // silently skipped the retain that `mymerge` emitted — every element of a
+        // merged array was freed while the result still pointed at it
+        // (`is_array($r[0])` true, `count($r[0])` 0, every symfony Table cell
+        // blank). Retaining by tag is safe in the erased case: the helper
+        // dispatches on the tag and no-ops on a raw / non-pointer payload, so it
+        // can only ever under-retain, never over-retain.
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
             $vk = $value->kind;
             if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
                 || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
