@@ -322,8 +322,12 @@ function __mc_rlimit_get(int $resource, int $which): int
 }
 
 /**
- * setrlimit(2). PHP_INT_MAX on either value means "no limit" and is translated to
- * the host's RLIM_INFINITY. 0 on success, -1 on failure.
+ * setrlimit(2). Values go to the kernel UNTRANSLATED, which is what php does:
+ * "no limit" is spelled POSIX_RLIMIT_INFINITY, and that constant carries the
+ * HOST's RLIM_INFINITY — PHP_INT_MAX on Darwin, -1 on glibc. Mapping PHP_INT_MAX
+ * to infinity here looked portable and was a divergence: on Linux php sets a
+ * finite limit of PHP_INT_MAX and reads it back as that number, where we reported
+ * 'unlimited'. 0 on success, -1 on failure.
  */
 function __mc_rlimit_set(int $resource, int $soft, int $hard): int
 {
@@ -331,9 +335,8 @@ function __mc_rlimit_set(int $resource, int $soft, int $hard): int
     if ($buf === null) {
         return -1;
     }
-    $inf = \__mc_rlimit_const(10);
-    \poke_i64($buf, 0, $soft === \PHP_INT_MAX ? $inf : $soft);
-    \poke_i64($buf, 8, $hard === \PHP_INT_MAX ? $inf : $hard);
+    \poke_i64($buf, 0, $soft);
+    \poke_i64($buf, 8, $hard);
     $rc = \Runtime\Libc\sys_setrlimit($resource, $buf);
     \Runtime\Libc\free($buf);
     return $rc;

@@ -10,7 +10,7 @@ var_dump(is_int(POSIX_RLIMIT_INFINITY));
 
 // Lowering a soft limit needs no privilege anywhere. Round-trip it.
 $before = posix_getrlimit(POSIX_RLIMIT_NOFILE);
-var_dump(posix_setrlimit(POSIX_RLIMIT_NOFILE, 64, $before[1] === 'unlimited' ? PHP_INT_MAX : $before[1]));
+var_dump(posix_setrlimit(POSIX_RLIMIT_NOFILE, 64, $before[1] === 'unlimited' ? POSIX_RLIMIT_INFINITY : $before[1]));
 $after = posix_getrlimit(POSIX_RLIMIT_NOFILE);
 var_dump($after[0], count($after));
 
@@ -19,7 +19,9 @@ var_dump(posix_setrlimit(POSIX_RLIMIT_CORE, 0, 0));
 var_dump(posix_getrlimit(POSIX_RLIMIT_CORE));
 
 // "no limit" survives the round trip as the string php uses.
-var_dump(posix_setrlimit(POSIX_RLIMIT_CPU, PHP_INT_MAX, PHP_INT_MAX));
+// POSIX_RLIMIT_INFINITY, not PHP_INT_MAX: php passes the value through untouched,
+// and the host RLIM_INFINITY is -1 on glibc — PHP_INT_MAX there is a finite limit.
+var_dump(posix_setrlimit(POSIX_RLIMIT_CPU, POSIX_RLIMIT_INFINITY, POSIX_RLIMIT_INFINITY));
 var_dump(posix_getrlimit(POSIX_RLIMIT_CPU)[0]);
 
 // The no-argument form: names, not numbers. Only the keys both hosts have.
