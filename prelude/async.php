@@ -1624,6 +1624,10 @@ namespace Async {
         // ── the run entry ──────────────────────────────────────────────────
         public function run(callable $main, string $site = ''): mixed
         {
+            // A run starts with no failure to its name: otherwise a second async()
+            // in the same program would report the FIRST one's provenance for its
+            // own, unrelated exception.
+            self::$lastFailure = '';
             $root = new TaskGroup(null);
             $this->root = $root;
             $rootTask = $this->newTask($main, [], $root);
@@ -1635,6 +1639,7 @@ namespace Async {
             $this->clearNetpoller();
 
             $stuck = $this->live > 0;
+            $watchdogOn = $this->watchdog > 0.0;
             $failure = $root->failure;
             $result = $rootTask->result;
             // A CancelledException that reached the top WITHOUT the root actually
@@ -1660,6 +1665,13 @@ namespace Async {
             // same program starts from a clean engine.
             self::$instance = null;
             if ($failure !== null) {
+                // On the same channel and under the same knob as the watchdog: a
+                // program that asked to be told about its loop wants this too, and
+                // one that catches the exception and carries on does not need the
+                // noise. {@see failure()} reads it either way.
+                if ($watchdogOn && self::$lastFailure !== '') {
+                    \fwrite(\STDERR, "async: failure — " . self::$lastFailure . "\n");
+                }
                 throw $failure;
             }
             if ($stuck) {
@@ -1900,6 +1912,45 @@ namespace Async {
                 . __ms($held) . ' ms (limit ' . __ms($this->watchdog) . " ms)\n");
         }
 
+        /**
+         * Provenance for the first real failure of this run: which task raised it
+         * and where that task was spawned, plus the scopes it sat inside.
+         *
+         * A child's exception is rethrown by whoever joins it, so it reaches user
+         * code carrying the JOINER's file and line — the task that actually failed
+         * is not in the trace at all. The exception itself cannot say so: mutating a
+         * user's throwable is not possible, and wrapping it would break `catch`. So
+         * the provenance rides BESIDE it, recorded here at the moment of failure and
+         * read back with {@see failure()}.
+         *
+         * FIRST failure only, matching TaskGroup::fail(): everything that follows is
+         * the cancellation wave, and naming a task that was merely swept up would be
+         * worse than saying nothing. A static, because {@see run()} drops the
+         * singleton before it rethrows.
+         */
+        private static string $lastFailure = '';
+
+        private function noteFailure(Task $task, \Throwable $error): void
+        {
+            if (self::$lastFailure !== '') { return; }
+            if ($error instanceof CancelledException) { return; }
+            $where = 'task ' . $task->label() . ' raised ' . \get_class($error);
+            $msg = $error->getMessage();
+            if ($msg !== '') { $where = $where . ': ' . $msg; }
+            $g = $task->owner;
+            while ($g !== null) {
+                if ($g->site !== '') { $where = $where . "\n  in scope " . $g->site; }
+                $g = $g->parent;
+            }
+            self::$lastFailure = $where;
+        }
+
+        /** {@see $lastFailure}. '' when the last run did not fail. */
+        public static function lastFailure(): string
+        {
+            return self::$lastFailure;
+        }
+
         /** @return array<string,int> monotonic counters + the current gauges */
         public function stats(): array
         {
@@ -1924,6 +1975,13 @@ namespace Async {
             $task->result = $result;
             $task->error = $error;
             $this->nSettled = $this->nSettled + 1;
+            // Where a failure came FROM, recorded at the only point that still knows:
+            // the exception is rethrown by whoever joins, so by the time it leaves
+            // async() it carries the JOINER's trace and the task that raised it is
+            // gone. {@see noteFailure()}.
+            if ($state === Task::FAILED && $error !== null) {
+                $this->noteFailure($task, $error);
+            }
             if (!$task->daemon) { $this->live = $this->live - 1; }
             // Unlink from the live-task list (diagnostics) — O(1), both directions.
             if ($task->allPrev !== null) {
@@ -3104,6 +3162,28 @@ namespace Async {
     function dump(): string
     {
         return Scheduler::hasInstance() ? Scheduler::instance()->report() : '';
+    }
+
+    /**
+     * Where the last failure came FROM: the task that raised it, the `file:line`
+     * it was spawned at, and the scopes it sat inside.
+     *
+     *   try { async(fn() => …); }
+     *   catch (\Throwable $e) { fwrite(STDERR, Async\failure()); }
+     *
+     *   task #7 "worker" at jobs.php:31 raised RuntimeException: no such row
+     *     in scope near jobs.php:12
+     *
+     * A child's exception reaches you carrying the trace of whoever JOINED it —
+     * the task that actually failed is not in that trace, and cannot be added to
+     * it (mutating a user's throwable is impossible; wrapping it breaks `catch`).
+     * So this is recorded beside the exception, at the moment of failure.
+     *
+     * '' when the last run did not fail. Cleared by every async().
+     */
+    function failure(): string
+    {
+        return Scheduler::lastFailure();
     }
 
     /**
