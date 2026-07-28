@@ -104,6 +104,9 @@ async(function () {
 | `Async\dumpOn(int ...$signals)` | print that on a signal — `kill -QUIT <pid>` on a hung process |
 | `Async\watchdog(float $ms)` | name the task that HOLDS the loop longer than $ms |
 | `Async\stats(): array` | engine counters (spawned/wakes/reactor_waits/…) |
+| `Async\failure(): string` | which task raised the failure that escaped, and where it was spawned |
+| `Fiber::setStackSize(int)` | bytes of stack per fiber (`MANTICORE_FIBER_STACK` does the same) |
+| `fwrite($s, [$hdr, $body])` | vectored write — one `writev(2)`, no concat |
 
 ### Scopes, deadlines, cancellation
 
@@ -367,11 +370,15 @@ Ordinary stream calls suspend the fiber instead of the process when a scheduler 
 `connect(2)` runs non-blocking, BOTH TLS handshake directions are driven through
 `WANT_READ`/`WANT_WRITE` parks (client `SSL_connect` and server `SSL_accept` — so a TLS
 server serves concurrent clients), and a hostname is resolved over the netpoller:
-`/etc/hosts`, a per-run cache held by the scheduler, the `search` list and `ndots` rule from
+a per-run cache held by the scheduler, then the `search` list and `ndots` rule from
 `resolv.conf` (so `db`, `redis`, `service.namespace` — the names compose and kubernetes hand
-you — resolve here instead of falling through to the blocking walk), then A and AAAA queries
-across **every** nameserver (two attempts each, 2 s apiece, TC → retry over TCP), falling
-back to the blocking `getaddrinfo` walk when none of that can answer. A search walk stops the
+you — resolve here instead of falling through to the blocking walk). `/etc/hosts` is
+consulted for EVERY candidate the search list produces, the way glibc runs nsswitch, so a
+short name matches a fully-qualified hosts line. Then A and AAAA queries across **every**
+nameserver, `options attempts:` rounds over the list with `options timeout:` seconds each
+(2 and 2 by default — glibc waits 5 s, which is too much of a request budget to hand a
+silent resolver), TC → retry over TCP, falling back to the blocking `getaddrinfo` walk when
+none of that can answer. A search walk stops the
 moment NO server answers: a dead resolver must not be multiplied by the suffix count.
 Two spawned HTTPS fetches to DIFFERENT hosts run 0.17s vs 0.34s sequential.
 
@@ -463,8 +470,12 @@ Regression coverage lives in the suite: `tests/aot/cases/async_*.php`
 
 ## Where it stands (macOS, 10-core, `wrk -t4`, plaintext keep-alive)
 
-Single-core keep-alive ~64.5k rps (2-syscall/req floor). Multi-process (8-worker prefork)
-same-box vs reference servers driven by the same `wrk`:
+Single-core keep-alive ~64.5k rps, which is the **two-syscall floor** of a readiness design:
+one `recv(2)` and one `write(2)` per request, plus one `kevent`/`epoll_wait` amortised over
+every connection ready in that turn. There is no third syscall to remove — an fd is registered
+with the reactor once for the life of the connection, and a warm keep-alive socket never parks
+at all, because the read tries `recv` first and only suspends on `EWOULDBLOCK`. Multi-process
+(8-worker prefork) same-box vs reference servers driven by the same `wrk`:
 
 | server                     | req/s        |
 |----------------------------|--------------|
@@ -487,8 +498,21 @@ is still there.
 
 ## Not yet
 
-Also: `writev`/`io_uring` to break the 2-syscall floor · off-thread file I/O · shared-memory
-multithreading (a future compiler superset).
+Also: off-thread file I/O · shared-memory multithreading (a future compiler superset).
+
+**Below two syscalls per request.** `writev(2)` is already here — `fwrite($s, [$hdr, $body])`
+sends both in one syscall — but merging writes cannot help a request that only makes one. The
+floor moves for exactly two reasons, and neither is free:
+
+- **Pipelining.** Parse every complete request sitting in one `recv`, answer with one vectored
+  write of N responses: 2/N syscalls per request. Portable, and it needs nothing from the
+  compiler — but only a client that pipelines sees it.
+- **Completion-based I/O (`io_uring`).** The win is not a new `Io\Poll` backend. Our seam is
+  *readiness* — the hook says "ready", the caller then makes the syscall — and io_uring pays
+  when the operations themselves are submitted in batches, so one `io_uring_enter` covers the
+  recv and send of every ready connection in a turn. That means a second I/O path and a
+  different hook shape, Linux-only, with macOS left on the readiness path. Worth a design
+  document before a line of it.
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
 return type. The only piece here that cannot be a library: it needs the compiler to split

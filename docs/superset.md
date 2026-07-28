@@ -112,6 +112,10 @@ Under it, and all superset:
   consulted per CANDIDATE the way glibc runs nsswitch, then A and AAAA across every
   nameserver — attempt-major, so a dead first entry costs one timeout per round rather than
   two — TC → retry over TCP, with the blocking `getaddrinfo` walk as the last resort.
+- **`fwrite()` takes a vector.** `fwrite($s, [$headers, $body])` on a plain socket is one
+  `writev(2)`: no userspace concat of the two, and no second send. php's `fwrite` takes a
+  string and nothing else, so the array form is superset — a non-socket sink or a TLS stream
+  degrades to the concat, with an identical return value, which is what keeps it a drop-in.
 - **Every wait is bounded.** `stream_set_timeout()` sets the stream's timeout for reads *and*
   writes; a park that expires records `timed_out` and reports a short read/write. An unbounded
   park is a liveness hole, not a feature — a peer that stops reading would otherwise wedge a
