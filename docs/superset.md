@@ -108,9 +108,10 @@ Under it, and all superset:
 - **Network setup is async too** — non-blocking `connect(2)`, both TLS handshake directions
   driven through `WANT_READ`/`WANT_WRITE` parks (so a TLS *server* serves concurrent clients),
   and name resolution over the netpoller: `/etc/hosts`, a per-run cache held by the scheduler,
-  `search`/`ndots` expansion from `resolv.conf`, then A and AAAA across every nameserver
-  (two attempts each, TC → retry over TCP), with the blocking `getaddrinfo` walk as the last
-  resort.
+  the full `resolv.conf` (`search`, `ndots`, `timeout:`, `attempts:`) with `/etc/hosts`
+  consulted per CANDIDATE the way glibc runs nsswitch, then A and AAAA across every
+  nameserver — attempt-major, so a dead first entry costs one timeout per round rather than
+  two — TC → retry over TCP, with the blocking `getaddrinfo` walk as the last resort.
 - **Every wait is bounded.** `stream_set_timeout()` sets the stream's timeout for reads *and*
   writes; a park that expires records `timed_out` and reports a short read/write. An unbounded
   park is a liveness hole, not a feature — a peer that stops reading would otherwise wedge a

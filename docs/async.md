@@ -487,9 +487,7 @@ is still there.
 
 ## Not yet
 
-Also: `writev`/`io_uring` to break the 2-syscall floor · `resolv.conf`'s `timeout:`/`attempts:`
-options (the search list and `ndots` are in; those two still hard-code 2 s × 2) · the search
-list applied to `/etc/hosts` the way glibc does · off-thread file I/O · shared-memory
+Also: `writev`/`io_uring` to break the 2-syscall floor · off-thread file I/O · shared-memory
 multithreading (a future compiler superset).
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
