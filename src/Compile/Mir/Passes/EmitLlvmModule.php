@@ -763,6 +763,30 @@ trait EmitLlvmModule
                 $this->locals->slots[$p->name] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
+                // A by-value array-hinted slot is read as a RAW buffer pointer
+                // throughout the body, so strip a NaN tag on entry. The call
+                // sites try to do this (`unboxCellArg` + the array-hint mask),
+                // but they can only act on what the ARGUMENT's static type says,
+                // and an erased container hands back a boxed cell whose node is
+                // typed as a plain array: symfony's
+                // `array_filter($namespace['commands'], …)` reached
+                // `__mir_array_live_len` with a tagged word and the release then
+                // read `ptr-8` of it. Masking here is unconditional and free —
+                // every userspace address fits the 48 payload bits, so it is the
+                // identity on a value that was already raw. By-ref keeps aliasing
+                // the caller's slot and must not be rewritten.
+                // ⚠ NOT when the param was PROMOTED to a cell. An `array` param
+                // stored into a `mixed` field is deliberately retyped cell so the
+                // call site BOXES the argument (see
+                // tests/aot/cases/array_param_mixed_field.php) — there the tag is
+                // the point, and stripping it hands `var_dump` a raw buffer.
+                if (!$p->byRef && $p->arrayHinted && $p->type->kind !== Type::KIND_CELL) {
+                    $rw = $this->ssa->allocReg();
+                    $body .= '  ' . $rw . ' = load i64, ptr ' . $slot . "\n";
+                    $mk = $this->ssa->allocReg();
+                    $body .= '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n";
+                    $body .= '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
+                }
                 // PHP arrays are values: a by-VALUE array param the body mutates
                 // in place (`$x[] = …` / `$x[$k] = …` / nested `$x[0][] = …`) must
                 // not alias the caller's buffer. Copy it on entry so the mutation

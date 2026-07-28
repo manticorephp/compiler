@@ -790,7 +790,14 @@ final class Monomorphize implements Pass
         $newName = '__closure_' . (string)$newId;
         $newParams = [];
         foreach ($orig->params as $p) {
-            $newParams[] = new Param($p->name, $p->type, $p->byRef, $p->variadic, $p->default);
+            $np = new Param($p->name, $p->type, $p->byRef, $p->variadic, $p->default);
+            // `arrayHinted` is not part of the constructor, so it has to be
+            // carried across explicitly — exactly as cloneWith does. A freshened
+            // closure that lost it stopped having its cell/erased arguments
+            // untagged at the call site, since the whole array-hint mask is keyed
+            // off this flag.
+            $np->arrayHinted = $p->arrayHinted;
+            $newParams[] = $np;
         }
         $clFn = new FunctionDef($newName, $newParams, $orig->returnType, $clBody, $orig->returnsByRef, $orig->isPrelude);
 
