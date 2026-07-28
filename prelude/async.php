@@ -346,6 +346,13 @@ namespace Async {
         public bool $chanSend = false;
         /** The single channel this task is parked on, for deregistration on cancel. */
         public ?Channel $chanHost = null;
+        /**
+         * This task's index in $chanHost's queue, so a cancel can tombstone it in
+         * O(1) instead of rebuilding the queue around it. -1 when the task is not
+         * parked on exactly one channel — a select() waiter sits in several queues
+         * at once and no single index describes it.
+         */
+        public int $chanSlot = -1;
         /** @var Channel[] every channel a select() parked this task on */
         public array $selectChans = [];
 
@@ -791,13 +798,34 @@ namespace Async {
         /** @var mixed[] buffered values, FIFO (cap > 0 only) */
         private array $buffer = [];
 
-        /** @var Task[] senders parked (buffer full / no receiver) */
+        /**
+         * The parked queues, as CURSOR queues with tombstones — `null` in a slot
+         * means "that waiter left". Both properties matter at scale:
+         *
+         * - a delivery pops at $sendHead/$recvHead instead of array_shift, which
+         *   re-indexes the whole queue every time;
+         * - a cancelled or select-losing waiter is tombstoned at its own slot
+         *   ({@see Task::$chanSlot}) instead of rebuilding the queue around it.
+         *
+         * removeWaiter used to rebuild both queues on every removal, so cancelling
+         * N tasks parked on one channel was O(N^2) in time AND allocated an N-sized
+         * array N times: 10k waiters cost 71 KiB of RSS each, 20k cost 111 KiB each
+         * — the per-task cost GREW with the task count, which is what a quadratic
+         * looks like from the outside.
+         *
+         * @var array<int, Task|null> senders parked (buffer full / no receiver)
+         */
         private array $sendQ = [];
         /** @var mixed[] the value each parked sender offers, parallel to $sendQ */
         private array $sendVal = [];
+        private int $sendHead = 0;
+        /** The value {@see popSend} took, handed over separately so the pop can
+         *  keep task and value in lockstep without returning a pair. */
+        private mixed $sendPopped = null;
 
-        /** @var Task[] receivers parked with nothing to take yet */
+        /** @var array<int, Task|null> receivers parked with nothing to take yet */
         private array $recvQ = [];
+        private int $recvHead = 0;
 
         public function __construct(int $capacity = 0)
         {
@@ -834,6 +862,7 @@ namespace Async {
             // registering: throwing after would strand us in sendQ.
             $sched->checkCancel();
             $me = $sched->current();
+            $me->chanSlot = \count($this->sendQ);
             $this->sendQ[] = $me;
             $this->sendVal[] = $value;
             $me->chanHost = $this;
@@ -848,14 +877,110 @@ namespace Async {
         /** Hand $value to a parked receiver, if there is a live one. */
         private function handOff(mixed $value): bool
         {
-            while (\count($this->recvQ) > 0) {
-                $r = \array_shift($this->recvQ);
+            while (true) {
+                $r = $this->popRecv();
+                if ($r === null) { return false; }
                 if ($this->wakeReceiver($r, $value, true)) {
                     return true;
                 }
             }
-            return false;
         }
+
+        /**
+         * Take the next live receiver, consuming tombstones on the way. Returns
+         * null once the queue is drained — which also resets the cursor, so an
+         * idle channel never keeps a spent array alive.
+         */
+        private function popRecv(): ?Task
+        {
+            $n = \count($this->recvQ);
+            while ($this->recvHead < $n) {
+                $r = $this->recvQ[$this->recvHead];
+                $this->recvQ[$this->recvHead] = null;
+                $this->recvHead = $this->recvHead + 1;
+                if ($r !== null) {
+                    $r->chanSlot = -1;
+                    $this->compactRecv();
+                    return $r;
+                }
+            }
+            $this->recvQ = [];
+            $this->recvHead = 0;
+            return null;
+        }
+
+        /**
+         * Drop the consumed prefix once it is most of the array. A channel that is
+         * never idle never hits the drain-and-reset in {@see popRecv}, so without
+         * this the queue of a busy server grows for the life of the process even
+         * though almost every slot is spent. Amortised O(1): the walk costs one
+         * step per live waiter and only runs after the head has passed half.
+         */
+        private function compactRecv(): void
+        {
+            $n = \count($this->recvQ);
+            if ($this->recvHead < 64 || $this->recvHead * 2 < $n) {
+                return;
+            }
+            /** @var array<int, Task|null> $live */
+            $live = [];
+            for ($i = $this->recvHead; $i < $n; $i++) {
+                $r = $this->recvQ[$i];
+                if ($r === null) { continue; }
+                if ($r->chanSlot >= 0) { $r->chanSlot = \count($live); }
+                $live[] = $r;
+            }
+            $this->recvQ = $live;
+            $this->recvHead = 0;
+        }
+
+
+        /** The send-side twin of {@see popRecv}: value and task in lockstep. */
+        private function popSend(): ?Task
+        {
+            $n = \count($this->sendQ);
+            while ($this->sendHead < $n) {
+                $s = $this->sendQ[$this->sendHead];
+                $this->sendPopped = $this->sendVal[$this->sendHead];
+                $this->sendQ[$this->sendHead] = null;
+                $this->sendVal[$this->sendHead] = null;
+                $this->sendHead = $this->sendHead + 1;
+                if ($s !== null) {
+                    $s->chanSlot = -1;
+                    $this->compactSend();
+                    return $s;
+                }
+            }
+            $this->sendQ = [];
+            $this->sendVal = [];
+            $this->sendHead = 0;
+            $this->sendPopped = null;
+            return null;
+        }
+
+        /** {@see compactRecv}, with the value array moved in lockstep. */
+        private function compactSend(): void
+        {
+            $n = \count($this->sendQ);
+            if ($this->sendHead < 64 || $this->sendHead * 2 < $n) {
+                return;
+            }
+            /** @var array<int, Task|null> $live */
+            $live = [];
+            /** @var mixed[] $vals */
+            $vals = [];
+            for ($i = $this->sendHead; $i < $n; $i++) {
+                $s = $this->sendQ[$i];
+                if ($s === null) { continue; }
+                if ($s->chanSlot >= 0) { $s->chanSlot = \count($live); }
+                $live[] = $s;
+                $vals[] = $this->sendVal[$i];
+            }
+            $this->sendQ = $live;
+            $this->sendVal = $vals;
+            $this->sendHead = 0;
+        }
+
 
         /**
          * The next delivery, as an object. `ok` is false once the channel is
@@ -885,6 +1010,7 @@ namespace Async {
             $me = $sched->current();
             $me->chanValue = null;
             $me->chanOk = true;
+            $me->chanSlot = \count($this->recvQ);
             $this->recvQ[] = $me;
             $me->chanHost = $this;
             \Fiber::suspend();
@@ -905,15 +1031,15 @@ namespace Async {
         /** Take from a parked sender (unbuffered rendezvous), skipping dead ones. */
         private function takeFromSender(): ?Received
         {
-            while (\count($this->sendQ) > 0) {
-                $s = \array_shift($this->sendQ);
-                $v = \array_shift($this->sendVal);
+            while (true) {
+                $s = $this->popSend();
+                if ($s === null) { return null; }
+                $v = $this->sendPopped;
                 if (!$this->claimSender($s)) {
                     continue;   // cancelled or already claimed by another case
                 }
                 return new Received($v, true);
             }
-            return null;
         }
 
         /**
@@ -997,51 +1123,64 @@ namespace Async {
         /** Park $t on this channel's receive queue (select() slow path). */
         public function registerSelectRecv(Task $t): void
         {
+            $t->chanSlot = -1;   // in several queues at once — no single slot to hold
             $this->recvQ[] = $t;
         }
 
         /** Park $t on this channel's send queue offering $value (select() slow path). */
         public function registerSelectSend(Task $t, mixed $value): void
         {
+            $t->chanSlot = -1;
             $this->sendQ[] = $t;
             $this->sendVal[] = $value;
         }
 
         /**
-         * Remove a parked task from BOTH queues by identity — a select loser, or
-         * a task the scheduler just cancelled. The sendQ/sendVal pair is rebuilt
-         * in lockstep (array_splice is still unimplemented).
+         * Remove a parked task from BOTH queues — a select loser, or a task the
+         * scheduler just cancelled. O(1) when the task carries this channel's slot
+         * ({@see Task::$chanSlot}), which is every ordinary send()/next() park.
+         *
+         * A task parked by {@see select()} sits in SEVERAL channels' queues at once
+         * and so cannot carry one slot; that path still scans, from the cursor
+         * rather than from zero. Select sets are small and this only walks the live
+         * tail, but it is the one case left that is not O(1).
          */
         public function removeWaiter(Task $t): void
         {
-            /** @var Task[] $keptR */
-            $keptR = [];
-            foreach ($this->recvQ as $r) {
-                if ($r !== $t) { $keptR[] = $r; }
-            }
-            $this->recvQ = $keptR;
-
-            /** @var Task[] $keptS */
-            $keptS = [];
-            /** @var mixed[] $keptV */
-            $keptV = [];
-            $n = \count($this->sendQ);
-            for ($i = 0; $i < $n; $i++) {
-                if ($this->sendQ[$i] !== $t) {
-                    $keptS[] = $this->sendQ[$i];
-                    $keptV[] = $this->sendVal[$i];
+            $s = $t->chanSlot;
+            if ($s >= 0) {
+                if ($s < \count($this->recvQ) && $this->recvQ[$s] === $t) {
+                    $this->recvQ[$s] = null;
+                    $t->chanSlot = -1;
+                    return;
+                }
+                if ($s < \count($this->sendQ) && $this->sendQ[$s] === $t) {
+                    $this->sendQ[$s] = null;
+                    $this->sendVal[$s] = null;   // drop the offered value with it
+                    $t->chanSlot = -1;
+                    return;
                 }
             }
-            $this->sendQ = $keptS;
-            $this->sendVal = $keptV;
+            $n = \count($this->recvQ);
+            for ($i = $this->recvHead; $i < $n; $i++) {
+                if ($this->recvQ[$i] === $t) { $this->recvQ[$i] = null; }
+            }
+            $n = \count($this->sendQ);
+            for ($i = $this->sendHead; $i < $n; $i++) {
+                if ($this->sendQ[$i] === $t) {
+                    $this->sendQ[$i] = null;
+                    $this->sendVal[$i] = null;
+                }
+            }
         }
 
         /** Move one parked sender's value into a buffer slot freed by a recv. */
         private function promoteSender(): void
         {
-            while (\count($this->sendQ) > 0 && \count($this->buffer) < $this->cap) {
-                $s = \array_shift($this->sendQ);
-                $v = \array_shift($this->sendVal);
+            while (\count($this->buffer) < $this->cap) {
+                $s = $this->popSend();
+                if ($s === null) { return; }
+                $v = $this->sendPopped;
                 if (!$this->claimSender($s)) { continue; }
                 $this->buffer[] = $v;
                 return;
@@ -1057,18 +1196,19 @@ namespace Async {
             $this->closed = true;
             $sched = Scheduler::instance();
 
-            foreach ($this->recvQ as $r) {
+            while (true) {
+                $r = $this->popRecv();
+                if ($r === null) { break; }
                 $this->wakeReceiver($r, null, false);
             }
-            $this->recvQ = [];
 
             // Wake parked senders; each re-checks $closed on resume and throws.
-            foreach ($this->sendQ as $s) {
+            while (true) {
+                $s = $this->popSend();
+                if ($s === null) { break; }
                 $s->chanHost = null;
                 $sched->wake($s);
             }
-            $this->sendQ = [];
-            $this->sendVal = [];
         }
     }
 
