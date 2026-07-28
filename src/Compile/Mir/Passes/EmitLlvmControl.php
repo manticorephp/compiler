@@ -116,6 +116,19 @@ trait EmitLlvmControl
      */
     private function emitForeachGenerator(\Compile\Mir\Foreach_ $fe): string
     {
+        $out = $this->emitNode($fe->array);
+        $out .= $this->coerceToPtr();
+        return $out . $this->emitForeachGeneratorFrom($fe, $this->lastValue);
+    }
+
+    /**
+     * The generator loop itself, over an ALREADY-materialized frame `ptr`. Split
+     * out so the erased-base foreach can reach it after its runtime classify
+     * without evaluating the subject a second time (which would run its side
+     * effects twice).
+     */
+    private function emitForeachGeneratorFrom(\Compile\Mir\Foreach_ $fe, string $g, bool $ownsFrame = true): string
+    {
         $out = '';
         if (!isset($this->locals->slots[$fe->valueVar])) {
             $vs = $this->ssa->allocReg();
@@ -127,9 +140,6 @@ trait EmitLlvmControl
             $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
-        $out .= $this->emitNode($fe->array);
-        $out .= $this->coerceToPtr();
-        $g = $this->lastValue;
         // Inside a generator the sub-generator ptr must survive the inner
         // yield (the resume entry-switch re-enters mid-loop), so stash it in a
         // frame slot and reload it in each block.
@@ -169,6 +179,15 @@ trait EmitLlvmControl
         $out .= $bodyLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
         $out .= $this->genFieldLoad($g, 16);
+        // `current`@16 is a tagged cell ({@see EmitLlvmGenerator::emitYield}) —
+        // unbox to whatever this loop's value var is typed as. For a cell or
+        // erased element that is a no-op and the slot keeps the self-describing
+        // cell, which is the shape the runtime classifiers want.
+        $gelem = Type::unknown();
+        $gt = $fe->array->type;
+        if ($gt->element !== null) { $gelem = $gt->element; }
+        $out .= $this->unboxCellToType($gelem);
+        $out .= $this->coerceToI64();
         $cur = $this->lastValue;
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
@@ -191,8 +210,9 @@ trait EmitLlvmControl
         // (rc str-path). A borrowed local subject (`foreach ($g as ...)`) is
         // released at its own scope exit; releasing here would double-free.
         $ak = $fe->array->kind;
-        if ($ak === Node::KIND_CALL || $ak === Node::KIND_METHOD_CALL
-            || $ak === Node::KIND_STATIC_CALL || $ak === Node::KIND_INVOKE) {
+        if ($ownsFrame
+            && ($ak === Node::KIND_CALL || $ak === Node::KIND_METHOD_CALL
+                || $ak === Node::KIND_STATIC_CALL || $ak === Node::KIND_INVOKE)) {
             $relPtr = $g;
             if ($framed) { $out .= $this->genReloadArr($gSlot); $relPtr = $this->lastValue; }
             $this->rt->needsStrRc = true;
@@ -211,6 +231,156 @@ trait EmitLlvmControl
      * {@see MethodCall_} routed through the normal (virtual) dispatch. Subject
      * type / value+key types were resolved by InferTypes onto the node.
      */
+    /**
+     * The iterator's static class is an INTERFACE with no descriptor —
+     * `getIterator(): \Traversable` resolves to nothing a virtual dispatch can
+     * use, and a Generator satisfies it without being a class at all. symfony's
+     * `TableRows implements IteratorAggregate` returns its generator closure
+     * that way, so every protocol call missed and `Table::render` iterated its
+     * rows ZERO times: borders drawn around no cells.
+     */
+    private function iterNeedsRuntimeClass(string $cls): bool
+    {
+        if ($cls === '' || $cls === 'Generator') { return false; }
+        return !isset($this->classes[$cls]);
+    }
+
+    /**
+     * Is this i64 carrier a GENERATOR FRAME? A frame borrows the string rc
+     * header, so `ptr-8` holds a plain count and says nothing — its identity is
+     * the magic the creator stamps in the otherwise-unused `cap@-24`
+     * ({@see \Compile\MemoryAbi::GENERATOR_TAG_MAGIC}).
+     *
+     * Three steps, and each is load-bearing:
+     *  1. bounded both ends ({@see plausiblePtrIr}) — an unboxed word IS its
+     *     double bits, and a small int would dereference 0xFFFF…F9;
+     *  2. `ptr-8` against the CONTAINER magics — an array or an object is
+     *     positively identified there, and this stops step 3 from reading
+     *     `-24` on something with no 32-byte header;
+     *  3. `ptr-24` against the frame magic. What reaches here is a string or a
+     *     frame, both of which carry the full header, so the read is in bounds.
+     *
+     * The result i1 is left in {@see EmitLlvm::$genFrameReg}.
+     */
+    private function genFrameProbeIr(string $iw): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca i1\n";
+        $out .= '  store i1 0, ptr ' . $slot . "\n";
+        $probeL = $this->ssa->allocLabel('gf.probe');
+        $capL = $this->ssa->allocLabel('gf.cap');
+        $endL = $this->ssa->allocLabel('gf.end');
+        $out .= $this->plausiblePtrIr($iw);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $probeL
+              . ', label %' . $endL . "\n";
+        $out .= $probeL . ":\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $iw . " to ptr\n";
+        $tp = $this->ssa->allocReg();
+        $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+        $tw = $this->ssa->allocReg();
+        $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+        $isCont = $this->magicMatchIr($tw, [\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            \Compile\MemoryAbi::ARRAY_TAG_ARENA, \Compile\MemoryAbi::ASSOC_TAG_MAGIC,
+            \Compile\MemoryAbi::RC_TAG_MAGIC, \Compile\MemoryAbi::ENUM_TAG_MAGIC,
+            \Compile\MemoryAbi::STRUCT_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $out .= '  br i1 ' . $isCont . ', label %' . $endL . ', label %' . $capL . "\n";
+        $out .= $capL . ":\n";
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -24\n";
+        $cw = $this->ssa->allocReg();
+        $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+        $isGen = $this->ssa->allocReg();
+        $out .= '  ' . $isGen . ' = icmp eq i64 ' . $cw . ', '
+              . (string)\Compile\MemoryAbi::GENERATOR_TAG_MAGIC . "\n";
+        $out .= '  store i1 ' . $isGen . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i1, ptr ' . $slot . "\n";
+        $this->genFrameReg = $r;
+        return $out;
+    }
+
+    /**
+     * One step of the foreach-over-object iterator protocol.
+     *
+     * When the iterator's class is known this is just the synthesized method
+     * call it always was. When it is an interface ({@see
+     * iterNeedsRuntimeClass}), the same step is emitted twice behind the
+     * runtime generator test: the frame arm drives the generator directly (the
+     * dispatch cannot reach it — a Generator has no class descriptor) and the
+     * object arm keeps the virtual call. `valid`/`current`/`key` leave an i64 in
+     * lastValue; `rewind`/`next` leave nothing meaningful.
+     */
+    private function iterProtoStep(bool $dyn, string $isGen, string $iterSlot,
+        \Compile\Mir\LoadLocal $iterNode, string $m): string
+    {
+        $rt = ($m === 'valid') ? \Compile\Mir\Type::bool_()
+            : (($m === 'current' || $m === 'key') ? \Compile\Mir\Type::unknown()
+                : \Compile\Mir\Type::void());
+        if (!$dyn) {
+            return $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, $m, [], $rt));
+        }
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $slot . "\n";
+        $genL = $this->ssa->allocLabel('ip.gen');
+        $objL = $this->ssa->allocLabel('ip.obj');
+        $endL = $this->ssa->allocLabel('ip.end');
+        $out .= '  br i1 ' . $isGen . ', label %' . $genL . ', label %' . $objL . "\n";
+
+        $out .= $genL . ":\n";
+        $out .= $this->iterFramePtr($iterSlot);
+        $g = $this->lastValue;
+        if ($m === 'rewind') {
+            $out .= $this->genPrimeIfFresh($g);
+        } elseif ($m === 'next') {
+            $out .= $this->genResumeCall($g);
+        } elseif ($m === 'valid') {
+            $out .= $this->genPrimeIfFresh($g);
+            $out .= $this->genFieldLoad($g, 8);
+            $ne = $this->ssa->allocReg();
+            $out .= '  ' . $ne . ' = icmp ne i64 ' . $this->lastValue . ", -1\n";
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
+            $out .= '  store i64 ' . $z . ', ptr ' . $slot . "\n";
+        } else {
+            // current@16 / key@24 — both already tagged cells.
+            $out .= $this->genFieldLoad($g, ($m === 'current') ? 16 : 24);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $objL . ":\n";
+        $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, $m, [], $rt));
+        if ($m !== 'rewind' && $m !== 'next') {
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Reload the iterator slot as a frame `ptr`; sets lastValue. */
+    private function iterFramePtr(string $iterSlot): string
+    {
+        $w = $this->ssa->allocReg();
+        $out = '  ' . $w . ' = load i64, ptr ' . $iterSlot . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitForeachObject(\Compile\Mir\Foreach_ $fe): string
     {
         $out = '';
@@ -254,7 +424,19 @@ trait EmitLlvmControl
         }
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
 
-        $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'rewind', [], \Compile\Mir\Type::void()));
+        // An interface-typed iterator may be a Generator at runtime; classify
+        // ONCE here (the test dominates every loop block) and branch each
+        // protocol step. The body is still emitted exactly once.
+        $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
+        $isGen = '';
+        if ($dyn) {
+            $iw0 = $this->ssa->allocReg();
+            $out .= '  ' . $iw0 . ' = load i64, ptr ' . $iterSlot . "\n";
+            $out .= $this->genFrameProbeIr($iw0);
+            $isGen = $this->genFrameReg;
+        }
+
+        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'rewind');
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -263,18 +445,18 @@ trait EmitLlvmControl
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $condL . ":\n";
-        $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'valid', [], \Compile\Mir\Type::bool_()));
+        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'valid');
         $out .= $this->coerceToI64();
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
         $out .= '  br i1 ' . $v . ', label %' . $bodyL . ', label %' . $endL . "\n";
 
         $out .= $bodyL . ":\n";
-        $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'current', [], \Compile\Mir\Type::unknown()));
+        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'current');
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
-            $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'key', [], \Compile\Mir\Type::unknown()));
+            $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'key');
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
@@ -284,7 +466,7 @@ trait EmitLlvmControl
         $out .= '  br label %' . $stepL . "\n";
 
         $out .= $stepL . ":\n";
-        $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, 'next', [], \Compile\Mir\Type::void()));
+        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'next');
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $endL . ":\n";
@@ -425,7 +607,47 @@ trait EmitLlvmControl
         // header. Classify at runtime and fall back to the empty array — see
         // {@see arrayPtrOrEmptyIr} for the semantics this does and does not give.
         $bk = $fe->array->type->kind;
-        if ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
+        $dynEnd = '';
+        $dynGen = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN)
+            && !$this->foreachBodyYields($fe->body);
+        if ($dynGen) {
+            $out .= $this->coerceToI64();
+            $word = $this->lastValue;
+            // An erased carrier can also be a GENERATOR, and classifying only
+            // "array or not" answered the empty array for one — zero iterations,
+            // silently. Every lazy producer arrives this way: a `callable`/
+            // `iterable` param, a closure invoke (dynamic ⇒ cell), a method
+            // declared `: \Traversable`. symfony's
+            // `calculateColumnsWidth(iterable $groups)` is exactly that, so the
+            // Table measured no columns and drew its borders around nothing.
+            //
+            // Probe first, and drive the real generator protocol when it is one.
+            // The body is emitted in both arms; that cost is paid only by an
+            // erased base, and only one arm ever runs.
+            //
+            // ⚠ NOT when the body itself yields: emitting it twice would emit
+            // twice the yields, and the resume switch is built from the SOURCE
+            // yield count ({@see EmitLlvmGenerator::emitGenerator}) — the second
+            // copy's `gen.resume.N` labels would have no switch case. Such a
+            // foreach keeps the array-only classification it has always had.
+            $out .= $this->genFrameProbeIr($word);
+            $isGen = $this->genFrameReg;
+            $gArm = $this->ssa->allocLabel('fe.dyn.gen');
+            $aArm = $this->ssa->allocLabel('fe.dyn.arr');
+            $dynEnd = $this->ssa->allocLabel('fe.dyn.end');
+            $out .= '  br i1 ' . $isGen . ', label %' . $gArm . ', label %' . $aArm . "\n";
+            $out .= $gArm . ":\n";
+            $gp = $this->ssa->allocReg();
+            $out .= '  ' . $gp . ' = inttoptr i64 ' . $word . " to ptr\n";
+            // The subject temp is released by the erased path's own bookkeeping,
+            // so this arm must NOT also drop the frame.
+            $out .= $this->emitForeachGeneratorFrom($fe, $gp, false);
+            $out .= '  br label %' . $dynEnd . "\n";
+            $out .= $aArm . ":\n";
+            $out .= $this->arrayPtrOrEmptyIr($word);
+            $this->lastValue = $this->arrayPtrReg;
+            $this->lastValueType = 'ptr';
+        } elseif ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
             $out .= $this->coerceToI64();
             $out .= $this->arrayPtrOrEmptyIr($this->lastValue);
             $this->lastValue = $this->arrayPtrReg;
@@ -574,6 +796,13 @@ trait EmitLlvmControl
         $out .= $endLabel . ":\n";
 
         $this->cf->leave();
+        // Rejoin the generator arm of the erased-base classify above.
+        if ($dynEnd !== '') {
+            $out .= '  br label %' . $dynEnd . "\n";
+            $out .= $dynEnd . ":\n";
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+        }
         return $out;
     }
 

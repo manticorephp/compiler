@@ -320,6 +320,122 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * Box for a slot that must be SELF-DESCRIBING without changing what it
+     * holds: tag the value, never rebuild it.
+     *
+     * {@see boxToCell} rebuilds a homogeneous array with every element boxed,
+     * which is right when the consumer walks the elements as cells (var_dump,
+     * json_encode, a `mixed` field) and WRONG when the value is merely passing
+     * through a carrier — the elements' repr changes under readers that still
+     * take the raw path. That is what sank the two earlier attempts at boxing
+     * `yield`: symfony's Table went from denormal cells to blank ones, `implode`
+     * over a yielded row returned '' and `count()` on one faulted.
+     *
+     * Here the payload is untouched, so unboxing at the consumer hands back
+     * exactly the word that would have been stored raw — a generator with a
+     * concrete element type round-trips to a no-op, and only an erased or
+     * cell-typed channel changes behaviour.
+     */
+    private function boxToCellShallow(Type $t): string
+    {
+        if ($t->isVec() || $t->isAssoc() || $t->isArray()) {
+            $this->rt->needsTagged = true;
+            $out = $this->coerceToPtr();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+            return $this->finishI64($out, $r);
+        }
+        if ($t->kind === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
+        return $this->boxToCell($t);
+    }
+
+    /**
+     * Tag an ERASED i64 carrier when — and only when — the runtime can say what
+     * it is. `boxToCell` sends KIND_UNKNOWN to `__manticore_box_int`, which
+     * mis-tags an object or an array as an integer; the honest answer is to
+     * probe.
+     *
+     * Already NaN-boxed passes through. A raw word is only identifiable as a
+     * CONTAINER: the allocator stamps a magic at `ptr-8`, and nothing does for a
+     * raw string vs a raw int ({@see biIsType} says the same). An unidentifiable
+     * word is left exactly as it is — which is today's behaviour for the whole
+     * erased case, so this only ever adds information.
+     *
+     * The pointer bounds are the house predicate ({@see plausiblePtrIr}).
+     */
+    private function boxUnknownShallowIr(): string
+    {
+        $this->rt->needsTagged = true;
+        $out = $this->coerceToI64();
+        $v = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $v . ', ptr ' . $slot . "\n";
+        $rawL = $this->ssa->allocLabel('bx.raw');
+        $probeL = $this->ssa->allocLabel('bx.probe');
+        $arrL = $this->ssa->allocLabel('bx.arr');
+        $objL = $this->ssa->allocLabel('bx.obj');
+        $endL = $this->ssa->allocLabel('bx.end');
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $out .= '  br i1 ' . $isBox . ', label %' . $endL . ', label %' . $rawL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($v);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $probeL
+              . ', label %' . $endL . "\n";
+        $out .= $probeL . ":\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $v . " to ptr\n";
+        $tp = $this->ssa->allocReg();
+        $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+        $tw = $this->ssa->allocReg();
+        $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+        $isArr = $this->magicMatchIr($tw, [\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            \Compile\MemoryAbi::ARRAY_TAG_ARENA, \Compile\MemoryAbi::ASSOC_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $out .= '  br i1 ' . $isArr . ', label %' . $arrL . ', label %' . $objL . "\n";
+        $out .= $arrL . ":\n";
+        $ab = $this->ssa->allocReg();
+        $out .= '  ' . $ab . ' = call i64 @__manticore_box_array(ptr ' . $rp . ")\n";
+        $out .= '  store i64 ' . $ab . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $objL . ":\n";
+        $isObj = $this->magicMatchIr($tw, [\Compile\MemoryAbi::RC_TAG_MAGIC,
+            \Compile\MemoryAbi::ENUM_TAG_MAGIC, \Compile\MemoryAbi::STRUCT_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $ob = $this->ssa->allocReg();
+        $out .= '  ' . $ob . ' = call i64 @__manticore_box_object(ptr ' . $rp . ")\n";
+        $sel = $this->ssa->allocReg();
+        $out .= '  ' . $sel . ' = select i1 ' . $isObj . ', i64 ' . $ob . ', i64 ' . $v . "\n";
+        $out .= '  store i64 ' . $sel . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /** `tw == m0 || tw == m1 || …` — returns the i1 reg; the IR is left in the
+     *  host's {@see EmitLlvm::$magicMatchOut} (no by-ref out-param — that pattern
+     *  miscompiles under self-host, {@see plausiblePtrIr}).
+     *  @param int[] $magics */
+    private function magicMatchIr(string $tw, array $magics): string
+    {
+        $out = '';
+        $prev = '';
+        foreach ($magics as $magic) {
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $tw . ', ' . (string)$magic . "\n";
+            if ($prev === '') { $prev = $eq; continue; }
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $prev . ', ' . $eq . "\n";
+            $prev = $or;
+        }
+        $this->magicMatchOut = $out;
+        return $prev;
+    }
+
     private function boxToCell(Type $t): string
     {
         $this->rt->needsTagged = true;

@@ -2611,7 +2611,12 @@ trait EmitLlvmObjects
         // current/key/valid/rewind all observe the FIRST element, so they
         // prime a fresh generator (advance to the first yield) — PHP rewinds
         // implicitly on first access. next/send drive an already-primed one.
-        if ($m === 'current') { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 16); return $this->finishI64($out, $this->lastValue); }
+        // `current`@16 holds a tagged cell ({@see EmitLlvmGenerator::emitYield});
+        // every reader unboxes to its own declared type. InferCalls types
+        // current()/send()/throw() as the generator's element, so `$mc->type` IS
+        // that channel — and for a cell/erased one the unbox is a no-op, which
+        // leaves the self-describing cell the runtime classifiers want.
+        if ($m === 'current') { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 16); $out .= $this->unboxCellToType($mc->type); $out .= $this->coerceToI64(); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'key')     { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 24); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
@@ -2628,6 +2633,8 @@ trait EmitLlvmObjects
             }
             $out .= $this->genResumeCall($g);
             $out .= $this->genFieldLoad($g, 16);
+            $out .= $this->unboxCellToType($mc->type);
+            $out .= $this->coerceToI64();
             return $this->finishI64($out, $this->lastValue);
         }
         if ($m === 'throw') {
@@ -2643,6 +2650,8 @@ trait EmitLlvmObjects
             }
             $out .= $this->genResumeCall($g);
             $out .= $this->genFieldLoad($g, 16);
+            $out .= $this->unboxCellToType($mc->type);
+            $out .= $this->coerceToI64();
             return $this->finishI64($out, $this->lastValue);
         }
         if ($m === 'valid') {

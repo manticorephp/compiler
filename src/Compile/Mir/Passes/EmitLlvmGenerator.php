@@ -165,7 +165,12 @@ trait EmitLlvmGenerator
         $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . (string)($frameSize + $strHdr) . ")\n";
         $fr = $this->ssa->allocReg();
         $out .= '  ' . $fr . ' = getelementptr inbounds i8, ptr ' . $base . ", i64 " . (string)$strHdr . "\n";
-        $out .= $this->genStoreAt($fr, -24, '0');                     // cap@-24 = 0 (unused)
+        // cap@-24 is unused by a frame — stamp the frame's identity there. The
+        // rc at -8 is a plain count (a string's is too), so this is the only
+        // thing that lets an erased carrier be recognised as a generator
+        // ({@see \Compile\MemoryAbi::GENERATOR_TAG_MAGIC}).
+        $out .= $this->genStoreAt($fr, -24,
+            (string)\Compile\MemoryAbi::GENERATOR_TAG_MAGIC);
         $out .= $this->genStoreAt($fr, -16, '0');                     // len@-16 = 0 (unused)
         $out .= $this->genStoreAt($fr, -8, '1');                      // rc@-8 = 1
         $rp = $this->ssa->allocReg();
@@ -368,16 +373,41 @@ trait EmitLlvmGenerator
         $val = '0';
         if ($y->value !== null) {
             $out .= $this->emitNode($y->value);
-            // ⚠ NOT boxToCell'd, though the KEY below is, and though every
-            // consumer reads `current` through an ERASED channel — so producer
-            // and consumer genuinely disagree about repr here. Boxing it has been
-            // tried TWICE and reverted both times: boxToCell cellifies a yielded
-            // array's ELEMENTS, and every consumer that reads them raw then sees
-            // empty strings instead of garbage (symfony's Table went from
-            // denormal cells to blank cells, `implode` over a yielded row
-            // returned '', and `count()` on one started faulting). The fix is not
-            // here alone — the consumers have to move in the same commit. See the
-            // repr-consistency epic.
+            // `current`@16 is SELF-DESCRIBING, like `key`@24 beside it: every
+            // consumer reads it through an erased or cell-typed channel, so a raw
+            // word left the two sides disagreeing and each value decoded as a
+            // tag-6 double (symfony's Table rendered borders around blank cells).
+            //
+            // WHICH box depends on the channel the consumers read, and that is
+            // this generator's ELEMENT type — every consumer types itself off it
+            // ({@see InferNodes::inferForeach}, {@see InferCalls}).
+            //
+            //  - a CELL channel (heterogeneous yields, or a bare `Generator` /
+            //    `Traversable` hint that carries no element) means the consumer
+            //    reads elements as cells, so a yielded array must be cellified:
+            //    the plain `boxToCell`. Doing this WITHOUT moving the consumers
+            //    is what got the two earlier attempts reverted — they then read
+            //    the cellified elements raw and saw empty strings.
+            //  - a CONCRETE channel means the consumer unboxes back to that type
+            //    and reads elements raw, so the payload must not be touched:
+            //    {@see EmitLlvmBuiltins::boxToCellShallow} tags and nothing else,
+            //    and the round trip is exactly the word this used to store raw.
+            //
+            // No retain either way for the shallow one — it creates no ownership,
+            // and the consumer reads `current` before the next resume, as always.
+            //
+            // ⚠ Producer and consumers are ONE unit. Do not touch a side alone.
+            $genElem = null;
+            $frt = $this->frame->returnType;
+            if ($frt !== null && $frt->element !== null) { $genElem = $frt->element; }
+            $cellChannel = $genElem === null
+                || $genElem->kind === Type::KIND_CELL
+                || $genElem->kind === Type::KIND_UNKNOWN;
+            if ($cellChannel) {
+                $out .= $this->boxToCell($y->value->type);
+            } else {
+                $out .= $this->boxToCellShallow($y->value->type);
+            }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
         }

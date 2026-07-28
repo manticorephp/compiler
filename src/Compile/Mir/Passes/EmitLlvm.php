@@ -148,6 +148,12 @@ final class EmitLlvm implements EmitVisitor
     // Out-slot for {@see arrayPtrOrEmptyIr}: array ptr, or the empty zero word.
     private string $arrayPtrReg = '';
 
+    // Out-slot for {@see magicMatchIr}: the IR computing the `ptr-8` magic test.
+    private string $magicMatchOut = '';
+
+    // Out-slot for {@see genFrameProbeIr}: i1, "this iterator is a generator frame".
+    private string $genFrameReg = '';
+
     /** break/continue/finally targets of the current function (fresh each {@see emit}). */
     private ?ControlFlow $cf = null;
 

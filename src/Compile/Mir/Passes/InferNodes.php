@@ -1361,14 +1361,17 @@ trait InferNodes
         // key came back as its raw POINTER and printed as a large integer.
         if ($at->kind === Type::KIND_OBJ && ($at->class ?? '') === 'Generator') {
             $keyT = Type::cell();
-            // ⚠ The VALUE is deliberately NOT forced to a cell here, even though
-            // the consumer really does read `current` through an erased channel
-            // and the two sides therefore disagree about repr. Typing it cell
-            // only pays off if the yield BOXES, and boxing the yield is a
-            // separate, larger change that has now been tried twice and reverted
-            // both times — it cellifies a yielded array's elements and every
-            // consumer that reads them raw then sees empty strings. Move the two
-            // together, with the consumers, or not at all.
+            // `current`@16 holds a SHALLOW-boxed cell ({@see
+            // EmitLlvmGenerator::emitYield}) and each consumer unboxes to the
+            // channel it declares, so a KNOWN element type round-trips exactly.
+            // When it is not known — a bare `Generator` hint carries no element,
+            // as `function sum(Generator $g)` — the honest type is CELL, not
+            // unknown: the producer boxed, so an unknown-typed value var would
+            // hand `$t + $v` the tag bits. cell routes it through the tagged
+            // paths, which is what the slot really holds.
+            // ⚠ The producer and every consumer are one unit. Do not un-box the
+            // yield without moving all of them.
+            if ($elem->kind === Type::KIND_UNKNOWN) { $elem = Type::cell(); }
         }
         // Iterating a `mixed` (tagged cell) that holds an array: both the
         // value AND the key come back as tagged cells (a cell array's key is

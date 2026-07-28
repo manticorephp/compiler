@@ -92,6 +92,23 @@ final class MemoryAbi
      */
     public const STRUCT_TAG_MAGIC = 0x7E66000000000005;
 
+    /**
+     * Sentinel in a GENERATOR FRAME's `cap@-24`. A frame borrows the string rc
+     * header so the existing string helpers free it, which leaves it with no
+     * identity of its own: `ptr-8` holds the rc COUNT, exactly like a string's,
+     * so a carrier of unknown repr could not be told apart from one.
+     *
+     * That mattered once `foreach` learned to drive a generator behind an erased
+     * carrier ({@see \Compile\Mir\Passes\EmitLlvmControl::genFrameProbeIr}) — the
+     * "no object magic at ptr-8" test alone would have claimed every raw ARRAY
+     * and every raw STRING as a frame. `cap` is unused by a frame (the creator
+     * stored 0 there) and is a small byte count for a real string, so it can
+     * carry this without disturbing either. Probe it only AFTER `ptr-8` has
+     * ruled out the container magics: strings and frames both have the full
+     * 32-byte header, so `-24` is in bounds for whatever is left.
+     */
+    public const GENERATOR_TAG_MAGIC = 0x7E66000000000006;
+
     // ─── String header (32 bytes) ─────────────────────────────────
 
     /**

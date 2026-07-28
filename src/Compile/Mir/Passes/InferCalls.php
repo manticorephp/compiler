@@ -618,12 +618,25 @@ trait InferCalls
         // Generator iterator protocol: current()/send() yield the value type
         // (the Generator's element); key() an int; valid() a bool. next()/
         // rewind()/getReturn() are left as-is (void / unknown).
+        //
+        // No declared element means CELL, not unknown: `current`@16 holds a
+        // shallow-boxed cell ({@see EmitLlvmGenerator::emitYield}), so a bare
+        // `Generator` hint's reader must be told it is getting one. Same rule as
+        // the foreach value var ({@see InferNodes::inferForeach}).
         if ($objType->isGenerator()) {
             $m = $node->method;
             if ($m === 'current' || $m === 'send' || $m === 'throw') {
-                $node->type = $objType->element ?? Type::unknown();
+                $et = $objType->element;
+                if ($et === null || $et->kind === Type::KIND_UNKNOWN) { $et = Type::cell(); }
+                $node->type = $et;
             } elseif ($m === 'key') {
-                $node->type = Type::int_();
+                // `key`@24 is stored BOXED — a generator's keys have no single
+                // static type (`yield "a" => 1` beside the auto-incrementing
+                // int), which is why the yield boxes them. Typed int, `$g->key()`
+                // handed back the tag bits as an integer. The foreach key var is
+                // already cell ({@see InferNodes::inferForeach}); this is the
+                // method form of the same channel.
+                $node->type = Type::cell();
             } elseif ($m === 'valid') {
                 $node->type = Type::bool_();
             }
