@@ -1,0 +1,44 @@
+int(10)
+int(0)
+int(20)
+int(1)
+int(30)
+int(2)
+bool(false)
+NULL
+bool(false)
+int(10)
+int(0)
+int(30)
+int(2)
+int(20)
+int(1)
+int(10)
+bool(false)
+NULL
+int(1)
+string(1) "x"
+int(2)
+string(1) "y"
+int(3)
+string(1) "z"
+string(1) "k"
+int(0)
+int(7)
+string(1) "w"
+bool(false)
+NULL
+bool(false)
+bool(false)
+bool(false)
+string(4) "only"
+bool(false)
+bool(false)
+string(4) "only"
+string(1) "a"
+string(1) "c"
+int(3)
+0=1 1=2 2=3 
+int(2)
+a=1 b=0
+c=1 d=0

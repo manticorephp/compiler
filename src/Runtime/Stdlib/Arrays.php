@@ -112,18 +112,12 @@ function array_merge(array ...$arrays): array
 // the prelude, call-site element inference types the param + result. Same reason
 // as array_reverse / array_reduce / sort / usort. Gated in Main.
 
-function reset(array &$arr): mixed
-{
-    foreach ($arr as $v) { return $v; }
-    return false;
-}
-
-function end(array &$arr): mixed
-{
-    $last = false;
-    foreach ($arr as $v) { $last = $v; }
-    return $last;
-}
+// `reset` / `end` are NOT here any more, and neither are `current` / `key` /
+// `next` / `prev`: the whole internal-pointer family is a CODEGEN BUILTIN
+// (EmitLlvmBuiltins::biArrayCursor). They read and write php's cursor in the
+// array header (flags bits 36-63), which a PHP-level helper cannot reach — and
+// the old walking `reset`/`end` could not move the cursor at all, so a
+// following `current()` disagreed with them.
 
 /**
  * `array_is_list` — true iff `$a`'s keys are the integers 0..n-1 in order
@@ -165,20 +159,97 @@ function array_is_list(array $a): bool
 // fixed return type would silently break those call sites.
 
 /**
- * `range(start, end, step)` — an inclusive list of integers ascending or
- * descending (step is taken as its magnitude). Float ranges round to int here.
+ * `range(start, end, step)` — an inclusive list ascending or descending (the
+ * step is taken as its magnitude).
+ *
+ * Three shapes, as in PHP: INT when both ends and the step are integral, FLOAT
+ * when any of them is not, and CHARACTER when both ends are single-character
+ * non-numeric strings (`range('a','e')`). The float branch counts iterations
+ * up front rather than accumulating `$i += $step`, so rounding drift cannot
+ * add or drop a final element.
  */
-function range(int $start, int $end, int $step = 1): array
+function range(int|float|string $start, int|float|string $end, int|float $step = 1): array
 {
+    if (\is_string($start) && \is_string($end)
+        && \strlen($start) === 1 && \strlen($end) === 1
+        && !\is_numeric($start) && !\is_numeric($end)) {
+        return __mc_range_char($start, $end, (int)$step);
+    }
+    $fs = (float)$start;
+    $fe = (float)$end;
+    $fstep = (float)$step;
+    if ($fstep < 0) { $fstep = -$fstep; }
+    if ($fstep === 0.0) { $fstep = 1.0; }
+    $isFloat = !__mc_range_integral($start) || !__mc_range_integral($end)
+        || (float)(int)$fstep !== $fstep;
+    if (!$isFloat) {
+        $out = [];
+        $s = (int)$fstep;
+        $a = (int)$fs;
+        $b = (int)$fe;
+        if ($a <= $b) {
+            for ($i = $a; $i <= $b; $i = $i + $s) { $out[] = $i; }
+        } else {
+            for ($i = $a; $i >= $b; $i = $i - $s) { $out[] = $i; }
+        }
+        return $out;
+    }
+    $span = $fs <= $fe ? $fe - $fs : $fs - $fe;
+    $n = (int)($span / $fstep);
     $out = [];
-    $s = $step < 0 ? -$step : $step;
-    if ($s === 0) { $s = 1; }
-    if ($start <= $end) {
-        for ($i = $start; $i <= $end; $i = $i + $s) { $out[] = $i; }
-    } else {
-        for ($i = $start; $i >= $end; $i = $i - $s) { $out[] = $i; }
+    $i = 0;
+    while ($i <= $n) {
+        $out[] = $fs <= $fe ? $fs + $fstep * $i : $fs - $fstep * $i;
+        $i = $i + 1;
     }
     return $out;
+}
+
+/** Whether a range endpoint is an integer value (an int, or a float with no
+ *  fractional part — `range(1.0, 3.0)` is an INT range in PHP). */
+function __mc_range_integral(int|float|string $v): bool
+{
+    if (\is_int($v)) { return true; }
+    if (\is_float($v)) { return (float)(int)$v === $v; }
+    return (string)(int)$v === $v;
+}
+
+/** `range('a', 'e')` — the character form, ascending or descending. */
+function __mc_range_char(string $start, string $end, int $step): array
+{
+    $a = \ord($start);
+    $b = \ord($end);
+    $s = $step < 0 ? -$step : $step;
+    if ($s === 0) { $s = 1; }
+    $out = [];
+    if ($a <= $b) {
+        for ($i = $a; $i <= $b; $i = $i + $s) { $out[] = \chr($i); }
+    } else {
+        for ($i = $a; $i >= $b; $i = $i - $s) { $out[] = \chr($i); }
+    }
+    return $out;
+}
+
+/**
+ * `count($x, COUNT_RECURSIVE)` — every element, plus every element of every
+ * nested array, at any depth. `count` itself is a codegen builtin that reads the
+ * live length straight out of the header and ignores a mode argument, so
+ * LowerExprs rewrites the non-zero-mode call into this instead of growing the
+ * builtin.
+ *
+ * `$arr` is `mixed`, NOT `array`: a foreach over a bare-`array` stdlib param
+ * leaves the values RAW, and this needs the tag to ask `is_array`. A cell
+ * subject yields cell values and recurses on the tag alone — no element repr is
+ * ever needed, which is why this one CAN live in the stdlib .o.
+ */
+function __mc_count_recursive(mixed $arr): int
+{
+    $n = 0;
+    foreach ($arr as $v) {
+        $n = $n + 1;
+        if (\is_array($v)) { $n = $n + __mc_count_recursive($v); }
+    }
+    return $n;
 }
 
 /**
@@ -208,10 +279,18 @@ function array_fill(int $start, int $count, mixed $value): array
 // types the param and the in-module closure ABI matches. Follow-up.
 
 /**
- * Return the values of a single column `$column_key` from a list of array rows,
+ * Return the values of a single column `$column_key` from a list of rows,
  * optionally re-keyed by each row's `$index_key` (PHP `array_column`). A null
  * `$column_key` yields whole rows (re-keyed). Rows lacking the column are
- * skipped. Array rows only (the object-property form is not modelled here).
+ * skipped.
+ *
+ * ARRAY rows only. php also accepts OBJECT rows (reading a public property of
+ * the same name), and that is deliberately NOT modelled here: inside this
+ * function `$row` is erased to a cell, and a cell receiver cannot be reflected
+ * on — `property_exists($row, …)` returns false and a dynamic `$row->$name`
+ * read yields the cell's bits, even after funnelling through an `object`-typed
+ * param. It needs a compiler fix (erased-receiver reflection), not a stdlib one;
+ * shipping the object arm before that would silently drop every object row.
  * @param array<int|string, array<int|string, mixed>> $array
  */
 function array_column(array $array, int|string|null $column_key, int|string|null $index_key = null): array

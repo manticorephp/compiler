@@ -288,6 +288,11 @@ trait LowerFns
             || $n === 'method_exists' || $n === 'property_exists'
             || $n === 'is_a' || $n === 'is_subclass_of'
             || $n === 'get_parent_class' || $n === 'get_class_methods'
+            // The internal-pointer family. They read/write the cursor in the
+            // array header, so they cannot be PHP helpers — and `reset`/`end`
+            // are no longer stdlib functions for exactly that reason.
+            || $n === 'current' || $n === 'pos' || $n === 'key'
+            || $n === 'next' || $n === 'prev' || $n === 'reset' || $n === 'end'
             || $n === '__mir_float_repr';
     }
 

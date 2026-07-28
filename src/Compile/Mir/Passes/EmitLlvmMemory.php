@@ -232,6 +232,21 @@ trait EmitLlvmMemory
      */
     private function collectMutatedVecs(Node $n): void
     {
+        // A cursor MOVE writes the array header (php's nInternalPointer lives
+        // in the value), so `next`/`prev`/`reset`/`end` mutate their argument
+        // exactly like an element store. Without this a prior `$b = $a` shared
+        // the buffer and `next($a)` moved `$b`'s cursor too — the CoW inside
+        // the builtin cannot help, because a read-only alias is never retained
+        // and the buffer's rc stays 1. `current`/`key` only read.
+        if ($n->kind === Node::KIND_CALL
+            && ($n->function === 'next' || $n->function === 'prev'
+                || $n->function === 'reset' || $n->function === 'end')
+            && \count($n->args) === 1) {
+            $a0 = $n->args[0];
+            if ($a0->kind === Node::KIND_LOAD_LOCAL && $a0->type->isArray()) {
+                $this->frame->mutatedVecLocals[$a0->name] = true;
+            }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $arr = $n->array;
             if ($arr->kind === Node::KIND_LOAD_LOCAL

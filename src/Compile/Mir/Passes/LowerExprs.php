@@ -296,6 +296,31 @@ trait LowerExprs
                     return new ArrayLit($elems, Type::unknown());
                 }
             }
+            // `array_multisort($a, SORT_DESC, $b, …)` — every array argument is
+            // BY REF and the SORT_* flags are interleaved positionally, which
+            // needs a by-ref VARIADIC pack; that does not exist (the caller
+            // packs trailing args into one array_lit, so the pack is a VALUE and
+            // the callee's writes land in a throwaway alloca). Zend special-
+            // cases this function in the engine for the same reason, so we
+            // desugar it at the call site, where the arguments are still real
+            // lvalues: compute the row permutation once, then rebuild each
+            // column through a plain assignment. The call itself yields `true`.
+            if ($fn === 'array_multisort' && \count($expr->args) >= 1) {
+                $ms = $this->lowerMultisort($expr);
+                if ($ms !== null) { return $ms; }
+            }
+            // `count($x, COUNT_RECURSIVE)` — the codegen builtin reads the live
+            // length out of the array header and has no notion of a mode, so a
+            // non-zero mode is rewritten to the stdlib walker instead. A literal
+            // COUNT_NORMAL (0) keeps the fast path.
+            if (($fn === 'count' || $fn === 'sizeof') && \count($expr->args) === 2) {
+                $mode = $this->lowerExpr($expr->args[1]);
+                if ($mode->kind !== Node::KIND_INT_CONST || $mode->value !== 0) {
+                    return new Call('__mc_count_recursive', [
+                        $this->lowerExpr($expr->args[0]),
+                    ], Type::int_());
+                }
+            }
             // `define("NAME", v)` — registered in the run() pre-pass; the call
             // itself is a no-op yielding true (define's bool return).
             if ($fn === 'define') {
@@ -432,6 +457,88 @@ trait LowerExprs
             'MIR.lower: unsupported expression kind ' . $expr->kind . $extra
             . ' at line ' . (string)$expr->span->line
         );
+    }
+
+    /**
+     * Desugar `array_multisort($a, SORT_DESC, $b, …)`.
+     *
+     * Every array argument is BY REF and the `SORT_*` settings are interleaved
+     * positionally — a by-ref variadic pack, which the compiler does not have
+     * (trailing args are packed into one array_lit, i.e. a VALUE, so a callee's
+     * writes would land in a throwaway alloca and vanish silently). Zend
+     * special-cases the function in the engine for the same reason. Here the
+     * arguments are still real lvalues, so the whole thing lowers to
+     *
+     *     $__mc_msN = __mc_multisort_order([$a, $b], [orders], [flags]);
+     *     $a = __mc_multisort_apply($a, $__mc_msN);
+     *     $b = __mc_multisort_apply($b, $__mc_msN);
+     *
+     * queued on {@see LowerFromAst::$pendingCallInits} (flushed immediately
+     * before the statement that uses them, the `#[RefOut]` auto-viv path), with
+     * the call itself yielding `true` — array_multisort's return value.
+     *
+     * Classification is syntactic: a plain `$var` starts a new column, anything
+     * else is one of that column's two settings. Zend decides by runtime TYPE
+     * and accepts the order/flag pair in either sequence, so the settings are
+     * told apart by VALUE — SORT_ASC (4) / SORT_DESC (3) are the order, every
+     * other constant is the flags. A shape this cannot classify (a non-variable
+     * column, a non-constant setting, a setting before any column) returns null
+     * and falls through to the normal call path, which reports the function as
+     * unresolved rather than compiling something silently wrong.
+     */
+    private function lowerMultisort(\Parser\Ast\Call $expr): ?Node
+    {
+        $names = [];
+        $orders = [];
+        $flags = [];
+        $cur = -1;
+        foreach ($expr->args as $a) {
+            if ($a->kind === 'Variable') {
+                $names[] = $this->variableName($a);
+                $orders[] = 4;                       // SORT_ASC
+                $flags[] = 0;                        // SORT_REGULAR
+                $cur = $cur + 1;
+                continue;
+            }
+            if ($cur < 0) { return null; }           // a setting before any column
+            $lv = $this->lowerExpr($a);
+            if ($lv->kind !== Node::KIND_INT_CONST) { return null; }
+            $v = $lv->value;
+            if ($v === 3 || $v === 4) { $orders[$cur] = $v; } else { $flags[$cur] = $v; }
+        }
+        if (\count($names) === 0) { return null; }
+
+        $colEls = [];
+        $ordEls = [];
+        $flgEls = [];
+        $i = 0;
+        foreach ($names as $nm) {
+            $colEls[] = new ArrayElement_(null, new LoadLocal($nm, Type::unknown()));
+            $ordEls[] = new ArrayElement_(null, new IntConst($orders[$i], Type::int_()));
+            $flgEls[] = new ArrayElement_(null, new IntConst($flags[$i], Type::int_()));
+            $i = $i + 1;
+        }
+        $permName = '__mc_ms' . (string)$this->multisortSeq;
+        $this->multisortSeq = $this->multisortSeq + 1;
+        $order = new Call('__mc_multisort_order', [
+            new ArrayLit($colEls, Type::unknown()),
+            new ArrayLit($ordEls, Type::unknown()),
+            new ArrayLit($flgEls, Type::unknown()),
+        ], Type::unknown());
+        $this->pendingCallInits[] = new StoreLocal($permName, $order, Type::unknown());
+        foreach ($names as $nm) {
+            // A plain CALL, not an assignment: `__mc_multisort_apply` takes its
+            // column BY REF, so each one keeps its own element repr (the store-
+            // back of a cell-element return into a `vec[string]` slot made the
+            // slot's release read cell bits as string pointers). By-ref-ness is
+            // resolved at emit from the callee's signature, and a LoadLocal is
+            // addressable, so nothing extra is needed at the call site.
+            $this->pendingCallInits[] = new Call('__mc_multisort_apply', [
+                new LoadLocal($nm, Type::unknown()),
+                new LoadLocal($permName, Type::unknown()),
+            ], Type::void());
+        }
+        return new BoolConst(true, Type::bool_());
     }
 
     /**
