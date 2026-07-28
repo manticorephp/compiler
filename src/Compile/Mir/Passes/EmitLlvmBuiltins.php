@@ -2026,7 +2026,23 @@ trait EmitLlvmBuiltins
     private function biIsType(array $args, int $wantTag, string $kind): string
     {
         $a = $args[0];
-        if ($a->type->kind === Type::KIND_CELL) {
+        // Kinds a RAW carrier can be identified as, from the allocator tag at
+        // ptr-8. Only containers stamp one, so a raw string / int / null cannot
+        // be told apart and keeps the constant answer.
+        $rawMagics = [];
+        if ($kind === Type::KIND_ARRAY) {
+            $rawMagics = [\Compile\MemoryAbi::ARRAY_TAG_MAGIC, \Compile\MemoryAbi::ARRAY_TAG_ARENA,
+                          \Compile\MemoryAbi::ASSOC_TAG_MAGIC];
+        } elseif ($kind === Type::KIND_OBJ) {
+            $rawMagics = [\Compile\MemoryAbi::RC_TAG_MAGIC, \Compile\MemoryAbi::ENUM_TAG_MAGIC];
+        }
+        // A CELL slot does NOT guarantee a boxed value — that is the standing
+        // repr gap: a `vec[cell]` param is routinely handed a `vec[vec[string]]`
+        // whose elements ride RAW. Pure tag dispatch reads such a pointer as tag
+        // 6 (an unboxed word IS a double under NaN boxing) and answers "float".
+        // So when the kind is one a raw carrier can be identified as, take the
+        // classify-at-runtime path below instead.
+        if ($a->type->kind === Type::KIND_CELL && $rawMagics === []) {
             $this->rt->needsTagged = true;
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
@@ -2053,6 +2069,72 @@ trait EmitLlvmBuiltins
             $z = $this->ssa->allocReg();
             $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
             return $this->finishI64($out, $z);
+        }
+        // Any `is_*` over an ERASED or CELL value: the static type says nothing
+        // about the repr, and answering a flat false is what made symfony's Table
+        // treat a row array as a scalar. A BOXED carrier answers on its cell tag,
+        // which works for every kind. A RAW one can only be identified positively
+        // from the allocator tag at ptr-8 — that names arrays and objects and
+        // nothing else, so a raw string / int / null keeps the constant `false`
+        // rather than a guess. (Raw null vs raw int 0 is genuinely undecidable
+        // here; do not extend the erasure by guessing.)
+        if ($a->type->kind === Type::KIND_UNKNOWN || $a->type->kind === Type::KIND_CELL) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $v = $this->lastValue;
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $slot . "\n";
+            $isBox = $this->ssa->allocReg();
+            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+            $boxL = $this->ssa->allocLabel('ia.box');
+            $rawL = $this->ssa->allocLabel('ia.raw');
+            $chkL = $this->ssa->allocLabel('ia.rawchk');
+            $endL = $this->ssa->allocLabel('ia.end');
+            $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+            $out .= $boxL . ":\n";
+            $out .= $this->cellTagIr($v);
+            $isArr = $this->ssa->allocReg();
+            $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg
+                  . ', ' . (string)$wantTag . "\n";
+            $bz = $this->ssa->allocReg();
+            $out .= '  ' . $bz . ' = zext i1 ' . $isArr . " to i64\n";
+            $out .= '  store i64 ' . $bz . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $rawL . ":\n";
+            if ($rawMagics === []) {
+                // Nothing positively identifies a raw carrier of this kind —
+                // keep the old constant false rather than guess.
+                $out .= '  br label %' . $endL . "\n";
+            } else {
+                $out .= $this->plausiblePtrIr($v);
+                $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $chkL
+                      . ', label %' . $endL . "\n";
+                $out .= $chkL . ":\n";
+                $rp = $this->ssa->allocReg();
+                $out .= '  ' . $rp . ' = inttoptr i64 ' . $v . " to ptr\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+                $tw = $this->ssa->allocReg();
+                $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+                $prev = null;
+                foreach ($rawMagics as $magic) {
+                    $eq = $this->ssa->allocReg();
+                    $out .= '  ' . $eq . ' = icmp eq i64 ' . $tw . ', ' . (string)$magic . "\n";
+                    if ($prev === null) { $prev = $eq; continue; }
+                    $or = $this->ssa->allocReg();
+                    $out .= '  ' . $or . ' = or i1 ' . $prev . ', ' . $eq . "\n";
+                    $prev = $or;
+                }
+                $rz = $this->ssa->allocReg();
+                $out .= '  ' . $rz . ' = zext i1 ' . $prev . " to i64\n";
+                $out .= '  store i64 ' . $rz . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+            }
+            $out .= $endL . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+            return $this->finishI64($out, $r);
         }
         $this->lastValue = ($a->type->kind === $kind) ? '1' : '0';
         $this->lastValueType = 'i64';

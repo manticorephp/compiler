@@ -51,6 +51,17 @@ trait EmitLlvmObjects
         $hdr = $isStruct ? 0 : 2;
         $obj = $this->ssa->allocReg();
         $out = '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
+        if ($isStruct) {
+            // A struct has NO header — property slot 0 sits at +0 and there is
+            // no rc at +8. Leaving the allocator's RC_TAG_MAGIC at ptr-8 would
+            // advertise a header it does not have, and anything that self-routes
+            // on that tag (cell_drop, the raw `instanceof` carrier check) reads a
+            // property as a descriptor. Restamp with the struct sentinel.
+            $stp = $this->ssa->allocReg();
+            $out .= '  ' . $stp . ' = getelementptr inbounds i8, ptr ' . $obj . ", i64 -8\n";
+            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::STRUCT_TAG_MAGIC
+                  . ', ptr ' . $stp . "\n";
+        }
         if (!$isStruct) {
             // header[0] = class descriptor ptr ({class_id, drop_fn}); class_id
             // and drop are read THROUGH it so drops compose across objects.
@@ -141,9 +152,11 @@ trait EmitLlvmObjects
             $ctorClass = $this->resolveMethodClass($cd->name, '__construct');
             $ptypes = [];
             $tmask = [];
+            $ahmask = [];
             $need = 0;
             if ($ctorClass !== '') {
                 $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
+                $ahmask = $this->sigs->arrayHintedParams[$ctorClass . '____construct'] ?? [];
                 $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
                 // Param 0 is the implicit `$this`.
                 $need = \count($ptypes) - 1;
@@ -177,7 +190,7 @@ trait EmitLlvmObjects
                         $out .= $this->boxToCell($a->type);
                     } else {
                         $out .= $this->coerceToI64();
-                        $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                        $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                     }
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
@@ -221,6 +234,7 @@ trait EmitLlvmObjects
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
+            $ahmask = $this->sigs->arrayHintedParams[$ctorClass . '____construct'] ?? [];
             $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
             // A ctor takes by-ref params like any other method, and this loop
             // did not honour them: `new ConsoleSectionOutput($s, $this->sections,
@@ -255,7 +269,7 @@ trait EmitLlvmObjects
                         $this->lastValueType = 'double';
                     }
                     $out .= $this->coerceToI64();
-                    $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                    $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                     if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
                 }
                 $argList .= ', i64 ' . $this->lastValue;
@@ -2260,6 +2274,7 @@ trait EmitLlvmObjects
         // a by-ref param instead of the dereferenced value.
         $mask = $this->sigs->refParams[$cls . '__' . $n->method] ?? [];
         $ptypes = $this->sigs->paramTypes[$cls . '__' . $n->method] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$cls . '__' . $n->method] ?? [];
         $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
         $ai = 0;
         foreach ($n->args as $a) {
@@ -2293,7 +2308,7 @@ trait EmitLlvmObjects
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
-                $out .= $this->unboxCellArg($a, $ptypes, $ai);
+                $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
             }
@@ -2791,6 +2806,7 @@ trait EmitLlvmObjects
         $mask = $this->sigs->refParams[$fallback . '__' . $mc->method] ?? [];
         $ptypes = $this->sigs->paramTypes[$fallback . '__' . $mc->method] ?? [];
         $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$fallback . '__' . $mc->method] ?? [];
         // The repr each argument is ACTUALLY emitted in, indexed like the
         // parameter list (0 is `$this`). A virtual-dispatch arm that disagrees
         // with the fallback's signature has to re-coerce, and it can only do
@@ -2844,7 +2860,7 @@ trait EmitLlvmObjects
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
-                $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                 $argList .= ', i64 ' . $this->lastValue;
                 // unboxCellArg lowers a CELL arg to the param's repr; everything
                 // else crosses in the argument's own.

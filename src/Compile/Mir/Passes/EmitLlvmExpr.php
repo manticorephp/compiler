@@ -253,6 +253,32 @@ trait EmitLlvmExpr
     }
 
     /**
+     * Emit IR deciding whether the raw i64 $v could be a heap pointer worth
+     * probing at `ptr-8` for an allocator tag. Two bounds, and both are needed:
+     *
+     *  - `> 0xFFFF` rejects a small int / bool / null riding an erased slot —
+     *    `inttoptr 1` then loads at 0xFFFF…F9. This is the house predicate
+     *    (`__mir_cell_drop` and siblings, {@see \Compile\Runtime\UnifiedArrayRuntime}).
+     *  - `< 2^48` rejects a raw DOUBLE. Under canonical NaN boxing an unboxed
+     *    word IS its double bit pattern, so a cell slot holding 3.14 carries
+     *    0x40091EB851EB851F — above every userspace address, and dereferencing
+     *    it faults. Userspace pointers fit 48 bits on both arm64 and x86_64.
+     *
+     * The result reg is left in {@see $plausiblePtrReg} (no by-ref out-param —
+     * that pattern miscompiles under self-host).
+     */
+    private function plausiblePtrIr(string $v): string
+    {
+        $lo = $this->ssa->allocReg();
+        $hi = $this->ssa->allocReg();
+        $ok = $this->ssa->allocReg();
+        $this->plausiblePtrReg = $ok;
+        return '  ' . $lo . ' = icmp ugt i64 ' . $v . ", 65535\n"
+            . '  ' . $hi . ' = icmp ult i64 ' . $v . ", 281474976710656\n"
+            . '  ' . $ok . ' = and i1 ' . $lo . ', ' . $hi . "\n";
+    }
+
+    /**
      * Emit IR computing the 4-bit cell tag of $v into a fresh SSA reg, with
      * canonical-NaN-boxing semantics: an i64 NOT in the tagged range
      * (> 0xFFF0000000000000) is a raw double → synthetic FLOAT tag 6. Mirrors
@@ -2096,6 +2122,16 @@ trait EmitLlvmExpr
         // carrier whatever it was — `$row instanceof TableSeparator` over
         // symfony's rows read a class id out of an ARRAY cell's tag bits.
         $opk = $io->operand->type->kind;
+        // A statically non-object operand is never an instance, and reading a
+        // class id out of it is a wild load: `$s instanceof Sep` over a
+        // monomorphised vec[string] element dereferenced the string's own bytes.
+        if ($opk === Type::KIND_STRING || $opk === Type::KIND_INT
+            || $opk === Type::KIND_FLOAT || $opk === Type::KIND_BOOL
+            || $opk === Type::KIND_NULL || $io->operand->type->isArray()) {
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if ($opk === Type::KIND_CELL || $opk === Type::KIND_UNKNOWN) {
             $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . " = alloca i64\n";
@@ -2104,20 +2140,72 @@ trait EmitLlvmExpr
             $tag = $this->cellTagReg;
             $isObj = $this->ssa->allocReg();
             $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
+            // Neither an UNKNOWN nor a CELL slot guarantees a BOXED value — that
+            // is the standing repr gap: a `vec[cell]` param is routinely handed a
+            // `vec[obj<C>]` whose elements ride RAW, and pure tag dispatch reads
+            // such a pointer as tag 6 (an unboxed word IS a double under NaN
+            // boxing) and answers false for every element. So classify at
+            // runtime. A RAW carrier is only an object when the allocator says
+            // so: `__mir_alloc_tagged` stamps RC_TAG_MAGIC at ptr-8 for objects,
+            // an array carries ARRAY_TAG_MAGIC/ARENA there and a string its rc,
+            // so the one load separates all three. Reading a class id out of
+            // whatever a raw pointer happens to be is how a row of header STRINGS
+            // reached `instanceof TableCell` and dereferenced an FNV hash.
+            $useSlot = $this->ssa->allocReg();
+            $out .= '  ' . $useSlot . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $useSlot . "\n";
+            $paySlot = $this->ssa->allocReg();
+            $out .= '  ' . $paySlot . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $paySlot . "\n";
+            $isBox = $this->ssa->allocReg();
+            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $obj . ", -4503599627370496\n";
+            $boxL = $this->ssa->allocLabel('io.box');
+            $rawL = $this->ssa->allocLabel('io.raw');
+            $chkL = $this->ssa->allocLabel('io.rawchk');
+            $joinL = $this->ssa->allocLabel('io.class');
+            $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+            $out .= $boxL . ":\n";
+            $bx = $this->ssa->allocReg();
+            $out .= '  ' . $bx . ' = zext i1 ' . $isObj . " to i64\n";
+            $out .= '  store i64 ' . $bx . ', ptr ' . $useSlot . "\n";
+            $bp = $this->ssa->allocReg();
+            $out .= '  ' . $bp . ' = and i64 ' . $obj . ", 281474976710655\n";
+            $out .= '  store i64 ' . $bp . ', ptr ' . $paySlot . "\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $rawL . ":\n";
+            $out .= $this->plausiblePtrIr($obj);
+            $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $chkL
+                  . ', label %' . $joinL . "\n";
+            $out .= $chkL . ":\n";
+            $rp = $this->ssa->allocReg();
+            $out .= '  ' . $rp . ' = inttoptr i64 ' . $obj . " to ptr\n";
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+            $tw = $this->ssa->allocReg();
+            $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+            // Two tags carry a class descriptor at +0: a normal object and an
+            // enum-case singleton. A STRUCT deliberately does not (its +0 is
+            // property slot 0), and neither does an array or a string.
+            $isro = $this->ssa->allocReg();
+            $out .= '  ' . $isro . ' = icmp eq i64 ' . $tw . ', '
+                  . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+            $isre = $this->ssa->allocReg();
+            $out .= '  ' . $isre . ' = icmp eq i64 ' . $tw . ', '
+                  . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . "\n";
+            $ist = $this->ssa->allocReg();
+            $out .= '  ' . $ist . ' = or i1 ' . $isro . ', ' . $isre . "\n";
+            $ix = $this->ssa->allocReg();
+            $out .= '  ' . $ix . ' = zext i1 ' . $ist . " to i64\n";
+            $out .= '  store i64 ' . $ix . ', ptr ' . $useSlot . "\n";
+            $out .= '  store i64 ' . $obj . ', ptr ' . $paySlot . "\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $joinL . ":\n";
+            $uv = $this->ssa->allocReg();
+            $out .= '  ' . $uv . ' = load i64, ptr ' . $useSlot . "\n";
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = icmp ne i64 ' . $uv . ", 0\n";
             $payload = $this->ssa->allocReg();
-            $payIr = '  ' . $payload . ' = and i64 ' . $obj . ", 281474976710655\n";
-            if ($opk === Type::KIND_UNKNOWN) {
-                $isBox = $this->ssa->allocReg();
-                $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $obj . ", -4503599627370496\n";
-                $nn = $this->ssa->allocReg();
-                $out .= '  ' . $nn . ' = icmp ne i64 ' . $obj . ", 0\n";
-                $use = $this->ssa->allocReg();
-                $out .= '  ' . $use . ' = select i1 ' . $isBox . ', i1 ' . $isObj . ', i1 ' . $nn . "\n";
-                $isObj = $use;
-                $raw = $this->ssa->allocReg();
-                $payIr .= '  ' . $raw . ' = select i1 ' . $isBox . ', i64 ' . $payload . ', i64 ' . $obj . "\n";
-                $payload = $raw;
-            }
+            $payIr = '  ' . $payload . ' = load i64, ptr ' . $paySlot . "\n";
             $objL = $this->ssa->allocLabel('io.obj');
             $doneL = $this->ssa->allocLabel('io.done');
             $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
@@ -3877,11 +3965,29 @@ trait EmitLlvmExpr
      * `bool`/`int` param it would otherwise carry the tag bits (a boxed
      * `false` is non-zero → reads truthy). Returns IR; updates lastValue.
      * `$mask` is the callee's per-param type table; `$pi` the param index.
+     *
+     * `$ahmask` marks params declared bare `array`. That hint lowers to
+     * KIND_UNKNOWN, so there is no target repr to unbox to — but the callee
+     * reads the slot as a raw buffer pointer, so the tag has to come off all the
+     * same. symfony reaches `getNumberOfColumns(array $row)` with a cell element
+     * of `$this->rows`, and count() then walked the tag bits.
+     *
+     * @param array<int, bool> $ahmask
      */
-    private function unboxCellArg(Node $a, array $ptypes, int $pi): string
+    private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
-        if ($a->type->kind !== Type::KIND_CELL) { return ''; }
+        $ak = $a->type->kind;
         $pt = $ptypes[$pi] ?? null;
+        // An ERASED arg counts too: a foreach over a bare-`array` param yields
+        // its elements unknown-typed, and symfony passes one straight on to
+        // `getNumberOfColumns(array $row)`. Masking is a no-op on a raw pointer
+        // — every userspace address fits the 48 payload bits — so the boxed and
+        // raw shapes can share one path.
+        if ($pt !== null && ($ahmask[$pi] ?? false) && $pt->kind === Type::KIND_UNKNOWN
+            && ($ak === Type::KIND_CELL || $ak === Type::KIND_UNKNOWN)) {
+            return $this->unboxCellToType(Type::vec(Type::unknown())) . $this->coerceToI64();
+        }
+        if ($ak !== Type::KIND_CELL) { return ''; }
         if ($pt === null) { return ''; }
         $out = $this->unboxCellToType($pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that

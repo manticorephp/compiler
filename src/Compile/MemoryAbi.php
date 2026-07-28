@@ -56,16 +56,37 @@ final class MemoryAbi
      */
     public const ASSOC_TAG_MAGIC = 0x7E66000000000001;
 
-    // ─── String header (24 bytes) ─────────────────────────────────
+    /**
+     * Sentinel at an enum-case singleton's `data-8`. A case mimics the object
+     * layout (descriptor at +0, ordinal at +16) but is a `constant` — immortal,
+     * never rc-touched. It used to carry a plain 0 here, which the rc helpers
+     * correctly skipped but which is indistinguishable from arbitrary memory: a
+     * RAW erased carrier holding an enum case could not be told apart from a
+     * bare pointer, so `instanceof` had to answer false for every case. A magic
+     * of its own says "descriptor at +0, but do NOT rc me".
+     */
+    public const ENUM_TAG_MAGIC = 0x7E66000000000004;
 
     /**
-     * Heap string layout: `[cap@-24, len@-16, rc@-8, bytes@0]`. The data ptr
-     * is `malloc_base + 24`. Strings are BINARY-SAFE: `len` is the content
+     * Sentinel at a `#[Struct]` instance's `ptr-8`. A struct is a value type
+     * with NO header at all — no descriptor at +0, no rc at +8 — yet it is
+     * allocated through the same `__mir_alloc_tagged`, so it used to carry
+     * {@see RC_TAG_MAGIC} and advertise a header it does not have. Any consumer
+     * that self-routes on the tag (`__mir_cell_drop`, the raw `instanceof`
+     * carrier check) would then read a PROPERTY slot as a descriptor or an rc.
+     */
+    public const STRUCT_TAG_MAGIC = 0x7E66000000000005;
+
+    // ─── String header (32 bytes) ─────────────────────────────────
+
+    /**
+     * Heap string layout: `[hash@-32, cap@-24, len@-16, rc@-8, bytes@0]`. The
+     * data ptr is `malloc_base + 32`. Strings are BINARY-SAFE: `len` is the content
      * length and the single source of truth — `strlen()` / comparison read it,
      * NOT libc `strlen` (which stops at `\0`). A trailing NUL is kept only as a
      * convenience for libc interop (paths, printf `%s`). `rc@-8` and `bytes@0`
      * are unchanged so the rc/free string-vs-obj routing (it reads `ptr-8`)
-     * stays valid; only the FREE base moves to `p-24`. `cap` is the byte
+     * stays valid; only the FREE base moves to `p-32`. `cap` is the byte
      * capacity of the data region (content + NUL); amortized `.=` appends in
      * place when `rc==1` and `len+addlen < cap`. Immortal strings (literals,
      * arena) carry rc=-1; literals carry a full header so `len` reads are valid.

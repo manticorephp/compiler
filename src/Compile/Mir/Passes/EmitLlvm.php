@@ -142,6 +142,9 @@ final class EmitLlvm implements EmitVisitor
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
     private string $cellTagReg = '';
 
+    // Out-slot for {@see plausiblePtrIr}: the i1 reg guarding a `ptr-8` probe.
+    private string $plausiblePtrReg = '';
+
     /** break/continue/finally targets of the current function (fresh each {@see emit}). */
     private ?ControlFlow $cf = null;
 
@@ -480,8 +483,11 @@ final class EmitLlvm implements EmitVisitor
      * pointer, and every generic object consumer (var_dump / ===) then derefs it
      * → SIGSEGV / wrong compare. Each singleton mimics the object layout so the
      * normal object machinery works uniformly:
-     *   data-8 : header sentinel 0 (NOT RC_TAG_MAGIC → cell_drop / rc ops SKIP it;
-     *            the case is a `constant`, immortal, never rc-touched)
+     *   data-8 : ENUM_TAG_MAGIC (NOT RC_TAG_MAGIC → cell_drop / rc ops SKIP it;
+     *            the case is a `constant`, immortal, never rc-touched). It used
+     *            to be a plain 0, which the rc helpers skipped just as well but
+     *            which a RAW erased carrier could not be told apart from junk —
+     *            so `instanceof` over an erased enum case answered false.
      *   data+0 : class descriptor ptr ({class_id, drop=null}) — instanceof /
      *            __mir_enum_name read class_id THROUGH it
      *   data+8 : rc (unused)
@@ -515,7 +521,8 @@ final class EmitLlvm implements EmitVisitor
         $i = 0;
         foreach ($ed->caseNames as $cn) {
             $sym = '@' . $mn . '__case_' . (string)$i;
-            $out .= $sym . ' = linkonce_odr constant { i64, i64, i64, i64 } { i64 0, i64 '
+            $out .= $sym . ' = linkonce_odr constant { i64, i64, i64, i64 } { i64 '
+                  . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . ', i64 '
                   . $descI . ', i64 0, i64 ' . (string)$i . " }\n";
             $dataPtrs[] = 'i64 ptrtoint (ptr getelementptr (i8, ptr ' . $sym . ', i64 8) to i64)';
             $fq = '@' . $mn . '__fqn_' . (string)$i;
