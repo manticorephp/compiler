@@ -314,7 +314,7 @@ trait EmitLlvmControl
      * object arm keeps the virtual call. `valid`/`current`/`key` leave an i64 in
      * lastValue; `rewind`/`next` leave nothing meaningful.
      */
-    private function iterProtoStep(bool $dyn, string $isGen, string $iterSlot,
+    private function iterProtoStep(bool $dyn, string $iterSlot,
         \Compile\Mir\LoadLocal $iterNode, string $m): string
     {
         $rt = ($m === 'valid') ? \Compile\Mir\Type::bool_()
@@ -323,8 +323,19 @@ trait EmitLlvmControl
         if (!$dyn) {
             return $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, $m, [], $rt));
         }
+        // The classify is recomputed HERE, per step, rather than hoisted before
+        // the loop. A `yield` in the body makes the generator resume switch
+        // re-enter mid-loop, so a value defined before the loop does not
+        // dominate the blocks the switch lands in — clang rejected the module.
+        // The iterator itself lives in a slot (a frame slot inside a generator),
+        // so reloading and re-probing is always dominated.
+        $out = '';
+        $iw = $this->ssa->allocReg();
+        $out .= '  ' . $iw . ' = load i64, ptr ' . $iterSlot . "\n";
+        $out .= $this->genFrameProbeIr($iw);
+        $isGen = $this->genFrameReg;
         $slot = $this->ssa->allocReg();
-        $out  = '  ' . $slot . " = alloca i64\n";
+        $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $slot . "\n";
         $genL = $this->ssa->allocLabel('ip.gen');
         $objL = $this->ssa->allocLabel('ip.obj');
@@ -424,19 +435,12 @@ trait EmitLlvmControl
         }
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
 
-        // An interface-typed iterator may be a Generator at runtime; classify
-        // ONCE here (the test dominates every loop block) and branch each
-        // protocol step. The body is still emitted exactly once.
+        // An interface-typed iterator may be a Generator at runtime, so each
+        // protocol step classifies and branches. The body is still emitted
+        // exactly once.
         $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
-        $isGen = '';
-        if ($dyn) {
-            $iw0 = $this->ssa->allocReg();
-            $out .= '  ' . $iw0 . ' = load i64, ptr ' . $iterSlot . "\n";
-            $out .= $this->genFrameProbeIr($iw0);
-            $isGen = $this->genFrameReg;
-        }
 
-        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'rewind');
+        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -445,18 +449,18 @@ trait EmitLlvmControl
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $condL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'valid');
+        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid');
         $out .= $this->coerceToI64();
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
         $out .= '  br i1 ' . $v . ', label %' . $bodyL . ', label %' . $endL . "\n";
 
         $out .= $bodyL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'current');
+        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current');
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
-            $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'key');
+            $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key');
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
@@ -466,7 +470,7 @@ trait EmitLlvmControl
         $out .= '  br label %' . $stepL . "\n";
 
         $out .= $stepL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $isGen, $iterSlot, $iterNode, 'next');
+        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next');
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $endL . ":\n";
