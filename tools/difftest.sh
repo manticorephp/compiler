@@ -34,6 +34,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 source "$ROOT/tools/lib/limit.sh"
 CASE_TIMEOUT="${MC_RUN_TIMEOUT:-60}"
 COMPILE_TIMEOUT="${MC_COMPILE_TIMEOUT:-300}"
+# The REFERENCE gets a bigger budget than our binary: a php case may legitimately
+# sit on php's own default_socket_timeout, which is 60 s — enable_crypto.php spends
+# exactly that failing a handshake on a plain socket. Bounding php at the same 60 s
+# turns the oracle itself into a finding.
+REF_TIMEOUT="${MC_REF_TIMEOUT:-180}"
 timedout=0
 TIMEDOUT=()
 
@@ -75,10 +80,10 @@ for f in "${FILES[@]}"; do
     # (`#[\Deprecated]`, `#[\NoDiscard]`). Those need php's error output ON,
     # which the default invocation deliberately suppresses.
     if [[ -f "${f%.php}.diag" ]]; then
-        ref="$(mc_limit "$CASE_TIMEOUT" php -d error_reporting=E_ALL -d display_errors=STDOUT \
+        ref="$(mc_limit "$REF_TIMEOUT" php -d error_reporting=E_ALL -d display_errors=STDOUT \
                    -d html_errors=0 -d log_errors=0 "$f" 2>"$WORK/ref.err")"; rrc=$?
     else
-        ref="$(mc_limit "$CASE_TIMEOUT" php -d error_reporting=0 -d display_errors=0 \
+        ref="$(mc_limit "$REF_TIMEOUT" php -d error_reporting=0 -d display_errors=0 \
                    "$f" 2>"$WORK/ref.err")"; rrc=$?
     fi
     # 124 FIRST: a php side that ran out of time produces no stdout, which the
@@ -125,7 +130,7 @@ echo "════════ difftest vs PHP $(php -r 'echo PHP_VERSION;') ═
 echo "  MATCH:     $match"
 echo "  DIFF:      $diff"
 echo "  COMPILE:   $compile   (manticore failed to compile a php-runnable file)"
-echo "  TIMEOUT:   $timedout   (>${CASE_TIMEOUT}s — a hang, on either side)"
+echo "  TIMEOUT:   $timedout   (>${CASE_TIMEOUT}s ours / >${REF_TIMEOUT}s php — a hang, on either side)"
 echo "  PHP-SKIP:  $phpskip   (not plain-runnable under php — manticore-only)"
 
 if [[ ${#TIMEDOUT[@]} -gt 0 ]]; then
