@@ -1186,16 +1186,20 @@ trait EmitLlvmModule
         // whole-program INCLUDE-return — a polyfill bootstrap's `return require …`
         // parses to `return null`, and require is a no-op — so evaluate nothing and
         // FALL THROUGH (it must not terminate __main before the entry's own code
-        // runs). A VALUE return is the script exit code → `ret i32`. This is
-        // targeted at null (never the compiler's own `return $rc`), so it is safe
-        // across the self-host 2-gen build.
+        // runs).
+        //
+        // A VALUE return ENDS the script but is NOT its exit status: php CLI leaves
+        // `$?` at 0 for a top-level `return` (only exit()/die() and an uncaught throw
+        // set it). The value is the INCLUDE-return the entry hands its includer, and
+        // there is none. symfony's own entry idiom is `return $app->run();` with
+        // setAutoExit(false), which php exits 0 from — we reported the command's
+        // status instead. So evaluate the expression (it IS the program: `run()` does
+        // the work) and discard it, then `ret i32 0` like the fall-through.
         if ($this->frame->isMain) {
             if ($v === null || $v->kind === Node::KIND_NULL_CONST) { return ''; }
             $out = $this->emitNode($v);
             $out .= $this->coerceToI64();
-            $t = $this->ssa->allocReg();
-            $out .= '  ' . $t . ' = trunc i64 ' . $this->lastValue . " to i32\n";
-            return $out . '  ret i32 ' . $t . "\n" . $this->emitDeadLabel();
+            return $out . "  ret i32 0\n" . $this->emitDeadLabel();
         }
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
         // The return value (if any) is stashed in `retval` for getReturn().

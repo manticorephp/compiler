@@ -1678,8 +1678,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // truncated array pointer as the exit status.
     //
     // `require` is already a no-op here, so its value has no consumer: drop
-    // these returns outright. The ENTRY's own `return $rc` is the script exit
-    // code and is kept — which is why the test is "not the last source".
+    // these returns outright. The ENTRY's own `return` is kept — it ends the
+    // script, which a mid-flatten one must not — but its VALUE is discarded too
+    // ({@see \Compile\Mir\Passes\EmitLlvmModule::emitReturn}): php CLI does not
+    // make a top-level return the exit status. Hence the test is "not the last
+    // source": position decides whether the statement survives, not its value.
     $lastIdx = \count($sources) - 1;
     foreach ($sources as $i => $source) {
         try {
