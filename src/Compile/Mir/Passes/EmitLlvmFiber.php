@@ -424,18 +424,44 @@ trait EmitLlvmFiber
     private function biFiberCtxNew(array $args): string
     {
         $this->rt->needsFibers = true;
+        $okl = $this->ssa->allocLabel('fibctx.ok');
+        $badl = $this->ssa->allocLabel('fibctx.bad');
+        $nojs = $this->ssa->allocLabel('fibctx.nojs');
+        $donel = $this->ssa->allocLabel('fibctx.done');
+        $joinl = $this->ssa->allocLabel('fibctx.join');
         $p = $this->ssa->allocReg();
         $out = '  ' . $p . ' = call ptr @calloc(i64 64, i64 1)' . "\n";
+        // Under memory pressure this is where a 100k-task process died: a null ctx
+        // was stored into and a null jmp stack installed, so the SIGSEGV landed
+        // nowhere near the allocation that failed. 0 comes back instead, and
+        // Fiber::start() raises FiberError — the same contract the stack has.
+        $pnull = $this->ssa->allocReg();
+        $out .= '  ' . $pnull . ' = icmp eq ptr ' . $p . ", null\n";
+        $out .= '  br i1 ' . $pnull . ', label %' . $badl . ', label %' . $okl . "\n";
+        $out .= $okl . ":\n";
         $js = $this->ssa->allocReg();
         $out .= '  ' . $js . ' = call ptr @malloc(i64 8192)' . "\n";
+        $jsnull = $this->ssa->allocReg();
+        $out .= '  ' . $jsnull . ' = icmp eq ptr ' . $js . ", null\n";
+        $out .= '  br i1 ' . $jsnull . ', label %' . $nojs . ', label %' . $donel . "\n";
+        $out .= $nojs . ":\n";
+        $out .= '  call void @free(ptr ' . $p . ")\n";
+        $out .= '  br label %' . $badl . "\n";
+        $out .= $donel . ":\n";
         $jbslot = $this->ssa->allocReg();
         $out .= '  ' . $jbslot . ' = getelementptr i8, ptr ' . $p . ', i64 40' . "\n";
         $out .= '  store ptr ' . $js . ', ptr ' . $jbslot . "\n";
         $jdslot = $this->ssa->allocReg();
         $out .= '  ' . $jdslot . ' = getelementptr i8, ptr ' . $p . ', i64 48' . "\n";
         $out .= '  store i64 1, ptr ' . $jdslot . "\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
+        $out .= '  br label %' . $joinl . "\n";
+        $out .= $badl . ":\n";
+        $out .= '  br label %' . $joinl . "\n";
+        $out .= $joinl . ":\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
+        $out .= '  ' . $r . ' = phi i64 [ ' . $ok . ', %' . $donel . ' ], [ 0, %' . $badl . " ]\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;

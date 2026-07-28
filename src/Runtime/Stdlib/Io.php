@@ -56,6 +56,40 @@ function __mc_file_read_yielding(\Ffi\Ptr $buf, int $size, \Ffi\Ptr $fp): int
     return $off;
 }
 
+/**
+ * Read an open stream to EOF, growing the buffer as it goes. For files whose
+ * length cannot be known in advance: procfs/sysfs report st_size 0 and hand out
+ * their contents only on read.
+ */
+function __mc_read_until_eof(\Ffi\Ptr $fp): string
+{
+    $cap = 65536;
+    $len = 0;
+    $buf = \Runtime\Libc\calloc($cap, 1);
+    if ($buf === null) {
+        return '';
+    }
+    while (true) {
+        if ($len === $cap) {
+            $cap = $cap * 2;
+            $bigger = \Runtime\Libc\realloc($buf, $cap);
+            if ($bigger === null) {
+                \Runtime\Libc\free($buf);
+                return '';
+            }
+            $buf = $bigger;
+        }
+        $got = \Runtime\Libc\fread(\ptr_offset($buf, $len), 1, $cap - $len, $fp);
+        if ($got <= 0) {
+            break;
+        }
+        $len = $len + $got;
+    }
+    $s = \str_from_buffer($buf, $len);
+    \Runtime\Libc\free($buf);
+    return $s;
+}
+
 function file_get_contents(string $path, bool $use_include_path = false, ?\Resource $context = null): string|false
 {
     // The seam. http:// and https:// share the HTTP layer; the only difference is
@@ -84,6 +118,15 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
     if ($size < 0) {
         \Runtime\Libc\fclose($fp);
         return false;
+    }
+    // A file whose length ftell cannot report — every procfs and sysfs entry says
+    // 0 — has to be read until EOF instead. Sizing the buffer from ftell alone made
+    // `file_get_contents('/proc/self/status')` return the empty string, which is not
+    // an error anyone would notice: it reads as "the file is empty".
+    if ($size === 0) {
+        $s = \__mc_read_until_eof($fp);
+        \Runtime\Libc\fclose($fp);
+        return $s;
     }
     $buf = \Runtime\Libc\calloc($size + 1, 1);
     if ($buf === null) {

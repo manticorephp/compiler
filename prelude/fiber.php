@@ -68,6 +68,11 @@ class Fiber
         $this->started = true;
         $this->state = 1;
         $this->saveCtx = \__mir_fiber_ctx_new();
+        if ($this->saveCtx === 0) {
+            $this->started = false;
+            $this->state = 0;
+            throw new \FiberError("Fiber context allocation failed");
+        }
         $len = self::stackSize();
         $base = \__mir_fiber_stack_alloc($len);
         // 0, never MAP_FAILED: out of address space, over RLIMIT_AS or at
@@ -233,7 +238,13 @@ class Fiber
         }
         // getenv is `string|false` (a cell) — unbox before comparing.
         $env = \getenv('MANTICORE_FIBER_STACK');
-        $want = 8388608;
+        // 1 MiB, MEASURED (tools/fiber_ceiling.php, 40 000 concurrent tasks on
+        // Linux arm64): 8 MiB costs 6.55 GiB of RSS, 1 MiB costs 0.65 GiB, and 512
+        // and 256 KiB cost exactly the same 0.65 GiB. The curve is flat below 1 MiB
+        // and 10x worse above it, so this is the knee — smaller buys only address
+        // space, larger buys nothing but resident memory. Darwin shows no such
+        // step, which is why a macOS-only measurement would have kept 8 MiB.
+        $want = 1048576;
         if ($env !== false && $env !== '') {
             $n = (int)(string)$env;
             if ($n > 0) { $want = $n; }
