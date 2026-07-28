@@ -28,7 +28,10 @@ Build: `bin/build --seed` (cold Zend bootstrap → native) / `bin/build`
 
 **Recently completed** (2026-07): the async runtime — structured concurrency, transparent
 netpoller I/O, and the liveness pass over it (bounded write parks, a classified `accept(2)`
-loop that backs off on EMFILE instead of spinning, resolv.conf `search`/`ndots`) ·
+loop that backs off on EMFILE instead of spinning, resolv.conf `search`/`ndots`, a measured
+1 MiB fiber stack with `MANTICORE_FIBER_STACK`, `posix_getrlimit`/`posix_setrlimit`, and
+`Async\failure()` naming the task behind an escaped exception) · a per-case deadline in the
+test harness, so a liveness bug fails the suite instead of hanging it ·
 `docs/superset.md`, the catalogue of everything with no Zend oracle · the full `preg_*` family
 over host PCRE2 + `#[RefOut]` · Monomorphize **callable dimension** · **de-cellify** at the
 concrete-array ← cell-array store boundary · Ryu float formatting · reified-class generics ·

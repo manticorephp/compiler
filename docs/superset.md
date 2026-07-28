@@ -84,6 +84,15 @@ observable from library code:
 - `Async\stats()` — `spawned`/`settled`/`cancelled`/`wakes`/`reactor_waits`/`timer_fires`/
   `watchdog` plus the `live`/`ready`/`io_parked`/`timers` gauges. `live` is the gauge to alert
   on; `wakes` climbing with wall time rather than with work is what a spin looks like.
+- `Async\failure()` — **which task** raised the failure that escaped, and where it was spawned.
+  The exception itself cannot carry this: it is rethrown by whoever joined the task, so it
+  arrives with the joiner's file and line. First failure only; the cancellation wave that
+  follows is not the culprit.
+- `Fiber::setStackSize()` / `MANTICORE_FIBER_STACK` — bytes of stack per fiber, default 1 MiB.
+  MEASURED, not chosen: at 40 000 concurrent tasks on Linux, 8 MiB costs 6.55 GiB of RSS and
+  1 MiB costs 0.65 GiB, with 512 and 256 KiB costing exactly the same — flat below 1 MiB,
+  ten-fold above it. Two mappings go per fiber (the guard page splits the VMA), so a stock
+  `vm.max_map_count` of 65530 caps a process near 32 000 concurrent tasks whatever the size.
 
 ### 1.3 Transparent I/O — the same stdlib, different blocking behaviour
 
@@ -228,6 +237,7 @@ No `php.ini`. The environment variables that exist, and nothing more:
 |---|---|
 | `MANTICORE_MEMORY` | memory model — `hybrid` / `rc` / `arena` |
 | `MANTICORE_ASYNC_WATCHDOG` | loop-hog watchdog threshold, in ms |
+| `MANTICORE_FIBER_STACK` | bytes of stack per fiber (default 1 MiB). Zend spells this `fiber.stack_size` in php.ini, which we have no mechanism for |
 | `MANTICORE_PRELUDE` | where the prelude lives (a binary built to a temp path cannot find it argv0-relative) |
 | `MANTICORE_STDLIB` / `_O` / `_SIG` | override the stdlib object / signature the driver links |
 | `MANTICORE_PROFILE`, `MANTICORE_DEBUG_VERIFY`, `MANTICORE_TYPECHECK`, `MANTICORE_REFLECT_REPORT`, `MANTICORE_UNKNOWN_PROP_TRACE` | compiler diagnostics |

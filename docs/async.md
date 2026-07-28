@@ -262,6 +262,52 @@ compare per resume.
 `wakes`, `reactor_waits`, `timer_fires`, `watchdog`, plus the `live` / `ready` /
 `io_parked` / `timers` gauges.
 
+And for the third failure — something threw, and the trace points at the wrong
+place:
+
+```php
+try { async(fn() => …); }
+catch (\Throwable $e) { fwrite(STDERR, Async\failure()); }
+// task #7 "worker" at jobs.php:31 raised RuntimeException: no such row
+//   in scope near jobs.php:12
+```
+
+A child's exception is rethrown by whoever *joins* it, so it reaches you carrying
+the joiner's file and line; the task that actually failed is not in the trace at
+all. It cannot be put there — mutating a user's throwable is impossible, and
+wrapping it would break `catch (RuntimeException)`. So the provenance is recorded
+beside the exception, at the moment of failure, and read back with `Async\failure()`.
+It names the FIRST real failure only: everything after it is the cancellation wave,
+and blaming a task that was merely swept up is worse than saying nothing. With the
+watchdog on it also goes to STDERR, on the same channel.
+
+### How much a task costs
+
+A fiber is 1 MiB of stack by default — `MANTICORE_FIBER_STACK=<bytes>`, or
+`Fiber::setStackSize()` from code, both taking effect for fibers created afterwards.
+Stacks are `mmap`'d with a `PROT_NONE` guard page below them, pooled on termination,
+and paged in lazily, so what a parked task actually holds is far less than its size.
+
+The default is measured, not assumed (`tools/fiber_ceiling.php`). At 40 000
+concurrent tasks on Linux arm64:
+
+| stack | RSS | virtual |
+|---|---|---|
+| 8 MiB | 6.55 GiB | 313 GiB |
+| 1 MiB | 0.65 GiB | 39 GiB |
+| 512 KiB | 0.65 GiB | 20 GiB |
+| 256 KiB | 0.65 GiB | 10 GiB |
+
+Flat below 1 MiB, ten-fold above it. Raise it for deeply recursive work; lower it
+only to save address space, because it will not save memory. macOS shows no such
+step, which is exactly why the number had to come from both hosts.
+
+The ceiling that arrives first is neither of those columns: each fiber costs **two
+mappings** (the guard page splits the VMA), so a stock Linux `vm.max_map_count` of
+65530 stops a process near 32 000 concurrent tasks whatever the stack size. Raise
+`vm.max_map_count` if you need more; container defaults are often higher already
+(Docker Desktop ships 262144).
+
 ### Bounded concurrency
 
 ```php
@@ -438,10 +484,9 @@ is still there.
 Also: `writev`/`io_uring` to break the 2-syscall floor · `resolv.conf`'s `timeout:`/`attempts:`
 options (the search list and `ndots` are in; those two still hard-code 2 s × 2) · the search
 list applied to `/etc/hosts` the way glibc does · off-thread file I/O · shared-memory
-multithreading (a future compiler superset) · **fiber stack sizing**: 8 MiB of *virtual*
-address space per task with a `PROT_NONE` guard page, pooled and reclaimed promptly, but
-nobody has measured where 10 000 concurrent tasks actually hits `vm.max_map_count` or a
-container's `ulimit -v`. See the async roadmap memory for the plan.
+multithreading (a future compiler superset) · naming a **guard-page hit**: an overflowing
+fiber stack faults into the `PROT_NONE` page and dies as a bare SIGSEGV, where a `sigaltstack`
+handler could say "fiber stack overflow".
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
 return type. The only piece here that cannot be a library: it needs the compiler to split

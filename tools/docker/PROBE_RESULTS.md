@@ -199,3 +199,47 @@ kernel/arch ABI, not a libc choice. `dirent.d_name` at 19 matches
 | offsetof glob_t.gl_pathc | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | offsetof glob_t.gl_pathv | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 |
 
+
+---
+
+## Appendix: resource limits and fiber stacks (2026-07-28)
+
+Measured differently from the rest of this file — not by a C probe, but by asking
+each host's own `php` (which exposes the host `<sys/resource.h>`, the way it does
+for `FNM_*`) and by running `tools/fiber_ceiling.php` in the container.
+
+### `POSIX_RLIMIT_*` — the resource numbers
+
+| constant | Darwin arm64 | Linux glibc (aarch64) |
+|---|---|---|
+| `CPU` / `FSIZE` / `DATA` / `STACK` / `CORE` | 0 / 1 / 2 / 3 / 4 | same |
+| `RSS` | 5 | 5 |
+| `MEMLOCK` | 6 | 8 |
+| `NPROC` | 7 | 6 |
+| `NOFILE` | 8 | 7 |
+| `AS` | 5 (aliased to `RSS`; Darwin has no separate `AS`) | 9 |
+| `INFINITY` | `PHP_INT_MAX` | **-1** (`~0UL` read as an i64) |
+
+`INFINITY` is the trap: it is not `PHP_INT_MAX` everywhere, and -1 in an i64 is
+also what a failed call would look like, so `__mc_rlimit_get()` reports failure as
+`PHP_INT_MIN` and translates the host value to `PHP_INT_MAX` for php parity.
+`struct rlimit` is `{rlim_cur@0, rlim_max@8}`, 16 bytes on both.
+
+### Fiber stacks — RSS at 40 000 concurrent tasks
+
+Linux arm64, `vm.max_map_count` 262144 (Docker Desktop; a stock kernel is 65530):
+
+| stack size | VmRSS | VmSize | mappings |
+|---|---|---|---|
+| 8 MiB | 6.55 GiB | 313 GiB | 80 037 |
+| 1 MiB | 0.65 GiB | 39.7 GiB | 80 037 |
+| 512 KiB | 0.65 GiB | 20.1 GiB | 80 037 |
+| 256 KiB | 0.65 GiB | 10.4 GiB | 80 037 |
+
+Flat at and below 1 MiB, ten-fold above it — which is why the default is 1 MiB.
+**Two mappings per fiber** (`mprotect` splits the VMA for the guard page), so a
+stock `vm.max_map_count` caps a process near 32 000 concurrent tasks whatever the
+stack size — the real ceiling, and independent of memory.
+
+macOS arm64 for contrast: 40 000 tasks cost 7410 MiB at 8 MiB stacks and 7251 MiB
+at 256 KiB — no step at all. A macOS-only measurement would have kept 8 MiB.
