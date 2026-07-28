@@ -1352,7 +1352,15 @@ trait InferNodes
                 // ClassDef — fall back to any implementer's sig.
                 $ic = $node->iterClass;
                 $elem = $this->iterMethodReturn($ic, 'current', $elem);
-                $keyT = $this->iterMethodReturn($ic, 'key', $keyT);
+                // An interface iterClass says nothing about the KEY either, and
+                // the int default was a claim, not knowledge: the iterator can
+                // be a Generator at runtime ({@see
+                // EmitLlvmControl::iterNeedsRuntimeClass}) and its `key`@24 is a
+                // boxed cell, which printed as its tag bits. Erased is the honest
+                // answer — every erased consumer classifies at runtime, and a
+                // genuinely-int key still renders as one.
+                $kd = isset($this->classes[$ic]) ? $keyT : Type::unknown();
+                $keyT = $this->iterMethodReturn($ic, 'key', $kd);
             }
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an

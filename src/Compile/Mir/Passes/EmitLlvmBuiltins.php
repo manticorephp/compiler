@@ -1278,6 +1278,19 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         if ($args[0]->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
+        } elseif ($args[0]->type->kind === Type::KIND_UNKNOWN) {
+            // An ERASED operand is not known to be an array, and `inttoptr` of a
+            // tagged word read its tag bits as a length — `count()` over a value
+            // yielded by a generator behind an `iterable` answered garbage. Same
+            // classification `foreach` makes ({@see arrayPtrOrEmptyIr}): a boxed
+            // array is untagged, a raw one is accepted on its allocator magic,
+            // and anything else counts as the empty array (php counts a
+            // non-countable as 1 and warns; 0 is the direction the rest of the
+            // erased handling already takes).
+            $out .= $this->coerceToI64();
+            $out .= $this->arrayPtrOrEmptyIr($this->lastValue);
+            $this->lastValue = $this->arrayPtrReg;
+            $this->lastValueType = 'ptr';
         } else {
             $out .= $this->coerceToPtr();
         }

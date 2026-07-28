@@ -403,7 +403,13 @@ trait EmitLlvmGenerator
             $cellChannel = $genElem === null
                 || $genElem->kind === Type::KIND_CELL
                 || $genElem->kind === Type::KIND_UNKNOWN;
-            if ($cellChannel) {
+            // ⚠ An UNKNOWN value takes the runtime classify even on the cell
+            // channel: `boxToCell` sends unknown to `box_int`, which tags an
+            // array as an integer and every consumer then reads the empty
+            // array. This is not rare — a generator closure over a bare-`array`
+            // capture types its foreach value unknown, which is symfony's
+            // TableRows shape exactly.
+            if ($cellChannel && $y->value->type->kind !== Type::KIND_UNKNOWN) {
                 $out .= $this->boxToCell($y->value->type);
             } else {
                 $out .= $this->boxToCellShallow($y->value->type);

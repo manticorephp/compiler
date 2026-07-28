@@ -301,6 +301,14 @@ trait EmitLlvmCalls
                     $this->rt->needsRc = true;
                     $this->rt->needsStrRc = true;
                     $out .= '  call void @__mir_cell_retain(i64 ' . $capV . ")\n";
+                    // …and the other half: cell_retain answers on the cell tag
+                    // and does NOTHING for an untagged word, so a container on
+                    // an erased slot — a bare `array` hint lowers to unknown —
+                    // was captured without being co-owned. An argument with no
+                    // other owner (an array LITERAL passed straight into the
+                    // call) was then freed at the caller's scope exit and the
+                    // closure read freed memory. The two are disjoint.
+                    $out .= $this->rawContainerRetainIr($capV);
                 } else {
                     $out .= $this->rcRetainByType($c, $capV, null, 1);
                 }
