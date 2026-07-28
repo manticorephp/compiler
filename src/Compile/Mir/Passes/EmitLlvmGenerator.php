@@ -368,6 +368,15 @@ trait EmitLlvmGenerator
         $val = '0';
         if ($y->value !== null) {
             $out .= $this->emitNode($y->value);
+            // ⚠ NOT boxToCell'd, though the KEY below is, and though the consumer
+            // reads `current` as an ERASED carrier — so producer and consumer do
+            // disagree about repr here (`yield $row` of a `vec[string]` is read
+            // back by a cell consumer as tag-6 doubles). Boxing was tried and is
+            // WRONG on its own: it cellifies the array's elements, and every
+            // consumer that reads them raw then sees empty strings instead —
+            // symfony's Table went from garbage cells to blank cells, and an
+            // erased `array_filter` over the yielded row started faulting. Both
+            // sides have to move together; see the repr-consistency epic.
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
         }

@@ -419,9 +419,17 @@ trait EmitLlvmControl
             $out .= '  ' . $ks . " = alloca i64\n";
         }
         $out .= $this->emitNode($fe->array);
-        // A `mixed` (cell) holding an array: strip the tag to the ptr.
-        if ($fe->array->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
+        // An ERASED base (`mixed` cell, or an element read out of an untyped
+        // array) is NOT known to be an array. Stripping the tag unconditionally
+        // walked whatever it held: a cell carrying an OBJECT was read as an array
+        // header. Classify at runtime and fall back to the empty array — see
+        // {@see arrayPtrOrEmptyIr} for the semantics this does and does not give.
+        $bk = $fe->array->type->kind;
+        if ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->arrayPtrOrEmptyIr($this->lastValue);
+            $this->lastValue = $this->arrayPtrReg;
+            $this->lastValueType = 'ptr';
         } else {
             $out .= $this->coerceToPtr();
         }

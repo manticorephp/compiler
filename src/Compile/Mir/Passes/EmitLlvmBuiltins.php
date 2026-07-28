@@ -41,6 +41,8 @@ trait EmitLlvmBuiltins
         if ($name === 'strlen')                       { return $this->biStrlen($args); }
         if ($name === '__str_byte_at')                { return $this->biStrByteAt($args); }
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
+        if ($name === 'str_bytes')                    { return $this->biStrBytes($args); }
+        if ($name === 'manticore_str_bytes')                    { return $this->biStrBytes($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
         if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
         if ($name === 'int_to_ptr')                   { return $this->biIntToPtr($args); }
@@ -206,6 +208,13 @@ trait EmitLlvmBuiltins
         if ($name === 'array_first' && \count($args) === 1)     { return $this->biArrayEndpoint($args, false, false); }
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
+        if ($name === 'current' && \count($args) === 1) { return $this->biArrayCursor($args, 'current'); }
+        if ($name === 'pos' && \count($args) === 1)     { return $this->biArrayCursor($args, 'current'); }
+        if ($name === 'key' && \count($args) === 1)     { return $this->biArrayCursor($args, 'key'); }
+        if ($name === 'next' && \count($args) === 1)    { return $this->biArrayCursor($args, 'next'); }
+        if ($name === 'prev' && \count($args) === 1)    { return $this->biArrayCursor($args, 'prev'); }
+        if ($name === 'reset' && \count($args) === 1)   { return $this->biArrayCursor($args, 'reset'); }
+        if ($name === 'end' && \count($args) === 1)     { return $this->biArrayCursor($args, 'end'); }
         if ($name === 'array_key_last' && \count($args) === 1)  { return $this->biArrayEndpoint($args, true, true); }
         if ($name === 'array_values') {
             $vt = $args[0]->type;
@@ -492,10 +501,22 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $boxed = $this->ssa->allocReg();
         $ek = $elem->kind;
+        // ⚠ OWNERSHIP. The rebuilt array is a CELL array, so whoever owns it
+        // eventually drops it with `__mir_array_release_cell`, which releases
+        // every element payload. The values boxed in below are BORROWED from the
+        // source — boxing does not co-own — so without a retain here the rebuild
+        // is a second dropper of values it never took a reference to. That is a
+        // use-after-free, not a leak: `array_merge([['p','q']], $keep)` boxed the
+        // Sep out of `$keep` into the variadic pack, the pack's release freed it,
+        // and the merged array's copy pointed at freed memory (descriptor 0 →
+        // SIGSEGV in the very next `instanceof`). Only the pointer-carrying kinds
+        // need it; int/float/bool ride inline, and the nested-rebuild arm below
+        // allocates a FRESH inner array it already owns.
         if ($ek === Type::KIND_STRING) {
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
+            $out .= $this->rcRetainReg($ev, 'str');
         } elseif ($ek === Type::KIND_FLOAT) {
             $ed = $this->ssa->allocReg();
             $out .= '  ' . $ed . ' = bitcast i64 ' . $ev . " to double\n";
@@ -506,6 +527,7 @@ trait EmitLlvmBuiltins
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
+            $out .= $this->rcRetainReg($ev, 'obj');
         } elseif ($ek === Type::KIND_ARRAY) {
             $nestElem = $elem->element ?? Type::unknown();
             if ($nestElem->kind === Type::KIND_CELL) {
@@ -516,6 +538,9 @@ trait EmitLlvmBuiltins
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
+                // Borrowed inner array, and the outer drop releases it as a cell —
+                // so co-own it to the same DEPTH the cell release drops.
+                $out .= $this->rcRetainReg($ev, 'veccell');
             } else {
                 // Nested array value → recursively rebuild as a cell-array (see
                 // the vec variant) so its own concrete elements render.
@@ -775,6 +800,24 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $r . ' = call ptr @__mir_str_new(ptr ' . $p . ', i64 ' . $n . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `str_bytes(string $s): int` — the raw address of $s's DATA bytes as an
+     * i64. A headered string's runtime pointer already points AT the data (the
+     * rc/len header sits at negative offsets, see `__mir_strlen`), so this is a
+     * representation-level ptr→i64 cast. Purpose: fill an `iovec.iov_base` in a
+     * PHP-built `writev()` iov array without allocating a `\Ffi\Ptr` handle for
+     * every string. Analogous to `ptr_to_int(\Ffi\Ptr)` but with a string input
+     * that the type system would otherwise reject there.
+     * @param Node[] $args
+     */
+    private function biStrBytes(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $out .= $this->coerceToI64();
+        $this->lastValueType = 'i64';
         return $out;
     }
 
@@ -1123,17 +1166,23 @@ trait EmitLlvmBuiltins
         $physlen = $this->ssa->allocReg();
         $out .= '  ' . $physlen . ' = load i64, ptr ' . $safe . "\n";
         // count() is the LIVE element count: physical entries minus the
-        // tombstone counter in the flags word (bits 8+). A never-unset array
+        // tombstone counter in the flags word (bits 8-35). A never-unset array
         // has 0 there, so count == physical len as before. The flags load off
         // the zero-word (null path) is same-page and its value is discarded by
         // the select — count of an empty array stays 0.
+        // MASKED: the internal pointer sits above the tombstone field, so an
+        // unmasked shift would subtract the cursor position from the length.
         $flp = $this->ssa->allocReg();
         $out .= '  ' . $flp . ' = getelementptr inbounds i8, ptr ' . $safe . ', i64 '
               . (string) \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
         $flags = $this->ssa->allocReg();
         $out .= '  ' . $flags . ' = load i64, ptr ' . $flp . "\n";
+        $tombSh = $this->ssa->allocReg();
+        $out .= '  ' . $tombSh . ' = lshr i64 ' . $flags . ', '
+              . (string) \Compile\MemoryAbi::ARRAY_TOMB_SHIFT . "\n";
         $tomb0 = $this->ssa->allocReg();
-        $out .= '  ' . $tomb0 . ' = lshr i64 ' . $flags . ", 8\n";
+        $out .= '  ' . $tomb0 . ' = and i64 ' . $tombSh . ', '
+              . (string) \Compile\MemoryAbi::ARRAY_TOMB_VALUE_MASK . "\n";
         $tomb = $this->ssa->allocReg();
         $out .= '  ' . $tomb . ' = select i1 ' . $isNull . ', i64 0, i64 ' . $tomb0 . "\n";
         $reg = $this->ssa->allocReg();
@@ -1203,6 +1252,130 @@ trait EmitLlvmBuiltins
         } else {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
+            $out .= $this->boxRawElem($ev, $arrT);
+            $boxed = $this->lastValue;
+        }
+        $out .= '  store i64 ' . $boxed . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * The INTERNAL-POINTER family — `current` / `key` / `next` / `prev` /
+     * `reset` / `end`. php keeps a cursor per array (`nInternalPointer`); here
+     * it lives in bits 36-63 of the flags word ({@see MemoryAbi::ARRAY_PTR_SHIFT}),
+     * so a COW clone's header memcpy carries the position with the value exactly
+     * as Zend does.
+     *
+     * A codegen builtin rather than a PHP helper for the same reason as
+     * array_first/last: it sees the array's CONCRETE element type at the call
+     * site, so the value is boxed by that kind. An erased PHP-level version
+     * would box every element as int. KEY reads `__mir_array_key_cell_at`,
+     * already a tagged int|string.
+     *
+     * Out of range yields `false` (php's "no more elements"), except `key`,
+     * which yields `null`.
+     *
+     * MOVING the cursor is a WRITE, so `next`/`prev`/`reset`/`end` COW a shared
+     * buffer first and thread the clone back through the array's slot — exactly
+     * what an element store does. Without that, `$b = $a; next($a);` moved
+     * `$b`'s cursor too, where php separates. `current`/`key` only read and
+     * never COW.
+     *
+     * @param Node[] $args
+     */
+    private function biArrayCursor(array $args, string $mode): string
+    {
+        $this->rt->needsTagged = true;
+        $wantKey = $mode === 'key';
+        if ($wantKey) { $this->rt->needsCellKey = true; }
+        $moves = $mode !== 'current' && $mode !== 'key';
+        $arrNode = $args[0];
+        $arrT = $arrNode->type;
+        $baseCell = $arrT->kind === Type::KIND_CELL;
+        $out = $this->emitNode($arrNode);
+        if ($baseCell) {
+            $out .= $this->cellToPtr();
+        } else {
+            $out .= $this->coerceToPtr();
+        }
+        // A cursor move must not be seen through another name for the same
+        // buffer: separate first, then write the clone back into the slot.
+        if ($moves
+            && ($arrNode->kind === Node::KIND_LOAD_LOCAL
+                || $arrNode->kind === Node::KIND_PROPERTY_ACCESS
+                || $arrNode->kind === Node::KIND_STATIC_PROP)) {
+            $cowFn = $this->cowSymbolFor($arrT);
+            $cow = $this->ssa->allocReg();
+            $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $this->lastValue . ")\n";
+            $out .= $this->vecWriteBack($arrNode, $cow, $baseCell);
+            $this->lastValue = $cow;
+        }
+        // Empty `[]` lowers to a null ptr — redirect to the zero word so the
+        // length load reads 0 instead of dereferencing address 0 (biCount /
+        // biArrayEndpoint do the same).
+        $rawSrc = $this->lastValue;
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
+        $src = $this->ssa->allocReg();
+        $out .= '  ' . $src . ' = select i1 ' . $isNull
+              . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
+        // live_len BEFORE any cursor access: it compacts a tombstoned buffer,
+        // and compaction resets the flags word (and therefore the cursor).
+        $len = $this->ssa->allocReg();
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
+
+        $pos = $this->ssa->allocReg();
+        if ($mode === 'next' || $mode === 'prev') {
+            $delta = $mode === 'next' ? '1' : '-1';
+            $out .= '  ' . $pos . ' = call i64 @__mir_array_ptr_seek(ptr ' . $src
+                  . ', i64 ' . $delta . ")\n";
+        } elseif ($mode === 'reset') {
+            $out .= '  call void @__mir_array_ptr_set(ptr ' . $src . ", i64 0)\n";
+            $out .= '  ' . $pos . " = add i64 0, 0\n";
+        } elseif ($mode === 'end') {
+            $last = $this->ssa->allocReg();
+            $out .= '  ' . $last . ' = sub i64 ' . $len . ", 1\n";
+            $out .= '  call void @__mir_array_ptr_set(ptr ' . $src . ', i64 ' . $last . ")\n";
+            $out .= '  ' . $pos . ' = add i64 ' . $last . ", 0\n";
+        } else {
+            $out .= '  ' . $pos . ' = call i64 @__mir_array_ptr_get(ptr ' . $src . ")\n";
+        }
+
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $oob  = $this->ssa->allocLabel('ac.oob');
+        $take = $this->ssa->allocLabel('ac.take');
+        $done = $this->ssa->allocLabel('ac.done');
+        $lo = $this->ssa->allocReg();
+        $out .= '  ' . $lo . ' = icmp slt i64 ' . $pos . ", 0\n";
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = icmp sge i64 ' . $pos . ', ' . $len . "\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = or i1 ' . $lo . ', ' . $hi . "\n";
+        $out .= '  br i1 ' . $bad . ', label %' . $oob . ', label %' . $take . "\n";
+        // Past either end: `false`, or `null` for key().
+        $out .= $oob . ":\n";
+        $bn = $this->ssa->allocReg();
+        if ($wantKey) {
+            $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+        } else {
+            $out .= '  ' . $bn . " = call i64 @__manticore_box_bool(i64 0)\n";
+        }
+        $out .= '  store i64 ' . $bn . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $take . ":\n";
+        if ($wantKey) {
+            $boxed = $this->ssa->allocReg();
+            $out .= '  ' . $boxed . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src
+                  . ', i64 ' . $pos . ")\n";
+        } else {
+            $ev = $this->ssa->allocReg();
+            $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src
+                  . ', i64 ' . $pos . ")\n";
             $out .= $this->boxRawElem($ev, $arrT);
             $boxed = $this->lastValue;
         }

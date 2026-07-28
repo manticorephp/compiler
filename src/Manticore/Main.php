@@ -786,9 +786,10 @@ function resolve_source_files(array $files): ?array {
  * backend (the legacy AST Compiler was removed — MIR is self-hosting).
  *
  * @param string[] $sources
+ * @param string[] $paths   parallel to $sources; used for diagnostics only
  */
-function compile_with_backend(array $sources): ?string {
-    return compile_via_mir($sources);
+function compile_with_backend(array $sources, array $paths = []): ?string {
+    return compile_via_mir($sources, $paths);
 }
 
 function cmd_compile(array $args): int {
@@ -813,15 +814,27 @@ function cmd_compile(array $args): int {
     $strict = $p->flag("analyze-strict");
     $output = CompileArgs::$output;
 
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
+    // Read once, as SourceFile[] (path + contents), so every downstream stage
+    // — the analyzer AND the front-end's `parse failed` diagnostics — can name
+    // the specific file that broke. Previously we ran resolve_sources() and
+    // resolve_source_files() back-to-back and lost the paths on the compile
+    // path, so a `bin/manticore compile manticore.json` (or one bad file inside
+    // a directory arg) printed `parse failed: expected ';' after expression`
+    // with no filename.
+    $afiles = resolve_source_files(CompileArgs::$files);
+    if ($afiles === null) {
         dprint("compile: source resolution failed — no input read (rc=66)");
         return 66;
     }
-    if (\count($sources) === 0) {
+    if (\count($afiles) === 0) {
         dprint("compile: source list is empty (rc=66)");
         return 66;
     }
+    /** @var string[] $sources */
+    $sources = [];
+    /** @var string[] $paths */
+    $paths = [];
+    foreach ($afiles as $sf) { $sources[] = $sf->contents; $paths[] = $sf->path; }
 
     if ($analyze) {
         // Advisory by default: any failure inside the analyzer is swallowed so it
@@ -829,8 +842,7 @@ function cmd_compile(array $args): int {
         // `--analyze-strict`, error-severity findings instead FAIL the compile
         // (rc=65, before codegen) — a lint gate for CI.
         try {
-            $afiles = resolve_source_files(CompileArgs::$files);
-            if ($afiles !== null && \count($afiles) > 0) {
+            if (\count($afiles) > 0) {
                 $adiags = perform_analysis($afiles, CompileArgs::$files, false);
                 if (\count($adiags) > 0) { \error_log("\n" . \Analyze\Report::human($adiags)); }
                 if ($strict) {
@@ -859,7 +871,7 @@ function cmd_compile(array $args): int {
     // compiler on some stdlib+user combinations (the "stdlib as guest"
     // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
     // (see discover_stdlib_files / the link tail) — built once, in isolation.
-    $ir = compile_with_backend($sources);
+    $ir = compile_with_backend($sources, $paths);
     if ($ir === null) {
         dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");
         return 65;
@@ -947,12 +959,12 @@ function cmd_compile(array $args): int {
     // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
     // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
     // undefined reference without it. `--as-needed` drops it when unreferenced.
-    // Io\Poll's epoll backend binds Linux-only symbols with `#[Ffi\Weak]`
+    // Io\Poll's epoll backend and the scheduler's signalfd bind Linux-only
+    // symbols with `#[Ffi\Weak]`
     // (extern_weak). On a macOS build those are weak-undefined, which ld64
     // rejects unless allowed — `-U` on each permits exactly them (they bind to
     // 0 and the Linux-only branch never calls them). Harmless when unreferenced,
-    // exactly like ___errno_location. The signal capture in prelude/signals.php
-    // binds Linux-only signalfd the same way. kqueue/kevent are present on
+    // exactly like ___errno_location. kqueue/kevent are present on
     // Darwin (no flag); on Linux GNU ld auto-binds any weak-undefined to 0.
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
@@ -968,34 +980,38 @@ function cmd_compile(array $args): int {
 }
 
 /**
- * Host OS sysname ("Darwin" / "Linux") via libc uname(2). The `sysname`
- * member is at offset 0, NUL-terminated; a generously zeroed buffer covers
- * macOS's ~1.3 KB utsname.
+ * Host OS sysname ("Darwin" / "Linux").
+ *
+ * Goes through `php_uname()`, the ONE primitive that exists in BOTH worlds: php's
+ * own builtin while the compiler runs under the Zend cold seed, and the stdlib's
+ * uname(2) wrapper in a native build. The calloc+uname FFI pair this used to call
+ * is a STUB under Zend (an empty body with a `: \Ffi\Ptr` return type), so any
+ * emitter reaching it killed `bin/compile` with
+ * "Manticore\calloc(): Return value must be of type Ffi\Ptr, none returned".
+ *
+ * That stopped being hypothetical when the compiler's own source began demanding
+ * fibers: `src/Runtime/AsyncHook.php` mentions `\Fiber`, so the demand gate turns
+ * fibers on for the compiler itself, and the fiber preamble needs the host arch.
+ * Routing through php_uname removes the hazard class — and with it the old
+ * "never call host_os() from an emitter" rule.
  */
 function host_os(): string {
-    $buf = calloc(2048, 1);
-    uname($buf);
-    // `$buf` is a raw calloc block (no header). cstr_to_str copies to the NUL
-    // into an owned, headered MIR string — the single raw→string boundary.
-    return \cstr_to_str($buf);
+    return \php_uname('s');
 }
 
 /**
- * Host CPU arch, normalized to the codegen names ("arm64" / "x86_64"), via
- * the `machine` member of libc uname(2). Unlike sysname (offset 0), `machine`
- * is the 5th utsname field, so its offset depends on the per-field stride —
- * and the stride itself is OS-divergent: Darwin's _SYS_NAMELEN is 256, glibc/
- * musl's _UTSNAME_LENGTH is 65. So read sysname first to pick the stride, then
- * read machine at 4*stride. Same compile-time host==target assumption as
- * host_os(): the arch the compiler runs on IS the arch it emits for (no
- * cross-compile), so this must only be reached from a compiler pass, never a
- * path the stdlib itself walks (libc bindings are stubs under the Zend seed).
+ * Host CPU arch, normalized to the codegen names ("arm64" / "x86_64").
+ *
+ * Same both-worlds reasoning as {@see host_os()} — and this one mattered more: it
+ * hand-walked utsname with an OS-divergent field stride (Darwin's _SYS_NAMELEN 256
+ * vs glibc/musl's _UTSNAME_LENGTH 65) to reach `machine`. php_uname('m') answers
+ * that directly, under Zend and natively.
+ *
+ * The compile-time host==target assumption stands: the arch the compiler runs on IS
+ * the arch it emits for (no cross-compile yet).
  */
 function host_arch(): string {
-    $buf = calloc(2048, 1);
-    uname($buf);
-    $stride = \substr(\cstr_to_str($buf), 0, 6) === 'Darwin' ? 256 : 65;
-    $machine = \cstr_to_str(\ptr_offset($buf, 4 * $stride));
+    $machine = \php_uname('m');
     if ($machine === 'arm64' || $machine === 'aarch64') { return 'arm64'; }
     if ($machine === 'x86_64' || $machine === 'amd64') { return 'x86_64'; }
     return $machine;
@@ -1045,6 +1061,37 @@ function collect_php_sources(string $dir, array $excludes): array
         if ($skip) { continue; }
         $src = read_file($path);
         if ($src !== null) { $out[] = $src; }
+    }
+    return $out;
+}
+
+/**
+ * Same as {@see collect_php_sources}, but returns each file's PATH alongside
+ * its contents so a diagnostic (`parse failed` at line/col) can name the real
+ * file. Kept parallel rather than replacing the plain-`string[]` version
+ * because the self-host boundary loses the element types across a mixed
+ * `array<path,contents>` shape — hence a typed `SourceFile[]`.
+ *
+ * @param string[] $excludes
+ * @return \Analyze\SourceFile[]
+ */
+function collect_php_source_files(string $dir, array $excludes): array
+{
+    /** @var \Analyze\SourceFile[] $out */
+    $out = [];
+    $listPath = "/tmp/manticore_buildf_" . (string)getpid() . ".txt";
+    system("find " . $dir . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
+    $contents = read_file($listPath);
+    if ($contents === null) { return $out; }
+    foreach (\explode("\n", $contents) as $path) {
+        if (\strlen($path) === 0) { continue; }
+        $skip = false;
+        foreach ($excludes as $ex) {
+            if (\strlen($ex) > 0 && \str_starts_with($path, $ex)) { $skip = true; break; }
+        }
+        if ($skip) { continue; }
+        $src = read_file($path);
+        if ($src !== null) { $out[] = new \Analyze\SourceFile($path, $src); }
     }
     return $out;
 }
@@ -1197,7 +1244,7 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
  * @param string[] $sources
  * @param string[] $linkObjs
  */
-function build_compile_module(array $sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false): int
+function build_compile_module(array $sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false, array $paths = []): int
 {
     CompileArgs::$emitLibrary = $emitLibrary;
     // Ensure the output directory exists — a fresh checkout has no `lib/` (it is
@@ -1210,7 +1257,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     if ($withStdlib && !$emitLibrary) {
         foreach (collect_stdlib_extern_decls() as $d) { CompileArgs::$externDecls[] = $d; }
     }
-    $module = lower_module($sources);
+    $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
     try {
         $statT = \Compile\Stats::now();
@@ -1354,13 +1401,20 @@ function cmd_build(array $args): int
         $excludes = [];
         foreach ($lib["exclude"] as $e) { $excludes[] = (string)$e; }
         dprint("build: library '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        $sources = collect_php_sources($srcDir, $excludes);
+        /** @var string[] $sources */
+        $sources = [];
+        /** @var string[] $paths */
+        $paths = [];
+        foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
+            $sources[] = $sf->contents;
+            $paths[] = $sf->path;
+        }
         if (\count($sources) === 0) {
             dprint("build: no sources for library '" . $name . "'");
             return 66;
         }
         CompileArgs::$externDecls = [];
-        $rc = build_compile_module($sources, $output, true, []);
+        $rc = build_compile_module($sources, $output, true, [], '', false, $paths);
         if ($rc !== 0) { return $rc; }
     }
     if ($libsOnly) { return 0; }
@@ -1383,7 +1437,14 @@ function cmd_build(array $args): int
         $moduleExcludes = $excludes;
         if ($entry !== "") { $moduleExcludes[] = $entry; }
         dprint("build: application '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        $sources = collect_php_sources($srcDir, $moduleExcludes);
+        /** @var string[] $sources */
+        $sources = [];
+        /** @var string[] $paths */
+        $paths = [];
+        foreach (collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
+            $sources[] = $sf->contents;
+            $paths[] = $sf->path;
+        }
         // Composer discovery. "composer": true builds the project the way Composer
         // sees it — its own composer.json autoload (psr-4/psr-0 + classmap dirs)
         // AND every installed vendor package from composer.lock (vendor/<name>/).
@@ -1404,7 +1465,10 @@ function cmd_build(array $args): int
                 if (isset($covered[$nd])) { continue; }
                 $covered[$nd] = true;
                 dprint("build: + composer autoload '" . $nd . "'");
-                foreach (collect_php_sources($nd, $moduleExcludes) as $g) { $sources[] = $g; }
+                foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
+                    $sources[] = $sf->contents;
+                    $paths[] = $sf->path;
+                }
             }
         }
         // Extensions: opt-in native bindings. Each named extension adds its thin
@@ -1421,7 +1485,10 @@ function cmd_build(array $args): int
             }
             $ext = $extDefs[$en];
             $extSrc = (string)$ext["src"];
-            foreach (collect_php_sources($extSrc, []) as $g) { $sources[] = $g; }
+            foreach (collect_php_source_files($extSrc, []) as $sf) {
+                $sources[] = $sf->contents;
+                $paths[] = $sf->path;
+            }
             foreach ($ext["link"] as $lib) { $linkFlags = $linkFlags . " -l" . (string)$lib; }
             dprint("build: + extension '" . $en . "' (" . $extSrc . ")");
         }
@@ -1432,6 +1499,7 @@ function cmd_build(array $args): int
                 return 66;
             }
             $sources[] = $entrySrc;
+            $paths[] = $entry;
         }
         if (\count($sources) === 0) {
             dprint("build: no sources for application '" . $name . "'");
@@ -1486,7 +1554,7 @@ function cmd_build(array $args): int
             $linkObjs[] = $libOut;
         }
         CompileArgs::$externDecls = $externDecls;
-        $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib);
+        $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
         if ($rc !== 0) { return $rc; }
     }
     return 0;
@@ -1570,9 +1638,27 @@ function cmd_dump_ast(array $args): int {
  * by compile_via_mir (→ LLVM IR) and cmd_dump_sig (→ .sig). Externs/typing
  * come from {@see CompileArgs::$externDecls}.
  *
+ * `$paths` is optional but STRONGLY recommended: it names each source so a
+ * `parse failed` diagnostic points at the real file rather than swallowing
+ * the location (a compile-time UX regression that hits hardest when the caller
+ * passes `manticore.json` by mistake or one file in a 20-file manifest breaks).
+ *
  * @param string[] $sources
+ * @param string[] $paths   parallel to $sources; used only for diagnostics
  */
-function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Compile\Mir\Module {
+/**
+ * Absolute path for a source file, for `__FILE__`/`__DIR__`. php reports the
+ * resolved path, so symlinks and `./` segments are collapsed; an unresolvable or
+ * empty path stays as it came (the constants then read '', matching php for sources
+ * with no file).
+ */
+function __mc_abs_source_path(string $path): string {
+    if ($path === '') { return ''; }
+    $real = \realpath($path);
+    return $real === false ? $path : $real;
+}
+
+function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
     $docs = [];
@@ -1595,16 +1681,18 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // these returns outright. The ENTRY's own `return $rc` is the script exit
     // code and is kept — which is why the test is "not the last source".
     $lastIdx = \count($sources) - 1;
-    $srcIdx = -1;
-    foreach ($sources as $source) {
-        $srcIdx = $srcIdx + 1;
+    foreach ($sources as $i => $source) {
         try {
-            $program = Parser::parseSource($source);
+            // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
+            // parse time — statements are flattened across every file right below,
+            // which loses the per-file identity for good.
+            $program = Parser::parseSource($source, __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : ''));
         } catch (\Throwable $e) {
-            dprint("parse failed: " . $e->getMessage());
+            $where = isset($paths[$i]) ? $paths[$i] : "<source>";
+            dprint($where . ": parse failed: " . $e->getMessage());
             return null;
         }
-        $isEntry = $srcIdx === $lastIdx;
+        $isEntry = $i === $lastIdx;
         foreach ($program->statements as $s) {
             if (!$isEntry && $s->kind === 'Return') { continue; }
             $stmts[] = $s;
@@ -1650,8 +1738,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
     // cannot cross the stdlib.o boundary.
     $binarySrc = prelude_src_or_empty("binary.php");
-    // pcntl signals — prelude (handlers are callables), demand-gated.
-    $signalsSrc = prelude_src_or_empty("signals.php");
+    // Async\ (scheduler / tasks / channels / netpoller seam) — DEMAND-GATED,
+    // braced-namespace tree. Built ON Fiber + Io\Poll, so it forces both on.
+    $asyncSrc = prelude_src_or_empty("async.php");
+    // ext/pcntl + posix process control — DEMAND-GATED, braced-namespace tree.
+    $pcntlSrc = prelude_src_or_empty("pcntl.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1662,6 +1753,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // prelude is injected WHOLE — so a miscompile in any function sharing that
     // file breaks generation 2 of the self-host. Nothing in src/ calls these.
     $useArrayFnsExt = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsExtSrc));
+    // `array_multisort` is DESUGARED at the call site (LowerExprs) into
+    // __mc_multisort_order + __mc_multisort_apply, so the user's source never
+    // names either helper and the definedFunctions gate above cannot see the
+    // demand. Gate on the name the program actually writes.
+    if ($demand->callsAny(['array_multisort'])) { $useArrayFnsExt = true; }
     $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
         // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
         // file (they drain a Traversable, so they cannot live in the stdlib).
@@ -1676,13 +1772,34 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     // lowering rewrites it to `__mc_trigger_error` — the gate reads the SOURCE,
     // which still spells the php name.
     $useBinary = $demand->callsAny(['pack', 'unpack']);
-    $useSignals = $demand->callsAny(['pcntl_signal', 'pcntl_signal_dispatch',
-                                     'pcntl_signal_get_handler', 'pcntl_async_signals',
-                                     'posix_kill', 'posix_getpid', 'getmypid']);
     $useErrors = $demand->callsAny(['set_error_handler', 'restore_error_handler',
                                     'set_exception_handler', 'restore_exception_handler',
                                     'register_shutdown_function', 'trigger_error',
                                     'error_reporting', 'error_get_last']);
+    // Async\: `use function Async\spawn`, `\Async\async(...)`, `use Async\TaskGroup`
+    // — the Lexer emits the namespace qualifier as its own Identifier, so the
+    // `Async` mention is the reliable gate. NOT gated on definedFunctions(): this
+    // module provides read/write/close/select/connect, names any program may own.
+    $useAsync = $demand->mentionsAny(['Async', 'TaskGroup', 'CancelledException',
+                                      'DeadlockException']);
+    // ext/pcntl gates on the `pcntl_*` / `posix_*` names the FILE defines — those
+    // are prefixed, so no program owns them. The file ALSO defines a `Process\`
+    // namespace whose members are fork/pid/workers/supervise; those are gated on
+    // the `Process` qualifier instead, exactly as async.php is on `Async`,
+    // because a program may very well own a function called `workers()`.
+    $pcntlFns = [];
+    foreach (\Compile\Mir\PreludeDemand::definedFunctions($pcntlSrc) as $fn) {
+        if (\str_starts_with($fn, 'pcntl_') || \str_starts_with($fn, 'posix_')) { $pcntlFns[] = $fn; }
+    }
+    $usePcntl = $demand->callsAny($pcntlFns) || $demand->mentions('Process');
+    if ($useAsync) {
+        // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
+        // without either, whatever the program itself mentions. It also dispatches
+        // signals every tick, so the pcntl layer has to be there too.
+        $useFiber = true;
+        $useIoPoll = true;
+        $usePcntl = true;
+    }
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
     // ReflectionException. A program that never reflects carries none of it.
@@ -1808,7 +1925,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
-        $lower->signalsSrc = $useSignals ? $signalsSrc : "";
+        $lower->asyncSrc = $useAsync ? $asyncSrc : "";
+        $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -2000,15 +2118,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null): ?\Com
     }
 }
 
-function compile_via_mir(array $sources): ?string {
-    $module = lower_module($sources);
+function compile_via_mir(array $sources, array $paths = []): ?string {
+    $module = lower_module($sources, null, $paths);
     if ($module === null) { return null; }
     try {
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
         return $emit->emit($module);
     } catch (\Throwable $e) {
-        dprint("compile failed (emit): " . $e->getMessage());
+        dprint("compile failed (emit): " . $e->getMessage(). " ({$e->getFile()}:{$e->getLine()})");
         return null;
     }
 }
@@ -2072,7 +2190,14 @@ function analyze_prelude_files(): array {
     $names = [
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
-        "datetime.php", "errors.php", "binary.php", "signals.php",
+        "datetime.php", "errors.php", "binary.php",
+        // \Fiber (fiber.php) and the Io\Poll\* class tree (io_poll.php) are
+        // DEMAND-GATED at compile time (Main::lower_module), but the analyzer's
+        // undefined-symbol rules run closed-world across the whole source set —
+        // so they need every prelude class the user program can name. Without
+        // these, `new \Fiber(...)`, an `\Io\Poll\Context` hint, or the
+        // `StreamPollHandle` handle read as unknown classes.
+        "fiber.php", "io_poll.php", "async.php", "pcntl.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

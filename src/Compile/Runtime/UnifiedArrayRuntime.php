@@ -84,6 +84,9 @@ final class UnifiedArrayRuntime
         $this->emitArrayUnion();
         $this->emitKeyAt();
         $this->emitKeyCellAt();
+        $this->emitPtrGet();
+        $this->emitPtrSet();
+        $this->emitPtrSeek();
         $this->emitSpreadInto();
         $this->emitPop();
         $this->emitShift();
@@ -437,7 +440,11 @@ final class UnifiedArrayRuntime
         $llHi = $tagchk->lshr($llTag, Value::int(Type::i64(), 48));
         $tagchk->brIf($tagchk->icmp('ne', $llHi, Value::int(Type::i64(), 0x7E66)), $z, $chk);
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $tomb = $chk->lshr($flags, Value::int(Type::i64(), 8));
+        // MASKED: the internal pointer lives above the tombstone field, and an
+        // unmasked read would see a moved pointer as tombstones and COMPACT the
+        // array on every foreach/count.
+        $tombRaw = $chk->lshr($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_TOMB_SHIFT));
+        $tomb = $chk->and_($tombRaw, Value::int(Type::i64(), MemoryAbi::ARRAY_TOMB_VALUE_MASK));
         $chk->brIf($chk->icmp('eq', $tomb, Value::int(Type::i64(), 0)), $ret, $comp);
         $comp->call('__mir_array_compact', Type::void(), [$arr]);
         $comp->br($ret);
@@ -2803,6 +2810,101 @@ final class UnifiedArrayRuntime
         $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $packed->ret($packed->load(Type::i64(), $this->packedSlot($packed, $arr, $i)));
         $hashed->ret($hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET)));
+    }
+
+    /**
+     * `__mir_array_ptr_get(arr) -> i64` — php's internal pointer (the physical
+     * entry index `current`/`key` read). Bits 36-63 of the flags word, stored
+     * +1 so a zeroed header — and every array an older generation built —
+     * reads as position 0. A null / non-array base reads 0.
+     */
+    private function emitPtrGet(): void
+    {
+        $fn = $this->module->func('__mir_array_ptr_get', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $z = $fn->block('z');
+        $sub = $fn->block('sub');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $go);
+        $z->ret(Value::int(Type::i64(), 0));
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $sh = $go->lshr($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_PTR_SHIFT));
+        $raw = $go->and_($sh, Value::int(Type::i64(), MemoryAbi::ARRAY_PTR_VALUE_MASK));
+        $go->brIf($go->icmp('eq', $raw, Value::int(Type::i64(), 0)), $z, $sub);
+        $sub->ret($sub->sub($raw, Value::int(Type::i64(), 1)));
+    }
+
+    /**
+     * `__mir_array_ptr_set(arr, pos) -> void` — store the internal pointer.
+     * The caller has already separated the buffer (a pointer move is a WRITE:
+     * php copies the position with the value, so two owners must not share a
+     * cursor). A null base is a no-op. `pos` is clamped into the field; the
+     * stored value is `pos + 1` so 0 stays the "start" encoding.
+     */
+    private function emitPtrSet(): void
+    {
+        $fn = $this->module->func('__mir_array_ptr_set', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $pos = $fn->param(Type::i64(), 'pos');
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $go);
+        $addr = $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $flags = $go->load(Type::i64(), $addr);
+        $kept = $go->and_($flags, Value::int(Type::i64(), ~MemoryAbi::ARRAY_PTR_FIELD_MASK));
+        $enc = $go->add($pos, Value::int(Type::i64(), 1));
+        $clamped = $go->and_($enc, Value::int(Type::i64(), MemoryAbi::ARRAY_PTR_VALUE_MASK));
+        $shifted = $go->shl($clamped, Value::int(Type::i64(), MemoryAbi::ARRAY_PTR_SHIFT));
+        $go->store($go->or_($kept, $shifted), $addr);
+        $go->br($done);
+        $done->retVoid();
+    }
+
+    /**
+     * `__mir_array_ptr_seek(arr, delta) -> i64` — move the internal pointer by
+     * `delta` and return the NEW position, or -1 when it has run off either
+     * end (which is what makes `next`/`prev` return false). Past-the-end is
+     * stored as the live length so a following `prev` steps back to the last
+     * element, matching php.
+     */
+    private function emitPtrSeek(): void
+    {
+        $fn = $this->module->func('__mir_array_ptr_seek', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $delta = $fn->param(Type::i64(), 'delta');
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $live = $fn->block('live');
+        $neg = $fn->block('neg');
+        $inb = $fn->block('inb');
+        $past = $fn->block('past');
+        $ok = $fn->block('ok');
+        $off = $fn->block('off');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $off, $go);
+        // live_len FIRST: it COMPACTS when the buffer carries tombstones, and
+        // compaction resets the flags word — reading the pointer before that
+        // would hand back a position the compaction is about to invalidate.
+        $len = $go->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $cur = $go->call('__mir_array_ptr_get', Type::i64(), [$arr]);
+        // An ALREADY-INVALID cursor (parked past the end, in either direction)
+        // stays invalid: php's move_forward/move_backwards both fail from there,
+        // so `prev()` after running off the end is false — NOT a step back onto
+        // the last element. Only reset()/end() re-validate it.
+        $go->brIf($go->icmp('sge', $cur, $len), $off, $live);
+        $next = $live->add($cur, $delta);
+        $live->brIf($live->icmp('slt', $next, Value::int(Type::i64(), 0)), $neg, $inb);
+        // Off either END: php parks the pointer past-the-end, so a later next()
+        // does NOT resume from the old position. Both directions park at len.
+        $neg->call('__mir_array_ptr_set', Type::void(), [$arr, $len]);
+        $neg->br($off);
+        $inb->brIf($inb->icmp('sge', $next, $len), $past, $ok);
+        $past->call('__mir_array_ptr_set', Type::void(), [$arr, $len]);
+        $past->br($off);
+        $ok->call('__mir_array_ptr_set', Type::void(), [$arr, $next]);
+        $ok->ret($next);
+        $off->ret(Value::int(Type::i64(), -1));
     }
 
     /**

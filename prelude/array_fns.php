@@ -96,6 +96,18 @@ function array_reduce(array $a, callable $callback, mixed $initial = null): mixe
     return $carry;
 }
 
+/**
+ * `array_map(cb, arr)` — map each value, KEYS PRESERVED (a null callback is a
+ * plain copy).
+ *
+ * ⛔ php's ZIP form (`array_map($cb, $a, $b)`) is NOT here. It needs a
+ * variadic `array ...$more`, and array_map is compiled INTO THE COMPILER (src/
+ * calls it), where adding the pack destabilised generation 2: `array_map` over
+ * an ENUM array started SIGSEGVing and an unrelated assoc case began reading
+ * raw cell bits. The zip form belongs in array_fns_ext.php under its own name,
+ * or behind a variadic pack that Monomorphize handles for a callee the compiler
+ * itself uses — see the epic memory before retrying.
+ */
 function array_map(?callable $cb, array $arr): array
 {
     $out = [];
@@ -109,11 +121,24 @@ function array_map(?callable $cb, array $arr): array
     return $out;
 }
 
-function array_filter(array $arr, ?callable $cb = null): array
+/**
+ * `array_filter(arr, cb, mode)` — `$mode` selects what the callback receives:
+ * ARRAY_FILTER_USE_KEY (2) the key alone, ARRAY_FILTER_USE_BOTH (1) value then
+ * key, 0 (default) the value alone. Keys are preserved either way.
+ */
+function array_filter(array $arr, ?callable $cb = null, int $mode = 0): array
 {
     $out = [];
     foreach ($arr as $k => $v) {
-        $keep = $cb === null ? (bool)$v : (bool)$cb($v);
+        if ($cb === null) {
+            $keep = (bool)$v;
+        } elseif ($mode === 2) {
+            $keep = (bool)$cb($k);
+        } elseif ($mode === 1) {
+            $keep = (bool)$cb($v, $k);
+        } else {
+            $keep = (bool)$cb($v);
+        }
         if ($keep) { $out[$k] = $v; }
     }
     return $out;
@@ -178,8 +203,51 @@ function usort(array &$arr, callable $cmp): bool
  * body must not be specialised from the call sites of one module.
  * @param mixed[] $arr
  */
-function sort(array &$arr): bool
+/**
+ * Compare two values under one `SORT_*` flag. `SORT_FLAG_CASE` (8) is an
+ * OR-able modifier on the STRING and NATURAL bases, so it is masked off first.
+ *
+ * Only the FLAGGED sort paths call this. The default `SORT_REGULAR` sorts keep
+ * their inlined `<=>` / strcmp comparison — they are what the compiler's own
+ * build uses, and a call per comparison would show up in build time.
+ */
+function __mc_sort_cmp(mixed $a, mixed $b, int $flags): int
 {
+    $ci = ($flags & 8) !== 0;
+    $base = $flags & ~8;
+    if ($base === 1) {
+        $fa = (float)$a;
+        $fb = (float)$b;
+        if ($fa < $fb) { return -1; }
+        if ($fa > $fb) { return 1; }
+        return 0;
+    }
+    if ($base === 2 || $base === 5) {
+        $sa = (string)$a;
+        $sb = (string)$b;
+        $r = $ci ? \strcasecmp($sa, $sb) : \strcmp($sa, $sb);
+        if ($r < 0) { return -1; }
+        if ($r > 0) { return 1; }
+        return 0;
+    }
+    if ($base === 6) {
+        $sa = (string)$a;
+        $sb = (string)$b;
+        $r = $ci ? \strnatcasecmp($sa, $sb) : \strnatcmp($sa, $sb);
+        if ($r < 0) { return -1; }
+        if ($r > 0) { return 1; }
+        return 0;
+    }
+    return $a <=> $b;
+}
+
+function sort(array &$arr, int $flags = 0): bool
+{
+    // A non-default flag routes through usort — decorate-free, and it reuses
+    // the same proven merge sort instead of duplicating six flagged bodies.
+    if ($flags !== 0) {
+        return usort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
+    }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
@@ -214,8 +282,11 @@ function sort(array &$arr): bool
  * Canonical `mixed[]` element — see the note on usort.
  * @param mixed[] $arr
  */
-function rsort(array &$arr): bool
+function rsort(array &$arr, int $flags = 0): bool
 {
+    if ($flags !== 0) {
+        return usort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
+    }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
@@ -255,8 +326,11 @@ function rsort(array &$arr): bool
  * — correct for both string and int keys. Does NOT call the shared sort() (that
  * would add a conflicting call site and erase sort's element type).
  */
-function ksort(array &$arr): bool
+function ksort(array &$arr, int $flags = 0): bool
 {
+    if ($flags !== 0) {
+        return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
+    }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -291,8 +365,11 @@ function ksort(array &$arr): bool
     return true;
 }
 
-function krsort(array &$arr): bool
+function krsort(array &$arr, int $flags = 0): bool
 {
+    if ($flags !== 0) {
+        return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
+    }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -335,8 +412,11 @@ function krsort(array &$arr): bool
  * The old insertion sort was O(n²) with a hashed `$arr[$keys[$j]]` read per
  * comparison — quadratic wall on any real map.
  */
-function asort(array &$arr): bool
+function asort(array &$arr, int $flags = 0): bool
 {
+    if ($flags !== 0) {
+        return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
+    }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -373,8 +453,11 @@ function asort(array &$arr): bool
     return true;
 }
 
-function arsort(array &$arr): bool
+function arsort(array &$arr, int $flags = 0): bool
 {
+    if ($flags !== 0) {
+        return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
+    }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -665,17 +748,27 @@ function array_intersect_key(array $arr, array ...$others): array
 }
 
 /**
- * `array_unique(arr)` — first occurrence of each (string) value, keys preserved
- * (PHP default SORT_STRING comparison).
+ * `array_unique(arr, flags)` — first occurrence of each value, keys preserved.
+ *
+ * The default is SORT_STRING (2), NOT a loose `==`: php compares the values as
+ * STRINGS, so `[0, "a", false]` keeps all three ("0" / "a" / "") while a loose
+ * compare would drop `false` against `0`. SORT_REGULAR (0) is the loose compare
+ * and SORT_NUMERIC (1) compares as floats.
  */
-function array_unique(array $arr): array
+function array_unique(array $arr, int $flags = 2): array
 {
     /** @var mixed[] $out */
     $out = [];
     foreach ($arr as $k => $v) {
         $dup = false;
         foreach ($out as $w) {
-            if ($w == $v) { $dup = true; break; }
+            if ($flags === 0) {
+                if ($w == $v) { $dup = true; break; }
+            } elseif ($flags === 1) {
+                if ((float)$w === (float)$v) { $dup = true; break; }
+            } else {
+                if ((string)$w === (string)$v) { $dup = true; break; }
+            }
         }
         if (!$dup) { $out[$k] = $v; }
     }

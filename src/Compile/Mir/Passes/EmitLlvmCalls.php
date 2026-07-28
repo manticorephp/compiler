@@ -211,6 +211,13 @@ trait EmitLlvmCalls
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = zext i1 ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
+            } elseif ($ret === 'i32') {
+                // A C `int` return: SIGN-extend. The callee wrote only w0, so its
+                // -1 has a zero upper half and an i64 read would answer
+                // 4294967295. {@see LowerFromAst::ffiRetIsInt32}
+                $ri = $this->ssa->allocReg();
+                $out .= '  ' . $ri . ' = sext i32 ' . $r . " to i64\n";
+                $out .= '  ret i64 ' . $ri . "\n";
             } else {
                 $out .= '  ret i64 ' . $r . "\n";
             }
@@ -380,6 +387,17 @@ trait EmitLlvmCalls
             } elseif ($argc < $req || $argc > $tot) {
                 continue;
             }
+            // Arity alone is not enough to make a candidate emittable. A FLOAT is
+            // the one kind whose LLVM carrier is `double` rather than i64/ptr, so
+            // pairing a float argument with a pointer parameter (or the reverse)
+            // produces IR that does not even verify — `%r = bitcast i64 %x to
+            // double` followed by `icmp eq ptr %r, null`. Such a pairing can never
+            // be the runtime target anyway (php would TypeError), so drop the arm
+            // rather than emit it: `$hf($sock, $timeout)` in __mc_dns_exchange
+            // matched `explode(string, string)` on arity and killed the cold seed.
+            if (!$hasSpread && !$this->dynArmTypesEmittable($ptypes, $iv->args)) {
+                continue;
+            }
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
             $cmp = $this->ssa->allocReg();
@@ -427,6 +445,37 @@ trait EmitLlvmCalls
         return $out;
     }
 
+    /**
+     * Whether a dynamic-name dispatch arm for a candidate with `$ptypes` can be
+     * emitted at all against these argument nodes. Only the float-vs-pointer
+     * pairing is rejected: every other kind rides an i64 carrier, so the existing
+     * coercions produce verifiable IR even when the pairing is nonsense (the arm
+     * is unreachable at runtime either way). A CELL / UNKNOWN on either side says
+     * nothing statically and always stays.
+     *
+     * @param Type[] $ptypes
+     * @param Node[] $args
+     */
+    private function dynArmTypesEmittable(array $ptypes, array $args): bool
+    {
+        foreach ($args as $i => $a) {
+            $pt = $ptypes[$i] ?? null;
+            if ($pt === null) { continue; }
+            $ak = $a->type->kind;
+            $pk = $pt->kind;
+            if ($ak === Type::KIND_FLOAT && $this->isPtrCarrierKind($pk)) { return false; }
+            if ($pk === Type::KIND_FLOAT && $this->isPtrCarrierKind($ak)) { return false; }
+        }
+        return true;
+    }
+
+    /** A kind whose LLVM carrier is a pointer rather than a plain i64/double. */
+    private function isPtrCarrierKind(string $kind): bool
+    {
+        return $kind === Type::KIND_STRING || $kind === Type::KIND_ARRAY
+            || $kind === Type::KIND_OBJ || $kind === Type::KIND_CLOSURE;
+    }
+
     private function emitInvoke(Invoke_ $n): string
     {
         $iv = $n;
@@ -466,6 +515,21 @@ trait EmitLlvmCalls
         // The closure struct is the env: the __closure fn unpacks its own
         // captures from it (slot 1+), so the call passes only `env + args`.
         $out = $this->emitNode($iv->callee);
+        // A `mixed`/`cell` callee (e.g. `AsyncHook::readable(): mixed` returning
+        // a closure) still carries NaN-box TAG BITS in its i64 slot — those must
+        // be masked off before we treat the value as a struct pointer. Missing
+        // this mask reads the fn ptr from a tagged address → SIGSEGV on the very
+        // first indirect call (the "transparent I/O" AsyncHook path). Concrete
+        // `Closure`/object-typed callees are already stored as raw pointers, so
+        // they don't need the mask; only untype-erased slots do.
+        $ck = $iv->callee->type->kind;
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+        }
         $out .= $this->coerceToPtr();
         return $out . $this->emitClosureStructInvoke($n, $this->lastValue);
     }

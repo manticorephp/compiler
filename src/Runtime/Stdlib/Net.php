@@ -208,7 +208,204 @@ function __mc_sock_error(int $fd): int
  *
  * @return \Resource|false
  */
-function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
+/** Put $fd in O_NONBLOCK. False if either fcntl failed. */
+function __mc_fd_nonblock(int $fd): bool
+{
+    $fl = \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(6), 0);
+    if ($fl < 0) {
+        return false;
+    }
+    return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5)) >= 0;
+}
+
+/**
+ * SO_ERROR on $fd — 0 once a non-blocking connect(2) has completed cleanly, the
+ * failing errno otherwise. The errno-free way to collect an async connect's
+ * outcome (errno itself belongs to the poll, not to the connect).
+ */
+function __mc_so_error(int $fd): int
+{
+    $val = \Runtime\Libc\calloc(1, 4);
+    if ($val === null) {
+        return -1;
+    }
+    $len = \Runtime\Libc\calloc(1, 4);
+    if ($len === null) {
+        \Runtime\Libc\free($val);
+        return -1;
+    }
+    \poke_i32($len, 0, 4);
+    $rc = \Runtime\Libc\sys_getsockopt($fd, \__mc_sock_const(0), \__mc_sock_const(1), $val, $len);
+    $e = $rc === 0 ? \peek_i32($val, 0) : -1;
+    \Runtime\Libc\free($val);
+    \Runtime\Libc\free($len);
+    return $e;
+}
+
+/**
+ * Finish an in-flight non-blocking connect: park the fiber until the fd is
+ * writable (the kernel's completion signal), then read SO_ERROR. Returns 0 on a
+ * connected socket, -1 otherwise. Only ever called under AsyncHook.
+ *
+ * The temporary \Resource is just a handle for the reactor (StreamPollHandle
+ * reads ->addr); the watcher is dropped again right after so the real stream
+ * registers cleanly. \Resource::__destruct closes an OPEN handle, so the temp is
+ * marked closed before it dies — otherwise it would close the fd we just
+ * connected.
+ */
+function __mc_await_connect(int $fd, float $timeout = 0.0): int
+{
+    $tmp = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
+    // BOUNDED: a connect(2) to a black-holed address completes never, and an
+    // unbounded park held the fiber forever while the caller's own timeout
+    // (fsockopen's 5th argument) was silently ignored. 0.0 = "no explicit
+    // timeout" → php's default_socket_timeout of 60 s, the same floor the read
+    // path uses.
+    $secs = $timeout > 0.0 ? $timeout : 60.0;
+    $wf = \Runtime\AsyncHook::writableFor();
+    $ok = $wf($tmp, $secs) === true;
+    $c = \Runtime\AsyncHook::closer();
+    $c($tmp);
+    if (!$ok) {
+        $tmp->closed = true;
+        $tmp->addr = 0;
+        \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+        return -1;
+    }
+    $e = \__mc_so_error($fd);
+    // Detach BEFORE the temp dies: __destruct closes an open handle, and this fd
+    // belongs to the caller.
+    $tmp->closed = true;
+    $tmp->addr = 0;
+    return $e === 0 ? 0 : -1;
+}
+
+/** True when $host is already a literal address, so no resolution is needed. */
+function __mc_is_numeric_host(string $host): bool
+{
+    if (\strpos($host, ':') !== false) {
+        return true;                       // IPv6 literal
+    }
+    $n = \strlen($host);
+    $digits = 0;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = \ord($host[$i]);
+        if ($c === 46) { continue; }       // '.'
+        if ($c < 48 || $c > 57) { return false; }
+        $digits = $digits + 1;
+    }
+    return $digits > 0;
+}
+
+/** An exact-name IPv4 lookup in /etc/hosts, '' when the name is not listed. */
+function __mc_hosts_lookup(string $host): string
+{
+    $c = \file_get_contents('/etc/hosts');
+    if ($c === false) {
+        return '';
+    }
+    $want = \strtolower($host);
+    foreach (\explode("\n", $c) as $line) {
+        $hash = \strpos($line, '#');
+        if ($hash !== false) {
+            $line = \substr($line, 0, $hash);
+        }
+        $parts = \preg_split('/\s+/', \trim($line));
+        if ($parts === false) {
+            continue;
+        }
+        $ip = '';
+        foreach ($parts as $tok) {
+            $t = (string)$tok;
+            if ($t === '') { continue; }
+            if ($ip === '') { $ip = $t; continue; }
+            if (\strtolower($t) === $want) {
+                // IPv4 only: a v6 answer would need a v6 sockaddr path.
+                return \strpos($ip, ':') === false ? $ip : '';
+            }
+        }
+    }
+    return '';
+}
+
+/**
+ * Resolve $host to an IPv4 literal WITHOUT blocking the scheduler: /etc/hosts
+ * first, then an A query over the netpoller-parked UDP exchange
+ * ({@see __mc_dns_exchange}). '' means "could not answer" — the
+ * caller then falls back to the blocking getaddrinfo walk, which is what keeps
+ * IPv6-only names, mDNS and every other nsswitch source working.
+ *
+ * No cache: it would have to live in a stdlib `static`, and a static array is the
+ * known repr trap. Its natural home is a Scheduler field, once the resolver is
+ * driven from the prelude side.
+ */
+function __mc_resolve_async(string $host): string
+{
+    $viaHosts = \__mc_hosts_lookup($host);
+    if ($viaHosts !== '') {
+        return $viaHosts;
+    }
+    // A cache lives in the SCHEDULER (prelude), reached through the hook: a stdlib
+    // static holding an assoc is the known repr trap, and the scheduler's lifetime is
+    // exactly the right scope for a per-run cache. Entries carry their TTL.
+    $cached = \__mc_resolve_cache_get($host);
+    if ($cached !== '') {
+        return $cached;
+    }
+    $ip = \__mc_resolve_query($host, 1);        // A
+    if ($ip === '') {
+        // AAAA next: an IPv6-only name is common enough (and the literal we return
+        // goes straight back into getaddrinfo, which takes v6 literals as happily as
+        // v4 — so nothing downstream needs to know).
+        $ip = \__mc_resolve_query($host, 28);   // AAAA
+    }
+    return $ip;
+}
+
+/**
+ * One QTYPE's worth of resolution: query, take the first address record, and cache it
+ * under its own TTL. '' when the type has no answer.
+ */
+function __mc_resolve_query(string $host, int $qtype): string
+{
+    $resp = \__mc_dns_query($host, $qtype);
+    if ($resp === '') {
+        return '';
+    }
+    /** @var array<int,array<string,mixed>> $recs */
+    $recs = \__mc_dns_parse($resp, $qtype);
+    foreach ($recs as $rec) {
+        $ip = $qtype === 28 ? (string)($rec['ipv6'] ?? '') : (string)($rec['ip'] ?? '');
+        if ($ip !== '') {
+            $ttl = (int)($rec['ttl'] ?? 0);
+            \__mc_resolve_cache_put($host, $ip, $ttl > 0 ? $ttl : 30);
+            return $ip;
+        }
+    }
+    return '';
+}
+
+/** Cached address for $host, or '' — see {@see __mc_resolve_async()} on the home. */
+function __mc_resolve_cache_get(string $host): string
+{
+    $g = \Runtime\AsyncHook::dnsGetter();
+    if ($g === null) {
+        return '';
+    }
+    return (string)$g($host);
+}
+
+/** Remember $host → $ip for $ttl seconds (no-op with no scheduler). */
+function __mc_resolve_cache_put(string $host, string $ip, int $ttl): void
+{
+    $p = \Runtime\AsyncHook::dnsPutter();
+    if ($p === null) {
+        return;
+    }
+    $p($host, $ip, $ttl);
+}
+
+function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $timeout = 0.0)
 {
     // $wantType is the socket type to select from the resolver's list: 1
     // SOCK_STREAM (tcp), 2 SOCK_DGRAM (udp) — both values are the same on every
@@ -219,9 +416,22 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     if ($res === null) {
         return false;
     }
+    // getaddrinfo(3) RESOLVES, and it blocks the whole process while it does — the
+    // last blocking step left in the network path. Under a scheduler, resolve the
+    // name first over the netpoller-parked DNS path and hand getaddrinfo the
+    // literal it produced: a numeric host touches no network, so the entire
+    // addrinfo walk below (socktype filter, ai_addr/ai_addrlen, the offset table)
+    // is reused untouched. An unanswerable name falls back to the blocking walk.
+    $lookup = $host;
+    if (\Runtime\AsyncHook::active() && !\__mc_is_numeric_host($host)) {
+        $ip = \__mc_resolve_async($host);
+        if ($ip !== '') {
+            $lookup = $ip;
+        }
+    }
     // hints = NULL: see the file header. The result list then also carries
     // the OTHER socktypes, which the ai_socktype filter below drops.
-    $rc = \Runtime\Libc\sys_getaddrinfo($host, (string)$port, \int_to_ptr(0), $res);
+    $rc = \Runtime\Libc\sys_getaddrinfo($lookup, (string)$port, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
         return false;
@@ -232,6 +442,11 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
         return false;
     }
 
+    // Under a scheduler the handshake must not stall the loop: the socket goes
+    // non-blocking BEFORE connect(2), EINPROGRESS parks the fiber on writability
+    // and SO_ERROR reports the outcome. Two spawned file_get_contents('https://…')
+    // then overlap their connects instead of serialising on them.
+    $async = \Runtime\AsyncHook::active();
     $fd = -1;
     $ai = $head;
     while ($ai !== 0) {
@@ -247,7 +462,14 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
                 // ai_canonname, so a wrong table passes a char* here).
                 $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $addrLen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
-                if (\Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen) === 0) {
+                if ($async) {
+                    \__mc_fd_nonblock($cand);
+                }
+                $rc = \Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen);
+                if ($rc !== 0 && $async && \__mc_errno() === \__mc_sock_const(12)) {
+                    $rc = \__mc_await_connect($cand, $timeout);
+                }
+                if ($rc === 0) {
                     $fd = $cand;
                     break;
                 }
@@ -266,6 +488,9 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
     // derefs the boxed handle) so a deferred STARTTLS has an SNI + verify target.
     $r = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
     $r->host = $host;
+    if ($async) {
+        $r->blocking = false;   // the fd went O_NONBLOCK above; keep the flag honest
+    }
     return $r;
 }
 
@@ -284,9 +509,9 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1)
  *
  * @return \Resource|false
  */
-function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool $verifyName = true)
+function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool $verifyName = true, float $timeout = 0.0)
 {
-    $sock = \__mc_tcp_connect($host, $port);
+    $sock = \__mc_tcp_connect($host, $port, 1, $timeout);
     if ($sock === false) {
         return false;
     }
@@ -295,7 +520,7 @@ function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool
     // handshake (which mutates the resource) MUST run through a \Resource-typed
     // parameter so codegen unboxes to a real object handle. Same funnel Ф3 uses
     // for __mc_http_read_response.
-    if (!\__mc_tls_handshake($sock, $host, $verifyPeer, $verifyName)) {
+    if (!\__mc_tls_handshake($sock, $host, $verifyPeer, $verifyName, $timeout)) {
         \fclose($sock);
         return false;
     }
@@ -308,7 +533,49 @@ function __mc_tls_connect(string $host, int $port, bool $verifyPeer = true, bool
  * failure (the caller closes the fd). $sock is \Resource-typed on purpose — see
  * the warning in __mc_tls_connect.
  */
-function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = true, bool $verifyName = true): bool
+/**
+ * Drive SSL_connect to completion. On a blocking fd that is a single call; on a
+ * non-blocking one (i.e. under a scheduler) OpenSSL returns <= 0 with
+ * SSL_ERROR_WANT_READ (2) / SSL_ERROR_WANT_WRITE (3) between handshake flights,
+ * and each of those is a park on the reactor — so the two RTTs of a TLS
+ * handshake overlap with every other task instead of stalling the loop.
+ * Returns SSL_connect's final code (1 = connected).
+ */
+function __mc_tls_drive_connect(\Resource $sock, int $ssl, float $timeout = 0.0): int
+{
+    $rc = \Runtime\Openssl\connect($ssl);
+    if ($rc === 1 || !\Runtime\AsyncHook::active()) {
+        return $rc;
+    }
+    // BOUNDED by an absolute deadline, not "by the peer". A peer that completes the
+    // TCP handshake and then goes silent mid-flight produces neither readiness nor
+    // an SSL error, so the old loop parked forever — a trivial way to wedge a
+    // client. 0.0 = no explicit timeout → the same 60 s default_socket_timeout
+    // floor the connect and read paths use.
+    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $rf = \Runtime\AsyncHook::readableFor();
+    $wf = \Runtime\AsyncHook::writableFor();
+    while ($rc !== 1) {
+        $err = \Runtime\Openssl\getError($ssl, $rc);
+        if ($err !== 2 && $err !== 3) {
+            return $rc;   // a real handshake failure (bad chain, wrong host, reset)
+        }
+        $left = $deadline - \__mc_microtime_f();
+        if ($left <= 0.0) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $ready = $err === 2 ? $rf($sock, $left) : $wf($sock, $left);
+        if ($ready !== true) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $rc = \Runtime\Openssl\connect($ssl);
+    }
+    return $rc;
+}
+
+function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = true, bool $verifyName = true, float $timeout = 0.0): bool
 {
     $method = \Runtime\Openssl\clientMethod();   // highest TLS the peer offers
     if ($method === 0) {
@@ -340,7 +607,7 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
         \Runtime\Openssl\set1Host($ssl, $host);
     }
     if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1
-        || \Runtime\Openssl\connect($ssl) !== 1) {
+        || \__mc_tls_drive_connect($sock, $ssl, $timeout) !== 1) {
         \Runtime\Openssl\sslFree($ssl);   // does not touch the fd
         return false;
     }
@@ -359,7 +626,7 @@ function __mc_tls_handshake(\Resource $sock, string $host, bool $verifyPeer = tr
  * toggles ssl.verify_peer / verify_peer_name per-socket.
  * @return \Resource|false
  */
-function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resource $context = null)
+function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resource $context = null, float $timeout = 0.0)
 {
     if ($scheme === 'ssl' || $scheme === 'tls') {
         // A context now toggles verification per-socket (defaults on, matching php).
@@ -371,13 +638,13 @@ function __mc_transport_connect(string $scheme, string $host, int $port, ?\Resou
             $vp = $f[0];
             $vn = $f[1];
         }
-        return \__mc_tls_connect($host, $port, $vp, $vn);
+        return \__mc_tls_connect($host, $port, $vp, $vn, $timeout);
     }
     if ($scheme === 'tcp' || $scheme === '') {
-        return \__mc_tcp_connect($host, $port);
+        return \__mc_tcp_connect($host, $port, 1, $timeout);
     }
     if ($scheme === 'udp') {
-        return \__mc_tcp_connect($host, $port, 2);   // 2 = SOCK_DGRAM
+        return \__mc_tcp_connect($host, $port, 2, $timeout);   // 2 = SOCK_DGRAM
     }
     if ($scheme === 'unix') {
         return \__mc_unix_connect($host);            // $host carries the path
@@ -500,24 +767,82 @@ function __mc_mark_tls_listener(\Resource $listener, int $ctx): void
 /**
  * Server-side TLS handshake on a freshly accept(2)ed fd, using the listener's
  * shared server ctx. Returns a KIND_TLS \Resource, or false (fd closed).
+ *
+ * Under a scheduler the handshake is DRIVEN, not blocked on: the accepted fd goes
+ * O_NONBLOCK first and each SSL_accept flight parks on the reactor through
+ * {@see __mc_tls_drive_accept()}. A blocking SSL_accept here froze the whole loop for
+ * the duration of every client handshake — and made a single-process TLS loopback
+ * (server task + client task) a hard DEADLOCK: the server sat inside SSL_accept
+ * waiting for a flight that only the parked client task could send.
+ *
  * @return \Resource|false
  */
-function __mc_tls_accept(int $serverCtx, int $fd)
+function __mc_tls_accept(int $serverCtx, int $fd, float $timeout = 0.0)
 {
     $ssl = \Runtime\Openssl\sslNew($serverCtx);   // refs the ctx; freed with the SSL
     if ($ssl === 0) {
         \Runtime\Libc\sys_close($fd);
         return false;
     }
-    if (\Runtime\Openssl\setFd($ssl, $fd) !== 1
-        || \Runtime\Openssl\accept($ssl) !== 1) {
+    if (\Runtime\Openssl\setFd($ssl, $fd) !== 1) {
         \Runtime\Openssl\sslFree($ssl);
         \Runtime\Libc\sys_close($fd);
         return false;
     }
+    // The \Resource must exist BEFORE the handshake: the reactor parks on a
+    // \Resource (StreamPollHandle reads ->addr), and on failure it is marked closed
+    // so its destructor does not double-close the fd we close by hand.
     $r = new \Resource(\Resource::KIND_TLS, 'stream', $fd);
     $r->ssl = $ssl;
+    if (\Runtime\AsyncHook::active()) {
+        \__mc_fd_nonblock($fd);
+        $r->blocking = false;
+    }
+    if (\__mc_tls_drive_accept($r, $ssl, $timeout) !== 1) {
+        \Runtime\Openssl\sslFree($ssl);
+        $r->ssl = 0;
+        $r->closed = true;
+        $r->addr = 0;
+        \Runtime\Libc\sys_close($fd);
+        return false;
+    }
     return $r;
+}
+
+/**
+ * Drive SSL_accept to completion, parking on the reactor between flights when a
+ * scheduler is running (mirrors {@see __mc_tls_drive_connect()} on the client side).
+ * Returns SSL_accept's final code (1 = handshaken). Bounded by an absolute deadline
+ * so a client that opens a TCP connection and never speaks TLS cannot pin a task —
+ * the classic slowloris-on-handshake shape.
+ */
+function __mc_tls_drive_accept(\Resource $sock, int $ssl, float $timeout = 0.0): int
+{
+    $rc = \Runtime\Openssl\accept($ssl);
+    if ($rc === 1 || !\Runtime\AsyncHook::active()) {
+        return $rc;
+    }
+    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $rf = \Runtime\AsyncHook::readableFor();
+    $wf = \Runtime\AsyncHook::writableFor();
+    while ($rc !== 1) {
+        $err = \Runtime\Openssl\getError($ssl, $rc);
+        if ($err !== 2 && $err !== 3) {
+            return $rc;   // a real handshake failure (no cert, bad client, reset)
+        }
+        $left = $deadline - \__mc_microtime_f();
+        if ($left <= 0.0) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $ready = $err === 2 ? $rf($sock, $left) : $wf($sock, $left);
+        if ($ready !== true) {
+            \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+            return -1;
+        }
+        $rc = \Runtime\Openssl\accept($ssl);
+    }
+    return $rc;
 }
 
 /**
@@ -616,7 +941,8 @@ function fsockopen(string $hostname, int $port = -1, &$error_code = 0, &$error_m
         $error_message = 'no port specified';
         return false;
     }
-    $sock = \__mc_transport_connect($scheme, $host, $port);
+    $sock = \__mc_transport_connect($scheme, $host, $port, null,
+                                    $timeout === null ? 0.0 : (float)$timeout);
     if ($sock === false) {
         // Report the real errno + strerror, as php does — a closed port gives
         // ECONNREFUSED / "Connection refused". Falls back to a generic message
@@ -685,7 +1011,10 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     if (\strlen($host) > 1 && $host[0] === '[' && $host[\strlen($host) - 1] === ']') {
         $host = \substr($host, 1, \strlen($host) - 2);
     }
-    $sock = \__mc_transport_connect($scheme, $host, $port, $context);
+    // $timeout is php's connect timeout; under a scheduler it now bounds the
+    // non-blocking connect AND the TLS handshake (both used to park forever).
+    $sock = \__mc_transport_connect($scheme, $host, $port, $context,
+                                    $timeout === null ? 0.0 : (float)$timeout);
     if ($sock === false) {
         $e = \__mc_net_errno(false, 0);
         $error_code = $e;
@@ -915,15 +1244,56 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
  */
 function stream_socket_accept(\Resource $server, ?float $timeout = null)
 {
-    if ($timeout !== null && $timeout >= 0.0) {
-        $ready = \__mc_poll_one($server->addr, false, (int)($timeout * 1000.0));
-        if ($ready <= 0) {
+    if (\Runtime\AsyncHook::active()) {
+        // ⚠ The LISTENER itself must be O_NONBLOCK under a scheduler. accept(2) on
+        // an idle BLOCKING listener blocks the whole PROCESS — every timer, every
+        // other connection and the signal pump with it — and this path attempts an
+        // accept before it ever parks. A listener is usually created before async()
+        // starts, so nothing else can have done it: it is the accept site's job.
+        if ($server->blocking) {
+            \__mc_fd_nonblock($server->addr);
+            $server->blocking = false;
+        }
+        // Netpoller: suspend on the listener until readable, then accept. Loop — a
+        // prefork sibling can take the connection between the wake and our accept
+        // (the listener is non-blocking, so a lost race is EWOULDBLOCK, not a stall).
+        // A $timeout is honoured by the reactor's BOUNDED wait; it used to fall into
+        // the branch below, whose poll(2) blocked the whole scheduler. The deadline
+        // is absolute, so a re-park after a lost race cannot extend it.
+        $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+        if ($fd < 0 && $timeout !== null && $timeout >= 0.0) {
+            $hf = \Runtime\AsyncHook::readableFor();
+            $deadline = \__mc_microtime_f() + $timeout;
+            while ($fd < 0) {
+                $left = $deadline - \__mc_microtime_f();
+                if ($left <= 0.0) {
+                    return false;
+                }
+                // `=== true`: the hook is an untyped slot, so its result arrives as
+                // a tagged cell and is read by tag, never as a raw word.
+                if ($hf($server, $left) !== true) {
+                    return false;
+                }
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+            }
+        } else {
+            $h = \Runtime\AsyncHook::readable();
+            while ($fd < 0) {
+                $h($server);
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+            }
+        }
+    } else {
+        if ($timeout !== null && $timeout >= 0.0) {
+            $ready = \__mc_poll_one($server->addr, false, (int)($timeout * 1000.0));
+            if ($ready <= 0) {
+                return false;
+            }
+        }
+        $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+        if ($fd < 0) {
             return false;
         }
-    }
-    $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-    if ($fd < 0) {
-        return false;
     }
     // A TLS listener parks its server ctx in $ssl (see __mc_mark_tls_listener):
     // handshake the accepted fd server-side and hand back a TLS stream.
@@ -935,6 +1305,11 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
     // find ssl.local_cert. Both are concrete \Resource here — a plain field copy.
     $conn = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
     $conn->ctxBlob = $server->ctxBlob;
+    // Netpoller: an accepted connection is driven non-blocking so recv/send report
+    // would-block (→ suspend) instead of stalling the loop.
+    if (\Runtime\AsyncHook::active()) {
+        \stream_set_blocking($conn, false);
+    }
     return $conn;
 }
 
@@ -1329,6 +1704,102 @@ function __mc_stream_fd(\Resource $s): int
 }
 
 /**
+ * The WAIT step of stream_select / socket_select: poll $count pollfds for
+ * $timeoutMs (-1 = forever) and return poll(2)'s count.
+ *
+ * Under a scheduler this must not block the PROCESS — every other task would stall
+ * for the whole timeout, and the common `stream_select($r, $w, $e, null)` would
+ * stall them forever. So it polls with a ZERO timeout and parks the FIBER between
+ * attempts (Scheduler::sleep through the netpoller's sleeper hook), backing off
+ * 0.2 ms → 10 ms: an idle select costs little and a ready fd is still seen promptly.
+ *
+ * ⚠ A POLLING park, not a reactor registration. One task holds a single per-fd
+ * waiter-chain slot while a select waits on N fds at once, so a reactor-native
+ * version needs a per-select waiter record in the Scheduler. Worth doing when a
+ * real workload leans on select — the transparent read/write/accept paths use the
+ * reactor directly and never come through here.
+ */
+function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
+{
+    if (!\Runtime\AsyncHook::active()) {
+        return \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
+    }
+    // Ready already? Answer without touching the reactor — a select in a busy loop
+    // is the common shape, and this is also the whole implementation of the
+    // non-blocking `stream_select($r, $w, $e, 0, 0)` form.
+    $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
+    if ($rc !== 0 || $timeoutMs === 0) {
+        return $rc;
+    }
+    $deadline = $timeoutMs < 0 ? -1.0 : \__mc_microtime_f() + (float)$timeoutMs / 1000.0;
+    if (!\Runtime\AsyncHook::selectReady()) {
+        return \__mc_select_poll_park($pfds, $count, $deadline);
+    }
+    $POLLIN = \__mc_net_const(1);
+    $POLLOUT = \__mc_net_const(2);
+    $add = \Runtime\AsyncHook::selectAdder();
+    $wait = \Runtime\AsyncHook::selectWaiter();
+    $done = \Runtime\AsyncHook::selectFinisher();
+    while (true) {
+        for ($i = 0; $i < $count; $i = $i + 1) {
+            $fd = \peek_i32($pfds, $i * 8);
+            $ev = \peek_i16($pfds, $i * 8 + 4);
+            // Register READ interest for a POLLPRI-only entry too: the reactor has
+            // no out-of-band notion, and re-polling is what decides the answer.
+            if (($ev & $POLLOUT) !== 0) { $add($fd, true); }
+            if (($ev & $POLLOUT) === 0 || ($ev & $POLLIN) !== 0) { $add($fd, false); }
+        }
+        $left = -1.0;
+        if ($deadline >= 0.0) {
+            $left = $deadline - \__mc_microtime_f();
+            if ($left <= 0.0) { $done(); return 0; }
+        }
+        $wait($left);
+        $done();
+        $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
+        if ($rc !== 0) {
+            return $rc;   // ready fds, or a poll error for the caller to report
+        }
+        if ($deadline >= 0.0 && $deadline - \__mc_microtime_f() <= 0.0) {
+            return 0;
+        }
+        // A wake with nothing ready is a HINT, not an answer (level-triggered, and
+        // several selects can share one fd) — go round again.
+    }
+}
+
+/**
+ * The fallback when the scheduler predates the select hooks: poll(2) with a zero
+ * timeout plus a fiber sleep backing off 0.2 ms → 10 ms. Kept because a hook slot
+ * may be absent (an older engine, a program that installed its own), never
+ * because it is good: it costs up to 10 ms of latency per readiness edge.
+ */
+function __mc_select_poll_park(\Ffi\Ptr $pfds, int $count, float $deadline): int
+{
+    $sleeper = \Runtime\AsyncHook::sleeper();
+    $step = 0.0002;
+    while (true) {
+        $rc = \Runtime\Libc\sys_poll($pfds, $count, 0);
+        if ($rc !== 0) {
+            return $rc;
+        }
+        if ($deadline >= 0.0) {
+            $left = $deadline - \__mc_microtime_f();
+            if ($left <= 0.0) {
+                return 0;
+            }
+            if ($left < $step) {
+                $step = $left;
+            }
+        }
+        $sleeper($step);
+        if ($step < 0.01) {
+            $step = $step * 2.0;
+        }
+    }
+}
+
+/**
  * stream_select(&$read, &$write, &$except, $sec, $usec) over poll(2) — the stream
  * twin of socket_select (the codebase avoids fd_set / FD_SETSIZE). The three arrays
  * are rewritten in place to hold only the ready streams; returns the ready count, 0
@@ -1388,7 +1859,7 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     // null $sec = block forever (-1); otherwise sec*1000 + usec/1000.
     $um = $usec === null ? 0 : $usec;
     $timeoutMs = $sec === null ? -1 : ($sec * 1000 + \intdiv($um, 1000));
-    $rc = \Runtime\Libc\sys_poll($pfds, $count, $timeoutMs);
+    $rc = \__mc_select_wait($pfds, $count, $timeoutMs);
     if ($rc < 0) {
         \Runtime\Libc\free($pfds);
         return false;
@@ -1749,6 +2220,11 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
         if ($sock === false) {
             return false;
         }
+
+        if (\Runtime\AsyncHook::active()) {
+            \stream_set_blocking($sock, false);
+        }
+
         // Default request mirrors php: no User-Agent, no Accept. `Connection: close`
         // ends the body at EOF when there is no Content-Length. Context adds the
         // method, extra headers, and a body (with its Content-Length) when given.

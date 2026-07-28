@@ -10,6 +10,31 @@ use Manticore\Attr\RefOut;
 // reuse only socket primitives and behave identically on every host. Names are
 // parsed with compression-pointer support. The record arrays mirror php's shapes.
 
+/**
+ * EVERY IPv4 `nameserver` from /etc/resolv.conf, comma-joined; '8.8.8.8' when the
+ * file lists none. A comma-joined STRING rather than an array so the value can cross
+ * any boundary unharmed (the stdlib array-repr rule) — callers explode() it.
+ *
+ * Resolvers are tried IN ORDER with a per-server timeout, which is what makes a dead
+ * first entry survivable; a single-server resolver failed the whole lookup.
+ */
+function __mc_dns_nameservers(): string
+{
+    $c = \file_get_contents('/etc/resolv.conf');
+    $out = '';
+    if ($c !== false) {
+        foreach (\explode("\n", $c) as $line) {
+            $line = \trim($line);
+            if (\strpos($line, 'nameserver ') !== 0) { continue; }
+            $ip = \trim(\substr($line, 11));
+            // IPv4 only here (a v6 nameserver needs a v6 UDP socket path).
+            if ($ip === '' || \strpos($ip, ':') !== false) { continue; }
+            $out = $out === '' ? $ip : ($out . ',' . $ip);
+        }
+    }
+    return $out === '' ? '8.8.8.8' : $out;
+}
+
 /** First `nameserver` (IPv4) from /etc/resolv.conf, or 8.8.8.8 as a fallback. */
 function __mc_dns_nameserver(): string
 {
@@ -265,14 +290,22 @@ function __mc_dns_parse(string $msg, int $want): array
     return $out;
 }
 
-/** Send $query to $sock and return the raw response (5s timeout), or ''. */
-function __mc_dns_exchange(\Resource $sock, string $query): string
+/** Send $query to $sock and return the raw response, or '' on timeout. */
+function __mc_dns_exchange(\Resource $sock, string $query, float $timeout = 5.0): string
 {
     $fd = $sock->addr;
     if (\Runtime\Libc\sys_send($fd, $query, \strlen($query), 0) < 0) {
         return '';
     }
-    if (\__mc_poll_readable($fd, 5000) === 0) {
+    // Under a scheduler the budget is served by the reactor's BOUNDED wait, so name
+    // resolution no longer stops the loop. It must stay BOUNDED: a lost datagram has
+    // no EOF to wake the fiber, and an unbounded park would hang it.
+    if (\Runtime\AsyncHook::active()) {
+        $hf = \Runtime\AsyncHook::readableFor();
+        if ($hf($sock, $timeout) !== true) {
+            return '';   // no reply in time
+        }
+    } elseif (\__mc_poll_readable($fd, (int)($timeout * 1000.0)) === 0) {
         return '';   // no reply in time
     }
     $buf = \Runtime\Libc\calloc(4096, 1);
@@ -286,17 +319,80 @@ function __mc_dns_exchange(\Resource $sock, string $query): string
     return $resp;
 }
 
-/** Query the system nameserver for ($host, wire $qtype) and return the raw reply. */
-function __mc_dns_query(string $host, int $qtype): string
+/** True when the reply's TC bit is set — the answer did not fit in one datagram. */
+function __mc_dns_truncated(string $msg): bool
 {
-    $ns = \__mc_dns_nameserver();
-    $sock = \__mc_tcp_connect($ns, 53, 2);   // 2 = SOCK_DGRAM (connected UDP)
+    if (\strlen($msg) < 12) {
+        return false;
+    }
+    return (\ord($msg[2]) & 0x02) !== 0;   // flags byte 1, bit 1 = TC
+}
+
+/**
+ * Repeat the query over TCP, which is what TC means: RFC 1035 says a truncated UDP
+ * answer must be retried on 53/tcp. The wire format is the same message with a
+ * 2-byte big-endian length prefix in both directions.
+ *
+ * Without this, a host with many A records (or any large RRset) resolved to whatever
+ * fragment fit in 512 bytes — or to nothing at all.
+ */
+function __mc_dns_exchange_tcp(string $ns, string $query, float $timeout = 5.0): string
+{
+    $sock = \__mc_tcp_connect($ns, 53, 1);   // 1 = SOCK_STREAM
     if ($sock === false) {
         return '';
     }
-    $resp = \__mc_dns_exchange($sock, \__mc_dns_build_query($host, $qtype));
+    $len = \strlen($query);
+    $framed = \chr(($len >> 8) & 0xFF) . \chr($len & 0xFF) . $query;
+    \stream_set_timeout($sock, (int)$timeout, 0);
+    if (\fwrite($sock, $framed) < 2) {
+        \fclose($sock);
+        return '';
+    }
+    $hdr = \fread($sock, 2);
+    if ($hdr === false || \strlen($hdr) < 2) {
+        \fclose($sock);
+        return '';
+    }
+    $want = (\ord($hdr[0]) << 8) | \ord($hdr[1]);
+    $body = '';
+    while (\strlen($body) < $want) {
+        $chunk = \fread($sock, $want - \strlen($body));
+        if ($chunk === false || $chunk === '') { break; }
+        $body = $body . $chunk;
+    }
     \fclose($sock);
-    return $resp;
+    return \strlen($body) === $want ? $body : '';
+}
+
+/**
+ * Query the system nameservers for ($host, wire $qtype) and return the raw reply.
+ *
+ * Walks EVERY nameserver from resolv.conf, twice each, with a 2 s per-attempt budget:
+ * a dead or slow first entry no longer fails the whole lookup (it used to take the
+ * first line and give up). A truncated (TC) answer is retried over TCP.
+ */
+function __mc_dns_query(string $host, int $qtype): string
+{
+    $servers = \explode(',', \__mc_dns_nameservers());
+    $query = \__mc_dns_build_query($host, $qtype);
+    foreach ($servers as $nsRaw) {
+        $ns = (string)$nsRaw;
+        if ($ns === '') { continue; }
+        for ($try = 0; $try < 2; $try = $try + 1) {
+            $sock = \__mc_tcp_connect($ns, 53, 2);   // 2 = SOCK_DGRAM (connected UDP)
+            if ($sock === false) { break; }          // cannot reach it at all
+            $resp = \__mc_dns_exchange($sock, $query, 2.0);
+            \fclose($sock);
+            if ($resp === '') { continue; }          // timed out — retry this server
+            if (\__mc_dns_truncated($resp)) {
+                $full = \__mc_dns_exchange_tcp($ns, $query, 2.0);
+                if ($full !== '') { return $full; }
+            }
+            return $resp;
+        }
+    }
+    return '';
 }
 
 /**

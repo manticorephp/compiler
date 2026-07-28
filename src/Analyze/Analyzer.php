@@ -54,6 +54,14 @@ final class Analyzer
             $returnType = new \Analyze\Rules\ReturnType();
             foreach ($returnType->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
 
+            // Async hazards. Both self-gate on the file naming `Async\`, so a
+            // program that never touches the runtime keeps its output unchanged.
+            $asyncStatic = new \Analyze\Rules\AsyncStaticLocal();
+            foreach ($asyncStatic->run($pf) as $d) { $this->diagnostics[] = $d; }
+
+            $asyncIo = new \Analyze\Rules\AsyncBlockingIo();
+            foreach ($asyncIo->run($pf) as $d) { $this->diagnostics[] = $d; }
+
             // Method existence self-gates on a fully-known hierarchy, so it is
             // safe even in single-file mode.
             $undefMethod = new \Analyze\Rules\UndefinedMethod();

@@ -145,7 +145,13 @@ trait LowerFns
             $ctypes = [];
             foreach ($decl->params as $p) { $ctypes[] = $this->ffiCType($p->typeHint); }
             $fn->ffiParamCTypes = $ctypes;
-            $fn->ffiRetCType = $this->ffiCType($decl->returnType);
+            // A FUNCTION-level `#[CType('int')]` states that the C RETURN is a
+            // 32-bit int, so the wrapper sign-extends it. Without that, a C
+            // function returning -1 in w0 (`mov w0, #-1` zeroes the top half)
+            // reads as 4294967295 through an i64 declare.
+            $fn->ffiRetCType = $this->ffiRetIsInt32($decl->attributes)
+                ? 'i32'
+                : $this->ffiCType($decl->returnType);
             return $fn;
         }
         $savedSawYield = $this->sawYield;
@@ -266,7 +272,7 @@ trait LowerFns
             || $n === 'strcspn'
             || $n === '__float_bits' || $n === '__ugt' || $n === '__ryu_msp'
             || $n === 'substr' || $n === 'str_repeat'
-            || $n === 'str_from_buffer' || $n === 'cstr_to_str'
+            || $n === 'str_from_buffer' || $n === 'cstr_to_str' || $n === 'str_bytes'
             || $n === '__mir_stdin' || $n === '__mir_stdout' || $n === '__mir_stderr'
             || $n === '__mir_argc' || $n === '__mir_argv_at' || $n === '__mir_to_cell'
             || $n === '__mir_env_count' || $n === '__mir_env_at'
@@ -284,6 +290,11 @@ trait LowerFns
             || $n === 'method_exists' || $n === 'property_exists'
             || $n === 'is_a' || $n === 'is_subclass_of'
             || $n === 'get_parent_class' || $n === 'get_class_methods'
+            // The internal-pointer family. They read/write the cursor in the
+            // array header, so they cannot be PHP helpers — and `reset`/`end`
+            // are no longer stdlib functions for exactly that reason.
+            || $n === 'current' || $n === 'pos' || $n === 'key'
+            || $n === 'next' || $n === 'prev' || $n === 'reset' || $n === 'end'
             || $n === '__mir_float_repr';
     }
 
@@ -571,6 +582,25 @@ trait LowerFns
      * @param \Parser\Ast\Expr[]  $astArgs
      * @return Node[]
      */
+    /**
+     * Lower one argument, converting a callable LITERAL into a closure when the
+     * parameter at this position is `callable`-typed. lowerCallArgs does this on
+     * its fast positional path, but every call that omits a DEFAULTED parameter
+     * lands here instead — and then a string like `"strlen"` was passed through
+     * as a plain string. The callee invokes a `callable` param through the
+     * closure ABI, so it jumped to the address of the string's own bytes:
+     * `array_filter($a, "strlen")` (three params, two arguments — symfony's
+     * InputOption constructor) crashed on the literal "strlen".
+     */
+    private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
+    {
+        if ($p !== null) {
+            $conv = $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($p)), $a);
+            if ($conv !== null) { return $conv; }
+        }
+        return $this->lowerExpr($a);
+    }
+
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
         $hasNamed = false;
@@ -585,7 +615,7 @@ trait LowerFns
             $packed = [];
             $i = 0;
             foreach ($astArgs as $a) {
-                if ($i < $vidx) { $out[] = $this->lowerExpr($a); }
+                if ($i < $vidx) { $out[] = $this->lowerArgForParam($params[$i] ?? null, $a); }
                 else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
                 $i = $i + 1;
             }
@@ -596,7 +626,11 @@ trait LowerFns
         // reordered; otherwise lower positionally.
         if (!$hasNamed && \count($astArgs) >= \count($params)) {
             $out = [];
-            foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
+            $i = 0;
+            foreach ($astArgs as $a) {
+                $out[] = $this->lowerArgForParam($params[$i] ?? null, $a);
+                $i = $i + 1;
+            }
             return $out;
         }
         // Dense parallel slots (sparse int-key isset is unreliable in
@@ -618,7 +652,7 @@ trait LowerFns
                 $idx = 0;
                 foreach ($params as $p) {
                     if ($this->paramName($p) === $an) {
-                        $slotNode[$idx] = $this->lowerExpr($av);
+                        $slotNode[$idx] = $this->lowerArgForParam($p, $av);
                         $slotSet[$idx] = true;
                         break;
                     }
@@ -626,7 +660,7 @@ trait LowerFns
                 }
                 continue;
             }
-            $slotNode[$pos] = $this->lowerExpr($a);
+            $slotNode[$pos] = $this->lowerArgForParam($params[$pos] ?? null, $a);
             $slotSet[$pos] = true;
             $pos = $pos + 1;
         }

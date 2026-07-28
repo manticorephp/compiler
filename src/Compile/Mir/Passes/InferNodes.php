@@ -1509,6 +1509,7 @@ trait InferNodes
         $subArrElemKinds = [];   // distinct concrete element kinds of array-typed values
         $allStrConstKeys = true; // every element keyed by a string literal → record
         $recordFields = [];      // string key → value Type (insertion order)
+        $keyKinds = [];          // distinct key KINDS, keyless counting as int
         foreach ($node->elements as $el) {
             if ($el->key !== null) {
                 $hasKey = true;
@@ -1517,9 +1518,13 @@ trait InferNodes
                 // overall — a leading keyless spread (`[...$a, "x"=>1]`) leaves
                 // keyType null when the first real key arrives.
                 $keyType = $keyType === null ? $kt : $keyType->unionWith($kt);
+                $keyKinds[$kt->kind] = true;
                 if ($el->key->kind !== Node::KIND_STRING_CONST) { $allStrConstKeys = false; }
             } else {
                 $allStrConstKeys = false;
+                // A keyless entry takes the next implicit INT key, so it counts
+                // toward key-kind heterogeneity exactly like an explicit int key.
+                $keyKinds[Type::KIND_INT] = true;
             }
             // A spread element contributes its source's element type.
             $vt = $this->inferNode($el->value);
@@ -1587,7 +1592,19 @@ trait InferNodes
                 $node->type = Type::record($recordFields, $vt);
                 return $node->type;
             }
-            $node->type = Type::assoc($keyType ?? Type::unknown(), $vt);
+            // MIXED-KEY literal (`['color' => …, 5 => …]`, or a keyless entry
+            // beside a string key): the key kinds disagree, and `unionWith`
+            // collapses `string ∪ int` to UNKNOWN — which reads as neither an
+            // assoc nor a cell-keyed array, so foreach fell back to a raw i64
+            // key and printed a string key as its pointer. Such an array's key
+            // is int-OR-string at runtime, so it must ride a tagged CELL, the
+            // shape inferForeach already expects ("incl. a MIXED literal-key
+            // array"). A single-kind literal is untouched.
+            $kt = $keyType ?? Type::unknown();
+            if (\count($keyKinds) >= 2 || $kt->kind === Type::KIND_UNKNOWN) {
+                $kt = Type::cell();
+            }
+            $node->type = Type::assoc($kt, $vt);
             return $node->type;
         }
         // Heterogeneous vec literal (≥2 distinct concrete element kinds, e.g.

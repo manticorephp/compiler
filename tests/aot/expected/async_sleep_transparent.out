@@ -1,0 +1,5 @@
+results: a,b,c
+overlapped: yes
+order: fast,mid,slow,
+sync still sleeps: yes
+sleep(): quick+slept

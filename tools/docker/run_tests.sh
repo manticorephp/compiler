@@ -18,13 +18,21 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 
 PLATFORMS=(linux/arm64)
 SHELL_MODE=0
-case "${1:-}" in
-    --amd64) PLATFORMS=(linux/amd64) ;;
-    --both)  PLATFORMS=(linux/arm64 linux/amd64) ;;
-    --shell) SHELL_MODE=1 ;;
-    "")      ;;
-    *) echo "usage: $0 [--amd64|--both|--shell]" >&2; exit 2 ;;
-esac
+GATE_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --amd64) PLATFORMS=(linux/amd64) ;;
+        --both)  PLATFORMS=(linux/arm64 linux/amd64) ;;
+        --shell) SHELL_MODE=1 ;;
+        # The HEAVY gate, on Linux: cold seed + full suite + difftest (php is in the
+        # image) + selfhost_fixpoint (fixpoint, self-host suite, MIR golden,
+        # rebuild-stability). macOS green proves nothing about the epoll path, the
+        # Linux socket/errno constants or a glibc free(), so this is the only honest
+        # gate for anything touching them.
+        --gate)  GATE_MODE=1 ;;
+        *) echo "usage: $0 [--amd64|--both|--shell|--gate]" >&2; exit 2 ;;
+    esac
+done
 
 # The in-container build+test. Kept as a heredoc so the image needs no copy of
 # it and it always matches this script.
@@ -68,9 +76,31 @@ echo "=== tests/aot/run.sh (full suite) ==="
 bash tests/aot/run.sh > /build/suite.log 2>&1
 suite_rc=$?
 tail -15 /build/suite.log
+
+if [ "${MC_GATE:-0}" != "1" ]; then
+    echo
+    echo "=== RESULT: suite exit=$suite_rc ==="
+    exit $suite_rc
+fi
+
 echo
-echo "=== RESULT: suite exit=$suite_rc ==="
-exit $suite_rc
+echo "=== tools/difftest.sh (php parity, Linux) ==="
+bash tools/difftest.sh > /build/difftest.log 2>&1
+diff_rc=$?
+tail -8 /build/difftest.log
+
+echo
+echo "=== tools/selfhost_fixpoint.sh (fixpoint + MIR golden + stability) ==="
+# Stability defaults to 5x2 rebuilds; a container is slower and each cold seed is
+# minutes, so 2x2 is the useful default here (MC_STABILITY_N overrides).
+MC_STABILITY_N="${MC_STABILITY_N:-2}" bash tools/selfhost_fixpoint.sh > /build/fixpoint.log 2>&1
+fix_rc=$?
+tail -12 /build/fixpoint.log
+
+echo
+echo "=== RESULT (Linux gate): suite=$suite_rc difftest=$diff_rc fixpoint=$fix_rc ==="
+[ "$suite_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+exit 0
 EOS
 
 IMAGE_BASE=manticore-toolchain
@@ -92,6 +122,8 @@ for platform in "${PLATFORMS[@]}"; do
 
     docker run --rm --platform "$platform" \
         -v "$ROOT":/repo:ro \
+        -e MC_GATE="$GATE_MODE" \
+        -e MC_STABILITY_N="${MC_STABILITY_N:-2}" \
         "$image" /bin/bash -c "$RUNNER" \
         && echo "### $platform: PASS" >&2 \
         || echo "### $platform: FAIL (exit $?)" >&2

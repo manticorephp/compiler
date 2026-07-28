@@ -3,7 +3,10 @@ var_dump(ip2long('192.168.1.1'));
 var_dump(ip2long('255.255.255.255'));
 var_dump(ip2long('1.2.3.256'));
 var_dump(ip2long('1.2.3'));
-var_dump(ip2long('1.2.3.04'));
+// '1.2.3.04' is DELIBERATELY not tested: php itself disagrees across platforms —
+// macOS php 8.5.8 reads the leading-zero octet as decimal and answers int(16909060),
+// the same php version on Linux answers bool(false). Asserting either one would make
+// difftest red on the other host, and the input has no single right answer to match.
 var_dump(long2ip(3232235777));
 var_dump(long2ip(ip2long('10.0.0.1')));
 var_dump(bin2hex(inet_pton('1.2.3.4')));

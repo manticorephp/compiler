@@ -1,0 +1,5 @@
+map: 2,4,6,8,10,12,14,16 max-inflight: 3
+map-fail: boom
+semaphore max-inflight: 2 free-after: 2
+context: inside=req-7 outside=null
+done

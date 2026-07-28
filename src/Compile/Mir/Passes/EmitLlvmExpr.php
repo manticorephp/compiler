@@ -191,7 +191,7 @@ trait EmitLlvmExpr
         // box_null: pure header + tag(NULL=3)
         $out .= "define i64 @__manticore_box_null() {\n";
         $out .= "entry:\n";
-        $out .= "  ret i64 -3659174697238528\n";
+        $out .= '  ret i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
         $out .= "}\n";
         // box_ptr: (ptrtoint(p) & PAYLOAD_MASK) | tagBits(PTR=4). A 0 pointer
         // can only be a `?string` null (a real string ptr is never 0) → box as
@@ -276,6 +276,85 @@ trait EmitLlvmExpr
         return '  ' . $lo . ' = icmp ugt i64 ' . $v . ", 65535\n"
             . '  ' . $hi . ' = icmp ult i64 ' . $v . ", 281474976710656\n"
             . '  ' . $ok . ' = and i1 ' . $lo . ', ' . $hi . "\n";
+    }
+
+    /**
+     * Emit IR reducing an i64 carrier of UNKNOWN repr to "a pointer to an array,
+     * or the empty-array zero word". Same classification as `is_array` over an
+     * erased operand: a NaN-boxed value answers on its tag and is untagged; a raw
+     * one is accepted only when the allocator stamped an array magic at ptr-8.
+     *
+     * A `foreach` needs this because it cannot assume its base is an array. A
+     * CELL base was previously untagged unconditionally, so a cell holding an
+     * OBJECT was walked as an array: symfony's Table merges a TableSeparator in
+     * among the row arrays, and `foreach ($rows[$line] as ...)` read the object's
+     * memory as an array header and iterated 6034 times before it ran off the
+     * page (php iterates a property-less object zero times).
+     *
+     * ⚠ Anything that is not an array yields the EMPTY array, i.e. zero
+     * iterations. That matches php for a property-less object, and is what the
+     * symfony case needs, but php would iterate a public-property object or drive
+     * an Iterator. A statically-typed Traversable/Generator still takes the real
+     * object path in {@see emitForeach}; only an ERASED one degrades to empty.
+     *
+     * The result reg is left in {@see $arrayPtrReg}.
+     */
+    private function arrayPtrOrEmptyIr(string $v): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca ptr\n";
+        $out .= '  store ptr @__mir_zero_word, ptr ' . $slot . "\n";
+        $boxL = $this->ssa->allocLabel('fa.box');
+        $rawL = $this->ssa->allocLabel('fa.raw');
+        $chkL = $this->ssa->allocLabel('fa.rawchk');
+        $useL = $this->ssa->allocLabel('fa.use');
+        $endL = $this->ssa->allocLabel('fa.end');
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+        $out .= $boxL . ":\n";
+        $out .= $this->cellTagIr($v);
+        $isArr = $this->ssa->allocReg();
+        $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
+        $pay = $this->ssa->allocReg();
+        $out .= '  ' . $pay . ' = and i64 ' . $v . ", 281474976710655\n";
+        $payP = $this->ssa->allocReg();
+        $out .= '  ' . $payP . ' = inttoptr i64 ' . $pay . " to ptr\n";
+        $selP = $this->ssa->allocReg();
+        $out .= '  ' . $selP . ' = select i1 ' . $isArr
+              . ', ptr ' . $payP . ", ptr @__mir_zero_word\n";
+        $out .= '  store ptr ' . $selP . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($v);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $chkL
+              . ', label %' . $endL . "\n";
+        $out .= $chkL . ":\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $v . " to ptr\n";
+        $tp = $this->ssa->allocReg();
+        $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+        $tw = $this->ssa->allocReg();
+        $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+        $prev = null;
+        foreach ([\Compile\MemoryAbi::ARRAY_TAG_MAGIC, \Compile\MemoryAbi::ARRAY_TAG_ARENA,
+                  \Compile\MemoryAbi::ASSOC_TAG_MAGIC] as $magic) {
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $tw . ', ' . (string)$magic . "\n";
+            if ($prev === null) { $prev = $eq; continue; }
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $prev . ', ' . $eq . "\n";
+            $prev = $or;
+        }
+        $out .= '  br i1 ' . $prev . ', label %' . $useL . ', label %' . $endL . "\n";
+        $out .= $useL . ":\n";
+        $out .= '  store ptr ' . $rp . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+        $this->arrayPtrReg = $res;
+        return $out;
     }
 
     /**
@@ -4208,14 +4287,30 @@ trait EmitLlvmExpr
     private function coerceToPtr(): string
     {
         if ($this->lastValueType === 'ptr') { return ''; }
+        $out = '';
+        // A DOUBLE carrier used where a pointer is wanted used to fall through
+        // this function untouched, so the double landed in the IR as the pointer
+        // operand — `icmp eq ptr 0.0, null`, which does not even verify. It
+        // reaches here from a dynamic-name dispatch arm, where every
+        // arity-compatible candidate is emitted against the same argument values
+        // and one of them declares a string/array where the value is a float.
+        // The arm is unreachable at runtime; it still has to be well-formed.
+        // Route it through the i64 carrier, exactly like the raw-bits reading
+        // every other float-crossing-an-i64-boundary does.
+        if ($this->lastValueType === 'double') {
+            $bits = $this->ssa->allocReg();
+            $out .= '  ' . $bits . ' = bitcast double ' . $this->lastValue . " to i64\n";
+            $this->lastValue = $bits;
+            $this->lastValueType = 'i64';
+        }
         if ($this->lastValueType === 'i64') {
             $reg = $this->ssa->allocReg();
-            $out = '  ' . $reg . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+            $out .= '  ' . $reg . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'ptr';
             return $out;
         }
-        return '';
+        return $out;
     }
 
     /**

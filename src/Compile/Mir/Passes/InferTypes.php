@@ -1008,6 +1008,18 @@ final class InferTypes implements Pass
                 // compare on string pointers; see preserve_known_type_principle.)
                 if ($this->isUnknownArrayElem($a->type)) { continue; }
                 $isAssoc = $a->type->isAssoc();
+                // A CELL-KEYED array (a mixed int+string key literal, or a
+                // buffer rebuilt through a cell-keyed `$o[$k]=…`) reports
+                // isAssoc() FALSE — that predicate is string-key-only — AND
+                // isVec() true, so it used to be collected as a plain vec and
+                // the refinement rebuilt `Type::vec(elem)`, DROPPING the key.
+                // The callee's foreach then read a tagged key off the raw i64
+                // channel. Carry the key like an assoc does, under its own
+                // shape letter so a cell-keyed and a string-keyed site still
+                // conflict instead of silently agreeing.
+                $isCellKey = !$isAssoc && $a->type->isArray()
+                    && $a->type->key !== null
+                    && $a->type->key->kind === Type::KIND_CELL;
                 // An ASSOC arg refines the param to assoc[K,V] — but ONLY for a
                 // NUMERIC value (int/float/bool). A string/cell value stays out:
                 // a bare-`array` param that also holds a callable name / mixed is
@@ -1035,11 +1047,11 @@ final class InferTypes implements Pass
                 }
                 // All call sites must agree on the shape (all vec, or all assoc
                 // with the same key type).
-                $sh = $isAssoc ? 'a' : 'v';
+                $sh = $isAssoc ? 'a' : ($isCellKey ? 'c' : 'v');
                 if (isset($shape[$key]) && $shape[$key] !== $sh) {
                     unset($observed[$key]); $conflict[$key] = true; continue;
                 }
-                if ($isAssoc) {
+                if ($isAssoc || $isCellKey) {
                     $kt = $a->type->key ?? Type::string_();
                     if (isset($assocKey[$key]) && $assocKey[$key]->kind !== $kt->kind) {
                         unset($observed[$key]); $conflict[$key] = true; continue;

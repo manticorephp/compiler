@@ -183,6 +183,12 @@ trait InferCalls
         if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }
+        // str_bytes: the raw address of a headered string's DATA bytes (i.e. the
+        // same pointer C sees when a `string` is passed through an FFI `char *`
+        // parameter). Used to poke an iovec.iov_base for a writev syscall
+        // without materialising a Ptr handle. Returns i64.
+        if ($n === 'str_bytes') { return Type::int_(); }
+
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id'
@@ -260,6 +266,15 @@ trait InferCalls
         // {@see EmitLlvmBuiltins::biDebugBacktrace}). Cell values match the frame
         // assoc's mixed int/string layout.
         if ($n === 'debug_backtrace') { return Type::vec(Type::assoc(Type::string_(), Type::cell())); }
+        // The internal-pointer family (codegen builtin
+        // {@see EmitLlvmBuiltins::biArrayCursor}). Every one yields a tagged
+        // cell: the element value, or `false` past the end — and `key` the
+        // int|string key or null. Only the 1-arg array forms are builtins.
+        if (($n === 'current' || $n === 'pos' || $n === 'key' || $n === 'next'
+            || $n === 'prev' || $n === 'reset' || $n === 'end')
+            && \count($args) === 1) {
+            return Type::cell();
+        }
         // array_first/array_last (8.5) + array_key_first/array_key_last — the
         // first/last value or key as a tagged cell, null on empty (codegen
         // builtin {@see EmitLlvmBuiltins::biArrayEndpoint}). A cell result lets
@@ -400,6 +415,20 @@ trait InferCalls
         // invoke is a cell. Typing it `unknown` (the old fall-through) meant a
         // `: string` caller returned the tagged word raw and the reader took the
         // length header off the tag bits.
+        //
+        // The same shape reaches here as a closure parked in an untyped slot —
+        // `\Runtime\AsyncHook::readable()` is the canonical one. It says nothing
+        // about its return type, but the uniform closure ABI BOXES whatever the
+        // callee returns, so leaving the invoke untyped made every caller read a
+        // tagged word RAW: `$h = Hook::get(); $b = $h(…);` var_dumped a bool as
+        // int(-3940649673949183), `$b === true` was false, and an array/object
+        // return failed is_array()/is_object(). Type it by its actual repr.
+        // ⚠ An OBJECT return still rides RAW (the ABI note in {@see
+        // EmitLlvm::isCellBoxableArg}), so `is_object()`/`get_debug_type()` on the
+        // result of an untyped callable that returns an object still lie. Property
+        // and method access work — the cell path masks the low 48 bits, which is
+        // identity for a real heap pointer. Boxing objects at the closure return
+        // would have to be matched by an unmask in every typed callee path.
         if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN) {
             $node->type = Type::cell();
             return $node->type;

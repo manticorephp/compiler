@@ -1,0 +1,5 @@
+bound: yes
+req=hello-sockets
+ sent=9728 read=9728 exact=yes ticks=6
+served n=9 buf=recv-path
+done

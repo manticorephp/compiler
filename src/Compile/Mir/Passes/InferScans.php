@@ -617,7 +617,16 @@ trait InferScans
                 // KIND_UNKNOWN, which isUnknownArrayElem also answers true for.
                 // Only a param the source actually hinted `array` may be
                 // narrowed from its call sites; `mixed` stays mixed.
-                if (!$p->variadic && $p->arrayHinted && $this->isUnknownArrayElem($p->type)) {
+                //
+                // A VARIADIC pack qualifies too, and on the same terms: it IS an
+                // array by construction. The caller already built the pack as one
+                // array_lit whose type is known (`vec[assoc[cell,cell]]`) while
+                // the declared param says `vec[unknown]`; Monomorphize only
+                // closes that gap when it actually clones, so a callee it
+                // declines to clone (a lone user call site) read every pack
+                // element off an untyped buffer. Only the ELEMENT is refined —
+                // the pack ABI is one vec param either way.
+                if (($p->arrayHinted || $p->variadic) && $this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
                 } elseif (!$p->variadic && $p->type->isArray()) {
                     // A param the per-fn heuristic already refined (e.g. vec[string]

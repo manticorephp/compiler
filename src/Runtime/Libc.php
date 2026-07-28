@@ -2,6 +2,17 @@
 
 namespace Runtime\Libc;
 
+// ⚠ A bind whose C prototype returns `int` MUST carry `#[CType('int')]`, or its -1 comes
+// back as 4294967295: the callee writes only w0/eax and the wrapper reads the full 64-bit
+// register. On DARWIN most of these are hand-written syscall stubs that happen to write
+// the whole x0, so the bug is INVISIBLE there — on Linux every one of them is a C function
+// in glibc/musl and `accept()`/`connect()` really do come back positive, which is what
+// broke every async socket test on Linux while macOS stayed green.
+//
+// Do NOT add it to a bind that returns ssize_t (read/write/recv/send/readlink), size_t
+// (strlen/fread/fwrite), long (ftell), off_t (lseek/truncate) or a POINTER carried as int
+// (strstr/malloc/fopen) — the sign-extension would truncate those to 32 bits.
+
 use Ffi\CType;
 use Ffi\Give;
 use Ffi\Library;
@@ -9,6 +20,7 @@ use Ffi\Ptr;
 use Ffi\Symbol;
 use Ffi\Take;
 use Ffi\Variadic;
+use Ffi\Weak;
 
 // ── Memory ─────────────────────────────────────────────────────────────
 
@@ -30,7 +42,13 @@ function memcpy(Ptr $dst, Ptr $src, #[CType('size_t')] int $n): Ptr {}
 #[Library('c'), Symbol('memset')]
 function memset(Ptr $dst, #[CType('int')] int $byte, #[CType('size_t')] int $n): Ptr {}
 
-#[Library('c'), Symbol('memcmp')]
+// The COMPARISON family returns a C `int` whose SIGN is the whole answer, so
+// each one needs the fn-level #[CType('int')] sext. Without it a negative
+// result reads as ~4.29e9 on any target whose libc leaves the upper half of the
+// return register undefined — glibc/x86_64 does, arm64 (Darwin and Linux) does
+// not, which is why every string sort was correct on arm64 and reversed on
+// amd64 (closure_string_abi, sort_usort_reduce, uasort_int_arith, ...).
+#[Library('c'), Symbol('memcmp'), CType('int')]
 function memcmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
 #[Library('c'), Symbol('memchr')]
@@ -41,7 +59,7 @@ function memchr(Ptr $hay, #[CType('int')] int $byte, #[CType('size_t')] int $n):
 #[Library('c'), Symbol('strlen')]
 function strlen(string $s): int {}
 
-#[Library('c'), Symbol('strcmp')]
+#[Library('c'), Symbol('strcmp'), CType('int')]
 function strcmp(string $a, string $b): int {}
 
 // `char *strerror(int errnum)` — the message for an errno. The returned buffer is
@@ -49,13 +67,13 @@ function strcmp(string $a, string $b): int {}
 #[Library('c'), Symbol('strerror')]
 function strerror(#[CType('int')] int $errnum): Ptr {}
 
-#[Library('c'), Symbol('strncmp')]
+#[Library('c'), Symbol('strncmp'), CType('int')]
 function strncmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
-#[Library('c'), Symbol('strcasecmp')]
+#[Library('c'), Symbol('strcasecmp'), CType('int')]
 function strcasecmp(string $a, string $b): int {}
 
-#[Library('c'), Symbol('strncasecmp')]
+#[Library('c'), Symbol('strncasecmp'), CType('int')]
 function strncasecmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
 #[Library('c'), Symbol('strchr')]
@@ -99,7 +117,7 @@ function read(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n): int
 #[Library('c'), Symbol('fopen'), Give]
 function fopen(string $path, string $mode): Ptr {}
 
-#[Library('c'), Symbol('fclose')]
+#[Library('c'), Symbol('fclose'), CType('int')]
 function fclose(#[Take] Ptr $stream): int {}
 
 // `FILE *popen(const char *command, const char *type)` — spawn a shell pipe.
@@ -108,7 +126,7 @@ function fclose(#[Take] Ptr $stream): int {}
 #[Library('c'), Symbol('popen'), Give]
 function popen(string $command, string $type): Ptr {}
 
-#[Library('c'), Symbol('pclose')]
+#[Library('c'), Symbol('pclose'), CType('int')]
 function pclose(#[Take] Ptr $stream): int {}
 
 #[Library('c'), Symbol('fread')]
@@ -123,16 +141,16 @@ function fwrite(string $buf, #[CType('size_t')] int $size, #[CType('size_t')] in
 #[Library('c'), Symbol('fwrite')]
 function fwrite_buf(Ptr $buf, #[CType('size_t')] int $size, #[CType('size_t')] int $count, Ptr $stream): int {}
 
-#[Library('c'), Symbol('fseek')]
+#[Library('c'), Symbol('fseek'), CType('int')]
 function fseek(Ptr $stream, #[CType('long')] int $offset, #[CType('int')] int $whence): int {}
 
 #[Library('c'), Symbol('ftell')]
 function ftell(Ptr $stream): int {}
 
-#[Library('c'), Symbol('feof')]
+#[Library('c'), Symbol('feof'), CType('int')]
 function feof(Ptr $stream): int {}
 
-#[Library('c'), Symbol('fflush')]
+#[Library('c'), Symbol('fflush'), CType('int')]
 function fflush(Ptr $stream): int {}
 
 // `char *fgets(char *str, int n, FILE *stream)` — fills str, returns str (or
@@ -141,7 +159,7 @@ function fflush(Ptr $stream): int {}
 #[Library('c'), Symbol('fgets')]
 function fgets(Ptr $buf, #[CType('int')] int $n, Ptr $stream): Ptr {}
 
-#[Library('c'), Symbol('access')]
+#[Library('c'), Symbol('access'), CType('int')]
 function access(string $path, #[CType('int')] int $mode): int {}
 
 // Directory / metadata syscalls. `sys_`-prefixed like sys_unlink/sys_getcwd —
@@ -149,16 +167,16 @@ function access(string $path, #[CType('int')] int $mode): int {}
 // mode_t/uid_t/gid_t are narrower than int on some hosts; the C ABI promotes
 // them, so passing `int` is correct on both Darwin and Linux.
 
-#[Library('c'), Symbol('mkdir')]
+#[Library('c'), Symbol('mkdir'), CType('int')]
 function sys_mkdir(string $path, #[CType('int')] int $mode): int {}
 
-#[Library('c'), Symbol('rmdir')]
+#[Library('c'), Symbol('rmdir'), CType('int')]
 function sys_rmdir(string $path): int {}
 
-#[Library('c'), Symbol('rename')]
+#[Library('c'), Symbol('rename'), CType('int')]
 function sys_rename(string $from, string $to): int {}
 
-#[Library('c'), Symbol('chmod')]
+#[Library('c'), Symbol('chmod'), CType('int')]
 function sys_chmod(string $path, #[CType('int')] int $mode): int {}
 
 #[Library('c'), Symbol('chown')]
@@ -184,20 +202,20 @@ function sys_readlink(string $path, Ptr $buf, #[CType('size_t')] int $size): int
 #[Library('c'), Symbol('truncate')]
 function sys_truncate(string $path, #[CType('long')] int $length): int {}
 
-#[Library('c'), Symbol('ftruncate')]
+#[Library('c'), Symbol('ftruncate'), CType('int')]
 function sys_ftruncate(#[CType('int')] int $fd, #[CType('long')] int $length): int {}
 
-#[Library('c'), Symbol('fileno')]
+#[Library('c'), Symbol('fileno'), CType('int')]
 function sys_fileno(Ptr $stream): int {}
 
 // `int isatty(int fd)` — 1 when fd is a terminal, 0 otherwise.
-#[Library('c'), Symbol('isatty')]
+#[Library('c'), Symbol('isatty'), CType('int')]
 function sys_isatty(#[CType('int')] int $fd): int {}
 
-#[Library('c'), Symbol('flock')]
+#[Library('c'), Symbol('flock'), CType('int')]
 function sys_flock(#[CType('int')] int $fd, #[CType('int')] int $op): int {}
 
-#[Library('c'), Symbol('fsync')]
+#[Library('c'), Symbol('fsync'), CType('int')]
 function sys_fsync(#[CType('int')] int $fd): int {}
 
 #[Library('c'), Symbol('umask')]
@@ -227,7 +245,7 @@ function sys_utimes(string $path, Ptr $times): int {}
 // that target would need its own binding; arm64 macOS and Linux use the plain
 // names below.
 
-#[Library('c'), Symbol('stat')]
+#[Library('c'), Symbol('stat'), CType('int')]
 function sys_stat(string $path, Ptr $buf): int {}
 
 // `int statvfs(const char *, struct statvfs *)` — filesystem stats for
@@ -236,10 +254,10 @@ function sys_stat(string $path, Ptr $buf): int {}
 #[Library('c'), Symbol('statvfs')]
 function sys_statvfs(string $path, Ptr $buf): int {}
 
-#[Library('c'), Symbol('lstat')]
+#[Library('c'), Symbol('lstat'), CType('int')]
 function sys_lstat(string $path, Ptr $buf): int {}
 
-#[Library('c'), Symbol('fstat')]
+#[Library('c'), Symbol('fstat'), CType('int')]
 function sys_fstat(#[CType('int')] int $fd, Ptr $buf): int {}
 
 #[Library('c'), Symbol('opendir'), Give]
@@ -250,7 +268,7 @@ function sys_opendir(string $path): Ptr {}
 #[Library('c'), Symbol('readdir')]
 function sys_readdir(Ptr $dir): Ptr {}
 
-#[Library('c'), Symbol('closedir')]
+#[Library('c'), Symbol('closedir'), CType('int')]
 function sys_closedir(#[Take] Ptr $dir): int {}
 
 #[Library('c'), Symbol('rewinddir')]
@@ -262,10 +280,10 @@ function sys_rewinddir(Ptr $dir): void {}
 #[Library('c'), Symbol('uname')]
 function uname(Ptr $buf): int {}
 
-#[Library('c'), Symbol('unlink')]
+#[Library('c'), Symbol('unlink'), CType('int')]
 function sys_unlink(string $path): int {}
 
-#[Library('c'), Symbol('chdir')]
+#[Library('c'), Symbol('chdir'), CType('int')]
 function sys_chdir(string $path): int {}
 
 // glob(3)/globfree(3) are deliberately NOT bound: glob_t, the flag values and
@@ -289,7 +307,7 @@ function sys_tmpfile(): Ptr {}
 #[Library('c'), Symbol('mkstemp')]
 function sys_mkstemp(Ptr $template): int {}
 
-#[Library('c'), Symbol('close')]
+#[Library('c'), Symbol('close'), CType('int')]
 function sys_close(#[CType('int')] int $fd): int {}
 
 #[Library('c'), Symbol('getcwd'), Give]
@@ -324,7 +342,7 @@ function sys_getcwd(Ptr $buf, #[CType('size_t')] int $size): Ptr {}
 // *hints, struct addrinfo **res)` — 0 on success, else a gai error code (NOT
 // errno). $hints may be a null Ptr (int_to_ptr(0)); $res is a Ptr to an 8-byte
 // out slot that receives the head of the result list.
-#[Library('c'), Symbol('getaddrinfo')]
+#[Library('c'), Symbol('getaddrinfo'), CType('int')]
 function sys_getaddrinfo(string $node, string $service, Ptr $hints, Ptr $res): int {}
 
 // `void freeaddrinfo(struct addrinfo *res)` — frees the whole list.
@@ -338,13 +356,13 @@ function sys_gai_strerror(#[CType('int')] int $errcode): Ptr {}
 
 // `int socket(int domain, int type, int protocol)` — fd, or -1. The three args
 // come from an addrinfo entry, never from a constant we chose.
-#[Library('c'), Symbol('socket')]
+#[Library('c'), Symbol('socket'), CType('int')]
 function sys_socket(#[CType('int')] int $domain, #[CType('int')] int $type,
                     #[CType('int')] int $protocol): int {}
 
 // `int connect(int fd, const struct sockaddr *addr, socklen_t len)` — 0, or -1.
 // $addr/$len are ai_addr/ai_addrlen, passed through untouched.
-#[Library('c'), Symbol('connect')]
+#[Library('c'), Symbol('connect'), CType('int')]
 function sys_connect(#[CType('int')] int $fd, Ptr $addr, #[CType('int')] int $len): int {}
 
 // `ssize_t send(int fd, const void *buf, size_t n, int flags)` — bytes sent, or -1.
@@ -357,6 +375,15 @@ function sys_send(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $
 #[Library('c'), Symbol('send')]
 function sys_send_buf(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n,
                       #[CType('int')] int $flags): int {}
+
+// `ssize_t writev(int fd, const struct iovec *iov, int iovcnt)` — vectored write:
+// send N discontiguous chunks with ONE syscall. $iov points at a PHP-built array
+// of `iovec { void *iov_base; size_t iov_len; }` (16 bytes/entry on 64-bit, both
+// hosts). Returns the total bytes queued, or -1. Used by fwrite($stream, array)
+// to send a precomputed HTTP header + a dynamic body without a userspace concat
+// AND without splitting the response into two `send()` syscalls.
+#[Library('c'), Symbol('writev')]
+function sys_writev(#[CType('int')] int $fd, Ptr $iov, #[CType('int')] int $iovcnt): int {}
 
 // `ssize_t recv(int fd, void *buf, size_t n, int flags)` — bytes read, 0 at the
 // peer's orderly shutdown, -1 on error.
@@ -389,38 +416,38 @@ function sys_recvmsg(#[CType('int')] int $fd, Ptr $msg, #[CType('int')] int $fla
 
 // `int getpeername(int fd, sockaddr *addr, socklen_t *addrlen)` — the address of
 // the connected peer (the mirror of getsockname).
-#[Library('c'), Symbol('getpeername')]
+#[Library('c'), Symbol('getpeername'), CType('int')]
 function sys_getpeername(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 
 // `int poll(struct pollfd *fds, nfds_t nfds, int timeout)` — ready count, 0 on
 // timeout, -1 on error. $timeout is MILLISECONDS; -1 blocks. This is the whole
 // timeout mechanism (see the note above).
-#[Library('c'), Symbol('poll')]
+#[Library('c'), Symbol('poll'), CType('int')]
 function sys_poll(Ptr $fds, #[CType('size_t')] int $nfds, #[CType('int')] int $timeout): int {}
 
 // `int usleep(useconds_t usec)` — suspend the calling thread for $usec
 // microseconds. Distinct `sys_` name so the global `usleep` wrapper resolves it
 // cleanly (a bare `usleep` alias would collide).
-#[Library('c'), Symbol('usleep')]
+#[Library('c'), Symbol('usleep'), CType('int')]
 function sys_usleep(#[CType('unsigned int')] int $usec): int {}
 
 // `int nanosleep(const struct timespec *req, struct timespec *rem)` — $req/$rem
 // are timespec{tv_sec@0, tv_nsec@8} (16B on both hosts). 0 on success.
-#[Library('c'), Symbol('nanosleep')]
+#[Library('c'), Symbol('nanosleep'), CType('int')]
 function sys_nanosleep(Ptr $req, Ptr $rem): int {}
 
 // `int shutdown(int fd, int how)` — SHUT_RD/WR/RDWR are 0/1/2 on both hosts.
-#[Library('c'), Symbol('shutdown')]
+#[Library('c'), Symbol('shutdown'), CType('int')]
 function sys_shutdown(#[CType('int')] int $fd, #[CType('int')] int $how): int {}
 
 // `int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)`
 // — the errno-free way to read a failed connect's cause, via SO_ERROR.
-#[Library('c'), Symbol('getsockopt')]
+#[Library('c'), Symbol('getsockopt'), CType('int')]
 function sys_getsockopt(#[CType('int')] int $fd, #[CType('int')] int $level,
                         #[CType('int')] int $optname, Ptr $optval, Ptr $optlen): int {}
 
 // `int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)`
-#[Library('c'), Symbol('setsockopt')]
+#[Library('c'), Symbol('setsockopt'), CType('int')]
 function sys_setsockopt(#[CType('int')] int $fd, #[CType('int')] int $level,
                         #[CType('int')] int $optname, Ptr $optval,
                         #[CType('int')] int $optlen): int {}
@@ -428,17 +455,17 @@ function sys_setsockopt(#[CType('int')] int $fd, #[CType('int')] int $level,
 // `int bind(int fd, const struct sockaddr *addr, socklen_t len)` — 0, or -1.
 // $addr comes from getaddrinfo(AI_PASSIVE), so the server path builds no
 // sockaddr either.
-#[Library('c'), Symbol('bind')]
+#[Library('c'), Symbol('bind'), CType('int')]
 function sys_bind(#[CType('int')] int $fd, Ptr $addr, #[CType('int')] int $len): int {}
 
 // `int listen(int fd, int backlog)` — 0, or -1.
-#[Library('c'), Symbol('listen')]
+#[Library('c'), Symbol('listen'), CType('int')]
 function sys_listen(#[CType('int')] int $fd, #[CType('int')] int $backlog): int {}
 
 // `int accept(int fd, struct sockaddr *addr, socklen_t *addrlen)` — a NEW fd for
 // the connection, or -1. Both out-params may be NULL when the peer's address is
 // of no interest, which keeps this off the sockaddr-parsing path entirely.
-#[Library('c'), Symbol('accept')]
+#[Library('c'), Symbol('accept'), CType('int')]
 function sys_accept(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 
 // `int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)` — the
@@ -448,7 +475,7 @@ function sys_accept(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 // sin_len(u8)+sin_family(u8) and Linux as sin_family(u16), so the port lands in
 // the same place either way, and reading it needs no host branch. It is in
 // network byte order.
-#[Library('c'), Symbol('getsockname')]
+#[Library('c'), Symbol('getsockname'), CType('int')]
 function sys_getsockname(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 
 // `int gethostname(char *name, size_t len)` — the local host's name into $name.
@@ -459,14 +486,14 @@ function sys_gethostname(Ptr $name, #[CType('size_t')] int $len): int {}
 //  socklen_t hostlen, char *serv, socklen_t servlen, int flags)` — the reverse of
 // getaddrinfo. With NI_NUMERICHOST it stringifies a sockaddr to its numeric IP
 // without ANY sockaddr parsing on our side (getnameinfo owns the family details).
-#[Library('c'), Symbol('getnameinfo')]
+#[Library('c'), Symbol('getnameinfo'), CType('int')]
 function sys_getnameinfo(Ptr $addr, #[CType('int')] int $addrlen, Ptr $host,
                         #[CType('int')] int $hostlen, Ptr $serv,
                         #[CType('int')] int $servlen, #[CType('int')] int $flags): int {}
 
 // `int inet_pton(int af, const char *src, void *dst)` — a printable address to its
 // packed bytes (4 for AF_INET, 16 for AF_INET6). 1 on success, 0 on a bad address.
-#[Library('c'), Symbol('inet_pton')]
+#[Library('c'), Symbol('inet_pton'), CType('int')]
 function sys_inet_pton(#[CType('int')] int $af, string $src, Ptr $dst): int {}
 
 // service/protocol DB lookups → struct servent* / protoent* (LP64 layout, same on
@@ -505,13 +532,13 @@ function sys_inet_ntop(#[CType('int')] int $af, Ptr $src, Ptr $dst, #[CType('int
 // marks fd+cmd as the two NAMED params so the wrapper emits a variadic call —
 // without it the arg is passed in a register and Darwin arm64's variadic ABI
 // (varargs on the stack) reads garbage where the callee does va_arg.
-#[Library('c'), Symbol('fcntl'), Variadic(2)]
+#[Library('c'), Symbol('fcntl'), Variadic(2), CType('int')]
 function sys_fcntl(#[CType('int')] int $fd, #[CType('int')] int $cmd, #[CType('int')] int $arg): int {}
 
 // `int socketpair(int domain, int type, int protocol, int sv[2])` — a connected
 // pair of fds for socket_create_pair. $sv is an 8-byte out buffer receiving two
 // int fds (peek_i32 @0 and @4).
-#[Library('c'), Symbol('socketpair')]
+#[Library('c'), Symbol('socketpair'), CType('int')]
 function sys_socketpair(#[CType('int')] int $domain, #[CType('int')] int $type,
                         #[CType('int')] int $protocol, Ptr $sv): int {}
 
@@ -526,6 +553,79 @@ function sys_sockatmark(#[CType('int')] int $fd): int {}
 // variadic ABI when called through the fixed-arity FFI wrapper.
 #[Library('c'), Symbol('dup')]
 function sys_dup(#[CType('int')] int $fd): int {}
+
+// ── Signals + process control (ext/pcntl, ext/posix) ───────────────────
+// A C signal HANDLER cannot be installed from PHP, so the pcntl layer never
+// tries: it BLOCKS the signals it handles (they stay pending instead of firing
+// their default action) and reaps them at a safe point with sigpending(2) +
+// sigwait(2). That is pcntl's own deferred model, and it is the reason
+// sigtimedwait is not bound — it does not exist on Darwin, while sigwait is
+// POSIX on both. See src/Runtime/Stdlib/Pcntl.php.
+//
+// `sigset_t` is 4 bytes on Darwin and 128 on Linux (MEASURED, both libcs) —
+// callers allocate the 128-byte superset and let the host's own
+// sigemptyset/sigaddset write into it.
+
+#[Library('c'), Symbol('sigemptyset')]
+function sys_sigemptyset(Ptr $set): int {}
+
+#[Library('c'), Symbol('sigaddset')]
+function sys_sigaddset(Ptr $set, #[CType('int')] int $signo): int {}
+
+// 1 = member, 0 = not, -1 = error.
+#[Library('c'), Symbol('sigismember')]
+function sys_sigismember(Ptr $set, #[CType('int')] int $signo): int {}
+
+// `int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)` — how is
+// SIG_BLOCK/UNBLOCK/SETMASK, whose VALUES DIFFER between hosts (1/2/3 Darwin vs
+// 0/1/2 Linux), so callers take them from __mc_sig_const(), never a literal.
+#[Library('c'), Symbol('sigprocmask')]
+function sys_sigprocmask(#[CType('int')] int $how, Ptr $set, Ptr $old): int {}
+
+#[Library('c'), Symbol('sigpending')]
+function sys_sigpending(Ptr $set): int {}
+
+// `int sigwait(const sigset_t *set, int *sig)` — blocks until one of $set is
+// delivered. Only ever called on a signal already known to be BLOCKED AND
+// PENDING, so it returns immediately.
+#[Library('c'), Symbol('sigwait')]
+function sys_sigwait(Ptr $set, Ptr $sig): int {}
+
+// `int signalfd(int fd, const sigset_t *mask, int flags)` — LINUX ONLY, hence
+// #[Weak] (extern_weak resolves to null on Darwin, where kqueue's EVFILT_SIGNAL
+// is the equivalent and is reached through Io\Poll instead). Turns "one of these
+// BLOCKED signals is pending" into an ordinary readable fd, so the netpoller can
+// wait on it beside every socket instead of a task polling sigpending() on a
+// timer. Pass -1 as $fd to create; pass an existing one to replace its mask.
+// Flags MEASURED on glibc+musl aarch64: SFD_NONBLOCK=2048 SFD_CLOEXEC=524288.
+#[Library('c'), Symbol('signalfd'), CType('int'), \Ffi\Weak]
+function sys_signalfd(#[CType('int')] int $fd, Ptr $mask, #[CType('int')] int $flags): int {}
+
+// `sighandler_t signal(int signum, sighandler_t handler)` — used ONLY to set
+// SIG_DFL (0) / SIG_IGN (1); a PHP callback can never be the handler. Returns
+// the previous handler, or SIG_ERR (-1).
+#[Library('c'), Symbol('signal')]
+function sys_signal(#[CType('int')] int $signo, Ptr $handler): int {}
+
+#[Library('c'), Symbol('kill'), CType('int')]
+function sys_kill(#[CType('int')] int $pid, #[CType('int')] int $sig): int {}
+
+#[Library('c'), Symbol('fork')]
+function sys_fork(): int {}
+
+// `pid_t waitpid(pid_t pid, int *status, int options)` — $status is a 4-byte
+// out slot. The W* macros are pure bit math on it and live in the PHP layer.
+#[Library('c'), Symbol('waitpid')]
+function sys_waitpid(#[CType('int')] int $pid, Ptr $status, #[CType('int')] int $options): int {}
+
+#[Library('c'), Symbol('getpid')]
+function sys_getpid(): int {}
+
+#[Library('c'), Symbol('getppid')]
+function sys_getppid(): int {}
+
+#[Library('c'), Symbol('alarm')]
+function sys_alarm(#[CType('unsigned int')] int $seconds): int {}
 
 // ── Randomness ─────────────────────────────────────────────────────────
 // `int getentropy(void *buf, size_t buflen)` — fill $buf with $buflen (<= 256)

@@ -1,3 +1,4 @@
+<?php
 // Io\Poll — PHP 8.6 low-level fd-readiness multiplexer (RFC poll_api). Oracle =
 // php 8.6. A thin PHP layer (compiled native) over poll(2); kqueue/epoll backends
 // slot in later. DEMAND-GATED (Main.php): compiled only when a program mentions
@@ -310,6 +311,42 @@ namespace Io\Poll {
 
         public function getBackend(): Backend { return $this->backend; }
 
+        /**
+         * Watch for a SIGNAL, not an fd — kqueue's EVFILT_SIGNAL, where the ident
+         * is the signal number. Returns false when the backend has no such notion
+         * (poll and epoll: Linux answers this with signalfd, which is an ordinary
+         * fd and needs nothing here).
+         *
+         * The signal must be BLOCKED for the process, which is exactly the model
+         * the pcntl layer already runs (a C handler cannot be a PHP closure, so a
+         * handled signal is blocked and reaped at a dispatch point). EVFILT_SIGNAL
+         * reports it without unblocking it.
+         */
+        public function watchSignal(int $signo): bool
+        {
+            if ($this->backend !== Backend::Kqueue) { return false; }
+            if (isset($this->sigWatched[$signo])) { return true; }
+            $buf = \Runtime\Libc\calloc(1, 32);
+            $this->__kevPut($buf, 0, $signo, -6, 1);        // EVFILT_SIGNAL, EV_ADD
+            $rc = \__mc_iopoll_kevent($this->reactorFd, $buf, 1, \int_to_ptr(0), 0, \int_to_ptr(0));
+            \Runtime\Libc\free($buf);
+            if ($rc < 0) { return false; }
+            $this->sigWatched[$signo] = $signo;
+            return true;
+        }
+
+        /** Did a watched signal fire during the last {@see wait()}? Clears the flag. */
+        public function takeSignal(): bool
+        {
+            $f = $this->sigFired;
+            $this->sigFired = false;
+            return $f;
+        }
+
+        /** @var array<int,int> signo → signo, for kqueue's EVFILT_SIGNAL */
+        private array $sigWatched = [];
+        private bool $sigFired = false;
+
         public function add(Handle $handle, array $events, mixed $data = null): Watcher
         {
             if (\count($events) === 0) {
@@ -334,7 +371,9 @@ namespace Io\Poll {
         /** @return Watcher[] the watchers whose fds became ready */
         public function wait(?int $timeoutSeconds = null, int $timeoutMicroseconds = 0, ?int $maxEvents = null): array
         {
-            if (\count($this->fds) === 0) { return []; }
+            // A signal watch is work too: with no fds but a watched signal, an
+            // early return here would spin the caller's loop.
+            if (\count($this->fds) === 0 && \count($this->sigWatched) === 0) { return []; }
             if ($this->backend === Backend::Epoll) {
                 return $this->__waitEpoll($timeoutSeconds, $timeoutMicroseconds, $maxEvents);
             }
@@ -451,6 +490,13 @@ namespace Io\Poll {
                 $fd = \peek_i64($buf, $off);
                 $filter = \peek_i16($buf, $off + 8);
                 $flags = \peek_u16($buf, $off + 10);
+                if ($filter === -6) {                          // EVFILT_SIGNAL
+                    // Not an fd — the ident is the signal number. Flag it and let
+                    // the caller reap; a Watcher would have nothing to point at.
+                    $this->sigFired = true;
+                    $i = $i + 1;
+                    continue;
+                }
                 $b = 0;
                 if ($filter === -1) { $b = $b | 1; }          // EVFILT_READ  -> Read
                 elseif ($filter === -2) { $b = $b | 2; }      // EVFILT_WRITE -> Write
@@ -547,10 +593,13 @@ namespace Io\Poll {
 
         private function handleFd(Handle $handle): int
         {
-            if (!($handle instanceof \StreamPollHandle)) {
-                throw new InvalidHandleException("Unsupported handle type");
+            if ($handle instanceof \StreamPollHandle) {
+                return $handle->__fd();
             }
-            return $handle->__fd();
+            if ($handle instanceof \FdPollHandle) {
+                return $handle->__fd();
+            }
+            throw new InvalidHandleException("Unsupported handle type");
         }
     }
 
@@ -606,5 +655,25 @@ namespace {
 
         // ── internal: the underlying fd ──
         public function __fd(): int { return $this->stream->addr; }
+    }
+
+    /**
+     * A pollable BARE descriptor, owning nothing.
+     *
+     * StreamPollHandle keeps the \Resource alive, which is what you want when the
+     * watcher outlives the call that made it — but `stream_select()` is handed fds
+     * whose resources belong to the caller, and wrapping one of those would either
+     * close the caller's fd when the wrapper dies or leave the watcher pointing at
+     * a neutered resource. This wrapper has no lifetime of its own: the caller
+     * guarantees the fd is open for as long as the watcher is registered.
+     */
+    final class FdPollHandle implements \Io\Poll\Handle
+    {
+        public function __construct(private int $fd) {}
+
+        public function isValid(): bool { return $this->fd >= 0; }
+
+        // ── internal: the underlying fd ──
+        public function __fd(): int { return $this->fd; }
     }
 }
