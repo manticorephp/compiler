@@ -10,8 +10,8 @@ namespace Compile\Mir\Passes;
  *   __mir_fiber_jump(fctx)          : int   -- switch; returns the resumer's fctx
  *   __mir_fiber_current()           : Fiber -- the running fiber (or null ptr)
  *   __mir_fiber_set_current(fiber)  : void
- *   __mir_fiber_stack_alloc(size)   : int   -- returns the stack base
- *   __mir_fiber_stack_free(base)    : void
+ *   __mir_fiber_stack_alloc(size)     : int -- the stack base, or 0 on failure
+ *   __mir_fiber_stack_free(base,size) : void
  *
  * Own i64-only switch ABI (single i64 return, no boost transfer_t struct-return):
  *   void* mc_fiber_jump(void* to_fctx);                        -> from_fctx
@@ -57,12 +57,21 @@ trait EmitLlvmFiber
         // stack; main's state lives here. {@see prelude/fiber.php} brackets every
         // jump with save/load.
         $out .= "@__mir_fiber_main_ctx = linkonce_odr global [64 x i8] zeroinitializer\n";
-        // Fiber-stack free-list: mmap'd stacks (all one size, guard page already
-        // set) returned by a destroyed fiber are POOLED here instead of munmap'd,
-        // so a new fiber reuses one — no mmap+mprotect+munmap churn per fiber
-        // (~3µs). Single-threaded (parallelism is multi-process), so no lock. Cap
-        // 128; overflow falls back to munmap.
+        // Fiber-stack free-list: mmap'd stacks (guard page already set) returned by
+        // a destroyed fiber are POOLED here instead of munmap'd, so a new fiber
+        // reuses one — no mmap+mprotect+munmap churn per fiber (~3µs).
+        // Single-threaded (parallelism is multi-process), so no lock. Cap 128;
+        // overflow falls back to munmap.
+        //
+        // The pool records each stack's LENGTH beside its base. The size is a knob
+        // ({@see prelude/fiber.php} MANTICORE_FIBER_STACK / Fiber::setStackSize),
+        // so "all one size" is no longer true: handing a pooled 8 MiB base out as a
+        // 1 MiB stack — or munmap'ing it with the wrong length — is silent memory
+        // corruption. A slot whose size does not match the request is left alone
+        // and the caller mmaps instead (one extra load+compare on a path that is
+        // already a branch).
         $out .= "@__mir_fib_pool = linkonce_odr global [128 x i64] zeroinitializer\n";
+        $out .= "@__mir_fib_pool_sz = linkonce_odr global [128 x i64] zeroinitializer\n";
         $out .= "@__mir_fib_pool_n = linkonce_odr global i64 0\n";
         $out .= "declare i64 @mc_fiber_make(i64, i64, i64)\n";
         $out .= "declare i64 @mc_fiber_jump(i64)\n";
@@ -255,42 +264,82 @@ trait EmitLlvmFiber
 
     /** __mir_fiber_stack_alloc(size) : int — an mmap'd stack with a PROT_NONE
      *  guard page at the low end (stack grows down ⇒ overflow faults instead of
-     *  scribbling the heap). Returns the base. */
+     *  scribbling the heap). Returns the base, or **0** when the stack could not
+     *  be allocated.
+     *
+     *  0 and not MAP_FAILED: the old code handed mmap's -1 straight back, and
+     *  `prelude/fiber.php` then computed `-1 + size` and made a context on it, so
+     *  running out of address space was a SIGSEGV instead of an error. 0 is never a
+     *  valid base, so it needs no second channel; Fiber::start() turns it into a
+     *  FiberError, which is what Zend throws when it cannot allocate a fiber. */
     private function biFiberStackAlloc(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $sz = $this->lastValue;
         $flags = \Manticore\is_darwin() ? 0x1002 : 0x22;
+        $check = $this->ssa->allocLabel('fibpool.check');
         $hit = $this->ssa->allocLabel('fibpool.hit');
         $miss = $this->ssa->allocLabel('fibpool.miss');
+        $guard = $this->ssa->allocLabel('fibpool.guard');
+        $ok = $this->ssa->allocLabel('fibpool.ok');
+        $unguarded = $this->ssa->allocLabel('fibpool.unguarded');
+        $fail = $this->ssa->allocLabel('fibpool.fail');
         $done = $this->ssa->allocLabel('fibpool.done');
-        // Reuse a pooled stack if one is free (guard page already set), else mmap.
+        // Reuse a pooled stack if one is free AND is exactly this long (guard page
+        // already set), else mmap.
         $n = $this->ssa->allocReg();
         $out .= '  ' . $n . " = load i64, ptr @__mir_fib_pool_n\n";
         $has = $this->ssa->allocReg();
         $out .= '  ' . $has . ' = icmp sgt i64 ' . $n . ", 0\n";
-        $out .= '  br i1 ' . $has . ', label %' . $hit . ', label %' . $miss . "\n";
-        $out .= $hit . ":\n";
+        $out .= '  br i1 ' . $has . ', label %' . $check . ', label %' . $miss . "\n";
+        $out .= $check . ":\n";
         $idx = $this->ssa->allocReg();
         $out .= '  ' . $idx . ' = sub i64 ' . $n . ", 1\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . ' = getelementptr inbounds [128 x i64], ptr @__mir_fib_pool, i64 0, i64 ' . $idx . "\n";
         $pooled = $this->ssa->allocReg();
         $out .= '  ' . $pooled . ' = load i64, ptr ' . $slot . "\n";
+        $szslot = $this->ssa->allocReg();
+        $out .= '  ' . $szslot . ' = getelementptr inbounds [128 x i64], ptr @__mir_fib_pool_sz, i64 0, i64 ' . $idx . "\n";
+        $psz = $this->ssa->allocReg();
+        $out .= '  ' . $psz . ' = load i64, ptr ' . $szslot . "\n";
+        $fits = $this->ssa->allocReg();
+        $out .= '  ' . $fits . ' = icmp eq i64 ' . $psz . ', ' . $sz . "\n";
+        $out .= '  br i1 ' . $fits . ', label %' . $hit . ', label %' . $miss . "\n";
+        $out .= $hit . ":\n";
         $out .= '  store i64 ' . $idx . ", ptr @__mir_fib_pool_n\n";
         $out .= '  br label %' . $done . "\n";
         $out .= $miss . ":\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = call ptr @mmap(ptr null, i64 ' . $sz
             . ', i32 3, i32 ' . (string)$flags . ', i32 -1, i64 0)' . "\n";
-        $out .= '  call i32 @mprotect(ptr ' . $p . ', i64 16384, i32 0)' . "\n";
         $fresh = $this->ssa->allocReg();
         $out .= '  ' . $fresh . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
+        // MAP_FAILED is -1, not null: out of VA / over RLIMIT_AS / at
+        // vm.max_map_count lands here.
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp eq i64 ' . $fresh . ", -1\n";
+        $out .= '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $guard . "\n";
+        $out .= $guard . ":\n";
+        // A stack without its guard page turns an overflow into heap corruption, so
+        // a failed mprotect fails the whole allocation rather than running blind.
+        $prc = $this->ssa->allocReg();
+        $out .= '  ' . $prc . ' = call i32 @mprotect(ptr ' . $p . ', i64 16384, i32 0)' . "\n";
+        $pok = $this->ssa->allocReg();
+        $out .= '  ' . $pok . ' = icmp eq i32 ' . $prc . ", 0\n";
+        $out .= '  br i1 ' . $pok . ', label %' . $ok . ', label %' . $unguarded . "\n";
+        $out .= $unguarded . ":\n";
+        $out .= '  call i32 @munmap(ptr ' . $p . ', i64 ' . $sz . ')' . "\n";
+        $out .= '  br label %' . $fail . "\n";
+        $out .= $ok . ":\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $fail . ":\n";
         $out .= '  br label %' . $done . "\n";
         $out .= $done . ":\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = phi i64 [ ' . $pooled . ', %' . $hit . ' ], [ ' . $fresh . ', %' . $miss . " ]\n";
+        $out .= '  ' . $r . ' = phi i64 [ ' . $pooled . ', %' . $hit . ' ], [ ' . $fresh
+            . ', %' . $ok . ' ], [ 0, %' . $fail . " ]\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
@@ -307,7 +356,9 @@ trait EmitLlvmFiber
         $push = $this->ssa->allocLabel('fibpool.push');
         $unmap = $this->ssa->allocLabel('fibpool.unmap');
         $fdone = $this->ssa->allocLabel('fibpool.free_done');
-        // Pool the stack for reuse if there's room, else munmap.
+        // Pool the stack for reuse if there's room, else munmap. The LENGTH goes in
+        // beside the base: a pooled stack carries no other record of how long it is,
+        // and alloc must not hand it out for a different size.
         $n = $this->ssa->allocReg();
         $out .= '  ' . $n . " = load i64, ptr @__mir_fib_pool_n\n";
         $room = $this->ssa->allocReg();
@@ -317,6 +368,9 @@ trait EmitLlvmFiber
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . ' = getelementptr inbounds [128 x i64], ptr @__mir_fib_pool, i64 0, i64 ' . $n . "\n";
         $out .= '  store i64 ' . $base . ', ptr ' . $slot . "\n";
+        $szslot = $this->ssa->allocReg();
+        $out .= '  ' . $szslot . ' = getelementptr inbounds [128 x i64], ptr @__mir_fib_pool_sz, i64 0, i64 ' . $n . "\n";
+        $out .= '  store i64 ' . $sz . ', ptr ' . $szslot . "\n";
         $n1 = $this->ssa->allocReg();
         $out .= '  ' . $n1 . ' = add i64 ' . $n . ", 1\n";
         $out .= '  store i64 ' . $n1 . ", ptr @__mir_fib_pool_n\n";
