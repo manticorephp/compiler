@@ -222,6 +222,18 @@ function __mc_fd_nonblock(int $fd): bool
     return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5)) >= 0;
 }
 
+/** Clear O_NONBLOCK on $fd. The undo of {@see __mc_fd_nonblock}: a socket made
+ *  non-blocking only to bound its connect must go back to blocking, or every
+ *  later read on it returns EAGAIN to a caller that never asked for that. */
+function __mc_fd_block(int $fd): bool
+{
+    $fl = \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(6), 0);
+    if ($fl < 0) {
+        return false;
+    }
+    return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl & ~\__mc_sock_const(5)) >= 0;
+}
+
 /**
  * SO_ERROR on $fd — 0 once a non-blocking connect(2) has completed cleanly, the
  * failing errno otherwise. The errno-free way to collect an async connect's
@@ -282,6 +294,35 @@ function __mc_await_connect(int $fd, float $timeout = 0.0): int
     $tmp->closed = true;
     $tmp->addr = 0;
     return $e === 0 ? 0 : -1;
+}
+
+/**
+ * Finish an in-flight non-blocking connect WITHOUT a scheduler: poll(POLLOUT) for
+ * the kernel's completion signal, then read SO_ERROR. 0 on a connected socket,
+ * -1 otherwise. The sync twin of {@see __mc_await_connect}.
+ *
+ * This is what makes fsockopen's 5th argument mean something outside async. It
+ * used to be accepted and ignored, so the OS's own connect timeout applied: a
+ * connect to a black-holed address took ~75 s of SYN retries where php returned in
+ * the 0.3 s it was asked for.
+ */
+function __mc_poll_connect(int $fd, float $timeout): int
+{
+    $ms = (int)($timeout * 1000.0);
+    if ($ms < 1) { $ms = 1; }
+    $rc = \__mc_poll_one($fd, true, $ms);
+    if ($rc <= 0) {
+        // 0 = the deadline passed with the handshake still in flight; <0 = the
+        // fd reported POLLERR/POLLHUP.
+        \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
+        return -1;
+    }
+    $e = \__mc_so_error($fd);
+    if ($e !== 0) {
+        \__mc_net_errno(true, $e);
+        return -1;
+    }
+    return 0;
 }
 
 /** True when $host is already a literal address, so no resolution is needed. */
@@ -486,12 +527,24 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $tim
                 // ai_canonname, so a wrong table passes a char* here).
                 $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $addrLen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
-                if ($async) {
+                // A caller-supplied timeout is honoured with or without a
+                // scheduler: same non-blocking connect, waited on by the reactor
+                // under async and by poll(2) without it. Sync sockets go back to
+                // blocking straight after, so nothing downstream sees EAGAIN.
+                $bounded = !$async && $timeout > 0.0;
+                if ($async || $bounded) {
                     \__mc_fd_nonblock($cand);
                 }
                 $rc = \Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen);
-                if ($rc !== 0 && $async && \__mc_errno() === \__mc_sock_const(12)) {
-                    $rc = \__mc_await_connect($cand, $timeout);
+                if ($rc !== 0 && \__mc_errno() === \__mc_sock_const(12)) {
+                    if ($async) {
+                        $rc = \__mc_await_connect($cand, $timeout);
+                    } elseif ($bounded) {
+                        $rc = \__mc_poll_connect($cand, $timeout);
+                    }
+                }
+                if ($bounded) {
+                    \__mc_fd_block($cand);
                 }
                 if ($rc === 0) {
                     $fd = $cand;
@@ -913,10 +966,11 @@ function __mc_tls_server_handshake(\Resource $sock, string $cert, string $pk): b
 /**
  * Open a TCP connection. php.net's signature, including the by-ref diagnostics.
  *
- * $timeout is accepted and currently IGNORED: the connect is blocking, so the
- * OS's own connect timeout applies. Honouring it needs O_NONBLOCK + poll(POLLOUT)
- * + getsockopt(SO_ERROR), which is the natural first step of the Fibers work
- * rather than a bolt-on here.
+ * $timeout is honoured in both modes — under a scheduler the fiber parks on
+ * writability ({@see __mc_await_connect}), without one poll(2) does the waiting
+ * ({@see __mc_poll_connect}). It used to be accepted and ignored, leaving the OS's
+ * own connect timeout in charge: ~75 s of SYN retries for a black-holed address
+ * where php answers in the 0.3 s it was given.
  *
  * A transport prefix on $hostname is honoured, as php's fsockopen does:
  * `ssl://host` / `tls://host` open a TLS stream, `tcp://host` (or none) a plain
