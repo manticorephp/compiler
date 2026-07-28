@@ -90,22 +90,7 @@ function array_values(array $arr): array
     return $out;
 }
 
-function array_merge(array ...$arrays): array
-{
-    $out = [];
-    foreach ($arrays as $arr) {
-        foreach ($arr as $k => $v) {
-            if (\is_int($k)) {
-                $out[] = $v;
-            } else {
-                $out[$k] = $v;
-            }
-        }
-    }
-    return $out;
-}
-
-// array_slice / array_map / array_filter live in prelude/array_fns.php
+// array_merge / array_slice / array_map / array_filter live in prelude/array_fns.php
 // (PRELUDE-injected), NOT here: as a stdlib extern the `array` param's element
 // erases to unknown, so re-stored values read back as garbage (a raw int → a
 // denormal float under NaN-boxing) and a callback crosses the closure ABI. In
