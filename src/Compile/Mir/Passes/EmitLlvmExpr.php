@@ -2865,6 +2865,45 @@ trait EmitLlvmExpr
             $this->lastValueType = 'ptr';
             return $out;
         }
+        // An ERASED operand may carry either a boxed cell or a raw i64, and
+        // falling through to the int path printed the tagged word itself:
+        // symfony's `' <comment>'.$namespace['id'].'</comment>'` rendered
+        // "-3377656686641632" where the namespace name belonged, because
+        // `$namespace` is an element of an erased array and the subscript is a
+        // cell. Decide at runtime — a NaN-boxed word goes through the tag
+        // dispatch, anything else keeps the integer rendering it had.
+        if ($operand->type->kind === Type::KIND_UNKNOWN) {
+            $this->rt->needsTaggedToStr = true;
+            $this->rt->needsIntStr = true;
+            if ($arena) { $this->rt->needsArena = true; }
+            $out = $this->coerceToI64();
+            $v = $this->lastValue;
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca ptr\n";
+            $isBox = $this->ssa->allocReg();
+            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+            $boxL = $this->ssa->allocLabel('cs.box');
+            $rawL = $this->ssa->allocLabel('cs.raw');
+            $endL = $this->ssa->allocLabel('cs.end');
+            $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+            $out .= $boxL . ":\n";
+            $bs = $this->ssa->allocReg();
+            $out .= '  ' . $bs . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
+            $out .= '  store ptr ' . $bs . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $rawL . ":\n";
+            $ifn = $arena ? '@__mir_int_to_str_arena' : '@__mir_int_to_str';
+            $rs = $this->ssa->allocReg();
+            $out .= '  ' . $rs . ' = call ptr ' . $ifn . '(i64 ' . $v . ")\n";
+            $out .= '  store ptr ' . $rs . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $endL . ":\n";
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+            $this->lastValue = $res;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $ts = $this->toStringClassOf($operand);
         if ($ts !== '') {
             return $this->emitToStringCall($ts);

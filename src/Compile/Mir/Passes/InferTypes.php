@@ -899,9 +899,19 @@ final class InferTypes implements Pass
             if ($lp !== '') { $this->strParamsFound[$lp] = true; }
             if ($rp !== '') { $this->strParamsFound[$rp] = true; }
         } elseif ($k === Node::KIND_ARRAY_ACCESS) {
-            // `$x[...]` where $x is an element-local → $x is a string (char
+            // `$x[$i]` where $x is an element-local → $x is a string (char
             // subscript), so its param is vec[string].
-            if ($n->array->kind === Node::KIND_LOAD_LOCAL) {
+            //
+            // ONLY for an INT-ish subscript. php has no string offset by string
+            // key — `$s['id']` is a TypeError, so a STRING index is proof of the
+            // opposite: `$x` is an array. Reading it as evidence for vec[string]
+            // retyped symfony's `$namespaces` (an assoc of assocs, whose
+            // call-site refinement legitimately conflicts and leaves the param
+            // bare) to vec[string], so `$namespace['id']` compiled to a char
+            // offset and `list` printed a raw tagged word where the namespace
+            // name belonged.
+            if ($n->array->kind === Node::KIND_LOAD_LOCAL
+                && !$this->isStringOperand($n->index)) {
                 $nm = $n->array->name;
                 if (isset($this->elemLocalOf[$nm])) { $this->strParamsFound[$this->elemLocalOf[$nm]] = true; }
             }
