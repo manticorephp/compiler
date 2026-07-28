@@ -471,6 +471,39 @@ trait LowerPrelude
             if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
         }
 
+        // ext/posix resource limits. Host-exposed like FNM_* above (php reads the
+        // host <sys/resource.h>; it does not invent these the way it does LOCK_*),
+        // so they resolve against the build host — and no stdlib source may name
+        // one: Stdlib/Pcntl.php uses the numeric __mc_rlimit_const() selector, whose
+        // $which ORDER is the order of this table.
+        //
+        // MEASURED against each host's own php: CPU/FSIZE/DATA/STACK/CORE agree at
+        // 0..4 and everything above diverges. INFINITY is what php reports, not what
+        // the header says — Linux's RLIM_INFINITY is ~0UL, which php surfaces as
+        // PHP_INT_MAX, and __mc_rlimit_get translates.
+        if (\substr($name, 0, 13) === 'POSIX_RLIMIT_') {
+            $isDarwin = \Manticore\is_darwin();
+            $rl = [
+                'POSIX_RLIMIT_CPU' => 0,
+                'POSIX_RLIMIT_FSIZE' => 1,
+                'POSIX_RLIMIT_DATA' => 2,
+                'POSIX_RLIMIT_STACK' => 3,
+                'POSIX_RLIMIT_CORE' => 4,
+                'POSIX_RLIMIT_RSS' => 5,
+                'POSIX_RLIMIT_MEMLOCK' => $isDarwin ? 6 : 8,
+                'POSIX_RLIMIT_NPROC' => $isDarwin ? 7 : 6,
+                'POSIX_RLIMIT_NOFILE' => $isDarwin ? 8 : 7,
+                'POSIX_RLIMIT_AS' => $isDarwin ? 5 : 9,
+                // MEASURED, and the one value that cannot be guessed: php hands out
+                // the host's raw RLIM_INFINITY, so this is PHP_INT_MAX on Darwin but
+                // -1 (~0UL read as an i64) on glibc. Assuming PHP_INT_MAX everywhere
+                // made the constant wrong on Linux while every test stayed green on
+                // macOS.
+                'POSIX_RLIMIT_INFINITY' => $isDarwin ? \PHP_INT_MAX : -1,
+            ];
+            if (isset($rl[$name])) { return new IntConst($rl[$name], Type::int_()); }
+        }
+
         // ext/pcntl signal numbers + the wait/mask flags. Host-DIVERGENT, and
         // resolved here for the same reason as FNM_* / SO_* below: php exposes
         // the host's own <signal.h>, and a compile-time host probe must not be

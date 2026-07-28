@@ -436,6 +436,19 @@ function sys_usleep(#[CType('unsigned int')] int $usec): int {}
 #[Library('c'), Symbol('nanosleep'), CType('int')]
 function sys_nanosleep(Ptr $req, Ptr $rem): int {}
 
+// `int getrlimit(int resource, struct rlimit *rlp)` / `int setrlimit(...)` —
+// rlimit{rlim_cur@0, rlim_max@8}, 16B on both hosts (rlim_t is 64-bit on Darwin
+// and on LP64 glibc/musl alike). The RESOURCE numbers diverge and are never named
+// here: {@see \__mc_rlimit_const}. RLIM_INFINITY diverges too — 0x7fffffffffffffff
+// on Darwin, ~0UL on Linux, which as a signed i64 is -1 and therefore
+// indistinguishable from an error return, so callers must test the RC and never
+// the value.
+#[Library('c'), Symbol('getrlimit'), CType('int')]
+function sys_getrlimit(#[CType('int')] int $resource, Ptr $rlp): int {}
+
+#[Library('c'), Symbol('setrlimit'), CType('int')]
+function sys_setrlimit(#[CType('int')] int $resource, Ptr $rlp): int {}
+
 // `int shutdown(int fd, int how)` — SHUT_RD/WR/RDWR are 0/1/2 on both hosts.
 #[Library('c'), Symbol('shutdown'), CType('int')]
 function sys_shutdown(#[CType('int')] int $fd, #[CType('int')] int $how): int {}

@@ -248,3 +248,93 @@ function __mc_proc_alarm(int $seconds): int
 {
     return \Runtime\Libc\sys_alarm($seconds);
 }
+
+/**
+ * Host-divergent rlimit numbers, runtime-selected (mirrors {@see __mc_sig_const};
+ * the same rule applies — no RLIMIT_* name may be written in this file). Ints
+ * only, never an array. $which is the ORDER php's POSIX_RLIMIT_* constants are
+ * folded in ({@see LowerPrelude}), so the two tables cannot drift apart:
+ *   0 CORE  1 DATA  2 STACK  3 CPU  4 FSIZE  5 MEMLOCK  6 NPROC  7 RSS
+ *   8 NOFILE  9 AS  10 = the host's own RLIM_INFINITY
+ *
+ * MEASURED against each host's php (which exposes the host <sys/resource.h>, the
+ * way it does for FNM_*, not the invented values it uses for LOCK_*): Darwin arm64
+ * vs Linux glibc — CPU/FSIZE/DATA/STACK/CORE agree at 0..4, and everything above
+ * that diverges.
+ */
+function __mc_rlimit_const(int $which): int
+{
+    static $ready = 0;
+    static $memlock = 0;
+    static $nproc = 0;
+    static $nofile = 0;
+    static $as = 0;
+    static $inf = 0;
+
+    if ($ready === 0) {
+        $isDarwin = \__mc_host_is_darwin();
+        $memlock = $isDarwin ? 6 : 8;
+        $nproc = $isDarwin ? 7 : 6;
+        $nofile = $isDarwin ? 8 : 7;
+        $as = $isDarwin ? 5 : 9;   // Darwin has no AS; its header aliases it to RSS
+        // Darwin: (1<<63)-1. Linux glibc/musl: ~0UL, i.e. all bits set, which read
+        // as a signed i64 is -1. Both are "no limit"; php reports PHP_INT_MAX.
+        $inf = $isDarwin ? \PHP_INT_MAX : -1;
+        $ready = 1;
+    }
+
+    if ($which === 0) { return 4; }        // CORE
+    if ($which === 1) { return 2; }        // DATA
+    if ($which === 2) { return 3; }        // STACK
+    if ($which === 3) { return 0; }        // CPU
+    if ($which === 4) { return 1; }        // FSIZE
+    if ($which === 5) { return $memlock; }
+    if ($which === 6) { return $nproc; }
+    if ($which === 7) { return 5; }        // RSS
+    if ($which === 8) { return $nofile; }
+    if ($which === 9) { return $as; }
+    return $inf;
+}
+
+/**
+ * getrlimit(2), one value at a time — $which 0 = soft, 1 = hard. The host's
+ * "infinite" is normalised to PHP_INT_MAX, which is what php's POSIX_RLIMIT_INFINITY
+ * is on both hosts. Failure is PHP_INT_MIN, NOT -1: on Linux RLIM_INFINITY *is*
+ * -1 in an i64, so -1 could never distinguish "no limit" from "call failed".
+ */
+function __mc_rlimit_get(int $resource, int $which): int
+{
+    $buf = \Runtime\Libc\calloc(1, 16);
+    if ($buf === null) {
+        return \PHP_INT_MIN;
+    }
+    $rc = \Runtime\Libc\sys_getrlimit($resource, $buf);
+    if ($rc !== 0) {
+        \Runtime\Libc\free($buf);
+        return \PHP_INT_MIN;
+    }
+    $v = \peek_i64($buf, $which === 0 ? 0 : 8);
+    \Runtime\Libc\free($buf);
+    if ($v === \__mc_rlimit_const(10)) {
+        return \PHP_INT_MAX;
+    }
+    return $v;
+}
+
+/**
+ * setrlimit(2). PHP_INT_MAX on either value means "no limit" and is translated to
+ * the host's RLIM_INFINITY. 0 on success, -1 on failure.
+ */
+function __mc_rlimit_set(int $resource, int $soft, int $hard): int
+{
+    $buf = \Runtime\Libc\calloc(1, 16);
+    if ($buf === null) {
+        return -1;
+    }
+    $inf = \__mc_rlimit_const(10);
+    \poke_i64($buf, 0, $soft === \PHP_INT_MAX ? $inf : $soft);
+    \poke_i64($buf, 8, $hard === \PHP_INT_MAX ? $inf : $hard);
+    $rc = \Runtime\Libc\sys_setrlimit($resource, $buf);
+    \Runtime\Libc\free($buf);
+    return $rc;
+}
