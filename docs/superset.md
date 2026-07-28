@@ -42,7 +42,7 @@ than a library you could publish on Packagist is that the primitives underneath 
 | what | Zend | here |
 |---|---|---|
 | green threads | `Fiber` (userland scheduler, no I/O integration) | `Fiber` on native `fcontext` (~2.8× a Zend fiber switch), stack pooled, guard page |
-| readiness | `stream_select` only | `Io\Poll` — kqueue / epoll / poll, edge-aware, a real reactor |
+| readiness | `stream_select` only | `Io\Poll` — kqueue / epoll / poll, edge-aware, a real reactor; a busy keep-alive connection never reaches it (2 syscalls/request, measured) |
 | blocking I/O | blocks the process | suspends the fiber (§1.3) |
 | task ownership | none | every task belongs to a scope; no fire-and-forget |
 | cancellation | none | delivered as `CancelledException` **at the suspend point**, sticky, re-raised at every later suspend |

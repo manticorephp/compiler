@@ -470,12 +470,8 @@ Regression coverage lives in the suite: `tests/aot/cases/async_*.php`
 
 ## Where it stands (macOS, 10-core, `wrk -t4`, plaintext keep-alive)
 
-Single-core keep-alive ~64.5k rps, which is the **two-syscall floor** of a readiness design:
-one `recv(2)` and one `write(2)` per request, plus one `kevent`/`epoll_wait` amortised over
-every connection ready in that turn. There is no third syscall to remove — an fd is registered
-with the reactor once for the life of the connection, and a warm keep-alive socket never parks
-at all, because the read tries `recv` first and only suspends on `EWOULDBLOCK`. Multi-process
-(8-worker prefork) same-box vs reference servers driven by the same `wrk`:
+Single-core keep-alive ~64.5k rps, at a **two-syscall floor** — counted, not assumed.
+Multi-process (8-worker prefork) same-box vs reference servers driven by the same `wrk`:
 
 | server                     | req/s        |
 |----------------------------|--------------|
@@ -487,6 +483,31 @@ at all, because the read tries `recv` first and only suspends on `EWOULDBLOCK`. 
 Caveats: the load generator shares the box (the server used only ~2.7/10 cores — a real
 ceiling needs an off-box client); this server does minimal HTTP (single-byte routing, fixed
 headers) — legitimate for the TechEmpower `plaintext` case, not a full framework.
+
+### The two syscalls, counted
+
+`strace -c -f` on one worker (Linux arm64), the same run at two request counts so the
+constant startup cost subtracts out:
+
+| syscall | 2 000 requests | 6 000 requests | per extra request |
+|---|---|---|---|
+| `recvfrom` | 2 008 | 6 008 | **1.00** |
+| `sendto` | 2 001 | 6 001 | **1.00** |
+| `epoll_pwait` | 2 | 2 | 0 |
+| `epoll_ctl` | 1 | 1 | 0 |
+| `accept` / `fcntl` / `close` | 10 / 34 / 15 | 10 / 34 / 15 | 0 |
+
+Two syscalls per request, and **nothing else scales with load at all**. The reactor is
+entered twice in a whole run: the optimistic `recv` finds the next pipelined-or-not request
+already buffered in the kernel, so a busy keep-alive connection never parks — and because
+`ensureWatcher` only runs when a task actually parks, those connection fds are never
+registered with epoll in the first place (`epoll_ctl` 1 is the listener). The `+8` on
+`recvfrom` is one per connection: the read that reports the peer's close.
+
+To repeat it: `strace -c -f -o out.txt ./server` under `docker run --user root
+--cap-add=SYS_PTRACE --security-opt seccomp=unconfined`, then subtract two runs. The
+toolchain image has no `pkill`/`pgrep` — use `killall` or `kill $!`, or the script waits
+forever for a server nothing stopped.
 
 Signal delivery is reactor-native: a blocked-and-pending signal is a readiness event on
 both hosts — `EVFILT_SIGNAL` on kqueue, `signalfd(2)` on Linux — so the dispatch task parks
@@ -500,9 +521,10 @@ is still there.
 
 Also: off-thread file I/O · shared-memory multithreading (a future compiler superset).
 
-**Below two syscalls per request.** `writev(2)` is already here — `fwrite($s, [$hdr, $body])`
-sends both in one syscall — but merging writes cannot help a request that only makes one. The
-floor moves for exactly two reasons, and neither is free:
+**Below two syscalls per request.** Those two are `recvfrom` + `sendto` and nothing else
+(measured above). `writev(2)` is already here — `fwrite($s, [$hdr, $body])` sends headers and
+body in one syscall — but merging writes cannot help a request that only makes one. The floor
+moves for exactly two reasons, and neither is free:
 
 - **Pipelining.** Parse every complete request sitting in one `recv`, answer with one vectored
   write of N responses: 2/N syscalls per request. Portable, and it needs nothing from the
