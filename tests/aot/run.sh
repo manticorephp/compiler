@@ -51,6 +51,14 @@ fi
 
 mkdir -p "$WORK"
 
+# Per-case time limits. Budgets are deliberately generous: every case is
+# sub-second, but macOS XProtect spends ~670 ms scanning each freshly built binary.
+# {@see tools/lib/limit.sh} for why `timeout(1)` cannot be assumed.
+# shellcheck source=../../tools/lib/limit.sh
+source "$ROOT/tools/lib/limit.sh"
+RUN_TIMEOUT="${MC_RUN_TIMEOUT:-60}"
+COMPILE_TIMEOUT="${MC_COMPILE_TIMEOUT:-300}"
+
 # Discover cases: every .php in cases/ and every subdir.
 cases=()
 for f in "$CASES"/*.php; do
@@ -118,21 +126,21 @@ for name in "${cases[@]}"; do
     # Compile: single-file vs directory (recursive *.php scan).
     src="$CASES/$name.php"
     if [[ -d "$CASES/$name" ]]; then
-        "$MANTICORE" compile $BACKEND_ARGS "$CASES/$name" -o "$bin" > "$stderr_log" 2>&1 || {
-            failed=$((failed + 1))
-            failed_names+=("$name")
+        src="$CASES/$name"
+    fi
+    crc=0
+    mc_limit "$COMPILE_TIMEOUT" \
+        "$MANTICORE" compile $BACKEND_ARGS "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
+    if [[ $crc -ne 0 ]]; then
+        failed=$((failed + 1))
+        failed_names+=("$name")
+        if [[ $crc -eq 124 ]]; then
+            printf 'FAIL %s  (compile TIMEOUT >%ss)\n' "$name" "$COMPILE_TIMEOUT"
+        else
             printf 'FAIL %s  (compile)\n' "$name"
-            [[ $VERBOSE -eq 1 ]] && sed 's/^/      /' "$stderr_log"
-            continue
-        }
-    else
-        "$MANTICORE" compile $BACKEND_ARGS "$src" -o "$bin" > "$stderr_log" 2>&1 || {
-            failed=$((failed + 1))
-            failed_names+=("$name")
-            printf 'FAIL %s  (compile)\n' "$name"
-            [[ $VERBOSE -eq 1 ]] && sed 's/^/      /' "$stderr_log"
-            continue
-        }
+        fi
+        [[ $VERBOSE -eq 1 ]] && sed 's/^/      /' "$stderr_log"
+        continue
     fi
 
     # Belt-and-braces: manticore can return 0 yet leave $bin missing.
@@ -148,13 +156,20 @@ for name in "${cases[@]}"; do
 
     # Run.
     set +e
-    "$bin" > "$actual" 2>>"$stderr_log"
+    mc_limit "$RUN_TIMEOUT" "$bin" > "$actual" 2>>"$stderr_log"
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
         failed=$((failed + 1))
         failed_names+=("$name")
-        printf 'FAIL %s  (runtime rc=%d)\n' "$name" "$rc"
+        # A hang is its own outcome, not `rc=124`: a case that legitimately exits
+        # non-zero is already reported that way, and the two must never be
+        # confusable — one is a wrong exit status, the other is a liveness bug.
+        if [[ $rc -eq 124 ]]; then
+            printf 'FAIL %s  (TIMEOUT >%ss)\n' "$name" "$RUN_TIMEOUT"
+        else
+            printf 'FAIL %s  (runtime rc=%d)\n' "$name" "$rc"
+        fi
         [[ $VERBOSE -eq 1 ]] && sed 's/^/      /' "$stderr_log"
         continue
     fi
