@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Build manticore from source in a Linux container and run the WHOLE
 # AOT suite there. Both arches; arm64 is native on an Apple Silicon host,
-# amd64 runs under qemu (slow but it works).
+# amd64 is TRANSLATED — Docker Desktop uses Rosetta, not qemu, and that is not a
+# pedantic difference: Rosetta reserves address space of its own, so a deliberately
+# impossible mmap kills the translator ("rosetta error: could not find free space")
+# instead of returning MAP_FAILED the way a real x86 kernel would.
 #
 #   bash tools/docker/run_tests.sh                 # arm64
 #   bash tools/docker/run_tests.sh --amd64         # amd64 (emulated)
