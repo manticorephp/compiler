@@ -243,3 +243,27 @@ stack size — the real ceiling, and independent of memory.
 
 macOS arm64 for contrast: 40 000 tasks cost 7410 MiB at 8 MiB stacks and 7251 MiB
 at 256 KiB — no step at all. A macOS-only measurement would have kept 8 MiB.
+
+### Signal handling, for the fiber guard page (2026-07-28)
+
+`probe.c` style measurement, Darwin arm64 vs Linux glibc aarch64. Consumed by
+`EmitLlvmFiber::biFiberGuardInstall` / `fiberGuardHandler`, which bake these in at
+compile time.
+
+| | Darwin | Linux glibc |
+|---|---|---|
+| `sizeof(struct sigaction)` | 16 | 152 |
+| `sa_handler@` / `sa_mask@` | 0 / 8 | 0 / 8 |
+| `sa_flags@` | 12 | **136** |
+| `sizeof(stack_t)` | 24 | 24 |
+| `ss_sp@` | 0 | 0 |
+| `ss_flags@` / `ss_size@` | 16 / 8 | **8 / 16** (SWAPPED) |
+| `siginfo_t` `si_addr@` | 24 | **16** |
+| `SA_SIGINFO` / `SA_ONSTACK` | 64 / 1 | 4 / 134217728 |
+| `SIGSEGV` / `SIGBUS` | 11 / 10 | 11 / **7** |
+| `MINSIGSTKSZ` | 32768 | 5120 |
+
+Two traps in there: `ss_flags` and `ss_size` are in the opposite order, so a
+shared layout silently sets the alt-stack size to zero; and a guard-page hit
+raises **SIGBUS on Darwin**, SIGSEGV on Linux, so the handler must take both or
+the message never prints on one host.

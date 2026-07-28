@@ -302,6 +302,12 @@ Flat below 1 MiB, ten-fold above it. Raise it for deeply recursive work; lower i
 only to save address space, because it will not save memory. macOS shows no such
 step, which is exactly why the number had to come from both hosts.
 
+An overflow is named rather than guessed at: running off the bottom of a fiber stack
+faults into the guard page, and a handler on an alternate stack prints
+`manticore: fiber stack overflow (raise MANTICORE_FIBER_STACK)` before letting the
+process die exactly as it would have. Any other fault is passed straight through, so a
+genuine null dereference still looks like one.
+
 The ceiling that arrives first is neither of those columns: each fiber costs **two
 mappings** (the guard page splits the VMA), so a stock Linux `vm.max_map_count` of
 65530 stops a process near 32 000 concurrent tasks whatever the stack size. Raise
@@ -484,9 +490,7 @@ is still there.
 Also: `writev`/`io_uring` to break the 2-syscall floor · `resolv.conf`'s `timeout:`/`attempts:`
 options (the search list and `ndots` are in; those two still hard-code 2 s × 2) · the search
 list applied to `/etc/hosts` the way glibc does · off-thread file I/O · shared-memory
-multithreading (a future compiler superset) · naming a **guard-page hit**: an overflowing
-fiber stack faults into the `PROT_NONE` page and dies as a bare SIGSEGV, where a `sigaltstack`
-handler could say "fiber stack overflow".
+multithreading (a future compiler superset).
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
 return type. The only piece here that cannot be a library: it needs the compiler to split

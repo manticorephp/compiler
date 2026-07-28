@@ -92,11 +92,14 @@ class Fiber
         $prev = \__mir_fiber_current();
         $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
+        \__mir_fiber_guard_install();
+        \__mir_fiber_guard_set($base);
         \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
         if ($this->pendingEx !== null) {
             $e = $this->pendingEx;
             $this->pendingEx = null;
@@ -155,11 +158,13 @@ class Fiber
         $prev = \__mir_fiber_current();
         $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
+        \__mir_fiber_guard_set($this->stackBase);
         \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
         if ($this->pendingEx !== null) {
             $e = $this->pendingEx;
             $this->pendingEx = null;
@@ -178,11 +183,13 @@ class Fiber
         $prev = \__mir_fiber_current();
         $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
+        \__mir_fiber_guard_set($this->stackBase);
         \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
         if ($this->pendingEx !== null) {
             $e = $this->pendingEx;
             $this->pendingEx = null;
@@ -310,11 +317,13 @@ class Fiber
             $prev = \__mir_fiber_current();
             $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
             \__mir_fiber_set_current($this);
+            \__mir_fiber_guard_set($this->stackBase);
             \__mir_fiber_ctx_save($this->resumerCtx);
             \__mir_fiber_ctx_load($this->saveCtx);
             $r = \__mir_fiber_jump($this->fctx);
             $this->fctx = $r;
             \__mir_fiber_set_current($prev);
+            \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
             $this->pendingEx = null;   // the FiberExit terminated it; do not re-raise
         }
         if ($this->stackBase !== 0) {

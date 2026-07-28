@@ -89,6 +89,8 @@ observable from library code:
   arrives with the joiner's file and line. First failure only; the cancellation wave that
   follows is not the culprit.
 - `Fiber::setStackSize()` / `MANTICORE_FIBER_STACK` — bytes of stack per fiber, default 1 MiB.
+  An overflow faults into the guard page and is NAMED (`fiber stack overflow`) by a handler on
+  an alternate stack; every other fault passes through untouched.
   MEASURED, not chosen: at 40 000 concurrent tasks on Linux, 8 MiB costs 6.55 GiB of RSS and
   1 MiB costs 0.65 GiB, with 512 and 256 KiB costing exactly the same — flat below 1 MiB,
   ten-fold above it. Two mappings go per fiber (the guard page splits the VMA), so a stock
