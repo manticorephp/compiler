@@ -428,6 +428,16 @@ final class Type
                 && \strncmp($t->class ?? '', '__closure_', 10) === 0);
     }
 
+    /**
+     * A kind whose values are always heap pointers and can therefore ride a
+     * tagged cell losslessly. The union of two DIFFERENT such kinds is a cell.
+     */
+    private static function isContainerish(string $kind): bool
+    {
+        return $kind === self::KIND_ARRAY || $kind === self::KIND_OBJ
+            || $kind === self::KIND_UNION || $kind === self::KIND_CELL;
+    }
+
     public function unionWith(Type $other): Type
     {
         // Object arms (either side already a union) join into a static object
@@ -467,6 +477,21 @@ final class Type
             }
             if ($other->kind === self::KIND_NULL && $this->kind === self::KIND_STRING) {
                 return $this;
+            }
+            // Two DIFFERENT container-ish kinds: the honest top is a CELL, not
+            // `unknown`. A cell is self-describing — it carries its tag, so
+            // instanceof / is_array / gettype still answer — while `unknown`
+            // rides RAW and is indistinguishable from an int at every consumer,
+            // AND carries no repr, so the value is neither boxed nor RETAINED
+            // when it is re-stored. That last part is what crashed symfony's
+            // Table: `array_merge($this->headers, [$divider], $this->rows)`
+            // joined `vec[vec[string]]` with `vec[obj<TableSeparator>]`, the
+            // element lattice gave `unknown`, and the merged array kept a raw
+            // pointer to a separator the caller's temporary literal then freed.
+            // Scalars are deliberately NOT included: a null|int / numeric-cell
+            // merge has its own discipline elsewhere that must not be perturbed.
+            if (self::isContainerish($this->kind) && self::isContainerish($other->kind)) {
+                return self::cell();
             }
             return self::unknown();
         }
