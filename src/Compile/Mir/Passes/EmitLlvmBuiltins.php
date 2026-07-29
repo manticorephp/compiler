@@ -503,7 +503,18 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $boxed = $this->ssa->allocReg();
         $ek = $elem->kind;
+        // A pointer-shaped element is boxed BY POINTER into the fresh cell array,
+        // so that array becomes a co-owner and must take a reference — its own
+        // release runs __mir_cell_drop per element. Without it the rebuild
+        // borrowed: `$out = ['iov' => $iovOut]` (a `mixed`-valued literal) boxed
+        // socket_recvmsg's vec[string], the source local's scope-exit release
+        // freed the bytes, and the caller var_dumped `string(0) ""`. It survived
+        // only on the double retain the append site used to pay for a string
+        // ternary. A RECURSIVELY rebuilt nested array is fresh (+1) — not
+        // retained; scalars have nothing to own.
+        $elemRetain = '';
         if ($ek === Type::KIND_STRING) {
+            $elemRetain = $this->discardReleaseFlavor($elem);
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
@@ -514,6 +525,9 @@ trait EmitLlvmBuiltins
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
         } elseif ($ek === Type::KIND_OBJ) {
+            // discardReleaseFlavor answers '' for the header-less classes (a
+            // #[Struct] / closure / enum ordinal / Ffi\Ptr) — never rc-touch those.
+            $elemRetain = $this->discardReleaseFlavor($elem);
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
@@ -524,6 +538,8 @@ trait EmitLlvmBuiltins
                 // cells) — box it as a plain array cell. Rebuilding would re-box
                 // each already-boxed cell (else-branch box_int) → double-box
                 // garbage (a vec of mixed assocs read raw by var_dump/json).
+                // Boxed by pointer ⇒ co-owned, at the depth its drop walks.
+                $elemRetain = $this->discardReleaseFlavor($elem);
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
@@ -540,6 +556,7 @@ trait EmitLlvmBuiltins
         } else {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
         }
+        if ($elemRetain !== '') { $out .= $this->rcRetainReg($ev, $elemRetain); }
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
