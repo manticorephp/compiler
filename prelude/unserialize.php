@@ -63,9 +63,11 @@ function __mc_un_lit(\__McUnSt $st, string $lit): void
     $st->p = $st->p + $n;
 }
 
-/** `s:<len>:"<bytes>";` — LEN is a BYTE count, so the body is taken by length,
- *  never scanned for the closing quote (a serialized string may contain `";`). */
-function __mc_un_str(\__McUnSt $st): string
+/** `<len>:"<bytes>"` plus `$tail` — LEN is a BYTE count, so the body is taken
+ *  by length, never scanned for the closing quote (a serialized string may
+ *  contain `";`). `$tail` is `";` for a string value and `":` for the class
+ *  name in an `O:` header. */
+function __mc_un_qstr(\__McUnSt $st, string $tail): string
 {
     $len = (int)__mc_un_upto($st, ':');
     if (!$st->ok || $len < 0) { $st->ok = false; return ''; }
@@ -74,8 +76,26 @@ function __mc_un_str(\__McUnSt $st): string
     if ($st->p + $len > strlen($st->s)) { $st->ok = false; return ''; }
     $body = substr($st->s, $st->p, $len);
     $st->p = $st->p + $len;
-    __mc_un_lit($st, '";');
+    __mc_un_lit($st, $tail);
     return $body;
+}
+
+function __mc_un_str(\__McUnSt $st): string
+{
+    return __mc_un_qstr($st, '";');
+}
+
+/** `"\0*\0prop"` / `"\0Cls\0prop"` back to `prop`. The fill arms are generated
+ *  from the class table and compare plain names, so demangling happens once,
+ *  here, rather than once per arm. */
+function __mc_un_demangle(string $k): string
+{
+    if (strlen($k) === 0) { return $k; }
+    $nul = chr(0);
+    if (substr($k, 0, 1) !== $nul) { return $k; }
+    $q = strpos($k, $nul, 1);
+    if ($q === false) { return $k; }
+    return substr($k, $q + 1);
 }
 
 /** An array KEY: `i:<n>;` or `s:<len>:"…";`. Keys are not values, so no slot. */
@@ -157,6 +177,52 @@ function __mc_unser_val(\__McUnSt $st): mixed
         $st->vars[$slot] = $arr;
         return $arr;
     }
+    if ($t === 'O:') {
+        $st->p = $st->p + 2;
+        $cls = __mc_un_qstr($st, '":');
+        $cnt = (int)__mc_un_upto($st, ':');
+        __mc_un_lit($st, '{');
+        if (!$st->ok) { return null; }
+        $o = __mc_unser_alloc($cls, $st);
+        if (!$st->ok) { return null; }
+        // Registered BEFORE its properties are read — this is what terminates
+        // `O:1:"C":1:{s:4:"self";r:1;}` instead of recursing forever.
+        $st->vars[$slot] = $o;
+        // A class with __unserialize wants the WHOLE array; every other class is
+        // filled key by key, STRAIGHT out of the parser. Routing through a
+        // collected array first would erase the values: its keys are cells, so
+        // the array types unknown, and a `foreach` value out of it no longer
+        // boxes — the typed-slot store then wrote the raw word (an array
+        // property got the tagged bits, an enum property the singleton pointer
+        // instead of its ordinal). Handing `__mc_unser_val`'s `mixed` result
+        // directly to a `mixed` parameter keeps it a CELL.
+        $magic = __mc_unser_has_magic($o);
+        $props = [];
+        $i = 0;
+        while ($i < $cnt) {
+            if (!$st->ok) { return null; }
+            $k = __mc_un_key($st);
+            $val = __mc_unser_val($st);
+            if (!$st->ok) { return null; }
+            $kk = __mc_un_demangle((string)$k);
+            if ($magic) { $props[$kk] = $val; }
+            else { __mc_unser_set($o, $kk, $val); }
+            $i = $i + 1;
+        }
+        __mc_un_lit($st, '}');
+        if (!$st->ok) { return null; }
+        if ($magic) { __mc_unser_magic($o, $props); }
+        return $o;
+    }
+    if ($t === 'E:') {
+        $st->p = $st->p + 2;
+        $spec = __mc_un_qstr($st, '";');
+        if (!$st->ok) { return null; }
+        $e = __mc_unser_enum($spec, $st);
+        if (!$st->ok) { return null; }
+        $st->vars[$slot] = $e;
+        return $e;
+    }
     if ($t === 'r:' || $t === 'R:') {
         $st->p = $st->p + 2;
         $k = (int)__mc_un_upto($st, ';');
@@ -164,6 +230,15 @@ function __mc_unser_val(\__McUnSt $st): mixed
         if (!array_key_exists($k, $st->vars)) { $st->ok = false; return null; }
         return $st->vars[$k];
     }
+    $st->ok = false;
+    return null;
+}
+
+/** A class name the closed-world table does not know. Ф6 replaces this with
+ *  php's `__PHP_Incomplete_Class`; for now the parse fails, which unwinds to
+ *  `false`. */
+function __mc_unser_unknown(string $cls, \__McUnSt $st): mixed
+{
     $st->ok = false;
     return null;
 }

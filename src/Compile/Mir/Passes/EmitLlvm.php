@@ -1385,6 +1385,12 @@ final class EmitLlvm implements EmitVisitor
         foreach ($this->classes as $name => $cd) {
             if ($this->classIsA($name, $target)) { $ids[] = $cd->classId; }
         }
+        // An enum is not in the class table, so `$v instanceof Suit` on an ERASED
+        // receiver had no id to match and read false — while the same test on a
+        // typed receiver folds at compile time and reads true. The case
+        // singletons all carry the enum's own class_id (see biEnumName), which is
+        // exactly the id to accept here.
+        if (isset($this->enums[$target])) { $ids[] = $this->enums[$target]->classId; }
         return $ids;
     }
 

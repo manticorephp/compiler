@@ -212,7 +212,12 @@ trait EmitLlvmObjects
         $obj = $this->lastValue;
         // ctor call — resolve through the parent chain (a subclass
         // with no ctor inherits its parent's).
-        $ctorClass = $this->resolveMethodClass($n->class, '__construct');
+        // `__mc_new_uninit('C')`: the instance exists and is zero-initialised by
+        // repr, but NO constructor runs — not the user's, and not the one
+        // synthesised for defaulted properties. php's unserialize fills the
+        // slots itself, and a default written here would be overwritten anyway
+        // (or, worse, kept for a key the stream did not carry).
+        $ctorClass = $n->bare ? '' : $this->resolveMethodClass($n->class, '__construct');
         if ($ctorClass !== '') {
             $objInt = $this->ssa->allocReg();
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
@@ -558,13 +563,26 @@ trait EmitLlvmObjects
         $out = $this->emitNode($pa->object);
         $out .= $this->cellToPtr();
         $objPtr = $this->lastValue;
+        // An ENUM case reaching here through an erased carrier — `$e->name` where
+        // `$e` is `mixed` (a `unserialize()` result, a mixed param, a generator
+        // yield). The singleton is not a normal object: it has no `name` slot,
+        // its ordinal sits at +16, and the value comes from a global table (the
+        // typed path, emitEnumProp, already knows this). Without arms here the
+        // read fell through to a bag read on a non-bag object and faulted.
+        $enumArms = [];
+        if ($prop === 'name' || $prop === 'value') {
+            foreach ($this->enums as $ename => $ed) {
+                if ($prop === 'value' && $this->edBacking($ed) === '') { continue; }
+                $enumArms[$ename] = $ed;
+            }
+        }
         // Pure dynamic-bag receiver — no concrete holder of $prop.
-        if (\count($fixed) === 0) {
+        if (\count($fixed) === 0 && $enumArms === []) {
             return $out . $this->emitBagReadInto($pa, $objPtr);
         }
         // Static fast path: a single holder and no bag class anywhere, so the
         // cell can only be that class — read the slot with no class_id switch.
-        if (\count($fixed) === 1 && !$hasBag) {
+        if (\count($fixed) === 1 && !$hasBag && $enumArms === []) {
             return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
         }
         // Runtime dispatch on the object's class_id.
@@ -581,6 +599,14 @@ trait EmitLlvmObjects
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($enumArms as $ename => $ed) {
+            $lbl = $this->ssa->allocLabel('cp.enum');
+            $switch .= '    i64 ' . (string)$ed->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitEnumCellPropLoad($objPtr, $ename, $ed, $prop);
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
@@ -613,12 +639,42 @@ trait EmitLlvmObjects
     private function emitFixedPropLoad(string $objPtr, ClassDef $cd, string $prop): string
     {
         $off = $cd->propertyOffset($prop);
+        $pt = $cd->propertyTypes[$prop] ?? null;
         $gep = $this->ssa->allocReg();
         $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$off . "\n";
-        $out .= $this->emitSlotLoad($gep, $cd, $prop, $cd->propertyTypes[$prop] ?? Type::unknown());
+        $out .= $this->emitSlotLoad($gep, $cd, $prop, $pt ?? Type::unknown());
         $ld = $this->lastValue;
-        $out .= $this->boxRawValue($ld, $cd->propertyTypes[$prop] ?? null);
+        // This caller's contract is a TAGGED CELL, and two slot shapes are ones
+        // boxRawValue deliberately hands back RAW (its other caller wants that):
+        //  - an ENUM slot holds an ORDINAL, passed through so a TYPED consumer can
+        //    index the case tables; an erased reader needs the singleton, or
+        //    `$e->s === Suit::Spades` compares an ordinal against a cell.
+        //  - a bare `array` hint erases its element to UNKNOWN, and an unknown is
+        //    passed through as if already boxed — so the raw buffer pointer got
+        //    var_dumped as a double, float(2.1490356046E-314).
+        if ($pt !== null && $this->isEnumType($pt)) {
+            $this->rt->needsTagged = true;
+            $pp = '';
+            $out .= $this->emitEnumSingletonPtr((string)$pt->class, $ld, $pp);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if (($cd->propertyArrayHinted[$prop] ?? false)
+            && ($pt === null || $pt->kind === Type::KIND_UNKNOWN)) {
+            $this->rt->needsTagged = true;
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $ld . " to ptr\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $p . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $this->boxRawValue($ld, $pt);
         return $out;
     }
 
@@ -725,9 +781,7 @@ trait EmitLlvmObjects
             if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
             if ($cd->usesBag()) { $hasBag = true; }
         }
-        $out = $this->emitNode($n->object);
-        if ($n->object->type->kind === Type::KIND_CELL) { $out .= $this->cellToPtr(); }
-        else { $out .= $this->coerceToPtr(); }
+        $out = $this->emitObjPtrOf($n->object);
         $objPtr = $this->lastValue;
         // Evaluate the RHS once; keep both a boxed-cell form (for cell slots) and
         // the payload retained once (the object takes an owning reference — only
@@ -890,6 +944,44 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `$e->name` / `$e->value` for an enum case reached through an ERASED
+     * receiver: `$objPtr` is the untagged singleton, whose ordinal lives at +16
+     * (the layout emitEnumCellSingletons writes). Same tables as
+     * {@see emitEnumProp}, but the result is BOXED — every other arm of
+     * {@see emitCellPropertyRead} yields a cell and the caller reads one.
+     */
+    private function emitEnumCellPropLoad(string $objPtr, string $ecls, \Compile\Mir\EnumDef $ed, string $prop): string
+    {
+        $this->rt->needsTagged = true;
+        $n = (string)\count($ed->caseNames);
+        $g0 = $this->ssa->allocReg();
+        $out = '  ' . $g0 . ' = getelementptr i8, ptr ' . $objPtr . ", i64 16\n";
+        $ord = $this->ssa->allocReg();
+        $out .= '  ' . $ord . ' = load i64, ptr ' . $g0 . "\n";
+        if ($prop === 'value' && $this->edBacking($ed) === 'int') {
+            $gep = $this->ssa->allocReg();
+            $out .= '  ' . $gep . ' = getelementptr inbounds [' . $n . ' x i64], ptr @'
+                  . $this->mangle($ecls) . '__values, i64 0, i64 ' . $ord . "\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = load i64, ptr ' . $gep . "\n";
+            $b = $this->ssa->allocReg();
+            $out .= '  ' . $b . ' = call i64 @__manticore_box_int(i64 ' . $r . ")\n";
+            $this->lastValue = $b; $this->lastValueType = 'i64';
+            return $out;
+        }
+        $table = ($prop === 'value') ? '__values' : '__names';
+        $gep = $this->ssa->allocReg();
+        $out .= '  ' . $gep . ' = getelementptr inbounds [' . $n . ' x ptr], ptr @'
+              . $this->mangle($ecls) . $table . ', i64 0, i64 ' . $ord . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load ptr, ptr ' . $gep . "\n";
+        $b = $this->ssa->allocReg();
+        $out .= '  ' . $b . ' = call i64 @__manticore_box_ptr(ptr ' . $r . ")\n";
+        $this->lastValue = $b; $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** `$enumCase->name` / `->value` via the global tables. */
     private function emitEnumProp(PropertyAccess_ $pa, string $ecls): string
     {
@@ -998,7 +1090,14 @@ trait EmitLlvmObjects
         $roCls = $n->object->type->class ?? '';
         if ($roCls !== '') {
             $roDecl = $this->readonlyDeclClass($roCls, $n->property);
-            if ($roDecl !== '' && !\str_starts_with($this->frame->name, $roDecl . '__')) {
+            // The generated unserialize filler is exempt: php's unserialize
+            // INITIALISES a readonly property on a freshly-created object, and
+            // the filler runs in declaring scope by construction (it is written
+            // from the class table, one arm per class, and reached only from
+            // `unserialize`). The guard is a frame-NAME prefix test, not a scope
+            // model, so the exemption has to be spelled out here.
+            if ($roDecl !== '' && !\str_starts_with($this->frame->name, $roDecl . '__')
+                && !\str_starts_with($this->frame->name, '__mc_unser_set')) {
                 $out = $this->emitNode($n->value);
                 $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
                 // Supply every ctor arg — emitNewObj does NOT pad defaults (that
@@ -1124,7 +1223,17 @@ trait EmitLlvmObjects
             // `return` path and per-element in emitStoreElementUnified;
             // unboxCellToType no-ops for a non-concrete target.
             if ($n->value->type->kind === Type::KIND_CELL && $propType !== null) {
-                $out .= $this->unboxCellToType($propType);
+                // A bare `array` hint lowers its element to unknown, so propType
+                // is KIND_UNKNOWN and unboxCellToType would no-op — leaving the
+                // TAGGED word in a slot the rest of the compiler reads as a raw
+                // array pointer (emitClone already treats propertyArrayHinted
+                // that way). var_dump of such a property printed the tagged bits
+                // as an int. Unbox it as the array it is.
+                $arrHinted = $pcls !== '' && isset($this->classes[$pcls])
+                    && ($this->classes[$pcls]->propertyArrayHinted[$n->property] ?? false);
+                $out .= ($arrHinted && $propType->kind === Type::KIND_UNKNOWN)
+                    ? $this->unboxCellToType(Type::vec(Type::unknown()))
+                    : $this->unboxCellToType($propType);
             }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
@@ -1280,6 +1389,26 @@ trait EmitLlvmObjects
         return $std === null ? 16 : $std->bagOffset();
     }
 
+    /**
+     * Emit `$obj` and leave its INSTANCE POINTER in lastValue. A CELL receiver
+     * carries a NaN-boxed word, so it must have the tag stripped — a bare
+     * `coerceToPtr` inttoptr's the tagged value and every offset computed from
+     * it (a bag slot, a class_id load) lands in the weeds.
+     *
+     * The one owner of "object node → pointer"; {@see emitCellStoreProperty} had
+     * the only correct copy of this and the two dyn-property dispatch fallbacks
+     * did not, which made `$o->$k = $v` on a `mixed` stdClass a wild write.
+     */
+    private function emitObjPtrOf(Node $obj): string
+    {
+        $out = $this->emitNode($obj);
+        $k = $obj->type->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
+            return $out . $this->cellToPtr();
+        }
+        return $out . $this->coerceToPtr();
+    }
+
     /** Emit the object → bag-assoc ptr; leaves bag ptr + slot gep regs. */
     private function emitBagPtr(Node $objNode, string $objPtr, int $bagOff): string
     {
@@ -1394,8 +1523,7 @@ trait EmitLlvmObjects
             $out .= $nextL . ":\n";
         }
         if ($bagCd !== null && $bagCd->usesBag()) {
-            $out .= $this->emitNode($n->object);
-            $out .= $this->coerceToPtr();
+            $out .= $this->emitObjPtrOf($n->object);
             $objPtr = $this->lastValue;
             $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $reg = $this->ssa->allocReg();
@@ -1594,8 +1722,7 @@ trait EmitLlvmObjects
             $out .= $nextL . ":\n";
         }
         if ($bagCd !== null && $bagCd->usesBag()) {
-            $out .= $this->emitNode($n->object);
-            $out .= $this->coerceToPtr();
+            $out .= $this->emitObjPtrOf($n->object);
             $objPtr = $this->lastValue;
             $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $bagP = $this->bagPtrReg;

@@ -655,6 +655,20 @@ final class LowerFromAst implements Pass
             }
         }
 
+        // unserialize()'s object arms — the reader's half of the above: an
+        // allocator that skips __construct, a per-class slot filler, and the
+        // enum spec -> case-singleton map.
+        if ($this->includeUnserialize) {
+            $unProg = \Parser\Parser::parseSource("<?php\n" . $this->unserSrc());
+            foreach ($unProg->statements as $ustmt) {
+                if ($ustmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$ustmt->decl->name] = $ustmt->decl;
+                $ufn = $this->lowerFunction($ustmt->decl);
+                $ufn->isPrelude = true;
+                $module->addFunction($ufn);
+            }
+        }
+
         // Reflection Ф2: an invoke trampoline per (user class, method) + ctor,
         // synthesized from the now-complete class table (same point + pattern as
         // __mir_dump_object). Gated on the program reflecting at all; a

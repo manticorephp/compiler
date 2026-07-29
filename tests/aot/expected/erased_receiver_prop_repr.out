@@ -1,0 +1,42 @@
+typed receiver:
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(3) "two"
+  [2]=>
+  array(1) {
+    [0]=>
+    int(3)
+  }
+}
+bool(true)
+int(7)
+string(3) "txt"
+float(2.5)
+bool(true)
+erased receiver:
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(3) "two"
+  [2]=>
+  array(1) {
+    [0]=>
+    int(3)
+  }
+}
+bool(true)
+int(7)
+string(3) "txt"
+float(2.5)
+bool(true)
+string(6) "Spades"
+int(0)
+int(3)
+array(1) {
+  [0]=>
+  int(1)
+}
+bool(true)
