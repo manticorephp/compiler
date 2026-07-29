@@ -2143,11 +2143,13 @@ final class UnifiedArrayRuntime
         $e->store($newcap, $this->hdr($e, $nu, MemoryAbi::ARRAY_CAPACITY_OFFSET));
         $e->store($len, $this->hdr($e, $nu, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
         $e->store($rc, $this->hdr($e, $nu, MemoryAbi::ARRAY_RC_OFFSET));
-        // Carry the source's element-repr bits across the packed→hashed promote
-        // (OR them onto HASHED) — else a stamped erased array loses its repr on
-        // the first string-keyed insert and its release stops dropping.
+        // Carry the source's element-repr AND element-kind-hint bits across the
+        // packed→hashed promote (OR them onto HASHED) — else a stamped erased
+        // array loses its repr on the first string-keyed insert and its release
+        // stops dropping, and a reader loses the shape it decodes by.
         $srcFlags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $srcRepr = $e->and_($srcFlags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $srcRepr = $e->and_($srcFlags, Value::int(Type::i64(),
+            MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
         $e->store($e->or_($srcRepr, Value::int(Type::i64(), MemoryAbi::ARRAY_FLAG_HASHED)), $this->hdr($e, $nu, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $iSlot = $e->alloca(Type::i64(), 'i');
         $e->store(Value::int(Type::i64(), 0), $iSlot);
@@ -3241,7 +3243,7 @@ final class UnifiedArrayRuntime
         $len = $chk->call('__mir_array_live_len', Type::i64(), [$arr]);
         $chk->brIf($chk->icmp('sle', $len, Value::int(Type::i64(), 0)), $z, $go);
         $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $repr = $go->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $repr = $go->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
         $v = $go->call($inner, Type::i64(), [$arr]);
         $go->ret($go->call('__mir_box_by_repr', Type::i64(), [$v, $repr]));
         $z->ret(Value::int(Type::i64(), self::CELL_NULL));
@@ -3258,16 +3260,19 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_box_by_repr(val, repr) -> i64` — NaN-box one element by the repr
-     * code its array stamped. Repr 0 means "the static type says", which an
-     * erased caller does not have; the carrier is passed through untouched
-     * there, exactly as a CELL element is.
+     * `__mir_box_by_repr(val, hint) -> i64` — NaN-box one element by the
+     * element-KIND hint its array stamped ({@see
+     * MemoryAbi::ARRAY_ELEM_HINT_MASK}, masked but still shifted). Hint 0 means
+     * "the static type says", which an erased caller does not have; the carrier
+     * is passed through untouched there, exactly as a CELL element is. The hint
+     * is deliberately NOT the ownership repr — a concrete-element array stamps
+     * shape without ever claiming its elements are droppable.
      */
     private function emitBoxByRepr(): void
     {
         $fn = $this->module->func('__mir_box_by_repr', Type::i64());
         $val = $fn->param(Type::i64(), 'val');
-        $repr = $fn->param(Type::i64(), 'repr');
+        $repr = $fn->param(Type::i64(), 'hint');
         $e = $fn->block('entry');
         $chkobj = $fn->block('chkobj');
         $chkarr = $fn->block('chkarr');
@@ -3278,11 +3283,11 @@ final class UnifiedArrayRuntime
         // Tagged inline rather than through __manticore_box_*: those live in the
         // tagged PRELUDE, which is demand-gated and need not be linked into a
         // module that only ever shifts an array.
-        $e->brIf($e->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_STR)), $dostr, $chkobj);
+        $e->brIf($e->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR)), $dostr, $chkobj);
         $dostr->ret($this->tagPtr($dostr, $val, self::CELL_STR));
-        $chkobj->brIf($chkobj->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_OBJ)), $doobj, $chkarr);
+        $chkobj->brIf($chkobj->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ)), $doobj, $chkarr);
         $doobj->ret($this->tagPtr($doobj, $val, self::CELL_OBJ));
-        $chkarr->brIf($chkarr->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_ARR)), $doarr, $asis);
+        $chkarr->brIf($chkarr->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR)), $doarr, $asis);
         $doarr->ret($this->tagPtr($doarr, $val, self::CELL_ARR));
         $asis->ret($val);
     }

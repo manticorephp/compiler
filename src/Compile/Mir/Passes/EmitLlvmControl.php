@@ -752,6 +752,13 @@ trait EmitLlvmControl
         $valSlot = $this->locals->slots[$fe->valueVar];
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $valAddr . "\n";
+        // ⚠ NOT decoded by the array's element hint, even on the CELL channel.
+        // A decode has to be paired with a re-ENCODE at the store, and the
+        // value var is routinely written back into a raw-repr array:
+        // `uasort` decorates `foreach ($arr as $k => $v)` into records and
+        // rebuilds `$arr` from them, so a tagged $v ends up stored in a
+        // `assoc[string]` the caller then releases by pointer (natsort
+        // SIGSEGV). Pairing the two is the remaining half of this epic.
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {
             $kSlot = $this->locals->slots[$fe->keyVar];

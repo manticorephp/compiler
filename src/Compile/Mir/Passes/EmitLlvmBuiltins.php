@@ -3019,8 +3019,20 @@ trait EmitLlvmBuiltins
         $useCell = $elem === null || $elem->kind !== Type::KIND_STRING;
         $out .= $this->emitNode($arr);
         if ($useCell) {
-            $out .= $this->boxToCell($arr->type);
-            $out .= $this->cellToPtr();
+            // An ERASED carrier must NOT go through boxToCell: with no static
+            // type to dispatch on it falls through to __manticore_box_int,
+            // whose 48-bit fit test fails on an already-tagged word and takes
+            // the HEAP arm — implode then read a fresh malloc(8) as an array and
+            // answered "". The word is already either a tagged cell or a raw
+            // pointer, and the 48-bit mask is the identity on the raw one;
+            // implode_cell decodes each element by the array's own repr.
+            if ($arr->type->kind === Type::KIND_UNKNOWN) {
+                $out .= $this->coerceToI64();
+                $out .= $this->cellToPtr();
+            } else {
+                $out .= $this->boxToCell($arr->type);
+                $out .= $this->cellToPtr();
+            }
             $vec = $this->lastValue;
             $this->rt->needsTaggedToStr = true;
             $this->rt->needsImplodeCell = true;

@@ -425,8 +425,11 @@ trait EmitLlvmArrays
         }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
-        // Self-describe a cell-valued literal (see emitArrayLitDirect).
+        // Self-describe a cell-valued literal, and record the element SHAPE for
+        // every rc-shaped one (see emitArrayLitDirect).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
+        $litHint = $this->elementHintCodeForType($al->type->element);
+        if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($res, $litHint); }
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
         return $out;
@@ -528,7 +531,12 @@ trait EmitLlvmArrays
         // release/COW reaching it through the plain repr helper — e.g. this
         // record nested in an erased `vec[unknown]` — still drops its boxed
         // cells. (A typed-flavor release ignores the bits; no double drop.)
+        // The HINT rides alongside for every rc-shaped element type: it says
+        // what the elements are, so an erased READER can decode a raw one
+        // (symfony's Table rows are a concrete `vec[string]` read as cells).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
+        $litHint = $this->elementHintCodeForType($al->type->element);
+        if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($arr, $litHint); }
         $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
@@ -582,6 +590,13 @@ trait EmitLlvmArrays
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // ⚠ The element is NOT decoded by the array's hint here. Two consumers
+        // proved a plain subscript cannot be: an UNKNOWN result is deref'd raw
+        // (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }` returns
+        // the word into a string slot), and a CELL result is written back into
+        // a raw-repr array by the sort family. The decode lives where a value
+        // is genuinely CONSUMED as a cell — array_pop/array_shift and implode —
+        // until the store side learns to re-encode.
         if ($self->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -606,6 +621,13 @@ trait EmitLlvmArrays
      * stamp lets the plain repr release drop it. Homogeneity is guaranteed
      * upstream: a heterogeneous erased array is promoted to vec[cell] (the
      * array-repr-conflict check), so it never reaches this raw path.
+     *
+     * ⚠ OWNERSHIP, not shape — a concrete-element array must NOT be stamped
+     * here even though its elements are perfectly describable: `uasort` moves
+     * them into a fresh buffer and writes it back WITHOUT retaining, so a
+     * stamped source frees the strings the result still points at
+     * (`natsort` over a `vec[string]`). Shape is the separate hint nibble,
+     * {@see elementHintCodeForType}.
      */
     private function erasedReprCode(StoreElement $se): ?int
     {
@@ -636,6 +658,64 @@ trait EmitLlvmArrays
             return \Compile\MemoryAbi::ARRAY_REPR_OBJ;
         }
         return null;
+    }
+
+    /**
+     * The element-KIND HINT for an element type — what the elements ARE, said
+     * without any claim about ownership ({@see MemoryAbi::ARRAY_ELEM_HINT_MASK}).
+     * The exclusions mirror {@see EmitLlvm::discardReleaseFlavor}: a decoded
+     * cell is later DROPPED by tag, so anything without the rc header that tag
+     * implies — `#[Struct]`, `Ffi\Ptr`, a closure, an enum singleton, a
+     * Generator frame (str-style header, object tag) — must stay hintless and
+     * ride raw, exactly as it does today. Scalars have nothing to decode.
+     */
+    private function elementHintCodeForType(?Type $el): ?int
+    {
+        if ($el === null) { return null; }
+        $k = $el->kind;
+        if ($k === Type::KIND_STRING) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR; }
+        if ($k === Type::KIND_ARRAY) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR; }
+        if ($k === Type::KIND_CELL) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL; }
+        if ($k === Type::KIND_OBJ) {
+            $cls = $el->class;
+            if ($cls === null) { $cls = ''; }
+            if ($cls === 'Ffi\\Ptr' || $cls === 'Generator') { return null; }
+            if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return null; }
+            if ($this->isClosureClass($cls)) { return null; }
+            if ($this->isEnumClass($cls)) { return null; }
+            return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
+        }
+        return null;
+    }
+
+    /** The hint that matches an ownership repr code — the two nibbles are
+     *  stamped together on the erased path so a reader can decode what the
+     *  release will drop. */
+    private function hintForReprCode(int $repr): ?int
+    {
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_STR) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR; }
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_OBJ) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ; }
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_ARR) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR; }
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_CELL) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL; }
+        return null;
+    }
+
+    /** Emit `flags = (flags & ~HINT_MASK) | code` on `$arrPtr` — record what
+     *  the elements ARE. Ownership-free: no release/retain/cow reads it. */
+    private function emitElemHintStamp(string $arrPtr, int $code): string
+    {
+        $fo = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
+        $fp = $this->ssa->allocReg();
+        $out  = '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $arrPtr . ', i64 ' . $fo . "\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $fp . "\n";
+        $cl = $this->ssa->allocReg();
+        $out .= '  ' . $cl . ' = and i64 ' . $fl . ', '
+              . (string)(~\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK) . "\n";
+        $nw = $this->ssa->allocReg();
+        $out .= '  ' . $nw . ' = or i64 ' . $cl . ', ' . (string)$code . "\n";
+        $out .= '  store i64 ' . $nw . ', ptr ' . $fp . "\n";
+        return $out;
     }
 
     /** Emit `flags = (flags & ~REPR_MASK) | code` on `$arrPtr` — stamp the
@@ -864,6 +944,29 @@ trait EmitLlvmArrays
         // release/retain/cow drop/co-own this erased array's raw elements.
         $reprCode = $this->erasedReprCode($se);
         if ($reprCode !== null) { $out .= $this->emitReprStamp($next, $reprCode); }
+        // The SHAPE hint is stamped whatever the ownership answer was: an
+        // erased store describes the value it just wrote, a concrete container
+        // describes its declared element, and a boxed (cell) store says so.
+        $hint = null;
+        if ($reprCode !== null) {
+            $hint = $this->hintForReprCode($reprCode);
+        } elseif ($boxVal) {
+            $hint = \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL;
+        } else {
+            $et = $se->array->type->element;
+            if ($et !== null && $et->kind !== Type::KIND_UNKNOWN) {
+                $hint = $this->elementHintCodeForType($et);
+            } else {
+                // An ERASED container is described by what actually lands in
+                // it, and a value with no describable shape (a scalar, or an
+                // erased word) CLEARS the hint rather than leaving a stale one:
+                // a mixed array whose last claim was STR would hand a reader an
+                // integer to dereference.
+                $hint = $this->elementHintCodeForType($se->value->type);
+                if ($hint === null) { $hint = 0; }
+            }
+        }
+        if ($hint !== null) { $out .= $this->emitElemHintStamp($next, $hint); }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
         $this->lastValue = $val;
         $this->lastValueType = 'i64';

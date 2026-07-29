@@ -554,6 +554,24 @@ final class MemoryAbi
     public const ARRAY_REPR_CELL = 8;   // 4<<1 — boxed cells → __mir_cell_drop (tag dispatch)
 
     /**
+     * Bits 4-6: the ELEMENT-KIND HINT — what the elements ARE, with no claim
+     * about who owns them. The repr bits above cannot answer that question:
+     * they mean "this array drops its elements", which is exactly what the sort
+     * family relies on being FALSE (uasort moves elements into a fresh buffer
+     * and writes it back without retaining, so a stamped source would free the
+     * strings the result still points at). A CONCRETE-element array therefore
+     * stamps only the hint — its release keeps using the typed flavor — and an
+     * erased reader can still decode an element it finds through a cell channel
+     * ({@see UnifiedArrayRuntime::emitBoxByRepr}). Also in the low byte, so
+     * compaction's `and flags, 255` preserves it.
+     */
+    public const ARRAY_ELEM_HINT_MASK = 112;  // 0b111 << 4
+    public const ARRAY_ELEM_HINT_STR  = 16;   // 1<<4 — raw string pointers
+    public const ARRAY_ELEM_HINT_OBJ  = 32;   // 2<<4 — raw object pointers
+    public const ARRAY_ELEM_HINT_ARR  = 48;   // 3<<4 — raw nested arrays
+    public const ARRAY_ELEM_HINT_CELL = 64;   // 4<<4 — already self-describing
+
+    /**
      * Bits 8-35 of the flags word: the TOMBSTONE COUNTER (how many KIND_DELETED
      * entries the buffer carries). It used to run to bit 63; it is now bounded
      * so the INTERNAL POINTER can live above it. Every read must mask — an

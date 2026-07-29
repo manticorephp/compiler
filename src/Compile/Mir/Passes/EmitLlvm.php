@@ -571,6 +571,15 @@ final class EmitLlvm implements EmitVisitor
         // read between the passes. A grow (str_alloc + memcpy + release old) is
         // amortized O(1) — the initial `8*len+16` estimate rarely regrows.
         $out .= "init:\n";
+        // The elements of an ERASED carrier are not self-describing: a concrete
+        // `vec[string]` literal reaching here through an erased alias stores raw
+        // pointers, which tagged_to_str reads as a denormal double and joins as
+        // "". Decode each element by the array's own element-kind hint first
+        // (the identity at hint 0 and on an already-boxed CELL).
+        $out .= "  %flagsp = getelementptr inbounds i8, ptr %arr, i64 "
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %flagsw = load i64, ptr %flagsp\n";
+        $out .= "  %repr = and i64 %flagsw, " . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
         $out .= "  %seplen = call i64 @__mir_strlen(ptr %sep)\n";
         $out .= "  %c0 = shl i64 %len, 3\n";
         $out .= "  %cap0 = add i64 %c0, 16\n";
@@ -583,7 +592,8 @@ final class EmitLlvm implements EmitVisitor
         $out .= "loop:\n  %i = load i64, ptr %ip\n  %ld = icmp sge i64 %i, %len\n";
         $out .= "  br i1 %ld, label %fin, label %body\n";
         $out .= "body:\n";
-        $out .= "  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
+        $out .= "  %ev0 = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
+        $out .= "  %ev = call i64 @__mir_box_by_repr(i64 %ev0, i64 %repr)\n";
         $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
         $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
         $out .= "  %isfirst = icmp eq i64 %i, 0\n";
