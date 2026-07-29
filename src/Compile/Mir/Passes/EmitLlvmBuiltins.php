@@ -681,6 +681,8 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
         $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        // Every value is a boxed cell now — self-describing.
+        $out .= $this->emitElemHintStamp($dst, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         // A NULL source is a `?array`'s null, not an empty array: the rebuild
         // above read it through the zero-word and would hand back `array(0) {}`,
         // which is what php prints for `[]` — not for NULL. Carry the null
@@ -799,6 +801,9 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
         $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        // The rebuild wrote RAW values of the element type — record the shape.
+        $eHint = $this->elementHintCodeForType($elem);
+        if ($eHint !== null) { $out .= $this->emitElemHintStamp($dst, $eHint); }
         // Leave the RAW array pointer (concrete-array slot repr — arrays pass
         // raw), NOT a boxed array cell.
         $r = $this->ssa->allocReg();
@@ -1713,6 +1718,8 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
         $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        // The keys came back NaN-boxed (key_cell_at) — self-describing.
+        $out .= $this->emitElemHintStamp($dst, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         $this->lastValue = $dst;
         $this->lastValueType = 'ptr';
         return $out;
@@ -1817,6 +1824,9 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $cond . "\n" . $end . ":\n";
         $dst = $this->ssa->allocReg();
         $out .= '  ' . $dst . ' = load ptr, ptr ' . $slot . "\n";
+        // Every element was re-boxed above — say so, so an erased reader
+        // decodes them as cells instead of guessing ({@see elementHintCodeForType}).
+        $out .= $this->emitElemHintStamp($dst, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         $this->lastValue = $dst;
         $this->lastValueType = 'ptr';
         return $out;

@@ -2517,11 +2517,15 @@ trait EmitLlvmExpr
                 $out .= '  ' . $ni . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
                       . (string)\Compile\MemoryAbi::ARRAY_NEXT_INT_OFFSET . "\n";
                 $out .= '  store i64 1, ptr ' . $ni . "\n";
-                // The slot holds a boxed cell, so stamp the element repr.
+                // The slot holds a boxed cell, so stamp the element repr — and
+                // the SHAPE hint alongside it, so a reader decodes the element
+                // instead of guessing (the buffer's flags are freshly zeroed,
+                // so one store writes both nibbles).
                 $fg = $this->ssa->allocReg();
                 $out .= '  ' . $fg . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
                       . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
-                $out .= '  store i64 ' . (string)\Compile\MemoryAbi::ARRAY_REPR_CELL . ', ptr ' . $fg . "\n";
+                $out .= '  store i64 ' . (string)(\Compile\MemoryAbi::ARRAY_REPR_CELL
+                      | \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) . ', ptr ' . $fg . "\n";
                 $out .= '  store ptr ' . $one . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $endL . ":\n";

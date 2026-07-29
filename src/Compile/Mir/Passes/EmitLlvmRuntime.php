@@ -2081,6 +2081,7 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %isneg, label %notail, label %dotail\n";
             $out .= "notail:\n";
             $out .= "  %narr = load ptr, ptr %arrp\n";
+            $out .= $this->explodeHintStampIr('%narr', 'n');
             $out .= "  ret ptr %narr\n";
             $out .= "dotail:\n";
             $out .= "  %fpos = load i64, ptr %posp\n";
@@ -2094,9 +2095,30 @@ trait EmitLlvmRuntime
             $out .= "  %tsegi = ptrtoint ptr %tseg to i64\n";
             $out .= "  %arrc2 = load ptr, ptr %arrp\n";
             $out .= "  %arrn2 = call ptr @__mir_array_append(ptr %arrc2, i64 %tsegi)\n";
+            $out .= $this->explodeHintStampIr('%arrn2', 't');
             $out .= "  ret ptr %arrn2\n";
             $out .= "}\n";
         }
+        return $out;
+    }
+
+    /**
+     * Stamp `ARRAY_ELEM_HINT_STR` on an explode result — its segments are raw
+     * string pointers, and a reader that meets the array through an erased
+     * carrier has no other way to know that ({@see
+     * EmitLlvmArrays::elementHintCodeForType}). Named registers, so each return
+     * path needs its own `$sfx`.
+     */
+    private function explodeHintStampIr(string $arr, string $sfx): string
+    {
+        $out  = "  %hf$sfx = getelementptr inbounds i8, ptr $arr, i64 "
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %hv$sfx = load i64, ptr %hf$sfx\n";
+        $out .= "  %hc$sfx = and i64 %hv$sfx, "
+              . (string)(~\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK) . "\n";
+        $out .= "  %hs$sfx = or i64 %hc$sfx, "
+              . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_STR . "\n";
+        $out .= "  store i64 %hs$sfx, ptr %hf$sfx\n";
         return $out;
     }
 
