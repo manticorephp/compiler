@@ -586,13 +586,17 @@ trait EmitLlvmObjects
                 $enumArms[$ename] = $ed;
             }
         }
+        // Property overloading on an ERASED receiver: a class that declares
+        // __get but not $prop answers through the method, exactly as the typed
+        // path already does.
+        $magic = $this->magicPropHolders($prop, '__get');
         // Pure dynamic-bag receiver — no concrete holder of $prop.
-        if (\count($fixed) === 0 && $enumArms === []) {
-            return $out . $this->emitBagReadInto($pa, $objPtr);
+        if (\count($fixed) === 0 && $enumArms === [] && $magic === []) {
+            return $out . $this->emitBagReadByClassId($pa, $objPtr);
         }
         // Static fast path: a single holder and no bag class anywhere, so the
         // cell can only be that class — read the slot with no class_id switch.
-        if (\count($fixed) === 1 && !$hasBag && $enumArms === []) {
+        if (\count($fixed) === 1 && !$hasBag && $enumArms === [] && $magic === []) {
             return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
         }
         // Runtime dispatch on the object's class_id.
@@ -620,11 +624,19 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        foreach ($magic as $cname => $declCls) {
+            $lbl = $this->ssa->allocLabel('cp.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicCall($declCls, '__get', $objPtr, $prop, null);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $out .= $def . ":\n";
         if ($hasBag) {
-            $out .= $this->emitBagReadInto($pa, $objPtr);
+            $out .= $this->emitBagReadByClassId($pa, $objPtr);
         } else {
             $this->rt->needsTagged = true;
             $bn = $this->ssa->allocReg();
@@ -639,6 +651,48 @@ trait EmitLlvmObjects
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Whether ANY class in the table declares (or inherits) `$method`. */
+    private function anyClassDeclares(string $method): bool
+    {
+        foreach ($this->classes as $cd) {
+            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * Classes whose instances answer `$prop` through a magic method instead of a
+     * slot: they do not declare `$prop`, but they or an ancestor declare
+     * `$method`. Keyed by the CONCRETE class — its class_id is what the runtime
+     * switch matches — mapping to the class that actually DECLARES the method,
+     * which is the symbol to call.
+     *
+     * This is what lifts the "statically known receiver" limit: the typed path
+     * has always routed an undeclared property through __get/__set, but an
+     * erased receiver had no arm and fell through to a bag read (or a raw slot-16
+     * load) instead.
+     *
+     * A bag class is EXCLUDED. php consults the dynamic property first and only
+     * reaches __get when the name is absent; the bag read here has no "absent"
+     * answer to branch on, so keeping the existing bag behaviour is the honest
+     * choice rather than silently preferring the magic method.
+     *
+     * @return array<string,string>
+     */
+    private function magicPropHolders(string $prop, string $method): array
+    {
+        $holders = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { continue; }
+            if ($cd->isStruct || $cd->usesBag()) { continue; }
+            if ($this->isClosureClass($cd->name) || $this->isEnumClass($cd->name)) { continue; }
+            $decl = $this->resolveMethodClass($cd->name, $method);
+            if ($decl === '') { continue; }
+            $holders[$cd->name] = $decl;
+        }
+        return $holders;
     }
 
     /**
@@ -688,6 +742,70 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * The bag read for a receiver whose class is only known at runtime: dispatch
+     * on class_id over the classes that ACTUALLY have a bag, each at its OWN
+     * offset, and answer a null cell for anything else.
+     *
+     * The unconditional version read stdClass's offset on whatever arrived. On a
+     * bag-less object that slot is a declared property, so `isset($p->undeclared)`
+     * with an erased `$p` handed `int $real` to __mir_array_get_str as an assoc
+     * pointer and SIGSEGV'd.
+     */
+    private function emitBagReadByClassId(PropertyAccess_ $pa, string $objPtr): string
+    {
+        $bagCds = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->usesBag()) { $bagCds[] = $cd; }
+        }
+        $this->rt->needsTagged = true;
+        if ($bagCds === []) {
+            $bn = $this->ssa->allocReg();
+            $out = '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+            $this->lastValue = $bn;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca i64\n";
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('bagr.end');
+        $def = $this->ssa->allocLabel('bagr.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        $kid = $this->pool->intern($pa->property);
+        foreach ($bagCds as $cd) {
+            $lbl = $this->ssa->allocLabel('bagr.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $g = $this->ssa->allocReg();
+            $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                     . ', i64 ' . (string)$cd->bagOffset() . "\n";
+            $bi = $this->ssa->allocReg();
+            $bodies .= '  ' . $bi . ' = load i64, ptr ' . $g . "\n";
+            $bp = $this->ssa->allocReg();
+            $bodies .= '  ' . $bp . ' = inttoptr i64 ' . $bi . " to ptr\n";
+            $rv = $this->ssa->allocReg();
+            $bodies .= '  ' . $rv . ' = call i64 @__mir_array_get_str(ptr ' . $bp
+                     . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
+            $bodies .= '  store i64 ' . $rv . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        $bn = $this->ssa->allocReg();
+        $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $bn . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** The dynamic-property bag read (`__mir_array_get_str` by name) given an
      *  already-unboxed object pointer; lastValue ← the cell value. */
     private function emitBagReadInto(PropertyAccess_ $pa, string $objPtr): string
@@ -722,11 +840,13 @@ trait EmitLlvmObjects
         foreach ($this->classes as $cd) {
             if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
         }
+        // Property overloading on an ERASED receiver — see magicPropHolders.
+        $magic = $this->magicPropHolders($prop, '__get');
         $out = $this->emitNode($pa->object);
         $out .= $this->cellToPtr();
         $objPtr = $this->lastValue;
         // No known holder → nothing better than the historical raw slot-16 read.
-        if (\count($fixed) === 0) {
+        if (\count($fixed) === 0 && $magic === []) {
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
             $ld = $this->ssa->allocReg();
@@ -736,9 +856,13 @@ trait EmitLlvmObjects
             return $out;
         }
         // A single holder → its real offset, boxed by its declared type.
-        if (\count($fixed) === 1) {
+        if (\count($fixed) === 1 && $magic === []) {
             return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
         }
+        // NO unconditional shortcut for a single magic holder: the receiver is
+        // ERASED, so "one class declares __get" says nothing about the class in
+        // hand. Calling it anyway ran Ovl::__get with a Plain2 `$this` and read
+        // that object's slot 0 as an array. Always dispatch on class_id.
         // Dispatch on class_id: each holder reads (and boxes) its OWN slot.
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
@@ -753,6 +877,14 @@ trait EmitLlvmObjects
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($magic as $cname => $declCls) {
+            $lbl = $this->ssa->allocLabel('rp.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicCall($declCls, '__get', $objPtr, $prop, null);
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
@@ -804,20 +936,26 @@ trait EmitLlvmObjects
         $this->lastValueType = 'i64';
         $out .= $this->boxToCell($n->value->type);
         $cellVal = $this->lastValue;
-        // No known holder → bag store (stdClass) or drop; never offset-16.
-        if (\count($fixed) === 0) {
+        // Property overloading on an ERASED receiver: a class that declares
+        // __set but not $prop takes the write through the method.
+        $magic = $this->magicPropHolders($prop, '__set');
+        // No known holder → __set, bag store (stdClass), or drop; never offset-16.
+        if (\count($fixed) === 0 && $magic === []) {
             if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
             return $out;
         }
         // Single holder and no bag anywhere → the cell can only be that class.
-        if (\count($fixed) === 1 && !$hasBag) {
+        if (\count($fixed) === 1 && !$hasBag && $magic === []) {
             $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
             return $out;
         }
+        // NO unconditional shortcut for a single magic holder — the receiver is
+        // ERASED, so one declarer says nothing about the class in hand. Always
+        // dispatch on class_id.
         // Runtime dispatch on the object's class_id — each holder stores its slot.
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
@@ -833,6 +971,15 @@ trait EmitLlvmObjects
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($magic as $cname => $declCls) {
+            if (isset($seen[$cname])) { continue; }
+            $seen[$cname] = true;
+            $lbl = $this->ssa->allocLabel('cs.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicCall($declCls, '__set', $objPtr, $prop, $cellVal);
             $bodies .= '  br label %' . $end . "\n";
         }
         $switch .= "  ]\n";
@@ -1822,6 +1969,75 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `isset($x->prop)` where `$x`'s class is erased and SOME class answers
+     * `$prop` through __isset. Dispatch on class_id: a magic holder takes the
+     * method, everything else takes the ordinary read-and-test-non-null path.
+     *
+     * Without this the erased receiver fell through to the generic read, which
+     * (now that __get has an erased arm) would call __get instead of __isset —
+     * php calls __isset, and the two are free to disagree.
+     *
+     * @param array<string,string> $magic
+     */
+    private function emitIssetMagicByClassId(PropertyAccess_ $pa, array $magic): string
+    {
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $out .= $this->emitObjPtrOf($pa->object);
+        $objPtr = $this->lastValue;
+        $end = $this->ssa->allocLabel('ism.end');
+        // A null receiver is not set, and reading its class_id is a wild load.
+        $isnull = $this->ssa->allocReg();
+        $out .= '  ' . $isnull . ' = icmp eq ptr ' . $objPtr . ", null\n";
+        $live = $this->ssa->allocLabel('ism.live');
+        $out .= '  br i1 ' . $isnull . ', label %' . $end . ', label %' . $live . "\n";
+        $out .= $live . ":\n";
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $def = $this->ssa->allocLabel('ism.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($magic as $cname => $declCls) {
+            $lbl = $this->ssa->allocLabel('ism.case');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicCall($declCls, '__isset', $objPtr, $pa->property, null);
+            $bodies .= $this->coerceToI64();
+            $c = $this->ssa->allocReg();
+            $bodies .= '  ' . $c . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+            $z = $this->ssa->allocReg();
+            $bodies .= '  ' . $z . ' = zext i1 ' . $c . " to i64\n";
+            $bodies .= '  store i64 ' . $z . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        // Not a magic holder at runtime — the ordinary read, set iff the value is
+        // neither a null pointer nor the boxed-NULL sentinel. Re-emitting the
+        // receiver is safe: exactly one arm runs.
+        $out .= $this->emitNode($pa);
+        $out .= $this->coerceToI64();
+        $rv = $this->lastValue;
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $rv . ", 0\n";
+        $nnul = $this->ssa->allocReg();
+        $out .= '  ' . $nnul . ' = icmp ne i64 ' . $rv . ", -3659174697238528\n";
+        $setc = $this->ssa->allocReg();
+        $out .= '  ' . $setc . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
+        $setz = $this->ssa->allocReg();
+        $out .= '  ' . $setz . ' = zext i1 ' . $setc . " to i64\n";
+        $out .= '  store i64 ' . $setz . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** Leave an i64 `0|1` in lastValue for whether `$t` is set. */
     private function emitIssetTarget(Node $t): string
     {
@@ -1929,6 +2145,14 @@ trait EmitLlvmObjects
                     $this->lastValue = $z; $this->lastValueType = 'i64';
                     return $out;
                 }
+            }
+            // Same thing with the receiver's class ERASED — dispatch at runtime.
+            // Gate on "not a KNOWN class", never on `=== ''`: the nullable
+            // `type->class` reads as garbage under the native self-build, so the
+            // string compare is false there while the isset is reliable.
+            if (!isset($this->classes[$icls])) {
+                $im = $this->magicPropHolders($ipa->property, '__isset');
+                if ($im !== []) { return $this->emitIssetMagicByClassId($ipa, $im); }
             }
         }
         // Property / dynamic-property isset: reading the field derefs the
@@ -2070,6 +2294,38 @@ trait EmitLlvmObjects
                         $out .= $this->emitNode($upa->object);
                         $out .= $this->coerceToPtr();
                         $out .= $this->emitMagicCall($unCls, '__unset', $this->lastValue, $upa->property, null);
+                    }
+                }
+                // Same thing with the receiver's class ERASED — dispatch at
+                // runtime. An unset of a DECLARED slot stays the no-op it has
+                // always been, so the default arm has nothing to do. Gate on
+                // "not a KNOWN class", never on `=== ''` — see the isset note.
+                if (!isset($this->classes[$ucls])) {
+                    $um = $this->magicPropHolders($upa->property, '__unset');
+                    if ($um !== []) {
+                        $out .= $this->emitObjPtrOf($upa->object);
+                        $objPtr = $this->lastValue;
+                        $endU = $this->ssa->allocLabel('unm.end');
+                        $isnullU = $this->ssa->allocReg();
+                        $out .= '  ' . $isnullU . ' = icmp eq ptr ' . $objPtr . ", null\n";
+                        $liveU = $this->ssa->allocLabel('unm.live');
+                        $out .= '  br i1 ' . $isnullU . ', label %' . $endU . ', label %' . $liveU . "\n";
+                        $out .= $liveU . ":\n";
+                        $out .= $this->emitLoadClassId($objPtr);
+                        $defU = $this->ssa->allocLabel('unm.default');
+                        $sw = '  switch i64 ' . $this->classIdReg . ', label %' . $defU . " [\n";
+                        $bd = '';
+                        foreach ($um as $cnameU => $declU) {
+                            $lblU = $this->ssa->allocLabel('unm.case');
+                            $sw .= '    i64 ' . (string)$this->classes[$cnameU]->classId . ', label %' . $lblU . "\n";
+                            $bd .= $lblU . ":\n";
+                            $bd .= $this->emitMagicCall($declU, '__unset', $objPtr, $upa->property, null);
+                            $bd .= '  br label %' . $endU . "\n";
+                        }
+                        $sw .= "  ]\n";
+                        $out .= $sw . $bd . $defU . ":\n";
+                        $out .= '  br label %' . $endU . "\n";
+                        $out .= $endU . ":\n";
                     }
                 }
             }
@@ -2805,6 +3061,25 @@ trait EmitLlvmObjects
         if ($mcStatic !== '' && isset($this->classes[$mcStatic])
             && $this->resolveMethodClass($mcStatic, $mc->method) === ''
             && $this->resolveMethodClass($mcStatic, '__call') !== '') {
+            $elems = [];
+            foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
+            $nameNode = new \Compile\Mir\StringConst($mc->method, Type::string_());
+            $call = new \Compile\Mir\MethodCall_($mc->object, '__call', [$nameNode, $argsArr], $mc->type);
+            return $this->emitMethodCall($call);
+        }
+        // Same reroute with the receiver's class ERASED. Only when NO class in
+        // the table declares the method: then every possible runtime receiver
+        // answers through __call, and the rewritten call's own virtual dispatch
+        // picks the right declarer. (`__call` is a real method, so that dispatch
+        // never lands back here — no recursion.)
+        //
+        // The MIXED case — some classes declare the method, others only __call —
+        // is NOT handled: the two shapes need different argument lists, so they
+        // cannot share one switch, and the arg emission below is already built
+        // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
+        if (!isset($this->classes[$mcStatic]) && $this->anyClassDeclares('__call')
+            && !$this->anyClassDeclares($mc->method)) {
             $elems = [];
             foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
             $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));

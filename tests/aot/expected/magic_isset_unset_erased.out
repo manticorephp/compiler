@@ -1,0 +1,9 @@
+[isset a]
+bool(true)
+[isset nope]
+bool(false)
+[unset a]
+[isset a]
+bool(false)
+bool(true)
+bool(false)

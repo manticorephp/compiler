@@ -696,6 +696,11 @@ trait InferCalls
         // at runtime (EmitLlvm); a disagreement leaves the type unresolved.
         if ($objType->kind === Type::KIND_CELL) {
             $rt = $this->cellMethodReturn($node->method);
+            // Nothing declares it, but something declares __call: the emitter
+            // reroutes the whole call there, so take __call's return type. Left
+            // unknown, the RESULT (a cell) would be re-boxed by the consumer's
+            // boxToCell(UNKNOWN) and a returned string read back as an int.
+            if ($rt === null) { $rt = $this->erasedMagicCallReturn($node->method); }
             if ($rt !== null) { $node->type = $rt; }
         }
         // A union receiver (`B|C`): resolve the method's return type from the
@@ -707,6 +712,24 @@ trait InferCalls
             if ($rt !== null) { $node->type = $rt; }
         }
         return $node->type;
+    }
+
+    /**
+     * The return type of an erased-receiver call that NO class declares but some
+     * class answers through __call — the shape EmitLlvm rewrites the call into.
+     * Null when any class declares the method (that is ordinary dispatch) or
+     * when nothing declares __call.
+     */
+    private function erasedMagicCallReturn(string $method): ?Type
+    {
+        $magic = null;
+        foreach ($this->classes as $cd) {
+            if ($this->resolveMethodClass($cd->name, $method) !== '') { return null; }
+            if ($magic === null && $this->classDefinesMagic($cd->name, '__call')) {
+                $magic = $this->magicReturnType($cd->name, '__call') ?? Type::cell();
+            }
+        }
+        return $magic;
     }
 
     /** Whether `$class` (or an ancestor) implements `$iface`, transitively
