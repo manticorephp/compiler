@@ -261,6 +261,20 @@ trait LowerPrelude
         return $names;
     }
 
+    /** Whether `$cls` or an ancestor declares method `$m`. `ClassDef::$methodNames`
+     *  carries declared + trait-mixed methods ONLY, so an inherited magic method
+     *  needs the parent walk (the same one {@see InferCalls::classDefinesMagic}
+     *  does on the infer side). */
+    private function declaresMethod(string $cls, string $m): bool
+    {
+        $c = $cls;
+        while ($c !== '' && isset($this->classTable[$c])) {
+            if (isset($this->classTable[$c]->methodNames[$m])) { return true; }
+            $c = $this->classTable[$c]->parent;
+        }
+        return false;
+    }
+
     /** `$s` as the BODY of a double-quoted PHP literal (no surrounding quotes).
      *  Every byte the lexer could reinterpret is escaped: a NUL becomes the
      *  three-digit octal `\000` (the parser's octal escape spans 1-3 digits, and
@@ -353,6 +367,20 @@ trait LowerPrelude
                     . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st)\n";
             }
             $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n";
+            if ($this->declaresMethod($cname, '__serialize')) {
+                // php 7.4+: __serialize REPLACES the property walk entirely. Its
+                // keys go out verbatim — no visibility mangling — and may be int
+                // or string. The class name is still the object's own.
+                $body = $body . "    \$d = \$v->__serialize();\n"
+                    . "    \$b = '';\n"
+                    . "    foreach (\$d as \$k => \$val) {\n"
+                    . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                    . "      else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                    . "      \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                    . "    }\n"
+                    . "    return \"" . $this->dqBody($head) . "\" . (string)count(\$d) . ':{' . \$b . '}';\n  }\n";
+                continue;
+            }
             if ($cd->usesBag()) {
                 // #[AllowDynamicProperties]: the declared slots, then the bag.
                 // `(array)$v` reads the BAG ONLY, which is exactly what is left
