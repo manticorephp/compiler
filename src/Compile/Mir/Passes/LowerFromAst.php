@@ -314,6 +314,13 @@ final class LowerFromAst implements Pass
     public bool $includeVarDump = false;
     /** `__mir_var_dump` prelude source, read by Main from `prelude/var_dump.php`. */
     public string $varDumpSrc = '';
+    /** var_export() — DEMAND-GATED on `var_export(`. Pulls in the recursive
+     *  walker AND the per-class `__mir_export_object` arms generated below. The
+     *  codegen builtin still formats a statically-typed scalar inline and never
+     *  reaches either. */
+    public bool $includeVarExport = false;
+    /** `__mir_var_export` prelude source, read by Main from `prelude/var_export.php`. */
+    public string $varExportSrc = '';
     public bool $includePrintR = false;
     /** print_r prelude source, read by Main from `prelude/print_r.php`. */
     public string $printRSrc = '';
@@ -638,6 +645,20 @@ final class LowerFromAst implements Pass
                 $dfn = $this->lowerFunction($dstmt->decl);
                 $dfn->isPrelude = true;
                 $module->addFunction($dfn);
+            }
+        }
+
+        // var_export()'s object arm — same point and pattern as
+        // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
+        // does NOT call that method from var_export, and neither does this.
+        if ($this->includeVarExport) {
+            $exProg = \Parser\Parser::parseSource("<?php\n" . $this->exportObjectSrc());
+            foreach ($exProg->statements as $estmt) {
+                if ($estmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$estmt->decl->name] = $estmt->decl;
+                $efn = $this->lowerFunction($estmt->decl);
+                $efn->isPrelude = true;
+                $module->addFunction($efn);
             }
         }
 

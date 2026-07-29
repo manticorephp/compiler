@@ -47,49 +47,8 @@ function __mc_var_export_qstr(string $s): string
     return \str_replace(['\\', "'"], ['\\\\', "\\'"], $s);
 }
 
-/**
- * var_export for a value whose type is only known at runtime. The codegen
- * builtin formats statically-typed scalars inline and delegates everything
- * else (arrays, mixed, unions) here, where the NaN tag can be read.
- *
- * $indent is the column the enclosing line starts at: php.net puts a nested
- * array on its OWN line, indented to the key rather than past it, so the value
- * needs to know where its key began.
- */
-function __mc_var_export_cell(mixed $v, int $indent): string
-{
-    if ($v === null) {
-        return 'NULL';
-    }
-    if (\is_bool($v)) {
-        return $v ? 'true' : 'false';
-    }
-    if (\is_int($v)) {
-        return (string)$v;
-    }
-    if (\is_float($v)) {
-        // upperE=1, forceDot=1 — var_export must round-trip as a float, so an
-        // integer-valued decimal keeps its `.0`.
-        return \__mc_dtoa_core(\__float_bits((float)$v), 1, 1);
-    }
-    if (\is_string($v)) {
-        return "'" . \__mc_var_export_qstr((string)$v) . "'";
-    }
-    if (\is_array($v)) {
-        $pad = \str_repeat(' ', $indent);
-        $inner = $pad . '  ';
-        $out = "array (\n";
-        foreach ($v as $k => $e) {
-            $ks = \is_int($k) ? (string)$k : ("'" . \__mc_var_export_qstr((string)$k) . "'");
-            $out = $out . $inner . $ks . ' => ';
-            if (\is_array($e)) {
-                // php.net breaks the line before a nested array and re-indents
-                // it to the key's own column.
-                $out = $out . "\n" . $inner;
-            }
-            $out = $out . \__mc_var_export_cell($e, $indent + 2) . ",\n";
-        }
-        return $out . $pad . ')';
-    }
-    return 'NULL';
-}
+// The runtime walk used to live here as `__mc_var_export_cell`. It moved to
+// prelude/var_export.php, because the stdlib is a prebuilt `.o` and cannot be
+// handed an OBJECT — so an object nested inside an array had nowhere to go.
+// Only the escaper stays: it takes a string and returns a string, which crosses
+// the boundary fine, and both the prelude walk and the codegen builtin call it.

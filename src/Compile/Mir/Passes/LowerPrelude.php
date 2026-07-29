@@ -126,6 +126,9 @@ trait LowerPrelude
         if ($this->includeCli) {
             $src = $src . $this->cliSrc;
         }
+        if ($this->includeVarExport) {
+            $src = $src . $this->varExportSrc;
+        }
         if ($this->includePrintR) {
             $src = $src . $this->printRSrc;
         }
@@ -465,6 +468,71 @@ trait LowerPrelude
             // it as an object reads a code address as a descriptor. php's answer
             // is this exact exception, so throw rather than deref.
             . "  throw new \\Exception(\"Serialization of 'Closure' is not allowed\");\n}\n";
+        return $body;
+    }
+
+    /**
+     * PHP source for `__mir_export_object` — var_export's object arm, written
+     * from the complete class table, same point and pattern as
+     * {@see dumpObjectSrc} and {@see serObjectSrc}.
+     *
+     * ⚠ php does NOT call `__set_state` from var_export. It only PRINTS a literal
+     * naming the method — `eval()` of that literal is what would call it, and
+     * there is no eval here. So the deliverable is the literal's exact TEXT, for
+     * every class, whether or not it declares `__set_state`; php prints the same
+     * thing either way. Nobody should later "fix" this into a call.
+     *
+     * Indent contract: see {@see __mir_var_export} in prelude/var_export.php.
+     * Keys sit at `$indent + 3`, the close at `$indent`, values recurse at
+     * `$indent + 2`, and a nested value breaks the line first.
+     */
+    private function exportObjectSrc(): string
+    {
+        $names = $this->walkableClassesDerivedFirst();
+        $body = "function __mir_export_object(mixed \$v, int \$indent): string {\n"
+            . "  \$pad = str_repeat(' ', \$indent);\n"
+            . "  \$ipad = \$pad . '   ';\n"
+            . "  \$lead = \$indent > 0 ? (\"\\n\" . \$pad) : '';\n"
+            // An enum case is a bare `\Enum::Case` — no array literal, but it is
+            // still a nested VALUE, so it takes the same line break.
+            . "  \$en = __mir_enum_name(\$v);\n"
+            . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n";
+        foreach ($names as $cname) {
+            $cd = $this->classTable[$cname];
+            $disp = $cd->display();
+            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n"
+                . "    \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
+            foreach ($cd->propertyNames as $p) {
+                $body = $body . "    \$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
+                    . $p . ", \$indent + 2) . \",\\n\";\n";
+            }
+            if ($cd->usesBag()) {
+                // #[AllowDynamicProperties]: the declared slots, then the bag.
+                // `(array)$v` reads the BAG ONLY, which is what is left to add.
+                $body = $body . "    foreach ((array)\$v as \$bk => \$bv) {\n"
+                    . "      \$ks = is_int(\$bk) ? (string)\$bk : (\"'\" . __mc_var_export_qstr((string)\$bk) . \"'\");\n"
+                    . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
+                    . "    }\n";
+            }
+            $body = $body . "    return \$out . \$pad . '))';\n  }\n";
+        }
+        // stdClass prints `(object) array(…)` and closes with ONE paren. An
+        // EXPLICIT arm, not the fallthrough — see the closure note below.
+        $body = $body
+            . "  if (\$v instanceof \\stdClass) {\n"
+            . "    \$out = \$lead . \"(object) array(\\n\";\n"
+            . "    foreach ((array)\$v as \$k => \$val) {\n"
+            . "      \$ks = is_int(\$k) ? (string)\$k : (\"'\" . __mc_var_export_qstr((string)\$k) . \"'\");\n"
+            . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n"
+            . "    }\n"
+            . "    return \$out . \$pad . ')';\n"
+            . "  }\n"
+            // Every class in the table has an arm above, so what is left is a
+            // CLOSURE: `[fn_ptr, capture…]` from `__mir_alloc`, with no class
+            // descriptor. Walking it would read a code address as one. php
+            // prints an empty __set_state literal for a Closure, so print that
+            // rather than deref.
+            . "  return \$lead . \"\\\\Closure::__set_state(array(\\n\" . \$pad . '))';\n}\n";
         return $body;
     }
 

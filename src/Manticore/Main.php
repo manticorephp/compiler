@@ -1650,6 +1650,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // that only serializes must not pay for unserialize's rebuild arms.
     $serializeSrc = prelude_src_or_empty("serialize.php");
     $unserializeSrc = prelude_src_or_empty("unserialize.php");
+    // var_export's recursive walk — DEMAND-GATED like var_dump, and in the
+    // prelude for the same reason: its object arm is generated per class table,
+    // and the stdlib .o cannot be handed an object.
+    $varExportSrc = prelude_src_or_empty("var_export.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1750,6 +1754,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                               'timezone_transitions_get', 'timezone_location_get',
                               'date_parse', 'date_parse_from_format']);
     $useVarDump = $demand->calls('var_dump');
+    $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
     // Token-based, so the compiler's own `$fn === 'serialize'` string literals
     // (EmitLlvm::isTagConsumer, CheckTypeDefs::observesObject) demand nothing,
@@ -1791,6 +1796,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read unserialize.php");
         return null;
     }
+    if ($useVarExport && $varExportSrc === "") {
+        dprint("compile failed: prelude: cannot read var_export.php");
+        return null;
+    }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
@@ -1815,6 +1824,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
+        $lower->includeVarExport = $useVarExport;
+        $lower->varExportSrc = $useVarExport ? $varExportSrc : "";
         $lower->includePrintR = $usePrintR;
         $lower->includeSerialize = $useSerialize;
         $lower->serializeSrc = $serializeSrc;

@@ -1,0 +1,48 @@
+\Trunk::__set_state(array(
+   'b' => 
+  \Branch::__set_state(array(
+     'map' => 
+    array (
+      'one' => 1,
+      'deep' => 
+      array (
+        'two' => 2,
+      ),
+    ),
+     'leaf' => 
+    \Leaf::__set_state(array(
+       'v' => 9,
+    )),
+  )),
+   'label' => 'root',
+))
+array (
+  'list' => 
+  array (
+    0 => 
+    \Leaf::__set_state(array(
+       'v' => 1,
+    )),
+    1 => 
+    \Leaf::__set_state(array(
+       'v' => 2,
+    )),
+  ),
+)
+array (
+  0 => 
+  \Branch::__set_state(array(
+     'map' => 
+    array (
+      'one' => 1,
+      'deep' => 
+      array (
+        'two' => 2,
+      ),
+    ),
+     'leaf' => 
+    \Leaf::__set_state(array(
+       'v' => 9,
+    )),
+  )),
+)

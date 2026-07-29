@@ -1,0 +1,22 @@
+\Suit::Hearts
+\Plain::Two
+array (
+  0 => 
+  \Suit::Hearts,
+  1 => 
+  \Suit::Spades,
+)
+\Hand::__set_state(array(
+   'suit' => 
+  \Suit::Hearts,
+   'tag' => 
+  \Plain::One,
+   'n' => 3,
+))
+array (
+  'deck' => 
+  array (
+    'top' => 
+    \Suit::Spades,
+  ),
+)

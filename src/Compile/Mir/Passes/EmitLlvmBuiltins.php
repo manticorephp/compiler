@@ -4776,27 +4776,34 @@ trait EmitLlvmBuiltins
             return $out;
         }
         if ($k === Type::KIND_STRING) {
-            // `'` . $s . `'`, with NULL when the (nullable) string is null.
+            // `'` . $s . `'`, with NULL when the (nullable) string is null. The
+            // body goes through the SAME escaper the array walk uses — a
+            // statically-typed string used to skip it, so `var_export("a'b")`
+            // printed an unquotable literal while `var_export(["a'b"])` did not.
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToPtr();
             $s = $this->lastValue;
-            return $out . $this->wrapOrNull($s, "'", "'", 'NULL');
+            return $out . $this->quoteOrNull($s);
         }
-        // Arrays, `mixed` and unions: the type is only known from the NaN tag at
-        // runtime, so hand off to the stdlib formatter rather than emitting a
-        // recursive walk inline. boxToCell rebuilds a homogeneous array with its
-        // elements boxed, which is exactly what that walk needs to read. Declare
-        // the extern only when it is not defined in-module (a self-contained
-        // build embeds the define; a second declare is a redefinition error).
+        // Arrays, objects, `mixed` and unions: the type is only known from the
+        // NaN tag at runtime, so hand off to the recursive walker rather than
+        // emitting the walk inline. boxToCell rebuilds a homogeneous array with
+        // its elements boxed, which is exactly what that walk needs to read.
+        //
+        // The walker is the PRELUDE's `__mir_var_export`, not the stdlib's old
+        // array-only `__mc_var_export_cell`: the stdlib is a prebuilt `.o` and
+        // cannot be handed an object, so an object nested inside an array had
+        // nowhere to go. The prelude version's object arm calls the per-class
+        // `__mir_export_object` generated beside it.
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cv = $this->lastValue;
-        if (!isset($this->definedFns[$this->mangle('__mc_var_export_cell')])) {
-            $this->libcExtra['manticore___mc_var_export_cell']
-                = 'declare i64 @manticore___mc_var_export_cell(i64, i64)';
+        if (!isset($this->definedFns[$this->mangle('__mir_var_export')])) {
+            $this->libcExtra['manticore___mir_var_export']
+                = 'declare i64 @manticore___mir_var_export(i64, i64)';
         }
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @manticore___mc_var_export_cell(i64 '
+        $out .= '  ' . $r . ' = call i64 @manticore___mir_var_export(i64 '
               . $cv . ", i64 0)\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
@@ -4826,6 +4833,46 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi ptr [' . $c2 . ', %' . $lSet . '], [' . $nl . ', %' . $lNull . "]\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * var_export of a nullable string: `'` . escaped($s) . `'`, or `NULL`.
+     * The escape runs INSIDE the non-null arm — __mc_var_export_qstr takes a
+     * `string`, and handing it a null would fault before the test.
+     */
+    private function quoteOrNull(string $s): string
+    {
+        if (!isset($this->definedFns[$this->mangle('__mc_var_export_qstr')])) {
+            $this->libcExtra['manticore___mc_var_export_qstr']
+                = 'declare i64 @manticore___mc_var_export_qstr(i64)';
+        }
+        $isnull = $this->ssa->allocReg();
+        $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
+        $lNull = $this->ssa->allocLabel('qe.null');
+        $lSet = $this->ssa->allocLabel('qe.set');
+        $lEnd = $this->ssa->allocLabel('qe.end');
+        $out .= '  br i1 ' . $isnull . ', label %' . $lNull . ', label %' . $lSet . "\n";
+        $out .= $lSet . ":\n";
+        $si = $this->ssa->allocReg();
+        $out .= '  ' . $si . ' = ptrtoint ptr ' . $s . " to i64\n";
+        $qi = $this->ssa->allocReg();
+        $out .= '  ' . $qi . ' = call i64 @manticore___mc_var_export_qstr(i64 ' . $si . ")\n";
+        $qp = $this->ssa->allocReg();
+        $out .= '  ' . $qp . ' = inttoptr i64 ' . $qi . " to ptr\n";
+        $c1 = $this->ssa->allocReg();
+        $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr("'") . ', ptr ' . $qp . ")\n";
+        $c2 = $this->ssa->allocReg();
+        $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr("'") . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lNull . ":\n";
+        $nl = $this->litStr('NULL');
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lEnd . ":\n";
         $r = $this->ssa->allocReg();

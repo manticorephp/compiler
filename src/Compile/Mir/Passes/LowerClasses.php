@@ -482,7 +482,14 @@ trait LowerClasses
         }
         $this->currentLowerClass = $prevLowerClass;
         $isStruct = $this->hasStructAttr($decl->attributes);
-        $hasBag = $this->hasDynamicPropsAttr($decl->attributes);
+        // #[AllowDynamicProperties] is INHERITED (php 8.2+). Without this a
+        // subclass of a bag class had no bag slot, so an undeclared store on it
+        // fell through to the fixed-slot path and WROTE A DECLARED SLOT —
+        // `$d->added = true` landed in `int $declared`, and the bag was missing
+        // from var_dump / serialize / var_export.
+        $hasBag = $this->hasDynamicPropsAttr($decl->attributes)
+            || ($parent !== '' && isset($this->classTable[$parent])
+                && $this->classTable[$parent]->usesBag());
         $this->currentLowerClass = $savedLowerClass;
         $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
