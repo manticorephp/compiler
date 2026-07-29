@@ -72,6 +72,8 @@ function __mc_ser_val(mixed $v, __McSerSt $st): string
         }
         return $out . '}';
     }
-    // TODO(Ф2): objects, enums, \Resource, Closure -> __mc_ser_object($v, $st).
-    return 'N;';
+    // Objects, enum cases and \Resource: `__mc_ser_object` is GENERATED from the
+    // class table ({@see LowerPrelude::serObjectSrc}) — one instanceof arm per
+    // class, so the property reads are typed and the mangled keys are baked in.
+    return __mc_ser_object($v, $st);
 }

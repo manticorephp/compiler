@@ -184,35 +184,8 @@ trait LowerPrelude
      */
     private function dumpObjectSrc(): string
     {
-        $names = [];
-        $depths = [];
-        foreach ($this->classTable as $cname => $cd) {
-            if ($cname === 'stdClass') { continue; }
-            if ($cd->isStruct) { continue; }
-            // A `#[TypeDef]` has no object to dump — and the dumper is generated as
-            // PHP SOURCE, so an arm for one would emit `$x instanceof U8` against a
-            // class that no longer exists at runtime (CheckTypeDefs then rejects the
-            // compiler's own generated code, blaming the user's program).
-            if ($this->isTypeDef($cname)) { continue; }
-            $names[] = $cname;
-            $depths[] = $this->classDepth($cname);
-        }
-        // Selection sort by depth DESC (a subclass before its base).
+        $names = $this->walkableClassesDerivedFirst();
         $n = \count($names);
-        $i = 0;
-        while ($i < $n) {
-            $max = $i;
-            $j = $i + 1;
-            while ($j < $n) {
-                if ($depths[$j] > $depths[$max]) { $max = $j; }
-                $j = $j + 1;
-            }
-            if ($max !== $i) {
-                $tn = $names[$i]; $names[$i] = $names[$max]; $names[$max] = $tn;
-                $td = $depths[$i]; $depths[$i] = $depths[$max]; $depths[$max] = $td;
-            }
-            $i = $i + 1;
-        }
         $body = "function __mir_dump_object(mixed \$v, int \$indent): void {\n"
             . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
             // An enum-case singleton renders `enum(Enum::Case)` — detected via its
@@ -244,6 +217,179 @@ trait LowerPrelude
             . "    __mir_var_dump(\$val, \$indent + 1);\n"
             . "  }\n"
             . "  echo \$pad, \"}\\n\";\n}\n";
+        return $body;
+    }
+
+    /**
+     * The class table sorted most-derived-first, with the classes that have no
+     * object to walk removed (stdClass — the dynamic-bag fallback handles it;
+     * a `#[Struct]`, which has no header; a `#[TypeDef]`, whose class does not
+     * exist at runtime, so an `instanceof` arm for one would make CheckTypeDefs
+     * reject the compiler's OWN generated code and blame the user's program).
+     *
+     * Depth-DESC matters: a subclass must be matched before its base, and a
+     * reified specialization before its origin.
+     *
+     * @return string[]
+     */
+    private function walkableClassesDerivedFirst(): array
+    {
+        $names = [];
+        $depths = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($cname === 'stdClass') { continue; }
+            if ($cd->isStruct) { continue; }
+            if ($this->isTypeDef($cname)) { continue; }
+            $names[] = $cname;
+            $depths[] = $this->classDepth($cname);
+        }
+        $n = \count($names);
+        $i = 0;
+        while ($i < $n) {
+            $max = $i;
+            $j = $i + 1;
+            while ($j < $n) {
+                if ($depths[$j] > $depths[$max]) { $max = $j; }
+                $j = $j + 1;
+            }
+            if ($max !== $i) {
+                $tn = $names[$i]; $names[$i] = $names[$max]; $names[$max] = $tn;
+                $td = $depths[$i]; $depths[$i] = $depths[$max]; $depths[$max] = $td;
+            }
+            $i = $i + 1;
+        }
+        return $names;
+    }
+
+    /** `$s` as the BODY of a double-quoted PHP literal (no surrounding quotes).
+     *  Every byte the lexer could reinterpret is escaped: a NUL becomes the
+     *  three-digit octal `\000` (the parser's octal escape spans 1-3 digits, and
+     *  neither a property name nor a class name can start with a digit, so the
+     *  run is unambiguous). */
+    private function dqBody(string $s): string
+    {
+        $out = '';
+        $n = \strlen($s);
+        $i = 0;
+        while ($i < $n) {
+            $c = \substr($s, $i, 1);
+            $o = \ord($c);
+            if ($o === 0) { $out = $out . '\\000'; }
+            else if ($c === '\\') { $out = $out . '\\\\'; }
+            else if ($c === '"') { $out = $out . '\\"'; }
+            else if ($c === '$') { $out = $out . '\\$'; }
+            else { $out = $out . $c; }
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * php's serialized property key for `$prop` of class `$cname`: `prop` when
+     * public, `"\0*\0prop"` when protected, `"\0<DeclaringClass>\0prop"` when
+     * private — and the DECLARING class, so a private inherited by a subclass
+     * still names its origin (php: `O:1:"Q":4:{…s:4:"\0P\0c";…}`).
+     */
+    private function serPropKey(string $cname, string $prop): string
+    {
+        $cd = $this->classTable[$cname];
+        $meta = $cd->propertyMeta[$prop] ?? null;
+        if ($meta === null) { return $prop; }
+        if ($meta->visibility === 'protected') { return "\0" . '*' . "\0" . $prop; }
+        if ($meta->visibility === 'private') {
+            $decl = $meta->declaringClass !== '' ? $meta->declaringClass : $cname;
+            return "\0" . $decl . "\0" . $prop;
+        }
+        return $prop;
+    }
+
+    /**
+     * PHP source for `__mc_ser_object` — serialize()'s object arm, generated from
+     * the complete class table for the same reason `__mir_dump_object` is: it
+     * needs one `instanceof` arm per class, and the class table only exists after
+     * every user class has registered. The arm is ordinary PHP, so it gets
+     * instanceof narrowing, typed property reads at the right offset/repr, and
+     * boxing on the recursive `mixed` parameter — and, because Manticore enforces
+     * no property visibility, a free function may read a private slot directly.
+     * Mangling is a FORMAT concern only.
+     *
+     * Called only from `__mc_ser_val`, which has already counted this value, so
+     * `$st->n` IS the slot php would record for a back-reference.
+     */
+    private function serObjectSrc(): string
+    {
+        $names = $this->walkableClassesDerivedFirst();
+        $body = "function __mc_ser_object(mixed \$v, __McSerSt \$st): string {\n"
+            // BEFORE the id map: a \Resource IS an object to us (php says it is
+            // not) and php serializes any resource as the integer 0. It CONSUMES
+            // a slot — `serialize([$f,$f,$o,$o])` is `…i:0;…i:0;…O:…r:4;` — but
+            // it is never RECORDED, so a repeat is `i:0;` again, not `r:`.
+            . "  if (\$v instanceof \\Resource) { return 'i:0;'; }\n"
+            // An object occupies ONE slot however many times it appears; every
+            // later occurrence is `r:<that slot>`. php numbers references and
+            // objects out of the same counter, and an enum case participates too
+            // (`a:2:{i:0;E:11:"Suit:Hearts";i:1;r:2;}`). `R:` is php's REFERENCE
+            // marker — Manticore arrays carry no is_ref bit, so there is no
+            // runtime fact to emit it from.
+            . "  \$id = spl_object_id(\$v);\n"
+            . "  if (isset(\$st->seen[\$id])) { return 'r:' . (string)\$st->seen[\$id] . ';'; }\n"
+            . "  \$st->seen[\$id] = \$st->n;\n"
+            // An enum-case singleton is `E:len:"Enum:Case";` — the same
+            // descriptor probe var_dump uses, with php's single-colon spelling.
+            . "  \$en = __mir_enum_name(\$v);\n"
+            . "  if (\$en !== '') {\n"
+            . "    \$nm = str_replace('::', ':', \$en);\n"
+            . "    return 'E:' . (string)strlen(\$nm) . ':\"' . \$nm . '\";';\n"
+            . "  }\n";
+        foreach ($names as $cname) {
+            $cd = $this->classTable[$cname];
+            $props = $cd->propertyNames;
+            $disp = $cd->display();
+            $head = 'O:' . (string)\strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+            $entries = '';
+            foreach ($props as $p) {
+                $key = $this->serPropKey($cname, $p);
+                $entries = $entries . "      . \"s:" . (string)\strlen($key) . ":\\\"" . $this->dqBody($key)
+                    . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st)\n";
+            }
+            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n";
+            if ($cd->usesBag()) {
+                // #[AllowDynamicProperties]: the declared slots, then the bag.
+                // `(array)$v` reads the BAG ONLY, which is exactly what is left
+                // to append — and the count cannot be baked in.
+                $body = $body . "    \$b = ''\n" . $entries . "      ;\n"
+                    . "    \$cnt = " . (string)\count($props) . ";\n"
+                    . "    foreach ((array)\$v as \$k => \$val) {\n"
+                    . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                    . "      else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                    . "      \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                    . "      \$cnt = \$cnt + 1;\n"
+                    . "    }\n"
+                    . "    return \"" . $this->dqBody($head) . "\" . (string)\$cnt . ':{' . \$b . '}';\n  }\n";
+            } else {
+                $body = $body . "    return \"" . $this->dqBody($head . (string)\count($props) . ':{') . "\"\n"
+                    . $entries . "      . '}';\n  }\n";
+            }
+        }
+        // stdClass: nothing is declared, so the whole body comes from the bag.
+        // An EXPLICIT arm, not the fallthrough — see the throw below.
+        $body = $body
+            . "  if (\$v instanceof \\stdClass) {\n"
+            . "    \$arr = (array)\$v;\n"
+            . "    \$out = 'O:8:\"stdClass\":' . (string)count(\$arr) . ':{';\n"
+            . "    foreach (\$arr as \$k => \$val) {\n"
+            . "      if (is_int(\$k)) { \$out = \$out . 'i:' . (string)\$k . ';'; }\n"
+            . "      else { \$out = \$out . __mc_ser_str((string)\$k); }\n"
+            . "      \$out = \$out . __mc_ser_val(\$val, \$st);\n"
+            . "    }\n"
+            . "    return \$out . '}';\n"
+            . "  }\n"
+            // Every class in the table has an arm above, so what is left is a
+            // CLOSURE: `[fn_ptr, capture…]` from `__mir_alloc`, with no rc tag
+            // and no class descriptor (slot 0 is the function pointer). Walking
+            // it as an object reads a code address as a descriptor. php's answer
+            // is this exact exception, so throw rather than deref.
+            . "  throw new \\Exception(\"Serialization of 'Closure' is not allowed\");\n}\n";
         return $body;
     }
 

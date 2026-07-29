@@ -636,6 +636,20 @@ final class LowerFromAst implements Pass
             }
         }
 
+        // serialize()'s object arm — same point and pattern as __mir_dump_object,
+        // and for the same reason: one `instanceof` arm per class, written from
+        // the now-complete class table.
+        if ($this->includeSerialize) {
+            $serProg = \Parser\Parser::parseSource("<?php\n" . $this->serObjectSrc());
+            foreach ($serProg->statements as $sstmt) {
+                if ($sstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$sstmt->decl->name] = $sstmt->decl;
+                $sfn = $this->lowerFunction($sstmt->decl);
+                $sfn->isPrelude = true;
+                $module->addFunction($sfn);
+            }
+        }
+
         // Reflection Ф2: an invoke trampoline per (user class, method) + ctor,
         // synthesized from the now-complete class table (same point + pattern as
         // __mir_dump_object). Gated on the program reflecting at all; a
