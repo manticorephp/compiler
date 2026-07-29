@@ -306,8 +306,17 @@ trait EmitLlvmControl
      * Conservative BY DESIGN, and in one direction only: a borrow mistaken for
      * fresh corrupts (the release side frees what nobody owned), a fresh value
      * mistaken for a borrow leaks one reference.
+     *
+     * The free-function case follows each flavor's ESTABLISHED convention: a
+     * string-returning builtin is +1 ({@see EmitLlvm::isFreshStringTemp} already
+     * releases its temp, and {@see InsertMemoryOps::isOwnedObj} owns it —
+     * substr / strtolower / str_repeat), while an obj/array builtin may hand
+     * back a borrowed element (`current()`), so only a known user signature
+     * proves ownership there ({@see EmitLlvm::freshRcArgFlavor} draws the same
+     * line). Getting this wrong cost a measured leak: str_repeat read as
+     * borrowed retained a temp nobody else owned.
      */
-    private function armIsFresh(Node $arm): bool
+    private function armIsFresh(Node $arm, string $flavor): bool
     {
         if ($arm->type->kind === Type::KIND_NULL) { return true; }
         $k = $arm->kind;
@@ -320,8 +329,9 @@ trait EmitLlvmControl
         }
         if ($k === Node::KIND_CALL) {
             $fn = $arm->function;
-            if (!isset($this->sigs->paramTypes[$fn])) { return false; }
-            return !($this->sigs->returnsByRef[$fn] ?? false);
+            if ($this->sigs->returnsByRef[$fn] ?? false) { return false; }
+            if ($flavor === 'str') { return true; }
+            return isset($this->sigs->paramTypes[$fn]);
         }
         return $this->condOwnsResult($arm);
     }
@@ -352,16 +362,10 @@ trait EmitLlvmControl
         if (!$this->condOwnsResult($res)) { return ''; }
         $flavor = $this->condFlavor($res->type);
         if ($flavor === '' || $flavor === 'cell') { return ''; }
-        if ($this->armIsFresh($arm)) { return ''; }
+        if ($this->armIsFresh($arm, $flavor)) { return ''; }
         return $this->rcRetainReg($i64reg, $flavor);
     }
 
-    /**
-     * The PRE-BOX half, for a CELL-typed conditional: a cell owns its payload by
-     * POINTER, so the co-owner retain must see the raw value — after boxToCell a
-     * concrete array has been rebuilt and a scalar is a tag. Same order
-     * {@see EmitLlvmModule::emitReturn} uses for a `: mixed` return.
-     */
     /**
      * armRetain on the value currently in lastValue, leaving lastValue and its
      * type untouched — for the `??` paths that hand their arm straight back
@@ -373,7 +377,7 @@ trait EmitLlvmControl
         $flavor = $this->condFlavor($res->type);
         if ($flavor === '') { return ''; }
         if ($flavor === 'cell') { return $this->armRetainPreBox($res, $arm); }
-        if ($this->armIsFresh($arm)) { return ''; }
+        if ($this->armIsFresh($arm, $flavor)) { return ''; }
         $sv = $this->lastValue;
         $st = $this->lastValueType;
         $out = $this->coerceToI64();
@@ -383,11 +387,17 @@ trait EmitLlvmControl
         return $out;
     }
 
+    /**
+     * The PRE-BOX half, for a CELL-typed conditional: a cell owns its payload by
+     * POINTER, so the co-owner retain must see the raw value — after boxToCell a
+     * concrete array has been rebuilt and a scalar is a tag. Same order
+     * {@see EmitLlvmModule::emitReturn} uses for a `: mixed` return.
+     */
     private function armRetainPreBox(Node $res, Node $arm): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
         if ($this->condFlavor($res->type) !== 'cell') { return ''; }
-        if ($this->armIsFresh($arm)) { return ''; }
+        if ($this->armIsFresh($arm, 'cell')) { return ''; }
         return $this->retainCellPayload($arm);
     }
 

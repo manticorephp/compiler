@@ -1768,16 +1768,23 @@ final class EmitLlvm implements EmitVisitor
         // through the tag-dispatched helper directly; it no-ops on an
         // int/float/bool/null cell. An OWNED producer's +1 transfers.
         if ($k === Type::KIND_CELL) {
-            $vk = $value->kind;
+            // `__mir_to_cell($x)` is pure BOXING ({@see EmitLlvmBuiltins::biToCell}
+            // = emit the arg, then boxToCell), so ownership follows its ARGUMENT.
+            // Reading the call itself as an owned producer stored the payload with
+            // NO co-owner: `__preg_cells` boxed borrowed `$groups` elements into a
+            // vec[cell], the caller's per-iteration release of $groups freed them,
+            // and preg_replace_callback's closure read `$mm[0]` out of a reused
+            // block ('<' for '3'). It only ever worked because the append site
+            // double-retained the string before the ownership contract landed.
+            $src = $this->cellBoxSource($value);
+            $vk = $src->kind;
+            if ($this->condOwnsResult($src)) { return ''; }
             if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
                 || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
                 || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
                 || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT) {
                 return '';
             }
-            // A normalized conditional boxed its own arm with a +1 — the same
-            // transfer as an owned producer above.
-            if ($this->condOwnsResult($value)) { return ''; }
             $sv = $this->lastValue;
             $st = $this->lastValueType;
             $o = $this->coerceToI64();
@@ -1797,6 +1804,20 @@ final class EmitLlvm implements EmitVisitor
         $this->lastValue = $saveV;
         $this->lastValueType = $saveT;
         return $out;
+    }
+
+    /**
+     * Look through a pure boxing call to the value whose ownership actually
+     * decides a cell co-owner retain. `__mir_to_cell($x)` emits `$x` and boxes
+     * it — the call node is not a producer, `$x` is.
+     */
+    private function cellBoxSource(Node $value): Node
+    {
+        if ($value->kind !== Node::KIND_CALL) { return $value; }
+        if (\ltrim($value->function, '\\') !== '__mir_to_cell') { return $value; }
+        $args = $value->args;
+        if (\count($args) !== 1) { return $value; }
+        return $this->cellBoxSource($args[0]);
     }
 
     private function isEmptyArrayLit(Node $n): bool
