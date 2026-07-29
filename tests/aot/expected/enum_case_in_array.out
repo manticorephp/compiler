@@ -1,0 +1,41 @@
+enum(Suit::Hearts)
+array(2) {
+  [0]=>
+  enum(Suit::Hearts)
+  [1]=>
+  enum(Suit::Spades)
+}
+array(2) {
+  ["first"]=>
+  enum(Suit::Spades)
+  ["second"]=>
+  enum(Suit::Hearts)
+}
+array(2) {
+  [0]=>
+  enum(Code::A)
+  [1]=>
+  enum(Code::B)
+}
+A=a
+B=b
+array(2) {
+  [0]=>
+  enum(Suit::Hearts)
+  [1]=>
+  enum(Suit::Spades)
+}
+array(2) {
+  [0]=>
+  array(1) {
+    [0]=>
+    enum(Suit::Hearts)
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    enum(Suit::Spades)
+    [1]=>
+    enum(Suit::Hearts)
+  }
+}

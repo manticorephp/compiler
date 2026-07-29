@@ -320,6 +320,37 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /** True when `$t` is an enum-case type — an OBJ type whose class is an enum,
+     *  and so travels as an ORDINAL, not as an object pointer. */
+    private function isEnumType(Type $t): bool
+    {
+        return $t->kind === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class]);
+    }
+
+    /**
+     * IR loading enum `$cls`'s per-case singleton object for the ordinal in
+     * register `$ord`; the object POINTER register is written to `$ptrReg`.
+     *
+     * The ONE owner of "an enum ordinal becomes an object": `boxToCell` boxes a
+     * scalar enum value with it, and the cell-array rebuild boxes each ELEMENT
+     * with it. The rebuild used to `box_object` the raw word, so an enum case
+     * inside an array reached var_dump as tag-8-payload-0 — it printed NULL and
+     * then dereferenced null.
+     */
+    private function emitEnumSingletonPtr(string $cls, string $ord, string &$ptrReg): string
+    {
+        $tbl = '@' . $this->mangle($cls) . '__cases';
+        $ct = (string)\count($this->enums[$cls]->caseNames);
+        $g = $this->ssa->allocReg();
+        $out = '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
+        $dp = $this->ssa->allocReg();
+        $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+        $ptrReg = $pp;
+        return $out;
+    }
+
     private function boxToCell(Type $t): string
     {
         $this->rt->needsTagged = true;
@@ -374,20 +405,13 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
-        if ($k === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class])) {
+        if ($this->isEnumType($t)) {
             // An enum case is an ORDINAL — box the per-case SINGLETON (carrying
             // class identity), NOT the raw ordinal (box_object of a tiny int
             // faults every generic object consumer). See emitEnumCellSingletons.
             $out = $this->coerceToI64();
-            $ord = $this->lastValue;
-            $tbl = '@' . $this->mangle($t->class) . '__cases';
-            $ct = (string)\count($this->enums[$t->class]->caseNames);
-            $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
-            $dp = $this->ssa->allocReg();
-            $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
-            $pp = $this->ssa->allocReg();
-            $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+            $pp = '';
+            $out .= $this->emitEnumSingletonPtr((string)$t->class, $this->lastValue, $pp);
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
             return $this->finishI64($out, $r);
@@ -511,6 +535,14 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+        } elseif ($this->isEnumType($elem)) {
+            // An enum ELEMENT is an ordinal, exactly like a scalar enum value —
+            // resolve the singleton before boxing. `box_object` on the raw word
+            // made an object cell with payload 0: var_dump printed NULL for it
+            // and then dereferenced null.
+            $ep = '';
+            $out .= $this->emitEnumSingletonPtr((string)$elem->class, $ev, $ep);
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_OBJ) {
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
@@ -1642,6 +1674,12 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
             } elseif ($ek === Type::KIND_BOOL) {
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+            } elseif ($this->isEnumType($boxElem)) {
+                // An enum element travels as an ordinal — resolve the singleton
+                // (see emitEnumSingletonPtr) before boxing it as an object.
+                $ep = '';
+                $out .= $this->emitEnumSingletonPtr((string)$boxElem->class, $ev, $ep);
+                $out .= '  ' . $bv . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
             } elseif ($ek === Type::KIND_OBJ) {
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
