@@ -189,6 +189,7 @@ trait LowerPrelude
     {
         $names = $this->walkableClassesDerivedFirst();
         $n = \count($names);
+        $sawDebugInfo = false;
         $body = "function __mir_dump_object(mixed \$v, int \$indent): void {\n"
             . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
             // An enum-case singleton renders `enum(Enum::Case)` — detected via its
@@ -205,6 +206,19 @@ trait LowerPrelude
             // props read at the specialized (concrete) types. Depth-sorting puts
             // it before its origin, which is what makes the narrowing land here.
             $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n";
+            // __debugInfo REPLACES the walk — both the declared slots and the
+            // bag, exactly as php does. The count is the returned array's, and
+            // its keys are printed as ARRAY keys (an int key is bare), because
+            // that array is what php shows, not a property list.
+            if ($this->declaresMethod($cname, '__debugInfo')) {
+                $sawDebugInfo = true;
+                $body = $body . "    \$d = \$v->__debugInfo();\n"
+                    . "    echo 'object(" . $cd->display() . ")#1 (', (string)count(\$d), \") {\\n\";\n"
+                    . "    __mir_dump_debug_body(\$d, \$indent);\n"
+                    . "    echo \$pad, \"}\\n\"; return;\n  }\n";
+                $ci = $ci + 1;
+                continue;
+            }
             if ($cd->usesBag()) {
                 // #[AllowDynamicProperties]: the count is not static, and the bag
                 // entries print after the declared slots. Without this the arm
@@ -235,6 +249,21 @@ trait LowerPrelude
             . "    __mir_var_dump(\$val, \$indent + 1);\n"
             . "  }\n"
             . "  echo \$pad, \"}\\n\";\n}\n";
+        // The __debugInfo body is a helper, not an arm, and only a program that
+        // declares the method pays for it. It takes the array as `mixed` ON
+        // PURPOSE: `__debugInfo(): array` is a bare `array` hint, which erases
+        // its element to unknown, so a `$k => $v` foreach in the arm above would
+        // hand __mir_var_dump the raw word. Crossing a `mixed` parameter makes
+        // it a cell array by construction — the one shape the walk can read.
+        if ($sawDebugInfo) {
+            $body = $body . "function __mir_dump_debug_body(mixed \$d, int \$indent): void {\n"
+                . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
+                . "  foreach (\$d as \$k => \$val) {\n"
+                . "    if (is_int(\$k)) { echo \$pad, '  [', (string)\$k, \"]=>\\n\", \$pad, '  '; }\n"
+                . "    else { echo \$pad, '  [\"', \$k, \"\\\"]=>\\n\", \$pad, '  '; }\n"
+                . "    __mir_var_dump(\$val, \$indent + 1);\n"
+                . "  }\n}\n";
+        }
         return $body;
     }
 
