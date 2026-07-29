@@ -1,6 +1,12 @@
 # Self-compile artifacts. Only the driver script is checked in.
+#
+# The wildcards matter: tools/selfhost.sh writes manticore_self{,.ll,_stubs.c}
+# here, and a 954k-line .ll that is neither tracked nor ignored rides into the
+# next `git add -A` — which is exactly how it got committed once.
 manticore
 manticore.ll
 manticore.o
 manticore_stubs.c
 manticore_stubs.o
+manticore_self*
+manticore_g[0-9]*

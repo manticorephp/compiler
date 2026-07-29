@@ -12,25 +12,30 @@ _Last updated: 2026-07-15 · branch `main` · HEAD `a6e062a`._
 Pure-PHP, self-hosting PHP→native AOT compiler. The runtime is emitted as LLVM IR from PHP; `bin/manticore` compiles its
 own `src/`.
 
-**Gates (all green):**
-- `tests/aot/run.sh` — **467/467**
-- `tools/selfhost_fixpoint.sh` — fixpoint byte-identical · self-host · stability 5×2
-- `tools/difftest.sh` — **458 match / 0 diff** vs PHP 8.5.8
+**Gates (all green, macOS + Linux):** `tests/aot/run.sh` · `tools/difftest.sh` (0 diff vs
+PHP 8.5.8) · `tools/selfhost_fixpoint.sh` (fixpoint byte-identical · self-host · MIR golden ·
+stability 5×2) · `tools/docker/run_tests.sh --gate`. Counts move every session — run them
+rather than trusting a number written here.
+
+⚠ **`bin/build` green says nothing about `tools/selfhost.sh`.** The manifest build compiles
+`src/Runtime` as a LIBRARY with a flattened namespace; the self-host path takes everything as
+ONE module. They diverge on emitted symbol names, and only the stability gate covers the
+second. Corollary: **never ship a compiler fix together with tree code that needs that fix** —
+the previous generation then cannot build the tree at all, and only a cold seed recovers.
 
 Build: `bin/build --seed` (cold Zend bootstrap → native) / `bin/build`
 (self-host). See `.claude/CLAUDE.md` for the pipeline and key files.
 
-**~228 stdlib functions** implemented (array/string/type/math/ctype/`preg_*`/JSON/
-var/SPL/date/IO); see the README's Standard library table.
-
-**Recently completed** (2026-07): full `preg_*` family over host PCRE2 +
-`#[RefOut]` out-param auto-vivification · Monomorphize **callable dimension**
-(specialize callback-takers per concrete closure) · **de-cellify** at the
-concrete-array ← cell-array store boundary — fixes `uasort` with any comparator
-and dents the erased-array representation root · Ryu float formatting · JSON
-decode 3.3× + default-flag escaping · assoc key-leak fix (malloc −97%) ·
-reified-class generics · pin elimination (278→0). Detail in the session memory
-files under `.claude/.../memory/`.
+**Recently completed** (2026-07): the async runtime — structured concurrency, transparent
+netpoller I/O, and the liveness pass over it (bounded write parks, a classified `accept(2)`
+loop that backs off on EMFILE instead of spinning, resolv.conf `search`/`ndots`, a measured
+1 MiB fiber stack with `MANTICORE_FIBER_STACK`, `posix_getrlimit`/`posix_setrlimit`, and
+`Async\failure()` naming the task behind an escaped exception) · a per-case deadline in the
+test harness, so a liveness bug fails the suite instead of hanging it ·
+`docs/superset.md`, the catalogue of everything with no Zend oracle · the full `preg_*` family
+over host PCRE2 + `#[RefOut]` · Monomorphize **callable dimension** · **de-cellify** at the
+concrete-array ← cell-array store boundary · Ryu float formatting · reified-class generics ·
+pin elimination. Detail in the session memory files under `.claude/.../memory/`.
 
 ## The gap matrix (probed, with repros)
 

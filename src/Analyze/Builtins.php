@@ -85,6 +85,7 @@ final class Builtins
             '__ryu_msp', '__mir_to_cell', '__float_bits', '__mir_clock_ns', '__ugt',
             '__mir_fiber_make', '__mir_fiber_jump', '__mir_fiber_current',
             '__mir_fiber_set_current', '__mir_fiber_stack_alloc', '__mir_fiber_stack_free',
+            '__mir_fiber_guard_set', '__mir_fiber_guard_install',
             '__mir_fiber_ctx_new', '__mir_fiber_ctx_save', '__mir_fiber_ctx_load',
             '__mir_fiber_main_ctx', '__mir_fiber_has_current', '__mir_fiber_ctx_free',
             '__mir_stdin', '__mir_stdout', '__mir_stderr', '__mir_argc', '__mir_argv_at',

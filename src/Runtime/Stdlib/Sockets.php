@@ -36,6 +36,7 @@ function __mc_sock_fd(\Socket $s): int
  *   0 SOL_SOCKET  1 SO_ERROR  2 SO_RCVTIMEO  3 SO_SNDTIMEO  4 AF_INET6
  *   5 O_NONBLOCK  6 F_GETFL   7 F_SETFL      8 SO_LINGER    9 SO_REUSEADDR
  *  10 EWOULDBLOCK 11 EAGAIN  12 EINPROGRESS 13 ETIMEDOUT
+ *  14 EMFILE     15 ENFILE  16 ECONNABORTED 17 ENOBUFS 18 ENOMEM 19 EPROTO
  */
 function __mc_sock_const(int $which): int
 {
@@ -52,6 +53,9 @@ function __mc_sock_const(int $which): int
     static $eAgain = 0;
     static $eInProgress = 0;
     static $eTimedOut = 0;
+    static $eConnAborted = 0;
+    static $eNoBufs = 0;
+    static $eProto = 0;
 
     if ($ready === 0) {
         $isDarwin = \__mc_host_is_darwin();
@@ -71,6 +75,11 @@ function __mc_sock_const(int $which): int
         // MEASURED: Darwin <sys/errno.h> ETIMEDOUT 60 (cc probe + php SOCKET_ETIMEDOUT);
         // Linux asm-generic/errno.h 110 (glibc and musl agree).
         $eTimedOut = $isDarwin ? 60 : 110;
+        // The accept(2) classifier's set. MEASURED the same way; EMFILE/ENFILE/
+        // ENOMEM live in asm-generic/errno-BASE.h, whose numbers Darwin shares.
+        $eConnAborted = $isDarwin ? 53 : 103;
+        $eNoBufs = $isDarwin ? 55 : 105;
+        $eProto = $isDarwin ? 100 : 71;
         $ready = 1;
     }
 
@@ -87,7 +96,13 @@ function __mc_sock_const(int $which): int
     if ($which === 10) { return $eWouldBlock; }
     if ($which === 11) { return $eAgain; }
     if ($which === 12) { return $eInProgress; }
-    return $eTimedOut;
+    if ($which === 13) { return $eTimedOut; }
+    if ($which === 14) { return 24; }       // EMFILE — 24 everywhere
+    if ($which === 15) { return 23; }       // ENFILE — 23 everywhere
+    if ($which === 16) { return $eConnAborted; }
+    if ($which === 17) { return $eNoBufs; }
+    if ($which === 18) { return 12; }       // ENOMEM — 12 everywhere
+    return $eProto;
 }
 
 /**
@@ -301,6 +316,54 @@ function __mc_sock_wouldblock(): bool
     return $e === 0 || $e === \__mc_sock_const(10) || $e === \__mc_sock_const(11) || $e === 4;
 }
 
+/**
+ * How an accept(2) failure must be handled:
+ *   0 would-block → park on readiness (today's only behaviour)
+ *   1 transient   → retry NOW. EINTR, and the peer that vanished between its SYN
+ *                   and our accept (ECONNABORTED/EPROTO): no readiness edge is
+ *                   coming for a connection that is already gone.
+ *   2 overload    → out of a process- or host-wide resource (EMFILE/ENFILE/
+ *                   ENOBUFS/ENOMEM). accept(2) fails while the pending connection
+ *                   STAYS QUEUED, so a level-triggered listener stays readable: the
+ *                   park returns at once, accept fails again, and the loop spins
+ *                   without ever suspending — a task that starves every sibling.
+ *                   Back off on a timer and keep serving what is already open.
+ *   3 fatal       → EBADF/EINVAL/ENOTSOCK … the listener itself is broken.
+ *
+ * ⚠ Kept SEPARATE from {@see __mc_sock_wouldblock}, and with the OPPOSITE polarity:
+ * there an unknown errno parks (a read must not truncate live data on an errno
+ * nobody set), here an unknown errno is fatal (on accept the alternative is an
+ * infinite loop). Folding EMFILE into the would-block set would make every
+ * socket_read/socket_send spin on it too.
+ */
+function __mc_accept_class(int $errno): int
+{
+    if ($errno === 0 || $errno === \__mc_sock_const(10) || $errno === \__mc_sock_const(11)) {
+        return 0;
+    }
+    if ($errno === 4 || $errno === \__mc_sock_const(16) || $errno === \__mc_sock_const(19)) {
+        return 1;
+    }
+    if ($errno === \__mc_sock_const(14) || $errno === \__mc_sock_const(15)
+        || $errno === \__mc_sock_const(17) || $errno === \__mc_sock_const(18)) {
+        return 2;
+    }
+    return 3;
+}
+
+/**
+ * The next overload backoff step: 1 ms, doubling to a 50 ms ceiling. Slower than
+ * __mc_select_poll_park's 0.2 ms/10 ms on purpose — fd exhaustion clears when some
+ * other connection closes, not when the next packet lands, so the point is to stop
+ * burning wakes rather than to keep latency low.
+ */
+function __mc_accept_backoff(float $prev): float
+{
+    if ($prev <= 0.0) { return 0.001; }
+    $next = $prev * 2.0;
+    return $next > 0.05 ? 0.05 : $next;
+}
+
 /** Mark $fd non-blocking under a scheduler, once, so a would-block can be parked. */
 function __mc_sock_async_prep(\Socket $socket): bool
 {
@@ -343,9 +406,25 @@ function socket_accept(\Socket $socket): \Socket|false
     $async = \__mc_sock_async_prep($socket);
     $fd = \Runtime\Libc\sys_accept($socket->fd, \int_to_ptr(0), \int_to_ptr(0));
     // Under a scheduler a would-block PARKS instead of blocking the loop; a wake is
-    // a hint, so the accept is retried until it lands or the wait expires.
-    while ($fd < 0 && $async && \__mc_sock_wouldblock()) {
+    // a hint, so the accept is retried until it lands or the wait expires. A
+    // transient failure (the peer gave up between its SYN and this accept) retries
+    // straight away — no readiness edge is coming for a connection already gone —
+    // but only a bounded number of times, or a listener stuck in that state spins.
+    //
+    // EMFILE is deliberately NOT backed off here: php's socket_accept reports the
+    // errno and returns false, and ext/sockets leaves the serving policy to the
+    // caller. The stream layer, which owns its accept loop, does back off.
+    $fast = 0;
+    while ($fd < 0 && $async) {
+        $cls = \__mc_accept_class(\__mc_errno());
+        if ($cls === 1 && $fast < 8) {
+            $fast = $fast + 1;
+            $fd = \Runtime\Libc\sys_accept($socket->fd, \int_to_ptr(0), \int_to_ptr(0));
+            continue;
+        }
+        if ($cls !== 0) { break; }
         if (!\__mc_sock_park($socket->fd, false, 0.0)) { break; }
+        $fast = 0;
         $fd = \Runtime\Libc\sys_accept($socket->fd, \int_to_ptr(0), \int_to_ptr(0));
     }
     if ($fd < 0) {

@@ -13,6 +13,11 @@ install, nothing to link — `use function Async\spawn;` is enough.
 
 This directory holds the examples and benchmarks.
 
+Everything here is **superset**: `php` has `Fiber` and nothing else of it, so `difftest` cannot
+check a single line — these cases carry hand-written expected output instead.
+[docs/superset.md](superset.md) catalogues that whole surface (concurrency, attributes, FFI,
+modules, types, memory) and the rules it lives under.
+
 ## Model (not Promises)
 
 The concurrency *model* is Go's — cheap tasks, channels, a netpoller, blocking-*looking* I/O
@@ -257,6 +262,58 @@ compare per resume.
 `wakes`, `reactor_waits`, `timer_fires`, `watchdog`, plus the `live` / `ready` /
 `io_parked` / `timers` gauges.
 
+And for the third failure — something threw, and the trace points at the wrong
+place:
+
+```php
+try { async(fn() => …); }
+catch (\Throwable $e) { fwrite(STDERR, Async\failure()); }
+// task #7 "worker" at jobs.php:31 raised RuntimeException: no such row
+//   in scope near jobs.php:12
+```
+
+A child's exception is rethrown by whoever *joins* it, so it reaches you carrying
+the joiner's file and line; the task that actually failed is not in the trace at
+all. It cannot be put there — mutating a user's throwable is impossible, and
+wrapping it would break `catch (RuntimeException)`. So the provenance is recorded
+beside the exception, at the moment of failure, and read back with `Async\failure()`.
+It names the FIRST real failure only: everything after it is the cancellation wave,
+and blaming a task that was merely swept up is worse than saying nothing. With the
+watchdog on it also goes to STDERR, on the same channel.
+
+### How much a task costs
+
+A fiber is 1 MiB of stack by default — `MANTICORE_FIBER_STACK=<bytes>`, or
+`Fiber::setStackSize()` from code, both taking effect for fibers created afterwards.
+Stacks are `mmap`'d with a `PROT_NONE` guard page below them, pooled on termination,
+and paged in lazily, so what a parked task actually holds is far less than its size.
+
+The default is measured, not assumed (`tools/fiber_ceiling.php`). At 40 000
+concurrent tasks on Linux arm64:
+
+| stack | RSS | virtual |
+|---|---|---|
+| 8 MiB | 6.55 GiB | 313 GiB |
+| 1 MiB | 0.65 GiB | 39 GiB |
+| 512 KiB | 0.65 GiB | 20 GiB |
+| 256 KiB | 0.65 GiB | 10 GiB |
+
+Flat below 1 MiB, ten-fold above it. Raise it for deeply recursive work; lower it
+only to save address space, because it will not save memory. macOS shows no such
+step, which is exactly why the number had to come from both hosts.
+
+An overflow is named rather than guessed at: running off the bottom of a fiber stack
+faults into the guard page, and a handler on an alternate stack prints
+`manticore: fiber stack overflow (raise MANTICORE_FIBER_STACK)` before letting the
+process die exactly as it would have. Any other fault is passed straight through, so a
+genuine null dereference still looks like one.
+
+The ceiling that arrives first is neither of those columns: each fiber costs **two
+mappings** (the guard page splits the VMA), so a stock Linux `vm.max_map_count` of
+65530 stops a process near 32 000 concurrent tasks whatever the stack size. Raise
+`vm.max_map_count` if you need more; container defaults are often higher already
+(Docker Desktop ships 262144).
+
 ### Bounded concurrency
 
 ```php
@@ -264,6 +321,34 @@ $pages = Async\mapConcurrent($urls, fn($u) => file_get_contents($u), 10);   // 1
 $sem = new Async\Semaphore(4);
 $sem->withPermit(fn() => work());
 ```
+
+**An accept loop needs one.** It is the one place a scheduler will happily let you
+spawn without bound: `while (true) { $g->spawn(serve(accept())); }` turns a
+connection burst into unbounded tasks, fds and memory, and the first thing to fail is
+something unrelated. Take the permit **before** the accept — then the queue stays in
+the kernel backlog, where it belongs, instead of in your heap.
+
+```php
+$gate = new Async\Semaphore(256);
+Async\group(function (Async\TaskGroup $g) use ($server, $gate) {
+    while (true) {
+        $gate->acquire();                                  // BEFORE the accept
+        $conn = stream_socket_accept($server);
+        if ($conn === false) { $gate->release(); continue; }
+        $g->spawn(function () use ($conn, $gate) {
+            try { serve($conn); } finally { $gate->release(); }   // in the CHILD
+        });
+    }
+});
+```
+
+`Async\stats()['live']` is the gauge to alert on, and `Async\dump()` names the tasks
+when it climbs. There is deliberately **no built-in ceiling on tasks per scope**:
+`spawn()` is the wrong place to fail (the exception would land in the acceptor, the
+one task that has to survive an overload), a hard error turns overload into a crash
+instead of flow control, and `live` counts timers and reporters that share nothing
+with the work being limited. The policy — park, shed, or answer 503 — belongs to the
+application, and a Semaphore owned by the scope that owns the work already expresses it.
 
 ### Scoped values
 
@@ -282,15 +367,32 @@ Ordinary stream calls suspend the fiber instead of the process when a scheduler 
 `connect(2)` runs non-blocking, BOTH TLS handshake directions are driven through
 `WANT_READ`/`WANT_WRITE` parks (client `SSL_connect` and server `SSL_accept` — so a TLS
 server serves concurrent clients), and a hostname is resolved over the netpoller:
-`/etc/hosts`, a per-run cache held by the scheduler, then A and AAAA queries across
-**every** nameserver in `resolv.conf` (two attempts each, 2 s apiece, TC → retry over
-TCP), falling back to the blocking `getaddrinfo` walk when none of that can answer.
+`/etc/hosts`, a per-run cache held by the scheduler, the `search` list and `ndots` rule from
+`resolv.conf` (so `db`, `redis`, `service.namespace` — the names compose and kubernetes hand
+you — resolve here instead of falling through to the blocking walk), then A and AAAA queries
+across **every** nameserver (two attempts each, 2 s apiece, TC → retry over TCP), falling
+back to the blocking `getaddrinfo` walk when none of that can answer. A search walk stops the
+moment NO server answers: a dead resolver must not be multiplied by the suffix count.
 Two spawned HTTPS fetches to DIFFERENT hosts run 0.17s vs 0.34s sequential.
 
-`stream_set_timeout()` and `stream_socket_accept($srv, $timeout)` are honoured under the
-scheduler: the wait is BOUNDED, so a hung peer no longer wedges the fiber forever (an
-unbounded park was the old behaviour, and a timeout used to fall back to a blocking `poll(2)`
-that stalled every other task).
+**Every wait is bounded.** `stream_set_timeout()` is the STREAM's timeout, as in php — reads
+*and* writes — and `stream_socket_accept($srv, $timeout)` is honoured under the scheduler.
+On expiry the operation reports a short read/write with `stream_get_meta_data()['timed_out']`
+true, never an exception. Unbounded parks were the old behaviour on both sides, and each was
+a liveness hole rather than a missing feature: a peer that stops reading wedged the writing
+fiber forever — the task never settled, its scope never closed, the fd was never released —
+and a timeout used to fall back to a blocking `poll(2)` that stalled every other task. The
+default when nothing is set is 60 s, php's `default_socket_timeout`.
+
+**`accept(2)` failures are classified.** A would-block parks; a peer that vanished between its
+SYN and our accept (`ECONNABORTED`/`EPROTO`/`EINTR`) retries immediately, since no readiness
+edge is coming for a connection that is already gone; resource exhaustion
+(`EMFILE`/`ENFILE`/`ENOBUFS`/`ENOMEM`) backs off on a timer and keeps serving what is already
+open; anything else is reported. The overload case is why this matters: `accept(2)` fails
+while the pending connection **stays queued**, so a level-triggered listener stays readable —
+re-arming readiness is a hot spin that starves every sibling task and never even trips the
+watchdog, because it suspends on every iteration. It shows up only as `stats()['wakes']`
+climbing with wall time instead of with connections.
 
 The seam is `\Runtime\AsyncHook` (five callbacks installed by the scheduler — readable,
 writable, close, bounded-readable, sleep; one null check per would-block when no scheduler is
@@ -385,10 +487,10 @@ is still there.
 
 ## Not yet
 
-Also: `writev`/`io_uring` to break the 2-syscall floor · DNS search-domain/`ndots` handling
-(a name needing a suffix falls back to the blocking walk today) · off-thread file I/O ·
-shared-memory multithreading (a future compiler superset). See the async roadmap memory for
-the plan.
+Also: `writev`/`io_uring` to break the 2-syscall floor · `resolv.conf`'s `timeout:`/`attempts:`
+options (the search list and `ndots` are in; those two still hard-code 2 s × 2) · the search
+list applied to `/etc/hosts` the way glibc does · off-thread file I/O · shared-memory
+multithreading (a future compiler superset).
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
 return type. The only piece here that cannot be a library: it needs the compiler to split

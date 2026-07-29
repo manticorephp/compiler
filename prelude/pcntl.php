@@ -272,6 +272,60 @@ namespace {
     {
         return \__mc_proc_getppid();
     }
+
+    /**
+     * getrlimit(2). With a resource: `[0 => soft, 1 => hard]`. Without one: every
+     * limit the host has, keyed `'soft <name>'` / `'hard <name>'` — php's own
+     * shape, including the STRING `'unlimited'` where the value is RLIM_INFINITY.
+     *
+     * The label table lives here rather than in the stdlib for the reason the file
+     * header gives: an array built inside the stdlib does not survive being handed
+     * back to user code. The RESOURCE numbers come from `__mc_rlimit_const()`,
+     * whose $which order is the same as POSIX_RLIMIT_* is folded in.
+     */
+    function posix_getrlimit(?int $resource = null): array|false
+    {
+        if ($resource !== null) {
+            $soft = \__mc_rlimit_get($resource, 0);
+            if ($soft === \PHP_INT_MIN) {
+                return false;
+            }
+            $hard = \__mc_rlimit_get($resource, 1);
+            return [
+                0 => $soft === \PHP_INT_MAX ? 'unlimited' : $soft,
+                1 => $hard === \PHP_INT_MAX ? 'unlimited' : $hard,
+            ];
+        }
+        // php's order and names, and only the resources both hosts have: NPROC is
+        // 'maxproc', FSIZE is 'filesize', NOFILE is 'openfiles', AS is 'totalmem'.
+        $names = ['core', 'data', 'stack', 'totalmem', 'rss', 'maxproc',
+                  'memlock', 'cpu', 'filesize', 'openfiles'];
+        $which = [0, 1, 2, 9, 7, 6, 5, 3, 4, 8];
+        $out = [];
+        for ($i = 0; $i < 10; $i++) {
+            $res = \__mc_rlimit_const($which[$i]);
+            $soft = \__mc_rlimit_get($res, 0);
+            if ($soft === \PHP_INT_MIN) {
+                continue;      // a resource this host does not support
+            }
+            $hard = \__mc_rlimit_get($res, 1);
+            $out['soft ' . $names[$i]] = $soft === \PHP_INT_MAX ? 'unlimited' : $soft;
+            $out['hard ' . $names[$i]] = $hard === \PHP_INT_MAX ? 'unlimited' : $hard;
+        }
+        return $out;
+    }
+
+    /**
+     * setrlimit(2). PHP_INT_MAX (= POSIX_RLIMIT_INFINITY) means "no limit".
+     * Raising a hard limit needs privilege; php returns false there rather than
+     * warning, so this does too — one of the few places the
+     * warning-becomes-exception rule does not apply, because there is no warning
+     * to convert.
+     */
+    function posix_setrlimit(int $resource, int $soft_limit, int $hard_limit): bool
+    {
+        return \__mc_rlimit_set($resource, $soft_limit, $hard_limit) === 0;
+    }
 }
 
 namespace Process {

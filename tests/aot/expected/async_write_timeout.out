@@ -1,0 +1,4 @@
+listening: yes
+short=yes timed_out=yes bounded=yes ticks=4
+r=3000 w=3000
+done

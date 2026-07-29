@@ -295,6 +295,46 @@ trait EmitLlvmControl
         return $label . ":\n";
     }
 
+    /**
+     * A string-typed conditional yields an OWNED (+1) value from EVERY arm, so a
+     * borrowed arm — an alias, a property / element read — is retained here.
+     *
+     * Without it `$out = $out === '' ? $s : ($out . ',' . $s);` stored $s's buffer
+     * BORROWED: the next iteration's `$s = trim(...)` freed it and the allocator
+     * handed the same block back, so the accumulated value silently became the
+     * newest element repeated. Assignment retains a bare alias ($x = $s) but never
+     * looked inside a conditional, and the mixed shape — one owned arm, one
+     * borrowed — is the `string|false` idiom, so it is everywhere. Its return-path
+     * twin is {@see EmitLlvmModule::returnedLocalNames}.
+     *
+     * ⚠ The retain is NOT paired with a release: the consumers still treat a
+     * conditional as borrowed ({@see EmitLlvm::isFreshStringTemp},
+     * {@see InsertMemoryOps::isOwnedObj}). Teaching them it is owned was tried and
+     * reverted — an arm that is not itself string-TYPED (a cell/unknown carrier
+     * that coerces to the string) gets no retain here, so the release side then
+     * freed what nobody owned and preg/socket cases read freed bytes. Retaining
+     * without releasing leaks a string; releasing without retaining corrupts one,
+     * and the concat arm already leaked before this. Pairing them needs every arm
+     * covered regardless of its static type — worth doing, not worth guessing at.
+     *
+     * A CELL-typed conditional is excluded: its arms are boxed, and a cell's
+     * ownership is the tag-guarded __mir_cell_drop discipline, not this one.
+     */
+    private function retainBorrowedStrArm(Ternary $n, ?Node $arm, string $i64reg): string
+    {
+        if ($arm === null || $n->type->kind !== Type::KIND_STRING) { return ''; }
+        if ($arm->type->kind !== Type::KIND_STRING) { return ''; }
+        // A fresh temp already carries the +1; a literal is immortal (its retain is
+        // a sentinel no-op, but skip the call rather than emit a useless one).
+        if ($this->isFreshStringTemp($arm) || $arm->kind === Node::KIND_STRING_CONST) {
+            return '';
+        }
+        $this->rt->needsStrRc = true;
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n"
+            . '  call void @__mir_rc_retain_str(ptr ' . $p . ")\n";
+    }
+
     private function emitTernary(Ternary $n): string
     {
         $t = $n;
@@ -341,11 +381,13 @@ trait EmitLlvmControl
         } else {
             $thenVal = $rawCond;
         }
+        $out .= $this->retainBorrowedStrArm($n, $t->then ?? $t->cond, $thenVal);
         $out .= '  store i64 ' . $thenVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $elseLabel . ":\n";
         $out .= $this->emitNode($t->else_);
         $out .= $wantCell ? $this->boxToCell($t->else_->type) : $this->coerceToI64();
+        $out .= $this->retainBorrowedStrArm($n, $t->else_, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
