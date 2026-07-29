@@ -1,257 +1,219 @@
 # Manticore
 
 Self-hosted PHP-to-native AOT compiler. Compiles a large subset of PHP 8.5+ to
-standalone native binaries (arm64 / x86_64) through LLVM IR — no PHP runtime,
-no shared libraries beyond libc. **The compiler is written in PHP and compiles
-itself to a byte-identical fixpoint.**
+standalone native binaries (arm64 / x86_64) through LLVM IR — no PHP runtime, no
+shared libraries beyond libc. **The compiler is written in PHP and compiles itself
+to a byte-identical fixpoint.**
 
-## Rationale
+```bash
+manticore compile app.php -o app && ./app      # one file → one static binary
+```
 
-`If you only knew the power of the dark side.`
+The output has no interpreter to install, no `php.ini`, no extension list — you ship
+the binary. What you write is ordinary PHP: the Zend interpreter is the reference,
+and every plain-runnable test case is diffed against it. On top of that sits a
+[superset](docs/superset.md) `php` cannot run at all — structured concurrency, FFI,
+a module system, compile-time attributes.
 
-Manticore is a proof-of-concept project that aims to demonstrate the
-feasibility of creating a self-hosted PHP compiler. By writing the compiler in
-PHP and compiling it to a byte-identical fixpoint, Manticore showcases the
-potential for creating a fully self-contained PHP runtime environment.
-
-## Status
-
-- ✅ **Self-host fixpoint holds.** `manticore build manticore.json` rebuilds the
-  compiler from PHP source; gen2 and gen3 emit byte-identical IR.
-- ✅ **AOT suite 467/467** green (`tests/aot/`).
-- ✅ **Differential parity 458/0** vs the Zend `php` interpreter (PHP 8.5.8) —
-  manticore output matches the reference on every plain-runnable case.
-- ✅ **~228 standard-library functions** implemented (array 35, string 43, type
-  30, math 28, ctype 11, `preg_*` 10, plus JSON / var-dump / SPL / date / I/O) —
-  each as a PHP-level stdlib function, an injected prelude helper, or an inlined
-  codegen builtin. See [Standard library](#standard-library).
-- ✅ **Rebuild-stable** — 5×2 cold/self rebuilds, every binary smoke-clean (no
-  build-to-build heap-layout roulette).
-- ✅ **Faster than Zend on every benchmark** — up to **44×** on compute/algorithms,
-  1.5–8× on the stdlib-bound tail, ~24× faster cold start — see
-  [Benchmarks](#benchmarks).
-- ✅ Refcount + copy-on-write (assoc + objects) and a Bacon–Rajan cycle
-  collector v1 (opt-in, zero-overhead unless `gc_collect_cycles()` is reached).
-- ✅ Cargo-like module system: `manticore.json`, `.sig` module interfaces,
-  prebuilt stdlib object, distributable compiler (`bin/` + `lib/`, no sources).
-- ✅ Extension system (MVP): manifest-declared native-library bindings —
-  glue compiled into the app + `-l<lib>` linked (proof: `zlib`/`crc32`). Real
-  extensions (curl / xml / pdo) build on the same mechanism.
-- ✅ **Broad PHP 8.5 surface.** Classes / interfaces / traits / enums (incl.
-  enum methods + constants and interface-implementing enums), abstract +
-  anonymous classes, late static binding (`new static`, `static::method()`,
-  `parent::`/`self::` forwarding), magic methods
-  (`__get`/`__set`/`__call`/`__invoke`/`__clone`/`__destruct`), `clone`-with,
-  8.4 **property hooks** + asymmetric visibility, closures + first-class callable
-  syntax (`f(...)`), by-ref / variadic params + **argument unpacking** (`f(...$a)`),
-  dynamic callables (`call_user_func`, string/array callables), the pipe operator
-  `|>`, `match`, DNF types, null-coalescing / nullsafe (`??`, `?->`), `global` /
-  `static` locals, heredoc / nowdoc, encapsed-string interpolation,
-  `define`/constants, generators (`yield` / `yield from`), exceptions with
-  `try`/`catch`/`finally` and stack traces (`getTrace` / `debug_backtrace`),
-  the full `preg_*` family (10 functions via the host PCRE2 library),
-  by-reference to an **array element / object property** (`f($a[0])`, `f($o->v)`)
-  and out-parameter auto-vivification (`preg_match($re, $s, $m)`), reference
-  returns (`function &f()`), and file I/O over libc.
-- ✅ **Generics** (docblock-driven, so source stays valid PHP): `@template` with
-  bounds (`T of C`) + defaults (`T = X`), `@extends`/`@implements`, generic
-  **traits** (`@use T<X>`, zero-cost), and **reified** `@var Box<float> = new Box`
-  (a real specialized class, no boxing) — plus implicit **monomorphization** of
-  erased `array` / `callable` params. See [`docs/generics.md`](docs/generics.md).
-
-## Benchmarks
-
-Native AOT output vs the Zend `php` interpreter (PHP 8.5.3). Apple M1 Pro,
-`-O2`, best of 5, each compiled program verified byte-equal to `php` first.
-Every loop is **data-dependent and `$argc`-seeded** so the LLVM optimizer can't
-fold it away — these numbers are real codegen throughput, not a deleted loop.
-Reproduce with `bash bench/run.sh` (cases in `bench/cases/`).
-
-**Compute-bound** — native codegen dominates (the interpreter's per-op dispatch
-is the tax we skip):
-
-| Benchmark | Workload | `php` | manticore | Speedup |
-|-----------|----------|------:|----------:|--------:|
-| `oop`     | 20 M polymorphic virtual `area()` (LCG-indexed) | 1.13 s | 0.04 s | **28×** |
-| `fib`     | recursive fib, data-dependent depth [30,33] | 1.86 s | 0.10 s | **19×** |
-| `closures`| 2 M closure build + call          | 0.19 s | 0.01 s | **19×** |
-| `mathf`   | 3 M `sqrt` + `sin` accumulate     | 0.16 s | 0.01 s | **16×** |
-| `loop`    | 50 M-iter data-dependent accumulate | 0.68 s | 0.06 s | **11×** |
-| `sieve`   | Sieve of Eratosthenes to 2 M      | 0.20 s | 0.02 s | **10×** |
-| `array`   | 30× build + sum a 500 K-element vec | 0.35 s | 0.07 s |  **5.0×** |
-| `strcat`  | 30 M-iter string append           | 0.37 s | 0.11 s | **3.4×** |
-
-**Algorithms** (Computer Language Benchmarks Game style — float math, tight
-loops, 2-D arrays):
-
-| Benchmark | `php` | manticore | Speedup |
-|-----------|------:|----------:|--------:|
-| `spectralnorm` | 0.44 s | 0.01 s | **44×** |
-| `mandelbrot`   | 0.26 s | 0.03 s | **8.7×** |
-| `matmul`       | 0.08 s | 0.01 s |  **8×** |
-| `dijkstra`     | 0.14 s | 0.03 s | **4.7×** |
-| `nbody`        | 0.17 s | 0.04 s | **4.2×** |
-
-**Library-bound** — time is spent in the PHP-level stdlib/prelude (arrays,
-strings, JSON), so the win is smaller and tracks how optimized that helper is,
-and how much it competes with PHP's hand-tuned C:
-
-| Benchmark | Workload | `php` | manticore | Speedup |
-|-----------|----------|------:|----------:|--------:|
-| `funcarr` | `array_map`/`filter`/`reduce`     | 0.16 s | 0.02 s | **8.0×** |
-| `strops`  | `strtoupper`/`str_replace` loop   | 0.07 s | 0.02 s | **3.5×** |
-| `wordcount`| assoc map build + iterate        | 0.07 s | 0.02 s | **3.5×** |
-| `sort`    | `sort()` 3 K ints × 200           | 0.12 s | 0.05 s | **2.4×** |
-| `sprintf` | `sprintf` formatting loop         | 0.09 s | 0.04 s | **2.2×** |
-| `in_array`| `in_array` linear scan over a vec | 0.15 s | 0.07 s | **2.1×** |
-| `explode` | `explode`/`implode` loop (fused)  | 0.14 s | 0.07 s | **2.0×** |
-| `assoc`   | string-keyed map build + lookup   | 0.15 s | 0.08 s | **1.9×** |
-| `json`    | `json_encode` loop                | 0.12 s | 0.08 s | **1.5×** |
-
-- **Cold start** (`echo "hello"`): `php` 62 ms vs manticore **2.6 ms** (~24×) —
-  no interpreter/extension init.
-- **Compile time**: `fib.php` → native binary in **~0.1 s** (parse → MIR →
-  LLVM → clang → link).
-- **Output size**: a trivial program links to a **~50 KB** fully-static binary
-  (libc only); the self-hosted compiler is ~4.3 MB.
-
-The library-bound tail is the tightest race — these lean on stdlib/prelude
-helpers competing with PHP's hand-tuned C, yet native still wins every one.
-`json_encode` is a native single-buffer codegen builtin (a recursive cell walk
-that formats ints/floats and escapes strings straight into one growing buffer),
-`explode`/`implode` round-trips fuse into a single native `str_replace`, assoc
-lookups cache each string's hash in its header (Zend `zend_string` style), and
-string builders (`$s = $s . …`) append in place, not the former O(n²) copy.
+---
 
 ## Requirements
 
-Emitted binaries are fully static and depend on nothing but libc. The
-*compiler* needs a real toolchain on the host:
+**Emitted binaries need nothing but libc.** The *compiler* needs a real toolchain on
+the host, because it ends in `clang` and `cc`:
 
-- **`clang`** and **`cc`** on `PATH`, with **LLVM ≥ 15** — Manticore emits
-  opaque-pointer IR, which clang 14 rejects.
-- **PHP 8.5** — only for the cold bootstrap (Zend runs the compiler source once
-  to seed the first native binary; emitted binaries make no PHP-runtime calls).
-- **libpcre2** (`preg_*`) and **OpenSSL 3** (TLS, `hash`/`hmac`) development
-  packages, plus `pcre2-config` / `pkg-config` to locate them.
+| What | Version | Why |
+|---|---|---|
+| `clang` + `cc` on `PATH` | **LLVM ≥ 15** | Manticore emits opaque-pointer IR; clang 14 rejects it |
+| `php` | **8.5** | cold bootstrap only — Zend runs the compiler source once to seed the first native binary |
+| libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config` |
+| OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config` |
 
-Both **macOS** (arm64 / x86_64) and **Linux** (glibc ≥ 2.33, arm64 / x86_64) are
-supported — each builds the compiler and passes the full suite, including the
-self-host fixpoint.
+The `-dev` / `-devel` half matters: the headers are what the build looks for, not just
+the runtime library.
 
-**Per-OS package lists, Docker images and troubleshooting:
-[`docs/install.md`](docs/install.md).**
-
-## Quick start
+**Platforms:** macOS (arm64 / x86_64) and Linux (glibc ≥ 2.33, arm64 / x86_64). Each
+builds the compiler and passes the full suite including the self-host fixpoint. Alpine
+(musl) builds; see [`docs/install.md`](docs/install.md) for the current caveats.
 
 ```bash
-# Install: the compiler builds itself into ~/.manticore (needs the toolchain above)
+# macOS
+brew install php pcre2 openssl@3 pkg-config
+
+# Debian / Ubuntu — plus clang from your distro or apt.llvm.org, and PHP 8.5 from sury.org
+sudo apt-get install -y build-essential pkg-config libpcre2-dev libssl-dev
+```
+
+Per-OS package lists, Docker images and troubleshooting:
+**[`docs/install.md`](docs/install.md)**.
+
+## Install
+
+There is no prebuilt binary to download — the compiler compiles itself. The installer
+checks the toolchain above, tells you what is missing, then installs under
+`$MANTICORE_HOME` (default `~/.manticore`):
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 export PATH="$HOME/.manticore/bin:$PATH"
 
-# ...or, from a checkout:
-
-# Cold bootstrap: Zend seeds the first native compiler (no binary needed yet)
-bash bin/compile                      # → bin/manticore  (~4.3 MB static binary)
-
-# Thereafter, the compiler rebuilds itself (Zend seed is only the cold start)
-bash bin/build                      # self-host: bin/manticore compiles src/
-bash bin/build --verify             # + fixpoint + suite gate
-
-# Compile and run a program
-bin/manticore compile path/to/app.php -o app && ./app
-
-# Source from stdin
-echo '<?php echo "hi\n";' | bin/manticore compile -o /tmp/hi && /tmp/hi
+manticore version        # manticore 0.6.0
 ```
 
-## CLI
+Re-running the installer **upgrades in place**: an existing `manticore` rebuilds the
+new version *with itself* (self-host, fast) — the Zend seed is only the cold first
+boot. Knobs: `MANTICORE_HOME`, `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`,
+`MANTICORE_SRC` (build a local checkout instead of cloning).
+
+Via Composer, which here is a delivery + build trigger rather than a runtime:
+
+```bash
+composer create-project manticorephp/compiler manticore   # builds into ~/.manticore
+vendor/bin/manticore-install                              # if it is already a dependency
+```
+
+The installed layout is self-contained and needs no environment variables — the binary
+finds its runtime relative to itself:
+
+```
+$MANTICORE_HOME/bin/manticore
+$MANTICORE_HOME/lib/manticore_stdlib.o(.sig)
+$MANTICORE_HOME/lib/prelude/*.php
+```
+
+### From a checkout
+
+```bash
+bin/compile              # cold bootstrap: Zend seeds the first native compiler
+bin/build                # thereafter it rebuilds ITSELF (this is the normal loop)
+bin/build --verify       # + fixpoint + suite gate
+```
+
+## Working with it
+
+```bash
+# one file
+manticore compile path/to/app.php -o app && ./app
+echo '<?php echo "hi\n";' | manticore compile -o /tmp/hi && /tmp/hi
+
+# a project — a cargo-style manifest, see docs/modules.md
+manticore build                    # reads ./manticore.json
+manticore build --libs-only        # library targets only
+
+# a Composer project: "composer": true in the manifest compiles the project's
+# autoload dirs AND every package in composer.lock — vendor/ is source, not an
+# autoload map evaluated at runtime.
+```
+
+Everything else is inspection — every stage of the pipeline is dumpable:
 
 | Command | Purpose |
-|---------|---------|
+|---|---|
 | `compile <file> -o <out>` | PHP source → native binary (file arg or stdin) |
-| `build [manticore.json]` | Build all manifest targets (libraries + applications) |
-| `dump-ast <file>` | Parse → print the AST |
-| `dump-mir <file>` | Lower → print the typed MIR |
-| `dump-llvm-mir <file>` | Full MIR pipeline → print LLVM IR |
-| `dump-llvm <file>` | Same as `dump-llvm-mir` (the AST backend was removed; MIR is the only backend) |
-| `dump-sig <files>` | Print the module-interface `.sig` (exported symbol table) |
+| `build [manticore.json]` | build all manifest targets (libraries + applications) |
+| `analyze <file>` | the static checks a compiler can make and an interpreter never gets to |
+| `dump-ast` / `dump-mir` / `dump-llvm-mir` | parse / typed MIR / LLVM IR |
+| `dump-sig <files>` | the module interface (exported symbol table) |
 | `version` / `help` | — |
 
 Flags: `-o <out>`, `-O<0|1|2|3|s|z>` (clang opt level, default `-O2`),
-`--emit-library` (compile to a standalone `.o` with no `@main`),
-`--memory=rc|arena|hybrid`. `build` also takes `--libs-only` (build the
-library targets and stop).
+`--emit-library` (a standalone `.o` with no `@main`), `--memory=rc|arena|hybrid`.
+`compile` **analyzes by default** and prints warnings without failing the build —
+`--no-analyze` turns it off, `--analyze-strict` makes error-severity findings fail the
+compile (rc=65).
 
-## Module system (`manticore.json`)
+⚠ The `dump-*` commands do **not** link the stdlib, so a call into it resolves as
+`unknown`. When that matters, read the final binary.
 
-A cargo-style manifest builds multi-file projects, links prebuilt libraries, and
-self-reproduces the compiler. **Full end-user guide: [`docs/modules.md`](docs/modules.md).**
+## The PHP you get
 
-```json
-{
-  "libraries": [{
-    "name": "stdlib",
-    "src": "src/Runtime",
-    "output": "lib/manticore_stdlib.o",
-    "runtime": true
-  }],
-  "applications": [{
-    "name": "compiler",
-    "src": "src",
-    "output": "bin/manticore",
-    "entry": "src/zzz_entry.php",
-    "stdlib": false
-  }]
-}
+Classes / interfaces / traits / enums (enum methods, constants, interface-implementing
+enums), abstract + anonymous classes, late static binding (`new static`,
+`static::method()`, `parent::`/`self::` forwarding), magic methods
+(`__get`/`__set`/`__call`/`__invoke`/`__clone`/`__destruct`), `clone`-with, 8.4
+**property hooks** + asymmetric visibility, closures + first-class callable syntax
+(`f(...)`), by-ref / variadic params + argument unpacking, dynamic callables, the pipe
+operator `|>`, `match`, DNF types, `??` / `?->`, `global` / `static` locals, heredoc /
+nowdoc, string interpolation, constants, generators (`yield` / `yield from`),
+exceptions with `try`/`catch`/`finally` and real stack traces, references to an array
+element / object property and out-parameter auto-vivification
+(`preg_match($re, $s, $m)`), reference returns, attributes, Reflection, Fibers, and
+file I/O over libc.
+
+**Generics** are docblock-driven, so the source stays valid PHP: `@template` with
+bounds and defaults, `@extends`/`@implements`, generic traits (zero-cost), and
+**reified** `@var Box<float> = new Box` — a real specialized class, no boxing — plus
+implicit monomorphization of erased `array` / `callable` params
+([`docs/generics.md`](docs/generics.md)).
+
+**Standard library:** the `array_*` family in full, strings (incl. the whole `preg_*`
+family over host PCRE2), type/reflection, math, `ctype_*`, JSON, `var_dump`/`print_r`,
+SPL, date/time, sockets and streams, hashing and crypto. Each function is either a
+PHP-level stdlib function (`src/Runtime/Stdlib/`, compiled into
+`lib/manticore_stdlib.o` and auto-linked), an injected prelude helper, or an inlined
+codegen builtin. No imports, no registration — they are simply there.
+
+Current gaps are tracked with repros in [`docs/ROADMAP.md`](docs/ROADMAP.md); the
+headline ones are listed under [Limitations](#limitations).
+
+## Beyond PHP — the superset
+
+Parity is the north star and `tools/difftest.sh` enforces it. The rest — the surface
+`php` cannot run, and difftest therefore cannot check — is catalogued in
+**[`docs/superset.md`](docs/superset.md)**: concurrency, compile-time attributes, FFI,
+the module system, the type system, the memory model.
+
+The headline is **structured concurrency** — Go's model, PHP's spelling, written in
+PHP over two primitives of ours (native `Fiber` on `fcontext`, and `Io\Poll` over
+kqueue/epoll):
+
+```php
+Async\async(function () {
+    $a = Async\spawn(fn() => file_get_contents('https://example.com/one'));
+    $b = Async\spawn(fn() => file_get_contents('https://example.com/two'));
+    [$x, $y] = Async\awaitAll($a, $b);      // ~1 RTT, not 2
+});
 ```
 
-- **`applications[]`** — `src` directory, `output` binary, optional `entry`
-  (the file whose top level becomes `main`), optional `exclude`, optional
-  `libraries` (user library deps — omit ⇒ all, `[]` ⇒ none), optional
-  `stdlib: false` (opt out of the always-on stdlib runtime), optional
-  `composer` — `true` builds the project the way Composer sees it: its
-  `composer.json` autoload (psr-4/psr-0/classmap dirs) **and** every installed
-  package from `composer.lock` (`vendor/<name>/`). The object form
-  `{ "vendor": false }` takes only the project's own autoload.
-- **`libraries[]`** — compiled to `<output>.o` + an `<output>.o.sig` interface;
-  an application links a user library by naming it. A `runtime: true` library
-  (the stdlib) is built but auto-linked into every app (see above).
-- **`.sig`** files carry a module's public symbol table so a dependent target
-  resolves cross-unit calls *without* re-parsing the dependency's sources. A
-  distributed compiler ships `bin/` + `lib/manticore_stdlib.{o,sig}` only — no
-  PHP sources — and resolves the bundled stdlib by `.sig`.
-
-The **stdlib is the always-on runtime**: every `compile`/`build` program gets it
-transparently (no manifest ceremony), independent of the `libraries` selection;
-opt out with `"stdlib": false` (only the self-contained compiler, which embeds
-`src/Runtime`, does). See [`docs/modules.md`](docs/modules.md).
+Ordinary `fread`/`fwrite`/`stream_socket_accept`/`sleep` suspend the fiber instead of
+the process — plain streams *are* the async API, TLS and DNS included. Every task is
+owned by a scope, cancellation is delivered at the suspend point, a deadlock is
+reported rather than exited, and `Async\dump()` names every live task and where it was
+spawned. An 8-worker prefork HTTP server does **150–160k rps** (`wrk`, plaintext
+keep-alive). See [`docs/async.md`](docs/async.md).
 
 **Native libraries** (zlib, libcurl, …) bind through FFI — `#[Library, Symbol]`
-attributes compile to direct C calls; declare them as manifest `extensions`.
-Mechanism + type mapping: [`docs/ffi.md`](docs/ffi.md).
+attributes compile to direct C calls, declared as manifest `extensions`; mechanism and
+type mapping in [`docs/ffi.md`](docs/ffi.md). The **module system**
+([`docs/modules.md`](docs/modules.md)) is a cargo-style `manticore.json` with
+`applications` and `libraries`, `.sig` module interfaces so a dependent target resolves
+cross-unit calls without re-parsing sources, and a distributable compiler that ships
+`bin/` + `lib/` with no PHP sources at all.
 
-## Standard library
+## Performance
 
-**~228 PHP standard-library functions** are implemented across three tiers, all
-exposed to user programs transparently (no imports, no registration):
+Native AOT output vs the Zend interpreter, Apple M1 Pro, `-O2`, best of 5, every
+compiled program verified byte-equal to `php` first. Loops are data-dependent and
+`$argc`-seeded so LLVM cannot fold them away. Representative slice — reproduce the
+full set with `bash bench/run.sh` (cases in `bench/cases/`):
 
-| Family | Count | Examples |
-|--------|------:|----------|
-| `array_*` | 35 | `array_map`/`filter`/`reduce`, `usort`/`uasort`/`uksort`, `array_merge`, `array_column`, `array_diff`, `array_unique` |
-| String | 43 | `str_replace`, `substr`, `explode`/`implode`, `sprintf`, `preg_*` (10, via host PCRE2), `str_pad`, `wordwrap`, `levenshtein` |
-| Type / reflection | 30 | `is_*`, `gettype`, `get_class`, `get_object_vars`, `class_exists`, `method_exists` |
-| Math | 28 | `abs`, `sqrt`, trig, `intdiv`, `fmod`, `round`, `pow`, `max`/`min` |
-| `ctype_*` | 11 | `ctype_digit`, `ctype_alpha`, … |
-| Var / JSON / SPL / date / I/O | remainder | `var_dump`, `var_export`, `print_r`, `json_encode`, `SplStack`/`SplQueue`, `time`/`date`, `fopen`/`fread` over libc |
+| Benchmark | Workload | `php` | manticore | Speedup |
+|---|---|---:|---:|---:|
+| `spectralnorm` | float math, tight loops | 0.44 s | 0.01 s | **44×** |
+| `oop` | 20 M polymorphic virtual calls | 1.13 s | 0.04 s | **28×** |
+| `fib` | recursive, data-dependent depth | 1.86 s | 0.10 s | **19×** |
+| `sieve` | Eratosthenes to 2 M | 0.20 s | 0.02 s | **10×** |
+| `funcarr` | `array_map`/`filter`/`reduce` | 0.16 s | 0.02 s | **8.0×** |
+| `strcat` | 30 M-iter string append | 0.37 s | 0.11 s | **3.4×** |
+| `sort` | `sort()` 3 K ints × 200 | 0.12 s | 0.05 s | **2.4×** |
+| `json` | `json_encode` loop | 0.12 s | 0.08 s | **1.5×** |
 
-Each function is one of: a **PHP-level stdlib function** (`src/Runtime/Stdlib/`,
-compiled into `lib/manticore_stdlib.o` and auto-linked), an **injected prelude
-helper** (`prelude/`, inlined into each program), or an **inlined codegen
-builtin** (`src/Compile/Mir/Passes/EmitLlvmBuiltins.php`, emitted as a primitive
-/ libc call / LLVM intrinsic). See `docs/ROADMAP.md` for the gap matrix.
+Compute-bound work wins big (no per-op dispatch). The library-bound tail is the
+tightest race — those helpers compete with PHP's hand-tuned C — and native still wins
+every one. Also: **cold start** 2.6 ms vs 62 ms (~24×), a trivial program links to a
+**~50 KB** fully-static binary, and `fib.php` compiles to native in ~0.1 s.
 
-## Compiler pipeline
+## How it is built
 
 ```
 PHP source
@@ -260,11 +222,11 @@ PHP source
   → LowerFromAst     ─┐
   → ConstFold         │
   → DeadStore         │
-  → InferTypes        │  MIR  (src/Compile/Mir) — flat, typed, SSA-ish IR
-  → InlineClosures    │  The only backend (the AST backend was removed);
-  → Monomorphize      │  EmitLlvm builds IR text via the src/Codegen/Llvm helpers.
-  → NarrowReturns     │  Monomorphize specializes erased-array / callable params
-  → CheckTypeDefs     │  per concrete call-site shape (see docs/design).
+  → InferTypes        │  MIR (src/Compile/Mir) — flat, typed, SSA-ish IR.
+  → InlineClosures    │  The only backend; Monomorphize specializes erased-array
+  → Monomorphize      │  and callable params per concrete call-site shape.
+  → NarrowReturns     │
+  → CheckTypeDefs     │
   → DemoteCharLocals  │
   → InferEffects      │
   → InferAllocKind    │
@@ -276,117 +238,64 @@ PHP source
   → cc                link static binary (libc only)
 ```
 
-## Memory model
+**Memory** ([`docs/memory.md`](docs/memory.md)): reference counting on strings,
+objects, vecs and assoc arrays with copy-on-write, so frees are deterministic and there
+are no GC pauses; a synchronous Bacon–Rajan cycle collector that is opt-in and
+zero-overhead until `gc_collect_cycles()` is reached; and three allocation modes
+(`--memory` / `MANTICORE_MEMORY`) — `hybrid` (default, escape analysis routes each
+allocation between arena and heap-rc), `rc`, `arena`.
 
-Full guide + how to control it: [`docs/memory.md`](docs/memory.md).
-
-- **Reference counting** on strings, objects, vecs, and assoc arrays, with
-  **copy-on-write** for assoc snapshots/stores (Zend-style). Deterministic
-  frees, no GC pauses.
-- **Cycle collector v1** — synchronous Bacon–Rajan, **opt-in**: zero overhead
-  unless a program reaches `gc_collect_cycles()`. (v1 limit: manual trigger;
-  static/global roots not scanned.)
-- **Allocation modes** (`--memory` / `MANTICORE_MEMORY`): `hybrid` *(default)*,
-  `rc`, `arena` (bump-pointer, scope-freed). Escape analysis (`InferAllocKind`)
-  routes each allocation between arena (confined) and heap-rc (escaping).
-- The unified `PhpArray` is one runtime type (vec + assoc collapsed) with FNV
-  bucket indexing for hashed keys.
-
-## Source layout
-
-Pure PHP, one class/interface/trait/enum per file, path mirrors FQN.
+**Source layout** — pure PHP, one class per file, path mirrors FQN:
 
 ```
 bin/            build & run scripts + the output binary
-  compile         cold seed: Zend builds a throwaway seed, which then runs
-                  `build manticore.json` → native bin/manticore + stdlib
+  compile         cold seed (Zend → throwaway seed → native compiler + stdlib)
   build           self-host rebuild via the manifest (+ --seed, --verify)
-lib/              prebuilt stdlib object + .sig (gitignored build artifacts)
-src/Lexer/        tokenizer
-src/Parser/       recursive-descent + Pratt parser; AST node types
-src/Compile/      AST → MIR lowering, MIR passes, and the EmitLlvm backend
-  Mir/              the typed IR (Node/Type/Module) + Passes/ pipeline
-  Runtime/, TypeHint/, MemoryAbi.php, MemoryOp.php
-src/Codegen/Llvm/ low-level LLVM-IR text builders (Module/Block/Type/Value)
-                  used by EmitLlvm + the runtime hosts; no semantic logic
-                  (new emission belongs in Compile/Mir/Passes/EmitLlvm*)
-src/Runtime/      PHP-level stdlib + runtime helpers compiled into binaries,
-                  plus libc / OS / Json bindings
-src/Ffi/          FFI binding attributes
-src/Os/           OS / syscall layer
-src/Manticore/    driver (Main.php), Sig.php (module interfaces), build command
-src/Cli/          CLI dispatch
-tools/            build + gate scripts (selfhost, difftest, …)
-tests/aot/        primary harness: cases/*.php + expected/*.out
-docs/ROADMAP.md   status, gap matrix, planning method (start here)
-docs/design/      design docs (module-system, type-system-v2, generators,
-                  late-static-binding, monomorphization, …)
+lib/            prebuilt stdlib object + .sig + prelude (build artifacts, gitignored)
+prelude/        PHP injected into every program (Fiber, async runtime, Resource, …)
+src/Lexer/      tokenizer
+src/Parser/     recursive-descent + Pratt parser; AST node types
+src/Compile/    AST → MIR lowering, MIR passes, EmitLlvm backend
+src/Codegen/    low-level LLVM-IR text builders (no semantic logic)
+src/Runtime/    PHP-level stdlib + libc / OS / FFI bindings compiled into binaries
+src/Manticore/  driver (Main.php), Sig.php, the build command
+tools/          build + gate scripts (selfhost, difftest, docker, …)
+tests/aot/      the harness: cases/*.php + expected/*.out, auto-discovered
+examples/       runnable demos (examples/async/ has the concurrency ones)
+docs/           the guides; docs/ROADMAP.md is the status + gap matrix
 ```
 
-`src/zzz_entry.php` sorts last and holds the top-level `main_driver()` call the
-binary's `main` lowers to.
-
-## Self-hosting & gates
+## Gates
 
 ```bash
-bash tests/aot/run.sh                 # AOT suite (467 cases)
+bash tests/aot/run.sh                 # the AOT suite (cases/ + expected/, auto-discovered)
 bash tests/aot/run.sh -k hello        # filter by substring
-bash tools/difftest.sh                # parity vs `php` (PHP 8.5.8)
-bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + stability
+bash tools/difftest.sh                # parity vs `php`
+bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + rebuild stability
+bash tools/docker/run_tests.sh --gate # the same, on Linux
 ```
 
-`bin/compile` cold-seeds (Zend → throwaway seed → native compiler via the
-manifest); `bin/build` self-hosts. `selfhost_fixpoint.sh` asserts gen2 IR ==
-gen3 IR, runs the suite through the self-built compiler, and rebuilds 5×2 to
-catch layout roulette.
+`selfhost_fixpoint.sh` asserts gen2 IR == gen3 IR, runs the suite through the
+self-built compiler, and rebuilds repeatedly to catch build-to-build layout roulette.
+The Linux gate is not optional for anything touching `src/Runtime/`, syscalls or errno.
 
-## Known limitations
+## Limitations
 
-- **Integer overflow wraps** (two's-complement) instead of promoting to float
-  as PHP does — `PHP_INT_MAX + 1` gives `PHP_INT_MIN`, not a float.
-- **Dynamic name resolution** is not yet supported — `new $cls()`, `$cls::m()`,
-  `$o->$m()`, `$o->$prop`, a computed-string `$f()`, `$obj instanceof $cls`, and
-  `ReflectionClass`. (Literal / first-class / `call_user_func($strVar, …)`
-  callables do work.)
-- **`extract()`** is not implemented (it needs dynamic symbol-table writes the
-  typed frame does not model). `compact()` works.
-- **`goto` into a loop body** is unsupported (plain forward/backward `goto`
-  works).
-- **Cycle collector** is manual-trigger only; static/global roots not scanned.
-- **Multi-object linking composes** (resolved): a binary linked from two
-  manticore objects (user `.o` + prebuilt `stdlib.o`) is correct and
-  byte-identical — class ids are content-hashed (stable across objects) and
-  drops route through a per-class `linkonce_odr` descriptor + indirect drop_fn,
-  so a class one object doesn't know still drops correctly. The compiler still
-  self-builds self-contained (stdlib embedded) for simplicity; user programs
-  link the cached `stdlib.o`.
+- **Integer overflow wraps** (two's-complement) instead of promoting to float —
+  `PHP_INT_MAX + 1` gives `PHP_INT_MIN`.
+- **`extract()`** is not implemented (dynamic symbol-table writes the typed frame does
+  not model). `compact()` works.
+- **`goto` into a loop body** is unsupported (plain forward/backward `goto` works).
+- **Cycle collector** is manual-trigger only and does not scan static/global roots.
+- **A `.sig` carries functions only** — classes, interfaces, traits, enums and
+  constants do not yet cross a compiled-library boundary.
+- **Regular-file I/O blocks the async loop** by design; see
+  [`docs/async.md`](docs/async.md#-what-is-not-async) for the measurements and
+  `Async\readFile()`.
 
-## Roadmap / next steps
-
-1. **Parity tail.** Close the remaining `tools/difftest.sh` gaps toward the full
-   PHP 8.5 surface: integer overflow → float promotion, the `sprintf` flag
-   corners (`%b`, width+precision, `%e` exponent), `extract`/`compact`. Each is a
-   scoped stdlib/codegen fix, not an architectural one.
-2. **Representation soundness.** Continue the typed⇄cell array reabstraction the
-   monomorphization + de-cellify work opened (`docs/design/unknown-cell-soundness.md`,
-   `docs/design/monomorphize-callable-dim.md`): erased-array boundaries now
-   specialize + de-cellify at stores; broaden the same discipline to the last
-   raw-guessing consumers.
-3. **Build cache.** A content-addressed cache (`~/.manticore/cache`, keyed by
-   srchash + compiler ABI + target triple) to skip re-lowering/re-clang of
-   unchanged modules — a speed feature (multi-object linking already composes).
-4. **Extension system.** MVP shipped (manifest `extensions`, glue compiled in,
-   `-l<lib>` linked; proof: `zlib`/`crc32`, and the `preg_*` family over host
-   PCRE2). Next: static-archive linking (keeps binaries fully static) + real
-   extensions (curl / xml / pdo) on the same FFI mechanism.
-5. **Module system depth.** Weak library symbols (app can override), composer
-   packaging + `dependencies` resolution (`vendor/`, lockfile), cross-library
-   `.sig` classes.
-6. **Memory.** Cycle-collector roots for statics/globals + automatic trigger;
-   broaden arena/hybrid escape routing.
+The full, current gap matrix with repros lives in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License
 
 Licensed under the [MIT License](LICENSE).
-
-[issue #1]: https://github.com/manticorephp/compiler/issues/1

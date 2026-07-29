@@ -11,27 +11,134 @@ use Manticore\Attr\RefOut;
 // parsed with compression-pointer support. The record arrays mirror php's shapes.
 
 /**
+ * resolv.conf's text, '' when it cannot be read. $path is a seam: every parser below
+ * takes TEXT, so the whole of resolv.conf handling is testable offline, with no
+ * network and no env var (the AOT runner injects none).
+ */
+function __mc_resolv_text(string $path = '/etc/resolv.conf'): string
+{
+    $c = \file_get_contents($path);
+    return $c === false ? '' : $c;
+}
+
+/**
+ * Every IPv4 `nameserver` in $text, comma-joined; '' when there is none. A
+ * comma-joined STRING rather than an array so the value can cross any boundary
+ * unharmed (the stdlib array-repr rule) — callers explode() it.
+ */
+function __mc_resolv_nameservers(string $text): string
+{
+    $out = '';
+    foreach (\explode("\n", $text) as $line) {
+        $line = \trim($line);
+        if (\strpos($line, 'nameserver ') !== 0) { continue; }
+        $ip = \trim(\substr($line, 11));
+        // IPv4 only here (a v6 nameserver needs a v6 UDP socket path).
+        if ($ip === '' || \strpos($ip, ':') !== false) { continue; }
+        $out = $out === '' ? $ip : ($out . ',' . $ip);
+    }
+    return $out;
+}
+
+/**
+ * The search list in $text, comma-joined; '' when there is none. `search a b c` and
+ * `domain d` both feed it and the LAST such line wins — glibc's rule, and the reason
+ * a file carrying both is not ambiguous. Capped at 6 entries (glibc's MAXSEARCH),
+ * lowercased, trailing dots stripped.
+ */
+function __mc_resolv_search(string $text): string
+{
+    $out = '';
+    foreach (\explode("\n", $text) as $line) {
+        $line = \trim($line);
+        if ($line === '' || $line[0] === '#' || $line[0] === ';') { continue; }
+        $isSearch = \strpos($line, 'search') === 0;
+        $isDomain = \strpos($line, 'domain') === 0;
+        if (!$isSearch && !$isDomain) { continue; }
+        // `searchfoo bar` is not a search line: the keyword must end at a separator.
+        $sep = \strlen($line) > 6 ? $line[6] : ' ';
+        if ($sep !== ' ' && $sep !== "\t") { continue; }
+        $rest = \trim(\substr($line, 6));
+        if ($rest === '') { continue; }
+        $out = '';
+        $n = 0;
+        foreach (\explode(' ', \str_replace("\t", ' ', $rest)) as $tokRaw) {
+            $tok = \rtrim(\strtolower(\trim((string)$tokRaw)), '.');
+            if ($tok === '') { continue; }
+            $out = $out === '' ? $tok : ($out . ',' . $tok);
+            $n = $n + 1;
+            if ($n >= 6) { break; }
+            if ($isDomain) { break; }   // `domain` names exactly one suffix
+        }
+    }
+    return $out;
+}
+
+/**
+ * `options ndots:N` from $text — last one wins, clamped to 0..15 (glibc's range);
+ * 1 when absent. Other options (timeout:, attempts:, rotate, edns0) are ignored;
+ * mapping timeout/attempts onto __mc_dns_query's 2 s × 2 tries is a follow-up.
+ */
+function __mc_resolv_ndots(string $text): int
+{
+    $nd = 1;
+    foreach (\explode("\n", $text) as $line) {
+        $line = \trim($line);
+        if (\strpos($line, 'options') !== 0) { continue; }
+        foreach (\explode(' ', \str_replace("\t", ' ', \substr($line, 7))) as $tokRaw) {
+            $tok = \trim((string)$tokRaw);
+            if (\strpos($tok, 'ndots:') !== 0) { continue; }
+            $v = (int)\substr($tok, 6);
+            if ($v < 0) { $v = 0; }
+            if ($v > 15) { $v = 15; }
+            $nd = $v;
+        }
+    }
+    return $nd;
+}
+
+/**
+ * The names to try for $host, in query order, comma-joined.
+ *
+ * An absolute name (`host.`) is used as-is. Otherwise the `ndots` rule decides which
+ * comes first: a name with at least $ndots dots is likely already qualified, so the
+ * bare name leads; a shorter one is a container/cluster short name (`db`, `redis`,
+ * `service.namespace`) and the search suffixes lead. Inside compose and kubernetes
+ * that shape is the NORM, and without it every such lookup fell through the async
+ * resolver into the blocking getaddrinfo walk — stalling the whole loop, in exactly
+ * the deployment async exists for.
+ */
+function __mc_dns_candidates(string $host, string $searchCsv, int $ndots): string
+{
+    $h = \rtrim($host, '.');
+    if ($h === '' || \strlen($host) !== \strlen($h)) {
+        return $h;   // rooted (or empty) — no search list applies
+    }
+    $suffixes = [];
+    foreach (\explode(',', $searchCsv) as $sRaw) {
+        $s = \trim((string)$sRaw);
+        if ($s !== '') { $suffixes[] = $s; }
+    }
+    if (\count($suffixes) === 0) { return $h; }
+    $qualified = \substr_count($h, '.') >= $ndots;
+    $out = $qualified ? $h : '';
+    foreach ($suffixes as $s) {
+        $cand = $h . '.' . (string)$s;
+        $out = $out === '' ? $cand : ($out . ',' . $cand);
+    }
+    return $qualified ? $out : ($out . ',' . $h);
+}
+
+/**
  * EVERY IPv4 `nameserver` from /etc/resolv.conf, comma-joined; '8.8.8.8' when the
- * file lists none. A comma-joined STRING rather than an array so the value can cross
- * any boundary unharmed (the stdlib array-repr rule) — callers explode() it.
+ * file lists none.
  *
  * Resolvers are tried IN ORDER with a per-server timeout, which is what makes a dead
  * first entry survivable; a single-server resolver failed the whole lookup.
  */
 function __mc_dns_nameservers(): string
 {
-    $c = \file_get_contents('/etc/resolv.conf');
-    $out = '';
-    if ($c !== false) {
-        foreach (\explode("\n", $c) as $line) {
-            $line = \trim($line);
-            if (\strpos($line, 'nameserver ') !== 0) { continue; }
-            $ip = \trim(\substr($line, 11));
-            // IPv4 only here (a v6 nameserver needs a v6 UDP socket path).
-            if ($ip === '' || \strpos($ip, ':') !== false) { continue; }
-            $out = $out === '' ? $ip : ($out . ',' . $ip);
-        }
-    }
+    $out = \__mc_resolv_nameservers(\__mc_resolv_text());
     return $out === '' ? '8.8.8.8' : $out;
 }
 
@@ -374,7 +481,25 @@ function __mc_dns_exchange_tcp(string $ns, string $query, float $timeout = 5.0):
  */
 function __mc_dns_query(string $host, int $qtype): string
 {
-    $servers = \explode(',', \__mc_dns_nameservers());
+    return \__mc_dns_query_via($host, $qtype, \__mc_dns_nameservers());
+}
+
+/** A reply's RCODE: 0 NOERROR, 3 NXDOMAIN; -1 when the message is too short. */
+function __mc_dns_rcode(string $msg): int
+{
+    if (\strlen($msg) < 4) { return -1; }
+    return \ord($msg[3]) & 0x0F;
+}
+
+/**
+ * {@see __mc_dns_query} against an explicit nameserver list, so a caller walking a
+ * search list parses resolv.conf ONCE instead of once per candidate. Records the
+ * reply's RCODE for that walk to read back.
+ */
+function __mc_dns_query_via(string $host, int $qtype, string $nsCsv): string
+{
+    \__mc_dns_rcode_hold(true, -1);
+    $servers = \explode(',', $nsCsv);
     $query = \__mc_dns_build_query($host, $qtype);
     foreach ($servers as $nsRaw) {
         $ns = (string)$nsRaw;
@@ -387,8 +512,12 @@ function __mc_dns_query(string $host, int $qtype): string
             if ($resp === '') { continue; }          // timed out — retry this server
             if (\__mc_dns_truncated($resp)) {
                 $full = \__mc_dns_exchange_tcp($ns, $query, 2.0);
-                if ($full !== '') { return $full; }
+                if ($full !== '') {
+                    \__mc_dns_rcode_hold(true, \__mc_dns_rcode($full));
+                    return $full;
+                }
             }
+            \__mc_dns_rcode_hold(true, \__mc_dns_rcode($resp));
             return $resp;
         }
     }

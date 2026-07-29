@@ -42,7 +42,13 @@ function memcpy(Ptr $dst, Ptr $src, #[CType('size_t')] int $n): Ptr {}
 #[Library('c'), Symbol('memset')]
 function memset(Ptr $dst, #[CType('int')] int $byte, #[CType('size_t')] int $n): Ptr {}
 
-#[Library('c'), Symbol('memcmp')]
+// The COMPARISON family returns a C `int` whose SIGN is the whole answer, so
+// each one needs the fn-level #[CType('int')] sext. Without it a negative
+// result reads as ~4.29e9 on any target whose libc leaves the upper half of the
+// return register undefined — glibc/x86_64 does, arm64 (Darwin and Linux) does
+// not, which is why every string sort was correct on arm64 and reversed on
+// amd64 (closure_string_abi, sort_usort_reduce, uasort_int_arith, ...).
+#[Library('c'), Symbol('memcmp'), CType('int')]
 function memcmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
 #[Library('c'), Symbol('memchr')]
@@ -53,7 +59,7 @@ function memchr(Ptr $hay, #[CType('int')] int $byte, #[CType('size_t')] int $n):
 #[Library('c'), Symbol('strlen')]
 function strlen(string $s): int {}
 
-#[Library('c'), Symbol('strcmp')]
+#[Library('c'), Symbol('strcmp'), CType('int')]
 function strcmp(string $a, string $b): int {}
 
 // `char *strerror(int errnum)` — the message for an errno. The returned buffer is
@@ -61,13 +67,13 @@ function strcmp(string $a, string $b): int {}
 #[Library('c'), Symbol('strerror')]
 function strerror(#[CType('int')] int $errnum): Ptr {}
 
-#[Library('c'), Symbol('strncmp')]
+#[Library('c'), Symbol('strncmp'), CType('int')]
 function strncmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
-#[Library('c'), Symbol('strcasecmp')]
+#[Library('c'), Symbol('strcasecmp'), CType('int')]
 function strcasecmp(string $a, string $b): int {}
 
-#[Library('c'), Symbol('strncasecmp')]
+#[Library('c'), Symbol('strncasecmp'), CType('int')]
 function strncasecmp(string $a, string $b, #[CType('size_t')] int $n): int {}
 
 #[Library('c'), Symbol('strchr')]
@@ -429,6 +435,19 @@ function sys_usleep(#[CType('unsigned int')] int $usec): int {}
 // are timespec{tv_sec@0, tv_nsec@8} (16B on both hosts). 0 on success.
 #[Library('c'), Symbol('nanosleep'), CType('int')]
 function sys_nanosleep(Ptr $req, Ptr $rem): int {}
+
+// `int getrlimit(int resource, struct rlimit *rlp)` / `int setrlimit(...)` —
+// rlimit{rlim_cur@0, rlim_max@8}, 16B on both hosts (rlim_t is 64-bit on Darwin
+// and on LP64 glibc/musl alike). The RESOURCE numbers diverge and are never named
+// here: {@see \__mc_rlimit_const}. RLIM_INFINITY diverges too — 0x7fffffffffffffff
+// on Darwin, ~0UL on Linux, which as a signed i64 is -1 and therefore
+// indistinguishable from an error return, so callers must test the RC and never
+// the value.
+#[Library('c'), Symbol('getrlimit'), CType('int')]
+function sys_getrlimit(#[CType('int')] int $resource, Ptr $rlp): int {}
+
+#[Library('c'), Symbol('setrlimit'), CType('int')]
+function sys_setrlimit(#[CType('int')] int $resource, Ptr $rlp): int {}
 
 // `int shutdown(int fd, int how)` — SHUT_RD/WR/RDWR are 0/1/2 on both hosts.
 #[Library('c'), Symbol('shutdown'), CType('int')]
