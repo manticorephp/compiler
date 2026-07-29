@@ -442,8 +442,21 @@ trait LowerClasses
                 }
             }
         }
+        // The TRANSITIVE closure, not just the `implements` line: an interface
+        // may extend others (`WrappableOutputFormatterInterface extends
+        // OutputFormatterInterface`), and the ClassDef list is what
+        // `classImplements` / `classIsA` walk. With only the direct names,
+        // `$impl instanceof BaseInterface` answered FALSE for every class that
+        // reaches the base through a derived one — and the same lookup drives
+        // the interface-typed clone dispatch and the catch matcher.
+        $inames = [];
+        $ivisited = [];
+        $this->collectInterfaceNames($this->declName($decl), $inames, $ivisited);
         $ifaces = [];
         foreach ($decl->implements as $i) { $ifaces[] = \ltrim($i, '\\'); }
+        foreach ($inames as $iname => $_) {
+            if (!\in_array($iname, $ifaces, true)) { $ifaces[] = $iname; }
+        }
         // Register a module global cell per static property (initialised
         // to its literal default, or 0). Set the class context so a
         // default like `self::CONST` resolves against this class.
