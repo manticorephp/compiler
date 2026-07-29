@@ -4,6 +4,7 @@ namespace Compile\Mir\Passes;
 
 use Compile\Mir\AllocationKind;
 use Compile\Mir\Block;
+use Compile\Mir\CondOwn;
 use Compile\Mir\FunctionDef;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\MemoryOp_;
@@ -191,6 +192,19 @@ final class InsertMemoryOps implements Pass
      */
     private function isOwnedObj(Node $value): bool
     {
+        // A conditional (ternary / `?:` / `??` / match) the contract covers is an
+        // owned producer: the emitter gives EVERY arm a +1 of the result type
+        // ({@see EmitLlvmControl::armRetainPostBox}), so the destination local
+        // owns it and must release it — that release is what stops the next
+        // iteration of `$out = $c ? $s : ($out . ',' . $s);` from handing out a
+        // freed block. Tested FIRST: its result may be a UNION (`$c ? new B :
+        // new C`), which the kind gate below rejects, and it carries no
+        // allocation of its own for the allocKind gate further down.
+        //
+        // ⚠ This answer must match {@see EmitLlvm::condOwnsResult} exactly. If
+        // only the emitter says owned, the value leaks; if only this pass does,
+        // the release has no matching retain and the value is double-freed.
+        if ($this->isOwnedCond($value)) { return true; }
         $tk = $value->type->kind;
         // A CELL counts: `f(): Foo|false` boxes a FRESH object into a cell, and
         // the +1 return convention transfers it to us exactly as for a plain
@@ -257,6 +271,42 @@ final class InsertMemoryOps implements Pass
         // FRESH +1 array, so it is owned exactly like a literal.
         return $k === Node::KIND_ARRAY_LIT
             || ($tk === Type::KIND_ARRAY && $k === Node::KIND_ADD);
+    }
+
+    /** {@see CondOwn} — the shared half of the contract, plus this pass's own
+     *  rc-eligibility guard on the result type. */
+    private function isOwnedCond(Node $value): bool
+    {
+        if (!CondOwn::isConditional($value)) { return false; }
+        if (!$this->condResultIsRc($value->type)) { return false; }
+        return CondOwn::armsCoverable($value);
+    }
+
+    private function condResultIsRc(Type $t): bool
+    {
+        if (CondOwn::shapeIsRc($t)) { return true; }
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) { return $this->objClassIsRc($t->class ?? ''); }
+        if ($k !== Type::KIND_UNION) { return false; }
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return false; }
+        foreach ($atoms as $a) {
+            if ($a->kind !== Type::KIND_OBJ) { return false; }
+            if (!$this->objClassIsRc($a->class ?? '')) { return false; }
+        }
+        return true;
+    }
+
+    /** ⚠ Character-for-character the obj guards of
+     *  {@see EmitLlvm::discardReleaseFlavor} and the union loop of
+     *  {@see EmitLlvm::condFlavor} — the two passes must answer identically. */
+    private function objClassIsRc(string $cls): bool
+    {
+        if ($cls === 'Ffi\\Ptr' || $cls === 'Closure') { return false; }
+        if (\str_starts_with($cls, '__closure_')) { return false; }
+        if ($cls !== '' && isset($this->enums[$cls])) { return false; }
+        if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        return true;
     }
 
     /**

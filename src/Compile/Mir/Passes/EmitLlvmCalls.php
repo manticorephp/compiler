@@ -809,6 +809,12 @@ trait EmitLlvmCalls
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
+        // A conditional in STATEMENT position (`$c ? f() : $s;`) now owns a +1
+        // from whichever arm ran, so the discarded value must be dropped.
+        if ($this->condOwnsResult($s)) {
+            $cf = $this->condFlavor($s->type);
+            return $cf === '' ? '' : $this->rcReleaseReg($this->lastValue, $cf);
+        }
         if ($k === Node::KIND_CALL) {
             // Free-function call: only a USER function reliably +1-owns its
             // result. Builtins vary (some return borrowed elements) — and a

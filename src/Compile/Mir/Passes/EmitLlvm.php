@@ -1502,13 +1502,11 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($node->type->kind !== Type::KIND_STRING) { return false; }
         $k = $node->kind;
-        // ⚠ A TERNARY is deliberately NOT here, even though
-        // {@see EmitLlvmControl::retainBorrowedStrArm} gives its borrowed arms a
-        // +1: an arm that is not itself string-TYPED (a cell/unknown carrier that
-        // coerces to the string) gets no retain, so treating the result as a fresh
-        // temp released what nobody owned — preg_full and socket_sendmsg read
-        // freed bytes. Retaining without releasing leaks; releasing without
-        // retaining corrupts.
+        // A conditional (ternary / `?:` / `??` / match) hands out +1 from EVERY
+        // arm ({@see EmitLlvmControl::armRetainPostBox}), so its result is a
+        // fresh temp exactly like a concat. Only the shapes CondOwn declares
+        // owned qualify — one with an erased arm stays borrowed.
+        if ($this->condOwnsResult($node)) { return true; }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;
@@ -1575,6 +1573,46 @@ final class EmitLlvm implements EmitVisitor
     {
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
             || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
+    /**
+     * The rc flavor a CONDITIONAL result is retained / released by, or '' when
+     * it is not rc-managed. {@see discardReleaseFlavor} plus the union mapping:
+     * an all-object union rides a bare object pointer, so it drops like one —
+     * but only when EVERY member is a real rc'd class (a #[Struct] / closure /
+     * enum / Ffi\Ptr member has no rc header, and rc-managing one writes into
+     * the allocator's metadata).
+     */
+    private function condFlavor(Type $t): string
+    {
+        if ($t->kind !== Type::KIND_UNION) { return $this->discardReleaseFlavor($t); }
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return ''; }
+        foreach ($atoms as $a) {
+            if ($a->kind !== Type::KIND_OBJ) { return ''; }
+            $cls = $a->class ?? '';
+            if ($cls === '' || $cls === 'Ffi\\Ptr') { return ''; }
+            if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return ''; }
+            if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
+        }
+        return 'obj';
+    }
+
+    /**
+     * Does this node yield an OWNED (+1) value because it is a conditional the
+     * emitter normalizes? The contract and the arm rule live in {@see CondOwn} —
+     * the same predicate {@see InsertMemoryOps::isOwnedObj} uses, so the two
+     * passes cannot disagree (one way leaks, the other double-frees).
+     *
+     * True here means: every arm was given a +1 of this node's result type
+     * ({@see EmitLlvmControl::armRetainPostBox}), so consumers must treat the
+     * result as a fresh temp — release it when done, never add a second retain.
+     */
+    private function condOwnsResult(Node $n): bool
+    {
+        if (!\Compile\Mir\CondOwn::isConditional($n)) { return false; }
+        if ($this->condFlavor($n->type) === '') { return false; }
+        return \Compile\Mir\CondOwn::armsCoverable($n);
     }
 
     private function discardReleaseFlavor(Type $t): string
@@ -1672,6 +1710,14 @@ final class EmitLlvm implements EmitVisitor
      */
     private function freshRcArgFlavor(Node $a): string
     {
+        // A normalized conditional is +1 from every arm, so a borrowed-arg temp
+        // must be released after the call like any other fresh producer. Tested
+        // first: its result type may be a UNION (which the obj/array gate below
+        // would reject) and the flavor comes from condFlavor, not the arm.
+        if ($this->condOwnsResult($a)) {
+            $cf = $this->condFlavor($a->type);
+            return $cf === 'cell' ? '' : $cf;
+        }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
@@ -1729,6 +1775,9 @@ final class EmitLlvm implements EmitVisitor
                 || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT) {
                 return '';
             }
+            // A normalized conditional boxed its own arm with a +1 — the same
+            // transfer as an owned producer above.
+            if ($this->condOwnsResult($value)) { return ''; }
             $sv = $this->lastValue;
             $st = $this->lastValueType;
             $o = $this->coerceToI64();
