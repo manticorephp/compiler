@@ -3446,6 +3446,48 @@ trait EmitLlvmExpr
             $this->lastValue = $z; $this->lastValueType = 'i64';
             return $out;
         }
+        // `obj === cell` / `cell === obj` (strict): PHP identity is "the same
+        // instance", so this is a pointer compare — but one side may be NaN-boxed
+        // and the other raw, and comparing the carriers verbatim never matched.
+        // symfony's Table marks its header/body boundary with
+        // `if ($divider === $row)`, where `$row` comes off a generator as a
+        // boxed cell and `$divider` is a plain object: the divider was never
+        // recognised, `$isHeader` stayed true and the Table drew a header rule
+        // above EVERY row. Compare payloads, and only when the cell really holds
+        // an object (an erased raw pointer counts — it is what it is).
+        if ($strictEq
+            && (($lk === Type::KIND_OBJ && $rCellish) || ($lCellish && $rk === Type::KIND_OBJ))) {
+            $objIsLeft = $lk === Type::KIND_OBJ;
+            $objV = $objIsLeft ? $l : $r;
+            $objT = $objIsLeft ? $lt : $rt;
+            $ci   = $objIsLeft ? $r : $l;
+            $cellT = $objIsLeft ? $rt : $lt;
+            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
+            $oi = $objV;
+            if ($objT === 'ptr') { $oi = $this->ssa->allocReg(); $out .= '  ' . $oi . ' = ptrtoint ptr ' . $objV . " to i64\n"; }
+            // Payload of a boxed carrier, the word itself when it was never boxed.
+            $isBox = $this->ssa->allocReg();
+            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $ci . ", 281474976710655\n";
+            $pay = $this->ssa->allocReg();
+            $out .= '  ' . $pay . ' = select i1 ' . $isBox . ', i64 ' . $pm . ', i64 ' . $ci . "\n";
+            // A boxed NON-object cell (a string, an array, a scalar) can never be
+            // the same instance, so its payload must not be compared.
+            $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
+            $isObjTag = $this->ssa->allocReg();
+            $out .= '  ' . $isObjTag . ' = icmp eq i64 ' . $tag . ", 8\n";
+            $okKind = $this->ssa->allocReg();
+            $out .= '  ' . $okKind . ' = select i1 ' . $isBox . ', i1 ' . $isObjTag . ", i1 true\n";
+            $same = $this->ssa->allocReg();
+            $out .= '  ' . $same . ' = icmp eq i64 ' . $pay . ', ' . $oi . "\n";
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = and i1 ' . $okKind . ', ' . $same . "\n";
+            if ($op === '!==') { $nn = $this->ssa->allocReg(); $out .= '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
+            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            $this->lastValue = $z; $this->lastValueType = 'i64';
+            return $out;
+        }
         // `cell === float` / `float === cell` (strict): equal iff the cell is a
         // FLOAT (tag 6) whose value equals the float operand. A non-float cell is
         // never strictly === a float. Compare the unboxed double (a float cell is

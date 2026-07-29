@@ -262,6 +262,117 @@ trait EmitLlvmControl
      *
      * The result i1 is left in {@see EmitLlvm::$genFrameReg}.
      */
+    /**
+     * `(w > 0xFFF0…) ? (w & PAYLOAD_MASK) : w` — the payload of a NaN-boxed
+     * carrier, or the word itself when it was never boxed. A conditional mask,
+     * not the unconditional one {@see EmitLlvmBuiltins::cellToPtr} uses: an
+     * untagged 64-bit INT must not be truncated into something that then looks
+     * like a plausible pointer to probe. lastValue ← the untagged i64.
+     */
+    private function untagCarrierIr(string $word): string
+    {
+        $isBox = $this->ssa->allocReg();
+        $out  = '  ' . $isBox . ' = icmp ugt i64 ' . $word . ", -4503599627370496\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = and i64 ' . $word . ", 281474976710655\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $isBox . ', i64 ' . $m . ', i64 ' . $word . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * True when this module knows any class that can drive the Iterator
+     * protocol — nothing else can reach {@see emitForeachErasedIterator}, and
+     * the arm costs a second copy of the loop body, so a program without one
+     * must not pay for it.
+     */
+    private function hasTraversableClasses(): bool
+    {
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            if ($this->classImplements($cls->name, 'Iterator')
+                || $this->classImplements($cls->name, 'IteratorAggregate')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** `plausible ptr && the word at ptr-8 is an OBJECT magic` — the runtime
+     *  "is this an object" test; the i1 lands in {@see $objectProbeReg}. */
+    private function objectProbeIr(string $iw): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca i1\n";
+        $out .= '  store i1 0, ptr ' . $slot . "\n";
+        $probeL = $this->ssa->allocLabel('op.probe');
+        $endL = $this->ssa->allocLabel('op.end');
+        $out .= $this->plausiblePtrIr($iw);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $probeL
+              . ', label %' . $endL . "\n";
+        $out .= $probeL . ":\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $iw . " to ptr\n";
+        $tp = $this->ssa->allocReg();
+        $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+        $tw = $this->ssa->allocReg();
+        $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+        $isObj = $this->magicMatchIr($tw, [\Compile\MemoryAbi::RC_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $out .= '  store i1 ' . $isObj . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i1, ptr ' . $slot . "\n";
+        $this->objectProbeReg = $r;
+        return $out;
+    }
+
+    /**
+     * Drive the Iterator protocol over an erased word already known to be an
+     * OBJECT. Which protocol it speaks is a runtime question — an
+     * IteratorAggregate hands over its `getIterator()` result (often a
+     * Generator, which the dynamic protocol step then recognises), an Iterator
+     * speaks for itself — so both are emitted and `instanceof` picks.
+     */
+    private function emitForeachErasedIterator(\Compile\Mir\Foreach_ $fe, string $word): string
+    {
+        $subjName = '@fe.subj.' . (string)$this->iterCounter;
+        $iterName = '@fe.it.' . (string)$this->iterCounter;
+        $this->iterCounter = $this->iterCounter + 1;
+        $subjSlot = $this->ssa->allocReg();
+        $iterSlot = $this->ssa->allocReg();
+        $this->locals->slots[$subjName] = $subjSlot;
+        $this->locals->slots[$iterName] = $iterSlot;
+        $out  = '  ' . $subjSlot . " = alloca i64\n";
+        $out .= '  ' . $iterSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
+        $out .= '  store i64 ' . $word . ', ptr ' . $iterSlot . "\n";
+        $aggL = $this->ssa->allocLabel('fe.agg');
+        $joinL = $this->ssa->allocLabel('fe.agg.end');
+        $probe = new \Compile\Mir\Instanceof_(
+            new \Compile\Mir\LoadLocal($subjName, \Compile\Mir\Type::unknown()),
+            'IteratorAggregate');
+        $out .= $this->emitNode($probe);
+        $out .= $this->coerceToI64();
+        $isAgg = $this->ssa->allocReg();
+        $out .= '  ' . $isAgg . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+        $out .= '  br i1 ' . $isAgg . ', label %' . $aggL . ', label %' . $joinL . "\n";
+        $out .= $aggL . ":\n";
+        $gi = new \Compile\Mir\MethodCall_(
+            new \Compile\Mir\LoadLocal($subjName, \Compile\Mir\Type::obj('IteratorAggregate')),
+            'getIterator', [], \Compile\Mir\Type::obj('Iterator'));
+        $out .= $this->emitNode($gi);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $joinL . ":\n";
+        return $out . $this->emitIterProtocolLoop(
+            $fe, $iterSlot, $iterName, \Compile\Mir\Type::obj('Iterator'), true);
+    }
+
     private function genFrameProbeIr(string $iw): string
     {
         $slot = $this->ssa->allocReg();
@@ -433,14 +544,25 @@ trait EmitLlvmControl
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
         }
-        $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
-
         // An interface-typed iterator may be a Generator at runtime, so each
         // protocol step classifies and branches. The body is still emitted
         // exactly once.
-        $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
+        return $out . $this->emitIterProtocolLoop(
+            $fe, $iterSlot, $iterName, $iterType,
+            $this->iterNeedsRuntimeClass($fe->iterClass));
+    }
 
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
+    /**
+     * The Iterator protocol loop over an iterator already stored in `$iterSlot`
+     * — `rewind`, then `valid` / `current` / `key` / body / `next`. Shared by
+     * the statically-typed object foreach and the erased one, which finds its
+     * iterator at runtime ({@see emitForeachErasedIterator}).
+     */
+    private function emitIterProtocolLoop(\Compile\Mir\Foreach_ $fe, string $iterSlot,
+        string $iterName, \Compile\Mir\Type $iterType, bool $dyn): string
+    {
+        $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
+        $out = $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -634,12 +756,24 @@ trait EmitLlvmControl
             // yield count ({@see EmitLlvmGenerator::emitGenerator}) — the second
             // copy's `gen.resume.N` labels would have no switch case. Such a
             // foreach keeps the array-only classification it has always had.
+            // ⚠ The carrier may be a BOXED cell — a generator handed to a
+            // `mixed`/`iterable` param is tagged on the way in, and every probe
+            // below starts at {@see plausiblePtrIr}, which rejects a tagged word
+            // outright. The classify then always answered "not a generator",
+            // fell into the array arm and iterated ZERO times — silently.
+            // symfony's `calculateColumnsWidth(iterable $groups)` never ran, so
+            // every Table column measured 0. Strip the NaN tag first; a raw word
+            // is left exactly as it is.
+            $out .= $this->untagCarrierIr($word);
+            $word = $this->lastValue;
             $out .= $this->genFrameProbeIr($word);
             $isGen = $this->genFrameReg;
             $gArm = $this->ssa->allocLabel('fe.dyn.gen');
+            $oChk = $this->ssa->allocLabel('fe.dyn.ochk');
+            $oArm = $this->ssa->allocLabel('fe.dyn.obj');
             $aArm = $this->ssa->allocLabel('fe.dyn.arr');
             $dynEnd = $this->ssa->allocLabel('fe.dyn.end');
-            $out .= '  br i1 ' . $isGen . ', label %' . $gArm . ', label %' . $aArm . "\n";
+            $out .= '  br i1 ' . $isGen . ', label %' . $gArm . ', label %' . $oChk . "\n";
             $out .= $gArm . ":\n";
             $gp = $this->ssa->allocReg();
             $out .= '  ' . $gp . ' = inttoptr i64 ' . $word . " to ptr\n";
@@ -647,6 +781,23 @@ trait EmitLlvmControl
             // so this arm must NOT also drop the frame.
             $out .= $this->emitForeachGeneratorFrom($fe, $gp, false);
             $out .= '  br label %' . $dynEnd . "\n";
+            // An erased carrier can also be a plain TRAVERSABLE OBJECT, and
+            // "array or generator" answered the empty array for one. symfony's
+            // `calculateColumnsWidth(iterable $groups)` is handed a `TableRows`
+            // (an IteratorAggregate), so the width loop ran ZERO times and every
+            // column measured 0 — the Table drew ` -- -- -- ` around correctly
+            // rendered rows.
+            $out .= $oChk . ":\n";
+            if ($this->hasTraversableClasses()) {
+                $out .= $this->objectProbeIr($word);
+                $out .= '  br i1 ' . $this->objectProbeReg . ', label %' . $oArm
+                      . ', label %' . $aArm . "\n";
+                $out .= $oArm . ":\n";
+                $out .= $this->emitForeachErasedIterator($fe, $word);
+                $out .= '  br label %' . $dynEnd . "\n";
+            } else {
+                $out .= '  br label %' . $aArm . "\n";
+            }
             $out .= $aArm . ":\n";
             $out .= $this->arrayPtrOrEmptyIr($word);
             $this->lastValue = $this->arrayPtrReg;
@@ -752,13 +903,16 @@ trait EmitLlvmControl
         $valSlot = $this->locals->slots[$fe->valueVar];
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $valAddr . "\n";
-        // ⚠ NOT decoded by the array's element hint, even on the CELL channel.
-        // A decode has to be paired with a re-ENCODE at the store, and the
-        // value var is routinely written back into a raw-repr array:
-        // `uasort` decorates `foreach ($arr as $k => $v)` into records and
-        // rebuilds `$arr` from them, so a tagged $v ends up stored in a
-        // `assoc[string]` the caller then releases by pointer (natsort
-        // SIGSEGV). Pairing the two is the remaining half of this epic.
+        // ⚠ The value word is NOT decoded by the array's element hint, on any
+        // channel. The hint says what the elements ARE at runtime, but every
+        // STATIC type downstream still says otherwise, and the two desynchronise
+        // the moment the value is stored back: `uasort` decorates
+        // `foreach ($arr as $k => $v)` into records and rebuilds $arr from them,
+        // so a decoded $v lands as a tagged word inside the caller's
+        // `assoc[string]`, which print_r then deref'd — natsort SIGSEGV,
+        // measured twice, with and without a store-side re-encode. The decode
+        // only becomes sound once the erased element CHANNEL is retyped cell in
+        // InferTypes: that is the rest of this epic.
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {
             $kSlot = $this->locals->slots[$fe->keyVar];

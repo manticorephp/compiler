@@ -154,6 +154,9 @@ final class EmitLlvm implements EmitVisitor
     // Out-slot for {@see genFrameProbeIr}: i1, "this iterator is a generator frame".
     private string $genFrameReg = '';
 
+    // Out-slot for {@see objectProbeIr}: i1, "this erased word is an object".
+    private string $objectProbeReg = '';
+
     /** break/continue/finally targets of the current function (fresh each {@see emit}). */
     private ?ControlFlow $cf = null;
 

@@ -377,10 +377,28 @@ trait EmitLlvmBuiltins
         $arrL = $this->ssa->allocLabel('bx.arr');
         $objL = $this->ssa->allocLabel('bx.obj');
         $endL = $this->ssa->allocLabel('bx.end');
+        // The INTEGER answer, for a word that is neither already boxed nor a
+        // recognisable container: box_int's own 48-bit fit test decides. A raw
+        // DOUBLE fails it (its exponent bits make it huge) and is left alone —
+        // an untagged double already IS a valid cell — and so does a tagged
+        // word, which never reaches here. Without this arm every erased int
+        // crossing into a cell channel arrived as a denormal double
+        // (`fact()`'s result through a `mixed` return).
+        $ish = $this->ssa->allocReg();
+        $out .= '  ' . $ish . ' = shl i64 ' . $v . ", 16\n";
+        $ise = $this->ssa->allocReg();
+        $out .= '  ' . $ise . ' = ashr i64 ' . $ish . ", 16\n";
+        $isInt = $this->ssa->allocReg();
+        $out .= '  ' . $isInt . ' = icmp eq i64 ' . $ise . ', ' . $v . "\n";
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $v . ")\n";
+        $intB = $this->ssa->allocReg();
+        $out .= '  ' . $intB . ' = select i1 ' . $isInt . ', i64 ' . $bi . ', i64 ' . $v . "\n";
         $isBox = $this->ssa->allocReg();
         $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
         $out .= '  br i1 ' . $isBox . ', label %' . $endL . ', label %' . $rawL . "\n";
         $out .= $rawL . ":\n";
+        $out .= '  store i64 ' . $intB . ', ptr ' . $slot . "\n";
         $out .= $this->plausiblePtrIr($v);
         $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $probeL
               . ', label %' . $endL . "\n";
@@ -407,7 +425,7 @@ trait EmitLlvmBuiltins
         $ob = $this->ssa->allocReg();
         $out .= '  ' . $ob . ' = call i64 @__manticore_box_object(ptr ' . $rp . ")\n";
         $sel = $this->ssa->allocReg();
-        $out .= '  ' . $sel . ' = select i1 ' . $isObj . ', i64 ' . $ob . ', i64 ' . $v . "\n";
+        $out .= '  ' . $sel . ' = select i1 ' . $isObj . ', i64 ' . $ob . ', i64 ' . $intB . "\n";
         $out .= '  store i64 ' . $sel . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -517,6 +535,15 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
+        // An ERASED word is NOT an int. box_int's 48-bit fit test fails on an
+        // already-tagged one, so it took the HEAP arm — malloc(8), store the
+        // word, hand back a pointer to that — and every erased→cell boundary
+        // (an argument bound to a `mixed`/cell param, a return, implode's
+        // subject) got an integer cell wrapping a fresh 8-byte block. Probe
+        // instead: an already-boxed word passes through, a raw container is
+        // identified from its allocator magic, and anything else is left exactly
+        // as it was, which is what the whole erased path does today.
+        if ($k === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
         $helper = ($k === Type::KIND_BOOL) ? '__manticore_box_bool' : '__manticore_box_int';
         $out = $this->coerceToI64();
         $r = $this->ssa->allocReg();
@@ -2818,7 +2845,8 @@ trait EmitLlvmBuiltins
     private function biStrpos(array $args): string
     {
         $this->rt->needsStrpos = true;
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
         $h = $this->lastValue;

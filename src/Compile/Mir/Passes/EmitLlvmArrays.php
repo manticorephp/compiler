@@ -191,6 +191,27 @@ trait EmitLlvmArrays
         return $this->emitArrayLitUnified($n);
     }
 
+    /**
+     * Lower the just-emitted subject of a subscript / isset / unset to the array
+     * POINTER it stands for.
+     *
+     * A CELL base obviously carries the pointer NaN-boxed. So does an UNKNOWN
+     * one: an `IteratorAggregate` whose `getIterator()` is declared
+     * `\Traversable` gives the foreach value var no type at all, and the word it
+     * holds is the generator's shallow-boxed `current` — a TAGGED array. The raw
+     * inttoptr then read the tag bits as an address, so `isset($row[$column])`
+     * answered false for every cell and symfony's Table computed every column
+     * width as 0 (` -- -- -- ` instead of ` -------- ----- ---------- `).
+     * The 48-bit payload mask is the identity on an already-raw pointer, so this
+     * is free for every other erased carrier.
+     */
+    private function arrayBaseToPtr(Type $baseType): string
+    {
+        $k = $baseType->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { return $this->cellToPtr(); }
+        return $this->coerceToPtr();
+    }
+
     private function emitArrayAccess(ArrayAccess_ $n): string
     {
         $aa = $n;
@@ -563,14 +584,10 @@ trait EmitLlvmArrays
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
     {
         $out = $this->emitNode($aa->array);
-        // A `mixed`/cell base (e.g. a nested value out of json_decode) carries
-        // the array pointer NaN-boxed — strip the tag to the payload ptr, not
-        // a raw inttoptr of the boxed bits (which faults in __mir_array_get).
-        if ($aa->array->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } else {
-            $out .= $this->coerceToPtr();
-        }
+        // A `mixed`/cell base (e.g. a nested value out of json_decode) — and an
+        // ERASED one, which may hold the very same boxed word — carries the
+        // array pointer NaN-boxed ({@see arrayBaseToPtr}).
+        $out .= $this->arrayBaseToPtr($aa->array->type);
         $arrPtr = $this->lastValue;
         // A `mixed`/cell index (int-OR-string at runtime) → dispatch helper.
         $keyIsCell = $this->keyRidesCellChannel($aa->index);

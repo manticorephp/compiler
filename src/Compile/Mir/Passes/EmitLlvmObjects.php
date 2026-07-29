@@ -1743,14 +1743,10 @@ trait EmitLlvmObjects
             }
             if ($aa->array->type->kind !== Type::KIND_STRING) {
                 $out = $this->emitNode($aa->array);
-                // A `mixed`/cell base (e.g. a json_decode value) carries the
-                // array pointer NaN-boxed — strip the tag, don't inttoptr the
-                // boxed bits (which faults in __mir_array_isset_*).
-                if ($aa->array->type->kind === Type::KIND_CELL) {
-                    $out .= $this->cellToPtr();
-                } else {
-                    $out .= $this->coerceToPtr();
-                }
+                // A `mixed`/cell base (a json_decode value) — and an ERASED one,
+                // which may hold the very same boxed word — carries the array
+                // pointer NaN-boxed ({@see EmitLlvmArrays::arrayBaseToPtr}).
+                $out .= $this->arrayBaseToPtr($aa->array->type);
                 $arr = $this->lastValue;
                 $keyIsCell = $this->keyRidesCellChannel($aa->index);
                 $keyIsString = $aa->index->type->kind === Type::KIND_STRING
@@ -1928,7 +1924,7 @@ trait EmitLlvmObjects
                 } elseif ($aa->array->type->kind !== Type::KIND_STRING) {
                     $baseCell = $aa->array->type->kind === Type::KIND_CELL;
                     $out .= $this->emitNode($aa->array);
-                    $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+                    $out .= $this->arrayBaseToPtr($aa->array->type);
                     $arrPtr = $this->lastValue;
                     $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
