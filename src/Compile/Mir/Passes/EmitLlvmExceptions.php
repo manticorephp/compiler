@@ -53,6 +53,29 @@ trait EmitLlvmExceptions
     private string $tryDepthScratch = '';
 
     /**
+     * The try regions a `yield` is lexically inside, innermost LAST. Only ever
+     * non-empty inside a generator.
+     *
+     * A generator's `setjmp` is taken in the invocation that ENTERS the try, and
+     * that stack frame is gone the moment the yield returns to the consumer. So on
+     * resume the buffer describes a dead frame, and `@__mir_jmp_depth` belongs to
+     * whoever called `resume()`/`throw()` — not to us. Every resume point inside a
+     * try therefore re-arms its landing pad in the CURRENT frame
+     * ({@see rearmGeneratorTrys}), and this is the list of what to re-arm.
+     *
+     * THREE PARALLEL ARRAYS, not a list of tuples: a heterogeneous literal
+     * (`[string, int, string]`) unions to an erased element type natively, and the
+     * reads come back as garbage — the compiler segfaulted on the first program
+     * with a yield inside a try. Scalars in lockstep is the idiom this tree already
+     * uses for the same reason ({@see Scheduler::$tmDeadline}/$tmTask).
+     * @var string[] */
+    private array $genTryLabel = [];
+    /** @var int[] */
+    private array $genTrySlot = [];
+    /** @var string[] */
+    private array $genTryDepthReg = [];
+
+    /**
      * Give a try's jmp slot back before jumping out of it. `$depthReg` is the
      * pre-try depth ({@see ControlFlow::returnDepthReg}); '' means the jump
      * crosses no try, so the depth was never bumped and there is nothing to do.
@@ -66,6 +89,52 @@ trait EmitLlvmExceptions
         if ($depthReg === '') { return ''; }
         $ir = $this->tryReloadDepth($genSlot, $depthReg);
         return $ir . '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
+    }
+
+    /**
+     * Re-arm every enclosing try's landing pad at a generator resume point,
+     * outermost first, and leave `@__mir_jmp_depth` describing the innermost.
+     *
+     * Without this a resumed generator runs its try body with a `jmp_buf` captured
+     * by a `setjmp` in the invocation that ENTERED the try — a frame destroyed when
+     * the yield returned — and with the CONSUMER's `@__mir_jmp_depth`. Both halves
+     * bite: `$gen->throw()` landed in whatever try the consumer happened to be in
+     * (php runs the generator's own catch), and with no consumer try it longjmp'd
+     * into the dead frame, which arm64 tolerates and x86_64 turns into a SIGSEGV as
+     * soon as the catch body allocates dynamically — which a virtual dispatch does.
+     *
+     * The re-taken `setjmp` writes the same slot the try used, so a later `throw`
+     * from anywhere in the body still finds it by depth.
+     */
+    private function rearmGeneratorTrys(): string
+    {
+        $out = '';
+        $n = \count($this->genTryLabel);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $lbl = $this->genTryLabel[$i];
+            // Slots are taken from the CURRENT top of the jmp stack, not from the
+            // depth the try was originally entered at: that index belongs to the
+            // invocation that has since returned, and by now it may be a LIVE try
+            // of the consumer — or of another generator, which is exactly how an
+            // exception ended up in a different generator's catch. The frame slot is
+            // rewritten so the catch and the normal exit restore what we borrowed.
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
+            $out .= $this->tryStoreDepth($this->genTrySlot[$i], $d);
+            $out .= $this->jmpBufExpr($d);
+            $buf = $this->jmpScratch;
+            $nd = $this->ssa->allocReg();
+            $out .= '  ' . $nd . ' = add i64 ' . $d . ", 1\n";
+            $out .= '  store i64 ' . $nd . ", ptr @__mir_jmp_depth\n";
+            $sj = $this->ssa->allocReg();
+            $out .= '  ' . $sj . ' = call i32 @setjmp(ptr ' . $buf . ")\n";
+            $ok = $this->ssa->allocReg();
+            $cont = $this->ssa->allocLabel('gen.rearm');
+            $out .= '  ' . $ok . ' = icmp eq i32 ' . $sj . ", 0\n";
+            $out .= '  br i1 ' . $ok . ', label %' . $cont . ', label %' . $lbl . "\n";
+            $out .= $cont . ":\n";
+        }
+        return $out;
     }
 
     /** Stash a try depth-snapshot into the generator frame slot (no-op outside
@@ -221,7 +290,30 @@ trait EmitLlvmExceptions
 
         // Try body — pop inner depth on normal exit.
         $out .= $tryLbl . ":\n";
+        // A yield in this body suspends with the setjmp above belonging to a frame
+        // that dies on the way out; every resume point re-arms it. {@see $genTryStack}
+        $pushed = 0;
+        if ($this->gen->inGenerator) {
+            if ($hasFinally) {
+                $this->genTryLabel[] = $outerCatchLbl;
+                $this->genTrySlot[] = $n->genOuterSlot;
+                $this->genTryDepthReg[] = $od;
+                $pushed = $pushed + 1;
+            }
+            if ($hasCatch || $catchlessFin) {
+                $this->genTryLabel[] = $catchLbl;
+                $this->genTrySlot[] = $n->genDepthSlot;
+                $this->genTryDepthReg[] = $idb;
+                $pushed = $pushed + 1;
+            }
+        }
         foreach ($n->tryBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
+        while ($pushed > 0) {
+            \array_pop($this->genTryLabel);
+            \array_pop($this->genTrySlot);
+            \array_pop($this->genTryDepthReg);
+            $pushed = $pushed - 1;
+        }
         $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
         $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
         if ($hasFinally) {

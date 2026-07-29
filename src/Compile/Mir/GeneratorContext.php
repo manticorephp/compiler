@@ -28,6 +28,14 @@ final class GeneratorContext
     public string $sentPtr = '';
     /** SSA ptr to the frame's `retval` word (return value for getReturn()). */
     public string $retvalPtr = '';
+    /**
+     * SSA ptr to an ENTRY-BLOCK alloca holding the jmp depth this invocation was
+     * entered with — the consumer's. A resumed generator re-arms its trys and so
+     * raises the global depth; every suspend puts it back, or the slot it armed
+     * outlives the suspension and catches an exception meant for someone else.
+     */
+    public string $entryDepthPtr = '';
+
     /** Module uses `$gen->throw($e)` → emit the per-yield injection check. */
     public bool $throwUsed = false;
 }
