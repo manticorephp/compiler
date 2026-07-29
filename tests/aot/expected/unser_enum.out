@@ -1,0 +1,20 @@
+bool(true)
+string(6) "Spades"
+bool(true)
+string(3) "Bee"
+string(3) "bee"
+bool(true)
+int(9)
+bool(true)
+bool(true)
+bool(true)
+array(3) {
+  [0]=>
+  enum(Suit::Hearts)
+  [1]=>
+  enum(Suit::Hearts)
+  [2]=>
+  enum(Suit::Spades)
+}
+bool(true)
+bool(true)

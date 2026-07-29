@@ -1,0 +1,6 @@
+i:0;
+a:3:{i:0;i:0;i:1;i:1;s:1:"k";i:0;}
+O:8:"stdClass":1:{s:1:"r";i:0;}
+Exception: Serialization of 'Closure' is not allowed
+Serialization of 'Closure' is not allowed
+after

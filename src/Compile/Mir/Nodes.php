@@ -1104,6 +1104,13 @@ final class NewObj extends Node
         parent::__construct(Node::KIND_NEW_OBJ, $type);
     }
 
+    /** Allocate and initialise the instance but do NOT run `__construct` —
+     *  php's `unserialize` rebuilds an object without it, and so must the
+     *  generated `__mc_unser_alloc`. Set by the `__mc_new_uninit('C')` desugar;
+     *  declared AFTER the constructor so the promoted-parameter order (which is
+     *  load-bearing) does not shift. */
+    public bool $bare = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNewObj($this);

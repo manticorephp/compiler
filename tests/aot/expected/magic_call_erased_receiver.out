@@ -1,0 +1,6 @@
+string(15) "one:anything(2)"
+string(15) "one:anything(2)"
+string(12) "one:other(0)"
+string(9) "other:zzz"
+string(11) "one:ping(1)"
+string(10) "other:ping"

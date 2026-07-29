@@ -126,10 +126,52 @@ to a dynamic site).
 - Reflection Tier-2: `ReflectionClass`, runtime attribute reads, dynamic class
   names (Tier-1 compile-time class queries already fold — see
   `session_handoff_2026_06_19`).
-- `__debugInfo`, `serialize` / `unserialize` family.
-- Dynamic property store `$o->$key = …` (blocks `src/Runtime/Json.php`).
 - `unset` of a packed vec element (hole / shift semantics).
 - `echo`/concat of `INF`/`NAN` renders lowercase (var_dump fixed).
+
+#### Magic methods — what is done, and what is knowingly not
+
+`serialize`/`unserialize` (incl. `__serialize`/`__unserialize`, `allowed_classes`,
+`__PHP_Incomplete_Class`), `__debugInfo`, and `var_export` of objects are DONE, and
+`__get`/`__set`/`__isset`/`__unset`/`__call` now fire on an ERASED receiver as well as a
+statically-known one. The gaps left, deliberately:
+
+1. **None of the hooks fire for an INACCESSIBLE DECLARED member.** All of them gate on
+   "the class has no slot for this name". php also fires when the slot EXISTS but is
+   private/protected out of the accessing scope. Manticore enforces no visibility at all,
+   so such an access simply succeeds. Closing it needs a scope model in the emitter
+   (compare the frame's class prefix against `PropertyMeta::$visibility` /
+   `$declaringClass`) — separate work, not a dispatch problem.
+2. **`__call` on an erased receiver is rerouted only when NO class declares the method.**
+   The mixed case — some classes declare it, others answer through `__call` — needs two
+   different argument lists in one switch, and the call's arg emission is built against
+   the resolved callee's signature.
+3. **`is_callable()` on an erased value answers true for ANY object.** Narrowing it to
+   classes declaring `__invoke` needs a class_id probe, and a Closure has NO class
+   descriptor (slot 0 is its function pointer), so the probe would start answering false
+   for the common case. Needs the closure header, not a switch.
+4. **`__sleep`/`__wakeup` are ignored.** php calls them from serialize/unserialize when
+   `__serialize`/`__unserialize` are absent.
+5. **`unset($o->declaredProp)` is a no-op**, so the "unset it so `__get` fires again"
+   idiom does not work.
+6. **`&__get` (return by reference) is unsupported** — the magic call yields an i64 cell.
+7. **`Stringable` is not auto-added** to a class declaring `__toString`, so
+   `class_implements()` / `getInterfaceNames()` do not report it as php 8 does.
+8. **Uninitialized typed properties serialize as their zero value.** Manticore zero-fills
+   every slot, so `class P { public int $x; }` writes `1:{s:1:"x";i:0;}` where php writes
+   `0:{}`. It needs an init bitmap in the object header — an object-ABI change.
+9. **`R:` is never emitted.** It marks a php REFERENCE, and a Manticore array carries no
+   is_ref bit, so there is no runtime fact to emit it from. It is accepted on input as a
+   value copy.
+10. **`(array)$obj` yields the dynamic-property BAG only**, where php returns the declared
+    properties too. var_dump / serialize / var_export compose the two themselves.
+11. **A bare `array` property hint erases its element**, so the elements of
+    `public array $a` read raw — var_dump and var_export print ints as denormal floats. A
+    `@var int[]` on the same property is correct. This is the parked element-repr work.
+12. **php 8.5 clone-with does NOT run the readonly guard here** — and should not: the RFC's
+    purpose is to let a clone reinitialize a readonly property. Noted because it looks
+    like a missing check. There is no `php` oracle for it (8.5.8 does not parse the
+    syntax), so it is a superset feature.
 
 ### Tier 4 — performance & infra (everything already beats Zend)
 

@@ -2104,6 +2104,73 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * The dynamic-property bag of an object whose class is only known at
+     * runtime: dispatch on class_id, since every bag class puts its bag after
+     * its OWN declared slots. Classes sharing stdClass's offset need no arm —
+     * they fall into the default. lastValue ← the bag assoc ptr.
+     */
+    private function emitBagOfUnknownClass(string $objPtr): string
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $defOff = $std === null ? 16 : $std->bagOffset();
+        $arms = [];
+        foreach ($this->classes as $cd) {
+            if (!$cd->usesBag()) { continue; }
+            if ($cd->bagOffset() === $defOff) { continue; }
+            $arms[] = $cd;
+        }
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca i64\n";
+        if ($arms === []) {
+            $bg = $this->ssa->allocReg();
+            $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                  . ', i64 ' . (string)$defOff . "\n";
+            $bagI = $this->ssa->allocReg();
+            $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+            $bagP = $this->ssa->allocReg();
+            $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+            $this->lastValue = $bagP;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('bag.end');
+        $def = $this->ssa->allocLabel('bag.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($arms as $cd) {
+            $lbl = $this->ssa->allocLabel('bag.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $g = $this->ssa->allocReg();
+            $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                     . ', i64 ' . (string)$cd->bagOffset() . "\n";
+            $v = $this->ssa->allocReg();
+            $bodies .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
+            $bodies .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        $dg = $this->ssa->allocReg();
+        $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+              . ', i64 ' . (string)$defOff . "\n";
+        $dv = $this->ssa->allocReg();
+        $out .= '  ' . $dv . ' = load i64, ptr ' . $dg . "\n";
+        $out .= '  store i64 ' . $dv . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $ld = $this->ssa->allocReg();
+        $out .= '  ' . $ld . ' = load i64, ptr ' . $res . "\n";
+        $bagP = $this->ssa->allocReg();
+        $out .= '  ' . $bagP . ' = inttoptr i64 ' . $ld . " to ptr\n";
+        $this->lastValue = $bagP;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitCast(Cast $n): string
     {
         $c = $n;
@@ -2195,25 +2262,21 @@ trait EmitLlvmExpr
             return $out;
         }
         if ($c->target === 'array') {
-            // `(array)$cell` — a tagged OBJECT cell → its bag assoc.
+            // `(array)$obj` → the object's dynamic-property bag.
+            //
+            // The bag slot sits AFTER the declared ones, so its offset is the
+            // CLASS's, not stdClass's. Reading it at stdClass's offset on an
+            // #[AllowDynamicProperties] class that declares a property loaded
+            // that property as an assoc pointer — `(array)$loose` SIGSEGV'd on
+            // `int $declared`, and var_dump / serialize / var_export of such an
+            // object with it.
             if ($ok === Type::KIND_CELL) {
                 $out .= $this->cellToPtr();
-                $std = $this->classes['stdClass'] ?? null;
-                $bagOff = $std === null ? 16 : $std->bagOffset();
-                $bg = $this->ssa->allocReg();
-                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $this->lastValue . ', i64 ' . (string)$bagOff . "\n";
-                $bagI = $this->ssa->allocReg();
-                $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-                $bagP = $this->ssa->allocReg();
-                $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-                $this->lastValue = $bagP; $this->lastValueType = 'ptr';
-                return $out;
+                return $out . $this->emitBagOfUnknownClass($this->lastValue);
             }
-            // `(array)$stdClass` → its bag assoc; an array stays itself.
             if ($ok === Type::KIND_OBJ) {
-                $std = $this->classes['stdClass'] ?? null;
-                $bagOff = $std === null ? 16 : $std->bagOffset();
                 $out .= $this->coerceToPtr();
+                $bagOff = $this->bagOffsetOf($c->operand);
                 $bg = $this->ssa->allocReg();
                 $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $this->lastValue . ', i64 ' . (string)$bagOff . "\n";
                 $bagI = $this->ssa->allocReg();

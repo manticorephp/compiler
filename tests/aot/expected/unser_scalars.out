@@ -1,0 +1,21 @@
+NULL
+bool(true)
+bool(false)
+int(0)
+int(42)
+int(-7)
+int(9223372036854775807)
+float(0)
+float(1)
+float(0.1)
+float(0.30000000000000004)
+float(-2.5)
+float(1.0E+100)
+float(INF)
+float(-INF)
+float(NAN)
+string(0) ""
+string(5) "hello"
+string(12) "привіт"
+string(4) "a";b"
+bool(true)

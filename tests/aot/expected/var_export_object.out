@@ -1,0 +1,42 @@
+\P::__set_state(array(
+   'a' => 1,
+   'b' => 'x',
+   'c' => 2.5,
+))
+\Blank::__set_state(array(
+))
+\Nested::__set_state(array(
+   'rows' => 
+  array (
+    0 => 1,
+    1 => 2,
+  ),
+   'inner' => 
+  \P::__set_state(array(
+     'a' => 1,
+     'b' => 'x',
+     'c' => 2.5,
+  )),
+   'flag' => true,
+))
+\Quoted::__set_state(array(
+   's' => 'a\'b\\c',
+))
+array (
+  0 => 
+  \P::__set_state(array(
+     'a' => 1,
+     'b' => 'x',
+     'c' => 2.5,
+  )),
+  1 => 'plain',
+  2 => 
+  \Blank::__set_state(array(
+  )),
+)
+68
+\P::__set_state(array(
+   'a' => 1,
+   'b' => 'x',
+   'c' => 2.5,
+))

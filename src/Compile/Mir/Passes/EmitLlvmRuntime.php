@@ -1831,28 +1831,60 @@ trait EmitLlvmRuntime
             // a negative offset counts from the end; an offset past the end
             // misses). The returned position is relative to the ORIGINAL $h.
             // Result is NaN-boxed: hit → int cell, miss → `false` cell.
+            // BINARY-SAFE, like __mir_strcspn: both lengths come from the string
+            // header (len@-16 via __mir_strlen), and the scan is memchr+memcmp.
+            // strlen+strstr made a NUL-bearing argument unfindable — a haystack
+            // truncated at its first NUL, and a needle CONTAINING one read as
+            // empty. serialize's mangled property keys ("\0*\0prop") are exactly
+            // that, and demangling them silently found nothing.
             $out .= "\ndefine i64 @__mir_strpos(ptr %h, ptr %n, i64 %off) {\n";
             $out .= "entry:\n";
-            $out .= "  %hlen = call i64 @strlen(ptr %h)\n";
+            $out .= "  %hlen = call i64 @__mir_strlen(ptr %h)\n";
+            $out .= "  %nlen = call i64 @__mir_strlen(ptr %n)\n";
             $out .= "  %isneg = icmp slt i64 %off, 0\n";
             $out .= "  %fromend = add i64 %hlen, %off\n";
             $out .= "  %off1 = select i1 %isneg, i64 %fromend, i64 %off\n";
             $out .= "  %neg2 = icmp slt i64 %off1, 0\n";
             $out .= "  %off2 = select i1 %neg2, i64 0, i64 %off1\n";
             $out .= "  %toobig = icmp sgt i64 %off2, %hlen\n";
-            $out .= "  br i1 %toobig, label %miss, label %search\n";
-            $out .= "search:\n";
-            $out .= "  %hstart = getelementptr i8, ptr %h, i64 %off2\n";
-            $out .= "  %p = call ptr @strstr(ptr %hstart, ptr %n)\n";
+            $out .= "  br i1 %toobig, label %miss, label %chk0\n";
+            // php 8: an EMPTY needle matches at the offset itself.
+            $out .= "chk0:\n";
+            $out .= "  %isempty = icmp eq i64 %nlen, 0\n";
+            $out .= "  br i1 %isempty, label %hitoff, label %setup\n";
+            $out .= "setup:\n";
+            $out .= "  %last = sub i64 %hlen, %nlen\n";
+            $out .= "  %fits = icmp sle i64 %off2, %last\n";
+            $out .= "  %n0 = load i8, ptr %n\n";
+            $out .= "  %n0i = zext i8 %n0 to i32\n";
+            $out .= "  br i1 %fits, label %loop, label %miss\n";
+            $out .= "loop:\n";
+            $out .= "  %cur = phi i64 [ %off2, %setup ], [ %next, %again ]\n";
+            $out .= "  %win = sub i64 %last, %cur\n";
+            $out .= "  %win1 = add i64 %win, 1\n";
+            $out .= "  %hc = getelementptr i8, ptr %h, i64 %cur\n";
+            $out .= "  %p = call ptr @memchr(ptr %hc, i32 %n0i, i64 %win1)\n";
             $out .= "  %isnull = icmp eq ptr %p, null\n";
-            $out .= "  br i1 %isnull, label %miss, label %hit\n";
-            $out .= "hit:\n";
+            $out .= "  br i1 %isnull, label %miss, label %cand\n";
+            $out .= "cand:\n";
             $out .= "  %hi = ptrtoint ptr %h to i64\n";
             $out .= "  %pi = ptrtoint ptr %p to i64\n";
-            $out .= "  %d = sub i64 %pi, %hi\n";
-            $out .= "  %dm = and i64 %d, 281474976710655\n";
+            $out .= "  %idx = sub i64 %pi, %hi\n";
+            $out .= "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nlen)\n";
+            $out .= "  %eq = icmp eq i32 %c, 0\n";
+            $out .= "  br i1 %eq, label %hit, label %again\n";
+            $out .= "again:\n";
+            $out .= "  %next = add i64 %idx, 1\n";
+            $out .= "  %more = icmp sle i64 %next, %last\n";
+            $out .= "  br i1 %more, label %loop, label %miss\n";
+            $out .= "hit:\n";
+            $out .= "  %dm = and i64 %idx, 281474976710655\n";
             $out .= "  %db = or i64 %dm, -4222124650659840\n";
             $out .= "  ret i64 %db\n";
+            $out .= "hitoff:\n";
+            $out .= "  %om = and i64 %off2, 281474976710655\n";
+            $out .= "  %ob = or i64 %om, -4222124650659840\n";
+            $out .= "  ret i64 %ob\n";
             $out .= "miss:\n";
             $out .= "  ret i64 -3940649673949184\n";
             $out .= "}\n";

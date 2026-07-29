@@ -322,6 +322,37 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /** True when `$t` is an enum-case type — an OBJ type whose class is an enum,
+     *  and so travels as an ORDINAL, not as an object pointer. */
+    private function isEnumType(Type $t): bool
+    {
+        return $t->kind === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class]);
+    }
+
+    /**
+     * IR loading enum `$cls`'s per-case singleton object for the ordinal in
+     * register `$ord`; the object POINTER register is written to `$ptrReg`.
+     *
+     * The ONE owner of "an enum ordinal becomes an object": `boxToCell` boxes a
+     * scalar enum value with it, and the cell-array rebuild boxes each ELEMENT
+     * with it. The rebuild used to `box_object` the raw word, so an enum case
+     * inside an array reached var_dump as tag-8-payload-0 — it printed NULL and
+     * then dereferenced null.
+     */
+    private function emitEnumSingletonPtr(string $cls, string $ord, string &$ptrReg): string
+    {
+        $tbl = '@' . $this->mangle($cls) . '__cases';
+        $ct = (string)\count($this->enums[$cls]->caseNames);
+        $g = $this->ssa->allocReg();
+        $out = '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
+        $dp = $this->ssa->allocReg();
+        $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+        $ptrReg = $pp;
+        return $out;
+    }
+
     private function boxToCell(Type $t): string
     {
         $this->rt->needsTagged = true;
@@ -376,20 +407,13 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
-        if ($k === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class])) {
+        if ($this->isEnumType($t)) {
             // An enum case is an ORDINAL — box the per-case SINGLETON (carrying
             // class identity), NOT the raw ordinal (box_object of a tiny int
             // faults every generic object consumer). See emitEnumCellSingletons.
             $out = $this->coerceToI64();
-            $ord = $this->lastValue;
-            $tbl = '@' . $this->mangle($t->class) . '__cases';
-            $ct = (string)\count($this->enums[$t->class]->caseNames);
-            $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
-            $dp = $this->ssa->allocReg();
-            $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
-            $pp = $this->ssa->allocReg();
-            $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+            $pp = '';
+            $out .= $this->emitEnumSingletonPtr((string)$t->class, $this->lastValue, $pp);
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
             return $this->finishI64($out, $r);
@@ -513,6 +537,14 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+        } elseif ($this->isEnumType($elem)) {
+            // An enum ELEMENT is an ordinal, exactly like a scalar enum value —
+            // resolve the singleton before boxing. `box_object` on the raw word
+            // made an object cell with payload 0: var_dump printed NULL for it
+            // and then dereferenced null.
+            $ep = '';
+            $out .= $this->emitEnumSingletonPtr((string)$elem->class, $ev, $ep);
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_OBJ) {
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
@@ -1644,6 +1676,12 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
             } elseif ($ek === Type::KIND_BOOL) {
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+            } elseif ($this->isEnumType($boxElem)) {
+                // An enum element travels as an ordinal — resolve the singleton
+                // (see emitEnumSingletonPtr) before boxing it as an object.
+                $ep = '';
+                $out .= $this->emitEnumSingletonPtr((string)$boxElem->class, $ev, $ep);
+                $out .= '  ' . $bv . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
             } elseif ($ek === Type::KIND_OBJ) {
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
@@ -2550,8 +2588,12 @@ trait EmitLlvmBuiltins
     private function biStrpos(array $args): string
     {
         $this->rt->needsStrpos = true;
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
-        $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
+        // Binary-safe: header lengths (needsConcat pulls __mir_strlen) plus a
+        // memchr/memcmp scan. NOT strlen/strstr — a NUL in either argument made
+        // the search silently wrong.
+        $this->rt->needsConcat = true;
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $h = $this->lastValue;
         $out .= $this->emitNode($args[1]);
@@ -4736,27 +4778,34 @@ trait EmitLlvmBuiltins
             return $out;
         }
         if ($k === Type::KIND_STRING) {
-            // `'` . $s . `'`, with NULL when the (nullable) string is null.
+            // `'` . $s . `'`, with NULL when the (nullable) string is null. The
+            // body goes through the SAME escaper the array walk uses — a
+            // statically-typed string used to skip it, so `var_export("a'b")`
+            // printed an unquotable literal while `var_export(["a'b"])` did not.
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToPtr();
             $s = $this->lastValue;
-            return $out . $this->wrapOrNull($s, "'", "'", 'NULL');
+            return $out . $this->quoteOrNull($s);
         }
-        // Arrays, `mixed` and unions: the type is only known from the NaN tag at
-        // runtime, so hand off to the stdlib formatter rather than emitting a
-        // recursive walk inline. boxToCell rebuilds a homogeneous array with its
-        // elements boxed, which is exactly what that walk needs to read. Declare
-        // the extern only when it is not defined in-module (a self-contained
-        // build embeds the define; a second declare is a redefinition error).
+        // Arrays, objects, `mixed` and unions: the type is only known from the
+        // NaN tag at runtime, so hand off to the recursive walker rather than
+        // emitting the walk inline. boxToCell rebuilds a homogeneous array with
+        // its elements boxed, which is exactly what that walk needs to read.
+        //
+        // The walker is the PRELUDE's `__mir_var_export`, not the stdlib's old
+        // array-only `__mc_var_export_cell`: the stdlib is a prebuilt `.o` and
+        // cannot be handed an object, so an object nested inside an array had
+        // nowhere to go. The prelude version's object arm calls the per-class
+        // `__mir_export_object` generated beside it.
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cv = $this->lastValue;
-        if (!isset($this->definedFns[$this->mangle('__mc_var_export_cell')])) {
-            $this->libcExtra['manticore___mc_var_export_cell']
-                = 'declare i64 @manticore___mc_var_export_cell(i64, i64)';
+        if (!isset($this->definedFns[$this->mangle('__mir_var_export')])) {
+            $this->libcExtra['manticore___mir_var_export']
+                = 'declare i64 @manticore___mir_var_export(i64, i64)';
         }
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @manticore___mc_var_export_cell(i64 '
+        $out .= '  ' . $r . ' = call i64 @manticore___mir_var_export(i64 '
               . $cv . ", i64 0)\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
@@ -4786,6 +4835,46 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi ptr [' . $c2 . ', %' . $lSet . '], [' . $nl . ', %' . $lNull . "]\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * var_export of a nullable string: `'` . escaped($s) . `'`, or `NULL`.
+     * The escape runs INSIDE the non-null arm — __mc_var_export_qstr takes a
+     * `string`, and handing it a null would fault before the test.
+     */
+    private function quoteOrNull(string $s): string
+    {
+        if (!isset($this->definedFns[$this->mangle('__mc_var_export_qstr')])) {
+            $this->libcExtra['manticore___mc_var_export_qstr']
+                = 'declare i64 @manticore___mc_var_export_qstr(i64)';
+        }
+        $isnull = $this->ssa->allocReg();
+        $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
+        $lNull = $this->ssa->allocLabel('qe.null');
+        $lSet = $this->ssa->allocLabel('qe.set');
+        $lEnd = $this->ssa->allocLabel('qe.end');
+        $out .= '  br i1 ' . $isnull . ', label %' . $lNull . ', label %' . $lSet . "\n";
+        $out .= $lSet . ":\n";
+        $si = $this->ssa->allocReg();
+        $out .= '  ' . $si . ' = ptrtoint ptr ' . $s . " to i64\n";
+        $qi = $this->ssa->allocReg();
+        $out .= '  ' . $qi . ' = call i64 @manticore___mc_var_export_qstr(i64 ' . $si . ")\n";
+        $qp = $this->ssa->allocReg();
+        $out .= '  ' . $qp . ' = inttoptr i64 ' . $qi . " to ptr\n";
+        $c1 = $this->ssa->allocReg();
+        $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr("'") . ', ptr ' . $qp . ")\n";
+        $c2 = $this->ssa->allocReg();
+        $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr("'") . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lNull . ":\n";
+        $nl = $this->litStr('NULL');
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lEnd . ":\n";
         $r = $this->ssa->allocReg();

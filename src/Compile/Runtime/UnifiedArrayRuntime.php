@@ -2241,7 +2241,17 @@ final class UnifiedArrayRuntime
 
         // PACKED
         $len = $packed->load(Type::i64(), $arr);
-        $packed->brIf($packed->icmp('slt', $idx, $len), $inb, $atlen);
+        // BOTH ends: a NEGATIVE index is a legal PHP key (`$a[-3] = x`), and a
+        // bare `idx < len` is true for it — packedSlot would then store BEFORE
+        // the buffer, over the header (len/cap/flags), and count() read garbage.
+        // The read/isset/unset paths already test both ends; this one did not.
+        // Out of range (either way) falls through to at_len → sparse → promote,
+        // and the hashed path keys a negative index like any other int.
+        $inRange = $packed->and_(
+            $packed->icmp('sge', $idx, Value::int(Type::i64(), 0)),
+            $packed->icmp('slt', $idx, $len),
+        );
+        $packed->brIf($inRange, $inb, $atlen);
         $inb->store($val, $this->packedSlot($inb, $arr, $idx));
         $inb->ret($arr);
         // idx >= len: append iff idx == len, else sparse-promote

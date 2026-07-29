@@ -1,0 +1,10 @@
+E:11:"Suit:Hearts";
+E:11:"Suit:Spades";
+E:6:"Code:A";
+E:8:"Code:Bee";
+E:10:"Level:High";
+a:2:{i:0;E:11:"Suit:Hearts";i:1;E:11:"Suit:Spades";}
+a:2:{i:0;E:11:"Suit:Hearts";i:1;r:2;}
+a:3:{s:1:"s";E:6:"Code:A";s:1:"t";r:2;s:1:"u";E:8:"Code:Bee";}
+O:8:"WithEnum":2:{s:4:"suit";E:11:"Suit:Spades";s:4:"code";E:8:"Code:Bee";}
+a:2:{i:0;O:8:"WithEnum":2:{s:4:"suit";E:11:"Suit:Spades";s:4:"code";E:8:"Code:Bee";}i:1;r:2;}

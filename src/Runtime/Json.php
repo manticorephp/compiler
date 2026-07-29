@@ -7,12 +7,6 @@
  * so an unqualified `json_encode()` in any compiler namespace resolves
  * here. Mirrors the recursive walker proven in tests/aot/cases/
  * json_roundtrip.php.
- *
- * The matching `json_decode` parser (tests/aot/cases/json_object.php) is
- * NOT here yet: it uses `$o->$key = …` dynamic-property stores, which the
- * AST bootstrap backend can't lower. It lands the moment `bin/compile`
- * flips to the MIR backend (which supports stdClass + dynamic props).
- * See [[mir_selfcompile_migration_2026_06_01]].
  */
 
 /** Encode a value as JSON. */
