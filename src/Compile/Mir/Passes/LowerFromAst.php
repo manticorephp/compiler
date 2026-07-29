@@ -322,6 +322,11 @@ final class LowerFromAst implements Pass
     public bool $includeSerialize = false;
     /** serialize prelude source, read by Main from `prelude/serialize.php`. */
     public string $serializeSrc = '';
+    /** unserialize() — DEMAND-GATED on `unserialize(`, SEPARATELY from
+     *  serialize: the per-class rebuild arms cost roughly twice the writer's. */
+    public bool $includeUnserialize = false;
+    /** unserialize prelude source, read by Main from `prelude/unserialize.php`. */
+    public string $unserializeSrc = '';
     /** Inject the built-in SPL ArrayIterator / ArrayObject classes (gated on
      *  the user program referencing them — see Main.php). */
     public bool $includeArrayClasses = false;
