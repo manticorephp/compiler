@@ -2586,8 +2586,12 @@ trait EmitLlvmBuiltins
     private function biStrpos(array $args): string
     {
         $this->rt->needsStrpos = true;
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
-        $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
+        // Binary-safe: header lengths (needsConcat pulls __mir_strlen) plus a
+        // memchr/memcmp scan. NOT strlen/strstr — a NUL in either argument made
+        // the search silently wrong.
+        $this->rt->needsConcat = true;
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $h = $this->lastValue;
         $out .= $this->emitNode($args[1]);
