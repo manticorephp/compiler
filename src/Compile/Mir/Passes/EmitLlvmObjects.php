@@ -212,11 +212,21 @@ trait EmitLlvmObjects
         $obj = $this->lastValue;
         // ctor call — resolve through the parent chain (a subclass
         // with no ctor inherits its parent's).
-        // `__mc_new_uninit('C')`: the instance exists and is zero-initialised by
-        // repr, but NO constructor runs — not the user's, and not the one
-        // synthesised for defaulted properties. php's unserialize fills the
-        // slots itself, and a default written here would be overwritten anyway
-        // (or, worse, kept for a key the stream did not carry).
+        // `__mc_new_uninit('C')`: no CONSTRUCTOR BODY runs, but the declared
+        // property defaults do — that is exactly what php's unserialize does, so
+        // a property the stream omits keeps its default rather than reading 0.
+        // The defaults live in `C____mc_defaults`, emitted beside the ctor by
+        // LowerClasses when the program unserialises at all.
+        if ($n->bare) {
+            $defSym = $n->class . '____mc_defaults';
+            if (isset($this->sigs->paramTypes[$defSym])) {
+                $oi = $this->ssa->allocReg();
+                $out .= '  ' . $oi . ' = ptrtoint ptr ' . $obj . " to i64\n";
+                $dr = $this->ssa->allocReg();
+                $out .= '  ' . $dr . ' = call i64 @manticore_' . $this->mangle($defSym)
+                      . '(i64 ' . $oi . ")\n";
+            }
+        }
         $ctorClass = $n->bare ? '' : $this->resolveMethodClass($n->class, '__construct');
         if ($ctorClass !== '') {
             $objInt = $this->ssa->allocReg();
@@ -861,6 +871,33 @@ trait EmitLlvmObjects
         return $out . $this->emitSlotStore($gep, $cd, $prop, $val);
     }
 
+    /**
+     * Evaluate a dynamic-property (bag) store's RHS and leave the BOXED cell in
+     * lastValue, having taken the object's co-owning reference FIRST — on the
+     * RAW pointer, because a tagged cell mis-locates the rc header.
+     *
+     * A fixed slot has done this since forever (emitStoreProperty's
+     * `rcRetainByType`, and emitCellStoreProperty before its class_id switch);
+     * the two BAG arms boxed and stored without it, so the bag held a borrowed
+     * buffer. It survived exactly as long as some local still named the value:
+     * `$o->k = $heapString` inside a function, with the object outliving the
+     * frame, read back as whatever reused the freed buffer.
+     */
+    private function emitBagStoreValue(Node $value): string
+    {
+        $out = $this->emitNode($value);
+        $k = $value->type->kind;
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_ARRAY
+            || $k === Type::KIND_STRING || $k === Type::KIND_UNION) {
+            $out .= $this->coerceToI64();
+            $raw = $this->lastValue;
+            $out .= $this->rcRetainByType($value, $raw, $value->type, 4);
+            $this->lastValue = $raw;
+            $this->lastValueType = 'i64';
+        }
+        return $out . $this->boxToCell($value->type);
+    }
+
     /** Default-arm dynamic-bag store (`__mir_array_set_str` by the static prop
      *  name) for a classless receiver whose runtime class is a bag object. */
     private function emitCellBagStore(\Compile\Mir\StoreProperty $n, string $objPtr, string $cellVal): string
@@ -1141,8 +1178,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
             $bagP = $this->ssa->allocReg();
             $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-            $out .= $this->emitNode($n->value);
-            $out .= $this->boxToCell($n->value->type);
+            $out .= $this->emitBagStoreValue($n->value);
             $val = $this->lastValue;
             $kid = $this->pool->intern($n->property);
             $nb = $this->ssa->allocReg();
@@ -1727,8 +1763,7 @@ trait EmitLlvmObjects
             $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $bagP = $this->bagPtrReg;
             $bg = $this->bagSlotReg;
-            $out .= $this->emitNode($n->value);
-            $out .= $this->boxToCell($n->value->type);
+            $out .= $this->emitBagStoreValue($n->value);
             $val = $this->lastValue;
             $nb = $this->ssa->allocReg();
             $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP

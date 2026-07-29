@@ -33,13 +33,47 @@ final class __McUnSt
     public array $allowed = [];
 }
 
+/**
+ * `unserialize($data, ['allowed_classes' => true|false|['A','B']])`.
+ *
+ * `true` (the default) restores any class the build knows; `false` restores
+ * none; an array names the ones allowed. Anything excluded — and any class the
+ * closed-world table does not know, which is php's answer for a class that does
+ * not exist — becomes `__PHP_Incomplete_Class`.
+ */
 function unserialize(string $data, array $options = []): mixed
 {
     $st = new __McUnSt();
     $st->s = $data;
+    if (array_key_exists('allowed_classes', $options)) {
+        $ac = $options['allowed_classes'];
+        if (is_array($ac)) {
+            $st->allowAll = false;
+            foreach ($ac as $cn) { $st->allowed[(string)$cn] = true; }
+        } else {
+            $st->allowAll = (bool)$ac;
+        }
+    }
     $v = __mc_unser_val($st);
     if (!$st->ok) { return false; }
     return $v;
+}
+
+/**
+ * php's placeholder for a class that may not be restored. It keeps the original
+ * name under `__PHP_Incomplete_Class_Name`; php also keeps the property names
+ * MANGLED on it, we store them demangled.
+ */
+#[\AllowDynamicProperties]
+class __PHP_Incomplete_Class
+{
+}
+
+function __mc_incomplete(string $cls): \__PHP_Incomplete_Class
+{
+    $o = new \__PHP_Incomplete_Class();
+    $o->__PHP_Incomplete_Class_Name = $cls;
+    return $o;
 }
 
 /** The bytes from the cursor up to the next `$stop`, cursor left just past it.
@@ -234,11 +268,9 @@ function __mc_unser_val(\__McUnSt $st): mixed
     return null;
 }
 
-/** A class name the closed-world table does not know. Ф6 replaces this with
- *  php's `__PHP_Incomplete_Class`; for now the parse fails, which unwinds to
- *  `false`. */
+/** A class name the closed-world table does not know — the same answer php
+ *  gives for a class that does not exist. */
 function __mc_unser_unknown(string $cls, \__McUnSt $st): mixed
 {
-    $st->ok = false;
-    return null;
+    return __mc_incomplete($cls);
 }

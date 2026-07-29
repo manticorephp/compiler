@@ -204,10 +204,25 @@ trait LowerPrelude
             // `Box__of__float`) — but is still matched by its OWN name, so the
             // props read at the specialized (concrete) types. Depth-sorting puts
             // it before its origin, which is what makes the narrowing land here.
-            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n"
-                . "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n";
+            if ($cd->usesBag()) {
+                // #[AllowDynamicProperties]: the count is not static, and the bag
+                // entries print after the declared slots. Without this the arm
+                // claimed the object and printed `(0) {}` — the bag walk below is
+                // only reached by a class with NO arm (stdClass).
+                $body = $body . "    \$bag = (array)\$v;\n"
+                    . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pc . " + count(\$bag)), \") {\\n\";\n";
+            } else {
+                $body = $body . "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+            }
             foreach ($props as $p) {
                 $body = $body . "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
+            }
+            if ($cd->usesBag()) {
+                $body = $body . "    foreach (\$bag as \$bk => \$bv) {\n"
+                    . "      echo \$pad, '  [\"', \$bk, \"\\\"]=>\\n\", \$pad, '  ';\n"
+                    . "      __mir_var_dump(\$bv, \$indent + 1);\n"
+                    . "    }\n";
             }
             $body = $body . "    echo \$pad, \"}\\n\"; return;\n  }\n";
             $ci = $ci + 1;
@@ -445,6 +460,10 @@ trait LowerPrelude
         $names = $this->walkableClassesDerivedFirst();
 
         $alloc = "function __mc_unser_alloc(string \$cls, \\__McUnSt \$st): mixed {\n"
+            // allowed_classes is purely runtime, and the closed world is an ASSET
+            // here: a disallowed name and an unknown one fall out of the same
+            // chain onto the same __PHP_Incomplete_Class.
+            . "  if (!\$st->allowAll && !isset(\$st->allowed[\$cls])) { return __mc_incomplete(\$cls); }\n"
             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
         foreach ($names as $cname) {
             $alloc = $alloc . "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""

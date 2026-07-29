@@ -766,6 +766,33 @@ trait LowerClasses
                 ),
             ));
         }
+        // php's `unserialize` creates the object with the class's DEFAULT
+        // property table and then overwrites from the stream — it skips the
+        // constructor BODY, not the defaults. So a property the stream omits
+        // keeps its declared default (`public int $ignored = 5` reads 5, not 0).
+        //
+        // Here the defaults are ordinary stores, prepended to the ctor (or the
+        // whole synthesised one), so a bare NewObj cannot run them without also
+        // running the user's body. Emit them ONCE MORE as their own function,
+        // which `__mc_new_uninit` calls. The nodes are cloned: the originals go
+        // on being the ctor's prologue, and a shared subtree would be lowered
+        // twice under two frames. Gated on the program actually unserialising —
+        // nothing else needs the defaults without the ctor.
+        if ($this->includeUnserialize && $defaultStores !== []) {
+            $copies = [];
+            foreach ($defaultStores as $ds) { $copies[] = \Compile\Mir\NodeClone::node($ds); }
+            $module->addFunction(new FunctionDef(
+                name: $decl->name . '____mc_defaults',
+                params: [new Param(
+                    name: 'this',
+                    type: Type::obj($decl->name),
+                    byRef: false,
+                    variadic: false,
+                )],
+                returnType: Type::void(),
+                body: new Block($copies, Type::void()),
+            ));
+        }
         // No user ctor but defaulted properties → the defaults still have to run
         // at instantiation, so a ctor is synthesised for them.
         if (!$sawCtor && $defaultStores !== []) {
