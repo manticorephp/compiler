@@ -1873,12 +1873,24 @@ trait EmitLlvmExpr
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
             $out .= $this->emitNode($nc->left);
-            $out .= $wantCell ? $this->boxToCell($nc->left->type) : $this->coerceToI64();
+            if ($wantCell) {
+                $out .= $this->armRetainPreBox($n, $nc->left);
+                $out .= $this->boxToCell($nc->left->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $out .= $this->armRetainPostBox($n, $nc->left, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
             $out .= $this->emitNode($nc->right);
-            $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+            if ($wantCell) {
+                $out .= $this->armRetainPreBox($n, $nc->right);
+                $out .= $this->boxToCell($nc->right->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $out .= $this->armRetainPostBox($n, $nc->right, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $end . ":\n";
@@ -1890,7 +1902,10 @@ trait EmitLlvmExpr
         }
         $lk = $nc->left->type->kind;
         if ($lk === Type::KIND_NULL) {
-            return $this->emitNode($nc->right);
+            // The left is statically null, so the RIGHT is the only arm that
+            // ever runs — it still owes the +1 the contract promises.
+            $out = $this->emitNode($nc->right);
+            return $out . $this->armRetainLast($n, $nc->right);
         }
         if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
             // A raw int/float/bool is never null, so the left always wins. But if
@@ -1929,15 +1944,24 @@ trait EmitLlvmExpr
         if ($wantCell) {
             $this->lastValue = $lv;
             $this->lastValueType = 'i64';
+            $out .= $this->armRetainPreBox($n, $nc->left);
             $out .= $this->boxToCell($nc->left->type);
+            $out .= $this->armRetainPostBox($n, $nc->left, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
+            $out .= $this->armRetainPostBox($n, $nc->left, $lv);
             $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
         $out .= $this->emitNode($nc->right);
-        $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+        if ($wantCell) {
+            $out .= $this->armRetainPreBox($n, $nc->right);
+            $out .= $this->boxToCell($nc->right->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $out .= $this->armRetainPostBox($n, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
@@ -2008,15 +2032,26 @@ trait EmitLlvmExpr
         $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
+            $this->lastValue = $cur;
+            $this->lastValueType = 'i64';
+            $out .= $this->armRetainPreBox($nc, $leafPa);
             $out .= $this->boxRawValue($cur, $leafType);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
+            // The kept value is a raw property load — always a borrow.
+            $out .= $this->armRetainPostBox($nc, $leafPa, $cur);
             $out .= '  store i64 ' . $cur . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
         $out .= $this->emitNode($nc->right);
-        $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+        if ($wantCell) {
+            $out .= $this->armRetainPreBox($nc, $nc->right);
+            $out .= $this->boxToCell($nc->right->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $out .= $this->armRetainPostBox($nc, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";

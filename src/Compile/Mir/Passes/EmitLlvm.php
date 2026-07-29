@@ -1508,13 +1508,11 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($node->type->kind !== Type::KIND_STRING) { return false; }
         $k = $node->kind;
-        // ⚠ A TERNARY is deliberately NOT here, even though
-        // {@see EmitLlvmControl::retainBorrowedStrArm} gives its borrowed arms a
-        // +1: an arm that is not itself string-TYPED (a cell/unknown carrier that
-        // coerces to the string) gets no retain, so treating the result as a fresh
-        // temp released what nobody owned — preg_full and socket_sendmsg read
-        // freed bytes. Retaining without releasing leaks; releasing without
-        // retaining corrupts.
+        // A conditional (ternary / `?:` / `??` / match) hands out +1 from EVERY
+        // arm ({@see EmitLlvmControl::armRetainPostBox}), so its result is a
+        // fresh temp exactly like a concat. Only the shapes CondOwn declares
+        // owned qualify — one with an erased arm stays borrowed.
+        if ($this->condOwnsResult($node)) { return true; }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;
@@ -1581,6 +1579,46 @@ final class EmitLlvm implements EmitVisitor
     {
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
             || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
+    /**
+     * The rc flavor a CONDITIONAL result is retained / released by, or '' when
+     * it is not rc-managed. {@see discardReleaseFlavor} plus the union mapping:
+     * an all-object union rides a bare object pointer, so it drops like one —
+     * but only when EVERY member is a real rc'd class (a #[Struct] / closure /
+     * enum / Ffi\Ptr member has no rc header, and rc-managing one writes into
+     * the allocator's metadata).
+     */
+    private function condFlavor(Type $t): string
+    {
+        if ($t->kind !== Type::KIND_UNION) { return $this->discardReleaseFlavor($t); }
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return ''; }
+        foreach ($atoms as $a) {
+            if ($a->kind !== Type::KIND_OBJ) { return ''; }
+            $cls = $a->class ?? '';
+            if ($cls === '' || $cls === 'Ffi\\Ptr') { return ''; }
+            if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return ''; }
+            if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
+        }
+        return 'obj';
+    }
+
+    /**
+     * Does this node yield an OWNED (+1) value because it is a conditional the
+     * emitter normalizes? The contract and the arm rule live in {@see CondOwn} —
+     * the same predicate {@see InsertMemoryOps::isOwnedObj} uses, so the two
+     * passes cannot disagree (one way leaks, the other double-frees).
+     *
+     * True here means: every arm was given a +1 of this node's result type
+     * ({@see EmitLlvmControl::armRetainPostBox}), so consumers must treat the
+     * result as a fresh temp — release it when done, never add a second retain.
+     */
+    private function condOwnsResult(Node $n): bool
+    {
+        if (!\Compile\Mir\CondOwn::isConditional($n)) { return false; }
+        if ($this->condFlavor($n->type) === '') { return false; }
+        return \Compile\Mir\CondOwn::armsCoverable($n);
     }
 
     private function discardReleaseFlavor(Type $t): string
@@ -1678,6 +1716,14 @@ final class EmitLlvm implements EmitVisitor
      */
     private function freshRcArgFlavor(Node $a): string
     {
+        // A normalized conditional is +1 from every arm, so a borrowed-arg temp
+        // must be released after the call like any other fresh producer. Tested
+        // first: its result type may be a UNION (which the obj/array gate below
+        // would reject) and the flavor comes from condFlavor, not the arm.
+        if ($this->condOwnsResult($a)) {
+            $cf = $this->condFlavor($a->type);
+            return $cf === 'cell' ? '' : $cf;
+        }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
@@ -1728,7 +1774,17 @@ final class EmitLlvm implements EmitVisitor
         // through the tag-dispatched helper directly; it no-ops on an
         // int/float/bool/null cell. An OWNED producer's +1 transfers.
         if ($k === Type::KIND_CELL) {
-            $vk = $value->kind;
+            // `__mir_to_cell($x)` is pure BOXING ({@see EmitLlvmBuiltins::biToCell}
+            // = emit the arg, then boxToCell), so ownership follows its ARGUMENT.
+            // Reading the call itself as an owned producer stored the payload with
+            // NO co-owner: `__preg_cells` boxed borrowed `$groups` elements into a
+            // vec[cell], the caller's per-iteration release of $groups freed them,
+            // and preg_replace_callback's closure read `$mm[0]` out of a reused
+            // block ('<' for '3'). It only ever worked because the append site
+            // double-retained the string before the ownership contract landed.
+            $src = $this->cellBoxSource($value);
+            $vk = $src->kind;
+            if ($this->condOwnsResult($src)) { return ''; }
             if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
                 || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
                 || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
@@ -1754,6 +1810,20 @@ final class EmitLlvm implements EmitVisitor
         $this->lastValue = $saveV;
         $this->lastValueType = $saveT;
         return $out;
+    }
+
+    /**
+     * Look through a pure boxing call to the value whose ownership actually
+     * decides a cell co-owner retain. `__mir_to_cell($x)` emits `$x` and boxes
+     * it — the call node is not a producer, `$x` is.
+     */
+    private function cellBoxSource(Node $value): Node
+    {
+        if ($value->kind !== Node::KIND_CALL) { return $value; }
+        if (\ltrim($value->function, '\\') !== '__mir_to_cell') { return $value; }
+        $args = $value->args;
+        if (\count($args) !== 1) { return $value; }
+        return $this->cellBoxSource($args[0]);
     }
 
     private function isEmptyArrayLit(Node $n): bool
