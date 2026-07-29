@@ -317,6 +317,11 @@ final class LowerFromAst implements Pass
     public bool $includePrintR = false;
     /** print_r prelude source, read by Main from `prelude/print_r.php`. */
     public string $printRSrc = '';
+    /** serialize() — DEMAND-GATED on `serialize(`. Pulls in the hand-written
+     *  walker AND the per-class `__mc_ser_object` arms generated below. */
+    public bool $includeSerialize = false;
+    /** serialize prelude source, read by Main from `prelude/serialize.php`. */
+    public string $serializeSrc = '';
     /** Inject the built-in SPL ArrayIterator / ArrayObject classes (gated on
      *  the user program referencing them — see Main.php). */
     public bool $includeArrayClasses = false;

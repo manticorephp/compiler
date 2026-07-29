@@ -129,6 +129,9 @@ trait LowerPrelude
         if ($this->includePrintR) {
             $src = $src . $this->printRSrc;
         }
+        if ($this->includeSerialize) {
+            $src = $src . $this->serializeSrc;
+        }
         if ($this->includeReflection) {
             // After exceptions.php: ReflectionException extends Exception, and
             // the sources are concatenated then parsed as one unit.
