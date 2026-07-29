@@ -339,6 +339,72 @@ trait EmitLlvmObjects
     }
 
     /**
+     * The concrete classes a value of interface/unknown type `$iface` can be at
+     * runtime — the candidates a `clone` has to dispatch over. Structs and
+     * enums are excluded (they carry no rc header and clone as values).
+     *
+     * @return string[]
+     */
+    private function cloneImplementers(string $iface): array
+    {
+        if ($iface === '') { return []; }
+        $out = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($cd->isStruct) { continue; }
+            if ($this->isEnumClass($name) || $this->isClosureClass($name)) { continue; }
+            if ($name === $iface) { continue; }
+            if (!$this->classImplements($name, $iface)) { continue; }
+            $out[] = $name;
+        }
+        return $out;
+    }
+
+    /**
+     * `clone` over an interface-typed receiver: compare the instance's
+     * descriptor word (slot 0) against each candidate's and run that class's
+     * own clone. The default arm keeps the historical pass-through, so an
+     * implementer this module cannot see behaves exactly as it did.
+     *
+     * @param string[] $impls
+     */
+    private function emitCloneDispatch(\Compile\Mir\Clone_ $n, string $src, array $impls): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca i64\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = ptrtoint ptr ' . $src . " to i64\n";
+        $out .= '  store i64 ' . $sp . ', ptr ' . $slot . "\n";
+        $desc = $this->ssa->allocReg();
+        $out .= '  ' . $desc . ' = load i64, ptr ' . $src . "\n";
+        $endL = $this->ssa->allocLabel('clonedyn.end');
+        foreach ($impls as $name) {
+            $cdN = $this->classes[$name];
+            $hit = $this->ssa->allocLabel('clonedyn.hit');
+            $next = $this->ssa->allocLabel('clonedyn.next');
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $desc . ', '
+                  . $this->lib->descSlotValue($cdN) . "\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hit . ', label %' . $next . "\n";
+            $out .= $hit . ":\n";
+            $out .= $this->emitCloneOfClass($n, $cdN, $name, $src);
+            $ci = $this->ssa->allocReg();
+            $out .= '  ' . $ci . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $out .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $next . ":\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load i64, ptr ' . $slot . "\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $res . " to ptr\n";
+        $this->lastValue = $rp;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
      * `clone $obj` — allocate a fresh instance of the same class, shallow-copy
      * every property slot (co-owning rc-managed values: both objects share an
      * object/string/array handle), then call `__clone()` if defined. PHP 8.5
@@ -352,10 +418,32 @@ trait EmitLlvmObjects
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
         if ($cd === null || $cd->isStruct) {
-            // Unknown / value-type class — nothing to deep-manage; pass through.
+            // An INTERFACE-typed receiver has no ClassDef, and passing the
+            // pointer through made `clone` the IDENTITY — the "copy" was the
+            // original, so a write through it hit the shared object. symfony's
+            // SymfonyStyle does `new TrimmedBufferOutput(…, false, clone
+            // $output->getFormatter())` and then `setDecorated(false)` on that
+            // "clone", which switched the REAL console formatter off: the whole
+            // app rendered without colour. Dispatch on the runtime class id and
+            // clone each implementer concretely; an unknown one still passes
+            // through, exactly as before.
+            $impls = $cd === null ? $this->cloneImplementers($cls) : [];
+            if ($impls !== []) { return $out . $this->emitCloneDispatch($n, $src, $impls); }
             $this->lastValue = $src; $this->lastValueType = 'ptr';
             return $out;
         }
+        return $out . $this->emitCloneOfClass($n, $cd, $cls, $src);
+    }
+
+    /**
+     * The clone body for a KNOWN class: fresh instance, shallow-copied slots
+     * (arrays copied by value, other rc handles co-owned), `__clone()`, then the
+     * PHP 8.5 clone-with overrides. Shared by the static path and the
+     * interface dispatch ({@see emitCloneDispatch}).
+     */
+    private function emitCloneOfClass(\Compile\Mir\Clone_ $n, $cd, string $cls, string $src): string
+    {
+        $out = '';
         $size = $cd->instanceSize();
         $new = $this->ssa->allocReg();
         $out .= '  ' . $new . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";

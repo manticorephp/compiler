@@ -68,6 +68,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
         if ($name === '__mir_clock_ns')               { return $this->biClockNs($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
+        if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
         if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
         if ($name === '__mir_fiber_jump')             { return $this->biFiberJump($args); }
         if ($name === '__mir_fiber_current')          { return $this->biFiberCurrent($args); }
@@ -937,6 +938,31 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $ptr . "\n";
         $this->lastValue = $safe;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mir_untag_str($v): string` — the STRING behind an erased carrier,
+     * whatever shape it arrived in: a NaN-boxed cell strips to its payload, a
+     * scalar tag renders, and an already-raw pointer passes through unchanged
+     * (the identity). The result is OWNED — a stdlib function that hands it on
+     * (`preg_grep` stores it into a `string[]`) must not give away a borrow.
+     *
+     * The point is that a stdlib body cannot ask what its caller's array holds:
+     * `array_keys()` answers boxed cells while a literal answers raw pointers,
+     * and a `string[]` param reads both raw — `preg_grep(…, array_keys($a))`
+     * dereferenced the NaN tag, so `./app <unknown-command>` SIGSEGV'd.
+     *
+     * @param Node[] $args
+     */
+    private function biUntagStr(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $p = $this->lastValue;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_rc_retain_str(ptr ' . $p . ")\n";
+        $this->lastValue = $p;
         $this->lastValueType = 'ptr';
         return $out;
     }

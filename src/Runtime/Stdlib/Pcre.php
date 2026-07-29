@@ -497,8 +497,16 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
 // ── preg_grep ──────────────────────────────────────────────────────────────
 
 /**
- * @param string[] $array
- * @return array<int, string>
+ * ⚠ The parameter is deliberately left ERASED. A `string[]` declaration reads
+ * every element RAW, and the caller's array may hold BOXED cells —
+ * `array_keys()` answers `vec[cell]`, and symfony's `Application::find()` does
+ * `preg_grep(…, array_keys($this->commands))`, so preg_match dereferenced the
+ * NaN tag and `./app <unknown-command>` SIGSEGV'd before printing anything.
+ * `mixed[]` is not the answer either — it would force cells on the concrete
+ * callers. `__mir_untag_str` normalises whatever arrived to an OWNED raw
+ * string, which keeps the RESULT honestly `string[]` for its consumers.
+ *
+ * @return array<int|string, string>
  */
 function preg_grep(string $pattern, array $array, int $flags = 0): array
 {
@@ -506,8 +514,9 @@ function preg_grep(string $pattern, array $array, int $flags = 0): array
     $out = [];
     $tmp = [];
     foreach ($array as $key => $value) {
-        $hit = \preg_match($pattern, $value, $tmp) === 1;
-        if ($hit !== $invert) { $out[$key] = $value; }
+        $s = \__mir_untag_str($value);
+        $hit = \preg_match($pattern, $s, $tmp) === 1;
+        if ($hit !== $invert) { $out[$key] = $s; }
     }
     return $out;
 }

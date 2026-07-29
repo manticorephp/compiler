@@ -137,6 +137,8 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        // The string behind an erased carrier ({@see EmitLlvmBuiltins::biUntagStr}).
+        if ($n === '__mir_untag_str') { return Type::string_(); }
         // Fiber switch intrinsics: fctx/stack handles are raw addresses carried
         // as ints; current-fiber is a \Fiber obj (0 = none); the setters are void.
         if ($n === '__mir_fiber_make' || $n === '__mir_fiber_jump'
