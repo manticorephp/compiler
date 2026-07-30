@@ -142,6 +142,15 @@ trait EmitLlvmBuiltins
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
         if ($name === 'explode' && \count($args) >= 2) { return $this->biExplode($args); }
+        if ($name === 'print' && \count($args) === 1)  { return $this->biPrint($args); }
+        // Output-buffer primitives. Thin wrappers over the funnel's own state
+        // ({@see EmitLlvmRuntime::obApiRuntime}) — they hold BYTES; the handler
+        // callables live in prelude/ob.php, which cannot be here because a
+        // callable does not survive the stdlib.o boundary.
+        if ($name === 'flush' && $args === [])        { return $this->biOb('flush', []); }
+        if (\str_starts_with($name, '__mir_ob_') || $name === '__mir_out_write_str') {
+            return $this->biOb($name, $args);
+        }
         if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
@@ -3072,6 +3081,76 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /**
+     * The output-buffer primitives, as one table.
+     *
+     * Every one is a single call into the funnel runtime, so the shape is a
+     * signature table rather than a method each: `[llvm return, arg types]`.
+     * Argument coercion is by declared type — a level is an int, a payload is a
+     * ptr — and the result lands in lastValue exactly as any other builtin's.
+     *
+     * @param Node[] $args
+     */
+    private function biOb(string $name, array $args): string
+    {
+        // name → [symbol, return llvm type, arg llvm types]
+        $sig = [
+            'flush'               => ['@__mir_out_flush',     'void', []],
+            '__mir_out_write_str' => ['@__mir_out_str',       'void', ['ptr']],
+            '__mir_ob_push'       => ['@__mir_ob_push',       'i64',  []],
+            '__mir_ob_pop'        => ['@__mir_ob_pop',        'i64',  []],
+            '__mir_ob_level'      => ['@__mir_ob_level',      'i64',  []],
+            '__mir_ob_len'        => ['@__mir_ob_len',        'i64',  ['i64']],
+            '__mir_ob_peek'       => ['@__mir_ob_peek',       'ptr',  ['i64']],
+            '__mir_ob_take'       => ['@__mir_ob_take',       'ptr',  ['i64']],
+            '__mir_ob_clean'      => ['@__mir_ob_clean',      'void', ['i64']],
+            '__mir_ob_inuse'      => ['@__mir_ob_set_inuse',   'void', ['i64', 'i64']],
+            '__mir_ob_implicit'   => ['@__mir_ob_set_implicit', 'void', ['i64']],
+            '__mir_ob_incb'       => ['@__mir_ob_set_incb',    'void', ['i64']],
+        ];
+        if (!isset($sig[$name])) {
+            throw new \RuntimeException('EmitLlvm: unknown output-buffer builtin ' . $name);
+        }
+        $sym = $sig[$name][0];
+        $ret = $sig[$name][1];
+        $atys = $sig[$name][2];
+        $this->rt->needsOutBuf = true;
+        $out = '';
+        $vals = [];
+        foreach ($atys as $i => $aty) {
+            $out .= $this->emitNode($args[$i]);
+            $out .= $aty === 'ptr' ? $this->coerceToPtr() : $this->coerceToI64();
+            $vals[] = $aty . ' ' . $this->lastValue;
+        }
+        $call = $sym . '(' . \implode(', ', $vals) . ')';
+        if ($ret === 'void') {
+            $out .= '  call void ' . $call . "\n";
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ' . $ret . ' ' . $call . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = $ret;
+        return $out;
+    }
+
+    /**
+     * `print $x` — one echo operand, then the constant 1 PHP's `print` yields.
+     * The whole render is {@see EmitLlvmExpr::emitEchoOne}, so `print` and
+     * `echo` cannot drift apart on a type.
+     *
+     * @param Node[] $args
+     */
+    private function biPrint(array $args): string
+    {
+        $out = $this->emitEchoOne($args[0]);
+        $this->lastValue = '1';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** @param Node[] $args  print_r($v [, $return]) — echo form only. DEEP-boxes
      *  the value (a nested array's elements become tagged cells, so the recursive
      *  __mir_print_r reads real cells, not raw pointers) then calls the prelude
@@ -3234,7 +3313,9 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
                 $fs = $this->ssa->allocReg();
                 $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
-                $out .= '  call i32 (ptr, ...) @printf(ptr @.fmt.vdfloat, ptr ' . $fs . ")\n";
+                $out .= $this->emitOutLit('float(');
+                $out .= $this->emitOutStr($fs);
+                $out .= $this->emitOutLit(")\n");
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -3463,13 +3544,38 @@ trait EmitLlvmBuiltins
                 $vararg .= ', i64 ' . $this->lastValue;
             }
         }
-        // Fast path: direct printf to stdout when there is no exponent to fix.
+        // To stdout with no exponent to fix: render into an exactly-sized buffer,
+        // then funnel. Two snprintf passes rather than one printf — the bytes
+        // have to EXIST before the funnel can decide between stdout and an open
+        // ob_start() buffer. The size probe also retires the 255-byte clamp the
+        // buffered path below still carries: a long `printf` used to truncate.
+        // The vararg registers are already-materialised SSA values, so naming
+        // them in both calls re-reads them, it does not re-evaluate anything.
         if ($toStdout && !$hasExp) {
-            $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $fmtPtr . $vararg . ")\n";
-            $r2 = $this->ssa->allocReg();
-            $out .= '  ' . $r2 . ' = sext i32 ' . $r . " to i64\n";
-            $this->lastValue = $r2; $this->lastValueType = 'i64';
+            $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
+            $need = $this->ssa->allocReg();
+            $out .= '  ' . $need . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr null, i64 0, ptr '
+                  . $fmtPtr . $vararg . ")\n";
+            $need64 = $this->ssa->allocReg();
+            $out .= '  ' . $need64 . ' = sext i32 ' . $need . " to i64\n";
+            // snprintf answers negative on an encoding error; render nothing.
+            $bad = $this->ssa->allocReg();
+            $n = $this->ssa->allocReg();
+            $out .= '  ' . $bad . ' = icmp slt i64 ' . $need64 . ", 0\n";
+            $out .= '  ' . $n . ' = select i1 ' . $bad . ', i64 0, i64 ' . $need64 . "\n";
+            $cap = $this->ssa->allocReg();
+            $out .= '  ' . $cap . ' = add i64 ' . $n . ", 1\n";
+            $buf = $this->ssa->allocReg();
+            $out .= '  ' . $buf . ' = call ptr @__mir_str_alloc(i64 ' . $cap . ")\n";
+            $wrote = $this->ssa->allocReg();
+            $out .= '  ' . $wrote . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf
+                  . ', i64 ' . $cap . ', ptr ' . $fmtPtr . $vararg . ")\n";
+            $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $n . ")\n";
+            $out .= $this->emitOutWrite($buf, $n);
+            $bi = $this->ssa->allocReg();
+            $out .= '  ' . $bi . ' = ptrtoint ptr ' . $buf . " to i64\n";
+            $out .= $this->rcReleaseReg($bi, 'str');
+            $this->lastValue = $n; $this->lastValueType = 'i64';
             return $out;
         }
         // Format into a buffer (sprintf; also printf when %e/%g needs fixing).
@@ -3502,19 +3608,18 @@ trait EmitLlvmBuiltins
             $buf = $fp;
         }
         if ($toStdout) {
-            // Print the fixed buffer, then release it (owned intermediate, not
-            // returned). printf("%s", buf) returns the byte count.
-            $pcts = $this->strLitId($this->pool->intern('%s'));
-            $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $pcts . ', ptr ' . $buf . ")\n";
+            // Funnel the fixed buffer, then release it (owned intermediate, not
+            // returned). The byte count is the buffer's own length, read BEFORE
+            // the release.
+            $rl = $this->ssa->allocReg();
+            $out .= '  ' . $rl . ' = call i64 @__mir_strlen(ptr ' . $buf . ")\n";
+            $out .= $this->emitOutStr($buf);
             if ($hasExp) {
                 $bi2 = $this->ssa->allocReg();
                 $out .= '  ' . $bi2 . ' = ptrtoint ptr ' . $buf . " to i64\n";
                 $out .= $this->rcReleaseReg($bi2, 'str');
             }
-            $r2 = $this->ssa->allocReg();
-            $out .= '  ' . $r2 . ' = sext i32 ' . $r . " to i64\n";
-            $this->lastValue = $r2; $this->lastValueType = 'i64';
+            $this->lastValue = $rl; $this->lastValueType = 'i64';
             return $out;
         }
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
@@ -3678,12 +3783,12 @@ trait EmitLlvmBuiltins
         if ($toStdout) {
             $rp = $this->ssa->allocReg();
             $out .= '  ' . $rp . ' = inttoptr i64 ' . $res . " to ptr\n";
-            $pcts = $this->strLitId($this->pool->intern('%s'));
-            $pr = $this->ssa->allocReg();
-            $out .= '  ' . $pr . ' = call i32 (ptr, ...) @printf(ptr ' . $pcts . ', ptr ' . $rp . ")\n";
-            $out .= $this->rcReleaseReg($res, 'str');
+            // Length read BEFORE the release — the result is the byte count, and
+            // after the release the header it lives in may already be pooled.
             $len = $this->ssa->allocReg();
-            $out .= '  ' . $len . ' = sext i32 ' . $pr . " to i64\n";
+            $out .= '  ' . $len . ' = call i64 @__mir_strlen(ptr ' . $rp . ")\n";
+            $out .= $this->emitOutStr($rp);
+            $out .= $this->rcReleaseReg($res, 'str');
             $this->lastValue = $len; $this->lastValueType = 'i64';
             return $out;
         }
@@ -3740,7 +3845,11 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $this->libcExtra['write']  = 'declare i64 @write(i32, ptr, i64)';
-        $out = $this->emitPtrArg($args[0]);
+        // fd 2 bypasses stdout's stdio buffer, so drain it first or a diagnostic
+        // overtakes the output it is about. Only matters since `echo` became
+        // buffered — it used to write(1, …) unbuffered and self-order.
+        $out = $this->emitOutFlush();
+        $out .= $this->emitPtrArg($args[0]);
         $msg = $this->lastValue;
         $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = call i64 @strlen(ptr ' . $msg . ")\n";
@@ -5295,13 +5404,9 @@ trait EmitLlvmBuiltins
         if ($wantString) {
             return $out;
         }
-        $this->libcExtra['printf'] = 'declare i32 @printf(ptr, ...)';
         $out .= $this->coerceToPtr();
         $buf = $this->lastValue;
-        $pcts = $this->strLitId($this->pool->intern('%s'));
-        $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i32 (ptr, ...) @printf(ptr ' . $pcts
-              . ', ptr ' . $buf . ")\n";
+        $out .= $this->emitOutStr($buf);
         $this->lastValue = $this->litStr('');
         $this->lastValueType = 'ptr';
         return $out;

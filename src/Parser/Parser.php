@@ -2348,6 +2348,18 @@ final class Parser
                 $inner = $this->parseExpression();
                 return Expr::unary('throw', $inner, $span);
             }
+            // `print` is an EXPRESSION, not a statement: it prints one operand
+            // and yields int 1, so `$ok = print "x";` and `$c and print "y";`
+            // are both legal. Lowest precedence and right-associative, which
+            // falls out of consuming the operand with parseExpression — the
+            // same shape `throw` above uses. The statement form `print "x";`
+            // needs nothing extra: parseStatement has no `print` arm, so it
+            // already falls through to the expression statement.
+            if ($lower === 'print') {
+                $this->advance();
+                $inner = $this->parseExpression();
+                return Expr::unary('print', $inner, $span);
+            }
             if ($lower === 'static') {
                 $next = $this->tokens[$this->pos + 1] ?? null;
                 if ($next !== null && $next->kind === TokenKind::Keyword) {

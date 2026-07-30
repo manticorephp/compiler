@@ -156,6 +156,15 @@ final class Resource
      * seek-back must find the earlier bytes). `$addr` is 0 (no handle).
      */
     public const KIND_MEMFILE = 6;
+    /**
+     * php://output — a write-only sink that goes through the OUTPUT LAYER, so
+     * `ob_start()` captures it exactly as it captures `echo`. Distinct from
+     * php://stdout, which php writes to fd 1 directly and does NOT capture; the
+     * two used to fold to the same resource here, which made that difference
+     * unrepresentable. `$addr` is 0 — there is no handle, so close() is already
+     * a no-op — and every write funnels instead of reaching libc.
+     */
+    public const KIND_OUTPUT = 7;
 
 
     /** php numbers resources from 1 and never reuses an id within a run. */

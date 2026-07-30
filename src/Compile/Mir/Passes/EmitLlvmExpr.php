@@ -471,18 +471,18 @@ trait EmitLlvmExpr
         $out .= "    i64 7, label %asarray\n";
         $out .= "  ]\n";
         $out .= "asarray:\n";
-        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr @.tagstr.array)\n";
+        $out .= "  call void @__mir_out_write(ptr @.tagstr.array, i64 5)\n";
         $out .= "  ret void\n";
         $out .= "asint:\n";
         $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
-        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.d, i64 %i)\n";
+        $out .= "  call void @__mir_out_int(i64 %i)\n";
         $out .= "  ret void\n";
         $out .= "asbool:\n";
         $out .= "  %bb = and i64 %v, 1\n";
         $out .= "  %istrue = icmp ne i64 %bb, 0\n";
         $out .= "  br i1 %istrue, label %bt, label %bdone\n";
         $out .= "bt:\n";
-        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr @.tagstr.true)\n";
+        $out .= "  call void @__mir_out_write(ptr @.tagstr.true, i64 1)\n";
         $out .= "  ret void\n";
         $out .= "bdone:\n";
         $out .= "  ret void\n";
@@ -491,14 +491,15 @@ trait EmitLlvmExpr
         $out .= "asptr:\n";
         $out .= "  %pp = and i64 %v, 281474976710655\n";
         $out .= "  %p = inttoptr i64 %pp to ptr\n";
-        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr %p)\n";
+        // __mir_out_str, not printf("%s"): a boxed string is a headered string
+        // like any other, and the format render stopped at its first NUL — a
+        // binary value in a `mixed` array echoed truncated, silently.
+        $out .= "  call void @__mir_out_str(ptr %p)\n";
         $out .= "  ret void\n";
         $out .= "asfloat:\n";
         $out .= "  %fd = bitcast i64 %v to double\n";
         // PHP-formatted (echo scientific form is "1.0E+20", not C's "1e+20").
-        $out .= "  %ffs = call ptr @__mir_float_to_str(double %fd)\n";
-        $out .= "  call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr %ffs)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %ffs)\n";
+        $out .= "  call void @__mir_out_float(double %fd)\n";
         $out .= "  ret void\n";
         $out .= "}\n";
         return $out;
@@ -4198,133 +4199,155 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * The ONLY way to reach stdout from codegen.
+     *
+     * Every `emitOut*` below sets `needsOutBuf` itself, so a site that emits a
+     * call can never forget to demand the definition — and the reverse failure
+     * is the dangerous one: `tools/link_stubs.sh` turns an unresolved symbol
+     * into a `return 0` stub, so a missing funnel would silently swallow the
+     * program's entire output rather than fail the link.
+     */
+    private function emitOutWrite(string $ptr, string $len): string
+    {
+        $this->rt->needsOutBuf = true;
+        return '  call void @__mir_out_write(ptr ' . $ptr . ', i64 ' . $len . ")\n";
+    }
+
+    /** A headered string, whole — binary-safe and null-safe. */
+    private function emitOutStr(string $ptr): string
+    {
+        $this->rt->needsOutBuf = true;
+        return '  call void @__mir_out_str(ptr ' . $ptr . ")\n";
+    }
+
+    private function emitOutInt(string $v): string
+    {
+        $this->rt->needsOutBuf = true;
+        return '  call void @__mir_out_int(i64 ' . $v . ")\n";
+    }
+
+    private function emitOutBool(string $v): string
+    {
+        $this->rt->needsOutBuf = true;
+        return '  call void @__mir_out_bool(i64 ' . $v . ")\n";
+    }
+
+    /** Owns the formatter's temp: renders, writes, releases. */
+    private function emitOutFloat(string $d): string
+    {
+        $this->rt->needsOutBuf = true;
+        $this->rt->needsFloatStr = true;
+        $this->rt->needsStrRc = true;
+        return '  call void @__mir_out_float(double ' . $d . ")\n";
+    }
+
+    /**
+     * Drain stdout's stdio buffer.
+     *
+     * Needed before anything that writes fd 2 directly (a diagnostic, the
+     * uncaught-exception line) or hands the fd to another process (fork/exec):
+     * those bypass the stream, so without this they overtake output that came
+     * first. `echo` used to be an unbuffered `write(1, …)` and self-ordered.
+     */
+    private function emitOutFlush(): string
+    {
+        $this->rt->needsOutBuf = true;
+        return "  call void @__mir_out_flush()\n";
+    }
+
+    /** An interned literal — its length is known here, so no strlen at runtime. */
+    private function emitOutLit(string $text): string
+    {
+        $ptr = $this->strLitId($this->pool->intern($text));
+        return $this->emitOutWrite($ptr, (string)\strlen($text));
+    }
+
     private function emitEcho(Echo_ $n): string
     {
         $out = '';
         foreach ($n->exprs as $e) {
-            $out .= $this->emitNode($e);
-            $kind = $e->type->kind;
-            // Stringable object → __toString, then print as a string.
-            $ts = $this->toStringClassOf($e);
-            if ($ts !== '') {
-                $out .= $this->emitToStringCall($ts);
-                $kind = Type::KIND_STRING;
-            }
-            // A NaN-boxed cell (e.g. `int|false` from strpos) dispatches
-            // on its tag at runtime — int prints decimal, false / null
-            // print nothing, matching PHP echo.
-            if ($kind === Type::KIND_CELL) {
-                $out .= $this->coerceToI64();
-                $this->rt->needsTaggedEcho = true;
-                $out .= '  call void @__manticore_echo_tagged(i64 '
-                      . $this->lastValue . ")\n";
-                continue;
-            }
-            // An ERASED operand may carry a boxed cell or a raw i64, and the
-            // integer printf at the bottom rendered the tagged word itself —
-            // `echo $namespace['id']` over an erased array printed
-            // "-3377695414385432" where the name belonged. Same decision the
-            // concat path makes ({@see coerceToStr}), one branch: NaN-boxed goes
-            // to the tag dispatch, anything else keeps the integer rendering.
-            if ($kind === Type::KIND_UNKNOWN) {
-                $out .= $this->coerceToI64();
-                $this->rt->needsTaggedEcho = true;
-                $v = $this->lastValue;
-                $isBox = $this->ssa->allocReg();
-                $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
-                $boxL = $this->ssa->allocLabel('ec.box');
-                $rawL = $this->ssa->allocLabel('ec.raw');
-                $endL = $this->ssa->allocLabel('ec.end');
-                $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
-                $out .= $boxL . ":\n";
-                $out .= '  call void @__manticore_echo_tagged(i64 ' . $v . ")\n";
-                $out .= '  br label %' . $endL . "\n";
-                $out .= $rawL . ":\n";
-                $er = $this->ssa->allocReg();
-                $out .= '  ' . $er . ' = call i32 (ptr, ...) @printf(ptr @.fmt.d, i64 '
-                      . $v . ")\n";
-                $out .= '  br label %' . $endL . "\n";
-                $out .= $endL . ":\n";
-                continue;
-            }
-            // Coerce the cursor to the printf arg type — a string
-            // local arrives as the i64 slot payload and must be
-            // inttoptr'd; a float bitcast back to double.
-            // PHP `echo` of a bool prints "1" for true and "" (nothing) for
-            // false — NOT "0". Emit `printf("%.*s", b?1:0, "1")`: the precision
-            // arg gates whether the single "1" char prints.
-            if ($kind === Type::KIND_BOOL) {
-                $out .= $this->coerceToI64();
-                $nz = $this->ssa->allocReg();
-                $w = $this->ssa->allocReg();
-                $reg = $this->ssa->allocReg();
-                $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-                $out .= '  ' . $w . ' = zext i1 ' . $nz . " to i32\n";
-                $out .= '  ' . $reg . ' = call i32 (ptr, ...) @printf(ptr @.fmt.ds, i32 '
-                      . $w . ', ptr @.str.one)' . "\n";
-                continue;
-            }
-            if ($kind === Type::KIND_FLOAT) {
-                // Print via __mir_float_to_str, not a raw `printf("%.14g")`: PHP's
-                // `echo` scientific form is "1.0E+20", which the runtime formatter
-                // produces and C's `%g` ("1e+20") does not.
-                $this->rt->needsFloatStr = true;
-                $this->rt->needsStrRc = true;
-                $out .= $this->coerceTo('double');
-                $fsr = $this->ssa->allocReg();
-                $out .= '  ' . $fsr . ' = call ptr @__mir_float_to_str(double ' . $this->lastValue . ")\n";
-                $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr ' . $fsr . ")\n";
-                $out .= '  call void @__mir_rc_release_str(ptr ' . $fsr . ")\n";
-                continue;
-            }
-            if ($kind === Type::KIND_STRING) {
-                $out .= $this->coerceToPtr();
-                // A null `?string` (ptr 0) echoes "" in PHP — map 0 → the empty
-                // C-string (also headered, len@-16 = 0) so the write below sees a
-                // valid header instead of dereferencing null.
-                $sp = $this->lastValue;
-                $snn = $this->ssa->allocReg();
-                $ssafe = $this->ssa->allocReg();
-                $out .= '  ' . $snn . ' = icmp eq ptr ' . $sp . ", null\n";
-                $out .= '  ' . $ssafe . ' = select i1 ' . $snn
-                      . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $sp . "\n";
-                // PHP echo is BINARY-SAFE: print exactly len@-16 bytes with
-                // write(), not printf("%s") which stops at the first NUL (a raw
-                // binary string / image / protocol frame would truncate). A
-                // fflush(NULL) first keeps this unbuffered write ordered against
-                // the stdio-buffered printf the other arms use — it flushes ALL
-                // streams and needs no non-portable `stdout` symbol. Cheap in the
-                // common case: after a write the stdio buffer is empty, so a run
-                // of string echoes flushes nothing between them.
-                $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
-                $this->libcExtra['write'] = 'declare i64 @write(i32, ptr, i64)';
-                $lenp = $this->ssa->allocReg();
-                $len = $this->ssa->allocReg();
-                $out .= '  ' . $lenp . ' = getelementptr inbounds i8, ptr ' . $ssafe
-                      . ', i64 ' . (string)\Compile\MemoryAbi::STRING_LEN_OFFSET . "\n";
-                $out .= '  ' . $len . ' = load i64, ptr ' . $lenp . "\n";
-                $out .= "  call i32 @fflush(ptr null)\n";
-                $wr = $this->ssa->allocReg();
-                $out .= '  ' . $wr . ' = call i64 @write(i32 1, ptr ' . $ssafe
-                      . ', i64 ' . $len . ")\n";
-                $out .= $this->freeStrTemp($e, $ssafe);
-                continue;
-            } else {
-                $out .= $this->coerceToI64();
-                $fmt = '@.fmt.d';
-                $argType = 'i64';
-            }
-            $val = $this->lastValue;
-            $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i32 (ptr, ...) @printf(ptr '
-                  . $fmt . ', ' . $argType . ' ' . $val . ")\n";
-            // A fresh string temp (`echo $a . $b`) is dead after printing.
-            // ($val is a ptr in the string branch; freeStrTemp no-ops the
-            // non-string branches, where $e is never a fresh string.)
-            $out .= $this->freeStrTemp($e, $val);
+            $out .= $this->emitEchoOne($e);
         }
         return $out;
+    }
+
+    /**
+     * One `echo` operand. Split out of {@see emitEcho} because `print` is the
+     * same thing with a value — {@see EmitLlvmBuiltins::biPrint} emits this and
+     * then yields int 1.
+     */
+    private function emitEchoOne(Node $e): string
+    {
+        $out = $this->emitNode($e);
+        $kind = $e->type->kind;
+        // Stringable object → __toString, then print as a string.
+        $ts = $this->toStringClassOf($e);
+        if ($ts !== '') {
+            $out .= $this->emitToStringCall($ts);
+            $kind = Type::KIND_STRING;
+        }
+        // A NaN-boxed cell (e.g. `int|false` from strpos) dispatches
+        // on its tag at runtime — int prints decimal, false / null
+        // print nothing, matching PHP echo.
+        if ($kind === Type::KIND_CELL) {
+            $out .= $this->coerceToI64();
+            $this->rt->needsTaggedEcho = true;
+            $out .= '  call void @__manticore_echo_tagged(i64 '
+                  . $this->lastValue . ")\n";
+            return $out;
+        }
+        // An ERASED operand may carry a boxed cell or a raw i64, and the
+        // integer render at the bottom printed the tagged word itself —
+        // `echo $namespace['id']` over an erased array printed
+        // "-3377695414385432" where the name belonged. Same decision the
+        // concat path makes ({@see coerceToStr}), one branch: NaN-boxed goes
+        // to the tag dispatch, anything else keeps the integer rendering.
+        if ($kind === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $this->rt->needsTaggedEcho = true;
+            $v = $this->lastValue;
+            $isBox = $this->ssa->allocReg();
+            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+            $boxL = $this->ssa->allocLabel('ec.box');
+            $rawL = $this->ssa->allocLabel('ec.raw');
+            $endL = $this->ssa->allocLabel('ec.end');
+            $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+            $out .= $boxL . ":\n";
+            $out .= '  call void @__manticore_echo_tagged(i64 ' . $v . ")\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $rawL . ":\n";
+            $out .= $this->emitOutInt($v);
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $endL . ":\n";
+            return $out;
+        }
+        // PHP `echo` of a bool prints "1" for true and "" (nothing) for
+        // false — NOT "0".
+        if ($kind === Type::KIND_BOOL) {
+            $out .= $this->coerceToI64();
+            return $out . $this->emitOutBool($this->lastValue);
+        }
+        if ($kind === Type::KIND_FLOAT) {
+            // Rendered by __mir_float_to_str, not "%.14g": PHP's `echo`
+            // scientific form is "1.0E+20", which C's %g ("1e+20") is not.
+            $out .= $this->coerceTo('double');
+            return $out . $this->emitOutFloat($this->lastValue);
+        }
+        if ($kind === Type::KIND_STRING) {
+            $out .= $this->coerceToPtr();
+            $sp = $this->lastValue;
+            // PHP echo is BINARY-SAFE, and so is the funnel: __mir_out_str
+            // measures len@-16 rather than scanning for a NUL, so a string
+            // holding an image or a protocol frame survives whole. It is also
+            // null-safe — a null `?string` echoes "" — so the explicit
+            // empty-string select the write path used to need is gone.
+            $out .= $this->emitOutStr($sp);
+            // A fresh string temp (`echo $a . $b`) is dead after printing.
+            return $out . $this->freeStrTemp($e, $sp);
+        }
+        $out .= $this->coerceToI64();
+        return $out . $this->emitOutInt($this->lastValue);
     }
 
     /**

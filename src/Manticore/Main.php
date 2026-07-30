@@ -1948,6 +1948,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // prelude for the same reason: its object arm is generated per class table,
     // and the stdlib .o cannot be handed an object.
     $varExportSrc = prelude_src_or_empty("var_export.php");
+    // ob_* — DEMAND-GATED. In the prelude, not the stdlib .o, because an
+    // ob_start() handler is a CALLABLE; the buffered BYTES live in the codegen
+    // runtime instead, which is the only thing both objects can see.
+    $obSrc = prelude_src_or_empty("ob.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1958,6 +1962,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // prelude is injected WHOLE — so a miscompile in any function sharing that
     // file breaks generation 2 of the self-host. Nothing in src/ calls these.
     $useArrayFnsExt = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsExtSrc));
+    // Same definedFunctions gate: adding an ob_* function to prelude/ob.php
+    // needs no second edit here.
+    $useOb = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($obSrc));
     // `array_multisort` is DESUGARED at the call site (LowerExprs) into
     // __mc_multisort_order + __mc_multisort_apply, so the user's source never
     // names either helper and the definedFunctions gate above cannot see the
@@ -2131,6 +2138,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $module = new \Compile\Mir\Module();
         $module->needsBacktrace = $useBacktrace;
         $module->needsErrorHandlers = $useErrors;
+        $module->needsOb = $useOb;
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
@@ -2153,6 +2161,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
+        $lower->obSrc = $useOb ? $obSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
