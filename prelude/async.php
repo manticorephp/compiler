@@ -2081,7 +2081,9 @@ namespace Async {
             // is parked and restored. Doing it here rather than at every suspend
             // point is what keeps two interleaved requests from reading each
             // other's $_COOKIE; it costs one array probe when no request exists.
-            \__mc_sapi_ctx_switch($prev === null ? 0 : $prev->id, $task->id);
+            if (\function_exists('__mc_sapi_ctx_switch')) {
+                \__mc_sapi_ctx_switch($prev === null ? 0 : $prev->id, $task->id);
+            }
             // One float compare when the watchdog is off; microtime only when it is on.
             $t0 = $this->watchdog > 0.0 ? \microtime(true) : 0.0;
             try {
@@ -2096,14 +2098,18 @@ namespace Async {
                 }
             } catch (\Throwable $e) {
                 $this->running = $prev;
-                \__mc_sapi_ctx_switch($task->id, $prev === null ? 0 : $prev->id);
+                if (\function_exists('__mc_sapi_ctx_switch')) {
+                    \__mc_sapi_ctx_switch($task->id, $prev === null ? 0 : $prev->id);
+                }
                 if ($t0 > 0.0) { $this->watchdogCheck($task, $t0); }
                 $this->settle($task, Task::FAILED, null, $e);
                 $task->fiber->reclaim();      // terminated via exception → free stack now
                 return;
             }
             $this->running = $prev;
-            \__mc_sapi_ctx_switch($task->id, $prev === null ? 0 : $prev->id);
+            if (\function_exists('__mc_sapi_ctx_switch')) {
+                \__mc_sapi_ctx_switch($task->id, $prev === null ? 0 : $prev->id);
+            }
             if ($t0 > 0.0) { $this->watchdogCheck($task, $t0); }
             if ($task->fiber->isTerminated()) {
                 $this->settle($task, Task::DONE, $task->fiber->getReturn(), null);

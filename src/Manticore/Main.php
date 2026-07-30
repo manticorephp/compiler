@@ -2007,13 +2007,28 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     }
     $usePcntl = $demand->callsAny($pcntlFns) || $demand->mentions('Process');
     // header/setcookie/the request seam, gated on the functions the FILE defines.
-    $useSapi = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($sapiSrc));
+    //
+    // A program that DEFINES one of those names gets its own — php would fatal
+    // ("Cannot redeclare function header()"), and injecting on top of it emits
+    // two definitions of one symbol, which fails in clang with no useful
+    // diagnostic. Bowing out is the readable answer.
+    $sapiFns = \Compile\Mir\PreludeDemand::definedFunctions($sapiSrc);
+    $ownFns = [];
+    foreach ($sources as $usrc) {
+        foreach (\Compile\Mir\PreludeDemand::definedFunctions($usrc) as $fn) { $ownFns[$fn] = true; }
+    }
+    $sapiClash = false;
+    foreach ($sapiFns as $fn) { if (isset($ownFns[$fn])) { $sapiClash = true; } }
+    $useSapi = !$sapiClash && $demand->callsAny($sapiFns);
     // session_* + the handler interfaces a program may only MENTION (a class that
     // implements SessionHandlerInterface without calling a session_* function).
-    $useSession = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($sessionSrc))
+    $sessionFns = \Compile\Mir\PreludeDemand::definedFunctions($sessionSrc);
+    $sessionClash = $sapiClash;
+    foreach ($sessionFns as $fn) { if (isset($ownFns[$fn])) { $sessionClash = true; } }
+    $useSession = !$sessionClash && ($demand->callsAny($sessionFns)
         || $demand->mentionsAny(['SessionHandler', 'SessionHandlerInterface',
                                 'SessionIdInterface', 'SessionUpdateTimestampHandlerInterface'])
-        || $demand->usesVar('_SESSION');
+        || $demand->usesVar('_SESSION'));
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
         // without either, whatever the program itself mentions. It also dispatches
@@ -2021,10 +2036,6 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $useFiber = true;
         $useIoPoll = true;
         $usePcntl = true;
-        // Scheduler::step swaps the per-request context on every task switch, so
-        // the file defining that hook has to be there. An async program is
-        // precisely the one that can interleave two requests in one process.
-        $useSapi = true;
     }
     if ($useSession) {
         // ext/session is built ON the request seam (setcookie, headers_sent,
