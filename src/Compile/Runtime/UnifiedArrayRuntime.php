@@ -65,11 +65,6 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
         $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
-        $this->emitAdoptVariant('__mir_array_adopt', 'repr');
-        $this->emitAdoptVariant('__mir_array_adopt_buf', '');
-        $this->emitAdoptVariant('__mir_array_adopt_obj', 'obj');
-        $this->emitAdoptVariant('__mir_array_adopt_str', 'str');
-        $this->emitAdoptVariant('__mir_array_adopt_cell', 'cell');
         $this->emitRelease();
         $this->emitIsHashed();
         $this->emitGetInt();
@@ -1410,36 +1405,18 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_array_retain[_obj|_str|_cell](arr)` — rc += 1, and NOTHING else.
-     * No-op on NULL. Tag-guarded: a buffer carrying any sentinel other than
+     * `__mir_array_retain[_obj|_str|_cell](arr)` — rc += 1. No-op on NULL.
+     * Tag-guarded: a buffer carrying any sentinel other than
      * {@see MemoryAbi::ARRAY_TAG_MAGIC} at `ptr-8` is not a unified array →
-     * bail before touching rc@24. The flavor suffixes survive only because the
-     * call sites are typed; every variant emits the same body.
+     * bail before touching rc@24.
      *
-     * ⚠ The OWNERSHIP MODEL, and why the flavored variants no longer walk:
-     * an array owns EXACTLY ONE reference to each of its hashed string keys and
-     * each of its rc-managed element values, taken when the entry was inserted.
-     * `rc` counts owners of the ARRAY, not of its contents.
-     * {@see emitReleaseVariant} already implements this — it drops the keys and
-     * elements once, on the transition to rc 0.
-     *
-     * Retain used to co-own the whole content on EVERY call, which is only
-     * balanced if every retain is paired with a release that reaches zero — and
-     * only one release ever does. So an array whose rc went 1→2→1→0 leaked one
-     * ref per key and per element, every time. That was 65 MB of the 292 MB
-     * json_decode figure: `$arr[] = $rec` retains the record cell, the temp's
-     * drop takes rc back to 1 without dropping anything, and the record's string
-     * keys were never reclaimed. It is not json-specific — `$arr[] = mkRec($k)`
-     * in a plain loop leaks exactly the keys.
-     *
-     * The deep walk was introduced for a `Node[]` use-after-free (`return
-     * $this->stmts;` freeing the tree's children under the property). That shape
-     * is a MISSING CONTAINER RETAIN, and the deep walk only masked it by leaking
-     * a ref per child; with rc counting owners correctly the second owner's
-     * release cannot reach zero while the property still holds one. Retain depth
-     * is now irrelevant, which also retires the whole
-     * retain-flavor-vs-release-flavor mismatch class (`_buf` retain paired with
-     * a `_cell` release used to over-drop at free).
+     * The flavored variants additionally CO-OWN what the matching
+     * {@see emitReleaseVariant} drops — hashed string keys always, element
+     * values per `$valueFlavor`. Retain used to be buffer-only for every array
+     * flavor while release dropped elements, so a second owner of a `Node[]`
+     * (`return $this->stmts;` — the +1 borrow-return convention) dropped every
+     * child on its release without ever having retained one: the tree's nodes
+     * were freed under it. Retain must undo exactly what release does.
      */
     private function emitRetainVariant(string $symbol, string $valueFlavor): void
     {
@@ -1474,71 +1451,39 @@ final class UnifiedArrayRuntime
             $rcAddr = $bump->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::ARRAY_RC_OFFSET)]);
         }
         $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
-        $bump->retVoid();
-    }
 
-    /**
-     * `__mir_array_adopt[_obj|_str|_cell](arr)` — take ONE reference on every
-     * hashed string key and every rc-managed element value of `arr`, WITHOUT
-     * touching `rc`. The exact set {@see emitReleaseVariant} drops at free.
-     *
-     * This is what a VALUE COPY needs, and it is the piece
-     * `__mir_array_copy` never had. `$b = $a` flat-copies the header and body
-     * into a fresh rc=1 buffer and leaves the element POINTERS shared — two
-     * arrays, one set of refs. Whichever hits rc 0 first drops them and the
-     * other dangles: `$b = $a` on a `Node[]` freed the AST out from under the
-     * original. It was invisible only because {@see emitRetainVariant} used to
-     * add a spare ref per element on every rc bump, which papered over it at
-     * the cost of a leak per retain (65 MB of json_decode's RSS).
-     *
-     * Distinct from retain on purpose: rc counts OWNERS OF THE ARRAY, adopt
-     * counts owners of the CONTENTS, and a copy adds one of the latter without
-     * adding one of the former. Flavor comes from the call site's static type
-     * ({@see EmitLlvm::discardReleaseFlavor}), so adopt and the release that
-     * eventually pairs with it walk to the same depth.
-     */
-    private function emitAdoptVariant(string $symbol, string $valueFlavor): void
-    {
-        $fn = $this->module->func($symbol, Type::void());
-        $arr = $fn->param(Type::ptr(), 'arr');
-        $entry = $fn->block('entry');
-        $cont = $fn->block('cont');
-        $skipNull = $fn->block('skip_null');
-        $bail = $fn->block('bail');
-        $walk = $fn->block('walk');
-
-        $entry->brIf($entry->icmp('eq', $arr, Value::null()), $skipNull, $cont);
-        $skipNull->retVoid();
-        $tag = $cont->load(Type::i64(), $cont->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]));
-        $cont->brIf($cont->icmp('eq', $tag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_MAGIC)), $walk, $bail);
-        $bail->retVoid();
-
-        $ret = $fn->block('ad_ret');
-        $len = $walk->load(Type::i64(), $arr);
-        $flags = $walk->load(Type::i64(), $this->hdr($walk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $isH = $walk->icmp('ne', $this->hashedBit($walk, $flags), Value::int(Type::i64(), 0));
-        $iSlot = $walk->alloca(Type::i64(), 'ai');
-        $walk->store(Value::int(Type::i64(), 0), $iSlot);
+        // ── co-own exactly what the matching release will drop ──
+        $ret = $fn->block('rt_ret');
+        $len = $bump->load(Type::i64(), $arr);
+        $flags = $bump->load(Type::i64(), $this->hdr($bump, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $isH = $bump->icmp('ne', $this->hashedBit($bump, $flags), Value::int(Type::i64(), 0));
+        $iSlot = $bump->alloca(Type::i64(), 'ri');
+        $bump->store(Value::int(Type::i64(), 0), $iSlot);
+        // 'repr' mode (the plain __mir_array_retain): co-own each boxed-cell
+        // element iff the runtime repr bits are set — the mirror of the plain
+        // release, so an erased cell-array's second owner co-owns exactly what
+        // that owner's release will drop.
         $repr = ($valueFlavor === 'repr');
-        $reprBits = $repr ? $walk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
-        $hasCells = $repr ? $walk->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
+        $reprBits = $repr ? $bump->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
+        $hasCells = $repr ? $bump->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
         // The ELEMENT HINT is what the slots ACTUALLY hold, stamped by every
         // builder; the flavor is only what the caller's static type claimed.
         // They disagree whenever a cell-element array reaches a concrete-element
-        // consumer, and the raw walk then `inttoptr`s a NaN-tagged word past the
-        // `> 0xFFFF` guard and faults in __mir_rc_retain_str. Adopt and release
-        // read the SAME nibble: one side alone is a leak, the other a double free.
-        $isCellHint = $this->elemHintIsCell($walk, $flags, $valueFlavor);
-        $hhead = $fn->block('ad_hhead');
+        // consumer — `preg_grep($re, array_keys($assoc))`, `new C(array_values(
+        // array_keys($m)))` against a `string[]` param — and the raw walk then
+        // `inttoptr`s a NaN-tagged word past the `> 0xFFFF` guard and faults in
+        // __mir_rc_retain_str. An unstamped array (hint 0) keeps the old path
+        // exactly. Retain and release read the SAME nibble: one side alone is a
+        // leak, the other a double free.
+        $isCellHint = $this->elemHintIsCell($bump, $flags, $valueFlavor);
+        $hhead = $fn->block('rt_hhead');
         if ($valueFlavor === '') {
-            // Buffer flavor: only the HASHED string keys are owned by the
-            // buffer, exactly as the '' release drops only those.
-            $walk->brIf($isH, $hhead, $ret);
+            $bump->brIf($isH, $hhead, $ret);
         } elseif ($repr) {
-            $phead = $fn->block('ad_phead');
-            $pbody = $fn->block('ad_pbody');
-            $pgate = $fn->block('ad_pgate');
-            $walk->brIf($isH, $hhead, $pgate);
+            $phead = $fn->block('rt_phead');
+            $pbody = $fn->block('rt_pbody');
+            $pgate = $fn->block('rt_pgate');
+            $bump->brIf($isH, $hhead, $pgate);
             $pgate->brIf($hasCells, $phead, $ret);
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
@@ -1547,19 +1492,19 @@ final class UnifiedArrayRuntime
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         } else {
-            $phead = $fn->block('ad_phead');
-            $pbody = $fn->block('ad_pbody');
-            $walk->brIf($isH, $hhead, $phead);
+            $phead = $fn->block('rt_phead');
+            $pbody = $fn->block('rt_pbody');
+            $bump->brIf($isH, $hhead, $phead);
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'adp', $isCellHint);
+            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp', $isCellHint);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         }
-        $hbody = $fn->block('ad_hbody');
-        $hkey  = $fn->block('ad_hkey');
-        $hval  = $fn->block('ad_hval');
+        $hbody = $fn->block('rt_hbody');
+        $hkey  = $fn->block('rt_hkey');
+        $hval  = $fn->block('rt_hval');
         $hi = $hhead->load(Type::i64(), $iSlot);
         $hhead->brIf($hhead->icmp('sge', $hi, $len), $ret, $hbody);
         $kind = $hbody->load(Type::i64(), $this->entryAddr($hbody, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
@@ -1568,8 +1513,8 @@ final class UnifiedArrayRuntime
         $hkey->call('__mir_rc_retain_str', Type::void(), [$kp]);
         $hkey->br($hval);
         if ($repr) {
-            $hadv = $fn->block('ad_hadv');
-            $hvret = $fn->block('ad_hvret');
+            $hadv = $fn->block('rt_hadv');
+            $hvret = $fn->block('rt_hvret');
             $hval->brIf($hasCells, $hvret, $hadv);
             $vv = $hvret->load(Type::i64(), $this->entryAddr($hvret, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
             $hvret->call('__mir_retain_by_repr', Type::void(), [$vv, $reprBits]);
@@ -1579,11 +1524,12 @@ final class UnifiedArrayRuntime
         } else {
             if ($valueFlavor !== '') {
                 $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'adh', $isCellHint);
+                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth', $isCellHint);
             }
             $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hval->br($hhead);
         }
+
         $ret->retVoid();
     }
 

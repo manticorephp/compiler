@@ -812,25 +812,11 @@ trait EmitLlvmModule
                         // share the inner array). Safe only here — raw vecs can't
                         // be tag-inspected (a large/neg int could look boxed).
                         $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
-                        // Shares every non-array cell payload with the caller's
-                        // buffer (it clones only the boxed-ARRAY elements), so the
-                        // copy owes those a reference. A cloned inner array gets a
-                        // spare rc from the same walk — a bounded leak, and the
-                        // safe direction against the caller's release.
-                        $body .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($p->type));
                     } else {
                         $depth = $this->arrayCopyDepth($p->type);
                         if ($depth < 0) { $depth = 0; }
                         $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
                               . ', i64 ' . (string)$depth . ")\n";
-                        // depth 0 is a FLAT copy: every element stays shared with
-                        // the caller and must be adopted. depth > 0 replaces each
-                        // element with a fresh clone the copy already owns — the
-                        // sharing moves one level down, where the runtime's own
-                        // recursion is the only place that can see it.
-                        if ($depth === 0) {
-                            $body .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($p->type));
-                        }
                     }
                     $ci = $this->ssa->allocReg();
                     $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";

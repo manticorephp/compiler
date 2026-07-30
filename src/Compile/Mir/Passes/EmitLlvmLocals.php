@@ -521,7 +521,6 @@ trait EmitLlvmLocals
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
-            $out .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($v->type));
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
             // The copy is heap-owned + independent, so it is no longer an
@@ -545,7 +544,6 @@ trait EmitLlvmLocals
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
-            $out .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($v->type));
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
         }

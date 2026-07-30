@@ -493,9 +493,6 @@ trait EmitLlvmObjects
                 $cp = $this->ssa->allocReg();
                 $fn = $isCellElem ? '__mir_array_copy_cells' : '__mir_array_copy';
                 $out .= '  ' . $cp . ' = call ptr @' . $fn . '(ptr ' . $vp . ")\n";
-                // The copy shares the source's elements — take a reference on
-                // each, at the depth the property's release will drop.
-                $out .= $this->rcAdoptPtr($cp, $pt !== null ? $this->discardReleaseFlavor($pt) : 'vec');
                 $cpi = $this->ssa->allocReg();
                 $out .= '  ' . $cpi . ' = ptrtoint ptr ' . $cp . " to i64\n";
                 $out .= '  store i64 ' . $cpi . ', ptr ' . $dg . "\n";
