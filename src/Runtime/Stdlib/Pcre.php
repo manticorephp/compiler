@@ -84,26 +84,36 @@ function __preg_compile(string $pattern): int
  * at [0] and each captured group after it (unmatched groups → "").
  */
 /**
- * Every capture PCRE hands back is a STRING (an unmatched group becomes ""),
- * so $matches is declared string-element rather than erased. That is not
- * cosmetic: a bare `array` crosses the .sig as `mixed[]`, the elements had to
- * be NaN-boxed on the way out, and a caller in ANOTHER MODULE reading
- * `$m[1]` as a string got the tagged bits as a pointer and SIGSEGV'd. The
- * declared element type is what makes the read-back typed
+ * $matches is CELL-element, like preg_match_all's.
+ *
+ * It used to be declared `array<int, string>` because every capture PCRE hands
+ * back is a string, and that typing was load-bearing: a bare `array` crosses
+ * the .sig as `mixed[]`, and a caller in ANOTHER MODULE reading `$m[1]` as a
+ * string once got the tagged bits as a pointer and SIGSEGV'd. The declared
+ * element type is what makes the read-back typed
  * ({@see LowerFromAst::defineOutParams}).
  *
- * preg_match_all keeps `mixed[]`: its $matches is genuinely an array OF
- * arrays, so its elements really are cells.
+ * PREG_OFFSET_CAPTURE is why it cannot stay that way: under that flag php
+ * reports every group as `[text, byteOffset]`, so the values genuinely ARE
+ * arrays and a string element has nowhere to put them. The flag was therefore
+ * being silently ignored — twig's Lexer, symfony/yaml's Inline parser and the
+ * DI PhpDumper all read the offset out of `$m[n][1]` and were getting a
+ * one-character substring of the matched text instead.
  *
- * @param string[] $matches
- * @param-out string[] $matches
+ * The cross-module read that motivated the narrow typing is exactly what the
+ * probe exercises: every user program calls into the stdlib .o, so
+ * tests/aot/cases/cap_preg_named_groups.php IS the regression test for it.
+ *
+ * @param mixed[] $matches
+ * @param-out mixed[] $matches
  */
-function preg_match(string $pattern, string $subject, #[RefOut] array<int, string> &$matches = [], int $flags = 0, int $offset = 0): int
+function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed> &$matches = [], int $flags = 0, int $offset = 0): int
 {
     // Written straight into the by-ref so the caller's container is the one
-    // that grows. The elements are RAW strings now that the container is
-    // declared string-element — no NaN-boxing, and no unboxing at the reader.
+    // that grows.
     $matches = [];
+    $offsetCapture = ($flags & 256) !== 0;        // PREG_OFFSET_CAPTURE
+    $asNull = ($flags & 512) !== 0;               // PREG_UNMATCHED_AS_NULL
     $code = \__preg_compile($pattern);
     if ($code === 0) {
         return 0;
@@ -121,17 +131,85 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, strin
         return 0;
     }
     $ov = \Runtime\Pcre\ovectorPtr($md);
-    for ($i = 0; $i < $rc; $i = $i + 1) {
-        $s = \peek_i64($ov, $i * 16);
-        $e = \peek_i64($ov, $i * 16 + 8);
-        if ($s < 0) {
-            $matches[] = "";                   // PCRE2_UNSET (~0) → unmatched group
-        } else {
-            $matches[] = \substr($subject, $s, $e - $s);
+    // A named group appears TWICE in php's $matches — under its name first,
+    // then under its number — so the two are interleaved rather than appended.
+    $names = \__preg_name_map($code);
+    // PCRE2 stops its return count at the LAST group that participated, so a
+    // trailing optional group is simply absent — which is what php reports too,
+    // except under PREG_UNMATCHED_AS_NULL, where every declared group is
+    // present and an absent one is null. Only then is the pattern's own capture
+    // count needed.
+    $total = $rc;
+    if ($asNull) {
+        $declared = \__preg_capture_count($code) + 1;   // +1: group 0, the whole match
+        if ($declared > $total) { $total = $declared; }
+    }
+    for ($i = 0; $i < $total; $i = $i + 1) {
+        $s = $i < $rc ? \peek_i64($ov, $i * 16) : -1;
+        $e = $i < $rc ? \peek_i64($ov, $i * 16 + 8) : -1;
+        // PCRE2_UNSET (~0) reads back negative: the group did not participate.
+        $unset = $s < 0;
+        if ($offsetCapture) {
+            // A fresh pair per key: two keys sharing one buffer would hand the
+            // caller a double release, the same reason preg_match_all copies.
+            if (isset($names[$i])) {
+                $matches[$names[$i]] = \__mir_to_cell(\__preg_group_pair($subject, $s, $e, $asNull));
+            }
+            $matches[$i] = \__mir_to_cell(\__preg_group_pair($subject, $s, $e, $asNull));
+            continue;
         }
+        $val = $unset
+            ? ($asNull ? null : "")
+            : \substr($subject, $s, $e - $s);
+        if (isset($names[$i])) {
+            $matches[$names[$i]] = \__mir_to_cell($val);
+        }
+        $matches[$i] = \__mir_to_cell($val);
     }
     \Runtime\Pcre\matchDataFree($md);
     return 1;
+}
+
+/**
+ * Group number → name for every `(?P<name>…)` / `(?<name>…)` / `(?'name'…)` in
+ * a compiled pattern, read out of PCRE2's name table.
+ *
+ * Table layout in 8-bit mode: `namecount` entries of `nameentrysize` bytes,
+ * each holding a 2-byte BIG-ENDIAN group number followed by the NUL-terminated
+ * name. Big-endian regardless of host, so the bytes are combined by hand
+ * rather than peeked as a u16.
+ *
+ * @return array<int, string>
+ */
+function __preg_name_map(int $code): array
+{
+    $buf = \Runtime\Libc\calloc(8, 1);
+    // PCRE2_INFO_NAMECOUNT = 17, NAMEENTRYSIZE = 18, NAMETABLE = 19.
+    \Runtime\Pcre\patternInfo($code, 17, $buf);
+    $count = \peek_u32($buf, 0);
+    if ($count <= 0) {
+        \Runtime\Libc\free($buf);
+        return [];
+    }
+    \Runtime\Pcre\patternInfo($code, 18, $buf);
+    $size = \peek_u32($buf, 0);
+    \Runtime\Pcre\patternInfo($code, 19, $buf);
+    $table = \peek_i64($buf, 0);
+    \Runtime\Libc\free($buf);
+    if ($table === 0 || $size <= 2) {
+        return [];
+    }
+    /** @var array<int, string> $out */
+    $out = [];
+    for ($i = 0; $i < $count; $i = $i + 1) {
+        $entry = \int_to_ptr($table + $i * $size);
+        $group = \peek_u8($entry, 0) * 256 + \peek_u8($entry, 1);
+        // cstr_to_str is the NUL-terminated-char* boundary: it copies into a
+        // real rc-headed string. The table itself belongs to the cached
+        // pcre2_code and must not be freed here.
+        $out[$group] = \cstr_to_str(\int_to_ptr($table + $i * $size + 2));
+    }
+    return $out;
 }
 
 /**
@@ -255,6 +333,10 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
     \Runtime\Pcre\matchDataFree($md);
 
     $count = \count($rows);
+    // Same interleaving rule as preg_match: a named group is reported under its
+    // NAME first, then under its number — at the top level in pattern order,
+    // and inside each row in set order.
+    $names = \__preg_name_map($code);
     if ($setOrder) {
         // matches[i] = [full, g1, g2, ...] for match i. The row is COPIED: the
         // local $rows is released when this function returns, and boxing a row
@@ -262,7 +344,7 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
         // would be left holding a freed buffer (the release then walked garbage
         // and blew the stack).
         for ($i = 0; $i < $count; $i = $i + 1) {
-            $matches[] = \__mir_to_cell(\__preg_copy_cells($rows[$i]));
+            $matches[] = \__mir_to_cell(\__preg_row_named($rows[$i], $names));
         }
     } else {
         // PREG_PATTERN_ORDER (default): matches[g] = [g of match 0, g of match 1, ...].
@@ -279,8 +361,13 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
             }
             // Copied for the same reason the set-order row above is: $col is a
             // named LOCAL, released at return, so the out-param must not simply
-            // box its pointer.
-            $matches[] = \__mir_to_cell(\__preg_copy_cells($col));
+            // box its pointer. The named alias gets its OWN copy rather than a
+            // second reference to the same buffer — sharing one pointer under
+            // two keys would hand the caller a double release.
+            if (isset($names[$g])) {
+                $matches[$names[$g]] = \__mir_to_cell(\__preg_copy_cells($col));
+            }
+            $matches[$g] = \__mir_to_cell(\__preg_copy_cells($col));
         }
     }
     return $count;
@@ -305,6 +392,58 @@ function __preg_copy_cells(array $cells): array
     $out = [];
     foreach ($cells as $c) { $out[] = $c; }
     return $out;
+}
+
+/** One PREG_SET_ORDER row, with each named group aliased ahead of its number.
+ *  Copies like {@see __preg_copy_cells} — the source row is a local that gets
+ *  released at return, and the name alias is a separate copy so two keys never
+ *  share one buffer.
+ *  @param mixed[] $cells @param array<int, string> $names @return mixed[] */
+function __preg_row_named(array $cells, array $names): array
+{
+    if ($names === []) {
+        return \__preg_copy_cells($cells);
+    }
+    /** @var mixed[] $out */
+    $out = [];
+    $i = 0;
+    foreach ($cells as $c) {
+        if (isset($names[$i])) { $out[$names[$i]] = $c; }
+        $out[$i] = $c;
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+/**
+ * One PREG_OFFSET_CAPTURE entry for group `[$s,$e)` of $subject.
+ *
+ * A group that did not participate is `["", -1]`, or `[null, -1]` under
+ * PREG_UNMATCHED_AS_NULL — the flag changes the TEXT half of the pair, not the
+ * offset.
+ *
+ * @return mixed[]
+ */
+function __preg_group_pair(string $subject, int $s, int $e, bool $asNull): array
+{
+    if ($s < 0) {
+        /** @var mixed[] $pair */
+        $pair = [];
+        $pair[] = \__mir_to_cell($asNull ? null : "");
+        $pair[] = \__mir_to_cell(-1);
+        return $pair;
+    }
+    return \__preg_pair(\substr($subject, $s, $e - $s), $s);
+}
+
+/** Number of capturing groups the pattern DECLARES (group 0 not counted). */
+function __preg_capture_count(int $code): int
+{
+    $buf = \Runtime\Libc\calloc(8, 1);
+    \Runtime\Pcre\patternInfo($code, 4, $buf);      // PCRE2_INFO_CAPTURECOUNT
+    $n = \peek_u32($buf, 0);
+    \Runtime\Libc\free($buf);
+    return $n;
 }
 
 function __preg_pair(string $s, int $off): array
