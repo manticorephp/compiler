@@ -1255,13 +1255,13 @@ final class EmitLlvm implements EmitVisitor
      * the entry retain). Only the no-retain case transfers — a retaining
      * store keeps the local's release (it is balanced by the container drop).
      */
-    private function maybeTransfer(Node $valueNode, ?Type $fallback): void
+    private function maybeTransfer(Node $valueNode, ?Type $fallback, bool $boxed = false): void
     {
         if ($valueNode->kind !== Node::KIND_LOAD_LOCAL) { return; }
         $name = $valueNode->name;
         if (!isset($this->frame->rcObjLocals[$name])) { return; }
         if (isset($this->frame->paramNames[$name])) { return; }
-        if ($this->containerStoreRetains($valueNode, $fallback)) { return; }
+        if ($this->containerStoreRetains($valueNode, $fallback, $boxed)) { return; }
         $this->frame->transferredLocals[$name] = true;
     }
 
@@ -1288,11 +1288,23 @@ final class EmitLlvm implements EmitVisitor
      * effective type (own type, or the container fallback when erased) is a
      * non-struct, non-closure rc kind. When false the store borrows (no
      * retain) and ownership must transfer to avoid the over-release.
+     *
+     * `$boxed` says the destination NaN-boxes the value into the slot
+     * ({@see EmitLlvmArrays::storeElemBoxesValue} / `::litBoxesValues`). That arm
+     * does NOT go through rcRetainByType at all — it co-owns via
+     * {@see retainCellPayload}, which tag-dispatches an already-boxed CELL and
+     * retains it for any borrowed producer. The element-type fallback plays no
+     * part there, so a CELL value answers TRUE outright. Reading the non-boxed
+     * gate for it was the json_decode leak: `$arr[] = $val;` with a `mixed`
+     * `$val` emitted `__mir_cell_retain` while this said "borrowed", which
+     * marked $val transferred and deleted BOTH its reassignment drop and its
+     * scope-exit drop — +1 with no −1, one leaked value per element.
      */
-    private function containerStoreRetains(Node $valueNode, ?Type $fallback): bool
+    private function containerStoreRetains(Node $valueNode, ?Type $fallback, bool $boxed = false): bool
     {
         $tk = $valueNode->type->kind;
         $cls = $valueNode->type->class ?? '';
+        if ($boxed && $tk === Type::KIND_CELL) { return true; }
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY
@@ -1726,6 +1738,25 @@ final class EmitLlvm implements EmitVisitor
         return \Compile\Mir\CondOwn::armsCoverable($n);
     }
 
+    /**
+     * The `obj` / `str` / `buf` suffix for an array whose ELEMENT is an object,
+     * decided by running the element through the scalar-object guards above.
+     *
+     * The element branches used to guard only enums, so `vec[Closure]` answered
+     * `vecobj` and its release ran `__mir_rc_release` on a record with no rc
+     * header — the word at ptr-8 is the allocator's metadata. `serialize([$c])`
+     * trapped on it. A `#[Struct]` or `Ffi\Ptr` element had the same exposure,
+     * and a `Generator` element wants the string-style rc path its scalar form
+     * already asks for. One helper, so the two levels cannot disagree again.
+     */
+    private function elemObjFlavor(Type $el): string
+    {
+        $f = $this->discardReleaseFlavor($el);
+        if ($f === 'obj') { return 'obj'; }
+        if ($f === 'str') { return 'str'; }
+        return 'buf';   // closure / #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
+    }
+
     private function discardReleaseFlavor(Type $t): string
     {
         $k = $t->kind;
@@ -1756,7 +1787,7 @@ final class EmitLlvm implements EmitVisitor
         if ($t->isVec()) {
             $el = $t->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vec' . $this->elemObjFlavor($el); }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A concrete scalar element (int/float/bool/null) has nothing to
             // drop → buffer-only, skipping the repr-bit read. Only an ERASED
@@ -1767,7 +1798,7 @@ final class EmitLlvm implements EmitVisitor
         if ($t->isAssoc()) {
             $el = $t->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assoc' . $this->elemObjFlavor($el); }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
@@ -1846,6 +1877,29 @@ final class EmitLlvm implements EmitVisitor
         }
         if (!$owned) { return ''; }
         return $this->discardReleaseFlavor($a->type);
+    }
+
+    /**
+     * Release flavor for the SOURCE of a cellify rebuild
+     * ({@see EmitLlvmBuiltins::emitAssocToCellArrayUnified}), or '' to leave it
+     * alone.
+     *
+     * The rebuild allocates a FRESH cell array and co-owns every element it
+     * copies, so the source array is dead the instant the walk ends. Whether we
+     * may free it is purely "was it an owned temp?" — the same question
+     * {@see freshRcArgFlavor} answers for a fresh temp handed to a borrowing
+     * callee, so it is answered THERE and not copied here. A `LoadLocal` source
+     * is never a temp: either {@see InsertMemoryOps::isOwnedObj} registered it
+     * and its own scope-exit release covers it, or it is a borrow — freeing it
+     * here would double-free in the first case and over-release in the second.
+     * The return path is the one place a returned owned LOCAL is also dead at
+     * the rebuild; {@see EmitLlvmModule::emitReturn} handles that by dropping
+     * the transfer exemption, not by widening this predicate.
+     */
+    private function cellifySourceFlavor(Node $src): string
+    {
+        if ($src->kind === Node::KIND_LOAD_LOCAL) { return ''; }
+        return $this->freshRcArgFlavor($src);
     }
 
     /**

@@ -244,6 +244,7 @@ trait EmitLlvmBuiltins
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
         if ($name === '__mc_json_escape')             { return $this->biJsonEscape($args); }
         if ($name === 'json_encode' && \count($args) === 1) { return $this->biJsonEncode($args); }
+        if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
@@ -498,10 +499,21 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    private function boxToCell(Type $t): string
+    /**
+     * Box the value in lastValue to a NaN-tagged cell.
+     *
+     * `$src` is the NODE that produced it, when the caller has it. It is used
+     * for exactly one thing: a concrete-element array is REBUILT here into a
+     * fresh cell array, and if the source was an owned temp it must be released
+     * ({@see EmitLlvm::cellifySourceFlavor}). Passing it is optional only
+     * because a handful of sites box a synthesized value with no node; every
+     * site that has one should pass it, or that source leaks.
+     */
+    private function boxToCell(Type $t, ?Node $src = null): string
     {
         $this->rt->needsTagged = true;
         $k = $t->kind;
+        $srcFlavor = $src !== null ? $this->cellifySourceFlavor($src) : '';
         // Already a tagged cell — don't double-box.
         if ($k === Type::KIND_CELL) { return $this->coerceToI64(); }
         if ($k === Type::KIND_FLOAT) {
@@ -528,7 +540,7 @@ trait EmitLlvmBuiltins
             // recursive consumers (var_dump / json_encode) see tagged cells.
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
-                return $this->emitVecToCellArray($elem);
+                return $this->emitVecToCellArray($elem, $srcFlavor);
             }
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
@@ -545,7 +557,7 @@ trait EmitLlvmBuiltins
             // (mirrors the vec branch above).
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
-                return $this->emitAssocToCellArrayUnified($elem);
+                return $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
             }
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
@@ -609,9 +621,9 @@ trait EmitLlvmBuiltins
      * vec[cell], boxing each element per $elem; result boxed as an
      * ARRAY cell in lastValue.
      */
-    private function emitVecToCellArray(Type $elem): string
+    private function emitVecToCellArray(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitVecToCellArrayUnified($elem);
+        return $this->emitVecToCellArrayUnified($elem, $srcFlavor);
     }
 
     /**
@@ -625,9 +637,9 @@ trait EmitLlvmBuiltins
      * (the buffer stays packed), so this is correct AND no slower for the common
      * case. The two paths are identical now; vec delegates to assoc.
      */
-    private function emitVecToCellArrayUnified(Type $elem): string
+    private function emitVecToCellArrayUnified(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitAssocToCellArrayUnified($elem);
+        return $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
     }
 
     /**
@@ -638,8 +650,16 @@ trait EmitLlvmBuiltins
      * as an ARRAY cell in lastValue. The assoc analogue of
      * {@see emitVecToCellArrayUnified}; without it a raw-valued assoc reaching
      * a cell consumer (var_dump) mis-dispatches each entry.
+     *
+     * `$srcFlavor` is the release flavor of the SOURCE array when the caller
+     * knows it is an owned temp ({@see EmitLlvm::cellifySourceFlavor}). The
+     * rebuild is a fresh +1 that co-owns every element it took, so a temp source
+     * is dead the moment the walk ends — and it used to be dropped on the floor
+     * instead: `$row = ["tags" => ["a","b","c"]]` leaked the inner `vec[string]`
+     * AND one ref on each of its strings, once per evaluation. '' keeps the
+     * historical borrow (a LoadLocal source, whose owner releases it).
      */
-    private function emitAssocToCellArrayUnified(Type $elem, bool $raw = false): string
+    private function emitAssocToCellArrayUnified(Type $elem, bool $raw = false, string $srcFlavor = ''): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -769,6 +789,14 @@ trait EmitLlvmBuiltins
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = select i1 ' . $isNull
               . ', ptr null, ptr ' . $dst . "\n";
+        // The walk is over and every element the rebuild keeps is co-owned, so an
+        // OWNED-TEMP source dies here. Emitted after the loop and after $dst is
+        // loaded — the source is read until the last iteration.
+        if ($srcFlavor !== '') {
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $rawSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $srcFlavor);
+        }
         if ($raw) {
             // The cell-element array itself, unboxed: a `vec[cell]` slot is
             // KIND_ARRAY and travels RAW, so a return/store boundary wants this
@@ -791,9 +819,9 @@ trait EmitLlvmBuiltins
      * the arm that is still `vec[string]` must be rebuilt with every element
      * boxed — otherwise the reader unboxes a raw string pointer by tag.
      */
-    private function emitCellifyArrayRaw(Type $elem): string
+    private function emitCellifyArrayRaw(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitAssocToCellArrayUnified($elem, true);
+        return $this->emitAssocToCellArrayUnified($elem, true, $srcFlavor);
     }
 
     /**
@@ -5610,6 +5638,51 @@ trait EmitLlvmBuiltins
      * with php's serialize_precision=-1). An OBJECT cell falls back to the
      * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
      */
+    /**
+     * Can this `json_decode()` call take the native path? The `$associative`
+     * flag is accepted and IGNORED (objects always decode to assoc arrays —
+     * documented behaviour of {@see \Runtime\Json\Parser}), so a second
+     * argument may only be dropped when it is a literal with no side effect to
+     * lose. Anything else falls through to the compiled PHP parser.
+     * @param Node[] $args
+     */
+    private function jsonDecodeNative(array $args): bool
+    {
+        $c = \count($args);
+        if ($c === 1) { return true; }
+        if ($c !== 2) { return false; }
+        $k = $args[1]->kind;
+        return $k === Node::KIND_BOOL_CONST || $k === Node::KIND_INT_CONST
+            || $k === Node::KIND_NULL_CONST;
+    }
+
+    /**
+     * `json_decode($json)` — native recursive-descent decoder
+     * ({@see \Compile\Mir\RuntimeLibrary::jsonDec}). Returns a NaN-boxed cell:
+     * objects become cell-repr assoc arrays, arrays cell-repr vecs, scalars
+     * their boxed selves. Replaces the five-PHP-calls-per-value
+     * `\Runtime\Json\Parser`, which stayed at php's own speed because every key
+     * and value cost a `substr` malloc. @param Node[] $args
+     */
+    private function biJsonDecode(array $args): string
+    {
+        $this->rt->needsJsonDec = true;
+        $this->rt->needsStrRc = true;     // __mir_rc_release_str on the key temp
+        $this->rt->needsConcat = true;    // __mir_strlen / __mir_str_new / set_len
+        $this->rt->needsTagged = true;    // the box_* helpers
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_json_decode(ptr ' . $sp . ")\n";
+        $out .= $this->freeStrTemp($args[0], $sp);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function biJsonEncode(array $args): string
     {
         $this->rt->needsJsonEnc = true;

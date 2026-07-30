@@ -2236,6 +2236,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
+        if ($this->rt->needsJsonDec) { $out .= $this->lib->jsonDec(); }
         if ($this->rt->needsStrReplaceOne) { $out .= $this->lib->strReplaceOne(); }
         if ($this->rt->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),
