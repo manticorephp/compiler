@@ -1,2 +1,2 @@
 probe	location	status	owning_epic	php_out_sha	mc_out_sha
-cap_preg_named_groups	audit	PASS	regex-surface	55781052	55781052
+cap_trigger_error_handler	audit	DIFF	error-handling	19571bee	b2169fcd

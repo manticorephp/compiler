@@ -1315,59 +1315,97 @@ trait InferScans
             $i = -1;
             foreach ($c->args as $a) {
                 $i = $i + 1;
-                $key = $c->function . '#' . (string)$i;
-                if (!isset($foreign[$key])) { continue; }
-                if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-                $t = $a->type;
-                if (!$t->isArray()) { continue; }
-                $el = $t->element;
-                if ($el === null) { continue; }
-                $ek = $el->kind;
-                // A CELL element boxes anything — nothing to widen.
-                if ($ek === Type::KIND_CELL) { continue; }
-                // An ERASED element used to be skipped here, deferring to
-                // scanLocalElemFromStores. That deferral is unsound for exactly
-                // this shape: that scan is INTRA-procedural and reads the local's
-                // own stores, so a writer sitting inside a by-ref callee is
-                // invisible to it. `$out = []; collect($out);` therefore stayed
-                // vec[unknown], the callee wrote its string RAW, and the caller
-                // decoded the slot as erased and printed a denormal float. The
-                // accumulator idiom — the one symfony's event dispatcher, config
-                // merge and DI passes are built out of.
-                //
-                // `vec[unknown]` is only ever safe when local refinement can see
-                // every writer; a by-ref call is precisely when it cannot.
-                $erased = $ek === Type::KIND_UNKNOWN;
-                foreach ($foreign[$key] as $tok => $unused) {
-                    if (\str_starts_with($tok, 'k:')) {
-                        // For an erased element the kind never matches, so this
-                        // widens — which is the point.
-                        if (\substr($tok, 2) !== $ek) { $found[$a->name] = true; }
-                        continue;
-                    }
-                    // A param-sourced append says nothing on its own: what lands
-                    // is whatever THIS call site passed, and for an erased
-                    // element there is no mismatch to reason from. Left alone so
-                    // `array_push($erased, …)` does not widen on every call.
-                    if ($erased) { continue; }
-                    $parts = \explode(':', $tok);
-                    $j = (int)$parts[1];
-                    $flag = $parts[2];
-                    $last = \str_starts_with($tok, 'v:') ? \count($c->args) - 1 : $j;
-                    for ($k = $j; $k <= $last; $k = $k + 1) {
-                        if ($k >= \count($c->args)) { break; }
-                        $at = $c->args[$k]->type;
-                        $ak = ($flag === '1' && $at->isArray() && $at->element !== null)
-                            ? $at->element->kind
-                            : $at->kind;
-                        if ($ak === Type::KIND_UNKNOWN || $ak === Type::KIND_VOID) { continue; }
-                        if ($ak !== $ek) { $found[$a->name] = true; }
-                    }
-                }
+                $this->widenIfForeign($c->function . '#' . (string)$i, $a, $c->args, $foreign, $found);
+            }
+        } elseif ($n->kind === Node::KIND_CLOSURE) {
+            // `use (&$x)` is a by-ref writer just as much as a by-ref argument
+            // is, and the body runs wherever the closure is later invoked —
+            // including inside a stdlib function, where nothing local can see
+            // the store. Captures are lowered as the LEADING params of
+            // `__closure_N` ({@see LowerFns}), so capture index == param index.
+            $cl = $n;
+            $i = -1;
+            foreach ($cl->captures as $cap) {
+                $i = $i + 1;
+                if (!($cl->captureByRef[$i] ?? false)) { continue; }
+                $key = '__closure_' . (string)$cl->id . '#' . (string)$i;
+                $this->widenIfForeign($key, $cap, $cl->captures, $foreign, $found);
             }
         }
         foreach (Walk::children($n) as $ch) {
             $this->collectByRefWidenArgs($ch, $foreign, $found);
+        }
+    }
+
+    /**
+     * One by-ref sink — a call argument or a closure capture — against what its
+     * callee is known to append. Shared so the two carriers cannot drift: they
+     * are the same question asked about the same map.
+     *
+     * @param Node[] $siblings the other args/captures, for param-sourced tokens
+     * @param array<string, array<string,bool>> $foreign
+     * @param array<string,bool> $found
+     */
+    private function widenIfForeign(string $key, Node $a, array $siblings, array $foreign, array &$found): void
+    {
+        if (!isset($foreign[$key])) { return; }
+        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return; }
+        $t = $a->type;
+        if (!$t->isArray()) { return; }
+        $el = $t->element;
+        if ($el === null) { return; }
+        $ek = $el->kind;
+        // A CELL element boxes anything — nothing to widen.
+        if ($ek === Type::KIND_CELL) { return; }
+        // An ERASED element used to be skipped here, deferring to
+        // scanLocalElemFromStores. That deferral is unsound for exactly this
+        // shape: that scan is INTRA-procedural and reads the local's own stores,
+        // so a writer sitting inside a by-ref callee — or inside a closure body
+        // the stdlib invokes — is invisible to it. `$out = []; collect($out);`
+        // therefore stayed vec[unknown], the callee wrote its string RAW, and
+        // the caller decoded the slot as erased and printed a denormal float.
+        // The accumulator idiom, which symfony's event dispatcher, config merge
+        // and DI passes are built out of.
+        //
+        // `vec[unknown]` is only ever safe while local refinement can see every
+        // writer; a by-ref sink is precisely when it cannot.
+        $erased = $ek === Type::KIND_UNKNOWN;
+        foreach ($foreign[$key] as $tok => $unused) {
+            if (\str_starts_with($tok, 'k:')) {
+                // For an erased element the kind never matches, so this widens —
+                // which is the point.
+                if (\substr($tok, 2) !== $ek) { $found[$a->name] = true; }
+                continue;
+            }
+            // A param-sourced append is judged from what THIS site passed at
+            // that index — which is why `sort()`-family moves stay off the
+            // widening path and a matching kind costs nothing.
+            $parts = \explode(':', $tok);
+            $j = (int)$parts[1];
+            $flag = $parts[2];
+            $last = \str_starts_with($tok, 'v:') ? \count($siblings) - 1 : $j;
+            for ($k = $j; $k <= $last; $k = $k + 1) {
+                if ($k >= \count($siblings)) {
+                    // The index is not AT this site. A closure's own declared
+                    // params sit past its captures and are supplied by whoever
+                    // invokes it, so `function ($v, $k) use (&$out) { $out[] =
+                    // "$k=$v"; }` handed to array_walk_recursive appends a value
+                    // of provenance nothing here can see. An erased element
+                    // cannot absorb an unknown raw value; a concrete one keeps
+                    // the old benefit of the doubt.
+                    if ($erased) { $found[$a->name] = true; }
+                    break;
+                }
+                $at = $siblings[$k]->type;
+                $ak = ($flag === '1' && $at->isArray() && $at->element !== null)
+                    ? $at->element->kind
+                    : $at->kind;
+                if ($ak === Type::KIND_UNKNOWN || $ak === Type::KIND_VOID) { continue; }
+                // With an erased element there is no kind to match, so any
+                // concrete append widens — `array_push($erased, "x")` wrote its
+                // string raw into a buffer the caller then read as erased.
+                if ($ak !== $ek) { $found[$a->name] = true; }
+            }
         }
     }
 
