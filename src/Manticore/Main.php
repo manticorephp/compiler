@@ -1934,6 +1934,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
     // cannot cross the stdlib.o boundary.
     $binarySrc = prelude_src_or_empty("binary.php");
+    // Response headers / cookies / the per-request context — DEMAND-GATED. Holds
+    // ARRAYS (the header block, the parked superglobals), so the stdlib .o cannot
+    // carry it; the one scalar it needs there is __mc_out_sent.
+    $sapiSrc = prelude_src_or_empty("sapi.php");
     // Async\ (scheduler / tasks / channels / netpoller seam) — DEMAND-GATED,
     // braced-namespace tree. Built ON Fiber + Io\Poll, so it forces both on.
     $asyncSrc = prelude_src_or_empty("async.php");
@@ -1997,6 +2001,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         if (\str_starts_with($fn, 'pcntl_') || \str_starts_with($fn, 'posix_')) { $pcntlFns[] = $fn; }
     }
     $usePcntl = $demand->callsAny($pcntlFns) || $demand->mentions('Process');
+    // header/setcookie/the request seam, gated on the functions the FILE defines.
+    $useSapi = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($sapiSrc));
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
         // without either, whatever the program itself mentions. It also dispatches
@@ -2004,6 +2010,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $useFiber = true;
         $useIoPoll = true;
         $usePcntl = true;
+        // Scheduler::step swaps the per-request context on every task switch, so
+        // the file defining that hook has to be there. An async program is
+        // precisely the one that can interleave two requests in one process.
+        $useSapi = true;
     }
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
@@ -2075,7 +2085,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         || $demand->usesVar('_SERVER') || $demand->usesVar('_ENV')
         || $demand->calls('getopt')
         // no-arg `getenv()` lowers to the $_ENV builder (__mc_env), which lives here.
-        || $demand->calls('getenv');
+        || $demand->calls('getenv')
+        // sapi.php MENTIONS $_SERVER, and superglobal demand is module-wide: the
+        // seed for it is __mc_server(), which lives in cli.php. Without this the
+        // request seam would link against an undefined symbol.
+        || $useSapi;
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
@@ -2107,6 +2121,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     }
     if ($useVarExport && $varExportSrc === "") {
         dprint("compile failed: prelude: cannot read var_export.php");
+        return null;
+    }
+    if ($useSapi && $sapiSrc === "") {
+        dprint("compile failed: prelude: cannot read sapi.php");
         return null;
     }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
@@ -2154,6 +2172,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
+        $lower->sapiSrc = $useSapi ? $sapiSrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->backtraceSrc = $backtraceSrc;

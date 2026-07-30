@@ -329,6 +329,9 @@ final class LowerFromAst implements Pass
     public string $errorsSrc = '';
     /** pack/unpack — DEMAND-GATED. */
     public string $binarySrc = '';
+    /** Response headers / cookies / the per-request context — DEMAND-GATED.
+     *  Implies cliSrc: it seeds $_SERVER, which __mc_server() builds. */
+    public string $sapiSrc = '';
     /** Nesting depth of the `@` suppression operator around the expression being
      *  lowered — read by the `trigger_error` rewrite ({@see LowerExprs}). */
     private int $silenceDepth = 0;

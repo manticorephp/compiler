@@ -161,6 +161,11 @@ trait LowerPrelude
             // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
             $src = $src . $this->errorsSrc;
         }
+        if ($this->sapiSrc !== '') {
+            // After exceptions.php (setcookie throws ValueError) and after
+            // cli.php, which Main forces on: the request context seeds $_SERVER.
+            $src = $src . $this->sapiSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
