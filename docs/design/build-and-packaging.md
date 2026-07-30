@@ -140,12 +140,20 @@ cleanly (no two-object path left).
 
 ## Extensions (curl / xml / pdo, …) — MVP shipped
 
-**Status:** the manifest-driven mechanism works (proof: the `zlib` extension
-binding `crc32`, gated by `tools/ext_smoke.sh`). `extensions[]` in the manifest
-declares `{ src, link, static }`; an app opts in via `"extensions": [...]`;
-`cmd_build` compiles the glue into the app module and appends `-l<lib>` to the
-link. See `docs/modules.md`. Remaining: static-archive linking (dynamic `-l`
-today), and richer real extensions (curl/xml/pdo) on top of the same mechanism.
+**Status:** the mechanism works (proof: the `zlib` extension binding `crc32`,
+gated by `tools/ext_smoke.sh` — which builds it twice, once through the manifest
+and once through the attribute alone). `extensions[]` declares
+`{ src, link, static }`; an app opts in via `"extensions": [...]`; `cmd_build`
+compiles the glue into the app module.
+
+The link flag itself comes from the binding's **`#[Ffi\Library]`** — resolved
+via `pkg-config`, then `<name>-config`, then a bare `-l<name>`, and carried
+across a library's `.sig` so a dependent that never names the library still
+links it. `extensions[].link` is the escape hatch for a library no attribute
+names, or one whose flags are not a bare `-l`; both sources dedupe by `-l<name>`.
+See `docs/ffi.md` and `docs/modules.md`. Remaining: static-archive linking
+(dynamic `-l` today), and richer real extensions (curl/xml/pdo) on the same
+mechanism.
 
 An extension = thin PHP glue + FFI bindings + a native library. The native lib
 (libcurl/libxml2/libpq) is an ordinary C archive linked by `cc`; it never
