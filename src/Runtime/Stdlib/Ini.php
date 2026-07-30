@@ -308,8 +308,18 @@ function __mc_ini_store(int $op, string $key, string $val): string
     }
     $found = "\x00";
     $out = '';
-    $lines = ($blob === '') ? [] : \explode("\n", $blob);
-    foreach ($lines as $line) {
+    // Scanned with strpos/substr rather than explode(): inside the stdlib the
+    // `$blob === '' ? [] : explode(...)` union erased the element type, and the
+    // rebuilt blob then carried a raw POINTER where the first line belonged
+    // ("4348863856" instead of session.save_path=…), silently dropping every
+    // override but the last. Pure string scanning has no element to erase.
+    $n = \strlen($blob);
+    $i = 0;
+    while ($i < $n) {
+        $nl = \strpos($blob, "\n", $i);
+        $end = ($nl === false) ? $n : $nl;
+        $line = \substr($blob, $i, $end - $i);
+        $i = $end + 1;
         if ($line === '') {
             continue;
         }

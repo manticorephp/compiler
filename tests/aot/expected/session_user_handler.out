@@ -1,0 +1,10 @@
+true
+2
+true
+'k|s:1:"v";n|i:7;'
+true
+'v'
+7
+true
+''
+open(PHPSESSID);read(memone);write(memone);close;open(PHPSESSID);read(memone);destroy(memone);close;

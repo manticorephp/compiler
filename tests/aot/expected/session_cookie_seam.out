@@ -1,0 +1,8 @@
+headers=4
+cookie=Set-Cookie: PHPSESSID=<ID>; path=/; HttpOnly; SameSite=Lax
+idlen=32
+same-id=yes
+hits=1
+cookie-again=no
+hits=2
+left=0

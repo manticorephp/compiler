@@ -1,0 +1,10 @@
+true
+'a:3:{s:1:"i";i:42;s:3:"str";s:3:"a|b";s:3:"arr";a:1:{s:1:"x";i:1;}}'
+true
+'a:3:{s:1:"i";i:42;s:3:"str";s:3:"a|b";s:3:"arr";a:1:{s:1:"x";i:1;}}'
+true
+42
+'a|b'
+1
+true
+false

@@ -142,6 +142,12 @@ function __mc_sapi_ctx_switch(int $from, int $to): void
     \__McSapi::$savedSession[$from] = $_SESSION;
     \__McSapi::$seen[$from] = true;
     \__McSapi::$cur = $to;
+    // The session tier parks its own per-request half (status, id) the same way.
+    // Guarded, so this file keeps no dependency on it: a program with no session
+    // compiles the branch away.
+    if (\function_exists('__mc_session_ctx_switch')) {
+        \__mc_session_ctx_switch($from, $to);
+    }
     if (!isset(\__McSapi::$seen[$to])) {
         // A flow that has never been parked starts clean — a fresh task has no
         // request, and inheriting the previous one's would be the leak above.

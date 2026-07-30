@@ -1934,6 +1934,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
     // cannot cross the stdlib.o boundary.
     $binarySrc = prelude_src_or_empty("binary.php");
+    // ext/session — DEMAND-GATED. Interfaces + a handler OBJECT + user CALLABLES
+    // + $_SESSION + serialize(): every one of those is a reason it cannot live in
+    // the stdlib .o. Implies sapi (setcookie/headers_sent), serialize/unserialize
+    // (the encoders) and errors (the end-of-request write-close).
+    $sessionSrc = prelude_src_or_empty("session.php");
     // Response headers / cookies / the per-request context — DEMAND-GATED. Holds
     // ARRAYS (the header block, the parked superglobals), so the stdlib .o cannot
     // carry it; the one scalar it needs there is __mc_out_sent.
@@ -2003,6 +2008,12 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $usePcntl = $demand->callsAny($pcntlFns) || $demand->mentions('Process');
     // header/setcookie/the request seam, gated on the functions the FILE defines.
     $useSapi = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($sapiSrc));
+    // session_* + the handler interfaces a program may only MENTION (a class that
+    // implements SessionHandlerInterface without calling a session_* function).
+    $useSession = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($sessionSrc))
+        || $demand->mentionsAny(['SessionHandler', 'SessionHandlerInterface',
+                                'SessionIdInterface', 'SessionUpdateTimestampHandlerInterface'])
+        || $demand->usesVar('_SESSION');
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
         // without either, whatever the program itself mentions. It also dispatches
@@ -2014,6 +2025,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // the file defining that hook has to be there. An async program is
         // precisely the one that can interleave two requests in one process.
         $useSapi = true;
+    }
+    if ($useSession) {
+        // ext/session is built ON the request seam (setcookie, headers_sent,
+        // __McSapi::$empty) and on the shutdown queue (the implicit
+        // end-of-request write-close). Forced HERE, before $useCli, which reads
+        // $useSapi; the serialize tiers are forced below, after their own gates
+        // have run — forcing them here would be overwritten.
+        $useSapi = true;
+        $useErrors = true;
     }
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
@@ -2078,6 +2098,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // and `unserialize(` does not match `serialize`.
     $useSerialize = $demand->calls('serialize');
     $useUnserialize = $demand->calls('unserialize');
+    if ($useSession) {
+        // The session encoders ARE serialize/unserialize — the `php` handler is
+        // `key|serialize(v)` runs, and decoding drives the unserialize prelude's
+        // own cursor (__McUnSt) to find where one value ends and the next key
+        // begins. A program that never spells either name still needs both.
+        $useSerialize = true;
+        $useUnserialize = true;
+    }
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
     // (__mc_server / __mc_env), so they gate it too; the other superglobals seed
     // an empty array literal and need nothing.
@@ -2127,6 +2155,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read sapi.php");
         return null;
     }
+    if ($useSession && $sessionSrc === "") {
+        dprint("compile failed: prelude: cannot read session.php");
+        return null;
+    }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
@@ -2173,6 +2205,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
         $lower->sapiSrc = $useSapi ? $sapiSrc : "";
+        $lower->sessionSrc = $useSession ? $sessionSrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
