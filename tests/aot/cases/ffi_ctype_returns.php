@@ -29,6 +29,12 @@ function ct_strtof(string $s, \Ffi\Ptr $end): float { return 0.0; }
 #[\Ffi\Library('c'), \Ffi\Symbol('htonl'), \Ffi\CType('uint')]
 function ct_htonl(int $x): int { return 0; }
 
+// The scratch cell strtof() writes its end-pointer into. Allocated HERE, before
+// the first echo, deliberately: difftest classifies a case as manticore-only
+// only when `php` prints NOTHING for it, so a case that echoes before its first
+// Manticore-only call turns a skip into a silent DIFF (docs/superset.md §1).
+$end = \Runtime\Libc\calloc(8, 1);
+
 // UNSIGNED narrow return: the same 32 bits, extended the other way.
 echo "htonl=", ct_htonl(4294967295), "\n";
 
@@ -47,7 +53,6 @@ echo "atof=", ct_atof("1.5"), "\n";
 
 // C `float` is 32 bits: the wrapper must fpext before reinterpreting, or the
 // carrier holds a double built from a float's bit pattern.
-$end = \Runtime\Libc\calloc(8, 1);
 echo "strtof=", ct_strtof("2.5", $end), "\n";
 \Runtime\Libc\free($end);
 
