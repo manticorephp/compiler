@@ -1,0 +1,8 @@
+a takes: no
+b takes: no
+c takes: no
+live receiver takes: yes
+received: ok
+d takes after cancel: no
+d takes with a receiver: yes
+tail received: done
