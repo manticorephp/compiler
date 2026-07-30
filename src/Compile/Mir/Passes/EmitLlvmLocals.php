@@ -392,7 +392,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-            $out .= $this->boxToCell($sl->value->type);
+            $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
             $out .= '  store i64 ' . $boxed . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             $this->lastValue = $boxed;
@@ -495,6 +495,7 @@ trait EmitLlvmLocals
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
+            $out .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($v->type));
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
             // The copy is heap-owned + independent, so it is no longer an
@@ -518,6 +519,7 @@ trait EmitLlvmLocals
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
+            $out .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($v->type));
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
         }

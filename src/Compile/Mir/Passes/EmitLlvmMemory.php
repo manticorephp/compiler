@@ -167,7 +167,7 @@ trait EmitLlvmMemory
             // ({@see storeRetainFallback}): a CELL value is NaN-boxed, and its
             // co-ownership is boxToCell's business, not the element type's.
             $fallback = $this->storeRetainFallback($n);
-            $this->maybeTransfer($n->value, $fallback);
+            $this->maybeTransfer($n->value, $fallback, $this->storeElemBoxesValue($n));
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
             $pcls = $n->object->type->class ?? '';
             $propType = ($pcls !== '' && isset($this->classes[$pcls]))
@@ -176,7 +176,8 @@ trait EmitLlvmMemory
             $this->maybeTransfer($n->value, $propType);
         } elseif ($k === Node::KIND_ARRAY_LIT) {
             $fallback = $n->type->element ?? null;
-            foreach ($n->elements as $el) { $this->maybeTransfer($el->value, $fallback); }
+            $boxed = $this->litBoxesValues($n);
+            foreach ($n->elements as $el) { $this->maybeTransfer($el->value, $fallback, $boxed); }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectTransferredLocals($c); }
     }
@@ -382,6 +383,29 @@ trait EmitLlvmMemory
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
         return $out;
+    }
+
+    /**
+     * Emit the content-adoption a VALUE COPY owes: one reference on every key
+     * and rc-managed element the copy now shares with its source, taken at the
+     * depth `$flavor`'s release will drop. `$ptrReg` is the COPY (a `ptr`).
+     *
+     * `__mir_array_copy` flat-copies the body, so the two buffers point at the
+     * same elements while only one set of refs exists — see
+     * {@see \Compile\Runtime\UnifiedArrayRuntime::emitAdoptVariant}. rc is NOT
+     * touched: the copy is a fresh rc=1 array, it just co-owns the contents.
+     */
+    private function rcAdoptPtr(string $ptrReg, string $flavor): string
+    {
+        $fn = '';
+        if ($flavor === 'vec' || $flavor === 'assoc') { $fn = '@__mir_array_adopt'; }
+        elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_adopt_buf'; }
+        elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_adopt_obj'; }
+        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_adopt_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_adopt_cell'; }
+        if ($fn === '') { return ''; }
+        $this->rt->needsStrRc = true;   // hashed string keys, every flavor
+        return '  call void ' . $fn . '(ptr ' . $ptrReg . ")\n";
     }
 
     /** Emit a release of the rc value held in `$slot` (obj / vec / vecobj / str). */

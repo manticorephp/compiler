@@ -353,10 +353,21 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    private function boxToCell(Type $t): string
+    /**
+     * Box the value in lastValue to a NaN-tagged cell.
+     *
+     * `$src` is the NODE that produced it, when the caller has it. It is used
+     * for exactly one thing: a concrete-element array is REBUILT here into a
+     * fresh cell array, and if the source was an owned temp it must be released
+     * ({@see EmitLlvm::cellifySourceFlavor}). Passing it is optional only
+     * because a handful of sites box a synthesized value with no node; every
+     * site that has one should pass it, or that source leaks.
+     */
+    private function boxToCell(Type $t, ?Node $src = null): string
     {
         $this->rt->needsTagged = true;
         $k = $t->kind;
+        $srcFlavor = $src !== null ? $this->cellifySourceFlavor($src) : '';
         // Already a tagged cell — don't double-box.
         if ($k === Type::KIND_CELL) { return $this->coerceToI64(); }
         if ($k === Type::KIND_FLOAT) {
@@ -383,7 +394,7 @@ trait EmitLlvmBuiltins
             // recursive consumers (var_dump / json_encode) see tagged cells.
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
-                return $this->emitVecToCellArray($elem);
+                return $this->emitVecToCellArray($elem, $srcFlavor);
             }
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
@@ -400,7 +411,7 @@ trait EmitLlvmBuiltins
             // (mirrors the vec branch above).
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
-                return $this->emitAssocToCellArrayUnified($elem);
+                return $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
             }
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
@@ -455,9 +466,9 @@ trait EmitLlvmBuiltins
      * vec[cell], boxing each element per $elem; result boxed as an
      * ARRAY cell in lastValue.
      */
-    private function emitVecToCellArray(Type $elem): string
+    private function emitVecToCellArray(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitVecToCellArrayUnified($elem);
+        return $this->emitVecToCellArrayUnified($elem, $srcFlavor);
     }
 
     /**
@@ -471,9 +482,9 @@ trait EmitLlvmBuiltins
      * (the buffer stays packed), so this is correct AND no slower for the common
      * case. The two paths are identical now; vec delegates to assoc.
      */
-    private function emitVecToCellArrayUnified(Type $elem): string
+    private function emitVecToCellArrayUnified(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitAssocToCellArrayUnified($elem);
+        return $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
     }
 
     /**
@@ -484,8 +495,16 @@ trait EmitLlvmBuiltins
      * as an ARRAY cell in lastValue. The assoc analogue of
      * {@see emitVecToCellArrayUnified}; without it a raw-valued assoc reaching
      * a cell consumer (var_dump) mis-dispatches each entry.
+     *
+     * `$srcFlavor` is the release flavor of the SOURCE array when the caller
+     * knows it is an owned temp ({@see EmitLlvm::cellifySourceFlavor}). The
+     * rebuild is a fresh +1 that co-owns every element it took, so a temp source
+     * is dead the moment the walk ends — and it used to be dropped on the floor
+     * instead: `$row = ["tags" => ["a","b","c"]]` leaked the inner `vec[string]`
+     * AND one ref on each of its strings, once per evaluation. '' keeps the
+     * historical borrow (a LoadLocal source, whose owner releases it).
      */
-    private function emitAssocToCellArrayUnified(Type $elem, bool $raw = false): string
+    private function emitAssocToCellArrayUnified(Type $elem, bool $raw = false, string $srcFlavor = ''): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -609,6 +628,14 @@ trait EmitLlvmBuiltins
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = select i1 ' . $isNull
               . ', ptr null, ptr ' . $dst . "\n";
+        // The walk is over and every element the rebuild keeps is co-owned, so an
+        // OWNED-TEMP source dies here. Emitted after the loop and after $dst is
+        // loaded — the source is read until the last iteration.
+        if ($srcFlavor !== '') {
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $rawSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $srcFlavor);
+        }
         if ($raw) {
             // The cell-element array itself, unboxed: a `vec[cell]` slot is
             // KIND_ARRAY and travels RAW, so a return/store boundary wants this
@@ -631,9 +658,9 @@ trait EmitLlvmBuiltins
      * the arm that is still `vec[string]` must be rebuilt with every element
      * boxed — otherwise the reader unboxes a raw string pointer by tag.
      */
-    private function emitCellifyArrayRaw(Type $elem): string
+    private function emitCellifyArrayRaw(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitAssocToCellArrayUnified($elem, true);
+        return $this->emitAssocToCellArrayUnified($elem, true, $srcFlavor);
     }
 
     /**

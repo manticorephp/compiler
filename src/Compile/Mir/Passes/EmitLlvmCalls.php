@@ -1079,7 +1079,10 @@ trait EmitLlvmCalls
                 // Tagged (mixed/union) param: NaN-box the arg by its
                 // static type so the callee can read its runtime tag.
                 $out .= $this->emitNode($a);
-                $out .= $this->boxToCell($a->type);
+                // No post-call temp release is registered on this arm (only the
+                // raw `else` below feeds $rcArgRegs), so a cellified fresh temp
+                // is freed by the rebuild itself or not at all.
+                $out .= $this->boxToCell($a->type, $a);
                 $argList .= 'i64 ' . $this->lastValue;
             } else {
                 $out .= $this->emitNode($a);

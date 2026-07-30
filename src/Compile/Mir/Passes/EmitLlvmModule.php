@@ -782,11 +782,25 @@ trait EmitLlvmModule
                         // share the inner array). Safe only here — raw vecs can't
                         // be tag-inspected (a large/neg int could look boxed).
                         $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
+                        // Shares every non-array cell payload with the caller's
+                        // buffer (it clones only the boxed-ARRAY elements), so the
+                        // copy owes those a reference. A cloned inner array gets a
+                        // spare rc from the same walk — a bounded leak, and the
+                        // safe direction against the caller's release.
+                        $body .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($p->type));
                     } else {
                         $depth = $this->arrayCopyDepth($p->type);
                         if ($depth < 0) { $depth = 0; }
                         $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
                               . ', i64 ' . (string)$depth . ")\n";
+                        // depth 0 is a FLAT copy: every element stays shared with
+                        // the caller and must be adopted. depth > 0 replaces each
+                        // element with a fresh clone the copy already owns — the
+                        // sharing moves one level down, where the runtime's own
+                        // recursion is the only place that can see it.
+                        if ($depth === 0) {
+                            $body .= $this->rcAdoptPtr($cp, $this->discardReleaseFlavor($p->type));
+                        }
                     }
                     $ci = $this->ssa->allocReg();
                     $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
@@ -1137,7 +1151,13 @@ trait EmitLlvmModule
         // The exempt SET drives the cleanup; the single name below is a different
         // question ("is this a bare passthrough of a borrowed obj local?") and stays
         // restricted to a direct `return $x;`.
-        $leave .= $this->emitRcReturnCleanup($this->returnedLocalNames($v));
+        // A REBUILT return hands back a fresh cell array, not the local — so the
+        // "ownership transfers to the caller" exemption does not apply and the
+        // local must be dropped like any other. `function mk(): mixed { $v = [];
+        // …; return $v; }` leaked the whole source vec plus one ref on every
+        // element, with its release stranded in the unreachable dead block.
+        $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        $leave .= $this->emitRcReturnCleanup($exempt);
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
             ? $this->asLoadLocalNode($v)->name : null;
         if ($v === null) {
@@ -1161,7 +1181,7 @@ trait EmitLlvmModule
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
-            $out .= $this->boxToCell($v->type);
+            $out .= $this->boxToCell($v->type, $v);
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
@@ -1183,7 +1203,7 @@ trait EmitLlvmModule
         // reader unboxes this arm's raw string pointers by tag. Rebuild it with
         // each element boxed, left raw (an array slot travels raw).
         if ($this->needsCellify($this->frame->returnType, $v->type)) {
-            $out .= $this->emitCellifyArrayRaw($v->type->element);
+            $out .= $this->emitCellifyArrayRaw($v->type->element, $this->cellifySourceFlavor($v));
             // The rebuild is a FRESH array (+1, owned by the caller — no retain,
             // unlike a borrowed passthrough), but it leaves a raw `ptr`: the ABI
             // returns a uniform i64, so it rides the carrier like every other
@@ -1207,7 +1227,7 @@ trait EmitLlvmModule
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $out .= $this->retainCellPayload($v);
             }
-            $out .= $this->boxToCell($v->type);
+            $out .= $this->boxToCell($v->type, $v);
         } else {
             // A cell value returned where the declared type is concrete
             // (`return $mixed[$i]` from a `: int` fn) must be unboxed — else the
@@ -1300,6 +1320,29 @@ trait EmitLlvmModule
      * NOT cellified — nothing is known to box, and an erased array must stay raw
      * (the `cow2` carve-out).
      */
+    /**
+     * Does {@see emitReturn} REBUILD the returned array into a fresh cell array?
+     * True for every arm below that reaches
+     * {@see EmitLlvmBuiltins::emitAssocToCellArrayUnified} — a concrete-element
+     * vec/assoc under a cellify boundary, a `mixed`/union declared return, or the
+     * uniform closure ABI. Drives the transfer-exemption above: what is handed
+     * back is the rebuild, so the source is dead on this path.
+     */
+    private function returnRebuildsArray(?Node $v): bool
+    {
+        if ($v === null) { return false; }
+        $t = $v->type;
+        if (!$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null || $el->kind === Type::KIND_CELL
+            || $el->kind === Type::KIND_UNKNOWN) { return false; }
+        if ($this->needsCellify($this->frame->returnType, $t)) { return true; }
+        $rt = $this->frame->returnType;
+        if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
+        return ($this->frame->isClosure || $this->frame->isTrampoline)
+            && $this->isCellBoxableArg($t);
+    }
+
     private function needsCellify(?Type $slot, ?Type $val): bool
     {
         if ($slot === null || $val === null) { return false; }

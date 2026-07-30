@@ -318,8 +318,7 @@ trait EmitLlvmArrays
 
     private function emitArrayLitUnified(ArrayLit $al): string
     {
-        $cellVals = $al->type->element !== null
-            && $al->type->element->kind === Type::KIND_CELL;
+        $cellVals = $this->litBoxesValues($al);
         $count = \count($al->elements);
         // A non-escaping scalar array (InferAllocKind → NoRefcount → ApplyMemory
         // Mode → Arena; gated by Debug::$arenaArrays) bump-allocates in the
@@ -376,7 +375,7 @@ trait EmitLlvmArrays
                 $keyReg = $this->lastValue;
                 $out .= $this->emitNode($el->value);
                 if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
-                $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
+                $out .= $cellVals ? $this->boxToCell($el->value->type, $el->value) : $this->coerceToI64();
                 $val = $this->lastValue;
                 if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
                 $cur = $this->ssa->allocReg();
@@ -394,7 +393,7 @@ trait EmitLlvmArrays
             } else {
                 $out .= $this->emitNode($el->value);
                 if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
-                $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
+                $out .= $cellVals ? $this->boxToCell($el->value->type, $el->value) : $this->coerceToI64();
                 $val = $this->lastValue;
                 if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
                 $cur = $this->ssa->allocReg();
@@ -467,7 +466,7 @@ trait EmitLlvmArrays
             }
             $out .= $this->emitNode($el->value);
             if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
-            $out .= $cellVals ? $this->boxToCell($el->value->type) : $this->coerceToI64();
+            $out .= $cellVals ? $this->boxToCell($el->value->type, $el->value) : $this->coerceToI64();
             $val = $this->lastValue;
             if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
             if ($shape === 'packed') {
@@ -709,6 +708,32 @@ trait EmitLlvmArrays
         return $el;
     }
 
+    /**
+     * Does a StoreElement NaN-box its value into the slot? A cell BASE (a
+     * `mixed` property / param holding the array) or a cell ELEMENT type both
+     * store boxed, and that path co-owns the payload through
+     * {@see EmitLlvm::retainCellPayload} instead of {@see rcRetainByType}.
+     *
+     * ⚠ The ONE owner of that question: {@see emitStoreElementUnified} reads it
+     * to pick the arm, and {@see EmitLlvmMemory::collectTransferredLocals} reads
+     * it to pick the matching retain predicate. Two copies drift, and a drift
+     * here is a leak (pass says borrowed, emitter retains) or a double free.
+     */
+    private function storeElemBoxesValue(StoreElement $se): bool
+    {
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL) { return true; }
+        $et = $at->element;
+        return $et !== null && $et->kind === Type::KIND_CELL;
+    }
+
+    /** As {@see storeElemBoxesValue} for an array LITERAL — its `$cellVals`. */
+    private function litBoxesValues(ArrayLit $al): bool
+    {
+        $el = $al->type->element;
+        return $el !== null && $el->kind === Type::KIND_CELL;
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -749,10 +774,7 @@ trait EmitLlvmArrays
         // ELEMENT type is a cell) stores every value NaN-boxed — like the
         // literal path's $cellVals. Without it a read-back / var_dump misreads
         // a raw i64 as a tagged cell (`$e["s"]="hi"; $e["a"]=[1,2]`).
-        $elemCell = !$baseCell
-            && ($et = $se->array->type->element) !== null
-            && $et->kind === Type::KIND_CELL;
-        $boxVal = $baseCell || $elemCell;
+        $boxVal = $this->storeElemBoxesValue($se);
         $next = $this->ssa->allocReg();
         if ($isAppend) {
             $out .= $this->emitNode($se->value);
@@ -763,7 +785,7 @@ trait EmitLlvmArrays
                 // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
                 // $_SERVER value dangling the moment the temp subject was released.
                 $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type);
+                $out .= $this->boxToCell($se->value->type, $se->value);
                 $val = $this->lastValue;
             }
             else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
@@ -781,7 +803,7 @@ trait EmitLlvmArrays
                 // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
                 // $_SERVER value dangling the moment the temp subject was released.
                 $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type);
+                $out .= $this->boxToCell($se->value->type, $se->value);
                 $val = $this->lastValue;
             }
             else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
@@ -812,7 +834,7 @@ trait EmitLlvmArrays
                 // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
                 // $_SERVER value dangling the moment the temp subject was released.
                 $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type);
+                $out .= $this->boxToCell($se->value->type, $se->value);
                 $val = $this->lastValue;
             }
             else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
@@ -834,7 +856,7 @@ trait EmitLlvmArrays
                 // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
                 // $_SERVER value dangling the moment the temp subject was released.
                 $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type);
+                $out .= $this->boxToCell($se->value->type, $se->value);
                 $val = $this->lastValue;
             }
             else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
