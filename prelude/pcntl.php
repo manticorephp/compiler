@@ -273,6 +273,12 @@ namespace {
         return \__mc_proc_getppid();
     }
 
+    /** php's ext-less alias for the current pid — core, not ext/posix. */
+    function getmypid(): int
+    {
+        return \__mc_proc_getpid();
+    }
+
     /**
      * getrlimit(2). With a resource: `[0 => soft, 1 => hard]`. Without one: every
      * limit the host has, keyed `'soft <name>'` / `'hard <name>'` — php's own

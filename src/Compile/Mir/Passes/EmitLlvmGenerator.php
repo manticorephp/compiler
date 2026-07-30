@@ -165,7 +165,12 @@ trait EmitLlvmGenerator
         $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . (string)($frameSize + $strHdr) . ")\n";
         $fr = $this->ssa->allocReg();
         $out .= '  ' . $fr . ' = getelementptr inbounds i8, ptr ' . $base . ", i64 " . (string)$strHdr . "\n";
-        $out .= $this->genStoreAt($fr, -24, '0');                     // cap@-24 = 0 (unused)
+        // cap@-24 is unused by a frame — stamp the frame's identity there. The
+        // rc at -8 is a plain count (a string's is too), so this is the only
+        // thing that lets an erased carrier be recognised as a generator
+        // ({@see \Compile\MemoryAbi::GENERATOR_TAG_MAGIC}).
+        $out .= $this->genStoreAt($fr, -24,
+            (string)\Compile\MemoryAbi::GENERATOR_TAG_MAGIC);
         $out .= $this->genStoreAt($fr, -16, '0');                     // len@-16 = 0 (unused)
         $out .= $this->genStoreAt($fr, -8, '1');                      // rc@-8 = 1
         $rp = $this->ssa->allocReg();
@@ -342,6 +347,17 @@ trait EmitLlvmGenerator
                     $locals["@fe.1." . (string)$n->genSlotBase] = \count($locals);
                 }
             }
+            // The OBJECT path's synthetic iterator local is created at EMIT
+            // time, so inside a generator it had no frame slot and its alloca
+            // landed in whatever branch the foreach sat in — which the resume
+            // switch jumps straight past, so the loop's own blocks loaded a slot
+            // nothing dominated (invalid IR). Name it here, like every other
+            // generator local, and the emitter finds it already placed.
+            if ($n->iterName === '') {
+                $n->iterName = '@it.' . (string)$this->iterCounter;
+                $this->iterCounter = $this->iterCounter + 1;
+            }
+            if (!isset($locals[$n->iterName])) { $locals[$n->iterName] = \count($locals); }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectGenLocals($c, $locals);
@@ -379,18 +395,66 @@ trait EmitLlvmGenerator
         $val = '0';
         if ($y->value !== null) {
             $out .= $this->emitNode($y->value);
+            // `current`@16 is SELF-DESCRIBING, like `key`@24 beside it: every
+            // consumer reads it through an erased or cell-typed channel, so a raw
+            // word left the two sides disagreeing and each value decoded as a
+            // tag-6 double (symfony's Table rendered borders around blank cells).
+            //
+            // WHICH box depends on the channel the consumers read, and that is
+            // this generator's ELEMENT type — every consumer types itself off it
+            // ({@see InferNodes::inferForeach}, {@see InferCalls}).
+            //
+            //  - a CELL channel (heterogeneous yields, or a bare `Generator` /
+            //    `Traversable` hint that carries no element) means the consumer
+            //    reads elements as cells, so a yielded array must be cellified:
+            //    the plain `boxToCell`. Doing this WITHOUT moving the consumers
+            //    is what got the two earlier attempts reverted — they then read
+            //    the cellified elements raw and saw empty strings.
+            //  - a CONCRETE channel means the consumer unboxes back to that type
+            //    and reads elements raw, so the payload must not be touched:
+            //    {@see EmitLlvmBuiltins::boxToCellShallow} tags and nothing else,
+            //    and the round trip is exactly the word this used to store raw.
+            //
+            // No retain either way for the shallow one — it creates no ownership,
+            // and the consumer reads `current` before the next resume, as always.
+            //
+            // ⚠ Producer and consumers are ONE unit. Do not touch a side alone.
+            $genElem = null;
+            $frt = $this->frame->returnType;
+            if ($frt !== null && $frt->element !== null) { $genElem = $frt->element; }
+            $cellChannel = $genElem === null
+                || $genElem->kind === Type::KIND_CELL
+                || $genElem->kind === Type::KIND_UNKNOWN;
+            // ⚠ An UNKNOWN value takes the runtime classify even on the cell
+            // channel: `boxToCell` sends unknown to `box_int`, which tags an
+            // array as an integer and every consumer then reads the empty
+            // array. This is not rare — a generator closure over a bare-`array`
+            // capture types its foreach value unknown, which is symfony's
+            // TableRows shape exactly.
+            if ($cellChannel && $y->value->type->kind !== Type::KIND_UNKNOWN) {
+                $out .= $this->boxToCell($y->value->type);
+            } else {
+                $out .= $this->boxToCellShallow($y->value->type);
+            }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
         }
         // Key: explicit `$k =>`, else the auto-increment counter (then bump it).
+        // The key is stored BOXED: a generator's keys have no single static
+        // type (`yield "a" => 1` beside an auto-incrementing int), so a raw
+        // carrier left the reader guessing and a string key came back as its
+        // pointer. The foreach key var is typed cell to match.
         if ($y->key !== null) {
             $out .= $this->emitNode($y->key);
-            $out .= $this->coerceToI64();
+            $out .= $this->boxToCell($y->key->type);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->keyPtr . "\n";
         } else {
             $nk = $this->ssa->allocReg();
             $out .= '  ' . $nk . ' = load i64, ptr ' . $this->gen->nextKeyPtr . "\n";
-            $out .= '  store i64 ' . $nk . ', ptr ' . $this->gen->keyPtr . "\n";
+            $this->rt->needsTagged = true;
+            $nkb = $this->ssa->allocReg();
+            $out .= '  ' . $nkb . ' = call i64 @__manticore_box_int(i64 ' . $nk . ")\n";
+            $out .= '  store i64 ' . $nkb . ', ptr ' . $this->gen->keyPtr . "\n";
             $nk1 = $this->ssa->allocReg();
             $out .= '  ' . $nk1 . ' = add i64 ' . $nk . ", 1\n";
             $out .= '  store i64 ' . $nk1 . ', ptr ' . $this->gen->nextKeyPtr . "\n";

@@ -311,46 +311,52 @@ trait EmitLlvmRuntime
             $out .= $this->profBump(4);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %rc = load i64, ptr %rcp\n";
-            if ($this->rt->needsCc) {
-                // Cycle-collector mode: the rc word packs rc | color |
-                // buffered, so the live count is the SIGNED low-56-bit field
-                // (shl 8 / ashr 8) — color/buffered bits must not poison the
-                // zero test. On `rc>0` after a dec, the object MIGHT be a
-                // cycle root → cc_add_root (Bacon-Rajan PossibleRoot). On
-                // `rc<=0`, a *buffered* object is NOT freed here — the
-                // collector owns it (else the candidate list dangles).
-                $out .= "  %rc1 = sub i64 %rc, 1\n";
-                $out .= "  store i64 %rc1, ptr %rcp\n";
-                $out .= "  %rcsh = shl i64 %rc1, 8\n";
-                $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
-                $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
-                $out .= "  br i1 %zero, label %free, label %keep\n";
-                $out .= "keep:\n";
-                $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
-                $out .= "  br label %done\n";
-                $out .= "free:\n";
-                $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
-                $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
-                $out .= "  br i1 %isbuf, label %done, label %dofree\n";
-                $out .= "dofree:\n";
-                $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
-                $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
-                $out .= "  call void @free(ptr %obase)\n";
-                $out .= "  br label %done\n";
-            } else {
+            // ⚠ The rc WORD LAYOUT is an ABI fact, not a per-module option: the
+            // live count is the SIGNED low-56-bit field and the top byte carries
+            // the collector's color / buffered bits. This test must therefore
+            // read the field the same way in EVERY module.
+            //
+            // It did not. The zero test used to be a raw `icmp sle i64 %rc1, 0`
+            // unless THIS module needed the collector — and `__mir_rc_release`
+            // is `linkonce_odr`, so a program links ONE of the two disagreeing
+            // bodies. An object created inside `lib/manticore_stdlib.o` (built
+            // WITH the collector) carries a word like `0x8100000000000005`,
+            // which as a raw i64 is NEGATIVE: the collector-less copy freed it
+            // on the FIRST drop, at refcount 5. That is the stream_select loop's
+            // dead \Resource — an lldb watchpoint on the rc word caught the
+            // decrement 6→5 and the free in the same call. It was invisible at
+            // -O0, under MANTICORE_DEBUG_VERIFY and in --memory=arena, because
+            // each of those changes which copy or inlining survives.
             $out .= $this->rcVerifyAlive();
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %rcp\n";
-            $out .= "  %zero = icmp sle i64 %rc1, 0\n";
-            $out .= "  br i1 %zero, label %free, label %done\n";
+            $out .= "  %rcsh = shl i64 %rc1, 8\n";
+            $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
+            $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
+            $out .= "  br i1 %zero, label %free, label %keep\n";
+            $out .= "keep:\n";
+            if ($this->rt->needsCc) {
+                // On `rc>0` after a dec the object MIGHT be a cycle root
+                // (Bacon-Rajan PossibleRoot). Only a module that carries the
+                // collector can register one — a module without it simply does
+                // not participate, which costs cycle collection, never safety.
+                $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
+            }
+            $out .= "  br label %done\n";
             $out .= "free:\n";
+            // A *buffered* object is NOT freed here even at rc<=0 — the
+            // collector owns it, else its candidate list dangles. The mask is
+            // zero in a program that never buffers, so this is a no-op there.
+            $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
+            $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
+            $out .= "  br i1 %isbuf, label %done, label %dofree\n";
+            $out .= "dofree:\n";
             // Recursive drop: release this object's obj-typed properties
             // before freeing it, so nested objects don't leak.
             $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
             $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
             $out .= "  call void @free(ptr %obase)\n";
             $out .= "  br label %done\n";
-            }
             $out .= "str:\n";
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sdec\n";
@@ -1857,7 +1863,10 @@ trait EmitLlvmRuntime
             // strlen+strstr made a NUL-bearing argument unfindable — a haystack
             // truncated at its first NUL, and a needle CONTAINING one read as
             // empty. serialize's mangled property keys ("\0*\0prop") are exactly
-            // that, and demangling them silently found nothing.
+            // that, and demangling them silently found nothing — and so is
+            // `substr_count($cell, "\0")`, which symfony's Table uses to correct
+            // multi-byte padding: it answered strlen($cell)+1, every cell's pad
+            // width collapsed, and the table rendered unpadded.
             $out .= "\ndefine i64 @__mir_strpos(ptr %h, ptr %n, i64 %off) {\n";
             $out .= "entry:\n";
             $out .= "  %hlen = call i64 @__mir_strlen(ptr %h)\n";
@@ -2017,6 +2026,42 @@ trait EmitLlvmRuntime
             $out .= "  ret i64 %lim\n";
             $out .= "}\n";
         }
+        if ($this->rt->needsElemUntag) {
+            // `__mir_elem_untag(arr, v) -> i64` — the element `v`, read out of
+            // `arr` at a site whose STATIC element type is pointer-shaped
+            // (string / object), normalised to a raw pointer.
+            //
+            // The static type is a claim; the array's ELEMENT-HINT nibble is the
+            // fact. They part company whenever a cell-element array reaches a
+            // concrete-element consumer: symfony's `$this->headers[0]` is a
+            // declared `string[]` whose rows arrive as boxed cells, and the raw
+            // read handed the NaN tag to a string slot.
+            //
+            // This is the SOUND half of the withdrawn element decode: it only
+            // ever turns a cell INTO its raw payload, which is what the static
+            // type already promised the consumer. The unsound direction — a raw
+            // element handed on as a tagged cell — is not done here, and an
+            // UNKNOWN-typed result never reaches this helper.
+            $out .= "\ndefine i64 @__mir_elem_untag(ptr %arr, i64 %v) {\n";
+            $out .= "entry:\n";
+            // An auto-vivifying base is genuinely null (`$x['a']['b'] = 1`), so
+            // the flags load needs the guard.
+            $out .= "  %isnull = icmp eq ptr %arr, null\n";
+            $out .= "  br i1 %isnull, label %asis, label %chk\n";
+            $out .= "asis:\n  ret i64 %v\n";
+            $out .= "chk:\n";
+            $out .= "  %fp = getelementptr inbounds i8, ptr %arr, i64 "
+                  . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+            $out .= "  %fl = load i64, ptr %fp\n";
+            $out .= "  %hn = and i64 %fl, "
+                  . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+            $out .= "  %isc = icmp eq i64 %hn, "
+                  . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+            $out .= "  %pay = and i64 %v, 281474976710655\n";
+            $out .= "  %r = select i1 %isc, i64 %pay, i64 %v\n";
+            $out .= "  ret i64 %r\n";
+            $out .= "}\n";
+        }
         if ($this->rt->needsStrExplode) {
             // `__mir_str_explode(delim, subj, limit) -> ptr` — single-scan split
             // into a fresh vec[string]. Each segment is a POOLED `__mir_str_alloc`
@@ -2026,6 +2071,19 @@ trait EmitLlvmRuntime
             // empty delim yields [subj] (matches the prelude explode). Replaces the
             // PHP-level prelude explode's 8×(strpos-cell + substr-malloc + append)
             // per call with one C loop.
+            //
+            // A NEGATIVE limit is a different operation: php returns every
+            // component EXCEPT the last -limit, and those are whole components,
+            // not the "rest of the string" the positive form's final element
+            // carries. `sgt %lim, 1` was false for one, so it fell straight to
+            // the tail and answered [subj] — symfony's
+            // `explode(':', $name, -1)` in Application::extractNamespace put
+            // every command in a namespace of its own, so `list` printed a
+            // header per command instead of grouping under `config` / `list`.
+            // Handle it with a counting pre-pass: the segment total is
+            // occurrences+1, so `keep = total - (-limit)` is known before the
+            // split, and the same loop then emits exactly that many components
+            // with the tail append suppressed.
             $out .= "\ndefine ptr @__mir_str_explode(ptr %delim, ptr %subj, i64 %limit) {\n";
             $out .= "entry:\n";
             $out .= "  %dlen = call i64 @__mir_strlen(ptr %delim)\n";
@@ -2036,9 +2094,56 @@ trait EmitLlvmRuntime
             $out .= "  %posp = alloca i64\n";
             $out .= "  store i64 0, ptr %posp\n";
             $out .= "  %limp = alloca i64\n";
-            $out .= "  store i64 %limit, ptr %limp\n";
+            $out .= "  %cntp = alloca i64\n";
+            $out .= "  store i64 0, ptr %cntp\n";
+            $out .= "  %isneg = icmp slt i64 %limit, 0\n";
             $out .= "  %de0 = icmp eq i64 %dlen, 0\n";
-            $out .= "  br i1 %de0, label %tail, label %loop\n";
+            // An empty delimiter answers [subj] whatever the limit says (php
+            // raises there, so any answer is outside the oracle) — go straight
+            // to the tail append, never the negative early-out.
+            $out .= "  br i1 %de0, label %dotail, label %setup\n";
+            $out .= "setup:\n";
+            $out .= "  br i1 %isneg, label %cloop, label %setpos\n";
+            // php treats limit 0 as 1.
+            $out .= "setpos:\n";
+            $out .= "  %z0 = icmp eq i64 %limit, 0\n";
+            $out .= "  %l1 = select i1 %z0, i64 1, i64 %limit\n";
+            $out .= "  store i64 %l1, ptr %limp\n";
+            $out .= "  br label %loop\n";
+            // Counting pre-pass — delimiter occurrences, no allocation.
+            $out .= "cloop:\n";
+            $out .= "  %cpos = load i64, ptr %posp\n";
+            $out .= "  %chs = getelementptr inbounds i8, ptr %subj, i64 %cpos\n";
+            $out .= "  %chit = call ptr @strstr(ptr %chs, ptr %delim)\n";
+            $out .= "  %cmiss = icmp eq ptr %chit, null\n";
+            $out .= "  br i1 %cmiss, label %cdone, label %cnext\n";
+            $out .= "cnext:\n";
+            $out .= "  %chiti = ptrtoint ptr %chit to i64\n";
+            $out .= "  %csubji = ptrtoint ptr %subj to i64\n";
+            $out .= "  %coff = sub i64 %chiti, %csubji\n";
+            $out .= "  %cnewpos = add i64 %coff, %dlen\n";
+            $out .= "  store i64 %cnewpos, ptr %posp\n";
+            $out .= "  %cn = load i64, ptr %cntp\n";
+            $out .= "  %cn1 = add i64 %cn, 1\n";
+            $out .= "  store i64 %cn1, ptr %cntp\n";
+            $out .= "  br label %cloop\n";
+            $out .= "cdone:\n";
+            $out .= "  %occ = load i64, ptr %cntp\n";
+            $out .= "  %segtotal = add i64 %occ, 1\n";
+            $out .= "  %drop = sub i64 0, %limit\n";
+            $out .= "  %keep = sub i64 %segtotal, %drop\n";
+            $out .= "  %kle = icmp sle i64 %keep, 0\n";
+            $out .= "  br i1 %kle, label %kempty, label %kok\n";
+            $out .= "kempty:\n";
+            $out .= "  %earr = load ptr, ptr %arrp\n";
+            $out .= "  ret ptr %earr\n";
+            // keep+1 makes the shared loop stop after `keep` components; the
+            // tail append is then skipped, which is what drops the remainder.
+            $out .= "kok:\n";
+            $out .= "  %kp1 = add i64 %keep, 1\n";
+            $out .= "  store i64 %kp1, ptr %limp\n";
+            $out .= "  store i64 0, ptr %posp\n";
+            $out .= "  br label %loop\n";
             $out .= "loop:\n";
             $out .= "  %lim = load i64, ptr %limp\n";
             $out .= "  %limok = icmp sgt i64 %lim, 1\n";
@@ -2071,6 +2176,12 @@ trait EmitLlvmRuntime
             $out .= "  store i64 %lim3, ptr %limp\n";
             $out .= "  br label %loop\n";
             $out .= "tail:\n";
+            $out .= "  br i1 %isneg, label %notail, label %dotail\n";
+            $out .= "notail:\n";
+            $out .= "  %narr = load ptr, ptr %arrp\n";
+            $out .= $this->explodeHintStampIr('%narr', 'n');
+            $out .= "  ret ptr %narr\n";
+            $out .= "dotail:\n";
             $out .= "  %fpos = load i64, ptr %posp\n";
             $out .= "  %tstart = getelementptr inbounds i8, ptr %subj, i64 %fpos\n";
             $out .= "  %tlen = sub i64 %slen, %fpos\n";
@@ -2082,9 +2193,30 @@ trait EmitLlvmRuntime
             $out .= "  %tsegi = ptrtoint ptr %tseg to i64\n";
             $out .= "  %arrc2 = load ptr, ptr %arrp\n";
             $out .= "  %arrn2 = call ptr @__mir_array_append(ptr %arrc2, i64 %tsegi)\n";
+            $out .= $this->explodeHintStampIr('%arrn2', 't');
             $out .= "  ret ptr %arrn2\n";
             $out .= "}\n";
         }
+        return $out;
+    }
+
+    /**
+     * Stamp `ARRAY_ELEM_HINT_STR` on an explode result — its segments are raw
+     * string pointers, and a reader that meets the array through an erased
+     * carrier has no other way to know that ({@see
+     * EmitLlvmArrays::elementHintCodeForType}). Named registers, so each return
+     * path needs its own `$sfx`.
+     */
+    private function explodeHintStampIr(string $arr, string $sfx): string
+    {
+        $out  = "  %hf$sfx = getelementptr inbounds i8, ptr $arr, i64 "
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %hv$sfx = load i64, ptr %hf$sfx\n";
+        $out .= "  %hc$sfx = and i64 %hv$sfx, "
+              . (string)(~\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK) . "\n";
+        $out .= "  %hs$sfx = or i64 %hc$sfx, "
+              . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_STR . "\n";
+        $out .= "  store i64 %hs$sfx, ptr %hf$sfx\n";
         return $out;
     }
 

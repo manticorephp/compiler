@@ -240,6 +240,15 @@ final class InferTypes implements Pass
      *  from here so cross-scope reads carry the real type. */
     private array $globalVarTypes = [];
 
+    /** @var array<string, Type> static-local CELL name → the type joined from
+     *  every store to it in its function. A `static $x;` with no initialiser is
+     *  hard-lowered `int` like a global-backed decl, and its value SURVIVES the
+     *  call, so the read at the top of the next call (`if ($x) return $x;`) is
+     *  not flow-reachable from the store that filled it — the join is the only
+     *  way to type it. Keyed by cell, which is already unique per function+var.
+     *  {@see scanStaticLocalTypes}. */
+    private array $staticLocalTypes = [];
+
     /** @var array<string,bool> every `global $x` name in the module. In `__main`
      *  these are global-backed WITHOUT a decl node ({@see EmitLlvmModule::
      *  emitFunction}), so a top-level store to one must not undo the unified
@@ -320,7 +329,6 @@ final class InferTypes implements Pass
         // borrowed-element return isn't +1-retained (isBorrowedObjReturn
         // sees `unknown`), so the caller over-releases the shared element —
         // e.g. peek() freeing the Parser token vec out from under itself.
-        $this->scanPropElementReturns($module);
         // Module pre-scan: an array property that ever receives a MIXED/cell
         // value element store (`$this->prop[$k] = $mixed`, e.g. an ArrayAccess
         // `offsetSet(mixed $v)`) physically holds NaN-boxed cells, so its element
@@ -328,7 +336,13 @@ final class InferTypes implements Pass
         // is typed scalar, and a `mixed`-return / `??` re-boxes it → double-box
         // (previously MASKED by the 48-bit truncation; see
         // representation_consistency_root).
+        //
+        // BEFORE the getter scan below: a heterogeneous slot is heterogeneous no
+        // matter what one getter's return type says, and the getter scan only
+        // fires on a still-unknown/bare property, so running this first is what
+        // keeps it off. symfony's TableCell has both.
         $this->scanCellElemProps($module);
+        $this->scanPropElementReturns($module);
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
         }
@@ -395,6 +409,21 @@ final class InferTypes implements Pass
         // makes string/array ops misread it as a NaN-boxed value. Refine it to
         // the concrete type every call site passes (a TYPED `&$p` already works).
         if ($this->scanCallSiteRefParams($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+        }
+        // An uninitialised `static $x;` is hard-lowered `int` and its value
+        // outlives the call, so the read that OPENS the next call is not
+        // reachable from the store that filled it and keeps the int. Join every
+        // store and re-infer, exactly as the global unification below does.
+        if ($this->scanStaticLocalTypes($module)) {
+            foreach ($module->functions as $fn) {
+                if (isset($this->undeclaredReturnFns[$fn->name])) {
+                    $fn->returnType = Type::unknown();
+                    $this->sigs[$fn->name] = Type::unknown();
+                }
+            }
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
             }
@@ -530,22 +559,98 @@ final class InferTypes implements Pass
     /** @var ?Type accumulated union of the current generator's explicit keys */
     private ?Type $genKeyType = null;
 
-    /** @var array<string,bool> "Class::prop" → receives a mixed-value elem store */
+    /** @var array<string,bool|Type> "Class::prop" → receives a mixed-value elem store,
+     *  or the whole cell-element ARRAY type stored into it */
     private array $cellElemPropsFound = [];
+
+    /** @var array<string,string> "Class::prop" → the repr category of its element stores */
+    private array $propElemStoreCats = [];
+
+    /**
+     * The runtime REPRESENTATION class of a stored element — what the array's
+     * repr nibble would have to say. '' for a kind that carries no repr of its
+     * own (unknown/cell/void: a cell already self-describes, an unknown makes no
+     * claim), so it never counts as a conflict.
+     */
+    private function elemStoreCategory(Type $t): string
+    {
+        if ($t->isArray()) { return 'arr'; }
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE || $k === Type::KIND_UNION) {
+            // An enum case rides as an ORDINAL, not a pointer.
+            $cn = $t->class ?? '';
+            return ($cn !== '' && isset($this->enums[$cn])) ? 'num' : 'obj';
+        }
+        if ($k === Type::KIND_STRING) { return 'str'; }
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL) { return 'num'; }
+        return '';
+    }
 
     private function findCellElemStores(Node $n, string $cls): void
     {
+        // A WHOLE-property store of a CELL into an array-hinted slot. The only
+        // way a cell reaches such a slot is as a boxed array, and the boxing
+        // (boxToCell / a concrete array bound to a `mixed`|`iterable` param)
+        // cellifies the ELEMENTS on the way in. So the slot holds cells even
+        // though the bare `array` hint erased to unknown — symfony's
+        // `$this->aliases = is_array($aliases) ? $aliases : $list;` off an
+        // `iterable` param, whose readers then took the raw-element path and
+        // handed a boxed string straight to strlen.
+        if ($n->kind === Node::KIND_STORE_PROPERTY
+            && $n->object->kind === Node::KIND_LOAD_LOCAL
+            && $n->object->name === 'this'
+            && $n->value->type->kind === Type::KIND_CELL) {
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
+                $this->cellElemPropsFound[$cls . '::' . $n->property] = true;
+            }
+        }
+        // A whole-property store of a CELL-ELEMENT ARRAY — a heterogeneous
+        // literal default is the common one. It is the strongest statement
+        // available about what the slot holds, and without it a single
+        // `getStyle(): ?TableCellStyle { return $this->options['style']; }`
+        // retyped symfony's `['rowspan' => 1, 'colspan' => 1, 'style' => null]`
+        // to vec[TableCellStyle], so the boxed int 1 was rc-retained as an
+        // object pointer. The stored type is kept whole so the assoc key shape
+        // survives too.
+        if ($n->kind === Node::KIND_STORE_PROPERTY
+            && $n->object->kind === Node::KIND_LOAD_LOCAL
+            && $n->object->name === 'this'
+            && $n->value->type->isArray()
+            && ($n->value->type->element->kind ?? '') === Type::KIND_CELL) {
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
+                $this->cellElemPropsFound[$cls . '::' . $n->property] = $n->value->type;
+            }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS
-                && $se->index->kind !== Node::KIND_NULL_CONST) {
-                if ($se->array->object->kind === Node::KIND_LOAD_LOCAL
-                    && $se->array->object->name === 'this') {
-                    // A definitely-mixed stored value (a `mixed` param / cell):
-                    // the slot holds NaN-boxed cells.
-                    $vk = $se->value->type->kind;
-                    if ($vk === Type::KIND_CELL) {
-                        $this->cellElemPropsFound[$cls . '::' . $se->array->property] = true;
+                && $se->array->object->kind === Node::KIND_LOAD_LOCAL
+                && $se->array->object->name === 'this') {
+                $key = $cls . '::' . $se->array->property;
+                $vk = $se->value->type->kind;
+                // A definitely-mixed stored value (a `mixed` param / cell):
+                // the slot holds NaN-boxed cells.
+                if ($vk === Type::KIND_CELL && $se->index->kind !== Node::KIND_NULL_CONST) {
+                    $this->cellElemPropsFound[$key] = true;
+                }
+                // Element stores of DIFFERENT representations (append included):
+                // no single raw repr can describe the slot, and the runtime repr
+                // nibble holds one value — the last store's kind silently
+                // overwrote the earlier one, so a reader mis-read every element
+                // of the other kind. symfony's Table::addRow appends both a
+                // TableSeparator and an array_values() array to `$this->rows`,
+                // and `$row instanceof TableSeparator` then read a class id out
+                // of an array's length word. Cells are the only honest shape.
+                $cat = $this->elemStoreCategory($se->value->type);
+                if ($cat !== '') {
+                    $prev = $this->propElemStoreCats[$key] ?? '';
+                    if ($prev === '') {
+                        $this->propElemStoreCats[$key] = $cat;
+                    } elseif ($prev !== $cat) {
+                        $this->cellElemPropsFound[$key] = true;
                     }
                 }
             }
@@ -794,9 +899,19 @@ final class InferTypes implements Pass
             if ($lp !== '') { $this->strParamsFound[$lp] = true; }
             if ($rp !== '') { $this->strParamsFound[$rp] = true; }
         } elseif ($k === Node::KIND_ARRAY_ACCESS) {
-            // `$x[...]` where $x is an element-local → $x is a string (char
+            // `$x[$i]` where $x is an element-local → $x is a string (char
             // subscript), so its param is vec[string].
-            if ($n->array->kind === Node::KIND_LOAD_LOCAL) {
+            //
+            // ONLY for an INT-ish subscript. php has no string offset by string
+            // key — `$s['id']` is a TypeError, so a STRING index is proof of the
+            // opposite: `$x` is an array. Reading it as evidence for vec[string]
+            // retyped symfony's `$namespaces` (an assoc of assocs, whose
+            // call-site refinement legitimately conflicts and leaves the param
+            // bare) to vec[string], so `$namespace['id']` compiled to a char
+            // offset and `list` printed a raw tagged word where the namespace
+            // name belonged.
+            if ($n->array->kind === Node::KIND_LOAD_LOCAL
+                && !$this->isStringOperand($n->index)) {
                 $nm = $n->array->name;
                 if (isset($this->elemLocalOf[$nm])) { $this->strParamsFound[$this->elemLocalOf[$nm]] = true; }
             }

@@ -1546,6 +1546,18 @@ final class Parser
                 $target->span,
             );
         }
+        // A prefix unary binds tighter than `=` too, so `!$x = foo()` is
+        // `!($x = foo())` — the assignment attaches to the operand (the lvalue)
+        // and the unary sees its result. Same re-association as the binary case
+        // (`@$x = …` / `-$x = …` follow identically). `throw` never prefixes an
+        // lvalue, so it does not reach here.
+        if ($target->kind === 'UnaryOp') {
+            return Expr::unary(
+                $target->op,
+                $this->buildAssign($op, $target->operand, $value, $span),
+                $target->span,
+            );
+        }
         if ($op === '=')  { return Expr::assign($target, $value, $span); }
         if ($op === '=&') { return Expr::refAssign($target, $value, $span); }
         return Expr::compoundAssign($op, $target, $value, $span);
@@ -1930,11 +1942,16 @@ final class Parser
             $this->advance();
             return Expr::unary('~', $this->parseUnary(), $span);
         }
-        // `@expr` error suppression — Manticore emits no diagnostics, so it is
-        // a transparent no-op pass-through (same observable result as PHP here).
+        // `@expr` error suppression. Kept as a real node: `trigger_error` now
+        // PRINTS, and `@trigger_error(…)` — every symfony deprecation — must
+        // stay silent. The lowering consumes the marker (it never reaches MIR),
+        // so for everything else `@` is still the transparent pass-through it
+        // has always been: nothing else in this runtime emits a diagnostic to
+        // suppress.
         if ($tok->kind === TokenKind::AtSign) {
+            $span = $this->span();
             $this->advance();
-            return $this->parseUnary();
+            return Expr::unary('@', $this->parseUnary(), $span);
         }
         if ($tok->kind === TokenKind::PlusPlus) {
             $span = $this->span();
@@ -2747,6 +2764,21 @@ final class Parser
     /** chars consumed AFTER the backslash by the last {@see decodeEscapeSeq}. */
     private int $escapeLen = 0;
 
+    /** One code point as UTF-8 bytes, for the `\u{…}` escape. */
+    private function utf8Encode(int $cp): string
+    {
+        if ($cp < 0x80) { return \chr($cp); }
+        if ($cp < 0x800) {
+            return \chr(0xC0 | ($cp >> 6)) . \chr(0x80 | ($cp & 0x3F));
+        }
+        if ($cp < 0x10000) {
+            return \chr(0xE0 | ($cp >> 12)) . \chr(0x80 | (($cp >> 6) & 0x3F))
+                . \chr(0x80 | ($cp & 0x3F));
+        }
+        return \chr(0xF0 | ($cp >> 18)) . \chr(0x80 | (($cp >> 12) & 0x3F))
+            . \chr(0x80 | (($cp >> 6) & 0x3F)) . \chr(0x80 | ($cp & 0x3F));
+    }
+
     /**
      * Decode the double-quote escape whose backslash sits at `$i-1` (so `$i`
      * indexes the char right after it) and set {@see $escapeLen} to how many
@@ -2778,6 +2810,20 @@ final class Parser
             if ($got === 0) { return '\\x'; }
             $this->escapeLen = 1 + $got;
             return \chr($val & 255);
+        }
+        if ($c === 'u' && \substr($body, $i + 1, 1) === '{') {
+            // `\u{HHH}` (PHP 7.0) — a UTF-8 code point, not a byte. An
+            // unterminated or empty brace group is NOT an escape in php: the
+            // whole `\u` stays literal.
+            $val = 0; $got = 0; $j = $i + 2;
+            while ($j < $n) {
+                $hv = $this->hexDigitVal(\substr($body, $j, 1));
+                if ($hv < 0) { break; }
+                $val = $val * 16 + $hv; $got = $got + 1; $j = $j + 1;
+            }
+            if ($got === 0 || \substr($body, $j, 1) !== '}') { return '\\u'; }
+            $this->escapeLen = ($j - $i) + 1;
+            return $this->utf8Encode($val);
         }
         $o0 = \ord($c);
         if ($o0 >= 48 && $o0 <= 55) {

@@ -1,0 +1,10 @@
+config:set,list:items,greet
+1
+config:set,list:items
+0
+list:items
+bb
+6
+5|9
+two
+done

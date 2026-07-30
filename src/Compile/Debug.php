@@ -112,6 +112,13 @@ final class Debug
      */
     public static bool $emptyArraySingleton = true;
 
+    /**
+     * Compile-time profile: per-pass wall time, module size after each pass,
+     * per-round lines from the fixpoint passes, and a tail of whole-program
+     * scan counters. `MANTICORE_STATS=1`. See {@see \Compile\Stats}.
+     */
+    public static bool $stats = false;
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {
@@ -135,6 +142,12 @@ final class Debug
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
+        }
+        $env = \getenv('MANTICORE_STATS');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$stats = true;
+            Stats::$on = true;
+            Stats::init();
         }
         $env = \getenv('MANTICORE_MEMORY');
         if ($env !== false && $env !== '') {

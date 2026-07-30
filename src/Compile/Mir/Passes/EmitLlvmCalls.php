@@ -301,6 +301,14 @@ trait EmitLlvmCalls
                     $this->rt->needsRc = true;
                     $this->rt->needsStrRc = true;
                     $out .= '  call void @__mir_cell_retain(i64 ' . $capV . ")\n";
+                    // …and the other half: cell_retain answers on the cell tag
+                    // and does NOTHING for an untagged word, so a container on
+                    // an erased slot — a bare `array` hint lowers to unknown —
+                    // was captured without being co-owned. An argument with no
+                    // other owner (an array LITERAL passed straight into the
+                    // call) was then freed at the caller's scope exit and the
+                    // closure read freed memory. The two are disjoint.
+                    $out .= $this->rawContainerRetainIr($capV);
                 } else {
                     $out .= $this->rcRetainByType($c, $capV, null, 1);
                 }
@@ -322,12 +330,19 @@ trait EmitLlvmCalls
      *  cell; an unmatched name yields null. Method keys (`Class__method`) and
      *  `__main` are excluded (the `__` marker). One arm runs, so re-emitting
      *  args per arm evaluates them once at runtime. */
-    private function emitDynFnCall(Invoke_ $iv): string
+    private function emitDynFnCall(Invoke_ $iv, string $keyPtr = ''): string
     {
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($iv->callee);
-        $out .= $this->coerceToPtr();
-        $keyP = $this->lastValue;
+        // A caller that already materialized the name (the erased-callee tag
+        // dispatch) passes it in — re-emitting the callee there would evaluate
+        // it twice and, worse, hand this chain the still-boxed word.
+        $out = '';
+        $keyP = $keyPtr;
+        if ($keyPtr === '') {
+            $out = $this->emitNode($iv->callee);
+            $out .= $this->coerceToPtr();
+            $keyP = $this->lastValue;
+        }
         $argc = \count($iv->args);
         // A `...$arr` spread makes the runtime arg count unknown. HOIST the
         // fixed-prefix arg values and the spread array pointer ONCE, before the
@@ -380,6 +395,17 @@ trait EmitLlvmCalls
             } elseif ($argc < $req || $argc > $tot) {
                 continue;
             }
+            // Arity alone is not enough to make a candidate emittable. A FLOAT is
+            // the one kind whose LLVM carrier is `double` rather than i64/ptr, so
+            // pairing a float argument with a pointer parameter (or the reverse)
+            // produces IR that does not even verify — `%r = bitcast i64 %x to
+            // double` followed by `icmp eq ptr %r, null`. Such a pairing can never
+            // be the runtime target anyway (php would TypeError), so drop the arm
+            // rather than emit it: `$hf($sock, $timeout)` in __mc_dns_exchange
+            // matched `explode(string, string)` on arity and killed the cold seed.
+            if (!$hasSpread && !$this->dynArmTypesEmittable($ptypes, $iv->args)) {
+                continue;
+            }
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
             $cmp = $this->ssa->allocReg();
@@ -427,6 +453,37 @@ trait EmitLlvmCalls
         return $out;
     }
 
+    /**
+     * Whether a dynamic-name dispatch arm for a candidate with `$ptypes` can be
+     * emitted at all against these argument nodes. Only the float-vs-pointer
+     * pairing is rejected: every other kind rides an i64 carrier, so the existing
+     * coercions produce verifiable IR even when the pairing is nonsense (the arm
+     * is unreachable at runtime either way). A CELL / UNKNOWN on either side says
+     * nothing statically and always stays.
+     *
+     * @param Type[] $ptypes
+     * @param Node[] $args
+     */
+    private function dynArmTypesEmittable(array $ptypes, array $args): bool
+    {
+        foreach ($args as $i => $a) {
+            $pt = $ptypes[$i] ?? null;
+            if ($pt === null) { continue; }
+            $ak = $a->type->kind;
+            $pk = $pt->kind;
+            if ($ak === Type::KIND_FLOAT && $this->isPtrCarrierKind($pk)) { return false; }
+            if ($pk === Type::KIND_FLOAT && $this->isPtrCarrierKind($ak)) { return false; }
+        }
+        return true;
+    }
+
+    /** A kind whose LLVM carrier is a pointer rather than a plain i64/double. */
+    private function isPtrCarrierKind(string $kind): bool
+    {
+        return $kind === Type::KIND_STRING || $kind === Type::KIND_ARRAY
+            || $kind === Type::KIND_OBJ || $kind === Type::KIND_CLOSURE;
+    }
+
     private function emitInvoke(Invoke_ $n): string
     {
         $iv = $n;
@@ -454,6 +511,15 @@ trait EmitLlvmCalls
             $call = new \Compile\Mir\MethodCall_($iv->callee, '__invoke', $iv->args, $n->type);
             return $this->emitMethodCall($call);
         }
+        // An ERASED callee — a `mixed`/`callable` param, an element read out of a
+        // vec[cell], a static-prop slot. The value is NaN-boxed, so the struct
+        // path's bare inttoptr called through the TAG BITS (segfault), and a
+        // function-NAME string held in the same slot never reached the by-name
+        // dispatch at all. Decide on the runtime tag instead.
+        $ck = $iv->callee->type->kind;
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+            return $this->emitErasedInvoke($n);
+        }
         // The closure struct is the env: the __closure fn unpacks its own
         // captures from it (slot 1+), so the call passes only `env + args`.
         $out = $this->emitNode($iv->callee);
@@ -473,7 +539,76 @@ trait EmitLlvmCalls
             $this->lastValueType = 'i64';
         }
         $out .= $this->coerceToPtr();
-        $struct = $this->lastValue;
+        return $out . $this->emitClosureStructInvoke($n, $this->lastValue);
+    }
+
+    /**
+     * `$cb(args)` with `$cb` an erased (cell / unknown) slot. One evaluation of
+     * the callee, then a branch on its cell tag: a STRING cell (tag 4) is a
+     * function name → the by-name dispatch; anything else is a closure struct
+     * whose payload is masked out of the box. Both arms leave a boxed cell, so
+     * the merged result matches the invoke's inferred cell type.
+     */
+    private function emitErasedInvoke(Invoke_ $n): string
+    {
+        $out = $this->emitNode($n->callee);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->cellTagIr($raw);
+        $isStr = $this->ssa->allocReg();
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $nameL = $this->ssa->allocLabel('erinv.name');
+        $closL = $this->ssa->allocLabel('erinv.clos');
+        $endL = $this->ssa->allocLabel('erinv.end');
+        $out .= '  br i1 ' . $isStr . ', label %' . $nameL . ', label %' . $closL . "\n";
+
+        $out .= $nameL . ":\n";
+        $keyM = $this->ssa->allocReg();
+        $out .= '  ' . $keyM . ' = and i64 ' . $raw . ", 281474976710655\n";
+        $keyP = $this->ssa->allocReg();
+        $out .= '  ' . $keyP . ' = inttoptr i64 ' . $keyM . " to ptr\n";
+        $out .= $this->emitDynFnCall($n, $keyP);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $closL . ":\n";
+        $stM = $this->ssa->allocReg();
+        $out .= '  ' . $stM . ' = and i64 ' . $raw . ", 281474976710655\n";
+        $struct = $this->ssa->allocReg();
+        $out .= '  ' . $struct . ' = inttoptr i64 ' . $stM . " to ptr\n";
+        // No boxing here: the uniform closure ABI ALREADY returns a scalar as a
+        // tagged cell, so re-boxing turned a string cell into an int cell whose
+        // payload was then dereferenced as a char* (segfault). The join unboxes
+        // once, exactly as the direct closure path does.
+        $out .= $this->emitClosureStructInvoke($n, $struct, false);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        if ($this->isCellScalarParam($n->type)) {
+            $out .= $this->unboxCellToType($n->type);
+        }
+        return $out;
+    }
+
+    /**
+     * The closure-struct call itself, given the already-materialized env `ptr`.
+     * Split out of {@see emitInvoke} so an erased callee can reach it with a
+     * payload masked out of a NaN-boxed cell. `$unboxResult` is false when the
+     * caller merges arms and unboxes once at the join.
+     */
+    private function emitClosureStructInvoke(Invoke_ $n, string $struct, bool $unboxResult = true): string
+    {
+        $iv = $n;
+        $out = '';
+        $fn = $iv->callee->type->class ?? '';
         $argList = 'ptr ' . $struct;
         $argTypes = 'ptr';
         // Uniform closure ABI: box each scalar arg into a tagged cell so the
@@ -617,7 +752,7 @@ trait EmitLlvmCalls
         // to the invoke's static type — a known closure types it from the sig
         // (string/int/float/…); a dynamic one is cell ({@see inferInvoke}) and
         // stays boxed. A non-scalar (array/obj) result rode raw → no unbox.
-        if ($this->isCellScalarParam($n->type)) {
+        if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
         return $out;
@@ -1102,23 +1237,7 @@ trait EmitLlvmCalls
                 // ABI: every fn takes i64 args. Float / ptr values
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();
-                $out .= $this->unboxCellArg($a, $ptypes, $ai);
-                // A bare `array` hint lowers to KIND_UNKNOWN, so unboxCellArg
-                // sees no target repr and leaves the tag on — but the callee
-                // reads that slot as a raw buffer pointer (EmitLlvmModule's
-                // array-hint prologue copies through `inttoptr`). Strip it. This
-                // is the boundary a cell-merged local now crosses: `$t = [];
-                // if (is_array($m)) { $t = $m; }` is a cell by the time it is
-                // handed to `f(array $a)`.
-                if (($ahmask[$ai] ?? false) && $a->type->kind === Type::KIND_CELL
-                    && ($ptypes[$ai] ?? null) !== null
-                    && $ptypes[$ai]->kind === Type::KIND_UNKNOWN) {
-                    $sp = $this->ssa->allocReg();
-                    $out .= '  ' . $sp . ' = and i64 ' . $this->lastValue
-                          . ", 281474976710655\n";
-                    $this->lastValue = $sp;
-                    $this->lastValueType = 'i64';
-                }
+                $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($this->isFreshStringTemp($a)) {
                     $argTemps[] = $this->lastValue;

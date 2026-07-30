@@ -51,6 +51,17 @@ trait EmitLlvmObjects
         $hdr = $isStruct ? 0 : 2;
         $obj = $this->ssa->allocReg();
         $out = '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
+        if ($isStruct) {
+            // A struct has NO header — property slot 0 sits at +0 and there is
+            // no rc at +8. Leaving the allocator's RC_TAG_MAGIC at ptr-8 would
+            // advertise a header it does not have, and anything that self-routes
+            // on that tag (cell_drop, the raw `instanceof` carrier check) reads a
+            // property as a descriptor. Restamp with the struct sentinel.
+            $stp = $this->ssa->allocReg();
+            $out .= '  ' . $stp . ' = getelementptr inbounds i8, ptr ' . $obj . ", i64 -8\n";
+            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::STRUCT_TAG_MAGIC
+                  . ', ptr ' . $stp . "\n";
+        }
         if (!$isStruct) {
             // header[0] = class descriptor ptr ({class_id, drop_fn}); class_id
             // and drop are read THROUGH it so drops compose across objects.
@@ -141,9 +152,11 @@ trait EmitLlvmObjects
             $ctorClass = $this->resolveMethodClass($cd->name, '__construct');
             $ptypes = [];
             $tmask = [];
+            $ahmask = [];
             $need = 0;
             if ($ctorClass !== '') {
                 $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
+                $ahmask = $this->sigs->arrayHintedParams[$ctorClass . '____construct'] ?? [];
                 $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
                 // Param 0 is the implicit `$this`.
                 $need = \count($ptypes) - 1;
@@ -177,7 +190,7 @@ trait EmitLlvmObjects
                         $out .= $this->boxToCell($a->type);
                     } else {
                         $out .= $this->coerceToI64();
-                        $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                        $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                     }
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
@@ -236,10 +249,21 @@ trait EmitLlvmObjects
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
+            $ahmask = $this->sigs->arrayHintedParams[$ctorClass . '____construct'] ?? [];
             $tmask = $this->sigs->taggedParams[$ctorClass . '____construct'] ?? [];
+            // A ctor takes by-ref params like any other method, and this loop
+            // did not honour them: `new ConsoleSectionOutput($s, $this->sections,
+            // …)` against `array &$sections` handed over the array POINTER, and
+            // the callee's array_unshift wrote the relocated buffer back through
+            // it — into the empty-array singleton's LENGTH field, which every
+            // later `= []` then copied as a length of 0xa77…, so the first
+            // append to any such array wrote off the end of the world.
+            $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
             foreach ($n->args as $a) {
-                if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
+                if ($this->argIsByRef($mask, $ai + 1, $a)) {
+                    $out .= $this->emitByRefArg($a);
+                } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
                     // static type so the ctor reads the runtime tag.
                     $out .= $this->emitNode($a);
@@ -260,7 +284,7 @@ trait EmitLlvmObjects
                         $this->lastValueType = 'double';
                     }
                     $out .= $this->coerceToI64();
-                    $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                    $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                     if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
                 }
                 $argList .= ', i64 ' . $this->lastValue;
@@ -330,6 +354,72 @@ trait EmitLlvmObjects
     }
 
     /**
+     * The concrete classes a value of interface/unknown type `$iface` can be at
+     * runtime — the candidates a `clone` has to dispatch over. Structs and
+     * enums are excluded (they carry no rc header and clone as values).
+     *
+     * @return string[]
+     */
+    private function cloneImplementers(string $iface): array
+    {
+        if ($iface === '') { return []; }
+        $out = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($cd->isStruct) { continue; }
+            if ($this->isEnumClass($name) || $this->isClosureClass($name)) { continue; }
+            if ($name === $iface) { continue; }
+            if (!$this->classImplements($name, $iface)) { continue; }
+            $out[] = $name;
+        }
+        return $out;
+    }
+
+    /**
+     * `clone` over an interface-typed receiver: compare the instance's
+     * descriptor word (slot 0) against each candidate's and run that class's
+     * own clone. The default arm keeps the historical pass-through, so an
+     * implementer this module cannot see behaves exactly as it did.
+     *
+     * @param string[] $impls
+     */
+    private function emitCloneDispatch(\Compile\Mir\Clone_ $n, string $src, array $impls): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca i64\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = ptrtoint ptr ' . $src . " to i64\n";
+        $out .= '  store i64 ' . $sp . ', ptr ' . $slot . "\n";
+        $desc = $this->ssa->allocReg();
+        $out .= '  ' . $desc . ' = load i64, ptr ' . $src . "\n";
+        $endL = $this->ssa->allocLabel('clonedyn.end');
+        foreach ($impls as $name) {
+            $cdN = $this->classes[$name];
+            $hit = $this->ssa->allocLabel('clonedyn.hit');
+            $next = $this->ssa->allocLabel('clonedyn.next');
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $desc . ', '
+                  . $this->lib->descSlotValue($cdN) . "\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hit . ', label %' . $next . "\n";
+            $out .= $hit . ":\n";
+            $out .= $this->emitCloneOfClass($n, $cdN, $name, $src);
+            $ci = $this->ssa->allocReg();
+            $out .= '  ' . $ci . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $out .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $next . ":\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load i64, ptr ' . $slot . "\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $res . " to ptr\n";
+        $this->lastValue = $rp;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
      * `clone $obj` — allocate a fresh instance of the same class, shallow-copy
      * every property slot (co-owning rc-managed values: both objects share an
      * object/string/array handle), then call `__clone()` if defined. PHP 8.5
@@ -343,10 +433,32 @@ trait EmitLlvmObjects
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
         if ($cd === null || $cd->isStruct) {
-            // Unknown / value-type class — nothing to deep-manage; pass through.
+            // An INTERFACE-typed receiver has no ClassDef, and passing the
+            // pointer through made `clone` the IDENTITY — the "copy" was the
+            // original, so a write through it hit the shared object. symfony's
+            // SymfonyStyle does `new TrimmedBufferOutput(…, false, clone
+            // $output->getFormatter())` and then `setDecorated(false)` on that
+            // "clone", which switched the REAL console formatter off: the whole
+            // app rendered without colour. Dispatch on the runtime class id and
+            // clone each implementer concretely; an unknown one still passes
+            // through, exactly as before.
+            $impls = $cd === null ? $this->cloneImplementers($cls) : [];
+            if ($impls !== []) { return $out . $this->emitCloneDispatch($n, $src, $impls); }
             $this->lastValue = $src; $this->lastValueType = 'ptr';
             return $out;
         }
+        return $out . $this->emitCloneOfClass($n, $cd, $cls, $src);
+    }
+
+    /**
+     * The clone body for a KNOWN class: fresh instance, shallow-copied slots
+     * (arrays copied by value, other rc handles co-owned), `__clone()`, then the
+     * PHP 8.5 clone-with overrides. Shared by the static path and the
+     * interface dispatch ({@see emitCloneDispatch}).
+     */
+    private function emitCloneOfClass(\Compile\Mir\Clone_ $n, $cd, string $cls, string $src): string
+    {
+        $out = '';
         $size = $cd->instanceSize();
         $new = $this->ssa->allocReg();
         $out .= '  ' . $new . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
@@ -1011,7 +1123,14 @@ trait EmitLlvmObjects
         }
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
-        $out .= $this->unboxCellToType($pt);
+        // A bare `array` hint erased to KIND_UNKNOWN still holds a RAW pointer —
+        // unbox it as an array, or the tag rides into a slot the readers deref.
+        // Same rule as the class-typed store path (see slotIsArrayHinted).
+        $out .= $this->unboxCellToType(
+            (!$pt->isArray() && ($cd->propertyArrayHinted[$prop] ?? false))
+                ? Type::vec(Type::unknown())
+                : $pt,
+        );
         $val = $this->lastValue;
         if ($this->lastValueType === 'double') {
             $bits = $this->ssa->allocReg();
@@ -1191,6 +1310,9 @@ trait EmitLlvmObjects
             $out .= '  ' . $ordR . ' = load i64, ptr ' . $g0 . "\n";
             $ord = $ordR;
         }
+        // The enum tables are emitted under the mangled FQN (EmitLlvmModule);
+        // the key lookup above uses the raw name, the symbol must match emit.
+        $eclsSym = $this->mangle($ecls);
         if ($pa->property === 'value' && $this->edBacking($ed) === 'int') {
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds [' . (string)$n . ' x i64], ptr @'
@@ -1408,18 +1530,20 @@ trait EmitLlvmObjects
             // property-slot analogue of the cell unboxing already done on the
             // `return` path and per-element in emitStoreElementUnified;
             // unboxCellToType no-ops for a non-concrete target.
-            if ($n->value->type->kind === Type::KIND_CELL && $propType !== null) {
-                // A bare `array` hint lowers its element to unknown, so propType
-                // is KIND_UNKNOWN and unboxCellToType would no-op — leaving the
-                // TAGGED word in a slot the rest of the compiler reads as a raw
-                // array pointer (emitClone already treats propertyArrayHinted
-                // that way). var_dump of such a property printed the tagged bits
-                // as an int. Unbox it as the array it is.
-                $arrHinted = $pcls !== '' && isset($this->classes[$pcls])
-                    && ($this->classes[$pcls]->propertyArrayHinted[$n->property] ?? false);
-                $out .= ($arrHinted && $propType->kind === Type::KIND_UNKNOWN)
-                    ? $this->unboxCellToType(Type::vec(Type::unknown()))
-                    : $this->unboxCellToType($propType);
+            if ($n->value->type->kind === Type::KIND_CELL) {
+                if ($this->slotIsArrayHinted($n->object, $n->property, $propType)) {
+                    // A bare `array` hint erases to KIND_UNKNOWN (LowerTypes has no
+                    // branch for it), so unboxCellToType would no-op and the TAGGED
+                    // word would land in a slot every reader treats as a raw
+                    // pointer — `$this->aliases = is_array($a) ? $a : $list;` with
+                    // an `iterable` param stored a cell, and the getter's caller
+                    // inttoptr'd 0xFFF7… straight into the array runtime. Strip to
+                    // the payload, the same repr `clone` already assumes for an
+                    // array-hinted slot.
+                    $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+                } elseif ($propType !== null) {
+                    $out .= $this->unboxCellToType($propType);
+                }
             }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
@@ -1678,8 +1802,7 @@ trait EmitLlvmObjects
     private function emitDynPropDispatch(DynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
     {
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
+        $out = $this->emitDynMemberKey($n->name);
         $keyP = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -1787,6 +1910,25 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * The runtime NAME of a dynamic member (`$o->$m`, `$o->$m()`, `$o->$m = v`)
+     * as a `ptr` fit for strcmp. lastValue ← ptr.
+     *
+     * A name read out of an erased slot — `$cb = [$obj, "hi"]; $m = $cb[1];` —
+     * is a NaN-boxed CELL, and coerceToPtr is a bare inttoptr: strcmp then
+     * dereferenced the tag bits and the program segfaulted. Mask the payload out
+     * whenever the static type is not already a concrete string. Masking is
+     * identity for a raw heap pointer (user-space VAs fit in the payload bits),
+     * so the erased/unknown case is safe from both directions.
+     */
+    private function emitDynMemberKey(Node $name): string
+    {
+        $out = $this->emitNode($name);
+        $out .= $name->type->kind === Type::KIND_STRING
+            ? $this->coerceToPtr() : $this->cellToPtr();
+        return $out;
+    }
+
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
         $recv = $dp->object;
@@ -1801,8 +1943,7 @@ trait EmitLlvmObjects
             return $out;
         }
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($nameNode);
-        $out .= $this->coerceToPtr();
+        $out = $this->emitDynMemberKey($nameNode);
         $keyP = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -1885,8 +2026,7 @@ trait EmitLlvmObjects
     private function emitStoreDynPropDispatch(StoreDynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
     {
         $this->rt->needsStrcmp = true;
-        $out = $this->emitNode($n->name);
-        $out .= $this->coerceToPtr();
+        $out = $this->emitDynMemberKey($n->name);
         $keyP = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -2062,16 +2202,12 @@ trait EmitLlvmObjects
             }
             if ($aa->array->type->kind !== Type::KIND_STRING) {
                 $out = $this->emitNode($aa->array);
-                // A `mixed`/cell base (e.g. a json_decode value) carries the
-                // array pointer NaN-boxed — strip the tag, don't inttoptr the
-                // boxed bits (which faults in __mir_array_isset_*).
-                if ($aa->array->type->kind === Type::KIND_CELL) {
-                    $out .= $this->cellToPtr();
-                } else {
-                    $out .= $this->coerceToPtr();
-                }
+                // A `mixed`/cell base (a json_decode value) — and an ERASED one,
+                // which may hold the very same boxed word — carries the array
+                // pointer NaN-boxed ({@see EmitLlvmArrays::arrayBaseToPtr}).
+                $out .= $this->arrayBaseToPtr($aa->array->type);
                 $arr = $this->lastValue;
-                $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+                $keyIsCell = $this->keyRidesCellChannel($aa->index);
                 $keyIsString = $aa->index->type->kind === Type::KIND_STRING
                     || $aa->index->kind === Node::KIND_STRING_CONST;
                 $out .= $this->emitNode($aa->index);
@@ -2236,12 +2372,26 @@ trait EmitLlvmObjects
                 // Release the held rc value first (drops to rc 0 → __destruct),
                 // THEN zero the slot — a later scope-exit release re-loads 0 and
                 // no-ops, so no double free.
+                //
+                // Only a local that OWNS its value may be released here. The
+                // owned set is the one InsertMemoryOps built — every name it
+                // gave a scope-exit `rc_release` ({@see EmitLlvm::collectRcObjLocals},
+                // which is also what pays the entry retain for a param). A
+                // BORROWED local releases a reference it never took: `$sel =
+                // $bag->one; unset($sel);` ran Node_::__destruct while the bag
+                // still held the object, and `$bag->one->name` then read freed
+                // memory. It stayed hidden because `$c ? $bag->one : …` pays the
+                // conditional contract's +1 — until a compile-time condition
+                // folded the ternary away ({@see LowerFromAst::lowerTernary}) and
+                // left the release with nothing to balance it.
                 $flavor = $this->discardReleaseFlavor($t->type);
                 if (isset($this->locals->globalBacked[$name])) {
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->globalBacked[$name], $flavor); }
                     $out .= '  store i64 0, ptr ' . $this->locals->globalBacked[$name] . "\n";
                 } elseif (isset($this->locals->slots[$name])) {
-                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor); }
+                    if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
+                        $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
+                    }
                     $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
                 }
             }
@@ -2255,9 +2405,9 @@ trait EmitLlvmObjects
                 } elseif ($aa->array->type->kind !== Type::KIND_STRING) {
                     $baseCell = $aa->array->type->kind === Type::KIND_CELL;
                     $out .= $this->emitNode($aa->array);
-                    $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+                    $out .= $this->arrayBaseToPtr($aa->array->type);
                     $arrPtr = $this->lastValue;
-                    $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+                    $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
                         || $aa->index->kind === Node::KIND_STRING_CONST;
                     $out .= $this->emitNode($aa->index);
@@ -2664,6 +2814,7 @@ trait EmitLlvmObjects
         // a by-ref param instead of the dereferenced value.
         $mask = $this->sigs->refParams[$cls . '__' . $n->method] ?? [];
         $ptypes = $this->sigs->paramTypes[$cls . '__' . $n->method] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$cls . '__' . $n->method] ?? [];
         $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
         $ai = 0;
         foreach ($n->args as $a) {
@@ -2697,7 +2848,7 @@ trait EmitLlvmObjects
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
-                $out .= $this->unboxCellArg($a, $ptypes, $ai);
+                $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
             }
@@ -2771,6 +2922,62 @@ trait EmitLlvmObjects
     }
 
     /**
+     * Re-coerce the shared dispatch argument list for ONE arm, and leave the
+     * arm's list in {@see $vdArmList}. Returns the fixup IR to emit inside that
+     * arm's block (empty when the arm already agrees).
+     *
+     * The call site coerces its arguments once, against the FALLBACK's
+     * signature. Candidates reached through an ERASED receiver are matched by
+     * method NAME, so they can be entirely unrelated classes whose parameter
+     * REPRS differ — a raw `string` in one, a `string|int` CELL in another. The
+     * arm that disagrees then reads the other's representation.
+     *
+     * Re-coercion runs from the repr the site ACTUALLY emitted, never from the
+     * fallback's declared type: symfony reaches `InputDefinition::hasArgument`
+     * (`string|int`) through a fallback declaring plain `string`, so boxing
+     * `$c - 1` by the declaration tagged an int -1 as a POINTER and the callee
+     * dereferenced 0xffffffffffff.
+     *
+     * Only the cell-vs-raw axis is fixed here: that is the one that mis-reads a
+     * value outright. An UNKNOWN on either side is left alone — there is nothing
+     * to box by, and guessing is what put a raw pointer in a cell slot before.
+     *
+     * @param array<int, Type> $srcTypes the repr each arg was emitted in
+     * @param array<int, Type> $cTypes   this arm's own signature
+     */
+    private function vdArmArgs(string $argList, array $srcTypes, array $cTypes): string
+    {
+        $this->vdArmList = $argList;
+        if (\count($cTypes) === 0 || \count($srcTypes) === 0) { return ''; }
+        $parts = \explode(', ', $argList);
+        $out = '';
+        $changed = false;
+        $n = \count($parts);
+        $i = 1;                       // index 0 is the implicit `$this`
+        while ($i < $n) {
+            $src = $srcTypes[$i] ?? null;
+            $ct = $cTypes[$i] ?? null;
+            if ($src !== null && $ct !== null
+                && $src->kind !== Type::KIND_UNKNOWN && $ct->kind !== Type::KIND_UNKNOWN
+                && \str_starts_with($parts[$i], 'i64 ')) {
+                $srcCell = $src->kind === Type::KIND_CELL;
+                $ctCell = $ct->kind === Type::KIND_CELL;
+                if ($srcCell !== $ctCell) {
+                    $this->lastValue = \substr($parts[$i], 4);
+                    $this->lastValueType = 'i64';
+                    $out .= $ctCell ? $this->boxToCell($src) : $this->unboxCellToType($ct);
+                    $out .= $this->coerceToI64();
+                    $parts[$i] = 'i64 ' . $this->lastValue;
+                    $changed = true;
+                }
+            }
+            $i = $i + 1;
+        }
+        if ($changed) { $this->vdArmList = \implode(', ', $parts); }
+        return $out;
+    }
+
+    /**
      * Emit a class_id switch for a polymorphic method call. Returns the
      * IR and leaves the i64 result reg in `$this->vdResult` (avoids a
      * `&$out` accumulator — self-host drops by-ref writes). Args are
@@ -2780,7 +2987,7 @@ trait EmitLlvmObjects
      * @param array<string, string> $targets    candidate class → declaring class
      * @param array<string, bool>   $erasedSyms symbol → emitted-as-erased
      */
-    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = []): string
+    private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
         $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
@@ -2799,8 +3006,16 @@ trait EmitLlvmObjects
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseLabel . "\n";
             $r = $this->ssa->allocReg();
             $bodies .= $caseLabel . ":\n";
+            // The shared $argList was coerced ONCE, to the FALLBACK's signature.
+            // Candidates reached through an erased receiver need not agree on it:
+            // symfony's closure sees `Input::getArgument(string)` and
+            // `InputDefinition::getArgument(string|int)` — six raw-string arms and
+            // one CELL arm — so the single `cell_to_strptr` the call site emitted
+            // handed the InputDefinition arm a raw pointer in a cell parameter.
+            // Re-coerce per arm where the repr disagrees.
+            $bodies .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$targets[$c]] ?? []);
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
-                     . '(' . $argList . ")\n";
+                     . '(' . $this->vdArmList . ")\n";
             // Cell-typed result over candidates whose declared returns DISAGREE:
             // box each arm's raw return by its OWN return type so the merged value
             // is a uniform, self-describing cell (a mixed-repr raw merge would read
@@ -2819,8 +3034,11 @@ trait EmitLlvmObjects
         $out .= $switch . $bodies;
         $rd = $this->ssa->allocReg();
         $out .= $defLabel . ":\n";
+        // The default arm is a candidate like any other — it too can declare a
+        // repr the site did not emit.
+        $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$fallback] ?? []);
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
-              . '(' . $argList . ")\n";
+              . '(' . $this->vdArmList . ")\n";
         if ($boxCell) {
             $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
             $rd = $this->lastValue;
@@ -2902,7 +3120,12 @@ trait EmitLlvmObjects
         // current/key/valid/rewind all observe the FIRST element, so they
         // prime a fresh generator (advance to the first yield) — PHP rewinds
         // implicitly on first access. next/send drive an already-primed one.
-        if ($m === 'current') { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 16); return $this->finishI64($out, $this->lastValue); }
+        // `current`@16 holds a tagged cell ({@see EmitLlvmGenerator::emitYield});
+        // every reader unboxes to its own declared type. InferCalls types
+        // current()/send()/throw() as the generator's element, so `$mc->type` IS
+        // that channel — and for a cell/erased one the unbox is a no-op, which
+        // leaves the self-describing cell the runtime classifiers want.
+        if ($m === 'current') { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 16); $out .= $this->unboxCellToType($mc->type); $out .= $this->coerceToI64(); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'key')     { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 24); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
@@ -2919,6 +3142,8 @@ trait EmitLlvmObjects
             }
             $out .= $this->genResumeCall($g);
             $out .= $this->genFieldLoad($g, 16);
+            $out .= $this->unboxCellToType($mc->type);
+            $out .= $this->coerceToI64();
             return $this->finishI64($out, $this->lastValue);
         }
         if ($m === 'throw') {
@@ -2934,6 +3159,8 @@ trait EmitLlvmObjects
             }
             $out .= $this->genResumeCall($g);
             $out .= $this->genFieldLoad($g, 16);
+            $out .= $this->unboxCellToType($mc->type);
+            $out .= $this->coerceToI64();
             return $this->finishI64($out, $this->lastValue);
         }
         if ($m === 'valid') {
@@ -3096,7 +3323,13 @@ trait EmitLlvmObjects
         // A `mixed`/cell receiver carries a NaN-boxed object — strip the tag to
         // the raw object pointer so both the `$this` arg and the class_id
         // virtual dispatch read the object, not the boxed bits (else SIGSEGV).
-        if ($mc->object->type->kind === Type::KIND_CELL) {
+        // UNKNOWN counts: an untyped property (`public $defn;`) is stored boxed
+        // but reads back as unknown, and the class_id load then dereferenced the
+        // OBJECT tag itself. Masking a raw pointer is a no-op — every userspace
+        // address fits in the 48 payload bits, which is why the `$this` slot is
+        // masked unconditionally too.
+        if ($mc->object->type->kind === Type::KIND_CELL
+            || $mc->object->type->kind === Type::KIND_UNKNOWN) {
             $unb = $this->ssa->allocReg();
             $out .= '  ' . $unb . ' = and i64 ' . $thisArg . ", 281474976710655\n";
             $thisArg = $unb;
@@ -3119,6 +3352,21 @@ trait EmitLlvmObjects
                 }
             }
         }
+        // A fully ERASED receiver (`public $defn;` with no declared type) leaves
+        // $static empty, so neither branch above ran and the parameter tables
+        // below were looked up under an empty key: the site coerced its args
+        // against an EMPTY signature and handed a `string|int` CELL param a RAW
+        // int. symfony's ArgvInput reaches InputDefinition::hasArgument that way
+        // and the -1 of `hasArgument($c - 1)` was read as a NaN-boxed pointer.
+        // The class_id switch below already scans every class for the method,
+        // and in the same order — resolve here too, so the ONE coercion the call
+        // site emits speaks the ABI the arms were selected for.
+        if ($static === '' && $fallback === '') {
+            foreach ($this->classes as $cd) {
+                $r = $this->resolveMethodClass($cd->name, $mc->method);
+                if ($r !== '') { $fallback = $r; break; }
+            }
+        }
         // By-ref mask of the resolved callee. A method's param 0 is the
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —
         // forward the slot address rather than the dereferenced value, or a
@@ -3126,6 +3374,15 @@ trait EmitLlvmObjects
         $mask = $this->sigs->refParams[$fallback . '__' . $mc->method] ?? [];
         $ptypes = $this->sigs->paramTypes[$fallback . '__' . $mc->method] ?? [];
         $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$fallback . '__' . $mc->method] ?? [];
+        // The repr each argument is ACTUALLY emitted in, indexed like the
+        // parameter list (0 is `$this`). A virtual-dispatch arm that disagrees
+        // with the fallback's signature has to re-coerce, and it can only do
+        // that from what the site really produced — the fallback's DECLARED
+        // type is a different thing, and reading `$c - 1` as the `string` the
+        // fallback declares is how an int -1 became a pointer. An index left
+        // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
+        $argOutTypes = [];
         $ai = 0;
         foreach ($mc->args as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
@@ -3152,6 +3409,7 @@ trait EmitLlvmObjects
                 $out .= $this->emitNode($a);
                 $out .= $this->boxToCell($a->type);
                 $argList .= ', i64 ' . $this->lastValue;
+                $argOutTypes[$ai + 1] = Type::cell();
             } elseif ($this->cellArrayParamNeedsBoxing($ptypes[$ai + 1] ?? null, $a->type)) {
                 // A concrete-element array (vec[int] …) passed to a cell-element
                 // array param (`mixed[]`): rebuild it with each element boxed,
@@ -3170,8 +3428,13 @@ trait EmitLlvmObjects
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
-                $out .= $this->unboxCellArg($a, $ptypes, $ai + 1);
+                $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                 $argList .= ', i64 ' . $this->lastValue;
+                // unboxCellArg lowers a CELL arg to the param's repr; everything
+                // else crosses in the argument's own.
+                $pt = $ptypes[$ai + 1] ?? null;
+                $argOutTypes[$ai + 1] = ($a->type->kind === Type::KIND_CELL && $pt !== null)
+                    ? $pt : $a->type;
                 if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
             }
             $ai = $ai + 1;
@@ -3216,6 +3479,8 @@ trait EmitLlvmObjects
         // object's runtime class_id selects the right impl.
         if (!$isUnion && !isset($this->classes[$static])) {
             $firstImpl = '';
+            \Compile\Stats::bump('dispatch.iface_sites', 1);
+            \Compile\Stats::bump('dispatch.iface_classes_scanned', \count($this->classes));
             foreach ($this->classes as $cd) {
                 if ($this->resolveMethodClass($cd->name, $mc->method) !== '') {
                     $cands[] = $cd->name;
@@ -3266,8 +3531,10 @@ trait EmitLlvmObjects
             if (!isset($this->sigs->paramTypes[$full])) { continue; }
             $liveCands[] = $c;
             $targets[$c] = $full;
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('dispatch.in_array_probes', \count($distinct)); }
             if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
         }
+        \Compile\Stats::bump('dispatch.arms_emitted', \count($distinct));
         $fallbackFull = $this->lsbTarget($fallback, $mc->method, $static);
         // The static receiver's own method may be abstract (`$this->m()` inside
         // an abstract base) — fall back to a concrete implementation.
@@ -3288,16 +3555,36 @@ trait EmitLlvmObjects
         $boxCell = $n->type->kind === Type::KIND_CELL;
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
+            // Absent-optional-dependency method call: no candidate resolved the
+            // method AND the receiver's static class is genuinely ABSENT (never
+            // compiled — an EventDispatcher / ext type that was not installed). A
+            // real call is php's "undefined method" Error, and every such site is
+            // dead null-guarded integration code. Degrade to null rather than a
+            // direct call to an undefined `@manticore_<empty>__<method>` symbol (a
+            // link error). The `!isset($this->classes[$static])` guard keeps this
+            // OFF known classes — a legit trampoline / cross-module callee whose
+            // sig is not in paramTypes must NOT be nulled (2-gen safety).
+            if ($distinct === [] && !isset($this->sigs->paramTypes[$sym])
+                && ($static === '' || !isset($this->classes[$static]))) {
+                if ($btName !== '') { $out .= $this->btPop(); }
+                $this->lastValue = '0';
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            // The single resolved target need not be the one the arguments were
+            // coerced for either (an erased receiver picks the fallback by
+            // method name, then resolves exactly one live candidate).
+            $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? []);
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
-                  . '(' . $argList . ")\n";
+                  . '(' . $this->vdArmList . ")\n";
             // An erased thunk already returns a cell; boxing it again double-boxes.
             if ($boxCell && !isset($erasedSyms[$sym])) {
                 $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
                 $reg = $this->lastValue;
             }
         } else {
-            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms);
+            $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms, $argOutTypes);
             $reg = $this->vdResult;
         }
         if ($btName !== '') { $out .= $this->btPop(); }
@@ -3508,6 +3795,25 @@ trait EmitLlvmObjects
         }
         $sub = $this->subclassPropHolder($cls, $prop);
         return $sub;
+    }
+
+    /**
+     * Whether the slot behind `$objExpr->$prop` holds a RAW array pointer.
+     *
+     * True for a declared array type AND for a bare `array` hint that erased to
+     * KIND_UNKNOWN — the latter is the case the store path has to know about,
+     * since `unboxCellToType` has nothing to unbox an `unknown` to and would
+     * leave a NaN-tagged word in a slot every reader inttoptr's directly. The
+     * hint is read from the SAME ClassDef the offset and width come from
+     * ({@see slotHolder}), and `emitObjClone` uses the identical predicate to
+     * decide that an array property is copied rather than co-owned.
+     */
+    private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool
+    {
+        if ($propType !== null && $propType->isArray()) { return true; }
+        $cd = $this->slotHolder($objExpr, $prop);
+        if ($cd === null) { return false; }
+        return $cd->propertyArrayHinted[$prop] ?? false;
     }
 
     /**

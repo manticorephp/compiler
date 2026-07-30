@@ -163,3 +163,87 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
         return new ArrayIterator($this->__s);
     }
 }
+
+/**
+ * iterator_to_array — drain a Traversable (or an array) into an array.
+ *
+ * In the PRELUDE, not the stdlib: it consumes an ITERATOR, and a generator /
+ * IteratorAggregate cannot cross the stdlib.o boundary any more than a callback
+ * can.
+ *
+ * ⚠ The Generator case goes through a \Generator-TYPED funnel on purpose.
+ * `foreach` picks its loop shape from the subject's STATIC type
+ * ({@see EmitLlvmControl::emitForeach}), so an erased `mixed` holding a
+ * generator fell through to the ARRAY path — it read a length word off an
+ * object pointer and iterated zero times, silently. Handing the value to a
+ * typed parameter re-types it at the callee, the same trick the guard folder
+ * needed for its AST nodes.
+ *
+ * ⚠ LIMITATION: every non-array argument takes that generator path, because
+ * nothing can tell a Generator from another Traversable at run time — a
+ * Generator is compiler-synthesised state with NO class descriptor, so
+ * `instanceof \Generator` and `get_class($gen)` both answer as if it were not
+ * one (false and ''), even for a concrete generator. A user Iterator /
+ * IteratorAggregate is therefore not supported here yet; giving Generator a
+ * real descriptor is the fix, and it is its own piece of work.
+ */
+function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
+{
+    $out = [];
+    if (\is_array($iterator)) {
+        if ($preserve_keys) { return $iterator; }
+        foreach ($iterator as $v) { $out[] = $v; }
+        return $out;
+    }
+    return __mc_iter_gen_to_array($iterator, $preserve_keys);
+}
+
+/** The generator arm of iterator_to_array, behind a TYPED parameter. */
+function __mc_iter_gen_to_array(\Generator $g, bool $preserve_keys): array
+{
+    // Yielded values are MIXED, so the accumulator must hold cells — left bare
+    // it types itself from the first store and the caller reads raw values back
+    // through a cell-shaped access (denormal floats).
+    /** @var array<int|string,mixed> $out */
+    $out = [];
+    foreach ($g as $k => $v) {
+        if (!$preserve_keys) {
+            $out[] = $v;
+            continue;
+        }
+        // The key is a cell; casting it gives the index store a CONCRETE key
+        // type to pick its layout from, which a bare cell key does not.
+        if (\is_int($k)) {
+            $out[(int)$k] = $v;
+        } else {
+            $out[(string)$k] = $v;
+        }
+    }
+    return $out;
+}
+
+/** Number of elements a Traversable yields. */
+function iterator_count(mixed $iterator): int
+{
+    if (\is_array($iterator)) { return \count($iterator); }
+    return __mc_iter_gen_count($iterator);
+}
+
+/** The generator arm of iterator_count, behind a TYPED parameter. */
+function __mc_iter_gen_count(\Generator $g): int
+{
+    $n = 0;
+    foreach ($g as $v) { $n = $n + 1; }
+    return $n;
+}
+
+/** Call `$callback` once per element for as long as it returns true. */
+function iterator_apply(mixed $iterator, mixed $callback, ?array $args = null): int
+{
+    $n = 0;
+    foreach (\iterator_to_array($iterator) as $v) {
+        $n = $n + 1;
+        if (!$callback()) { break; }
+    }
+    return $n;
+}

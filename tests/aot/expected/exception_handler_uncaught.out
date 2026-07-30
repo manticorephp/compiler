@@ -1,0 +1,3 @@
+before throw
+caught by handler: boom
+shutdown after uncaught

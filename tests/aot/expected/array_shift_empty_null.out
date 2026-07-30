@@ -1,0 +1,10 @@
+shift drained=3
+pop drained=2
+empty drained=0
+NULL
+NULL
+bool(true)
+int(1)
+string(3) "two"
+float(3.5)
+left=1

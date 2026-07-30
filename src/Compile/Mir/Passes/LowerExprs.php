@@ -173,8 +173,9 @@ trait LowerExprs
             }
             // EnumName::Case → ordinal int carrying the enum type. A non-case
             // name (ordinal -1) is an enum CONSTANT — fall through to the
-            // const lookup below.
-            $ecls = \ltrim($saClass, '\\');
+            // const lookup below. Resolve `self`/`static`/`parent` first so a
+            // `self::Case` inside an enum method finds its own case table.
+            $ecls = \ltrim($this->resolveStaticClass($saClass), '\\');
             if (isset($this->enumTable[$ecls])) {
                 $ord = $this->enumTable[$ecls]->ordinalOf($saName);
                 if ($ord >= 0) {
@@ -272,6 +273,36 @@ trait LowerExprs
             if ($fn === 'empty' && \count($expr->args) === 1) {
                 return new Not_($this->lowerExpr($expr->args[0]));
             }
+            // By-ref `sscanf($str, $fmt, $a, $b, …)` — the array-return form
+            // (`$r = sscanf($s, $f)`) is a plain stdlib call; the trailing-lvalue
+            // form assigns each parsed field into a variable and returns the count.
+            // Desugar to: tmp = __mc_sscanf($s, $f); $a = tmp[0]; $b = tmp[1]; …;
+            // count(tmp). (php returns the number of assigned values; a full match
+            // makes that the field count — the partial-match tail is not modelled.)
+            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
+            // `getenv()` with NO argument returns the whole environment as an
+            // assoc array — the same value as `$_ENV`. Reading the superglobal (not
+            // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
+            // builder; a direct call would be tree-shaken (undefined at link). The
+            // single-arg `getenv($name)` stays the codegen builtin.
+            if ($fnBare === 'getenv' && \count($expr->args) === 0) {
+                return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
+            }
+            if ($fnBare === 'sscanf' && \count($expr->args) > 2) {
+                $s = $this->lowerExpr($expr->args[0]);
+                $fmt = $this->lowerExpr($expr->args[1]);
+                $tmp = '__sscanf_' . (string)$this->destrCounter;
+                $this->destrCounter = $this->destrCounter + 1;
+                $vecT = Type::vec(Type::cell());
+                $stmts = [new StoreLocal($tmp, new Call('__mc_sscanf', [$s, $fmt], $vecT), $vecT)];
+                $n = \count($expr->args);
+                for ($i = 2; $i < $n; $i = $i + 1) {
+                    $val = new ArrayAccess_(new LoadLocal($tmp, $vecT), new IntConst($i - 2, Type::int_()), Type::cell());
+                    $stmts[] = $this->storeToTarget($expr->args[$i], $val);
+                }
+                $stmts[] = new Call('count', [new LoadLocal($tmp, $vecT)], Type::int_());
+                return new Block($stmts, Type::int_());
+            }
             // `compact('a', 'b', ...)` with STRING-LITERAL names → an assoc array
             // built from the named locals (`['a' => $a, 'b' => $b]`). PHP resolves
             // the names from the runtime symbol table; AOT has no runtime name→slot
@@ -367,21 +398,69 @@ trait LowerExprs
                 }
                 return new NullConst(Type::null_());
             }
+            // `func_num_args()` / `func_get_arg($k)` — resolved against the
+            // enclosing function's DECLARED parameters.
+            //
+            // Zend counts what the caller actually PASSED, which a compiled
+            // binary cannot know: an omitted optional arrives already filled
+            // from its default, indistinguishable from one passed explicitly.
+            // Answering with the declared count reads every call as "all
+            // arguments given". That is the useful direction — symfony's
+            // `if (1 > \func_num_args()) { trigger_deprecation(...) }` guards are
+            // BC shims for callers that omit a new parameter, and this build
+            // always fills it — and it is the only one that keeps
+            // `func_get_arg($k)` a real value rather than a stub.
+            // Matched on the BARE name: a namespaced file qualifies an
+            // unqualified call, so `func_get_arg(` inside
+            // `namespace Symfony\…;` arrives as `Symfony\…\func_get_arg`.
+            $fnBarePos = \strrpos($fn, '\\');
+            $fnBare = $fnBarePos === false ? $fn : \substr($fn, $fnBarePos + 1);
+            if ($fnBare === 'func_num_args' && \count($expr->args) === 0) {
+                return new IntConst(\count($this->currentLowerParams), Type::int_());
+            }
+            if ($fnBare === 'func_get_arg' && \count($expr->args) === 1
+                && $expr->args[0]->kind === 'IntLiteral') {
+                $idx = (int)$expr->args[0]->value;
+                if ($idx >= 0 && $idx < \count($this->currentLowerParams)) {
+                    return new LoadLocal($this->currentLowerParams[$idx], Type::unknown());
+                }
+                // Out of range: php throws ArgumentCountError. Nothing here can
+                // hold that value, so hand back null rather than a wild read.
+                return new NullConst(Type::null_());
+            }
+            // `trigger_error($msg[, $level])` → `__mc_trigger_error($msg,
+            // $level, <file>, <line>, <silenced>)`. A prelude function cannot
+            // see its caller's position, and php's diagnostic names the CALL
+            // SITE, so the file and line are threaded in from the span here.
+            // The last argument is 1 when the call was written `@trigger_error`
+            // ({@see lowerUnary}) — the one thing `@` has to mean now that a
+            // diagnostic can actually be printed.
+            if ($fnBare === 'trigger_error' && \count($expr->args) >= 1
+                && \count($expr->args) <= 2) {
+                $msg = $this->lowerExpr($expr->args[0]);
+                $lvl = \count($expr->args) > 1
+                    ? $this->lowerExpr($expr->args[1])
+                    : new IntConst(1024, Type::int_());   // E_USER_NOTICE
+                return new Call('__mc_trigger_error', [
+                    $msg,
+                    $lvl,
+                    new StringConst($this->lowerSourceFile, Type::string_()),
+                    new IntConst($expr->span->line, Type::int_()),
+                    new IntConst($this->silenceDepth > 0 ? 1 : 0, Type::int_()),
+                ], Type::bool_());
+            }
             // `function_exists("Name")` → compile-time 1/0 against the
             // declared functions (incl. FFI externs / use-function
             // aliases). A non-literal arg conservatively folds to false.
+            // Shares functionIsKnown with the statement-position guard fold, so
+            // the two can never disagree — and so a HIDDEN function (a
+            // link-only Windows stub) reads absent in both.
             if ($fn === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 $known = 0;
-                if ($a0->kind === 'StringLiteral') {
-                    $nm = \ltrim($this->stringLitValue($a0), '\\');
-                    $pos = \strrpos($nm, '\\');
-                    $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
-                    if (isset($this->fnDecls[$nm])
-                        || isset($this->fnDecls[$bare])
-                        || (($this->fnAliasByBare[$bare] ?? '') !== '')) {
-                        $known = 1;
-                    }
+                if ($a0->kind === 'StringLiteral'
+                    && $this->functionIsKnown($this->stringLitValue($a0))) {
+                    $known = 1;
                 }
                 return new IntConst($known, Type::bool_());
             }
@@ -393,6 +472,20 @@ trait LowerExprs
                 $vdArgs = [];
                 foreach ($expr->args as $a) { $vdArgs[] = $this->lowerExpr($a); }
                 return new Call('var_dump', $vdArgs, Type::void());
+            }
+            // `fopen('php://stdout', …)` → the same cached \Resource the STDOUT
+            // constant lowers to. It cannot be done in the stdlib's fopen: the
+            // FILE* has to come from the `__mir_std*` BUILTIN emitted at the
+            // MENTION, because resolving those platform globals needs host_os(),
+            // and a stdlib function that mentioned them would make the
+            // compiler's own src/ use a stream and kill the Zend cold seed (see
+            // LowerPrelude's STDIN/STDOUT/STDERR). Doing it here keeps that
+            // invariant and still answers the literal every console app opens
+            // with — symfony's ConsoleOutput is fopen('php://stdout', 'w').
+            if ($fn === 'fopen' && \count($expr->args) >= 1
+                && $expr->args[0]->kind === 'StringLiteral') {
+                $stdRes = $this->stdStreamResource($this->stringLitValue($expr->args[0]));
+                if ($stdRes !== null) { return $stdRes; }
             }
             // First-class callable: `foo(...)` → a closure wrapping foo.
             if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {

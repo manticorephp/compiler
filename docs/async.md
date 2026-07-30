@@ -326,9 +326,20 @@ process, so a program cannot end up holding a mix of guarded and unguarded stack
 
 Beyond the stack, a task's other cost is its **arena**: every fiber allocates on its
 own, and its first chunk is 4 KiB, doubling to a 64 KiB ceiling as the task actually
-allocates. A task that never allocates holds ~25 KiB; one that does holds ~31 KiB
-(macOS arm64, 1 MiB stacks, 10 000 and 20 000 concurrent tasks). A flat 64 KiB
-minimum chunk used to make that second number ~42 KiB.
+allocates. How much that saves depends entirely on the host allocator, so both were
+measured — 1 MiB stacks, 10 000 and 20 000 concurrent tasks parked on a channel with
+a body that allocates:
+
+| | first chunk 64 KiB | first chunk 4 KiB |
+|---|---|---|
+| macOS arm64 | ~42 KiB / task | **~31 KiB / task** |
+| Linux arm64 (glibc) | ~14.4 KiB / task | **~14.2 KiB / task** |
+
+macOS commits far more than a bump allocator writes, so shrinking the request is most
+of the cost; glibc serves the same request from the heap and touches nothing, so a
+chunk nobody writes past the first page costs one page either way. The mapping count
+is identical in every column — arena chunks are `malloc`'d, not `mmap`'d, and do not
+count against `vm.max_map_count`.
 
 ### Bounded concurrency
 

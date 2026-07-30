@@ -37,10 +37,13 @@ function.
   in both tiers — the codegen builtin wins.
 - **Signatures are php-faithful.** `strpos` / `strrpos` return `int|false`, not a
   `-1` sentinel; `preg_match` returns `int|false`. Do not "simplify" a return
-  type to dodge a union.
-- **A variadic cannot cross the `stdlib.o` boundary**, and neither can a callback
-  — that is why `array_map` / `array_filter` / `array_reduce` live in
-  `prelude/array_fns.php` rather than here.
+  type to dodge a union. (They once returned `-1`; code written against that
+  reads `false` as 0 through a `< 0` test and silently takes the found path.)
+- **A variadic cannot cross the `stdlib.o` boundary**, and neither can a callback.
+  The `.sig` carries no variadic-ness, so the callee reads its arguments from the
+  wrong place and returns garbage — `pack` lives in `prelude/binary.php` for that
+  reason, as `array_map` / `array_filter` / `array_reduce` live in
+  `prelude/array_fns.php` for the callback one.
 - An element-**consuming** `array` parameter (one whose values get cast or
   stringified) must be marked `#[\Manticore\Attr\CellArg]`, or a caller passing a
   concrete-element array will have its raw slots decoded as cells. See

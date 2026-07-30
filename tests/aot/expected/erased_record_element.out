@@ -1,0 +1,9 @@
+ <global:_global>
+  help        Display help
+    len=4 upper=HELP same=y
+  list        List commands
+    len=4 upper=LIST same=y
+ <config>
+  config:set  Set a key
+    len=10 upper=CONFIG:SET same=y
+done

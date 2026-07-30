@@ -361,6 +361,71 @@ trait EmitLlvmMemory
         return $out . $this->rcRetainReg($iv, $flavor);
     }
 
+    /**
+     * Co-own an rc value in `$i64reg` that is NOT NaN-boxed — the half
+     * `__mir_cell_retain` cannot do.
+     *
+     * That helper answers on the cell tag and returns immediately for an
+     * untagged word, which is correct for a scalar and wrong for the very
+     * common case of a container riding an ERASED slot: a bare `array` hint
+     * lowers to unknown, so the value is a raw pointer with no tag at all and
+     * the retain silently did nothing. A closure capturing such a param never
+     * co-owned it, so an argument with no other owner — an array LITERAL passed
+     * straight into the call — was freed at the caller's scope exit and the
+     * closure body then read freed memory (symfony's `TableRows` closure over
+     * `buildTableRows`' locals; `count()` on it answered garbage).
+     *
+     * Only a CONTAINER can be identified from a raw pointer: the allocator
+     * stamps a magic at `ptr-8`, and nothing does for a raw string or int
+     * ({@see biIsType} says the same), so those keep today's behaviour. The
+     * pointer is bounded both ends first ({@see plausiblePtrIr}).
+     *
+     * Emit this NEXT TO `__mir_cell_retain`, not instead of it — the two are
+     * disjoint (this one does nothing when the word IS tagged), so there is no
+     * double retain.
+     */
+    private function rawContainerRetainIr(string $v): string
+    {
+        $this->rt->needsRc = true;
+        $rawL = $this->ssa->allocLabel('rcap.raw');
+        $probeL = $this->ssa->allocLabel('rcap.probe');
+        $arrL = $this->ssa->allocLabel('rcap.arr');
+        $objChkL = $this->ssa->allocLabel('rcap.objchk');
+        $objL = $this->ssa->allocLabel('rcap.obj');
+        $endL = $this->ssa->allocLabel('rcap.end');
+        $isBox = $this->ssa->allocReg();
+        $out  = '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $out .= '  br i1 ' . $isBox . ', label %' . $endL . ', label %' . $rawL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($v);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $probeL
+              . ', label %' . $endL . "\n";
+        $out .= $probeL . ":\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $v . " to ptr\n";
+        $tp = $this->ssa->allocReg();
+        $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -8\n";
+        $tw = $this->ssa->allocReg();
+        $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+        $isArr = $this->magicMatchIr($tw, [\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            \Compile\MemoryAbi::ARRAY_TAG_ARENA, \Compile\MemoryAbi::ASSOC_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $out .= '  br i1 ' . $isArr . ', label %' . $arrL . ', label %' . $objChkL . "\n";
+        $out .= $arrL . ":\n";
+        $out .= '  call void @__mir_array_retain(ptr ' . $rp . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $objChkL . ":\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tw . ', '
+              . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $endL . "\n";
+        $out .= $objL . ":\n";
+        $out .= '  call void @__mir_rc_retain(ptr ' . $rp . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        return $out;
+    }
+
     /** Emit a retain of the rc value carried in the i64 register `$i64reg` —
      *  the exact mirror of {@see rcReleaseReg}. */
     private function rcRetainReg(string $i64reg, string $flavor): string

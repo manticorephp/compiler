@@ -15,7 +15,22 @@
  * is heavy, and a program that never calls getTrace() should not carry it.
  */
 
-interface Throwable {}
+/**
+ * php's Throwable DECLARES the accessor set, and code typed against the
+ * interface (`function (\Throwable $e) { $e->getMessage(); }` — every
+ * set_exception_handler) resolves through it. An empty marker made that an
+ * "unknown method" error.
+ */
+interface Throwable
+{
+    public function getMessage(): string;
+    public function getCode(): int;
+    public function getPrevious(): ?Throwable;
+    public function getFile(): string;
+    public function getLine(): int;
+    public function getTrace(): array;
+    public function getTraceAsString(): string;
+}
 
 class Exception implements Throwable
 {
@@ -97,3 +112,19 @@ class InvalidArgumentException extends LogicException {}
 class OutOfRangeException extends LogicException {}
 class TypeError extends Error {}
 class ValueError extends Error {}
+class AssertionError extends Error {}
+
+/**
+ * `assert($cond, $description)` — php CLI ships zend.assertions=1, so the
+ * assertion is EVALUATED and a falsy result throws AssertionError. (The
+ * `zend.assertions=-1` production mode, where the call compiles away entirely,
+ * has no equivalent here: there is no php.ini.) A string description becomes
+ * the message; a Throwable description is thrown as-is, exactly as php does.
+ */
+function assert(mixed $assertion, mixed $description = null): bool
+{
+    if ($assertion) { return true; }
+    if ($description instanceof Throwable) { throw $description; }
+    if (is_string($description) && $description !== '') { throw new AssertionError($description); }
+    throw new AssertionError('assert(false)');
+}

@@ -119,6 +119,14 @@ final class ReflectAnalysis
                 || $fname === 'get_declared_traits') {
                 $this->all = true;
             }
+            // `class_implements($x)` reflects INSIDE the prelude, and prelude
+            // bodies are skipped above (their `__mc_refl_find($name)` would
+            // escape every program to `all`). The user's CALL is the demand: the
+            // answer is the runtime class's interface list, so every class needs
+            // metadata. Without this the call compiled to an empty array.
+            if ($fname === 'class_implements') {
+                $this->all = true;
+            }
             if ($fname === 'class_exists' || $fname === 'interface_exists'
                 || $fname === 'trait_exists' || $fname === 'enum_exists') {
                 if (\count($n->args) >= 1 && !($n->args[0] instanceof \Compile\Mir\StringConst)) {

@@ -410,6 +410,7 @@ trait EmitLlvmModule
             $this->rt->needsStrRc = true;
         }
         $out .= $this->profileRuntime();
+        $out .= $this->shutdownRuntime();
         $out .= $this->allocRuntime();
         if ($this->rt->needsFloatStr) {
             $out .= $this->floatToStrImpl('@__mir_float_to_str', '@__mir_str_alloc');
@@ -628,6 +629,10 @@ trait EmitLlvmModule
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
         $this->frame->mutatedVecLocals = [];
+        $this->arrayHintedParams = [];
+        foreach ($fn->params as $ahp) {
+            if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
+        }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
@@ -647,6 +652,7 @@ trait EmitLlvmModule
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
         $this->frame->isClosure = false;
+        $this->frame->isMain = false;
         $this->frame->isTrampoline = \Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name);
 
         $isMain = $fn->name === '__main';
@@ -757,6 +763,30 @@ trait EmitLlvmModule
                 $this->locals->slots[$p->name] = $slot;
                 $body .= '  ' . $slot . " = alloca i64\n";
                 $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
+                // A by-value array-hinted slot is read as a RAW buffer pointer
+                // throughout the body, so strip a NaN tag on entry. The call
+                // sites try to do this (`unboxCellArg` + the array-hint mask),
+                // but they can only act on what the ARGUMENT's static type says,
+                // and an erased container hands back a boxed cell whose node is
+                // typed as a plain array: symfony's
+                // `array_filter($namespace['commands'], …)` reached
+                // `__mir_array_live_len` with a tagged word and the release then
+                // read `ptr-8` of it. Masking here is unconditional and free —
+                // every userspace address fits the 48 payload bits, so it is the
+                // identity on a value that was already raw. By-ref keeps aliasing
+                // the caller's slot and must not be rewritten.
+                // ⚠ NOT when the param was PROMOTED to a cell. An `array` param
+                // stored into a `mixed` field is deliberately retyped cell so the
+                // call site BOXES the argument (see
+                // tests/aot/cases/array_param_mixed_field.php) — there the tag is
+                // the point, and stripping it hands `var_dump` a raw buffer.
+                if (!$p->byRef && $p->arrayHinted && $p->type->kind !== Type::KIND_CELL) {
+                    $rw = $this->ssa->allocReg();
+                    $body .= '  ' . $rw . ' = load i64, ptr ' . $slot . "\n";
+                    $mk = $this->ssa->allocReg();
+                    $body .= '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n";
+                    $body .= '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
+                }
                 // PHP arrays are values: a by-VALUE array param the body mutates
                 // in place (`$x[] = …` / `$x[$k] = …` / nested `$x[0][] = …`) must
                 // not alias the caller's buffer. Copy it on entry so the mutation
@@ -852,6 +882,23 @@ trait EmitLlvmModule
     }
 
     /** The @__prof array + bump + atexit dump (preamble, profile mode only). */
+    /**
+     * The `atexit` trampoline for register_shutdown_function's queue.
+     *
+     * atexit takes a nullary C function, and the drain itself is PHP
+     * (`__mc_run_shutdown` in prelude/errors.php) because it invokes user
+     * callables. So the trampoline is the one-line bridge between the two —
+     * the same shape `@__manticore_profile_dump` uses.
+     */
+    private function shutdownRuntime(): string
+    {
+        if (!$this->needsErrorHandlers) { return ''; }
+        $out  = "define void @__manticore_shutdown() {\nentry:\n";
+        $out .= "  %r = call i64 @manticore___mc_run_shutdown()\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
     private function profileRuntime(): string
     {
         if (!\Compile\Debug::$profile) { return ''; }
@@ -958,6 +1005,23 @@ trait EmitLlvmModule
         $out .= "  %cn = alloca ptr\n";
         $out .= '  store ptr ' . $this->strSymBytes('@__mir_ucn_def') . ", ptr %cn\n";
         $out .= "  %e = load ptr, ptr @__mir_thrown\n";
+        // A set_exception_handler() gets the Throwable first, exactly as php
+        // does — and when one ran, php prints NOTHING of its own AND EXITS 0
+        // (verified against the oracle: 255 is the status of an exception that
+        // reached nobody). So the handler's return short-circuits the "PHP Fatal
+        // error: Uncaught …" line below. Shutdown functions still run — the exit
+        // is libc's, so the atexit hook fires on this path too.
+        if ($this->needsErrorHandlers) {
+            $out .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
+            $out .= "  %handled = call i64 @manticore___mc_dispatch_uncaught(i64 %eb)\n";
+            $out .= "  %washandled = icmp ne i64 %handled, 0\n";
+            $out .= "  br i1 %washandled, label %uc_handled, label %uc_print\n";
+            $out .= "uc_handled:\n";
+            $out .= "  call void @exit(i32 0)\n";
+            $out .= "  unreachable\n";
+            $out .= "uc_print:\n";
+            $this->rt->needsTagged = true;
+        }
         $out .= "  %z = icmp eq ptr %e, null\n";
         $out .= "  br i1 %z, label %named, label %have\n";
         $out .= "have:\n";
@@ -987,6 +1051,7 @@ trait EmitLlvmModule
     private function emitMain(FunctionDef $fn): string
     {
         $this->rt->needsCliArgv = true;
+        $this->frame->isMain = true;
         $header = "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n";
         if ($this->rt->needsExceptions) {
             // Install the base landing pad: depth 1 reserves slot 0 for this
@@ -1004,6 +1069,15 @@ trait EmitLlvmModule
         }
         if (\Compile\Debug::$profile) {
             $header .= "  call i32 @atexit(ptr @__manticore_profile_dump)\n";
+        }
+        // register_shutdown_function's queue runs from an atexit hook, which is
+        // what makes php's rule ("on a normal return, on exit(), and after an
+        // uncaught exception") true by construction here: `ret i32 0` runs
+        // atexit handlers, biExit calls libc exit(), and the uncaught path ends
+        // in exit(255). One registration covers all three.
+        if ($this->needsErrorHandlers) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";
         }
         // Capture argc/argv into module globals so the FFI-bound
         // manticore_cli_argc/argv (Main.php #[Symbol]) can read them.
@@ -1121,6 +1195,25 @@ trait EmitLlvmModule
     {
         $r = $n;
         $v = $r->value;
+        // In __main (emitted as `i32 @main`): a NULL/bare top-level return is a
+        // whole-program INCLUDE-return — a polyfill bootstrap's `return require …`
+        // parses to `return null`, and require is a no-op — so evaluate nothing and
+        // FALL THROUGH (it must not terminate __main before the entry's own code
+        // runs).
+        //
+        // A VALUE return ENDS the script but is NOT its exit status: php CLI leaves
+        // `$?` at 0 for a top-level `return` (only exit()/die() and an uncaught throw
+        // set it). The value is the INCLUDE-return the entry hands its includer, and
+        // there is none. symfony's own entry idiom is `return $app->run();` with
+        // setAutoExit(false), which php exits 0 from — we reported the command's
+        // status instead. So evaluate the expression (it IS the program: `run()` does
+        // the work) and discard it, then `ret i32 0` like the fall-through.
+        if ($this->frame->isMain) {
+            if ($v === null || $v->kind === Node::KIND_NULL_CONST) { return ''; }
+            $out = $this->emitNode($v);
+            $out .= $this->coerceToI64();
+            return $out . "  ret i32 0\n" . $this->emitDeadLabel();
+        }
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
         // The return value (if any) is stashed in `retval` for getReturn().
         if ($this->gen->inGenerator) {
@@ -1139,27 +1232,42 @@ trait EmitLlvmModule
             $out .= $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
-        // Close the frame arena before every exit, so confined values
-        // are freed on the path actually taken (the plan's trailing
-        // arena_leave only covers fall-through). The return value is
-        // escaping (RcHeap, heap-allocated), never arena, so freeing
-        // the arena here can't touch it.
-        $leave = $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         // Drop every owned RcHeap obj local on this return path, except
         // the one being returned (ownership transfers to the caller). The
         // trailing fall-through release covers paths with no `return`.
-        // The exempt SET drives the cleanup; the single name below is a different
-        // question ("is this a bare passthrough of a borrowed obj local?") and stays
+        //
+        // RELEASES FIRST, arena_leave AFTER — the order the fall-through
+        // cleanup already uses. A local that was arena-allocated still carries
+        // a release here; before the bulk free its header reads as arena and
+        // the release is a no-op, but AFTER the bulk free the header is freed
+        // memory, so the release read garbage and handed libmalloc a pointer it
+        // never allocated ("pointer being freed was not allocated", abort). It
+        // took a function with both an arena-confined string local and an early
+        // `return` — sprintf() with a non-literal format was one.
+        // Drop every owned RcHeap obj local on this return path, except the one
+        // being returned (ownership transfers to the caller). The trailing
+        // fall-through release covers paths with no `return`. The exempt SET
+        // drives the cleanup; `$returnedLocal` answers a different question
+        // ("is this a bare passthrough of a borrowed obj local?") and stays
         // restricted to a direct `return $x;`.
+        $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
+            ? $this->asLoadLocalNode($v)->name : null;
         // A REBUILT return hands back a fresh cell array, not the local — so the
         // "ownership transfers to the caller" exemption does not apply and the
         // local must be dropped like any other. `function mk(): mixed { $v = [];
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
-        $leave .= $this->emitRcReturnCleanup($exempt);
-        $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
-            ? $this->asLoadLocalNode($v)->name : null;
+        $leave = $this->emitRcReturnCleanup($exempt);
+        // Close the frame arena before every exit, so confined values
+        // are freed on the path actually taken (the plan's trailing
+        // arena_leave only covers fall-through). The return value is
+        // escaping (RcHeap, heap-allocated), never arena, so freeing
+        // the arena here can't touch it. The releases above must come FIRST:
+        // after the arena bulk free an arena-confined local's header is freed
+        // memory, and the release then handed libmalloc a pointer it never
+        // allocated.
+        $leave .= $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         if ($v === null) {
             return $this->finishReturn('', $this->implicitReturnValue(), $leave);
         }
@@ -1227,8 +1335,41 @@ trait EmitLlvmModule
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $out .= $this->retainCellPayload($v);
             }
-            $out .= $this->boxToCell($v->type, $v);
+            // An UNKNOWN value may ALREADY be a tagged cell (an element read out
+            // of a bare-`array` slot). boxToCell would int-box it a second time.
+            if ($v->type->kind === Type::KIND_UNKNOWN) {
+                // …and being a cell, the caller's `__mir_cell_drop` of a
+                // discarded result would free a payload this function only
+                // BORROWED. retainCellPayload can't see it (an unknown names no
+                // rc kind), so retain by runtime tag — a no-op for a scalar cell.
+                if ($this->isBorrowedCellReturn($v, $returnedLocal)) {
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                    $out .= $this->coerceToI64();
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                }
+                $out .= $this->boxUnknownIfRaw();
+            } else {
+                // `$v` so a rebuilt concrete-element array releases its source.
+                $out .= $this->boxToCell($v->type, $v);
+            }
         } else {
+            // A BORROWED cell handed back from a `: mixed` fn — `return
+            // self::$stack[$n-1]` off a `/** @var array<int,mixed> */` static
+            // prop. The value is already a cell so the boxing branch above never
+            // ran, and isBorrowedObjReturn names no rc kind for a cell, so
+            // nothing retained it: the caller's `__mir_cell_drop` of a DISCARDED
+            // result then freed an element still in the array (use-after-free on
+            // the next read). Retain by runtime tag — a no-op for a scalar cell.
+            if ($this->frame->returnType !== null
+                && $this->frame->returnType->kind === Type::KIND_CELL
+                && $v->type->kind === Type::KIND_CELL
+                && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= $this->coerceToI64();
+                $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+            }
             // A cell value returned where the declared type is concrete
             // (`return $mixed[$i]` from a `: int` fn) must be unboxed — else the
             // tagged bits flow back as the result (a boxed int read as a raw
@@ -1356,6 +1497,29 @@ trait EmitLlvmModule
     }
 
     /** Whether an obj/vec return value is a borrowed reference (needs +1). */
+    /**
+     * Whether an UNKNOWN-typed value returned as a cell is BORROWED — the same
+     * producer test {@see isBorrowedObjReturn} applies, minus the type test it
+     * cannot make (an `unknown` names no rc kind, so that predicate always said
+     * "not borrowed" and the caller's cell_drop freed a live array element).
+     */
+    private function isBorrowedCellReturn(Node $v, ?string $returnedLocal): bool
+    {
+        $k = $v->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+            || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
+            || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST) {
+            return false; // owned producer (+1 already) or immortal
+        }
+        if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
+            && isset($this->frame->rcObjLocals[$returnedLocal])) {
+            return false; // transfer of an owned local
+        }
+        return true;
+    }
+
     private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
     {
         $t = $this->ownershipReturnType($v);
