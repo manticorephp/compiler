@@ -4,6 +4,7 @@ namespace Compile\Mir\Passes;
 
 use Compile\Mir\AllocationKind;
 use Compile\Mir\Block;
+use Compile\Mir\CondOwn;
 use Compile\Mir\FunctionDef;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\MemoryOp_;
@@ -71,6 +72,14 @@ final class InsertMemoryOps implements Pass
     /** @var array<string, Type> owned RcHeap obj local → its obj type. */
     private array $rcObjType = [];
 
+    /** @var array<string, bool> locals whose only non-owning store is a
+     *  string LITERAL or `null` — neither owns nor borrows. */
+    private array $rcObjNeutral = [];
+
+    /** @var array<string, bool> locals given an owned value by something OTHER
+     *  than a conditional. */
+    private array $rcObjPlainOwner = [];
+
     /** @var array<string, bool> FFI function names (foreign, non-rc return) */
     private array $ffiFns = [];
 
@@ -107,6 +116,8 @@ final class InsertMemoryOps implements Pass
         $this->rcObjBlocked = [];
         $this->rcObjOrder = [];
         $this->rcObjType = [];
+        $this->rcObjNeutral = [];
+        $this->rcObjPlainOwner = [];
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -152,6 +163,25 @@ final class InsertMemoryOps implements Pass
                 $this->rcObjOrder[] = $p->name;
                 $this->rcObjType[$p->name] = Type::string_();
             }
+        }
+
+        // A `$x = null;` / `$x = '';` seed neither owns nor borrows, so it must
+        // not disqualify the local: the slot then holds 0, an immortal literal
+        // (both self-guarded by every release helper) or a genuine +1. Without
+        // this the seed of every accumulator disqualified it — `$out = '';`
+        // ahead of `$out = $c ? $s : ($out . ',' . $s);` left the arm retain the
+        // ownership contract pays for ({@see isOwnedCond}) with nothing to
+        // balance it, i.e. one leaked string per iteration (measured).
+        //
+        // Deliberately narrow: only when EVERY owned store to the name is a
+        // conditional, i.e. exactly the +1 population this contract created. A
+        // name that also takes a plain owned producer keeps the old blanket
+        // block — unblocking those too made `$conds = null; … $conds = [];`
+        // (LowerFromAst::lowerMatch) free a buffer a live MatchArm_ still held,
+        // a SIGBUS in the self-build. Whatever escape that shape relies on is
+        // NOT this epic's, so it is left exactly as it was.
+        foreach ($this->rcObjNeutral as $name => $ignored) {
+            if (isset($this->rcObjPlainOwner[$name])) { $this->rcObjBlocked[$name] = true; }
         }
 
         // Per-local releases for rc-mode confined allocations.
@@ -243,6 +273,19 @@ final class InsertMemoryOps implements Pass
      */
     private function isOwnedObj(Node $value): bool
     {
+        // A conditional (ternary / `?:` / `??` / match) the contract covers is an
+        // owned producer: the emitter gives EVERY arm a +1 of the result type
+        // ({@see EmitLlvmControl::armRetainPostBox}), so the destination local
+        // owns it and must release it — that release is what stops the next
+        // iteration of `$out = $c ? $s : ($out . ',' . $s);` from handing out a
+        // freed block. Tested FIRST: its result may be a UNION (`$c ? new B :
+        // new C`), which the kind gate below rejects, and it carries no
+        // allocation of its own for the allocKind gate further down.
+        //
+        // ⚠ This answer must match {@see EmitLlvm::condOwnsResult} exactly. If
+        // only the emitter says owned, the value leaks; if only this pass does,
+        // the release has no matching retain and the value is double-freed.
+        if ($this->isOwnedCond($value)) { return true; }
         $tk = $value->type->kind;
         // A CELL counts: `f(): Foo|false` boxes a FRESH object into a cell, and
         // the +1 return convention transfers it to us exactly as for a plain
@@ -311,6 +354,52 @@ final class InsertMemoryOps implements Pass
             || ($tk === Type::KIND_ARRAY && $k === Node::KIND_ADD);
     }
 
+    /** A store that neither owns nor borrows: a string LITERAL (immortal, `rc <
+     *  0`, and `__mir_rc_release_str` self-guards it) or `null` (the slot holds
+     *  0, and every release helper null-guards). */
+    private function isRcNeutralStore(Node $value): bool
+    {
+        if ($value->kind === Node::KIND_STRING_CONST) { return true; }
+        return $value->kind === Node::KIND_NULL_CONST
+            || $value->type->kind === Type::KIND_NULL;
+    }
+
+    /** {@see CondOwn} — the shared half of the contract, plus this pass's own
+     *  rc-eligibility guard on the result type. */
+    private function isOwnedCond(Node $value): bool
+    {
+        if (!CondOwn::isConditional($value)) { return false; }
+        if (!$this->condResultIsRc($value->type)) { return false; }
+        return CondOwn::armsCoverable($value);
+    }
+
+    private function condResultIsRc(Type $t): bool
+    {
+        if (CondOwn::shapeIsRc($t)) { return true; }
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) { return $this->objClassIsRc($t->class ?? ''); }
+        if ($k !== Type::KIND_UNION) { return false; }
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return false; }
+        foreach ($atoms as $a) {
+            if ($a->kind !== Type::KIND_OBJ) { return false; }
+            if (!$this->objClassIsRc($a->class ?? '')) { return false; }
+        }
+        return true;
+    }
+
+    /** ⚠ Character-for-character the obj guards of
+     *  {@see EmitLlvm::discardReleaseFlavor} and the union loop of
+     *  {@see EmitLlvm::condFlavor} — the two passes must answer identically. */
+    private function objClassIsRc(string $cls): bool
+    {
+        if ($cls === 'Ffi\\Ptr' || $cls === 'Closure') { return false; }
+        if (\str_starts_with($cls, '__closure_')) { return false; }
+        if ($cls !== '' && isset($this->enums[$cls])) { return false; }
+        if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        return true;
+    }
+
     /**
      * Walk the tree: flag any Arena allocation (drives the frame arena
      * scope) and collect NoRefcount owned locals (drive per-local
@@ -350,11 +439,18 @@ final class InsertMemoryOps implements Pass
             // double-free / over-release a borrow); an owned-obj store
             // (a `new` or an obj-returning call — both yield rc=1)
             // registers it.
-            if (!$this->isOwnedObj($value)) {
+            if ($this->isOwnedObj($value)) {
+                if (!isset($this->rcObjType[$name])) {
+                    $this->rcObjOrder[] = $name;
+                    $this->rcObjType[$name] = $value->type;
+                }
+                if (!CondOwn::isConditional($value)) { $this->rcObjPlainOwner[$name] = true; }
+            } elseif ($this->isRcNeutralStore($value)) {
+                // Decided after the walk — a neutral store only survives when
+                // EVERY owned store to the name is a conditional.
+                $this->rcObjNeutral[$name] = true;
+            } else {
                 $this->rcObjBlocked[$name] = true;
-            } elseif (!isset($this->rcObjType[$name])) {
-                $this->rcObjOrder[] = $name;
-                $this->rcObjType[$name] = $value->type;
             }
             // Aliasing a vec (`$b = $a`) leaves two locals sharing one
             // buffer (no obj-style alias retain for vecs — they COW-copy

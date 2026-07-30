@@ -1,0 +1,17 @@
+0
+inner caught: injected
+100
+0
+inner caught: second
+100
+0
+consumer caught: uncaught inside
+0
+self caught: self 7
+-1
+1
+finally ran
+after finally: through finally
+1
+inner
+2

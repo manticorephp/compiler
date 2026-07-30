@@ -1466,6 +1466,16 @@ final class UnifiedArrayRuntime
         $repr = ($valueFlavor === 'repr');
         $reprBits = $repr ? $bump->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
         $hasCells = $repr ? $bump->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
+        // The ELEMENT HINT is what the slots ACTUALLY hold, stamped by every
+        // builder; the flavor is only what the caller's static type claimed.
+        // They disagree whenever a cell-element array reaches a concrete-element
+        // consumer — `preg_grep($re, array_keys($assoc))`, `new C(array_values(
+        // array_keys($m)))` against a `string[]` param — and the raw walk then
+        // `inttoptr`s a NaN-tagged word past the `> 0xFFFF` guard and faults in
+        // __mir_rc_retain_str. An unstamped array (hint 0) keeps the old path
+        // exactly. Retain and release read the SAME nibble: one side alone is a
+        // leak, the other a double free.
+        $isCellHint = $this->elemHintIsCell($bump, $flags, $valueFlavor);
         $hhead = $fn->block('rt_hhead');
         if ($valueFlavor === '') {
             $bump->brIf($isH, $hhead, $ret);
@@ -1488,7 +1498,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp');
+            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp', $isCellHint);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         }
@@ -1514,7 +1524,7 @@ final class UnifiedArrayRuntime
         } else {
             if ($valueFlavor !== '') {
                 $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth');
+                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth', $isCellHint);
             }
             $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hval->br($hhead);
@@ -1618,14 +1628,51 @@ final class UnifiedArrayRuntime
         $done->retVoid();
     }
 
-    /** Drop one rc value `v` (i64) as obj / str / cell. No-op for ''. */
-    private function emitDropValue(Block $b, Value $v, string $flavor): void
+    /**
+     * "Do these slots hold BOXED CELLS?" — read from the array's own element-hint
+     * nibble (`ARRAY_ELEM_HINT_*` at flags bits 4-6, stamped by every literal,
+     * element store and native builder). Null for the flavors that already ask
+     * the array itself ('repr'), have nothing to drop ('') or are already
+     * self-describing ('cell') — only the CONCRETE pointer flavors can be lied
+     * to by a static type.
+     */
+    private function elemHintIsCell(Block $b, Value $flags, string $valueFlavor): ?Value
     {
-        if ($flavor === '') { return; }
-        if ($flavor === 'cell') { $b->call('__mir_cell_drop', Type::void(), [$v]); return; }
+        if ($valueFlavor !== 'str' && $valueFlavor !== 'obj') { return null; }
+        $hint = $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        return $b->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+    }
+
+    /**
+     * Drop one rc value `v` (i64) as obj / str / cell. No-op for ''.
+     *
+     * `$isCell` (an i1, or null) is the array's ELEMENT-HINT answer to "are these
+     * slots boxed cells?" — the runtime truth, which outranks the caller's
+     * compile-time flavor. A `string[]` param is routinely handed a `vec[cell]`
+     * (`array_values(array_keys($assoc))`), and the static flavor then walked
+     * tagged words as raw `char*`. Returns the continuation block.
+     */
+    private function emitDropValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $isCell = null): Block
+    {
+        if ($flavor === '') { return $b; }
+        if ($flavor === 'cell') { $b->call('__mir_cell_drop', Type::void(), [$v]); return $b; }
+        if ($isCell !== null) {
+            $cellB = $fn->block('dv_cell_' . $tag);
+            $rawB  = $fn->block('dv_raw_' . $tag);
+            $join  = $fn->block('dv_join_' . $tag);
+            $b->brIf($isCell, $cellB, $rawB);
+            $cellB->call('__mir_cell_drop', Type::void(), [$v]);
+            $cellB->br($join);
+            $b = $rawB;
+        } else {
+            $join = null;
+        }
         $p = $b->inttoptr($v, Type::ptr());
-        $fn = $flavor === 'str' ? '__mir_rc_release_str' : '__mir_rc_release';
-        $b->call($fn, Type::void(), [$p]);
+        $name = $flavor === 'str' ? '__mir_rc_release_str' : '__mir_rc_release';
+        $b->call($name, Type::void(), [$p]);
+        if ($join === null) { return $b; }
+        $b->br($join);
+        return $join;
     }
 
     /**
@@ -1639,10 +1686,21 @@ final class UnifiedArrayRuntime
      * release side has always had the same exposure and simply never
      * dereferenced first; the retain does, so it must guard.
      */
-    private function emitRetainValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag): Block
+    private function emitRetainValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $isCell = null): Block
     {
         if ($flavor === '') { return $b; }
         if ($flavor === 'cell') { $b->call('__mir_cell_retain', Type::void(), [$v]); return $b; }
+        $join = null;
+        if ($isCell !== null) {
+            // Runtime shape beats the static flavor — see {@see emitDropValue}.
+            $cellB = $fn->block('rv_cell_' . $tag);
+            $rawB  = $fn->block('rv_raw_' . $tag);
+            $join  = $fn->block('rv_join_' . $tag);
+            $b->brIf($isCell, $cellB, $rawB);
+            $cellB->call('__mir_cell_retain', Type::void(), [$v]);
+            $cellB->br($join);
+            $b = $rawB;
+        }
         $fnName = $flavor === 'str' ? '__mir_rc_retain_str' : '__mir_rc_retain';
         $doit = $fn->block('rv_do_' . $tag);
         $skip = $fn->block('rv_skip_' . $tag);
@@ -1650,7 +1708,9 @@ final class UnifiedArrayRuntime
         $p = $doit->inttoptr($v, Type::ptr());
         $doit->call($fnName, Type::void(), [$p]);
         $doit->br($skip);
-        return $skip;
+        if ($join === null) { return $skip; }
+        $skip->br($join);
+        return $join;
     }
 
     /**
@@ -1834,6 +1894,9 @@ final class UnifiedArrayRuntime
         $repr = ($valueFlavor === 'repr');
         $reprBits = $repr ? $free->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
         $hasCells = $repr ? $free->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
+        // The runtime element hint outranks the static flavor — the mirror of
+        // the retain side, and it MUST stay the mirror.
+        $isCellHint = $this->elemHintIsCell($free, $flags, $valueFlavor);
 
         $hhead = $fn->block('hhead');
         if ($valueFlavor === '') {
@@ -1861,7 +1924,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $freeb, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $this->emitDropValue($pbody, $pv, $valueFlavor);
+            $pbody = $this->emitDropValue($fn, $pbody, $pv, $valueFlavor, 'dp', $isCellHint);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         }
@@ -1895,7 +1958,7 @@ final class UnifiedArrayRuntime
         } else {
             if ($valueFlavor !== '') {
                 $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-                $this->emitDropValue($hval, $vv, $valueFlavor);
+                $hval = $this->emitDropValue($fn, $hval, $vv, $valueFlavor, 'dh', $isCellHint);
             }
             $hval->br($hadv);
         }
@@ -2252,7 +2315,17 @@ final class UnifiedArrayRuntime
 
         // PACKED
         $len = $packed->load(Type::i64(), $arr);
-        $packed->brIf($packed->icmp('slt', $idx, $len), $inb, $atlen);
+        // BOTH ends: a NEGATIVE index is a legal PHP key (`$a[-3] = x`), and a
+        // bare `idx < len` is true for it — packedSlot would then store BEFORE
+        // the buffer, over the header (len/cap/flags), and count() read garbage.
+        // The read/isset/unset paths already test both ends; this one did not.
+        // Out of range (either way) falls through to at_len → sparse → promote,
+        // and the hashed path keys a negative index like any other int.
+        $inRange = $packed->and_(
+            $packed->icmp('sge', $idx, Value::int(Type::i64(), 0)),
+            $packed->icmp('slt', $idx, $len),
+        );
+        $packed->brIf($inRange, $inb, $atlen);
         $inb->store($val, $this->packedSlot($inb, $arr, $idx));
         $inb->ret($arr);
         // idx >= len: append iff idx == len, else sparse-promote

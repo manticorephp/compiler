@@ -352,9 +352,26 @@ final class LowerFromAst implements Pass
     public bool $includeVarDump = false;
     /** `__mir_var_dump` prelude source, read by Main from `prelude/var_dump.php`. */
     public string $varDumpSrc = '';
+    /** var_export() — DEMAND-GATED on `var_export(`. Pulls in the recursive
+     *  walker AND the per-class `__mir_export_object` arms generated below. The
+     *  codegen builtin still formats a statically-typed scalar inline and never
+     *  reaches either. */
+    public bool $includeVarExport = false;
+    /** `__mir_var_export` prelude source, read by Main from `prelude/var_export.php`. */
+    public string $varExportSrc = '';
     public bool $includePrintR = false;
     /** print_r prelude source, read by Main from `prelude/print_r.php`. */
     public string $printRSrc = '';
+    /** serialize() — DEMAND-GATED on `serialize(`. Pulls in the hand-written
+     *  walker AND the per-class `__mc_ser_object` arms generated below. */
+    public bool $includeSerialize = false;
+    /** serialize prelude source, read by Main from `prelude/serialize.php`. */
+    public string $serializeSrc = '';
+    /** unserialize() — DEMAND-GATED on `unserialize(`, SEPARATELY from
+     *  serialize: the per-class rebuild arms cost roughly twice the writer's. */
+    public bool $includeUnserialize = false;
+    /** unserialize prelude source, read by Main from `prelude/unserialize.php`. */
+    public string $unserializeSrc = '';
     /** Inject the built-in SPL ArrayIterator / ArrayObject classes (gated on
      *  the user program referencing them — see Main.php). */
     public bool $includeArrayClasses = false;
@@ -675,6 +692,48 @@ final class LowerFromAst implements Pass
                 $dfn = $this->lowerFunction($dstmt->decl);
                 $dfn->isPrelude = true;
                 $module->addFunction($dfn);
+            }
+        }
+
+        // var_export()'s object arm — same point and pattern as
+        // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
+        // does NOT call that method from var_export, and neither does this.
+        if ($this->includeVarExport) {
+            $exProg = \Parser\Parser::parseSource("<?php\n" . $this->exportObjectSrc());
+            foreach ($exProg->statements as $estmt) {
+                if ($estmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$estmt->decl->name] = $estmt->decl;
+                $efn = $this->lowerFunction($estmt->decl);
+                $efn->isPrelude = true;
+                $module->addFunction($efn);
+            }
+        }
+
+        // serialize()'s object arm — same point and pattern as __mir_dump_object,
+        // and for the same reason: one `instanceof` arm per class, written from
+        // the now-complete class table.
+        if ($this->includeSerialize) {
+            $serProg = \Parser\Parser::parseSource("<?php\n" . $this->serObjectSrc());
+            foreach ($serProg->statements as $sstmt) {
+                if ($sstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$sstmt->decl->name] = $sstmt->decl;
+                $sfn = $this->lowerFunction($sstmt->decl);
+                $sfn->isPrelude = true;
+                $module->addFunction($sfn);
+            }
+        }
+
+        // unserialize()'s object arms — the reader's half of the above: an
+        // allocator that skips __construct, a per-class slot filler, and the
+        // enum spec -> case-singleton map.
+        if ($this->includeUnserialize) {
+            $unProg = \Parser\Parser::parseSource("<?php\n" . $this->unserSrc());
+            foreach ($unProg->statements as $ustmt) {
+                if ($ustmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$ustmt->decl->name] = $ustmt->decl;
+                $ufn = $this->lowerFunction($ustmt->decl);
+                $ufn->isPrelude = true;
+                $module->addFunction($ufn);
             }
         }
 
@@ -2080,6 +2139,13 @@ final class LowerFromAst implements Pass
      * each backed by a module global cell `@<fn>__sl_<name>`. A binding
      * with an initialiser also gets a once-init guard cell so the init
      * runs on the first call only.
+     *
+     * The name is SANITIZED, like a static property's: inside a namespaced
+     * function the cell would otherwise be `@Ns\fn__sl_x`, and a backslash in
+     * an unquoted LLVM identifier is a parse error ("expected '=' in global
+     * variable"). Every static local in this tree happened to sit in a
+     * global-namespace file, so the whole class of function was unbuildable
+     * without anyone finding out.
      */
     private function lowerStaticLocal(\Parser\Ast\StaticLocalStmt $stmt): Node
     {

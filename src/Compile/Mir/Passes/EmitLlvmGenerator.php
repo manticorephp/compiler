@@ -250,6 +250,16 @@ trait EmitLlvmGenerator
         $out .= '  ' . $this->gen->sentPtr . " = getelementptr inbounds i8, ptr %frame, i64 40\n";
         $this->gen->retvalPtr = $this->ssa->allocReg();
         $out .= '  ' . $this->gen->retvalPtr . " = getelementptr inbounds i8, ptr %frame, i64 48\n";
+        // The consumer's jmp depth, captured per INVOCATION in the entry block.
+        // A generator re-arms its trys on resume ({@see rearmGeneratorTrys}) and so
+        // bumps the global depth; it has to put it back on the way out, or the slot
+        // it armed stays live after the suspension and steals the next exception
+        // raised at that depth — including one meant for a DIFFERENT generator.
+        $this->gen->entryDepthPtr = $this->ssa->allocReg();
+        $out .= '  ' . $this->gen->entryDepthPtr . " = alloca i64\n";
+        $ed = $this->ssa->allocReg();
+        $out .= '  ' . $ed . " = load i64, ptr @__mir_jmp_depth\n";
+        $out .= '  store i64 ' . $ed . ', ptr ' . $this->gen->entryDepthPtr . "\n";
         $st = $this->ssa->allocReg();
         $out .= '  ' . $st . ' = load i64, ptr ' . $this->gen->statePtr . "\n";
         $nYields = $this->countYields($fn->body);
@@ -269,8 +279,10 @@ trait EmitLlvmGenerator
         $this->gen->inGenerator = $savedInGen;
         $this->gen->yieldCounter = $savedCounter;
 
-        // Fell off the end → finished.
+        // Fell off the end → finished. The depth goes back here too: a generator
+        // that ran to completion must not leave the consumer's jmp depth raised.
         $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
+        $out .= $this->genRestoreEntryDepth();
         $out .= "  ret i64 0\n}\n\n";
         return $out;
     }
@@ -350,6 +362,16 @@ trait EmitLlvmGenerator
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectGenLocals($c, $locals);
         }
+    }
+
+    /** Put the consumer's jmp depth back before suspending or returning.
+     *  {@see GeneratorContext::$entryDepthPtr} for why it must not be left raised. */
+    private function genRestoreEntryDepth(): string
+    {
+        if ($this->gen->entryDepthPtr === '') { return ''; }
+        $v = $this->ssa->allocReg();
+        return '  ' . $v . ' = load i64, ptr ' . $this->gen->entryDepthPtr . "\n"
+             . '  store i64 ' . $v . ", ptr @__mir_jmp_depth\n";
     }
 
     /**
@@ -441,13 +463,18 @@ trait EmitLlvmGenerator
         $k = $this->gen->yieldCounter + 1;
         $this->gen->yieldCounter = $k;
         $out .= '  store i64 ' . (string)$k . ', ptr ' . $this->gen->statePtr . "\n";
+        $out .= $this->genRestoreEntryDepth();
         $out .= "  ret i64 1\n";
         $out .= 'gen.resume.' . (string)$k . ":\n";
+        // FIRST, before anything can throw: re-arm the enclosing trys in THIS
+        // frame. The setjmp that guarded them belongs to the invocation that
+        // entered the try, and that frame died when this yield returned.
+        // {@see rearmGeneratorTrys}
+        $out .= $this->rearmGeneratorTrys();
         // `$gen->throw($e)` injection: on resume, a pending exception makes the
-        // suspended `yield` expression raise (caught by an enclosing try in the
-        // generator, else propagated to the consumer via the jmp stack). The
-        // longjmp targets depth-1 — the generator's own try setjmp (left at this
-        // depth by the suspend; yield-ret doesn't pop it) or the consumer's.
+        // suspended `yield` expression raise — caught by an enclosing try in the
+        // generator (its landing pad was just re-armed above, so depth-1 is ours
+        // and points at a LIVE frame), else propagated to the consumer.
         if ($this->gen->throwUsed) {
             $gt = $this->ssa->allocReg();
             $out .= '  ' . $gt . " = load ptr, ptr @__mir_gen_throw\n";

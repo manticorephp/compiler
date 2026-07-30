@@ -1827,7 +1827,17 @@ trait InferNodes
             && isset($this->classes[$objType->class])) {
             $cd = $this->classes[$objType->class];
             if (isset($cd->propertyTypes[$node->property])) {
-                $node->type = $cd->propertyTypes[$node->property];
+                $pt = $cd->propertyTypes[$node->property];
+                // A bare `array` hint erases its ELEMENT, so propertyTypes holds
+                // KIND_UNKNOWN — but the slot really carries an array pointer,
+                // which is how emitClone and the store path already treat it.
+                // Reading it as plain unknown made every cell consumer box_int
+                // the pointer: `var_dump($o->items)` printed int(4303224840).
+                if ($pt->kind === Type::KIND_UNKNOWN
+                    && ($cd->propertyArrayHinted[$node->property] ?? false)) {
+                    $pt = Type::vec(Type::unknown());
+                }
+                $node->type = $pt;
             } elseif ($cd->usesBag()) {
                 // Undeclared property on a bag class → tagged cell.
                 $node->type = Type::cell();

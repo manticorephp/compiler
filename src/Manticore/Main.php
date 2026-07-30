@@ -1746,6 +1746,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $asyncSrc = prelude_src_or_empty("async.php");
     // ext/pcntl + posix process control — DEMAND-GATED, braced-namespace tree.
     $pcntlSrc = prelude_src_or_empty("pcntl.php");
+    // serialize / unserialize — DEMAND-GATED, and gated SEPARATELY (two files):
+    // each one generates a per-class arm set from the class table, so a program
+    // that only serializes must not pay for unserialize's rebuild arms.
+    $serializeSrc = prelude_src_or_empty("serialize.php");
+    $unserializeSrc = prelude_src_or_empty("unserialize.php");
+    // var_export's recursive walk — DEMAND-GATED like var_dump, and in the
+    // prelude for the same reason: its object arm is generated per class table,
+    // and the stdlib .o cannot be handed an object.
+    $varExportSrc = prelude_src_or_empty("var_export.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1859,7 +1868,13 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                               'timezone_transitions_get', 'timezone_location_get',
                               'date_parse', 'date_parse_from_format']);
     $useVarDump = $demand->calls('var_dump');
+    $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
+    // Token-based, so the compiler's own `$fn === 'serialize'` string literals
+    // (EmitLlvm::isTagConsumer, CheckTypeDefs::observesObject) demand nothing,
+    // and `unserialize(` does not match `serialize`.
+    $useSerialize = $demand->calls('serialize');
+    $useUnserialize = $demand->calls('unserialize');
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
     // (__mc_server / __mc_env), so they gate it too; the other superglobals seed
     // an empty array literal and need nothing.
@@ -1889,6 +1904,18 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $resourceSrc = prelude_src_or_empty("resource.php");
     $backtraceSrc = prelude_src_or_empty($useBacktrace ? "backtrace.php" : "backtrace_stub.php");
     $varDumpSrc = $useVarDump ? prelude_src_or_empty("var_dump.php") : "";
+    if ($useSerialize && $serializeSrc === "") {
+        dprint("compile failed: prelude: cannot read serialize.php");
+        return null;
+    }
+    if ($useUnserialize && $unserializeSrc === "") {
+        dprint("compile failed: prelude: cannot read unserialize.php");
+        return null;
+    }
+    if ($useVarExport && $varExportSrc === "") {
+        dprint("compile failed: prelude: cannot read var_export.php");
+        return null;
+    }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
@@ -1914,7 +1941,13 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
+        $lower->includeVarExport = $useVarExport;
+        $lower->varExportSrc = $useVarExport ? $varExportSrc : "";
         $lower->includePrintR = $usePrintR;
+        $lower->includeSerialize = $useSerialize;
+        $lower->serializeSrc = $serializeSrc;
+        $lower->includeUnserialize = $useUnserialize;
+        $lower->unserializeSrc = $unserializeSrc;
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeReflection = $useReflection;
         $lower->includeAttributes = $useAttributes;
@@ -2194,6 +2227,7 @@ function analyze_prelude_files(): array {
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
         "datetime.php", "errors.php", "binary.php",
+        "serialize.php", "unserialize.php",
         // \Fiber (fiber.php) and the Io\Poll\* class tree (io_poll.php) are
         // DEMAND-GATED at compile time (Main::lower_module), but the analyzer's
         // undefined-symbol rules run closed-world across the whole source set —

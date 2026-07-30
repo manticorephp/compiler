@@ -2025,12 +2025,24 @@ trait EmitLlvmExpr
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
             $out .= $this->emitNode($nc->left);
-            $out .= $wantCell ? $this->boxToCell($nc->left->type) : $this->coerceToI64();
+            if ($wantCell) {
+                $out .= $this->armRetainPreBox($n, $nc->left);
+                $out .= $this->boxToCell($nc->left->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $out .= $this->armRetainPostBox($n, $nc->left, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
             $out .= $this->emitNode($nc->right);
-            $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+            if ($wantCell) {
+                $out .= $this->armRetainPreBox($n, $nc->right);
+                $out .= $this->boxToCell($nc->right->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $out .= $this->armRetainPostBox($n, $nc->right, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $end . ":\n";
@@ -2042,7 +2054,10 @@ trait EmitLlvmExpr
         }
         $lk = $nc->left->type->kind;
         if ($lk === Type::KIND_NULL) {
-            return $this->emitNode($nc->right);
+            // The left is statically null, so the RIGHT is the only arm that
+            // ever runs — it still owes the +1 the contract promises.
+            $out = $this->emitNode($nc->right);
+            return $out . $this->armRetainLast($n, $nc->right);
         }
         if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
             // A raw int/float/bool is never null, so the left always wins. But if
@@ -2081,15 +2096,24 @@ trait EmitLlvmExpr
         if ($wantCell) {
             $this->lastValue = $lv;
             $this->lastValueType = 'i64';
+            $out .= $this->armRetainPreBox($n, $nc->left);
             $out .= $this->boxToCell($nc->left->type);
+            $out .= $this->armRetainPostBox($n, $nc->left, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
+            $out .= $this->armRetainPostBox($n, $nc->left, $lv);
             $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
         $out .= $this->emitNode($nc->right);
-        $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+        if ($wantCell) {
+            $out .= $this->armRetainPreBox($n, $nc->right);
+            $out .= $this->boxToCell($nc->right->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $out .= $this->armRetainPostBox($n, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
@@ -2160,15 +2184,26 @@ trait EmitLlvmExpr
         $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
+            $this->lastValue = $cur;
+            $this->lastValueType = 'i64';
+            $out .= $this->armRetainPreBox($nc, $leafPa);
             $out .= $this->boxRawValue($cur, $leafType);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
+            // The kept value is a raw property load — always a borrow.
+            $out .= $this->armRetainPostBox($nc, $leafPa, $cur);
             $out .= '  store i64 ' . $cur . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
         $out .= $this->emitNode($nc->right);
-        $out .= $wantCell ? $this->boxToCell($nc->right->type) : $this->coerceToI64();
+        if ($wantCell) {
+            $out .= $this->armRetainPreBox($nc, $nc->right);
+            $out .= $this->boxToCell($nc->right->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $out .= $this->armRetainPostBox($nc, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
@@ -2181,11 +2216,24 @@ trait EmitLlvmExpr
 
     private function emitInstanceof(Instanceof_ $n): string
     {
-        $io = $n;
-        $out = $this->emitNode($io->operand);
+        return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class));
+    }
+
+    /**
+     * `$operand`'s runtime class id ∈ `$ids` → i64 0/1. The engine behind
+     * `instanceof` AND behind {@see EmitLlvmBuiltins::biIsA}'s runtime-SUBJECT
+     * path: neither one can ask the static type what class the value is (an
+     * interface-typed slot has no ClassDef at all, an erased one has no class
+     * name), so both read the descriptor at slot 0 and compare.
+     *
+     * @param int[] $ids the target's is-a id set ({@see instanceofMatchIds}),
+     *                   already narrowed for `is_subclass_of`'s strictness
+     */
+    private function emitClassIdTest(Node $operand, array $ids): string
+    {
+        $out = $this->emitNode($operand);
         $out .= $this->coerceToI64();
         $obj = $this->lastValue;
-        $ids = $this->instanceofMatchIds($io->class);
         if ($ids === []) {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
@@ -2200,13 +2248,13 @@ trait EmitLlvmExpr
         // or a raw object pointer, and the raw fallthrough below inttoptr'd the
         // carrier whatever it was — `$row instanceof TableSeparator` over
         // symfony's rows read a class id out of an ARRAY cell's tag bits.
-        $opk = $io->operand->type->kind;
+        $opk = $operand->type->kind;
         // A statically non-object operand is never an instance, and reading a
         // class id out of it is a wild load: `$s instanceof Sep` over a
         // monomorphised vec[string] element dereferenced the string's own bytes.
         if ($opk === Type::KIND_STRING || $opk === Type::KIND_INT
             || $opk === Type::KIND_FLOAT || $opk === Type::KIND_BOOL
-            || $opk === Type::KIND_NULL || $io->operand->type->isArray()) {
+            || $opk === Type::KIND_NULL || $operand->type->isArray()) {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
             return $out;
@@ -2336,6 +2384,73 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * The dynamic-property bag of an object whose class is only known at
+     * runtime: dispatch on class_id, since every bag class puts its bag after
+     * its OWN declared slots. Classes sharing stdClass's offset need no arm —
+     * they fall into the default. lastValue ← the bag assoc ptr.
+     */
+    private function emitBagOfUnknownClass(string $objPtr): string
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $defOff = $std === null ? 16 : $std->bagOffset();
+        $arms = [];
+        foreach ($this->classes as $cd) {
+            if (!$cd->usesBag()) { continue; }
+            if ($cd->bagOffset() === $defOff) { continue; }
+            $arms[] = $cd;
+        }
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca i64\n";
+        if ($arms === []) {
+            $bg = $this->ssa->allocReg();
+            $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                  . ', i64 ' . (string)$defOff . "\n";
+            $bagI = $this->ssa->allocReg();
+            $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+            $bagP = $this->ssa->allocReg();
+            $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+            $this->lastValue = $bagP;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('bag.end');
+        $def = $this->ssa->allocLabel('bag.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($arms as $cd) {
+            $lbl = $this->ssa->allocLabel('bag.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $g = $this->ssa->allocReg();
+            $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                     . ', i64 ' . (string)$cd->bagOffset() . "\n";
+            $v = $this->ssa->allocReg();
+            $bodies .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
+            $bodies .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        $dg = $this->ssa->allocReg();
+        $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+              . ', i64 ' . (string)$defOff . "\n";
+        $dv = $this->ssa->allocReg();
+        $out .= '  ' . $dv . ' = load i64, ptr ' . $dg . "\n";
+        $out .= '  store i64 ' . $dv . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $ld = $this->ssa->allocReg();
+        $out .= '  ' . $ld . ' = load i64, ptr ' . $res . "\n";
+        $bagP = $this->ssa->allocReg();
+        $out .= '  ' . $bagP . ' = inttoptr i64 ' . $ld . " to ptr\n";
+        $this->lastValue = $bagP;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitCast(Cast $n): string
     {
         $c = $n;
@@ -2443,8 +2558,6 @@ trait EmitLlvmExpr
                 $out .= $this->coerceToI64();
                 $v = $this->lastValue;
                 $this->rt->needsTagged = true;
-                $std = $this->classes['stdClass'] ?? null;
-                $bagOff = $std === null ? 16 : $std->bagOffset();
                 $slot = $this->ssa->allocReg();
                 $out .= '  ' . $slot . " = alloca ptr\n";
                 $out .= $this->cellTagIr($v);
@@ -2483,12 +2596,13 @@ trait EmitLlvmExpr
                 $out .= '  ' . $op . ' = and i64 ' . $v . ", 281474976710655\n";
                 $opp = $this->ssa->allocReg();
                 $out .= '  ' . $opp . ' = inttoptr i64 ' . $op . " to ptr\n";
-                $bg = $this->ssa->allocReg();
-                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $opp . ', i64 ' . (string)$bagOff . "\n";
-                $bagI = $this->ssa->allocReg();
-                $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-                $bagP = $this->ssa->allocReg();
-                $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+                // The bag slot sits AFTER the declared ones, so its offset is the
+                // instance's OWN class's — reading it at stdClass's offset on an
+                // #[AllowDynamicProperties] class that declares a property loaded
+                // that property as an assoc pointer. The class is only known at
+                // runtime here, so switch on the class id.
+                $out .= $this->emitBagOfUnknownClass($opp);
+                $bagP = $this->lastValue;
                 // Borrowed like the array arm above — co-own it.
                 $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
                 $out .= '  store ptr ' . $bagP . ', ptr ' . $slot . "\n";
@@ -2535,26 +2649,49 @@ trait EmitLlvmExpr
                 $this->lastValueType = 'ptr';
                 return $out;
             }
-            // `(array)$obj` → its properties. Only stdClass keeps them in a
-            // dynamic bag; a class with DECLARED properties holds them in slots,
-            // and reading the bag offset there returned garbage. That is exactly
-            // what get_object_vars already walks, so reuse it — for stdClass it
-            // resolves to the same bag.
+            // `(array)$obj` → php's answer: the DECLARED slots plus whatever the
+            // dynamic bag holds. The declared half is exactly what
+            // get_object_vars walks; the bag half needs the CLASS's own offset,
+            // because that slot sits AFTER the declared ones — reading it at
+            // stdClass's offset on an #[AllowDynamicProperties] class that
+            // declares a property loaded that property as an assoc pointer, and
+            // `(array)$loose` SIGSEGV'd on `int $declared`.
+            //
+            // The printers want the bag ALONE (they print the declared slots
+            // themselves) and call {@see EmitLlvmBuiltins::biObjBag} for it.
             if ($ok === Type::KIND_OBJ) {
-                $std = $this->classes['stdClass'] ?? null;
-                $cls = $c->operand->type->class ?? '';
-                if ($cls !== 'stdClass') {
-                    return $this->biGetObjectVars([$c->operand]);
-                }
-                $bagOff = $std === null ? 16 : $std->bagOffset();
                 $out .= $this->coerceToPtr();
+                $objp = $this->lastValue;
+                $cls = $c->operand->type->class ?? '';
+                $cd = $cls !== '' ? ($this->classes[$cls] ?? null) : null;
+                $declared = $cd !== null && $cd->propertyNames !== [];
+                $decl = '';
+                if ($declared) {
+                    $out .= $this->emitDeclaredPropsArray($objp, $cls);
+                    $decl = $this->lastValue;
+                    if (!$cd->usesBag()) {
+                        $this->lastValue = $decl; $this->lastValueType = 'ptr';
+                        return $out;
+                    }
+                }
+                $bagOff = $this->bagOffsetOf($c->operand);
                 $bg = $this->ssa->allocReg();
-                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $this->lastValue . ', i64 ' . (string)$bagOff . "\n";
+                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . (string)$bagOff . "\n";
                 $bagI = $this->ssa->allocReg();
                 $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
                 $bagP = $this->ssa->allocReg();
                 $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-                $this->lastValue = $bagP; $this->lastValueType = 'ptr';
+                if (!$declared) {
+                    $this->lastValue = $bagP; $this->lastValueType = 'ptr';
+                    return $out;
+                }
+                // Declared first, bag second — php's order, and `+` keeps the
+                // left side on a (impossible here) collision. Both halves are
+                // cell-repr, so the union's single repr stamp is exact.
+                $un = $this->ssa->allocReg();
+                $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $decl
+                      . ', ptr ' . $bagP . ")\n";
+                $this->lastValue = $un; $this->lastValueType = 'ptr';
                 return $out;
             }
             $out .= $this->coerceToPtr();

@@ -581,6 +581,11 @@ trait EmitLlvmMemory
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return '';
         }
+        // A normalized conditional already carries a +1 from whichever arm ran
+        // ({@see EmitLlvm::condOwnsResult}); retaining it here would over-count
+        // — that double retain is what made the half-fixed string ternary leak
+        // into every property / array-element / cell store.
+        if ($this->condOwnsResult($valueNode)) { return ''; }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return ''; }
         // An array literal / spread is a fresh +1 that transfers; only
         // borrowed arrays (alias / read) need a co-owner retain.

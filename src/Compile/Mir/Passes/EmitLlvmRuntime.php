@@ -1831,12 +1831,15 @@ trait EmitLlvmRuntime
             // a negative offset counts from the end; an offset past the end
             // misses). The returned position is relative to the ORIGINAL $h.
             // Result is NaN-boxed: hit → int cell, miss → `false` cell.
-            // BINARY-SAFE: both lengths come from the string header (len@-16),
-            // never from a NUL scan. `strstr` measured the NEEDLE as a C string,
-            // so a needle of "\0" was the EMPTY one and matched at every offset:
-            // `substr_count($cell, "\0")` — symfony's Table uses it to correct
-            // multi-byte padding — answered strlen($cell)+1, so every cell's pad
-            // width collapsed and the table rendered unpadded.
+            // BINARY-SAFE, like __mir_strcspn: both lengths come from the string
+            // header (len@-16 via __mir_strlen), and the scan is memchr+memcmp.
+            // strlen+strstr made a NUL-bearing argument unfindable — a haystack
+            // truncated at its first NUL, and a needle CONTAINING one read as
+            // empty. serialize's mangled property keys ("\0*\0prop") are exactly
+            // that, and demangling them silently found nothing — and so is
+            // `substr_count($cell, "\0")`, which symfony's Table uses to correct
+            // multi-byte padding: it answered strlen($cell)+1, every cell's pad
+            // width collapsed, and the table rendered unpadded.
             $out .= "\ndefine i64 @__mir_strpos(ptr %h, ptr %n, i64 %off) {\n";
             $out .= "entry:\n";
             $out .= "  %hlen = call i64 @__mir_strlen(ptr %h)\n";
@@ -1847,56 +1850,44 @@ trait EmitLlvmRuntime
             $out .= "  %neg2 = icmp slt i64 %off1, 0\n";
             $out .= "  %off2 = select i1 %neg2, i64 0, i64 %off1\n";
             $out .= "  %toobig = icmp sgt i64 %off2, %hlen\n";
-            $out .= "  br i1 %toobig, label %miss, label %search\n";
-            $out .= "search:\n";
-            $out .= "  %hstart = getelementptr i8, ptr %h, i64 %off2\n";
-            // php answers the offset itself for an empty needle.
-            $out .= "  %nempty = icmp eq i64 %nlen, 0\n";
-            $out .= "  br i1 %nempty, label %athit, label %scan\n";
-            $out .= "athit:\n";
+            $out .= "  br i1 %toobig, label %miss, label %chk0\n";
+            // php 8: an EMPTY needle matches at the offset itself.
+            $out .= "chk0:\n";
+            $out .= "  %isempty = icmp eq i64 %nlen, 0\n";
+            $out .= "  br i1 %isempty, label %hitoff, label %setup\n";
+            $out .= "setup:\n";
+            $out .= "  %last = sub i64 %hlen, %nlen\n";
+            $out .= "  %fits = icmp sle i64 %off2, %last\n";
+            $out .= "  %n0 = load i8, ptr %n\n";
+            $out .= "  %n0i = zext i8 %n0 to i32\n";
+            $out .= "  br i1 %fits, label %loop, label %miss\n";
+            $out .= "loop:\n";
+            $out .= "  %cur = phi i64 [ %off2, %setup ], [ %next, %again ]\n";
+            $out .= "  %win = sub i64 %last, %cur\n";
+            $out .= "  %win1 = add i64 %win, 1\n";
+            $out .= "  %hc = getelementptr i8, ptr %h, i64 %cur\n";
+            $out .= "  %p = call ptr @memchr(ptr %hc, i32 %n0i, i64 %win1)\n";
+            $out .= "  %isnull = icmp eq ptr %p, null\n";
+            $out .= "  br i1 %isnull, label %miss, label %cand\n";
+            $out .= "cand:\n";
+            $out .= "  %hi = ptrtoint ptr %h to i64\n";
+            $out .= "  %pi = ptrtoint ptr %p to i64\n";
+            $out .= "  %idx = sub i64 %pi, %hi\n";
+            $out .= "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nlen)\n";
+            $out .= "  %eq = icmp eq i32 %c, 0\n";
+            $out .= "  br i1 %eq, label %hit, label %again\n";
+            $out .= "again:\n";
+            $out .= "  %next = add i64 %idx, 1\n";
+            $out .= "  %more = icmp sle i64 %next, %last\n";
+            $out .= "  br i1 %more, label %loop, label %miss\n";
+            $out .= "hit:\n";
+            $out .= "  %dm = and i64 %idx, 281474976710655\n";
+            $out .= "  %db = or i64 %dm, -4222124650659840\n";
+            $out .= "  ret i64 %db\n";
+            $out .= "hitoff:\n";
             $out .= "  %om = and i64 %off2, 281474976710655\n";
             $out .= "  %ob = or i64 %om, -4222124650659840\n";
             $out .= "  ret i64 %ob\n";
-            $out .= "scan:\n";
-            $out .= "  %n0 = load i8, ptr %n\n";
-            $out .= "  %n0i = zext i8 %n0 to i32\n";
-            $out .= "  %span0 = sub i64 %hlen, %off2\n";
-            $out .= "  %curp = alloca ptr\n  store ptr %hstart, ptr %curp\n";
-            $out .= "  %spanp = alloca i64\n  store i64 %span0, ptr %spanp\n";
-            $out .= "  br label %loop\n";
-            $out .= "loop:\n";
-            $out .= "  %cur = load ptr, ptr %curp\n";
-            $out .= "  %span = load i64, ptr %spanp\n";
-            $out .= "  %room = sub i64 %span, %nlen\n";
-            $out .= "  %short = icmp slt i64 %room, 0\n";
-            $out .= "  br i1 %short, label %miss, label %find\n";
-            $out .= "find:\n";
-            $out .= "  %win = add i64 %room, 1\n";
-            $out .= "  %c = call ptr @memchr(ptr %cur, i32 %n0i, i64 %win)\n";
-            $out .= "  %cnull = icmp eq ptr %c, null\n";
-            $out .= "  br i1 %cnull, label %miss, label %cmp\n";
-            $out .= "cmp:\n";
-            $out .= "  %eq = call i32 @memcmp(ptr %c, ptr %n, i64 %nlen)\n";
-            $out .= "  %iseq = icmp eq i32 %eq, 0\n";
-            $out .= "  br i1 %iseq, label %hit, label %advance\n";
-            $out .= "advance:\n";
-            $out .= "  %next = getelementptr i8, ptr %c, i64 1\n";
-            $out .= "  store ptr %next, ptr %curp\n";
-            $out .= "  %ci = ptrtoint ptr %c to i64\n";
-            $out .= "  %curi = ptrtoint ptr %cur to i64\n";
-            $out .= "  %stepped = sub i64 %ci, %curi\n";
-            $out .= "  %step1 = add i64 %stepped, 1\n";
-            $out .= "  %nspan = sub i64 %span, %step1\n";
-            $out .= "  store i64 %nspan, ptr %spanp\n";
-            $out .= "  br label %loop\n";
-            $out .= "hit:\n";
-            $out .= "  %p = getelementptr i8, ptr %c, i64 0\n";
-            $out .= "  %hi = ptrtoint ptr %h to i64\n";
-            $out .= "  %pi = ptrtoint ptr %p to i64\n";
-            $out .= "  %d = sub i64 %pi, %hi\n";
-            $out .= "  %dm = and i64 %d, 281474976710655\n";
-            $out .= "  %db = or i64 %dm, -4222124650659840\n";
-            $out .= "  ret i64 %db\n";
             $out .= "miss:\n";
             $out .= "  ret i64 -3940649673949184\n";
             $out .= "}\n";
@@ -2006,6 +1997,42 @@ trait EmitLlvmRuntime
             $out .= "  ret i64 %si\n";
             $out .= "none:\n";
             $out .= "  ret i64 %lim\n";
+            $out .= "}\n";
+        }
+        if ($this->rt->needsElemUntag) {
+            // `__mir_elem_untag(arr, v) -> i64` — the element `v`, read out of
+            // `arr` at a site whose STATIC element type is pointer-shaped
+            // (string / object), normalised to a raw pointer.
+            //
+            // The static type is a claim; the array's ELEMENT-HINT nibble is the
+            // fact. They part company whenever a cell-element array reaches a
+            // concrete-element consumer: symfony's `$this->headers[0]` is a
+            // declared `string[]` whose rows arrive as boxed cells, and the raw
+            // read handed the NaN tag to a string slot.
+            //
+            // This is the SOUND half of the withdrawn element decode: it only
+            // ever turns a cell INTO its raw payload, which is what the static
+            // type already promised the consumer. The unsound direction — a raw
+            // element handed on as a tagged cell — is not done here, and an
+            // UNKNOWN-typed result never reaches this helper.
+            $out .= "\ndefine i64 @__mir_elem_untag(ptr %arr, i64 %v) {\n";
+            $out .= "entry:\n";
+            // An auto-vivifying base is genuinely null (`$x['a']['b'] = 1`), so
+            // the flags load needs the guard.
+            $out .= "  %isnull = icmp eq ptr %arr, null\n";
+            $out .= "  br i1 %isnull, label %asis, label %chk\n";
+            $out .= "asis:\n  ret i64 %v\n";
+            $out .= "chk:\n";
+            $out .= "  %fp = getelementptr inbounds i8, ptr %arr, i64 "
+                  . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+            $out .= "  %fl = load i64, ptr %fp\n";
+            $out .= "  %hn = and i64 %fl, "
+                  . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+            $out .= "  %isc = icmp eq i64 %hn, "
+                  . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+            $out .= "  %pay = and i64 %v, 281474976710655\n";
+            $out .= "  %r = select i1 %isc, i64 %pay, i64 %v\n";
+            $out .= "  ret i64 %r\n";
             $out .= "}\n";
         }
         if ($this->rt->needsStrExplode) {

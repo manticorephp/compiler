@@ -495,7 +495,14 @@ trait LowerClasses
         }
         $this->currentLowerClass = $prevLowerClass;
         $isStruct = $this->hasStructAttr($decl->attributes);
-        $hasBag = $this->hasDynamicPropsAttr($decl->attributes);
+        // #[AllowDynamicProperties] is INHERITED (php 8.2+). Without this a
+        // subclass of a bag class had no bag slot, so an undeclared store on it
+        // fell through to the fixed-slot path and WROTE A DECLARED SLOT —
+        // `$d->added = true` landed in `int $declared`, and the bag was missing
+        // from var_dump / serialize / var_export.
+        $hasBag = $this->hasDynamicPropsAttr($decl->attributes)
+            || ($parent !== '' && isset($this->classTable[$parent])
+                && $this->classTable[$parent]->usesBag());
         $this->currentLowerClass = $savedLowerClass;
         $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
@@ -777,6 +784,33 @@ trait LowerClasses
                     [new Return_(new LoadLocal('raw', $carrier->stripTypeDef()), $carrier)],
                     Type::void(),
                 ),
+            ));
+        }
+        // php's `unserialize` creates the object with the class's DEFAULT
+        // property table and then overwrites from the stream — it skips the
+        // constructor BODY, not the defaults. So a property the stream omits
+        // keeps its declared default (`public int $ignored = 5` reads 5, not 0).
+        //
+        // Here the defaults are ordinary stores, prepended to the ctor (or the
+        // whole synthesised one), so a bare NewObj cannot run them without also
+        // running the user's body. Emit them ONCE MORE as their own function,
+        // which `__mc_new_uninit` calls. The nodes are cloned: the originals go
+        // on being the ctor's prologue, and a shared subtree would be lowered
+        // twice under two frames. Gated on the program actually unserialising —
+        // nothing else needs the defaults without the ctor.
+        if ($this->includeUnserialize && $defaultStores !== []) {
+            $copies = [];
+            foreach ($defaultStores as $ds) { $copies[] = \Compile\Mir\NodeClone::node($ds); }
+            $module->addFunction(new FunctionDef(
+                name: $decl->name . '____mc_defaults',
+                params: [new Param(
+                    name: 'this',
+                    type: Type::obj($decl->name),
+                    byRef: false,
+                    variadic: false,
+                )],
+                returnType: Type::void(),
+                body: new Block($copies, Type::void()),
             ));
         }
         // No user ctor but defaulted properties → the defaults still have to run

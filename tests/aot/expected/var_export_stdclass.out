@@ -1,0 +1,31 @@
+(object) array(
+   'k' => 1,
+   'j' => 's',
+   'nested' => 
+  array (
+    'a' => 1,
+  ),
+)
+(object) array(
+)
+array (
+  0 => 
+  (object) array(
+     'k' => 1,
+     'j' => 's',
+     'nested' => 
+    array (
+      'a' => 1,
+    ),
+  ),
+)
+(object) array(
+   'inner' => 
+  (object) array(
+  ),
+   'n' => NULL,
+)
+\Loose::__set_state(array(
+   'declared' => 7,
+   'extra' => 'dyn',
+))

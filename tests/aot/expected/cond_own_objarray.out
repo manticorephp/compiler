@@ -1,0 +1,33 @@
+have a
+dtor a
+--1--
+prop elem
+bag alive: prop elem
+dtor prop
+dtor elem
+--2--
+BC
+dtor t0
+dtor t1
+dtor t2
+dtor t3
+dtor t4
+dtor t5
+dtor t6
+dtor t7
+a,b,c 3
+dtor t0
+dtor t1
+dtor t2
+dtor t3
+dtor t4
+dtor t5
+dtor t6
+dtor t7
+fast 1
+src
+src alive: src
+made
+dtor made
+dtor src
+--3--

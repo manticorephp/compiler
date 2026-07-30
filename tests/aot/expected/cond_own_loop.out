@@ -1,0 +1,22 @@
+use a0
+after unset: a0
+drop a0
+--
+use b1
+drop b1
+after unset: a1
+drop a1
+--
+use a2
+after unset: a2
+drop a2
+--
+ONE+TWO+THREE
+ONE,TWO,THREE
+tag s0
+src s0
+drop s0
+tag m1
+drop m1
+src s1
+drop s1

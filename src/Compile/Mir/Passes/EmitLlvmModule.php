@@ -1145,6 +1145,12 @@ trait EmitLlvmModule
      * return $d === false ? 'F' : $d; }` handed back the bytes of an unrelated
      * allocation), and it is the canonical `string|false` idiom, so it is everywhere.
      *
+     * Now only the conditionals OUTSIDE the ownership contract ({@see CondOwn} —
+     * an erased arm) need the exemption; a covered one retained its arm, so the
+     * local's release is correct and keeping the name here would leak. `match` is
+     * listed too: it was missing entirely, so `return match($k) { 'a' => $s, … };`
+     * freed $s on the way out.
+     *
      * Conservative BY DESIGN: a name kept here leaks at worst, a name missed corrupts.
      * @return array<string,bool>
      */
@@ -1154,20 +1160,15 @@ trait EmitLlvmModule
         if ($v->kind === Node::KIND_LOAD_LOCAL) {
             return [$this->asLoadLocalNode($v)->name => true];
         }
-        // Both arms of a ternary (`?:` leaves `then` null — the cond IS that arm, and
-        // it is evaluated into the result, so include it too).
-        if ($v->kind === Node::KIND_TERNARY) {
-            $t = $this->asTernaryNode($v);
-            $out = $this->returnedLocalNames($t->else_);
-            $arm = $t->then === null ? $t->cond : $t->then;
-            foreach ($this->returnedLocalNames($arm) as $k => $ignored) { $out[$k] = true; }
-            return $out;
-        }
-        // `$a ?? $b` yields one of its operands, exactly like a ternary.
-        if ($v->kind === Node::KIND_NULLCOALESCE) {
-            $c = $this->asNullCoalesceNode($v);
-            $out = $this->returnedLocalNames($c->left);
-            foreach ($this->returnedLocalNames($c->right) as $k => $ignored) { $out[$k] = true; }
+        // A conditional the ownership contract covers ({@see EmitLlvm::condOwnsResult})
+        // retained its own arm, so the returned value no longer aliases the local's
+        // reference — exempting it here would leak one instead.
+        if (\Compile\Mir\CondOwn::isConditional($v)) {
+            if ($this->condOwnsResult($v)) { return []; }
+            $out = [];
+            foreach (\Compile\Mir\CondOwn::arms($v) as $arm) {
+                foreach ($this->returnedLocalNames($arm) as $k => $ignored) { $out[$k] = true; }
+            }
             return $out;
         }
         return [];
@@ -1175,8 +1176,6 @@ trait EmitLlvmModule
 
     /** Typed reads — a base-`Node` field access resolves by OFFSET under self-host. */
     private function asLoadLocalNode(\Compile\Mir\LoadLocal $n): \Compile\Mir\LoadLocal { return $n; }
-    private function asTernaryNode(\Compile\Mir\Ternary $n): \Compile\Mir\Ternary { return $n; }
-    private function asNullCoalesceNode(\Compile\Mir\NullCoalesce_ $n): \Compile\Mir\NullCoalesce_ { return $n; }
 
     private function emitReturn(Return_ $n): string
     {
@@ -1495,6 +1494,9 @@ trait EmitLlvmModule
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return false; // owned producer — already +1
         }
+        // A normalized conditional is +1 from whichever arm ran; a second retain
+        // here would hand the caller two references and free none.
+        if ($this->condOwnsResult($v)) { return false; }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
         if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
         // A concat is an owned +1; a literal is immortal — neither needs a

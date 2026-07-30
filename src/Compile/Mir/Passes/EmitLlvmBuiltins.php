@@ -69,12 +69,15 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_clock_ns')               { return $this->biClockNs($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
+        if ($name === '__mir_obj_bag')                { return $this->biObjBag($args); }
         if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
         if ($name === '__mir_fiber_jump')             { return $this->biFiberJump($args); }
         if ($name === '__mir_fiber_current')          { return $this->biFiberCurrent($args); }
         if ($name === '__mir_fiber_set_current')      { return $this->biFiberSetCurrent($args); }
         if ($name === '__mir_fiber_stack_alloc')      { return $this->biFiberStackAlloc($args); }
         if ($name === '__mir_fiber_stack_free')       { return $this->biFiberStackFree($args); }
+        if ($name === '__mir_fiber_guard_set')        { return $this->biFiberGuardSet($args); }
+        if ($name === '__mir_fiber_guard_install')    { return $this->biFiberGuardInstall($args); }
         if ($name === '__mir_fiber_ctx_new')          { return $this->biFiberCtxNew($args); }
         if ($name === '__mir_fiber_ctx_save')         { return $this->biFiberCtxSave($args); }
         if ($name === '__mir_fiber_ctx_load')         { return $this->biFiberCtxLoad($args); }
@@ -455,6 +458,37 @@ trait EmitLlvmBuiltins
         return $prev;
     }
 
+    /** True when `$t` is an enum-case type — an OBJ type whose class is an enum,
+     *  and so travels as an ORDINAL, not as an object pointer. */
+    private function isEnumType(Type $t): bool
+    {
+        return $t->kind === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class]);
+    }
+
+    /**
+     * IR loading enum `$cls`'s per-case singleton object for the ordinal in
+     * register `$ord`; the object POINTER register is written to `$ptrReg`.
+     *
+     * The ONE owner of "an enum ordinal becomes an object": `boxToCell` boxes a
+     * scalar enum value with it, and the cell-array rebuild boxes each ELEMENT
+     * with it. The rebuild used to `box_object` the raw word, so an enum case
+     * inside an array reached var_dump as tag-8-payload-0 — it printed NULL and
+     * then dereferenced null.
+     */
+    private function emitEnumSingletonPtr(string $cls, string $ord, string &$ptrReg): string
+    {
+        $tbl = '@' . $this->mangle($cls) . '__cases';
+        $ct = (string)\count($this->enums[$cls]->caseNames);
+        $g = $this->ssa->allocReg();
+        $out = '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
+        $dp = $this->ssa->allocReg();
+        $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+        $ptrReg = $pp;
+        return $out;
+    }
+
     private function boxToCell(Type $t): string
     {
         $this->rt->needsTagged = true;
@@ -509,20 +543,13 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
             return $this->finishI64($out, $r);
         }
-        if ($k === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class])) {
+        if ($this->isEnumType($t)) {
             // An enum case is an ORDINAL — box the per-case SINGLETON (carrying
             // class identity), NOT the raw ordinal (box_object of a tiny int
             // faults every generic object consumer). See emitEnumCellSingletons.
             $out = $this->coerceToI64();
-            $ord = $this->lastValue;
-            $tbl = '@' . $this->mangle($t->class) . '__cases';
-            $ct = (string)\count($this->enums[$t->class]->caseNames);
-            $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr [' . $ct . ' x i64], ptr ' . $tbl . ', i64 0, i64 ' . $ord . "\n";
-            $dp = $this->ssa->allocReg();
-            $out .= '  ' . $dp . ' = load i64, ptr ' . $g . "\n";
-            $pp = $this->ssa->allocReg();
-            $out .= '  ' . $pp . ' = inttoptr i64 ' . $dp . " to ptr\n";
+            $pp = '';
+            $out .= $this->emitEnumSingletonPtr((string)$t->class, $this->lastValue, $pp);
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
             return $this->finishI64($out, $r);
@@ -645,33 +672,46 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $boxed = $this->ssa->allocReg();
         $ek = $elem->kind;
-        // ⚠ OWNERSHIP. The rebuilt array is a CELL array, so whoever owns it
-        // eventually drops it with `__mir_array_release_cell`, which releases
-        // every element payload. The values boxed in below are BORROWED from the
-        // source — boxing does not co-own — so without a retain here the rebuild
-        // is a second dropper of values it never took a reference to. That is a
-        // use-after-free, not a leak: `array_merge([['p','q']], $keep)` boxed the
-        // Sep out of `$keep` into the variadic pack, the pack's release freed it,
-        // and the merged array's copy pointed at freed memory (descriptor 0 →
-        // SIGSEGV in the very next `instanceof`). Only the pointer-carrying kinds
-        // need it; int/float/bool ride inline, and the nested-rebuild arm below
-        // allocates a FRESH inner array it already owns.
+        // ⚠ OWNERSHIP. A pointer-shaped element is boxed BY POINTER into the fresh cell array,
+        // so that array becomes a co-owner and must take a reference — its own
+        // release runs __mir_cell_drop per element. Without it the rebuild
+        // borrowed: `$out = ['iov' => $iovOut]` (a `mixed`-valued literal) boxed
+        // socket_recvmsg's vec[string], the source local's scope-exit release
+        // freed the bytes, and the caller var_dumped `string(0) ""`. It survived
+        // only on the double retain the append site used to pay for a string
+        // ternary. A RECURSIVELY rebuilt nested array is fresh (+1) — not
+        // retained; scalars have nothing to own. `array_merge([['p','q']], $keep)`
+        // is the other witness: the Sep boxed out of `$keep` into the variadic
+        // pack was freed by the pack's release and the merged array's copy
+        // pointed at freed memory (descriptor 0 → SIGSEGV in the next
+        // `instanceof`).
+        $elemRetain = '';
         if ($ek === Type::KIND_STRING) {
+            $elemRetain = $this->discardReleaseFlavor($elem);
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_ptr(ptr ' . $ep . ")\n";
-            $out .= $this->rcRetainReg($ev, 'str');
         } elseif ($ek === Type::KIND_FLOAT) {
             $ed = $this->ssa->allocReg();
             $out .= '  ' . $ed . ' = bitcast i64 ' . $ev . " to double\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+        } elseif ($this->isEnumType($elem)) {
+            // An enum ELEMENT is an ordinal, exactly like a scalar enum value —
+            // resolve the singleton before boxing. `box_object` on the raw word
+            // made an object cell with payload 0: var_dump printed NULL for it
+            // and then dereferenced null.
+            $ep = '';
+            $out .= $this->emitEnumSingletonPtr((string)$elem->class, $ev, $ep);
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_OBJ) {
+            // discardReleaseFlavor answers '' for the header-less classes (a
+            // #[Struct] / closure / enum ordinal / Ffi\Ptr) — never rc-touch those.
+            $elemRetain = $this->discardReleaseFlavor($elem);
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
-            $out .= $this->rcRetainReg($ev, 'obj');
         } elseif ($ek === Type::KIND_ARRAY) {
             $nestElem = $elem->element ?? Type::unknown();
             if ($nestElem->kind === Type::KIND_CELL) {
@@ -679,12 +719,11 @@ trait EmitLlvmBuiltins
                 // cells) — box it as a plain array cell. Rebuilding would re-box
                 // each already-boxed cell (else-branch box_int) → double-box
                 // garbage (a vec of mixed assocs read raw by var_dump/json).
+                // Boxed by pointer ⇒ co-owned, at the depth its drop walks.
+                $elemRetain = $this->discardReleaseFlavor($elem);
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
-                // Borrowed inner array, and the outer drop releases it as a cell —
-                // so co-own it to the same DEPTH the cell release drops.
-                $out .= $this->rcRetainReg($ev, 'veccell');
             } else {
                 // Nested array value → recursively rebuild as a cell-array (see
                 // the vec variant) so its own concrete elements render.
@@ -698,6 +737,7 @@ trait EmitLlvmBuiltins
         } else {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
         }
+        if ($elemRetain !== '') { $out .= $this->rcRetainReg($ev, $elemRetain); }
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
@@ -956,6 +996,40 @@ trait EmitLlvmBuiltins
      *
      * @param Node[] $args
      */
+    /**
+     * `__mir_obj_bag($o): array` — an object's DYNAMIC-property bag alone, at
+     * the offset its own class puts it (a class-id switch, {@see
+     * EmitLlvmExpr::emitBagOfUnknownClass}).
+     *
+     * The printers (`__mir_dump_object` and the serialize / var_export walks
+     * {@see LowerPrelude} generates) print the declared slots themselves and then
+     * append what is left, so they need the bag and NOT php's `(array)` answer —
+     * which is declared AND dynamic, and is what the cast now returns. Reading
+     * the bag through the cast made every one of them print the declared set
+     * twice and drop every dynamic property.
+     *
+     * @param Node[] $args
+     */
+    private function biObjBag(array $args): string
+    {
+        $a = $args[0];
+        $out = $this->emitNode($a);
+        $k = $a->type->kind;
+        $out .= ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN)
+            ? $this->cellToPtr()
+            : $this->coerceToPtr();
+        $out .= $this->emitBagOfUnknownClass($this->lastValue);
+        // A CALL result is owned by convention — the caller's release runs on it.
+        // The bag belongs to the object, so hand back a co-owned reference or the
+        // first `$bag = __mir_obj_bag($v);` frees the object's own properties.
+        $bagP = $this->lastValue;
+        $this->rt->needsRc = true;
+        $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+        $this->lastValue = $bagP;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function biUntagStr(array $args): string
     {
         $out = $this->emitPtrArg($args[0]);
@@ -1858,6 +1932,12 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
             } elseif ($ek === Type::KIND_BOOL) {
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+            } elseif ($this->isEnumType($boxElem)) {
+                // An enum element travels as an ordinal — resolve the singleton
+                // (see emitEnumSingletonPtr) before boxing it as an object.
+                $ep = '';
+                $out .= $this->emitEnumSingletonPtr((string)$boxElem->class, $ev, $ep);
+                $out .= '  ' . $bv . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
             } elseif ($ek === Type::KIND_OBJ) {
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
@@ -2871,6 +2951,10 @@ trait EmitLlvmBuiltins
     private function biStrpos(array $args): string
     {
         $this->rt->needsStrpos = true;
+        // Binary-safe: header lengths (needsConcat pulls __mir_strlen) plus a
+        // memchr/memcmp scan. NOT strlen/strstr — a NUL in either argument made
+        // the search silently wrong.
+        $this->rt->needsConcat = true;
         $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
         $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
@@ -3107,8 +3191,44 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceToPtr();
         $vec = $this->lastValue;
+        // A `string[]` is only what the STATIC type claims. The array itself
+        // records what its slots hold (`ARRAY_ELEM_HINT_*`), and the two disagree
+        // whenever a cell-element array reaches a string-element consumer —
+        // `implode(',', $h->get())` where the `string[]` property was built from
+        // `array_values(array_keys($assoc))`. The raw join inttoptr's the NaN tag
+        // and faults, so ask the array.
+        $this->rt->needsTaggedToStr = true;
+        $this->rt->needsImplodeCell = true;
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $vec . ', i64 '
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $fp . "\n";
+        $hn = $this->ssa->allocReg();
+        $out .= '  ' . $hn . ' = and i64 ' . $fl . ', '
+              . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+        $isCell = $this->ssa->allocReg();
+        $out .= '  ' . $isCell . ' = icmp eq i64 ' . $hn . ', '
+              . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca ptr\n";
+        $cellL = $this->ssa->allocLabel('imp.cell');
+        $rawL = $this->ssa->allocLabel('imp.raw');
+        $endL = $this->ssa->allocLabel('imp.end');
+        $out .= '  br i1 ' . $isCell . ', label %' . $cellL . ', label %' . $rawL . "\n";
+        $out .= $cellL . ":\n";
+        $rc = $this->ssa->allocReg();
+        $out .= '  ' . $rc . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+        $out .= '  store ptr ' . $rc . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $rawL . ":\n";
+        $rr = $this->ssa->allocReg();
+        $out .= '  ' . $rr . ' = call ptr @__mir_array_implode(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+        $out .= '  store ptr ' . $rr . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_array_implode(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+        $out .= '  ' . $reg . ' = load ptr, ptr ' . $slot . "\n";
         $this->lastValue = $reg; $this->lastValueType = 'ptr';
         return $out;
     }
@@ -4880,12 +5000,52 @@ trait EmitLlvmBuiltins
         if ($target === '' && $this->classArgIsRuntime($args[1])) {
             return $this->biIsADynamic($args, $strict);
         }
-        $out = $this->reflEvalArgs($args);
         $sub = $this->reflClassName($args[0]);
+        // A runtime SUBJECT. `reflClassName` answers '' for an erased slot and,
+        // for an INTERFACE-typed one, a name that has no ClassDef — and
+        // `classIsA` bails on the first unknown name. Either way the fold below
+        // answered FALSE for a value whose class is simply not a compile-time
+        // fact. `instanceof` never had the problem (it reads the descriptor at
+        // slot 0), and `$x instanceof $cls` LOWERS TO is_a ({@see
+        // Parser::…instanceof}), so the hole was dynamic-instanceof too.
+        // The target is a literal here, so its id set is compile-time; only the
+        // subject needs the runtime read.
+        if ($target !== '' && $args[1]->kind === Node::KIND_STRING_CONST
+            && !isset($this->classes[$sub])
+            && $this->subjectNeedsRuntimeClass($args[0])
+        ) {
+            $ids = $this->instanceofMatchIds($target);
+            if ($strict) {
+                // is_subclass_of is PROPER: drop the target's own id, exactly
+                // the way the dynamic-target arms do ({@see emitInstanceofArm}).
+                $ownId = isset($this->classes[$target]) ? $this->classes[$target]->classId : -1;
+                $keep = [];
+                foreach ($ids as $id) { if ($id !== $ownId) { $keep[] = $id; } }
+                $ids = $keep;
+            }
+            return $this->emitClassIdTest($args[0], $ids);
+        }
+        $out = $this->reflEvalArgs($args);
         $r = $sub !== '' && $target !== ''
             && (!$strict || $sub !== $target)
             && $this->classIsA($sub, $target);
         return $this->biConstBool($out, $r);
+    }
+
+    /** True when the SUBJECT's class can only be known at runtime: an erased
+     *  carrier, or an object whose static type names no class this module
+     *  defines (an interface / a `Foo|Bar` union / bare `object`). A statically
+     *  non-object subject keeps the constant fold — reading a class id out of a
+     *  string or an int is a wild load. */
+    private function subjectNeedsRuntimeClass(Node $arg): bool
+    {
+        $k = $arg->type->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { return true; }
+        if ($k !== Type::KIND_OBJ) { return false; }
+        // An ENUM case travels as an ORDINAL and a closure carries no class
+        // descriptor at slot 0, so neither may be read as an object pointer.
+        $c = $arg->type->class ?? '';
+        return !($c !== '' && ($this->isEnumClass($c) || $this->isClosureClass($c)));
     }
 
     /** A target-class arg named by a runtime value (string / cell / unknown),
@@ -5092,11 +5252,22 @@ trait EmitLlvmBuiltins
         $obj = $args[0];
         $out = $this->emitNode($obj);
         $out .= $this->coerceToPtr();
-        $objp = $this->lastValue;
+        return $out . $this->emitDeclaredPropsArray($this->lastValue, $obj->type->class ?? '');
+    }
+
+    /**
+     * The DECLARED properties of an already-emitted object pointer, as a fresh
+     * cell-valued assoc. Split out of {@see biGetObjectVars} so the `(array)`
+     * cast can reuse it without emitting its operand a SECOND time (which would
+     * run the operand's side effects twice).
+     */
+    private function emitDeclaredPropsArray(string $objp, string $cls): string
+    {
+        $this->rt->needsTagged = true;
+        $out = '';
         $initg = $this->ssa->allocReg();
         $out .= '  ' . $initg . " = call ptr @__mir_array_alloc(i64 0)\n";
         $cur = $initg;
-        $cls = $obj->type->class ?? '';
         if ($cls !== '' && isset($this->classes[$cls])) {
             $cd = $this->classes[$cls];
             foreach ($cd->propertyNames as $pn) {
@@ -5210,27 +5381,34 @@ trait EmitLlvmBuiltins
             return $out;
         }
         if ($k === Type::KIND_STRING) {
-            // `'` . $s . `'`, with NULL when the (nullable) string is null.
+            // `'` . $s . `'`, with NULL when the (nullable) string is null. The
+            // body goes through the SAME escaper the array walk uses — a
+            // statically-typed string used to skip it, so `var_export("a'b")`
+            // printed an unquotable literal while `var_export(["a'b"])` did not.
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToPtr();
             $s = $this->lastValue;
-            return $out . $this->wrapOrNull($s, "'", "'", 'NULL');
+            return $out . $this->quoteOrNull($s);
         }
-        // Arrays, `mixed` and unions: the type is only known from the NaN tag at
-        // runtime, so hand off to the stdlib formatter rather than emitting a
-        // recursive walk inline. boxToCell rebuilds a homogeneous array with its
-        // elements boxed, which is exactly what that walk needs to read. Declare
-        // the extern only when it is not defined in-module (a self-contained
-        // build embeds the define; a second declare is a redefinition error).
+        // Arrays, objects, `mixed` and unions: the type is only known from the
+        // NaN tag at runtime, so hand off to the recursive walker rather than
+        // emitting the walk inline. boxToCell rebuilds a homogeneous array with
+        // its elements boxed, which is exactly what that walk needs to read.
+        //
+        // The walker is the PRELUDE's `__mir_var_export`, not the stdlib's old
+        // array-only `__mc_var_export_cell`: the stdlib is a prebuilt `.o` and
+        // cannot be handed an object, so an object nested inside an array had
+        // nowhere to go. The prelude version's object arm calls the per-class
+        // `__mir_export_object` generated beside it.
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cv = $this->lastValue;
-        if (!isset($this->definedFns[$this->mangle('__mc_var_export_cell')])) {
-            $this->libcExtra['manticore___mc_var_export_cell']
-                = 'declare i64 @manticore___mc_var_export_cell(i64, i64)';
+        if (!isset($this->definedFns[$this->mangle('__mir_var_export')])) {
+            $this->libcExtra['manticore___mir_var_export']
+                = 'declare i64 @manticore___mir_var_export(i64, i64)';
         }
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @manticore___mc_var_export_cell(i64 '
+        $out .= '  ' . $r . ' = call i64 @manticore___mir_var_export(i64 '
               . $cv . ", i64 0)\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
@@ -5260,6 +5438,46 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi ptr [' . $c2 . ', %' . $lSet . '], [' . $nl . ', %' . $lNull . "]\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * var_export of a nullable string: `'` . escaped($s) . `'`, or `NULL`.
+     * The escape runs INSIDE the non-null arm — __mc_var_export_qstr takes a
+     * `string`, and handing it a null would fault before the test.
+     */
+    private function quoteOrNull(string $s): string
+    {
+        if (!isset($this->definedFns[$this->mangle('__mc_var_export_qstr')])) {
+            $this->libcExtra['manticore___mc_var_export_qstr']
+                = 'declare i64 @manticore___mc_var_export_qstr(i64)';
+        }
+        $isnull = $this->ssa->allocReg();
+        $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
+        $lNull = $this->ssa->allocLabel('qe.null');
+        $lSet = $this->ssa->allocLabel('qe.set');
+        $lEnd = $this->ssa->allocLabel('qe.end');
+        $out .= '  br i1 ' . $isnull . ', label %' . $lNull . ', label %' . $lSet . "\n";
+        $out .= $lSet . ":\n";
+        $si = $this->ssa->allocReg();
+        $out .= '  ' . $si . ' = ptrtoint ptr ' . $s . " to i64\n";
+        $qi = $this->ssa->allocReg();
+        $out .= '  ' . $qi . ' = call i64 @manticore___mc_var_export_qstr(i64 ' . $si . ")\n";
+        $qp = $this->ssa->allocReg();
+        $out .= '  ' . $qp . ' = inttoptr i64 ' . $qi . " to ptr\n";
+        $c1 = $this->ssa->allocReg();
+        $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr("'") . ', ptr ' . $qp . ")\n";
+        $c2 = $this->ssa->allocReg();
+        $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr("'") . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lNull . ":\n";
+        $nl = $this->litStr('NULL');
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lEnd . ":\n";
         $r = $this->ssa->allocReg();

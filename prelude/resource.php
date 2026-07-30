@@ -227,6 +227,14 @@ final class Resource
      * with a 0 timeout, so a read with no data ready returns '' instead of waiting.
      */
     public bool $blocking = true;
+    /**
+     * SOCKET/TLS WRITE timeout in ms; 0 = the same 60 s default the read side uses.
+     * stream_set_timeout() sets it together with $rtimeoutMs (php's timeout is the
+     * stream's, not the read's). A write park that expires records $timedOut and
+     * reports a SHORT WRITE — never an exception. Appended LAST on purpose: a new
+     * field ahead of an existing one moves every offset a stale stdlib.o still uses.
+     */
+    public int $wtimeoutMs = 0;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {

@@ -47,6 +47,12 @@ class Fiber
     // needs no deref), which is why the plain fiber_throw test never saw it.
     private ?\Throwable $pendingEx = null; // uncaught throwable from the callback, re-raised in the resumer
     private ?\Throwable $injectEx = null;  // throw()-injected throwable, raised at the suspend point
+    // The length of THIS fiber's stack, appended LAST on purpose: a new field
+    // ahead of an existing one moves every offset behind it. alloc, the stack top
+    // and both free paths used to spell the same literal separately; the size is a
+    // knob now ({@see stackSize()}), and a free that disagrees with its alloc
+    // munmaps a range it does not own — or pools a stack under the wrong length.
+    private int $stackLen = 0;
 
     public function __construct(callable $callback)
     {
@@ -62,17 +68,38 @@ class Fiber
         $this->started = true;
         $this->state = 1;
         $this->saveCtx = \__mir_fiber_ctx_new();
-        $base = \__mir_fiber_stack_alloc(8388608);
+        if ($this->saveCtx === 0) {
+            $this->started = false;
+            $this->state = 0;
+            throw new \FiberError("Fiber context allocation failed");
+        }
+        $len = self::stackSize();
+        $base = \__mir_fiber_stack_alloc($len);
+        // 0, never MAP_FAILED: out of address space, over RLIMIT_AS or at
+        // vm.max_map_count used to come back as -1 and get a context built on
+        // it — a SIGSEGV with nothing to read. Zend raises FiberError when it
+        // cannot allocate a fiber, so this is the oracle-shaped answer.
+        if ($base === 0) {
+            $this->started = false;
+            $this->state = 0;
+            \__mir_fiber_ctx_free($this->saveCtx);
+            $this->saveCtx = 0;
+            throw new \FiberError("Fiber stack allocation failed (" . (string)$len . " bytes)");
+        }
         $this->stackBase = $base;
-        $this->fctx = \__mir_fiber_make($base + 8388608, $this);
+        $this->stackLen = $len;
+        $this->fctx = \__mir_fiber_make($base + $len, $this);
         $prev = \__mir_fiber_current();
         $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
+        \__mir_fiber_guard_install();
+        \__mir_fiber_guard_set($base);
         \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
         if ($this->pendingEx !== null) {
             $e = $this->pendingEx;
             $this->pendingEx = null;
@@ -131,11 +158,13 @@ class Fiber
         $prev = \__mir_fiber_current();
         $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
+        \__mir_fiber_guard_set($this->stackBase);
         \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
         if ($this->pendingEx !== null) {
             $e = $this->pendingEx;
             $this->pendingEx = null;
@@ -154,11 +183,13 @@ class Fiber
         $prev = \__mir_fiber_current();
         $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
         \__mir_fiber_set_current($this);
+        \__mir_fiber_guard_set($this->stackBase);
         \__mir_fiber_ctx_save($this->resumerCtx);
         \__mir_fiber_ctx_load($this->saveCtx);
         $r = \__mir_fiber_jump($this->fctx);
         $this->fctx = $r;
         \__mir_fiber_set_current($prev);
+        \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
         if ($this->pendingEx !== null) {
             $e = $this->pendingEx;
             $this->pendingEx = null;
@@ -194,6 +225,64 @@ class Fiber
     }
 
     /**
+     * Bytes of stack per fiber, resolved ONCE and cached. Zend's equivalent is the
+     * `fiber.stack_size` ini; we have no ini, so it is the environment plus
+     * {@see setStackSize()} — SUPERSET, {@see docs/superset.md}.
+     *
+     * A stack is virtual address space, not memory: pages are touched lazily and the
+     * mapping is pooled and reclaimed on termination. What it costs is VA and ONE
+     * MAPPING per live fiber, and the mapping is the real ceiling — Linux
+     * `vm.max_map_count` defaults to 65530, so the stack size is what decides how
+     * many concurrent tasks a process can hold. {@see tools/fiber_ceiling.php}.
+     */
+    private static int $stackBytes = 0;
+
+    /** Bytes, resolved from MANTICORE_FIBER_STACK on first use. */
+    public static function stackSize(): int
+    {
+        if (self::$stackBytes !== 0) {
+            return self::$stackBytes;
+        }
+        // getenv is `string|false` (a cell) — unbox before comparing.
+        $env = \getenv('MANTICORE_FIBER_STACK');
+        // 1 MiB, MEASURED (tools/fiber_ceiling.php, 40 000 concurrent tasks on
+        // Linux arm64): 8 MiB costs 6.55 GiB of RSS, 1 MiB costs 0.65 GiB, and 512
+        // and 256 KiB cost exactly the same 0.65 GiB. The curve is flat below 1 MiB
+        // and 10x worse above it, so this is the knee — smaller buys only address
+        // space, larger buys nothing but resident memory. Darwin shows no such
+        // step, which is why a macOS-only measurement would have kept 8 MiB.
+        $want = 1048576;
+        if ($env !== false && $env !== '') {
+            $n = (int)(string)$env;
+            if ($n > 0) { $want = $n; }
+        }
+        self::$stackBytes = self::clampStack($want);
+        return self::$stackBytes;
+    }
+
+    /**
+     * Set the per-fiber stack size for fibers created AFTER this call. Stacks
+     * already pooled under the previous size are never reused for a different one
+     * (the pool records each mapping's length), so mixing sizes in one process is
+     * safe — it only costs an mmap where a pooled stack would have done.
+     */
+    public static function setStackSize(int $bytes): void
+    {
+        self::$stackBytes = self::clampStack($bytes);
+    }
+
+    /** Round up to a 16 KiB multiple (the Apple-silicon page) and keep the guard
+     *  page from eating the stack: the low 16 KiB is PROT_NONE, so anything near it
+     *  is a stack that faults before it is useful. */
+    private static function clampStack(int $bytes): int
+    {
+        if ($bytes < 65536) { $bytes = 65536; }
+        $rem = $bytes % 16384;
+        if ($rem !== 0) { $bytes = $bytes + (16384 - $rem); }
+        return $bytes;
+    }
+
+    /**
      * Free a TERMINATED fiber's stack + ctx NOW (the stack is pooled for reuse),
      * instead of waiting for the deferred __destruct. A scheduler that runs many
      * short-lived fibers (one per connection) calls this on completion so their
@@ -208,7 +297,7 @@ class Fiber
             return;                       // only a terminated fiber is safe to free
         }
         if ($this->stackBase !== 0) {
-            \__mir_fiber_stack_free($this->stackBase, 8388608);
+            \__mir_fiber_stack_free($this->stackBase, $this->stackLen);
             $this->stackBase = 0;
         }
         if ($this->saveCtx !== 0) {
@@ -228,15 +317,17 @@ class Fiber
             $prev = \__mir_fiber_current();
             $this->resumerCtx = \__mir_fiber_has_current() ? $prev->saveCtx : \__mir_fiber_main_ctx();
             \__mir_fiber_set_current($this);
+            \__mir_fiber_guard_set($this->stackBase);
             \__mir_fiber_ctx_save($this->resumerCtx);
             \__mir_fiber_ctx_load($this->saveCtx);
             $r = \__mir_fiber_jump($this->fctx);
             $this->fctx = $r;
             \__mir_fiber_set_current($prev);
+            \__mir_fiber_guard_set($prev === null ? 0 : $prev->stackBase);
             $this->pendingEx = null;   // the FiberExit terminated it; do not re-raise
         }
         if ($this->stackBase !== 0) {
-            \__mir_fiber_stack_free($this->stackBase, 8388608);
+            \__mir_fiber_stack_free($this->stackBase, $this->stackLen);
             $this->stackBase = 0;
         }
         if ($this->saveCtx !== 0) {

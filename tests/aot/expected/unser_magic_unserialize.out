@@ -1,0 +1,12 @@
+O:2:"Pt":2:{s:1:"x";i:3;s:1:"y";i:4;}
+string(2) "Pt"
+int(3)
+int(4)
+string(7) "Derived"
+int(1)
+int(2)
+int(5)
+O:7:"Renamed":1:{s:4:"then";s:1:"v";}
+string(2) "v!"
+bool(true)
+int(3)

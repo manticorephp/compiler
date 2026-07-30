@@ -340,6 +340,21 @@ trait LowerExprs
                 $ms = $this->lowerMultisort($expr);
                 if ($ms !== null) { return $ms; }
             }
+            // `__mc_new_uninit('C')` — internal: allocate an instance WITHOUT
+            // running __construct, which is what php's unserialize does. Written
+            // only by the generated `__mc_unser_alloc`, never in src/, so this
+            // costs the bootstrapping compiler nothing. Desugared to a NewObj so
+            // it reuses the whole allocation path (per-slot zero-init by repr,
+            // the bag, a reified specialization) instead of a second emitter.
+            if ($fn === '__mc_new_uninit' && \count($expr->args) === 1) {
+                $lit = $this->lowerExpr($expr->args[0]);
+                if ($lit->kind === Node::KIND_STRING_CONST) {
+                    $cls = $lit->value;
+                    $no = new NewObj($cls, [], Type::obj($cls));
+                    $no->bare = true;
+                    return $no;
+                }
+            }
             // `count($x, COUNT_RECURSIVE)` — the codegen builtin reads the live
             // length out of the array header and has no notion of a mode, so a
             // non-zero mode is rewritten to the stdlib walker instead. A literal

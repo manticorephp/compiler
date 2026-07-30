@@ -1,0 +1,35 @@
+object(Node_)#1 (2) {
+  ["name"]=>
+  string(4) "root"
+  ["kids"]=>
+  array(3) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+    [2]=>
+    int(3)
+  }
+}
+object(Leaf)#1 (1) {
+  ["leaf"]=>
+  string(3) "tip"
+}
+object(Holder)#1 (2) {
+  ["box"]=>
+  array(2) {
+    ["a"]=>
+    int(1)
+    ["b"]=>
+    array(1) {
+      ["deep"]=>
+      bool(true)
+    }
+  }
+  ["depth"]=>
+  int(1)
+}
+object(Loose)#1 (1) {
+  ["only"]=>
+  string(4) "this"
+}

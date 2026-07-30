@@ -1,0 +1,7 @@
+a:3:{i:0;O:4:"Node":2:{s:1:"v";i:0;s:4:"next";N;}i:1;r:2;i:2;O:4:"Node":2:{s:1:"v";i:7;s:4:"next";N;}}
+a:4:{i:0;O:4:"Node":2:{s:1:"v";i:0;s:4:"next";N;}i:1;O:4:"Node":2:{s:1:"v";i:7;s:4:"next";N;}i:2;r:2;i:3;r:5;}
+a:4:{i:0;i:1;i:1;i:2;i:2;O:4:"Node":2:{s:1:"v";i:0;s:4:"next";N;}i:3;r:4;}
+a:2:{s:1:"x";O:4:"Node":2:{s:1:"v";i:0;s:4:"next";N;}s:1:"y";r:2;}
+O:4:"Node":2:{s:1:"v";i:1;s:4:"next";r:1;}
+O:4:"Node":2:{s:1:"v";i:1;s:4:"next";O:4:"Node":2:{s:1:"v";i:2;s:4:"next";r:1;}}
+a:2:{i:0;O:4:"Node":2:{s:1:"v";i:0;s:4:"next";N;}i:1;a:2:{i:0;r:2;i:1;a:1:{i:0;r:2;}}}

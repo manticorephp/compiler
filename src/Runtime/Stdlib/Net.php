@@ -142,15 +142,19 @@ function __mc_poll_one(int $fd, bool $forWrite, int $timeoutMs): int
 }
 
 /**
- * php.net's stream_set_timeout: bound how long a read on $stream waits for data.
+ * php.net's stream_set_timeout: bound how long an operation on $stream waits.
  * 0/0 keeps the default (php's default_socket_timeout, 60s); a positive value caps
  * each read at that long, after which the read returns empty and
  * stream_get_meta_data()['timed_out'] is true.
+ *
+ * The value is the STREAM's timeout, not the read's — php applies it to writes too,
+ * so a peer that stops draining bounds the send instead of wedging it forever.
  */
 function stream_set_timeout(\Resource $stream, int $seconds, int $microseconds = 0): bool
 {
     $ms = $seconds * 1000 + \intdiv($microseconds, 1000);
     $stream->rtimeoutMs = $ms > 0 ? $ms : 0;
+    $stream->wtimeoutMs = $ms > 0 ? $ms : 0;
     return true;
 }
 
@@ -218,6 +222,18 @@ function __mc_fd_nonblock(int $fd): bool
     return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5)) >= 0;
 }
 
+/** Clear O_NONBLOCK on $fd. The undo of {@see __mc_fd_nonblock}: a socket made
+ *  non-blocking only to bound its connect must go back to blocking, or every
+ *  later read on it returns EAGAIN to a caller that never asked for that. */
+function __mc_fd_block(int $fd): bool
+{
+    $fl = \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(6), 0);
+    if ($fl < 0) {
+        return false;
+    }
+    return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl & ~\__mc_sock_const(5)) >= 0;
+}
+
 /**
  * SO_ERROR on $fd — 0 once a non-blocking connect(2) has completed cleanly, the
  * failing errno otherwise. The errno-free way to collect an async connect's
@@ -278,6 +294,36 @@ function __mc_await_connect(int $fd, float $timeout = 0.0): int
     $tmp->closed = true;
     $tmp->addr = 0;
     return $e === 0 ? 0 : -1;
+}
+
+/**
+ * Finish an in-flight non-blocking connect WITHOUT a scheduler: poll(POLLOUT) for
+ * the kernel's completion signal, then read SO_ERROR. 0 on a connected socket,
+ * -1 otherwise. The sync twin of {@see __mc_await_connect}.
+ *
+ * This is what makes fsockopen's 5th argument mean something outside async. It
+ * used to be accepted and ignored, so the OS's own connect timeout applied: a
+ * connect to a black-holed address took ~75 s of SYN retries where php returned in
+ * the 0.3 s it was asked for.
+ */
+function __mc_poll_connect(int $fd, float $timeout): int
+{
+    $ms = (int)($timeout * 1000.0);
+    if ($ms < 1) { $ms = 1; }
+    $rc = \__mc_poll_one($fd, true, $ms);
+    if ($rc === 0) {
+        \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT — the deadline
+        return -1;                                     // passed, still in flight
+    }
+    // rc < 0 is POLLERR/POLLHUP, which is how a REFUSED connect arrives here — and
+    // SO_ERROR, not the deadline, is what says so. Reporting ETIMEDOUT for it turned
+    // "Connection refused" into "Operation timed out".
+    $e = \__mc_so_error($fd);
+    if ($e > 0) {
+        \__mc_net_errno(true, $e);
+        return -1;
+    }
+    return $rc < 0 ? -1 : 0;
 }
 
 /** True when $host is already a literal address, so no resolution is needed. */
@@ -352,26 +398,46 @@ function __mc_resolve_async(string $host): string
     if ($cached !== '') {
         return $cached;
     }
-    $ip = \__mc_resolve_query($host, 1);        // A
-    if ($ip === '') {
+    // resolv.conf is read ONCE per lookup and its pieces threaded down — the search
+    // walk would otherwise re-read and re-parse it for every candidate and qtype.
+    $text = \__mc_resolv_text();
+    $ns = \__mc_resolv_nameservers($text);
+    if ($ns === '') { $ns = '8.8.8.8'; }
+    $cands = \__mc_dns_candidates($host, \__mc_resolv_search($text), \__mc_resolv_ndots($text));
+    foreach (\explode(',', $cands) as $cRaw) {
+        $qname = (string)$cRaw;
+        if ($qname === '') { continue; }
+        $ip = \__mc_resolve_query($qname, 1, $host, $ns);        // A
+        if ($ip !== '') { return $ip; }
         // AAAA next: an IPv6-only name is common enough (and the literal we return
         // goes straight back into getaddrinfo, which takes v6 literals as happily as
         // v4 — so nothing downstream needs to know).
-        $ip = \__mc_resolve_query($host, 28);   // AAAA
+        $ip = \__mc_resolve_query($qname, 28, $host, $ns);       // AAAA
+        if ($ip !== '') { return $ip; }
+        // Keep walking on NXDOMAIN *and* on a NOERROR with no address (a name with
+        // only MX/TXT is not an address, and a search list exists to keep going).
+        // Stop when NOBODY answered: a timeout must not be multiplied by the number
+        // of suffixes — that turns one dead resolver into a minutes-long lookup.
+        if (\__mc_dns_rcode_last() < 0) { break; }
     }
-    return $ip;
+    return '';
 }
 
 /**
- * One QTYPE's worth of resolution: query, take the first address record, and cache it
- * under its own TTL. '' when the type has no answer.
+ * One QTYPE's worth of resolution: query $qname, take the first address record, and
+ * cache it under its own TTL. '' when the type has no answer.
+ *
+ * $cacheKey is the name the CALLER asked for, never the expanded candidate: caching
+ * each suffix separately would fill the table with per-suffix duplicates and miss on
+ * the next lookup of the same short name.
  */
-function __mc_resolve_query(string $host, int $qtype): string
+function __mc_resolve_query(string $qname, int $qtype, string $cacheKey, string $nsCsv): string
 {
-    $resp = \__mc_dns_query($host, $qtype);
+    $resp = \__mc_dns_query_via($qname, $qtype, $nsCsv);
     if ($resp === '') {
         return '';
     }
+    $host = $cacheKey;
     /** @var array<int,array<string,mixed>> $recs */
     $recs = \__mc_dns_parse($resp, $qtype);
     foreach ($recs as $rec) {
@@ -462,18 +528,40 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $tim
                 // ai_canonname, so a wrong table passes a char* here).
                 $addr = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $addrLen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
-                if ($async) {
+                // A caller-supplied timeout is honoured with or without a
+                // scheduler: same non-blocking connect, waited on by the reactor
+                // under async and by poll(2) without it. Sync sockets go back to
+                // blocking straight after, so nothing downstream sees EAGAIN.
+                $bounded = !$async && $timeout > 0.0;
+                if ($async || $bounded) {
                     \__mc_fd_nonblock($cand);
                 }
                 $rc = \Runtime\Libc\sys_connect($cand, \int_to_ptr($addr), $addrLen);
-                if ($rc !== 0 && $async && \__mc_errno() === \__mc_sock_const(12)) {
-                    $rc = \__mc_await_connect($cand, $timeout);
+                $waited = false;
+                if ($rc !== 0 && \__mc_errno() === \__mc_sock_const(12)) {
+                    if ($async) {
+                        $rc = \__mc_await_connect($cand, $timeout);
+                        $waited = true;
+                    } elseif ($bounded) {
+                        $rc = \__mc_poll_connect($cand, $timeout);
+                        $waited = true;
+                    }
+                }
+                if ($bounded) {
+                    \__mc_fd_block($cand);
                 }
                 if ($rc === 0) {
                     $fd = $cand;
                     break;
                 }
-                \__mc_net_errno(true, \__mc_errno());   // capture BEFORE close clobbers errno
+                // Capture BEFORE close clobbers errno — but ONLY when the connect
+                // failed outright. After a wait, the live errno is the EINPROGRESS
+                // that started it; the real cause came from SO_ERROR and is already
+                // recorded, and overwriting it reported "Operation now in progress"
+                // where php says "Connection refused".
+                if (!$waited) {
+                    \__mc_net_errno(true, \__mc_errno());
+                }
                 \Runtime\Libc\sys_close($cand);
             }
         }
@@ -889,10 +977,11 @@ function __mc_tls_server_handshake(\Resource $sock, string $cert, string $pk): b
 /**
  * Open a TCP connection. php.net's signature, including the by-ref diagnostics.
  *
- * $timeout is accepted and currently IGNORED: the connect is blocking, so the
- * OS's own connect timeout applies. Honouring it needs O_NONBLOCK + poll(POLLOUT)
- * + getsockopt(SO_ERROR), which is the natural first step of the Fibers work
- * rather than a bolt-on here.
+ * $timeout is honoured in both modes — under a scheduler the fiber parks on
+ * writability ({@see __mc_await_connect}), without one poll(2) does the waiting
+ * ({@see __mc_poll_connect}). It used to be accepted and ignored, leaving the OS's
+ * own connect timeout in charge: ~75 s of SYN retries for a black-holed address
+ * where php answers in the 0.3 s it was given.
  *
  * A transport prefix on $hostname is honoured, as php's fsockopen does:
  * `ssl://host` / `tls://host` open a TLS stream, `tcp://host` (or none) a plain
@@ -913,6 +1002,32 @@ function __mc_net_errno(bool $write, int $val): int
     static $e = 0;
     if ($write) { $e = $val; }
     return $e;
+}
+
+/**
+ * The RCODE of the last DNS query, same idiom, -1 when NO server answered — which
+ * is what stops a search-list walk before a dead resolver is multiplied by the
+ * suffix count.
+ *
+ * ⚠ It lives HERE, in a global-namespace file, rather than beside the resolver in
+ * Dns.php: a `static` inside a NAMESPACED function used to emit `@Ns\fn__sl_x`,
+ * which is not valid LLVM. That is fixed in the compiler
+ * ({@see \Compile\Mir\Passes\LowerFromAst::lowerStaticLocal}) — but a compiler
+ * generation WITHOUT the fix cannot build a tree that needs it, so `bin/build`
+ * on any older binary would die here and only a cold seed could recover. The
+ * tree stays buildable by every generation; the fix stays for user code.
+ */
+function __mc_dns_rcode_hold(bool $write, int $val): int
+{
+    static $r = -1;
+    if ($write) { $r = $val; }
+    return $r;
+}
+
+/** The RCODE of the last query, or -1 when nobody answered. */
+function __mc_dns_rcode_last(): int
+{
+    return \__mc_dns_rcode_hold(false, 0);
 }
 
 /** strerror($errno) as an owned string ('' for 0). */
@@ -1259,29 +1374,63 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
         // (the listener is non-blocking, so a lost race is EWOULDBLOCK, not a stall).
         // A $timeout is honoured by the reactor's BOUNDED wait; it used to fall into
         // the branch below, whose poll(2) blocked the whole scheduler. The deadline
-        // is absolute, so a re-park after a lost race cannot extend it.
+        // is absolute, so a re-park after a lost race cannot extend it — a deadline
+        // of -1.0 means there is none.
+        //
+        // WHY THE FAILURE IS CLASSIFIED ({@see __mc_accept_class}): this loop used to
+        // re-park on ANY accept failure. Out of descriptors that is a hot spin, not a
+        // wait — accept(2) fails while the pending connection stays queued, so the
+        // listener stays readable and the park returns immediately, forever. It does
+        // not even trip the watchdog (it suspends every iteration); it shows only as
+        // an exploding `wakes` counter, while every sibling task starves.
+        $deadline = ($timeout !== null && $timeout >= 0.0)
+            ? \__mc_microtime_f() + $timeout : -1.0;
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-        if ($fd < 0 && $timeout !== null && $timeout >= 0.0) {
-            $hf = \Runtime\AsyncHook::readableFor();
-            $deadline = \__mc_microtime_f() + $timeout;
-            while ($fd < 0) {
-                $left = $deadline - \__mc_microtime_f();
-                if ($left <= 0.0) {
-                    return false;
+        $backoff = 0.0;
+        $fast = 0;
+        while ($fd < 0) {
+            $e = \__mc_errno();
+            $cls = \__mc_accept_class($e);
+            if ($cls === 3) {
+                \__mc_net_errno(true, $e);   // never a SILENT false
+                return false;
+            }
+            if ($cls === 1 && $fast < 8) {
+                $fast = $fast + 1;
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+                continue;
+            }
+            if ($cls === 2) {
+                // Sleep, do NOT re-arm readiness: the listener stays readable until
+                // an accept succeeds, so readiness carries no information here.
+                \__mc_net_errno(true, $e);
+                $backoff = \__mc_accept_backoff($backoff);
+                if ($deadline >= 0.0) {
+                    $left = $deadline - \__mc_microtime_f();
+                    if ($left <= 0.0) { return false; }
+                    if ($backoff > $left) { $backoff = $left; }
                 }
+                $sleep = \Runtime\AsyncHook::sleeper();
+                $sleep($backoff);
+                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
+                continue;
+            }
+            if ($deadline >= 0.0) {
+                $left = $deadline - \__mc_microtime_f();
+                if ($left <= 0.0) { return false; }
+                $hf = \Runtime\AsyncHook::readableFor();
                 // `=== true`: the hook is an untyped slot, so its result arrives as
                 // a tagged cell and is read by tag, never as a raw word.
-                if ($hf($server, $left) !== true) {
-                    return false;
-                }
-                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
-            }
-        } else {
-            $h = \Runtime\AsyncHook::readable();
-            while ($fd < 0) {
+                if ($hf($server, $left) !== true) { return false; }
+            } else {
+                $h = \Runtime\AsyncHook::readable();
                 $h($server);
-                $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
             }
+            // Readiness reached ⇒ the overload episode (if any) is over. Both
+            // counters must reset, or one EMFILE burst slows the loop for good.
+            $backoff = 0.0;
+            $fast = 0;
+            $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
         }
     } else {
         if ($timeout !== null && $timeout >= 0.0) {
@@ -1292,6 +1441,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
         }
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
         if ($fd < 0) {
+            \__mc_net_errno(true, \__mc_errno());
             return false;
         }
     }

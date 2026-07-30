@@ -1,0 +1,22 @@
+string(7) "Allowed"
+int(1)
+string(7) "Allowed"
+int(1)
+string(22) "__PHP_Incomplete_Class"
+string(7) "Allowed"
+string(7) "Allowed"
+int(1)
+string(22) "__PHP_Incomplete_Class"
+string(7) "Blocked"
+string(22) "__PHP_Incomplete_Class"
+string(7) "Missing"
+int(9)
+string(22) "__PHP_Incomplete_Class"
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "a"
+  [2]=>
+  float(2.5)
+}

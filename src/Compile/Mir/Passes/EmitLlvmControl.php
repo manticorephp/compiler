@@ -613,6 +613,112 @@ trait EmitLlvmControl
         return $label . ":\n";
     }
 
+    /**
+     * Does this conditional arm already carry a +1 that transfers to the
+     * conditional's result? Only a DEFINITE owned producer counts — a literal
+     * (immortal), a fresh allocation / concat, a method / static / closure call,
+     * a user free-function call (a builtin may hand back a borrowed element, so
+     * only a known signature proves it), a null arm (there is nothing to own),
+     * or a nested conditional the same contract already normalized.
+     *
+     * Conservative BY DESIGN, and in one direction only: a borrow mistaken for
+     * fresh corrupts (the release side frees what nobody owned), a fresh value
+     * mistaken for a borrow leaks one reference.
+     *
+     * The free-function case follows each flavor's ESTABLISHED convention: a
+     * string-returning builtin is +1 ({@see EmitLlvm::isFreshStringTemp} already
+     * releases its temp, and {@see InsertMemoryOps::isOwnedObj} owns it —
+     * substr / strtolower / str_repeat), while an obj/array builtin may hand
+     * back a borrowed element (`current()`), so only a known user signature
+     * proves ownership there ({@see EmitLlvm::freshRcArgFlavor} draws the same
+     * line). Getting this wrong cost a measured leak: str_repeat read as
+     * borrowed retained a temp nobody else owned.
+     */
+    private function armIsFresh(Node $arm, string $flavor): bool
+    {
+        if ($arm->type->kind === Type::KIND_NULL) { return true; }
+        $k = $arm->kind;
+        if ($k === Node::KIND_STRING_CONST || $k === Node::KIND_CONCAT
+            || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+            || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_INVOKE) {
+            return true;
+        }
+        if ($k === Node::KIND_CALL) {
+            $fn = $arm->function;
+            if ($this->sigs->returnsByRef[$fn] ?? false) { return false; }
+            if ($flavor === 'str') { return true; }
+            return isset($this->sigs->paramTypes[$fn]);
+        }
+        return $this->condOwnsResult($arm);
+    }
+
+    /**
+     * A conditional (ternary / `?:` / `??` / match) yields an OWNED (+1) value of
+     * its RESULT type from EVERY arm, so a borrowed arm — an alias, a property /
+     * element read, a param — is retained here. The contract, and which shapes
+     * qualify, live in {@see CondOwn} / {@see EmitLlvm::condOwnsResult}; the
+     * consumers that release it are {@see EmitLlvm::isFreshStringTemp},
+     * {@see EmitLlvm::freshRcArgFlavor}, {@see EmitLlvmCalls::emitDiscardedCallRelease}
+     * and {@see InsertMemoryOps::isOwnedObj}.
+     *
+     * Without it `$out = $out === '' ? $s : ($out . ',' . $s);` stored $s's buffer
+     * BORROWED: the next iteration's `$s = trim(...)` freed it and the allocator
+     * handed the same block back, so the accumulated value silently became the
+     * newest element repeated. Assignment retains a bare alias ($x = $s) but never
+     * looked inside a conditional, and the mixed shape — one owned arm, one
+     * borrowed — is the `string|false` idiom, so it is everywhere.
+     *
+     * This is the POST-BOX half: the retain runs on the arm's final carrier, at
+     * the depth the result's flavor will drop ({@see EmitLlvm::condFlavor} feeds
+     * both sides), which is why an arm of a different array element type is not
+     * coverable at all.
+     */
+    private function armRetainPostBox(Node $res, Node $arm, string $i64reg): string
+    {
+        if (!$this->condOwnsResult($res)) { return ''; }
+        $flavor = $this->condFlavor($res->type);
+        if ($flavor === '' || $flavor === 'cell') { return ''; }
+        if ($this->armIsFresh($arm, $flavor)) { return ''; }
+        return $this->rcRetainReg($i64reg, $flavor);
+    }
+
+    /**
+     * armRetain on the value currently in lastValue, leaving lastValue and its
+     * type untouched — for the `??` paths that hand their arm straight back
+     * without going through the i64 carrier.
+     */
+    private function armRetainLast(Node $res, Node $arm): string
+    {
+        if (!$this->condOwnsResult($res)) { return ''; }
+        $flavor = $this->condFlavor($res->type);
+        if ($flavor === '') { return ''; }
+        if ($flavor === 'cell') { return $this->armRetainPreBox($res, $arm); }
+        if ($this->armIsFresh($arm, $flavor)) { return ''; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out = $this->coerceToI64();
+        $out .= $this->rcRetainReg($this->lastValue, $flavor);
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
+    }
+
+    /**
+     * The PRE-BOX half, for a CELL-typed conditional: a cell owns its payload by
+     * POINTER, so the co-owner retain must see the raw value — after boxToCell a
+     * concrete array has been rebuilt and a scalar is a tag. Same order
+     * {@see EmitLlvmModule::emitReturn} uses for a `: mixed` return.
+     */
+    private function armRetainPreBox(Node $res, Node $arm): string
+    {
+        if (!$this->condOwnsResult($res)) { return ''; }
+        if ($this->condFlavor($res->type) !== 'cell') { return ''; }
+        if ($this->armIsFresh($arm, 'cell')) { return ''; }
+        return $this->retainCellPayload($arm);
+    }
+
     private function emitTernary(Ternary $n): string
     {
         $t = $n;
@@ -647,23 +753,38 @@ trait EmitLlvmControl
         $wantCell = $n->type->kind === Type::KIND_CELL;
         // then: short ternary (`?:`) reuses the condition value.
         $out .= $thenLabel . ":\n";
+        $thenArm = $t->then;
+        if ($thenArm === null) { $thenArm = $t->cond; }
         if ($t->then !== null) {
             $out .= $this->emitNode($t->then);
-            $out .= $wantCell ? $this->boxToCell($t->then->type) : $this->coerceToI64();
+            if ($wantCell) {
+                $out .= $this->armRetainPreBox($n, $thenArm);
+                $out .= $this->boxToCell($t->then->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
             $thenVal = $this->lastValue;
         } elseif ($wantCell) {
             $this->lastValue = $rawCond;
             $this->lastValueType = 'i64';
+            $out .= $this->armRetainPreBox($n, $thenArm);
             $out .= $this->boxToCell($t->cond->type);
             $thenVal = $this->lastValue;
         } else {
             $thenVal = $rawCond;
         }
+        $out .= $this->armRetainPostBox($n, $thenArm, $thenVal);
         $out .= '  store i64 ' . $thenVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $elseLabel . ":\n";
         $out .= $this->emitNode($t->else_);
-        $out .= $wantCell ? $this->boxToCell($t->else_->type) : $this->coerceToI64();
+        if ($wantCell) {
+            $out .= $this->armRetainPreBox($n, $t->else_);
+            $out .= $this->boxToCell($t->else_->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $out .= $this->armRetainPostBox($n, $t->else_, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
@@ -913,6 +1034,22 @@ trait EmitLlvmControl
         // measured twice, with and without a store-side re-encode. The decode
         // only becomes sound once the erased element CHANNEL is retyped cell in
         // InferTypes: that is the rest of this epic.
+        //
+        // The opposite direction IS sound and is done: when the static element
+        // type says STRING the value slot is read as a raw pointer everywhere, so
+        // a slot that actually holds a boxed cell has to be stripped to its
+        // payload. That claim is not always true — `foreach (array_values(
+        // array_keys($assoc)) as $n) { str_contains($n, …) }` through a `string[]`
+        // param walks cells — and it hands nothing downstream that the static
+        // type did not already promise. {@see EmitLlvmArrays::emitArrayAccessUnified}
+        $fel = $fe->array->type->element ?? null;
+        if ($fel !== null && $fel->kind === Type::KIND_STRING) {
+            $this->rt->needsElemUntag = true;
+            $eu = $this->ssa->allocReg();
+            $out .= '  ' . $eu . ' = call i64 @__mir_elem_untag(ptr ' . $arr
+                  . ', i64 ' . $ev . ")\n";
+            $ev = $eu;
+        }
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {
             $kSlot = $this->locals->slots[$fe->keyVar];
@@ -1211,7 +1348,13 @@ trait EmitLlvmControl
             }
             $out .= $bodyLabel . ":\n";
             $out .= $this->emitNode($arm->body);
-            $out .= $wantCell ? $this->boxToCell($arm->body->type) : $this->coerceToI64();
+            if ($wantCell) {
+                $out .= $this->armRetainPreBox($n, $arm->body);
+                $out .= $this->boxToCell($arm->body->type);
+            } else {
+                $out .= $this->coerceToI64();
+            }
+            $out .= $this->armRetainPostBox($n, $arm->body, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endLabel . "\n";
             $out .= $afterLabel . ":\n";

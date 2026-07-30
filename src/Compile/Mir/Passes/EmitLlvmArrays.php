@@ -581,6 +581,20 @@ trait EmitLlvmArrays
         return false;
     }
 
+    /**
+     * Can an array of static type `$t` hold BOXED cells in slots a
+     * concrete-element consumer will read raw? True for a declared
+     * pointer-element array — the mismatch case — and false for a base that is
+     * already cell/erased (its consumers decode anyway) so those pay no call.
+     */
+    private function elemMayBeCell(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null) { return false; }
+        return $el->kind === Type::KIND_STRING;
+    }
+
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
     {
         $out = $this->emitNode($aa->array);
@@ -607,13 +621,28 @@ trait EmitLlvmArrays
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
-        // ⚠ The element is NOT decoded by the array's hint here. Two consumers
-        // proved a plain subscript cannot be: an UNKNOWN result is deref'd raw
-        // (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }` returns
-        // the word into a string slot), and a CELL result is written back into
-        // a raw-repr array by the sort family. The decode lives where a value
-        // is genuinely CONSUMED as a cell — array_pop/array_shift and implode —
-        // until the store side learns to re-encode.
+        // ⚠ The element is NOT decoded into a CELL by the array's hint here. Two
+        // consumers proved a plain subscript cannot be: an UNKNOWN result is
+        // deref'd raw (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }`
+        // returns the word into a string slot), and a CELL result is written back
+        // into a raw-repr array by the sort family. That decode lives where a
+        // value is genuinely CONSUMED as a cell — array_pop/array_shift and
+        // implode — until the store side learns to re-encode.
+        //
+        // The OTHER direction is sound and is done: a result the static type
+        // already calls a STRING must be a raw pointer, so if the array says its
+        // slots are boxed cells, strip the tag. Nothing downstream is told
+        // anything new — it was promised a string and now gets one. symfony's
+        // `$this->headers[0]` (a declared `string[]` fed from cell rows) is the
+        // witness; the definition-list labels printed the tag bits.
+        if ($self->type->kind === Type::KIND_STRING && $this->elemMayBeCell($aa->array->type)) {
+            $this->rt->needsElemUntag = true;
+            $u = $this->ssa->allocReg();
+            $out .= '  ' . $u . ' = call i64 @__mir_elem_untag(ptr ' . $arrPtr
+                  . ', i64 ' . $reg . ")\n";
+            $reg = $u;
+            $this->lastValue = $reg;
+        }
         if ($self->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";

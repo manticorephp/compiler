@@ -22,6 +22,10 @@ use Async\CancelledException;
 use Async\TaskGroup;
 
 const ADDR = 'tcp://127.0.0.1:8081';
+// The ceiling on connections served AT ONCE, per worker. Tasks are cheap, which is
+// exactly why an accept loop needs a brake: without one a connection burst becomes
+// unbounded tasks, fds and memory, and the first thing to fail is unrelated.
+const MAX_CONNS = 256;
 
 final class Stats
 {
@@ -74,15 +78,30 @@ function worker(int $index): void
 
         // Every connection is a child of THIS scope, so the scope cannot close
         // while one is in flight — and cancelling it cancels all of them.
+        //
+        // The permit is taken BEFORE the accept: at the ceiling this worker simply
+        // stops accepting, and the queue stays in the kernel's backlog (then in the
+        // client's SYN retry), which is what backpressure means for a server. It has
+        // to be released in the CHILD's finally — the parent's would run once, at
+        // scope exit. acquire() checks cancellation, so SIGTERM still unwinds here.
+        $gate = new \Async\Semaphore(MAX_CONNS);
         try {
-            group(function (TaskGroup $g) use ($server, $stats) {
+            group(function (TaskGroup $g) use ($server, $stats, $gate) {
                 while (true) {
+                    $gate->acquire();
                     $conn = \stream_socket_accept($server);
                     if ($conn === false) {
+                        $gate->release();
                         continue;
                     }
                     \stream_set_blocking($conn, false);
-                    $g->spawn(fn() => serveConnection($conn, $stats));
+                    $g->spawn(function () use ($conn, $stats, $gate) {
+                        try {
+                            serveConnection($conn, $stats);
+                        } finally {
+                            $gate->release();
+                        }
+                    });
                 }
             });
         } catch (CancelledException $e) {
