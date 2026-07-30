@@ -96,6 +96,27 @@ final class Builtins
             '__mc_errno', '__mc_fmt_int', '__mc_fmt_float', '__mc_fmt_str',
             'isset', 'empty', 'unset', 'list', 'compact', 'define', 'defined',
             'constant', 'function_exists', 'call_user_func', 'call_user_func_array',
+            // Array-pointer family — emitBuiltin handles these inline, so they
+            // appear in NO prelude file and in no `.o.sig`. Their absence here
+            // made every `end($a)` / `reset($a)` in vendor code read undefined.
+            'current', 'end', 'key', 'next', 'prev', 'pos', 'reset',
+            // Reflection intrinsics behind prelude/reflection.php.
+            '__mc_refl_attr_args', '__mc_refl_attr_err', '__mc_refl_attr_name',
+            '__mc_refl_attr_new', '__mc_refl_attr_repeated', '__mc_refl_attr_target',
+            '__mc_refl_call0', '__mc_refl_call1', '__mc_refl_class_attrs',
+            '__mc_refl_class_nattrs', '__mc_refl_consts_fn', '__mc_refl_ctor',
+            '__mc_refl_fn_find', '__mc_refl_ifaces_fn', '__mc_refl_invoke',
+            '__mc_refl_methods_base', '__mc_refl_mrow', '__mc_refl_nmethods',
+            '__mc_refl_nprops', '__mc_refl_param_flags', '__mc_refl_param_name',
+            '__mc_refl_param_type', '__mc_refl_prop_getter', '__mc_refl_prop_set',
+            '__mc_refl_prop_setter', '__mc_refl_props_base', '__mc_refl_prow',
+            '__mc_refl_prow_type', '__mc_refl_row_arity', '__mc_refl_row_attrs',
+            '__mc_refl_row_flags', '__mc_refl_row_name', '__mc_refl_row_nattrs',
+            '__mc_refl_row_nparams', '__mc_refl_row_params', '__mc_refl_row_rettype',
+            '__mc_refl_row_tramp', '__mc_refl_tramp',
+            // Boxing / tagging intrinsics.
+            '__mir_obj_bag', '__mir_untag_str', 'manticore_box_int', 'manticore_tag',
+            'manticore_unbox_int', 'manticore_str_bytes',
         ];
         /** @var array<string, bool> $set */
         $set = [];

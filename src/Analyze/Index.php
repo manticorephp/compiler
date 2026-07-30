@@ -67,8 +67,12 @@ final class Index
                 $this->addFunction($s->decl);
             } elseif ($s instanceof ClassStmt) {
                 $this->addClass($s->decl);
-            } elseif ($s instanceof NamespaceStmt && $s->body !== null) {
-                $this->collectStmts($s->body->statements);
+            } else {
+                // Namespaces, and the conditional forms a polyfill declares
+                // inside — see {@see DeclScopes} for why. This is the symbol
+                // universe the closed-world undefined-* rules resolve against,
+                // so a declaration missed here reads as an undefined symbol.
+                foreach (DeclScopes::nested($s) as $body) { $this->collectStmts($body); }
             }
         }
     }

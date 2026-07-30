@@ -1,0 +1,12 @@
+# Annotated analyzer blind spots that are KNOWN, EXPLAINED and deliberately not
+# chased (audit stop condition S-B: record the residual, class it S4, move on).
+#
+# Format:  code <TAB> bare-name <TAB> reason
+# A line without a reason is ignored -- that is what keeps this from becoming a
+# place to silence findings.
+#
+# Read by tools/audit/calibrate.sh. Every entry here is a small analyzer
+# soundness hole, NOT a compiler gap: the code it flags compiles and runs.
+
+undefined.function	b	`use function Symfony\Component\String\b;` -- the analyzer does not model use-function imports, so an unqualified call to an imported namespaced function reads undefined. 1 site (symfony/console OutputFormatter.php:298). Root #6.
+undefined.function	s	same as `b`: `use function Symfony\Component\String\s;` at symfony/console QuestionHelper.php:282. Root #6.

@@ -2436,6 +2436,14 @@ function analyze_prelude_files(): array {
         // these, `new \Fiber(...)`, an `\Io\Poll\Context` hint, or the
         // `StreamPollHandle` handle read as unknown classes.
         "fiber.php", "io_poll.php", "async.php", "pcntl.php",
+        // Function-only prelude files. Omitting these is invisible in a normal
+        // build (they are injected on demand all the same) but makes the
+        // closed-world undefined-function rule report every one of their
+        // declarations — `array_splice`, `array_replace_recursive`,
+        // `array_walk_recursive`, `array_diff_ukey`, `var_export`, the reserved
+        // attribute classes — against code that runs correctly.
+        // `tools/audit/calibrate.sh` gates this list against `prelude/*.php`.
+        "array_fns_ext.php", "attributes.php", "backtrace_stub.php", "var_export.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];
@@ -2479,9 +2487,23 @@ function mir_line_to_diag(string $line, string $fileLabel): \Analyze\Diagnostic 
 }
 
 /**
- * Global-namespace stdlib function names from the bundled `.o.sig`, lowercased —
- * the analyzer's known-callable set for its undefined-function rule. Namespaced
- * internals (`Runtime\…`, `__mc_…`) are filtered: user code never names them.
+ * Stdlib function names from the bundled `.o.sig`, lowercased — the analyzer's
+ * known-callable set for its undefined-function rule.
+ *
+ * Global declarations are taken as-is. Namespaced ones are NOT simply dropped:
+ * `LowerFromAst::lowerProgram` (LowerFromAst.php:822-841) registers a bare-name
+ * alias for every namespaced extern whose bare name is unique, and
+ * `resolveCallName` (:1826) resolves an unqualified call through it. So an
+ * unqualified `strncmp()` really does bind to `Runtime\Libc\strncmp`, and the
+ * analyzer must model that or it reports a call that compiles and runs.
+ *
+ * The alias set is deliberately the SAME shape the lowering computes, including
+ * the collision rule (two namespaced decls sharing a bare name cancel each
+ * other out and no alias is registered).
+ *
+ * ⚠ Modelling this here makes the analyzer quiet about those names. Whether a
+ * given capture is CORRECT is a separate question — `tools/audit/alias_scan.php`
+ * answers it, and reports the ones that bind a raw C function under a PHP name.
  *
  * @return string[]
  */
@@ -2492,10 +2514,23 @@ function analyze_stdlib_fn_names(): array {
     if ($json === null) { return []; }
     /** @var string[] $out */
     $out = [];
+    /** @var array<string,int> $bareCount  bare name -> namespaced decls seen */
+    $bareCount = [];
+    /** @var string[] $bareNames */
+    $bareNames = [];
     try {
         foreach (Sig::declsFromJson($json) as $decl) {
-            if (\strpos($decl->name, "\\") !== false) { continue; }
-            $out[] = \strtolower($decl->name);
+            $name = $decl->name;
+            $pos = \strrpos($name, "\\");
+            if ($pos === false) { $out[] = \strtolower($name); continue; }
+            $bare = \strtolower(\substr($name, $pos + 1));
+            if (!isset($bareCount[$bare])) { $bareCount[$bare] = 0; $bareNames[] = $bare; }
+            $bareCount[$bare] = $bareCount[$bare] + 1;
+        }
+        // Only a UNIQUE bare name becomes an alias — mirrors the `isset(...) ? ''`
+        // collision guard in the lowering.
+        foreach ($bareNames as $bare) {
+            if ($bareCount[$bare] === 1) { $out[] = $bare; }
         }
     } catch (\Throwable $e) {
         // A malformed sig just yields no stdlib names (rule stays conservative).

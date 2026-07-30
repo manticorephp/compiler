@@ -6,7 +6,6 @@ use Parser\Ast\ClassStmt;
 use Parser\Ast\FunctionDecl;
 use Parser\Ast\FunctionStmt;
 use Parser\Ast\MethodDecl;
-use Parser\Ast\NamespaceStmt;
 use Parser\Ast\PropertyDecl;
 
 /**
@@ -47,8 +46,10 @@ final class Decls
                     $this->properties[] = $p;
                     $this->propertyClasses[] = $cls;
                 }
-            } elseif ($s instanceof NamespaceStmt && $s->body !== null) {
-                $this->collect($s->body->statements);
+            } else {
+                // Namespaces, and the conditional forms a polyfill declares
+                // inside — see {@see DeclScopes} for why.
+                foreach (DeclScopes::nested($s) as $body) { $this->collect($body); }
             }
         }
     }
