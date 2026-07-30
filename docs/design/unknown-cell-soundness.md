@@ -1,6 +1,14 @@
 # The `unknown` soundness problem (and the epic to fix it)
 
-Status: **problem definition + staged plan.** No code changed by this doc.
+Status: **LIVING LOG — largely executed.** This started as a problem definition
+and staged plan; the later sections record the work actually landing (STAGE 1
+EXECUTED, the 36→0 milestone, GATED GREEN, the array cluster). Read it
+chronologically: an early "NOT GATED" line is superseded by a later section, not
+contradicted by it.
+
+⚠ The `EmitLlvm*.php` line numbers in §1/§2 predate the split of `EmitLlvm` into
+14 traits. Treat every line reference here as unreliable; grep the symbol.
+
 Author context: distilled from a codegen-wide audit of `KIND_UNKNOWN` handling.
 
 ## 1. The heart of the problem

@@ -1,21 +1,27 @@
-# Manticore — Status & Roadmap
+# Manticore — status & roadmap
 
-**Single source of truth for "where the compiler is and what's next."** Supersedes
-`docs/bootstrap/13`, `docs/bootstrap/17`, `docs/bootstrap/README.md`, and
-`docs/PHP85_SYNTAX_GAP.md` (all deleted). Design *how-it-works* docs are listed
-under [Design references](#design-references) and remain valid.
+**Single source of truth for "where the compiler is and what's next."**
 
-_Last updated: 2026-07-15 · branch `main` · HEAD `a6e062a`._
+_Last updated: 2026-07-30 · branch `main` · HEAD `dea8a63`._
 
 ## Current state
 
-Pure-PHP, self-hosting PHP→native AOT compiler. The runtime is emitted as LLVM IR from PHP; `bin/manticore` compiles its
-own `src/`.
+Pure-PHP, self-hosting PHP→native AOT compiler. `bin/manticore` compiles its own `src/` to a
+byte-identical fixpoint, and the runtime is emitted as LLVM IR from PHP.
 
-**Gates (all green, macOS + Linux):** `tests/aot/run.sh` · `tools/difftest.sh` (0 diff vs
-PHP 8.5.8) · `tools/selfhost_fixpoint.sh` (fixpoint byte-identical · self-host · MIR golden ·
-stability 5×2) · `tools/docker/run_tests.sh --gate`. Counts move every session — run them
+**Self-hosting is done.** That was the north star; it is now the floor. What replaced it is
+**real-world applications** — the quality corpus is no longer the compiler alone but
+third-party PHP compiled through it (symfony/console is the current driver), and the oracle is
+still Zend: if `php` runs it, `tools/difftest.sh` must agree byte-for-byte.
+
+**Gates:** `tests/aot/run.sh` · `tools/difftest.sh` (parity vs PHP 8.5) ·
+`tools/selfhost_fixpoint.sh` (fixpoint byte-identical · self-host suite · rebuild stability
+5×2) · `tools/docker/run_tests.sh --gate` (Linux). Counts move every session — run them
 rather than trusting a number written here.
+
+**Build:** `bin/build` (self-host — the normal loop), `bin/build --seed` (cold Zend
+bootstrap), `bin/build --verify` (+ the gate). `bin/compile` is the cold-bootstrap fallback
+only.
 
 ⚠ **`bin/build` green says nothing about `tools/selfhost.sh`.** The manifest build compiles
 `src/Runtime` as a LIBRARY with a flattened namespace; the self-host path takes everything as
@@ -23,200 +29,166 @@ ONE module. They diverge on emitted symbol names, and only the stability gate co
 second. Corollary: **never ship a compiler fix together with tree code that needs that fix** —
 the previous generation then cannot build the tree at all, and only a cold seed recovers.
 
-Build: `bin/build --seed` (cold Zend bootstrap → native) / `bin/build`
-(self-host). See `.claude/CLAUDE.md` for the pipeline and key files.
+⚠ **A new codegen builtin used by the stdlib needs `bin/build --seed`.** The previous
+generation does not know the symbol, so the stdlib `.o` build dies on an undefined symbol.
 
-**Recently completed** (2026-07): the async runtime — structured concurrency, transparent
-netpoller I/O, and the liveness pass over it (bounded write parks, a classified `accept(2)`
-loop that backs off on EMFILE instead of spinning, resolv.conf `search`/`ndots`, a measured
-1 MiB fiber stack with `MANTICORE_FIBER_STACK`, `posix_getrlimit`/`posix_setrlimit`, and
-`Async\failure()` naming the task behind an escaped exception) · a per-case deadline in the
-test harness, so a liveness bug fails the suite instead of hanging it ·
-`docs/superset.md`, the catalogue of everything with no Zend oracle · the full `preg_*` family
-over host PCRE2 + `#[RefOut]` · Monomorphize **callable dimension** · **de-cellify** at the
-concrete-array ← cell-array store boundary · Ryu float formatting · reified-class generics ·
-pin elimination. Detail in the session memory files under `.claude/.../memory/`.
+### Recently completed (2026-07)
 
-## The gap matrix (probed, with repros)
+- **`serialize` / `unserialize` + magic methods** — `__serialize`/`__unserialize`,
+  `allowed_classes`, `__PHP_Incomplete_Class`, `__debugInfo`, `var_export` of objects, and
+  `__get`/`__set`/`__isset`/`__unset`/`__call` firing on an **erased** receiver.
+- **One ownership contract for conditionals** — `?:`, `??`, ternary and `match` share
+  `Compile\Mir\CondOwn`, so the arms and their consumer agree on who owns the result.
+- **Generators: a resumed `try` owns its landing pad** — `Generator::throw()` no longer lands
+  in the caller's catch.
+- **The full `array_*` surface** — all 59 functions, including `array_multisort`,
+  `array_merge_recursive` and the internal pointer.
+- **The async remainder** — 1 MiB fiber stacks with `MANTICORE_FIBER_STACK`, non-quadratic
+  channel waiter queues, checked `mmap`/`calloc`, `posix_getrlimit`/`setrlimit`, and a
+  per-case deadline in the harness so a liveness bug fails the suite instead of hanging it.
+- **Dynamic resolution** — dynamic function names, `new $cls`, `$cls::method()`, `$o->$m()`,
+  `$o->$p`, `$obj instanceof $cls`, and Reflection through Tier 3.
 
-Each row is a concrete `tests/aot`-style repro diffed against `php`. Re-probe
-before starting — turn "what's left" into a worklist.
-
-### Tier 1 — correctness bugs (silent wrong output — fix first)
+## Tier 1 — correctness
 
 | Gap | Repro | Today | Want |
 |---|---|---|---|
-| `int += float` in a loop | `$s=0; for(...) { $s += 1.5; }` | accumulator stays int-typed → reads float bits as garbage | promote the loop-carried local to float. NOTE: a loop-body **re-inference fixpoint** is a DEAD END — re-running `inferNode(body)` corrupts `cellMergeLocals` (the InferTypes "heisenbug zone") and SIGSEGV'd the self-host. Needs a separate per-local float-slot analysis (a local ever float → float slot, int stores coerce), not loop re-inference |
-| `/` exact-int (variable) | `$a/$b` (both int, divisible) | `float` | `int` — literal `6/2` now folds to int; variable stays float (a numeric-cell result cascades — low value) |
+| Integer overflow wraps | `PHP_INT_MAX + 1` | `PHP_INT_MIN` (two's complement) | promote to float, as php does. Needs value-range analysis to know which statically-int locals can overflow |
+| `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
+| `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
 
-_Done: **late static binding** — `static::class`, `new static`, `static::method()`,
-`static::$prop`, `parent::`/`self::` forwarding, ctor LSB (per-descendant
-monomorphised copies `<owner>__<m>__lsb<sub>`; `docs/design/late-static-binding.md`).
-**Encapsed strings** — `"$o->n"`, `"$a[$k]"`, `"{$this->arr[0]}"` all interpolate;
-the lone gap was bare-`array` **property** element erasure (now recovered from a
-homogeneous list-literal default). **`get_class()`** returns the runtime class
-via a class_id switch (not the static type). **Polymorphic object arrays** —
-`[new D, new C]` of unrelated classes sharing an interface now unifies to
-`obj<Iface>` (was element-erased → raw), so `$arr[0]->m()` / `foreach` dispatch
-virtually. **Untyped factory chain** — `A::create()->name()` where `create()`
-has no return hint now infers the object return (every return same class) →
-chains resolve. **Literal int division** — `6/2` folds to int(3) (non-exact /
-variable stay float)._
+`['a'] === ['a']` compares pointers rather than contents, and `extract()` is unimplemented
+(dynamic symbol-table writes the typed frame does not model). `compact()` works.
 
-### Tier 2 — missing PHP 8.5 syntax (blocks real code / self-host breadth)
+## Tier 2 — semantic depth
 
-_All previously-tracked syntax gaps are now closed (property hooks, asymmetric
-visibility, anonymous classes, heredoc/nowdoc, pipe `|>`, first-class callables,
-DNF types, enums, match, named args). The parser covers the PHP 8.5 surface the
-self-host needs; remaining gaps are semantic (see Tier 1 + the README limitations),
-not syntactic._
+### Magic methods — what is knowingly not done
 
-_Done: **property hooks** (`public string $x { get => …; }`) + **asymmetric
-visibility** (`public private(set) $x`). **anonymous classes** (`new class(args) extends X implements Y { … }`) —
-parsed under a synthetic name, hoisted to top-level, lowered like any class;
-fixed two surfaced abstract-method bugs (dispatch to a body-less method; abstract
-`: float` return untyped). **heredoc / nowdoc** (`<<<EOT … EOT;`, `<<<'EOT'`) —
-lexer normalises the
-body to a double-/single-quoted StringLiteral so the parser reuses interpolation
-/ literal handling; PHP 7.3 flexible (indented) closing marker with per-line
-dedent supported. **Pipe operator `|>`** — left-assoc, below `??` / above the
-ternary; the RHS callable is desugared by shape (FCC `f(...)`/`$o->m(...)`/
-`C::m(...)`, string `"fn"`/`"C::m"`, array `[$o,"m"]`/`["C","m"]`, else dynamic
-Invoke). **First-class + literal callables** — `f(...)`/`$o->m(...)`/`C::m(...)`
-as stored values, builtin FCC (`count(...)`), and literal `"fn"(x)`/`[$o,"m"](x)`
-invoked directly._
+`serialize`/`unserialize`, `__debugInfo`, `var_export` of objects, and erased-receiver
+dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is left, and why:
 
-### Tier 3 — callable values
-
-_Done: first-class callables (`f(...)`/`$o->m(...)`/`C::m(...)`) as values,
-literal `"fn"(x)`/`[$o,"m"](x)` invoked directly, `call_user_func` /
-`call_user_func_array`, a string/array literal bound to a `callable` param
-coerced to a closure at the call site (`array_map("strtoupper",…)`, `usort($a,
-"cmp")`), and a local holding a callable literal invoked directly (straight-line
-const-prop; `[$o,"m"]` dispatches on the `$g[0]` snapshot)._
-
-_Already done: clone-with, DNF types, yield from, first-class callables,
-match, enums, attributes, nullsafe, named args._
-
-### Tier 3 — runtime dynamic resolution (one epic, deferred)
-
-A family of features that all need the same missing piece — a **runtime
-name→thing dispatch table** generated at compile time (string-compare on the
-name → the matching symbol). Worth doing together, once, rather than piecemeal:
-
-- **Dynamic function call** — a non-literal computed callable: `$f = "str" . $x;
-  $f(…)`, `call_user_func($computed, …)`. (Literal / FCC / local-const callables
-  already work — Tier 3 callables above.)
-- **Dynamic class name** — `new $cls()`, `$cls::method()`, `$cls::CONST`,
-  `$obj instanceof $cls`, where `$cls` is a runtime string.
-- **Dynamic method / property** — `$o->$m()`, `$o->$p` (DynProp partially
-  exists), `$cls::$staticProp`.
-- **Reflection Tier-2** — `ReflectionClass`, runtime attribute reads (Tier-1
-  compile-time class queries already fold).
-
-Design sketch: emit one `__manticore_call_named(name, argc, args…)` (and
-`__manticore_new_named` / `__manticore_static_named`) switching over all known
-user symbols; a string-typed callee / class-name at an Invoke / New / static
-site routes through it. Bounded by a fixed max arity (uniform cell args).
-Decide the table's membership (all user fns/classes, or only those that escape
-to a dynamic site).
-
-### Tier 3 — semantic depth
-
-- Reflection Tier-2: `ReflectionClass`, runtime attribute reads, dynamic class
-  names (Tier-1 compile-time class queries already fold — see
-  `session_handoff_2026_06_19`).
-- `unset` of a packed vec element (hole / shift semantics).
-- `echo`/concat of `INF`/`NAN` renders lowercase (var_dump fixed).
-
-#### Magic methods — what is done, and what is knowingly not
-
-`serialize`/`unserialize` (incl. `__serialize`/`__unserialize`, `allowed_classes`,
-`__PHP_Incomplete_Class`), `__debugInfo`, and `var_export` of objects are DONE, and
-`__get`/`__set`/`__isset`/`__unset`/`__call` now fire on an ERASED receiver as well as a
-statically-known one. The gaps left, deliberately:
-
-1. **None of the hooks fire for an INACCESSIBLE DECLARED member.** All of them gate on
-   "the class has no slot for this name". php also fires when the slot EXISTS but is
-   private/protected out of the accessing scope. Manticore enforces no visibility at all,
-   so such an access simply succeeds. Closing it needs a scope model in the emitter
-   (compare the frame's class prefix against `PropertyMeta::$visibility` /
-   `$declaringClass`) — separate work, not a dispatch problem.
-2. **`__call` on an erased receiver is rerouted only when NO class declares the method.**
-   The mixed case — some classes declare it, others answer through `__call` — needs two
-   different argument lists in one switch, and the call's arg emission is built against
-   the resolved callee's signature.
-3. **`is_callable()` on an erased value answers true for ANY object.** Narrowing it to
-   classes declaring `__invoke` needs a class_id probe, and a Closure has NO class
-   descriptor (slot 0 is its function pointer), so the probe would start answering false
-   for the common case. Needs the closure header, not a switch.
-4. **`__sleep`/`__wakeup` are ignored.** php calls them from serialize/unserialize when
+1. **None of the hooks fire for an INACCESSIBLE DECLARED member.** All of them gate on "the
+   class has no slot for this name". php also fires when the slot EXISTS but is
+   private/protected out of the accessing scope. Manticore enforces no visibility at all, so
+   such an access simply succeeds. Closing it needs a scope model in the emitter (compare the
+   frame's class prefix against `PropertyMeta::$visibility` / `$declaringClass`) — separate
+   work, not a dispatch problem.
+2. **`__call` on an erased receiver is rerouted only when NO class declares the method.** The
+   mixed case — some classes declare it, others answer through `__call` — needs two different
+   argument lists in one switch, and the call's arg emission is built against the resolved
+   callee's signature.
+3. **`is_callable()` on an erased value answers true for ANY object.** Narrowing it to classes
+   declaring `__invoke` needs a class_id probe, and a Closure has NO class descriptor (slot 0
+   is its function pointer), so the probe would start answering false for the common case.
+   Needs the closure header, not a switch.
+4. **`__sleep` / `__wakeup` are ignored.** php calls them from serialize/unserialize when
    `__serialize`/`__unserialize` are absent.
-5. **`unset($o->declaredProp)` is a no-op**, so the "unset it so `__get` fires again"
-   idiom does not work.
+5. **`unset($o->declaredProp)` is a no-op**, so the "unset it so `__get` fires again" idiom
+   does not work.
 6. **`&__get` (return by reference) is unsupported** — the magic call yields an i64 cell.
 7. **`Stringable` is not auto-added** to a class declaring `__toString`, so
    `class_implements()` / `getInterfaceNames()` do not report it as php 8 does.
 8. **Uninitialized typed properties serialize as their zero value.** Manticore zero-fills
    every slot, so `class P { public int $x; }` writes `1:{s:1:"x";i:0;}` where php writes
-   `0:{}`. It needs an init bitmap in the object header — an object-ABI change.
+   `0:{}`. Needs an init bitmap in the object header — an object-ABI change.
 9. **`R:` is never emitted.** It marks a php REFERENCE, and a Manticore array carries no
    is_ref bit, so there is no runtime fact to emit it from. It is accepted on input as a
    value copy.
 10. **`(array)$obj` yields the dynamic-property BAG only**, where php returns the declared
-    properties too. var_dump / serialize / var_export compose the two themselves.
-11. **A bare `array` property hint erases its element**, so the elements of
-    `public array $a` read raw — var_dump and var_export print ints as denormal floats. A
-    `@var int[]` on the same property is correct. This is the parked element-repr work.
+    properties too. `var_dump` / `serialize` / `var_export` compose the two themselves.
+11. **A bare `array` property hint erases its element**, so the elements of `public array $a`
+    read raw — `var_dump` and `var_export` print ints as denormal floats. A `@var int[]` on
+    the same property is correct. This is the parked element-repr work.
 12. **php 8.5 clone-with does NOT run the readonly guard here** — and should not: the RFC's
-    purpose is to let a clone reinitialize a readonly property. Noted because it looks
-    like a missing check. There is no `php` oracle for it (8.5.8 does not parse the
-    syntax), so it is a superset feature.
+    purpose is to let a clone reinitialize a readonly property. Noted because it looks like a
+    missing check. There is no `php` oracle for it (8.5.8 does not parse the syntax), so it is
+    a superset feature.
 
-### Tier 4 — performance & infra (everything already beats Zend)
+### Other semantic gaps
 
+- **`goto` into a loop body** is unsupported. Plain forward and backward `goto` work.
+- **`ReflectionEnum` does not exist** — it was built and reverted. Every other Reflection
+  class ships (`prelude/reflection.php`).
+- **Static properties are external-linkage globals only**, so two compilation units cannot
+  disagree about one.
+- **Element representation is half done.** The array flags word carries an element-repr
+  nibble that release / retain / COW read, but the erased element channel is not yet a cell,
+  so a concrete `string[]` parameter fed a cell-element array still misreads.
+
+## Tier 3 — infrastructure
+
+- **EPIC: a `.sig` carries FUNCTIONS ONLY.** `src/Manticore/Sig.php` emits
+  `{"schema":1,"functions":[…]}` and nothing else, so classes, interfaces, traits, enums and
+  constants do not cross a compiled-library boundary. Consequences: `instanceofMatchIds` and
+  `descendantClassIds` are closed-world, and `catchAcceptsAll` fails open.
+- **No dependency resolution, no build cache, no packaging bootstrap.** `MANTICORE_HOME`,
+  `~/.manticore/cache` and a `compiler_abi` field appear in
+  [`design/module-system.md`](design/module-system.md) but nowhere in `src/`. Manifest targets
+  and Composer source discovery work; transitive dependency fetch does not.
+- **The ABI version is not surfaced.** `MemoryAbi::VERSION` is 7 and `manticore version`
+  prints only `manticore 0.6.0`, so a vendored `.o` cannot detect a mismatch.
+- **`dump-mir --after=<pass>`** is described in [`design/mir.md`](design/mir.md) but not
+  implemented.
+- **Cycle collector: manual trigger only**, and it does not scan static or global roots. A
+  threshold heartbeat and a safe-point trigger are unbuilt.
+- **Monomorphize has no `$cell` fallback.** `Monomorphize.php` calls it "future, Phase 3"; the
+  "every monomorphized function keeps exactly one name-addressable `$cell` entry" invariant in
+  [`design/monomorphization.md`](design/monomorphization.md) is aspirational, not upheld.
+- **No CI, no prebuilt binaries.** Every install compiles from source.
+
+## Tier 4 — performance
+
+Everything already beats Zend (2–50× on compute; assoc arrays beat php outright). The
+remaining levers:
+
+- **IR volume is the build-time lever** — `clang -O2` is ~66% of `bin/build`. Emitting less IR
+  beats optimising the front end.
 - SSO / interning for dynamic small strings; property-bag literal hashes.
-- Harden the gated `TypeCheck` pass (`MANTICORE_TYPECHECK=1`) toward on-by-default
-  — it would have caught the `str_replace`-array misuse at compile time instead
-  of as a runtime SIGBUS.
-
-## Recommended order
-
-1. ~~Late static binding~~ — **done** (see Tier 1).
-2. ~~Encapsed strings + `get_class()` runtime class~~ — **done** (see Tier 1).
-3. ~~Heredoc/nowdoc~~, ~~pipe `|>`~~, ~~anonymous classes~~ done. Tier 2 grammar
-   left: property hooks + asymmetric visibility (8.4).
-4. Tier 3 / Tier 4 as drivers demand.
+- Harden the gated `TypeCheck` pass (`MANTICORE_TYPECHECK=1`) toward on-by-default — it would
+  have caught the `str_replace`-array misuse at compile time instead of as a runtime SIGBUS.
+- Array / JSON / sort helpers sit at roughly 2× php and are competing with hand-tuned C —
+  that is close to the ceiling, not a bug.
 
 ## How to build the plans (the method that works here)
 
-1. **Probe-matrix first.** One minimal repro per feature, diffed against `php`,
-   before committing to a design. (This file's matrix is the template.)
-2. **Find the convergent root.** Monomorphization was *the* root behind a dozen
-   erasure symptoms. Ask "is there one fix that collapses several rows?" before
-   building.
-3. **Phase + gate hard, every phase:** suite + difftest + fixpoint + stability +
-   `--seed`. Never batch risky changes. A "random transient" can be a real latent
-   bug (the str_replace SIGBUS) — chase it, don't dismiss it.
-4. **Dual-validate Zend seed AND native** — they diverge on strings / floats /
-   by-ref. Some bugs only surface in the native self-build.
-5. **php-faithful signatures; root cause over workaround** (memory
-   `keep-php-signatures`, `fix-root-causes-not-reverts`).
-6. **Self-host is the gate; real programs are the probes** — the compiler and
-   stdlib are the quality corpus.
+1. **Probe-matrix first.** One minimal repro per feature, diffed against `php`, before
+   committing to a design.
+2. **Find the convergent root.** Monomorphization was *the* root behind a dozen erasure
+   symptoms. Ask "is there one fix that collapses several rows?" before building.
+3. **Phase and gate hard, every phase:** suite + difftest + fixpoint + stability + `--seed`.
+   Never batch risky changes. A "random transient" can be a real latent bug — chase it.
+4. **Dual-validate the Zend seed AND the native build** — they diverge on strings, floats and
+   by-ref. Some bugs only surface in the native self-build, and an emitter fix needs TWO
+   generations before its effect is real.
+5. **php-faithful signatures; root cause over workaround.** No reverts, no workarounds.
+6. **Self-host is the gate; real programs are the probes.**
 
-## Design references (current, keep)
+## Design references
 
-- `docs/generics.md` — the generics user guide (docblock `@template`, bounds,
-  traits, reified `@var C<T>`, monomorphization).
-- `docs/design/monomorphization.md`, `docs/design/monomorphize-callable-dim.md` —
-  the generics/erasure engine + the callable dimension.
-- `docs/design/type-system-v2.md`, `docs/design/unknown-cell-soundness.md` —
-  cell / union / NaN-box type system + the erased-representation soundness epic.
-- `docs/design/generators-and-pointers.md` — generators.
-- `docs/design/module-system.md`, `docs/modules.md` — modules / manifest build.
-- `docs/design/build-and-packaging.md` — packaging.
-- `docs/design/ptr-attribute-plan.md`, `docs/ffi.md` — typed FFI.
-- `docs/memory.md`, `docs/bootstrap/{10,11,12,14}` — memory model / rc / CoW /
-  cycle collector / ABI contract (`12` is the "stone tablet").
-- `docs/attributes.md` — attributes.
+Living reference:
+
+- [`../README.md`](../README.md) — what it is, what it needs, how to use it.
+- [`superset.md`](superset.md) — everything with no Zend oracle, and what that costs.
+- [`install.md`](install.md) — host dependencies and platform support.
+- [`async.md`](async.md) — structured concurrency and transparent I/O.
+- [`memory.md`](memory.md) — the memory model as a user sees it (`--memory`, env knobs).
+- [`modules.md`](modules.md) — the manifest, `.sig` interfaces, Composer projects.
+- [`generics.md`](generics.md) — docblock `@template`, bounds, reified `@var C<T>`.
+- [`ffi.md`](ffi.md), [`attributes.md`](attributes.md) — native binding and the attribute set.
+
+Design notes:
+
+- [`design/mir.md`](design/mir.md) — the IR, the type lattice, the pass pipeline.
+- [`design/memory-abi.md`](design/memory-abi.md) — **the stone tablet**: layout, refcount
+  encoding, destructor order, cycle-collector ABI.
+- [`design/refcount-cow.md`](design/refcount-cow.md) — why refcount + CoW, not a GC.
+- [`design/type-system-v2.md`](design/type-system-v2.md),
+  [`design/unknown-cell-soundness.md`](design/unknown-cell-soundness.md) — the cell / union /
+  NaN-box type system and the erased-representation soundness work.
+- [`design/monomorphization.md`](design/monomorphization.md) — the generics / erasure engine.
+- [`design/generators-and-pointers.md`](design/generators-and-pointers.md) — generators.
+- [`design/module-system.md`](design/module-system.md) — the module design behind `modules.md`.
+- [`design/build-and-packaging.md`](design/build-and-packaging.md) — packaging.
+- [`design/late-static-binding.md`](design/late-static-binding.md) — LSB lowering.
+- [`design/async-attribute.md`](design/async-attribute.md) — a designed, deliberately unbuilt
+  `#[Async]`.

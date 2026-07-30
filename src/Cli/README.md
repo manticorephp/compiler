@@ -14,6 +14,15 @@ Minimal clap-flavoured CLI router. Two classes, fluent builder, dispatch on `arg
   - `__construct(string $name, string $description)`
   - `run(\Closure $handler): self` — attach handler `fn(string[]): int`
   - `handler(): ?\Closure`
+- `Cli\ArgParse` — the shared flag/value parser.
+  - `ArgParse::FLAG` / `ArgParse::VALUE` — the two spec entry kinds
+  - `ArgParse::parse(array $args, array $spec): ParsedArgs`
+  - Accepts every value form (`-o out`, `-O2`, `--memory=rc`, `--memory rc`);
+    positionals may appear in any position.
+- `Cli\ParsedArgs` — the parse result.
+  - `flag(string): bool`, `value(string, string $default): string`,
+    `has(string): bool`
+  - `$positional` (files), `$error` (null on success)
 
 ## Invariants
 
@@ -34,4 +43,8 @@ $cli->command('help', 'Show help')
 exit($cli->run($argv));
 ```
 
-Whole module is the routing layer only. Argument parsing per command is the handler's job (see `Manticore\parse_compile_args`).
+`Cli` and `Command` are the routing layer; `ArgParse` / `ParsedArgs` are the
+parsing layer each handler opts into. A command builds its own spec — see
+`Manticore\compile_arg_spec()`, which `compile` extends with `--no-analyze` /
+`--analyze-strict` and `analyze` extends with `--deep` / `--json` /
+`--baseline` / `--generate-baseline`.

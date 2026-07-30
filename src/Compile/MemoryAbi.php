@@ -11,7 +11,7 @@ namespace Compile;
  * here changes. The version constant is exposed via `manticore
  * version` so out-of-tree consumers can detect mismatches.
  *
- * Design notes: `docs/bootstrap/12-memory-abi-contract.md`.
+ * Design notes: `docs/design/memory-abi.md`.
  */
 final class MemoryAbi
 {
@@ -419,7 +419,7 @@ final class MemoryAbi
     public const ASSOC_KIND_INT = 1;
     public const ASSOC_KIND_DELETED = -1;
 
-    // ─── Unified PhpArray (Phase 3, docs/bootstrap/16) ────────────
+    // ─── Unified PhpArray (docs/design/memory-abi.md §4) ─────────
 
     /**
      * Distinct sentinel at unified-array `ptr-8`. One greater than
@@ -428,7 +428,7 @@ final class MemoryAbi
      * shared rc-routing word. Behind `--array=unified` only; while both
      * runtimes coexist (Stages 1–3) the unified array is a THIRD tag,
      * replacing the vec+assoc tags at Stage 4. See
-     * `docs/bootstrap/16-unified-phparray-design.md`.
+     * `docs/design/memory-abi.md` §4.
      */
     public const ARRAY_TAG_MAGIC = 0x7E66000000000002;
 

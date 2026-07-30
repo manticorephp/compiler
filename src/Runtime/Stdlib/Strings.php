@@ -3,7 +3,7 @@
 /**
  * Pure-PHP implementations of common PHP string std functions on top
  * of libc primitives bound via #[Ffi\Library, Symbol] in
- * {@see Runtime\Libc}. No Rust runtime, no external libs.
+ * {@see Runtime\Libc}. No external runtime, no external libs.
  *
  * Naming: the symbols here live in the GLOBAL namespace (no `namespace`
  * declaration) so PHP code calling `str_starts_with($x, $y)` resolves

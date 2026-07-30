@@ -23,10 +23,10 @@ removed; MIR is the only backend.)
 | Symbol | Role |
 |--------|------|
 | `Module` | Whole-program unit: functions, classes, enums, globals, `passesApplied` ledger |
-| `Node` (`Nodes.php`) | MIR node base, flat `kind` discriminant; ~64 node subclasses, each carrying a `Type` |
+| `Node` (`Nodes.php`) | MIR node base, flat `kind` discriminant; 67 node subclasses, each carrying a `Type` |
 | `Type` | HHIR-style type lattice: void/null/bool/int/float/string, `vec[T]`, `assoc[K,V]`, `obj[class]`, `closure`, `cell` (tagged union of atoms), `unknown` |
 | `FunctionDef` / `Param` | Function record: params, `returnType`, FFI binding, extern/prelude flags, inferred `Effects` |
-| `ClassDef` / `EnumDef` | Class/enum layout descriptor (object ABI: class_id@0, rc@8, props@16+) |
+| `ClassDef` / `EnumDef` | Class/enum layout descriptor (object ABI: class-descriptor ptr@0, rc word@8, props@16+) |
 | `AllocationKind` | Per-alloc verdict: RcHeap / NoRefcount / Arena / Borrowed / Static |
 | `Effects` | Per-node + per-function memory-effect set (alloc/escape/throw/callUnknown/storeHeap…) |
 | `MemoryMode` | rc / arena / hybrid reclaim strategy (default HYBRID) |
@@ -34,12 +34,19 @@ removed; MIR is the only backend.)
 | `Walk` | Single source of truth for a node's value/control children |
 | `Dump` | Diff-friendly MIR pretty-printer (`dump-mir`) |
 
+Also in `Compile/Mir/`, supporting the above rather than being surface of their
+own: `RuntimeLibrary` (the emitted runtime's IR bodies — by far the largest file
+here), `PreludeDemand` (which prelude tiers a program actually pulls in),
+`RuntimeFeatures`, `ControlFlow`, `CondOwn` (the shared `?:`/`??`/ternary/`match`
+ownership predicate), `ArenaContext`, `GeneratorContext`, `FunctionEmitFrame`,
+`LocalSlots`, `MethodMeta`, `ParamMeta`, `PropertyMeta`, `StringPool`,
+`SsaBuilder`, `NodeClone`, `FunctionSignatures`.
+
 ### Memory ABI (`src/Compile/`)
 
 | Symbol | Role |
 |--------|------|
-| `MemoryAbi` | One source of truth for object/array layout, rc encoding, tag magics, CC state bits. Versioned (`VERSION`), exposed via `manticore version` |
-| `MemoryOp` | Semantic record of one rc op (retain/release/cow/possible_root × assoc/obj/vec) the lowering emits and audit passes read |
+| `MemoryAbi` | One source of truth for object/array layout, rc encoding, tag magics, CC state bits. Versioned (`VERSION`, currently 7 — not surfaced by any command today). Contract: `docs/design/memory-abi.md` |
 
 ### Runtime IR host (`src/Compile/Runtime/`)
 
@@ -47,7 +54,7 @@ removed; MIR is the only backend.)
 |--------|------|
 | `RuntimeHost` | Contract the standalone runtime emitters need from a backend: alloc + labels/instrumentation |
 | `BareHost` | MIR's host: plain libc `malloc`/`realloc`, no arena/profile/verify, private label counter |
-| `UnifiedArrayRuntime` | The ONE PhpArray runtime (`docs/bootstrap/16`): 48-byte header, PACKED (vec fast path) ↔ HASHED (assoc map) modes, rc always at one offset |
+| `UnifiedArrayRuntime` | The ONE PhpArray runtime (`docs/design/memory-abi.md` §4): 56-byte header, PACKED (vec fast path) ↔ HASHED (assoc map) modes, rc always at one offset |
 
 ### Type-hint parser (`src/Compile/TypeHint/`)
 
@@ -63,33 +70,39 @@ Driven by `lower_module()` / `compile_via_mir()` in
 `Module`, and stamps `passesApplied`:
 
 ```
-LowerFromAst      AST → MIR; `array` hint lowers to `unknown`
-   ↓
+LowerFromAst      AST → MIR; a bare `array` hint lowers to `unknown`
 ConstFold         fold literal arith/cmp/unary; collapse dead `if`
-   ↓
-DeadStore         drop pure StoreLocal whose name is never read
-   ↓
+DeadStore         drop a pure StoreLocal whose name is never read
 InferTypes        refine every node's Type from `unknown` (name→Type map)
-   ↓
-NarrowReturns     `unknown` array return → concrete `vec[T]` (fixpoint, re-runs InferTypes)
-   ↓
+NarrowReturns*    concrete param-independent `array` returns → vec[T] / assoc[K,V]
+InferTypes        re-run on the narrowed returns
+InlineClosures    inline captureless arrow closures; fuse map/filter/reduce to loops
+InferTypes        re-run on the spliced / fused expressions
+Monomorphize      specialize erased-array and callable params per call-site shape
+FuseSplitJoin     implode(explode(…)) → one native str_replace
+TypeCheck         array-REPR conflicts (fatal); full checker under MANTICORE_TYPECHECK=1
+NarrowReturns     final return narrowing, post-specialization
+CheckTypeDefs     the `#[TypeDef]` soundness gate
+ReflectAnalysis   decide which classes carry reflection metadata
+DemoteCharLocals  a compared / ord()'d `$s[$i]` becomes a byte read, not a fresh string
 InferEffects      stamp intrinsic Effects per node; union per function
-   ↓
-InferAllocKind    escape analysis → RcHeap (escapes) / NoRefcount (confined)
-   ↓
+InferAllocKind    escape analysis → RcHeap (escapes) / NoRefcount (confined) / Arena
 ApplyMemoryMode   overlay --memory: confined → Arena (hybrid) | NoRefcount (rc)
-   ↓
-InsertMemoryOps   lower the verdict to explicit MemoryOp_ nodes (arena scope / per-local release)
-   ↓
+InsertMemoryOps   lower the verdict to explicit MemoryOp_ nodes (arena scope / release)
 Verify            assert structural invariants; throw before bad MIR reaches LLVM
-   ↓
 EmitLlvm          MIR → LLVM IR text
 ```
 
-`EmitLlvm` is split across `EmitLlvm.php` + four traits: `EmitLlvmBuiltins`
-(PHP builtin call emitters), `EmitLlvmObjects` (new / prop / method /
-static / refs / isset), `EmitLlvmExceptions` (throw / try-catch via
-setjmp landing pads), `EmitLlvmRuntime` (tagged allocators + rc helpers).
+`NarrowReturns*` is the pre-monomorphization run (`new NarrowReturns(true)`): it
+narrows only returns Monomorphize will not re-shape. The interleaved `InferTypes`
+re-runs are not redundant — each later pass needs the types the previous one made
+concrete, which is also why `Monomorphize` sits this far down rather than right
+after lowering.
+
+`EmitLlvm` is one class assembled from 14 traits (`EmitLlvm.php`): `EmitLlvmVisit`,
+`Expr`, `Control`, `Locals`, `Calls`, `Memory`, `Arrays`, `Generator`, `Module`,
+`Runtime`, `Builtins`, `Exceptions`, `Objects`, `Fiber`. They share one `$this`, so
+a "trait" here is a file-level split of one emitter, not an independent unit.
 
 ## Key invariants
 
@@ -111,7 +124,8 @@ setjmp landing pads), `EmitLlvmRuntime` (tagged allocators + rc helpers).
   heisenbug).
 - Memory layout is versioned through `MemoryAbi` — every GEP offset
   flows through one constant there; bump `VERSION` on any layout change.
-- Object layout: class_id@0, rc@8, props@16+. Single inheritance;
+- Object layout: class-descriptor ptr@0, rc word@8, props@16+; the class id is
+  at descriptor offset 0. Single inheritance;
   virtual dispatch is a class-id chain collapsing to a direct call when
   one concrete class is reachable.
 - Exceptions use setjmp/longjmp + a process-global thrown slot. No
@@ -129,9 +143,9 @@ setjmp landing pads), `EmitLlvmRuntime` (tagged allocators + rc helpers).
 - `rc` confined → NoRefcount (per-local free at scope exit), escaping → RcHeap
 - `arena` everything → Arena; escaping gets a runtime bypass guard
 
-Cycles: Bacon–Rajan cycle collector v1 (opt-in, zero overhead unless
-`gc_collect_cycles()` is called). Refcount + copy-on-write for assoc +
-objects.
+Cycles: Bacon–Rajan cycle collector, manual-trigger only (zero overhead unless
+`gc_collect_cycles()` is called; does not scan static/global roots). Refcount +
+copy-on-write for arrays + objects.
 
 ## Usage
 

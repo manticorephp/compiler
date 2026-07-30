@@ -18,12 +18,11 @@ namespace Lexer;
  *   - magic constants (__LINE__, __FILE__, etc.) emitted as MagicConstant
  *   - all operators and delimiters tracked by TokenKind
  *   - attribute opener (#[)
+ *   - heredoc / nowdoc, including the flexible (indented) closing marker
+ *   - inline HTML between PHP tags
  *
- * Out of scope here, to be added later: heredoc and nowdoc, interpolated
- * string AST, inline HTML between PHP tags.
- *
- * Plain string concatenation only; no curly-brace member interpolation,
- * because the current AOT compiler does not reliably expand it.
+ * Out of scope here, by design: the INTERIOR of an interpolated string. A
+ * double-quoted lexeme reaches the parser whole and the parser sub-lexes it.
  */
 final class Lexer
 {

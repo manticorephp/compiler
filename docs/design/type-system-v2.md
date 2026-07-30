@@ -1,5 +1,16 @@
 # Type System v2 — deeper static typing
 
+Status: **LIVING LOG.** Phases 1-4 largely landed — `KIND_UNION` exists in
+`Compile\Mir\Type` with a union-aware `unionWith`, and flow / `instanceof`
+narrowing, `propPathKey` and `cellPropBoxed` are all done, each marked below with
+its commit. Sections are dated; the ✅ marks are the truth, the prose around them
+is the state at the time of writing. `Type.php` is the current lattice.
+
+⚠ Two things below are stale rather than historical: the "Where we are (v1)"
+section describes the PRE-v2 lattice in the present tense, and the type-checking
+scope predates `src/Analyze/` entirely (12 lint rules plus `TypeCheck`'s string
+arithmetic and arg/return checks).
+
 Goal: close the inference gaps that force the runtime cell/mixed fallback,
 catch more at compile time (toward "stricter than Zend, which only checks at
 runtime"), and emit more specialised code (fewer runtime tag dispatches).

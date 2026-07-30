@@ -5,7 +5,7 @@
 # Link the given objects into <output>, generating void*-returning stubs for
 # every symbol the linker can't resolve. This is the runtime-free bootstrap
 # tail: the compiler references native FFI-boundary primitives
-# (`manticore_rt_*`) that have no implementation on the no-Rust php/v2 branch;
+# (`manticore_rt_*`) that have no implementation in the pure-PHP tree;
 # they link-stub to 0 (and only fire at runtime if actually called).
 #
 # THE one implementation — bin/compile and tools/selfhost.sh both call this.

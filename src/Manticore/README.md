@@ -10,8 +10,9 @@ The compiler self-builds via `manticore build manticore.json` (a self-contained 
 
 | Command | Purpose |
 |---------|---------|
-| `compile` | Full pipeline → native binary. `-o <out>` (default `a.out`). Source from files, a directory (recursive `*.php` scan), or stdin. |
+| `compile` | Full pipeline → native binary. `-o <out>` (default `a.out`). Source from files, a directory (recursive `*.php` scan), or stdin. **Analyzes by default**: `--no-analyze` skips it, `--analyze-strict` makes error-severity findings fail the compile (rc 65). |
 | `build [manticore.json]` | Cargo-like manifest build: every library target → `.o` + `.sig`, every application target → executable. |
+| `analyze` | Static analysis only, no codegen. `--deep` also runs the MIR type passes (repr-soundness), `--json` for editors/CI, `--baseline <f>` / `--generate-baseline <f>` to snapshot and suppress known findings. Exit 1 if any error-severity diagnostic survives. |
 | `dump-ast` | Parse first source, print AST (`Parser\Dump`). |
 | `dump-mir` | Parse + run MIR pipeline (sans EmitLlvm), print typed IR. `--prelude` includes the Exception hierarchy, `--effects` annotates inferred memory effects. |
 | `dump-llvm` | Front-end + EmitLlvm, print LLVM IR (no link). Same as `dump-llvm-mir`. |
@@ -27,7 +28,7 @@ Manifest decoded with native `json_decode` (values flow as `mixed`, extracted vi
 - **libraries** — `{name, src, output, exclude}`. Compiled with `--emit-library` to a standalone `<output>.o` (no `@main`, no stdlib link) plus a sidecar `<output>.sig` written via `Sig::emitModule`.
 - **applications** — `{name, src, output, entry, exclude}`. Module files (everything in `src` except `entry` + `exclude`) contribute declarations only; `entry` is appended LAST so its top-level lowers into `__main` after every class/function registers. With no `entry`, falls back to find|sort order (a `zzz_*` file sorts last by convention). Each app auto-depends on every library: imports each `<output>.sig` (declare-only externs, incl. namespaced/FFI bindings) and links each `<output>.o`.
 
-Pipeline (`lower_module`): `LowerFromAst` → `ConstFold` → `DeadStore` → `InferTypes` → `NarrowReturns` → `InferEffects` → `InferAllocKind` → `ApplyMemoryMode` → `InsertMemoryOps` → `Verify`, then `EmitLlvm`.
+Pipeline (`lower_module`): `LowerFromAst` → `ConstFold` → `DeadStore` → `InferTypes` → `NarrowReturns`(pre-mono) → `InferTypes` → `InlineClosures` → `InferTypes` → `Monomorphize` → `FuseSplitJoin` → `TypeCheck` → `NarrowReturns` → `CheckTypeDefs` → `ReflectAnalysis` → `DemoteCharLocals` → `InferEffects` → `InferAllocKind` → `ApplyMemoryMode` → `InsertMemoryOps` → `Verify`, then `EmitLlvm`. Full annotation: `src/Compile/README.md`.
 
 ## `.sig` module interface (`Sig.php`)
 
@@ -44,9 +45,10 @@ Heterogeneous returns flatten to i64 in self-host today, so parsed args land in 
 - `-o <path>` → `$output` (default `a.out`).
 - `-O<level>` → `$optLevel`, one of `0 1 2 3 s z`. **Default `2`.** Passed to clang.
 - `--memory=<rc|arena|hybrid>` → `$memory`; routed through `Compile\Debug::applyMemoryMode`.
-- `--backend=<mir|ast>` → `$backend`. MIR is the only real backend (default).
+- `--backend=<mir|ast>` → `$backend`. **Inert** — `compile_with_backend()` calls `compile_via_mir()` unconditionally, so `ast` is accepted and ignored.
 - `--emit-library` → `$emitLibrary`: build a standalone stdlib `.o` (no `@main`, no stdlib link).
 - `--prelude` / `--effects` → `dump-mir` flags.
+- `compile` and `analyze` extend the shared spec: `--no-analyze` / `--analyze-strict` on the former, `--deep` / `--json` / `--baseline` / `--generate-baseline` on the latter.
 - Unknown flag → false (rc 64).
 
 `$linkStdlib` (set when any bundled-stdlib extern was injected) and `$externDecls` (collected by `cmd_compile` on the native path) are internal carry-over fields, not CLI flags.
@@ -62,8 +64,13 @@ A distributed compiler ships `bin/` + `lib/` only (no `src/Runtime`); the `.sig`
 
 ## Attr (`Manticore\Attr\`)
 
-- `Struct` — TARGET_CLASS; value-type class (no class-id header, static dispatch).
-- `RefOut` — pure-output by-ref param (auto-vivified at the call site; see `docs/attributes.md`).
+- `Struct` — TARGET_CLASS; value-type class (no header at all, static dispatch).
+- `RefOut` — pure-output by-ref param (auto-vivified at the call site).
+- `CellArg` — an element-CONSUMING `array` param: the call site boxes each element
+  so the callee sees a self-describing cell array. Carried in the `.sig`.
+
+All three, plus `#[TypeDef]` (matched by name — there is no `TypeDef` class file
+here): `docs/attributes.md`.
 
 ## Invariants
 

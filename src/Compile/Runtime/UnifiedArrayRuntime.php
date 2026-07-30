@@ -11,7 +11,7 @@ use Compile\Debug;
 use Compile\MemoryAbi;
 
 /**
- * Phase 3 unified PhpArray runtime (`docs/bootstrap/16`).
+ * The unified PhpArray runtime (`docs/design/memory-abi.md` §4).
  *
  * Emits ONE array runtime that replaces the dual vec/assoc split: a
  * single 48-byte header (len/cap/next_int/rc/flags/buckets) with TWO

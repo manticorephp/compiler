@@ -1,9 +1,23 @@
 # Monomorphization — non-reified generics for the erased-array boundary
 
-Status: **SHIPPED** — the `Monomorphize` pass (array dimension + the callable
-dimension, `docs/design/monomorphize-callable-dim.md`) is in `main`. This doc is
-the original engine design + rationale; read it with the callable-dim doc for
-the current shape. Prereqs (landed): uniform closure ABI, cell/union type system
+Status: **SHIPPED** — the `Monomorphize` pass covers both the array dimension and
+the callable dimension. This doc is the original engine design and rationale;
+three details below no longer match the implementation:
+
+1. **Mangling.** Specialised names are `<name>$mono$<key>`
+   (`Monomorphize.php`), not the `array_map$Lvec_int_R_Cint` scheme sketched
+   here. Examples: `head$mono$p0_vec_int`, `head$mono$p0_vec_str`.
+2. **Pipeline position.** Monomorphize does NOT run right after `LowerFromAst`.
+   It runs after `ConstFold`, `DeadStore`, `InferTypes`, a pre-mono
+   `NarrowReturns`, `InferTypes` again, `InlineClosures` and `InferTypes` a third
+   time — precisely because it needs settled call-argument types. See
+   `src/Compile/README.md` for the real order.
+3. **The `callee$cell` fallback is NOT built.** `Monomorphize.php` calls it
+   "future, Phase 3". The invariant stated below — that every monomorphized
+   function keeps exactly one name-addressable `$cell` entry — is aspirational,
+   not upheld. Phases 4-5 likewise did not land.
+
+Prereqs (landed): uniform closure ABI, cell/union type system
 (type-system-v2.md), float literal precision.
 
 ## Why this is THE next milestone

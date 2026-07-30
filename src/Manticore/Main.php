@@ -1267,7 +1267,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $ssl = openssl_link_flags();
         if ($ssl !== "") { $linkExtra = $linkExtra . " " . $ssl; }
     }
-    // Link via the stub-generating tail: the no-Rust bootstrap leaves native
+    // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();

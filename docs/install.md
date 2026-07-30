@@ -57,11 +57,11 @@ $MANTICORE_HOME/lib/prelude/*.php
 
 | Dependency | Needed for | Where it is used |
 |---|---|---|
-| **`clang`**, LLVM **≥ 15** | assembling emitted LLVM IR → object | `src/Manticore/Main.php:866` |
-| **`cc`** | linking objects → executable | `src/Manticore/Main.php:925` |
-| **PHP 8.5** (Zend) | *cold bootstrap only* — seeds the first native compiler | `bin/compile:42` |
-| **libpcre2** (8-bit) + `pcre2-config` | `preg_*` | `Main.php:287`, `src/Runtime/Pcre.php` |
-| **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php:307`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
+| **`clang`**, LLVM **≥ 15** | assembling emitted LLVM IR → object | `Main.php` — `clang -c`, the compile and library paths |
+| **`cc`** | linking objects → executable | `Main.php` — the `system("cc …")` link step |
+| **PHP 8.5** (Zend) | *cold bootstrap only* — seeds the first native compiler | `bin/compile:41` |
+| **libpcre2** (8-bit) + `pcre2-config` | `preg_*` | `Main.php::pcre2_link_flags()`, `src/Runtime/Pcre.php` |
+| **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php::openssl_link_flags()`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
 | `bash`, `find`, `sort`, `xargs`, `sed`, `awk`, `grep`, `mktemp` | build scripts | `bin/compile`, `tools/*.sh` |
 
 `pcre2-config --libs8` and `pkg-config --libs openssl` are how the link flags
@@ -107,7 +107,8 @@ sury.org and clang from apt.llvm.org:
 ```bash
 sudo apt-get install -y \
     gcc libc6-dev binutils make \
-    libpcre2-dev libssl-dev pkg-config
+    libpcre2-dev libssl-dev pkg-config \
+    netbase
 
 # clang / LLVM (pick the newest that publishes packages for your release)
 curl -sSL https://apt.llvm.org/llvm.sh | sudo bash -s 21
@@ -119,8 +120,14 @@ sudo apt-get install -y php8.5-cli php8.5-mbstring
 sudo update-alternatives --set php /usr/bin/php8.5
 ```
 
-The root `Dockerfile` does exactly this and is the authoritative version of
-these steps.
+⚠ **`netbase` is not optional.** It installs `/etc/services` and `/etc/protocols`,
+which a bare `debian:12` ships without — omit it and the network stdlib silently
+degrades (`getservbyname("http")` returns `false`) instead of failing loudly.
+
+The root `Dockerfile` covers the same ground, with one deliberate difference: it
+does **not** pin an LLVM version. It probes a descending list and takes the first
+that installs, then symlinks the newest it found. Pin `21` above only if you want
+a specific toolchain; otherwise follow the Dockerfile's approach.
 
 ### Alpine (musl)
 

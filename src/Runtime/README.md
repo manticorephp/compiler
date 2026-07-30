@@ -2,7 +2,7 @@
 
 PHP-side runtime support compiled into every output binary: libc FFI
 bindings, the built-in `stdClass`, a native JSON encoder/decoder, and
-pure-PHP reimplementations of common PHP std-functions. No Rust runtime,
+pure-PHP reimplementations of common PHP std-functions. No external runtime,
 no external libs — everything builds on the same compile-time-FFI
 mechanism the compiler uses internally.
 
@@ -37,9 +37,14 @@ self-contained compiler.
   AllowDynamicProperties]`. Declared here (not synthesised in the
   lowering pass) so both backends register a real `stdClass` that
   `(object)` casts and dynamic-property stores can name.
-- `Stdlib/` — global-namespace PHP std-function reimplementations
-  (`Arrays.php`, `Ctype.php`, `Gc.php`, `Io.php`, `Strings.php`). See
-  `Stdlib/README.md` for the per-file surface + invariants.
+- `AsyncHook.php` — the eleven callbacks the async runtime installs so
+  ordinary stream I/O parks a fiber instead of the process (readable /
+  writable, bounded variants, close, sleep, the DNS cache pair, and the
+  `select` trio).
+- `Crypto.php`, `Openssl.php`, `Pcre.php` — bindings for the two host
+  libraries the build links (OpenSSL 3, PCRE2).
+- `Stdlib/` — global-namespace PHP std-function reimplementations, 33
+  files. See `Stdlib/README.md` for the grouping and the invariants.
 
 ## Public surface (global namespace)
 
@@ -77,24 +82,20 @@ lives in the global namespace so an unqualified user call
   but **ignored** — it always returns arrays (no `stdClass`), which is
   what the manifest reader and config consumers want. The parser is not
   a strict validator: malformed input degrades, it does not throw.
-- `strpos` / `strrpos` return **`-1`** for "not found" (not PHP's
-  `false`) — compiler union-typing for return values is still in flight;
-  callers wanting PHP-strict semantics wrap. `strpos` also treats a
-  null haystack/needle as no-match (self-host `?string`→`string`
-  coercion robustness).
+- `strpos` / `strrpos` return **`int|false`**, exactly as php does — the
+  union is modelled now. `strpos` also treats a null haystack/needle as
+  no-match (self-host `?string`→`string` coercion robustness).
 - `str_replace` / `explode` inline a `memcmp` scan instead of calling
   `strpos`: the MIR `strpos` builtin returns a tagged `int|false` cell,
   so `$hit < 0` arithmetic on it would misread the boxed carrier and
   treat every match as a miss. Both also use chunk-based output (one
   `substr`/concat per match, not per byte) to stay linear under a
   runtime that frees nothing.
-- `in_array` today supports only string-needle / string-haystack — the
-  only shape the bootstrap exercises. Both sides go through libc
-  `strcmp` (byte compare, not pointer identity).
-- `array_key_last` deliberately omitted: PHP returns `int|string|null`,
-  the compiler doesn't track that union, and current call sites need an
-  `int` key — re-adding with a fixed return type would silently
-  miscompile.
+- `in_array(mixed $needle, array $haystack, bool $strict = false)` — the
+  full php signature. String comparisons go through libc `strcmp` (byte
+  compare, not pointer identity).
+- `array_key_last` / `array_key_first` are CODEGEN builtins
+  ({@see EmitLlvmBuiltins}), not PHP-level functions here.
 - `ctype_*`: empty string → `false` for every predicate; an int arg in
   `[-128, 255]` is treated as a single byte (signed wrap via `+256`),
   ints outside that range are coerced to decimal-string then scanned.

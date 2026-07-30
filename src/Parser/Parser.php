@@ -42,8 +42,8 @@ use Parser\Ast\UseItem;
  * heredoc, complex string interpolation, and the rich expression surface
  * (member access, array literals, lambdas, etc.).
  *
- * Mirrors `crates/manticore-parser/src/parser.rs` AST shape so the JSON dump
- * of the two implementations can be diffed for parity.
+ * The AST shape is stable enough to diff: `Parser\Dump::program()` is the
+ * regression format the parser tests compare against.
  */
 final class Parser
 {

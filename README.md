@@ -113,14 +113,17 @@ Everything else is inspection — every stage of the pipeline is dumpable:
 | `build [manticore.json]` | build all manifest targets (libraries + applications) |
 | `analyze <file>` | the static checks a compiler can make and an interpreter never gets to |
 | `dump-ast` / `dump-mir` / `dump-llvm-mir` | parse / typed MIR / LLVM IR |
+| `dump-llvm` | LLVM IR from stdin |
 | `dump-sig <files>` | the module interface (exported symbol table) |
 | `version` / `help` | — |
 
 Flags: `-o <out>`, `-O<0|1|2|3|s|z>` (clang opt level, default `-O2`),
-`--emit-library` (a standalone `.o` with no `@main`), `--memory=rc|arena|hybrid`.
-`compile` **analyzes by default** and prints warnings without failing the build —
-`--no-analyze` turns it off, `--analyze-strict` makes error-severity findings fail the
-compile (rc=65).
+`--emit-library` (a standalone `.o` with no `@main`), `--memory=rc|arena|hybrid`, and
+`--prelude` / `--effects` for the `dump-*` commands. `compile` **analyzes by default** and
+prints warnings without failing the build — `--no-analyze` turns it off, `--analyze-strict`
+makes error-severity findings fail the compile (rc=65). `analyze` adds `--deep` (also run the
+MIR type passes), `--json`, and `--baseline` / `--generate-baseline` to suppress known
+findings. `--backend=<mir|ast>` is still parsed but inert — MIR is the only backend.
 
 ⚠ The `dump-*` commands do **not** link the stdlib, so a call into it resolves as
 `unknown`. When that matters, read the final binary.
@@ -192,10 +195,10 @@ cross-unit calls without re-parsing sources, and a distributable compiler that s
 
 ## Performance
 
-Native AOT output vs the Zend interpreter, Apple M1 Pro, `-O2`, best of 5, every
-compiled program verified byte-equal to `php` first. Loops are data-dependent and
-`$argc`-seeded so LLVM cannot fold them away. Representative slice — reproduce the
-full set with `bash bench/run.sh` (cases in `bench/cases/`):
+Native AOT output vs the Zend interpreter, Apple M1 Pro, `-O2`, best of 5 (`REPS=5`; the
+script defaults to 3), every compiled program verified byte-equal to `php` first. Loops are
+data-dependent and `$argc`-seeded so LLVM cannot fold them away. Representative slice —
+reproduce with `REPS=5 bash bench/run.sh` (cases in `bench/cases/`):
 
 | Benchmark | Workload | `php` | manticore | Speedup |
 |---|---|---:|---:|---:|
@@ -223,10 +226,14 @@ PHP source
   → ConstFold         │
   → DeadStore         │
   → InferTypes        │  MIR (src/Compile/Mir) — flat, typed, SSA-ish IR.
-  → InlineClosures    │  The only backend; Monomorphize specializes erased-array
-  → Monomorphize      │  and callable params per concrete call-site shape.
-  → NarrowReturns     │
+  → NarrowReturns     │  The only backend. InferTypes re-runs after each pass
+  → InlineClosures    │  that makes new types concrete, which is why
+  → Monomorphize      │  Monomorphize — specializing erased-array and callable
+  → FuseSplitJoin     │  params per call-site shape — sits this far down.
+  → TypeCheck         │
+  → NarrowReturns     │  Full annotation: src/Compile/README.md
   → CheckTypeDefs     │
+  → ReflectAnalysis   │
   → DemoteCharLocals  │
   → InferEffects      │
   → InferAllocKind    │
@@ -251,12 +258,16 @@ allocation between arena and heap-rc), `rc`, `arena`.
 bin/            build & run scripts + the output binary
   compile         cold seed (Zend → throwaway seed → native compiler + stdlib)
   build           self-host rebuild via the manifest (+ --seed, --verify)
+  manticore-install  the installer entry point Composer exposes
 lib/            prebuilt stdlib object + .sig + prelude (build artifacts, gitignored)
 prelude/        PHP injected into every program (Fiber, async runtime, Resource, …)
 src/Lexer/      tokenizer
 src/Parser/     recursive-descent + Pratt parser; AST node types
 src/Compile/    AST → MIR lowering, MIR passes, EmitLlvm backend
 src/Codegen/    low-level LLVM-IR text builders (no semantic logic)
+src/Analyze/    the static analyzer behind `analyze` and compile-time warnings
+src/Cli/        subcommand registry + argument parsing
+src/Ffi/        the attributes and opaque pointer type for native bindings
 src/Runtime/    PHP-level stdlib + libc / OS / FFI bindings compiled into binaries
 src/Manticore/  driver (Main.php), Sig.php, the build command
 tools/          build + gate scripts (selfhost, difftest, docker, …)

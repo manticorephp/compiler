@@ -1,6 +1,9 @@
 # Build pipeline, stdlib packaging & extensions
 
-Status: **decision pending on #2** (this doc records the options + recommendation).
+Status: **DECIDED AND SHIPPED.** Option 2C won: user programs get the stdlib as a
+prebuilt `lib/manticore_stdlib.o` plus a sidecar `.sig`, linked in by
+`CompileArgs::$linkStdlib` / `find_stdlib_object()`. The manifest declares the
+stdlib as a library target. The enabling drop-ABI change is marked done below.
 Companion to `docs/design/module-system.md` (the `manticore.json` / `.sig` spec).
 
 Context: the compiler self-builds via `manticore build manticore.json` to a

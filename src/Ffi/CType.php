@@ -5,22 +5,24 @@ namespace Ffi;
 use Attribute;
 
 /**
- * Disambiguate the C-side type of a parameter or return value when
- * the PHP type alone is too coarse (e.g. PHP `int` could be int32_t,
- * size_t, off_t depending on the C signature).
+ * Declares the C-side type when PHP's is too coarse. Written at FUNCTION
+ * level, alongside {@see Library} / {@see Symbol}:
  *
- *     #[Library('c'), Symbol('write')]
- *     function write(
- *         #[CType('int')] int $fd,
- *         \Ffi\Ptr $buf,
- *         #[CType('size_t')] int $count,
- *     ): #[CType('ssize_t')] int {}
+ *     #[Library('c'), Symbol('signalfd'), CType('int')]
+ *     function signalfd(int $fd, \Ffi\Ptr $mask, int $flags): int { return -1; }
  *
- * Recognised tokens: `int`, `int8_t`..`int64_t`, `uint8_t`..`uint64_t`,
- * `size_t`, `ssize_t`, `off_t`, `char`, `void`. `char*` is implicit
- * for PHP `string` parameters and `\Ffi\Ptr` is `void*`.
+ * ONE token is acted on: `'int'`, meaning the C callee's RETURN is a 32-bit
+ * `int`, so the wrapper must SIGN-EXTEND it into the i64 carrier. Without it a
+ * C `-1` reads back as 4294967295 (`mov w0, #-1` zeroes x0's upper half) — the
+ * bug that turned SSL_read's WANT_READ into a 4 GB memmove.
+ *
+ * ⚠ NEVER on a binding returning a pointer, or a long / ssize_t / size_t /
+ * off_t carried as PHP `int` — the sign extension truncates the value.
+ *
+ * Every other token, and every parameter-position use, is accepted and IGNORED.
+ * See `docs/ffi.md`.
  */
-#[Attribute(Attribute::TARGET_PARAMETER)]
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD | Attribute::TARGET_PARAMETER)]
 final class CType
 {
     public function __construct(

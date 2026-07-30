@@ -172,5 +172,11 @@ keeps the single erased copy as the fallback. Design:
 - The type variable of an **erased** class is a cell — correctness is guaranteed,
   but boxing cost remains; reach for a trait or a reified `@var … = new …` when the
   hot path needs it.
-- Generics are docblock-driven; there is no native `<T>` syntax (a future
-  parser-only addition would feed the same lowering engine unchanged).
+- `@implements C<T>` is **inert** — nothing reads it. Only `@template`, `@extends`
+  and `@use` are consumed by the lowering; an interface type argument has to come
+  from a `@var C<X>` at the construction site. Written for documentation value, it
+  costs nothing and does nothing.
+- The inline `<…>` extension is **surface-level**: the parser swallows the
+  angle-bracketed text and preserves it inside the type name string. There is no
+  generic-type AST node, so it feeds the same docblock-driven engine — it is a
+  spelling, not a second mechanism.

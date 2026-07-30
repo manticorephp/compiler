@@ -153,16 +153,19 @@ for compiler instructions: the file still parses and runs under `php`.
 | attribute | what it buys | Zend equivalent |
 |---|---|---|
 | `#[Manticore\Attr\Struct]` | a class with **no object header** — a value laid out like a C struct | none |
-| `#[TypeDef]` | a named layout / type alias the compiler reasons about | none |
+| `#[TypeDef]` | the object ERASED to the one value it wraps: no allocation, no refcount, no class id. Carries a `repr` for a narrow property slot, a `__invoke` normaliser for refinement types, and a dedicated soundness gate (`CheckTypeDefs`) that refuses every site which would observe it as an object | none |
 | `#[Manticore\Attr\RefOut]` | an out-parameter that is auto-vivified for the callee (how `preg_match($s, $p, $m)` fills `$m` natively) | the engine's own C-level by-ref |
 | `#[Ffi\Library]` | which native library a binding links against | `ext/ffi` + `php.ini` |
 | `#[Ffi\Symbol]` | the C symbol behind a PHP function, per target | `FFI::cdef` string |
-| `#[Ffi\CType]` | the C type of a return/param — **not cosmetic**: a C `int` return is not sign-extended by every libc, so `-1` reads as `4294967295` without it | C declaration |
-| `#[Ffi\Borrow]` / `BorrowMut` / `Take` / `Give` / `StaticPtr` | ownership across the FFI boundary, so the compiler knows who frees what | nothing — you get a leak or a double free |
+| `#[Ffi\CType('int')]` | function-level: the C return is a 32-bit `int`, so sign-extend it — **not cosmetic**, without it `-1` reads as `4294967295` | C declaration |
+| `#[Ffi\Weak]` | `declare extern_weak`, so a symbol absent on this target resolves to null instead of failing the link | nothing |
+| `#[Manticore\Attr\CellArg]` | an element-CONSUMING `array` parameter: the call site boxes each element so a compiled-once stdlib callee always sees self-describing cells | nothing — the representation question does not exist in Zend |
 
-The ownership family is the part with no analogue anywhere in PHP: it lets a native pointer
-participate in the same rc discipline as a PHP value instead of being an opaque handle the
-programmer must remember to free.
+Declared but **not consumed** by codegen, kept for intent: `#[Ffi\Variadic]` (the emitter keys
+variadic arity off the C symbol name instead) and the ownership family `#[Ffi\Borrow]` /
+`BorrowMut` / `Take` / `Give` / `StaticPtr`. The latter is the one with no analogue anywhere in
+PHP — the plan is to let a native pointer join the same rc discipline as a PHP value — but
+nothing is freed on your behalf today.
 
 ---
 
@@ -233,7 +236,7 @@ scopes) is designed, not wired.
 
 ## 7. Runtime knobs
 
-No `php.ini`. The environment variables that exist, and nothing more:
+No `php.ini`. The environment variables that exist:
 
 | variable | effect |
 |---|---|
@@ -243,7 +246,8 @@ No `php.ini`. The environment variables that exist, and nothing more:
 | `MANTICORE_PRELUDE` | where the prelude lives (a binary built to a temp path cannot find it argv0-relative) |
 | `MANTICORE_STDLIB` / `_O` / `_SIG` | override the stdlib object / signature the driver links |
 | `MANTICORE_PROFILE`, `MANTICORE_DEBUG_VERIFY`, `MANTICORE_TYPECHECK`, `MANTICORE_REFLECT_REPORT`, `MANTICORE_UNKNOWN_PROP_TRACE` | compiler diagnostics |
-| `MANTICORE_ARENA_ARRAYS`, `MANTICORE_EMPTY_SINGLETON` | allocation experiments |
+| `MANTICORE_ARENA_ARRAYS`, `MANTICORE_EMPTY_SINGLETON` | allocation strategies, both **on** by default — set `0` to opt out |
+| `MANTICORE_HOME`, `MANTICORE_REPO`, `MANTICORE_REF`, `MANTICORE_SRC` | read by `install.sh`, not by the compiler: where to install, and what to build from |
 
 ---
 
@@ -274,7 +278,7 @@ Kept here so the boundary stays honest:
 | accept classification | `async_accept_errno` — asserted through the errno **selector**, never a raw number, so it reads the same on both hosts |
 | resolver | `dns_resolv_conf`, `async_dns_resolver` — text-fixture parsers, no network |
 | FFI / attributes | the stdlib itself is the test: every `Runtime\Libc` binding rides them |
-| modules | `manifest_app`, plus the compiler's own self-host build |
+| modules | `tests/aot/cases/manifest_app/` (a directory fixture, not a `-k`-selectable case) plus the compiler's own self-host build |
 | everything with a Zend answer | `tools/difftest.sh` |
 
 The network-dependent check lives outside the suite:
