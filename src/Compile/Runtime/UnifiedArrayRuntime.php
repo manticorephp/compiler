@@ -3448,6 +3448,16 @@ final class UnifiedArrayRuntime
         $init->raw('  %istride = select i1 %ihash, i64 ' . $iiES . ', i64 8');
         $init->raw('  %ibias0 = select i1 %ihash, i64 ' . $iiVO . ', i64 0');
         $init->raw('  %ibias = add i64 %ibias0, ' . $iiH);
+        // The slots may be BOXED CELLS while the static type said
+        // `string[]` — `array_keys()` answers cells. The array records
+        // what it holds; mask each element to its payload when it does.
+        // Masking a raw string pointer is the identity (every userspace
+        // address fits 48 bits), so one select covers both worlds — and
+        // unlike routing the whole join to the CELL variant it cannot
+        // render a raw pointer as a denormal double when the stamp and
+        // the contents disagree (measured on linux/arm64).
+        $init->raw('  %ihintn = and i64 %iflags, ' . (string) MemoryAbi::ARRAY_ELEM_HINT_MASK);
+        $init->raw('  %ihintc = icmp eq i64 %ihintn, ' . (string) MemoryAbi::ARRAY_ELEM_HINT_CELL);
         $init->raw('  %accp = alloca i64');
         $init->raw('  store i64 0, ptr %accp');
         $init->raw('  %ip = alloca i64');
@@ -3461,7 +3471,9 @@ final class UnifiedArrayRuntime
         $sumb->raw('  %iea0 = mul i64 %i, %istride');
         $sumb->raw('  %iea = add i64 %ibias, %iea0');
         $sumb->raw('  %eap = getelementptr inbounds i8, ptr %arr, i64 %iea');
-        $sumb->raw('  %ev = load i64, ptr %eap');
+        $sumb->raw('  %ev0 = load i64, ptr %eap');
+        $sumb->raw('  %evp = and i64 %ev0, 281474976710655');
+        $sumb->raw('  %ev = select i1 %ihintc, i64 %evp, i64 %ev0');
         $sumb->raw('  %es = inttoptr i64 %ev to ptr');
         $sumb->raw('  %el = call i64 @__mir_strlen(ptr %es)');
         $sumb->raw('  %a = load i64, ptr %accp');
@@ -3500,7 +3512,9 @@ final class UnifiedArrayRuntime
         $nosep->raw('  %jea0 = mul i64 %j, %istride');
         $nosep->raw('  %jea = add i64 %ibias, %jea0');
         $nosep->raw('  %eap2 = getelementptr inbounds i8, ptr %arr, i64 %jea');
-        $nosep->raw('  %ev2 = load i64, ptr %eap2');
+        $nosep->raw('  %ev20 = load i64, ptr %eap2');
+        $nosep->raw('  %ev2p = and i64 %ev20, 281474976710655');
+        $nosep->raw('  %ev2 = select i1 %ihintc, i64 %ev2p, i64 %ev20');
         $nosep->raw('  %es2 = inttoptr i64 %ev2 to ptr');
         $nosep->raw('  %el2 = call i64 @__mir_strlen(ptr %es2)');
         $nosep->raw('  %w1 = load i64, ptr %wp');

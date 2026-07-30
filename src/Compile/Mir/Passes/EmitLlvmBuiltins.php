@@ -3191,44 +3191,12 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceToPtr();
         $vec = $this->lastValue;
-        // A `string[]` is only what the STATIC type claims. The array itself
-        // records what its slots hold (`ARRAY_ELEM_HINT_*`), and the two disagree
-        // whenever a cell-element array reaches a string-element consumer —
-        // `implode(',', $h->get())` where the `string[]` property was built from
-        // `array_values(array_keys($assoc))`. The raw join inttoptr's the NaN tag
-        // and faults, so ask the array.
-        $this->rt->needsTaggedToStr = true;
-        $this->rt->needsImplodeCell = true;
-        $fp = $this->ssa->allocReg();
-        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $vec . ', i64 '
-              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
-        $fl = $this->ssa->allocReg();
-        $out .= '  ' . $fl . ' = load i64, ptr ' . $fp . "\n";
-        $hn = $this->ssa->allocReg();
-        $out .= '  ' . $hn . ' = and i64 ' . $fl . ', '
-              . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
-        $isCell = $this->ssa->allocReg();
-        $out .= '  ' . $isCell . ' = icmp eq i64 ' . $hn . ', '
-              . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
-        $slot = $this->ssa->allocReg();
-        $out .= '  ' . $slot . " = alloca ptr\n";
-        $cellL = $this->ssa->allocLabel('imp.cell');
-        $rawL = $this->ssa->allocLabel('imp.raw');
-        $endL = $this->ssa->allocLabel('imp.end');
-        $out .= '  br i1 ' . $isCell . ', label %' . $cellL . ', label %' . $rawL . "\n";
-        $out .= $cellL . ":\n";
-        $rc = $this->ssa->allocReg();
-        $out .= '  ' . $rc . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
-        $out .= '  store ptr ' . $rc . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $rawL . ":\n";
-        $rr = $this->ssa->allocReg();
-        $out .= '  ' . $rr . ' = call ptr @__mir_array_implode(ptr ' . $sep . ', ptr ' . $vec . ")\n";
-        $out .= '  store ptr ' . $rr . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $endL . ":\n";
+        // `__mir_array_implode` itself masks each element by the array's
+        // ELEMENT-HINT nibble, so a `string[]` that actually holds boxed cells
+        // (`array_values(array_keys($assoc))`) joins correctly without the join
+        // having to guess here.
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = load ptr, ptr ' . $slot . "\n";
+        $out .= '  ' . $reg . ' = call ptr @__mir_array_implode(ptr ' . $sep . ', ptr ' . $vec . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'ptr';
         return $out;
     }
