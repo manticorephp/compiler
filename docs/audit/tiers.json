@@ -1,0 +1,386 @@
+{
+    "generated_from": "/Users/taras/var/projects/symfony-demo-probe/app/composer.lock",
+    "lock_sha1": "5ac968d9f6af9dbb89fa6a3b5f81b905df3a3773",
+    "tiers": {
+        "T1": {
+            "anchors": [
+                "psr/container",
+                "psr/log",
+                "psr/cache",
+                "psr/clock",
+                "psr/event-dispatcher",
+                "psr/http-message",
+                "psr/http-factory",
+                "symfony/deprecation-contracts",
+                "symfony/service-contracts",
+                "symfony/event-dispatcher-contracts",
+                "symfony/cache-contracts",
+                "symfony/translation-contracts",
+                "symfony/http-client-contracts",
+                "symfony/polyfill-mbstring",
+                "symfony/polyfill-intl-grapheme",
+                "symfony/polyfill-intl-normalizer",
+                "symfony/polyfill-intl-icu",
+                "symfony/polyfill-intl-idn",
+                "symfony/polyfill-intl-messageformatter",
+                "symfony/polyfill-php85",
+                "symfony/polyfill-deepclone"
+            ],
+            "packages": [
+                "psr/cache",
+                "psr/clock",
+                "psr/container",
+                "psr/event-dispatcher",
+                "psr/http-factory",
+                "psr/http-message",
+                "psr/log",
+                "symfony/cache-contracts",
+                "symfony/deprecation-contracts",
+                "symfony/event-dispatcher-contracts",
+                "symfony/http-client-contracts",
+                "symfony/polyfill-deepclone",
+                "symfony/polyfill-intl-grapheme",
+                "symfony/polyfill-intl-icu",
+                "symfony/polyfill-intl-idn",
+                "symfony/polyfill-intl-messageformatter",
+                "symfony/polyfill-intl-normalizer",
+                "symfony/polyfill-mbstring",
+                "symfony/polyfill-php85",
+                "symfony/service-contracts",
+                "symfony/translation-contracts"
+            ],
+            "dirs": [
+                "vendor/psr/cache",
+                "vendor/psr/clock",
+                "vendor/psr/container",
+                "vendor/psr/event-dispatcher",
+                "vendor/psr/http-factory",
+                "vendor/psr/http-message",
+                "vendor/psr/log",
+                "vendor/symfony/cache-contracts",
+                "vendor/symfony/deprecation-contracts",
+                "vendor/symfony/event-dispatcher-contracts",
+                "vendor/symfony/http-client-contracts",
+                "vendor/symfony/polyfill-deepclone",
+                "vendor/symfony/polyfill-intl-grapheme",
+                "vendor/symfony/polyfill-intl-icu",
+                "vendor/symfony/polyfill-intl-idn",
+                "vendor/symfony/polyfill-intl-messageformatter",
+                "vendor/symfony/polyfill-intl-normalizer",
+                "vendor/symfony/polyfill-mbstring",
+                "vendor/symfony/polyfill-php85",
+                "vendor/symfony/service-contracts",
+                "vendor/symfony/translation-contracts"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T2": {
+            "anchors": [
+                "symfony/string",
+                "symfony/var-exporter",
+                "symfony/var-dumper",
+                "symfony/finder",
+                "symfony/filesystem",
+                "symfony/yaml",
+                "symfony/options-resolver",
+                "symfony/expression-language",
+                "symfony/type-info",
+                "symfony/process",
+                "symfony/clock"
+            ],
+            "packages": [
+                "symfony/cache",
+                "symfony/clock",
+                "symfony/expression-language",
+                "symfony/filesystem",
+                "symfony/finder",
+                "symfony/options-resolver",
+                "symfony/process",
+                "symfony/string",
+                "symfony/type-info",
+                "symfony/var-dumper",
+                "symfony/var-exporter",
+                "symfony/yaml"
+            ],
+            "dirs": [
+                "vendor/symfony/cache",
+                "vendor/symfony/clock",
+                "vendor/symfony/expression-language",
+                "vendor/symfony/filesystem",
+                "vendor/symfony/finder",
+                "vendor/symfony/options-resolver",
+                "vendor/symfony/process",
+                "vendor/symfony/string",
+                "vendor/symfony/type-info",
+                "vendor/symfony/var-dumper",
+                "vendor/symfony/var-exporter",
+                "vendor/symfony/yaml"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T3": {
+            "anchors": [
+                "symfony/config",
+                "symfony/dependency-injection",
+                "symfony/event-dispatcher",
+                "symfony/http-foundation",
+                "symfony/cache"
+            ],
+            "packages": [
+                "symfony/config",
+                "symfony/dependency-injection",
+                "symfony/event-dispatcher",
+                "symfony/http-foundation"
+            ],
+            "dirs": [
+                "vendor/symfony/config",
+                "vendor/symfony/dependency-injection",
+                "vendor/symfony/event-dispatcher",
+                "vendor/symfony/http-foundation"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T4": {
+            "anchors": [
+                "symfony/routing",
+                "symfony/http-kernel",
+                "symfony/error-handler",
+                "symfony/console",
+                "symfony/dotenv",
+                "symfony/runtime",
+                "symfony/framework-bundle",
+                "symfony/flex"
+            ],
+            "packages": [
+                "symfony/console",
+                "symfony/dotenv",
+                "symfony/error-handler",
+                "symfony/flex",
+                "symfony/framework-bundle",
+                "symfony/http-kernel",
+                "symfony/routing",
+                "symfony/runtime"
+            ],
+            "dirs": [
+                "vendor/symfony/console",
+                "vendor/symfony/dotenv",
+                "vendor/symfony/error-handler",
+                "vendor/symfony/flex",
+                "vendor/symfony/framework-bundle",
+                "vendor/symfony/http-kernel",
+                "vendor/symfony/routing",
+                "vendor/symfony/runtime"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T5": {
+            "anchors": [
+                "twig/twig",
+                "symfony/twig-bridge",
+                "symfony/twig-bundle",
+                "symfony/asset",
+                "symfony/translation",
+                "symfony/intl",
+                "twig/extra-bundle",
+                "twig/intl-extra",
+                "twig/markdown-extra",
+                "league/commonmark"
+            ],
+            "packages": [
+                "dflydev/dot-access-data",
+                "league/commonmark",
+                "league/config",
+                "nette/schema",
+                "nette/utils",
+                "symfony/asset",
+                "symfony/intl",
+                "symfony/translation",
+                "symfony/twig-bridge",
+                "symfony/twig-bundle",
+                "twig/extra-bundle",
+                "twig/intl-extra",
+                "twig/markdown-extra",
+                "twig/twig"
+            ],
+            "dirs": [
+                "vendor/dflydev/dot-access-data",
+                "vendor/league/commonmark",
+                "vendor/league/config",
+                "vendor/nette/schema",
+                "vendor/nette/utils",
+                "vendor/symfony/asset",
+                "vendor/symfony/intl",
+                "vendor/symfony/translation",
+                "vendor/symfony/twig-bridge",
+                "vendor/symfony/twig-bundle",
+                "vendor/twig/extra-bundle",
+                "vendor/twig/intl-extra",
+                "vendor/twig/markdown-extra",
+                "vendor/twig/twig"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T6": {
+            "anchors": [
+                "doctrine/orm",
+                "doctrine/dbal",
+                "doctrine/doctrine-bundle",
+                "symfony/doctrine-bridge"
+            ],
+            "packages": [
+                "doctrine/collections",
+                "doctrine/dbal",
+                "doctrine/deprecations",
+                "doctrine/doctrine-bundle",
+                "doctrine/event-manager",
+                "doctrine/inflector",
+                "doctrine/instantiator",
+                "doctrine/lexer",
+                "doctrine/orm",
+                "doctrine/persistence",
+                "doctrine/sql-formatter",
+                "symfony/doctrine-bridge"
+            ],
+            "dirs": [
+                "vendor/doctrine/collections",
+                "vendor/doctrine/dbal",
+                "vendor/doctrine/deprecations",
+                "vendor/doctrine/doctrine-bundle",
+                "vendor/doctrine/event-manager",
+                "vendor/doctrine/inflector",
+                "vendor/doctrine/instantiator",
+                "vendor/doctrine/lexer",
+                "vendor/doctrine/orm",
+                "vendor/doctrine/persistence",
+                "vendor/doctrine/sql-formatter",
+                "vendor/symfony/doctrine-bridge"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T7": {
+            "anchors": [
+                "symfony/security-bundle",
+                "symfony/form",
+                "symfony/validator",
+                "symfony/mailer",
+                "symfony/mime",
+                "symfony/password-hasher",
+                "symfony/property-access",
+                "symfony/property-info",
+                "symfony/html-sanitizer",
+                "symfony/http-client",
+                "symfony/monolog-bundle",
+                "monolog/monolog",
+                "symfony/monolog-bridge",
+                "symfony/asset-mapper",
+                "symfony/stimulus-bundle",
+                "symfony/ux-icons",
+                "symfony/ux-twig-component",
+                "symfony/ux-live-component",
+                "symfonycasts/sass-bundle"
+            ],
+            "packages": [
+                "composer/semver",
+                "egulias/email-validator",
+                "league/uri",
+                "league/uri-interfaces",
+                "monolog/monolog",
+                "symfony/asset-mapper",
+                "symfony/form",
+                "symfony/html-sanitizer",
+                "symfony/http-client",
+                "symfony/mailer",
+                "symfony/mime",
+                "symfony/monolog-bridge",
+                "symfony/monolog-bundle",
+                "symfony/password-hasher",
+                "symfony/property-access",
+                "symfony/property-info",
+                "symfony/security-bundle",
+                "symfony/security-core",
+                "symfony/security-csrf",
+                "symfony/security-http",
+                "symfony/stimulus-bundle",
+                "symfony/ux-icons",
+                "symfony/ux-live-component",
+                "symfony/ux-twig-component",
+                "symfony/validator",
+                "symfonycasts/sass-bundle",
+                "symfony/apache-pack",
+                "twbs/bootstrap"
+            ],
+            "dirs": [
+                "vendor/composer/semver",
+                "vendor/egulias/email-validator",
+                "vendor/league/uri",
+                "vendor/league/uri-interfaces",
+                "vendor/monolog/monolog",
+                "vendor/symfony/asset-mapper",
+                "vendor/symfony/form",
+                "vendor/symfony/html-sanitizer",
+                "vendor/symfony/http-client",
+                "vendor/symfony/mailer",
+                "vendor/symfony/mime",
+                "vendor/symfony/monolog-bridge",
+                "vendor/symfony/monolog-bundle",
+                "vendor/symfony/password-hasher",
+                "vendor/symfony/property-access",
+                "vendor/symfony/property-info",
+                "vendor/symfony/security-bundle",
+                "vendor/symfony/security-core",
+                "vendor/symfony/security-csrf",
+                "vendor/symfony/security-http",
+                "vendor/symfony/stimulus-bundle",
+                "vendor/symfony/ux-icons",
+                "vendor/symfony/ux-live-component",
+                "vendor/symfony/ux-twig-component",
+                "vendor/symfony/validator",
+                "vendor/symfonycasts/sass-bundle",
+                "vendor/twbs/bootstrap"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        },
+        "T8": {
+            "anchors": [],
+            "packages": [],
+            "dirs": [
+                "src",
+                "config",
+                "templates"
+            ],
+            "exclude": [
+                "./vendor/symfony/console/Tester",
+                "./vendor/symfony/console/DataCollector",
+                "./vendor/symfony/console/Debug"
+            ]
+        }
+    }
+}

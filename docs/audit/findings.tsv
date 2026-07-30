@@ -1,0 +1,56 @@
+# Finding annotations — the JUDGEMENT layer of the audit, kept as data.
+#
+# Evidence lives in docs/audit/data/ and is machine-generated. Severity class,
+# depth and epic ownership are calls a person makes, so they live here where
+# they can be reviewed and argued with, instead of being buried in a generator.
+# tools/audit/rank.php joins the two and renders docs/audit/GAPS.md, which is
+# therefore never hand-edited.
+#
+# id            short, stable, kebab-case
+# class         S0 silent wrong answer   (compiles, runs, answers differently than php)
+#               S1 runtime hard failure  (crash / uncaught / stub that explodes later)
+#               S2 compile or link hard failure, or a compiler crash
+#               S3 static finding with no observed runtime effect
+#               S4 advisory / analyzer residue
+# tier          lowest ladder tier that hits it (1-8); 0 = compiler-intrinsic, hits everything
+# depth         compiler-root | repr | prelude | stdlib-leaf | parser
+# packages      distinct vendor packages affected (count, from the evidence files)
+# epic          which follow-on epic owns it
+# evidence      file under docs/audit/ backing the row
+# title         one line
+#
+# id	class	tier	depth	packages	epic	evidence	title
+
+ffi-alias-capture-ret	S0	0	compiler-root	0	bare-alias-capture	data/alias-capture.tsv	strstr/strchr/strrchr resolve to the raw C bindings and return a pointer where PHP returns a string
+ffi-alias-capture-nul	S0	0	compiler-root	0	bare-alias-capture	data/alias-capture.tsv	strcmp/strncmp/strcasecmp/strncasecmp compare NUL-terminated, so strcmp("a\0b","a\0c") answers 0
+empty-array-byref-elem-repr	S0	0	repr	0	element-repr	probes/cap_callback_byref_capture.php	an array that is EMPTY at the call site loses its element hint through a by-reference write; the caller reads raw bits
+preg-named-groups	S0	2	stdlib-leaf	0	regex-surface	probes/cap_preg_named_groups.php	preg_match named capture groups come back NULL, which makes symfony/routing unimplementable
+preg-offset-capture-pair	S0	2	stdlib-leaf	0	regex-surface	probes/cap_preg_named_groups.php	PREG_OFFSET_CAPTURE returns the bare string instead of the [string, offset] pair
+reflection-type-tostring	S0	3	prelude	0	reflection-tier4	probes/cap_refl_union_type.php	(string) on a ReflectionNamedType prints a raw pointer
+shutdown-order-and-args	S0	4	prelude	0	lifecycle	probes/cap_destruct_and_shutdown.php	register_shutdown_function runs after destructors instead of before, and its bound argument is corrupted
+enum-exists-returns-int	S0	3	prelude	0	reflection-tier4	probes/cap_refl_enum.php	enum_exists returns an int where php returns bool
+iterator-double-foreach-sigbus	S1	2	repr	0	iteration	probes/cap_iterator_protocol.php	two foreach loops over one IteratorAggregate SIGBUS
+include-returns-null	S1	4	compiler-root	0	include-semantics	probes/cap_include_returns_value.php	require/include lower to null, so config/bundles.php, config/*.php closures and the dumped DI container never load
+autoload-absent	S1	1	stdlib-leaf	0	autoload-semantics	probes/cap_spl_autoload_register.php	spl_autoload_register does not exist; class_exists($n, true) can never fire a resolver
+func-args-absent	S1	1	stdlib-leaf	0	language-core	probes/cap_func_args.php	func_num_args/func_get_arg absent; symfony/console alone calls func_num_args 15 times to detect omitted arguments
+sapi-fns-absent	S1	3	stdlib-leaf	0	sapi-layer	SAPI-REQUIREMENTS.md	header/headers_sent/http_response_code/setcookie/ob_*/session_* all absent
+putenv-absent	S1	4	stdlib-leaf	0	sapi-layer	probes/cap_putenv.php	putenv absent, so SHELL_VERBOSITY never round-trips through getenv
+trigger-error-absent	S1	1	stdlib-leaf	0	error-handling	probes/cap_trigger_error_handler.php	trigger_error absent; every symfony package routes deprecations through it
+array-walk-recursive-callback	S0	2	repr	0	element-repr	probes/cap_array_recursion.php	array_walk_recursive hands its callback values that read back as raw bits
+parser-xor-operator	S2	3	parser	0	parser-gaps	data/analyze-t8.json	the `xor` operator is not parsed
+parser-byref-arrow-fn	S2	3	parser	0	parser-gaps	data/analyze-t8.json	`fn &() => ...` (by-reference arrow function) is not parsed
+parser-ref-in-array-literal	S2	1	parser	0	parser-gaps	data/analyze-t8.json	`[&$a[$k], $v]` (reference inside an array literal) is not parsed
+parser-reserved-enum-case	S2	3	parser	0	parser-gaps	data/analyze-t8.json	an enum case named with a reserved word (`case ARRAY = 'array';`) is not parsed
+parser-high-byte-identifier	S2	3	parser	0	parser-gaps	data/analyze-t8.json	an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9`
+parser-const-gaps	S2	6	parser	0	parser-gaps	data/analyze-t8.json	`expected const name` / `expected ';' after const` in doctrine/dbal Types and nette/utils Image
+refl-param-attributes	S2	3	prelude	0	reflection-tier4	probes/cap_refl_param_attributes.php	ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work
+refl-param-default	S2	3	prelude	0	reflection-tier4	probes/cap_refl_param_default.php	ReflectionParameter::getDefaultValue/getDeclaringClass absent
+refl-union-type	S2	3	prelude	0	reflection-tier4	probes/cap_refl_union_type.php	no ReflectionUnionType / ReflectionIntersectionType
+refl-attr-is-instanceof	S3	4	prelude	0	reflection-tier4	probes/cap_refl_attr_is_instanceof.php	ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only
+refl-enum-absent	S2	6	prelude	0	reflection-tier4	probes/cap_refl_enum.php	ReflectionEnum absent; doctrine enum types and form choices need it
+refl-hydration	S2	6	prelude	0	reflection-tier4	probes/cap_refl_hydration.php	newInstanceWithoutConstructor absent; doctrine hydration and var-exporter need it
+globals-whole-array	S2	3	compiler-root	0	sapi-layer	probes/cap_globals_array_read.php	a whole-array $GLOBALS read is a hard compile error
+pdo-absent	S2	6	stdlib-leaf	0	pdo-sqlite	PDO-SQLITE-REQUIREMENTS.md	no PDO, PDOStatement, PDOException or sqlite binding exists at all
+spl-classes-absent	S2	1	prelude	0	spl-classes	data/analyze-t8.json	OutOfBoundsException, BadMethodCallException, IteratorIterator, DirectoryIterator and friends are absent
+superglobals-unseeded	S1	3	compiler-root	0	sapi-layer	probes/cap_superglobal_server_web.php	$_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys
+analyzer-use-function	S4	1	compiler-root	0	analyzer	data/calibration-residue.txt	the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs
