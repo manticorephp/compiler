@@ -140,6 +140,8 @@ trait LowerFns
             );
             $fn->ffiSymbol = $ffiSymbol;
             $fn->ffiWeak = $this->ffiIsWeak($decl->attributes);
+            $fn->ffiVariadicFixed = $this->ffiVariadicFixed(
+                $decl->attributes, \count($decl->params), $decl->span, $decl->name);
             $ctypes = [];
             foreach ($decl->params as $p) { $ctypes[] = $this->ffiCType($p->typeHint); }
             $fn->ffiParamCTypes = $ctypes;

@@ -1569,6 +1569,59 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * `#[Ffi\Variadic($fixed)]` → the NAMED-param count of a C variadic callee,
+     * or -1 when the attribute is absent. The wrapper needs it to emit an LLVM
+     * variadic call type; without one, the backend applies the fixed-arity ABI
+     * and on Darwin arm64 (which passes varargs on the STACK) the callee reads
+     * register garbage where it does `va_arg`.
+     *
+     * Accepts the positional form `#[Ffi\Variadic(2)]` and the named form
+     * `#[Ffi\Variadic(fixed: 2)]`. `$arity` is the binding's declared parameter
+     * count, so a count past the end is caught here rather than in LLVM.
+     */
+    private function ffiVariadicFixed(array $attributes, int $arity,
+                                      \Parser\Ast\Span $span, string $fnName): int
+    {
+        foreach ($attributes as $attr) {
+            if (!$this->attrIsOneOf($attr, ['Variadic', 'Ffi\\Variadic'])) { continue; }
+            $args = $this->attrArgs($attr);
+            if ($args === []) {
+                $this->attrFail('#[Ffi\\Variadic] on ' . $fnName
+                    . '(): requires an integer literal argument', $span);
+                return -1;
+            }
+            // Unwrap `fixed: 2` to its value; both reads go through a
+            // subclass-typed accessor (a base-`Expr`-typed `->value` resolves
+            // by the WRONG offset under self-host — T5).
+            $arg = $args[0];
+            if ($arg->kind === 'NamedArg') { $arg = $this->namedArgValue($arg); }
+            // `-1` is a UnaryOp over an IntLiteral, not a literal. Fold it so a
+            // negative count reports the RANGE error (what the author got wrong)
+            // rather than "requires an integer literal".
+            $negate = false;
+            if ($arg->kind === 'UnaryOp' && $this->unaryOpOf($arg) === '-') {
+                $negate = true;
+                $arg = $this->unaryOperandOf($arg);
+            }
+            if ($arg->kind !== 'IntLiteral') {
+                $this->attrFail('#[Ffi\\Variadic] on ' . $fnName
+                    . '(): requires an integer literal argument', $span);
+                return -1;
+            }
+            $fixed = $this->intLitValue($arg);
+            if ($negate) { $fixed = -$fixed; }
+            if ($fixed < 0 || $fixed > $arity) {
+                $this->attrFail('#[Ffi\\Variadic(' . (string)$fixed . ')] on ' . $fnName
+                    . '(): $fixed must be between 0 and the declared arity ('
+                    . (string)$arity . ')', $span);
+                return -1;
+            }
+            return $fixed;
+        }
+        return -1;
+    }
+
+    /**
      * True when a FUNCTION-level `#[CType('int')]` declares the C RETURN as a
      * 32-bit int, so the FFI wrapper must SIGN-EXTEND it into the i64 carrier.
      *

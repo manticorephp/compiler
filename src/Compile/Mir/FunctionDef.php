@@ -55,4 +55,38 @@ final class FunctionDef
      * state machine). The declared body is the resume body.
      */
     public bool $isGenerator = false;
+
+    // ── FFI carriers — DELIBERATELY LAST, and every one non-nullable ──────────
+    //
+    // Two rules, both paid for. (1) A field added MID-CLASS shifts the byte
+    // offset of every later property ({@see ClassDef::propertyOffset} walks
+    // declaration order), which re-arms any latent wrong-offset read — the
+    // reason `ClassDef::$isPreludeClass` is also last. (2) A NULLABLE carrier
+    // read back on the emitter side lands in the cell/erasure path: a `?string`
+    // here once read as garbage and the FFI wrapper emitted `call <ptr> @fclose`,
+    // which is why variadic arity used to be keyed off the C symbol name.
+    // So: append only, non-nullable, concrete default, and read them through a
+    // `FunctionDef`-typed parameter into a non-nullable local.
+
+    /**
+     * `#[Ffi\Variadic($fixed)]`: the count of NAMED params of a C variadic
+     * callee (the ones before the `...`), or -1 when the callee is not
+     * variadic. Drives the LLVM variadic call type in
+     * {@see Passes\EmitLlvmCalls::emitFfiWrapper}.
+     */
+    public int $ffiVariadicFixed = -1;
+
+    /**
+     * The C return is an UNSIGNED narrow integer (`uint`, `uchar`, `ushort`),
+     * so the wrapper ZERO-extends it into the i64 carrier instead of sign-
+     * extending. Set from `#[Ffi\CType]` by {@see Passes\LowerFromAst}.
+     */
+    public bool $ffiRetUnsigned = false;
+
+    /**
+     * `#[Ffi\Library('name')]`: the native library this binding needs at link
+     * time. '' when absent, and 'c' is recorded but never turned into a flag
+     * (libc/libSystem is always linked).
+     */
+    public string $ffiLibrary = '';
 }

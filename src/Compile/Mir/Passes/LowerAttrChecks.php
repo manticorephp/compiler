@@ -405,6 +405,8 @@ trait LowerAttrChecks
     }
 
     private function intLitValue(\Parser\Ast\IntLiteral $e): int { return $e->value; }
+    private function unaryOpOf(\Parser\Ast\UnaryOp $e): string { return $e->op; }
+    private function unaryOperandOf(\Parser\Ast\UnaryOp $e): \Parser\Ast\Expr { return $e->operand; }
     private function staticAccessClass(\Parser\Ast\StaticAccess $e): string { return $e->class; }
     private function staticAccessName(\Parser\Ast\StaticAccess $e): string { return $e->name; }
     private function binaryOp(\Parser\Ast\BinaryOp $e): string { return $e->op; }
