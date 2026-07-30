@@ -311,46 +311,52 @@ trait EmitLlvmRuntime
             $out .= $this->profBump(4);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %rc = load i64, ptr %rcp\n";
-            if ($this->rt->needsCc) {
-                // Cycle-collector mode: the rc word packs rc | color |
-                // buffered, so the live count is the SIGNED low-56-bit field
-                // (shl 8 / ashr 8) — color/buffered bits must not poison the
-                // zero test. On `rc>0` after a dec, the object MIGHT be a
-                // cycle root → cc_add_root (Bacon-Rajan PossibleRoot). On
-                // `rc<=0`, a *buffered* object is NOT freed here — the
-                // collector owns it (else the candidate list dangles).
-                $out .= "  %rc1 = sub i64 %rc, 1\n";
-                $out .= "  store i64 %rc1, ptr %rcp\n";
-                $out .= "  %rcsh = shl i64 %rc1, 8\n";
-                $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
-                $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
-                $out .= "  br i1 %zero, label %free, label %keep\n";
-                $out .= "keep:\n";
-                $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
-                $out .= "  br label %done\n";
-                $out .= "free:\n";
-                $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
-                $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
-                $out .= "  br i1 %isbuf, label %done, label %dofree\n";
-                $out .= "dofree:\n";
-                $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
-                $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
-                $out .= "  call void @free(ptr %obase)\n";
-                $out .= "  br label %done\n";
-            } else {
+            // ⚠ The rc WORD LAYOUT is an ABI fact, not a per-module option: the
+            // live count is the SIGNED low-56-bit field and the top byte carries
+            // the collector's color / buffered bits. This test must therefore
+            // read the field the same way in EVERY module.
+            //
+            // It did not. The zero test used to be a raw `icmp sle i64 %rc1, 0`
+            // unless THIS module needed the collector — and `__mir_rc_release`
+            // is `linkonce_odr`, so a program links ONE of the two disagreeing
+            // bodies. An object created inside `lib/manticore_stdlib.o` (built
+            // WITH the collector) carries a word like `0x8100000000000005`,
+            // which as a raw i64 is NEGATIVE: the collector-less copy freed it
+            // on the FIRST drop, at refcount 5. That is the stream_select loop's
+            // dead \Resource — an lldb watchpoint on the rc word caught the
+            // decrement 6→5 and the free in the same call. It was invisible at
+            // -O0, under MANTICORE_DEBUG_VERIFY and in --memory=arena, because
+            // each of those changes which copy or inlining survives.
             $out .= $this->rcVerifyAlive();
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %rcp\n";
-            $out .= "  %zero = icmp sle i64 %rc1, 0\n";
-            $out .= "  br i1 %zero, label %free, label %done\n";
+            $out .= "  %rcsh = shl i64 %rc1, 8\n";
+            $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
+            $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
+            $out .= "  br i1 %zero, label %free, label %keep\n";
+            $out .= "keep:\n";
+            if ($this->rt->needsCc) {
+                // On `rc>0` after a dec the object MIGHT be a cycle root
+                // (Bacon-Rajan PossibleRoot). Only a module that carries the
+                // collector can register one — a module without it simply does
+                // not participate, which costs cycle collection, never safety.
+                $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
+            }
+            $out .= "  br label %done\n";
             $out .= "free:\n";
+            // A *buffered* object is NOT freed here even at rc<=0 — the
+            // collector owns it, else its candidate list dangles. The mask is
+            // zero in a program that never buffers, so this is a no-op there.
+            $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
+            $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
+            $out .= "  br i1 %isbuf, label %done, label %dofree\n";
+            $out .= "dofree:\n";
             // Recursive drop: release this object's obj-typed properties
             // before freeing it, so nested objects don't leak.
             $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
             $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
             $out .= "  call void @free(ptr %obase)\n";
             $out .= "  br label %done\n";
-            }
             $out .= "str:\n";
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sdec\n";
