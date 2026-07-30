@@ -1,0 +1,12 @@
+one(5)
+two(5,a)
+three(1,2,3)
+str(only)
+float(1.50)
+none
+count(42)
+returned=10
+vf(7)
+vp(9)
+sp(11)
+pf(13)
