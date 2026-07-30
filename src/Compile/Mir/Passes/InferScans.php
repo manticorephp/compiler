@@ -147,6 +147,10 @@ trait InferScans
                 // keeps each $cfn / $param class resolvable under self-host;
                 // a `name → Param[]` map would erase it through the assoc.
                 $pnames = [];
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('scanCtorProp.new_sites', 1);
+                    \Compile\Stats::bump('scanCtorProp.fns_scanned', \count($module->functions));
+                }
                 foreach ($module->functions as $cfn) {
                     if ($cfn->name === $ctorName) {
                         // The ctor's first param is the implicit `$this`;
@@ -246,6 +250,7 @@ trait InferScans
     private function scanCellElemProps(Module $module): void
     {
         $this->cellElemPropsFound = [];
+        $this->propElemStoreCats = [];
         foreach ($module->functions as $fn) {
             $cls = '';
             if (\count($fn->params) > 0 && $fn->params[0]->name === 'this'
@@ -256,7 +261,7 @@ trait InferScans
             if ($cls === '') { continue; }
             $this->findCellElemStores($fn->body, $cls);
         }
-        foreach ($this->cellElemPropsFound as $key => $_) {
+        foreach ($this->cellElemPropsFound as $key => $seen) {
             $cut = \strpos($key, '::');
             if ($cut === false || $cut < 0) { continue; }
             $cls = \substr($key, 0, $cut);
@@ -264,7 +269,26 @@ trait InferScans
             $cd = $this->classes[$cls] ?? null;
             if ($cd === null) { continue; }
             $cur = $cd->propertyTypes[$prop] ?? null;
-            if ($cur === null || !$cur->isArray()) { continue; }
+            if ($cur !== null && !$cur->isArray()) {
+                // A whole cell-element ARRAY was stored: that type is exact —
+                // keep its key shape rather than flattening to a vec.
+                if ($seen instanceof Type && $cur->kind === Type::KIND_UNKNOWN
+                    && ($cd->propertyArrayHinted[$prop] ?? false)) {
+                    $cd->propertyTypes[$prop] = $seen;
+                    continue;
+                }
+                // A bare `array` hint erases to KIND_UNKNOWN, so the slot is not
+                // yet an array Type at all — but it IS an array at runtime, and
+                // the store above proved its elements are cells. vec[cell] is the
+                // honest shape: the unified runtime picks packed vs hashed on the
+                // flags word, and inferForeach already tags a cell-element vec's
+                // KEY as a cell, so a hashed one still reads its string keys.
+                if ($cur->kind !== Type::KIND_UNKNOWN
+                    || !($cd->propertyArrayHinted[$prop] ?? false)) { continue; }
+                $cd->propertyTypes[$prop] = Type::vec(Type::cell());
+                continue;
+            }
+            if ($cur === null) { continue; }
             if (($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
             // Preserve the key shape (assoc vs vec); only the element → cell.
             $cd->propertyTypes[$prop] = ($cur->key !== null)
@@ -525,6 +549,13 @@ trait InferScans
         $cand = [];                       // param name → index
         foreach ($fn->params as $idx => $p) {
             if ($p->variadic) { continue; }
+            // arrayHinted, not just an erased type: isUnknownArrayElem is also
+            // true for KIND_UNKNOWN, which is what an UNTYPED (`mixed`) param
+            // erases to — and narrowing one of those to vec[T] is a lie. It is
+            // how symfony's `StreamOutput::__construct($stream)` became
+            // `array`, so is_resource($stream) folded false and every console
+            // app threw "needs a stream as its first argument".
+            if (!$p->arrayHinted) { continue; }
             if ($this->isUnknownArrayElem($p->type)) { $cand[$p->name] = $idx; }
         }
         if (\count($cand) === 0) { return; }
@@ -582,15 +613,20 @@ trait InferScans
                 // that properly means encoding the param types into the prelude
                 // SYMBOL, which is a separate change.
                 if ($fn->isPrelude && $p->byRef) { $idx = $idx + 1; continue; }
-                // A VARIADIC pack is refinable on the same terms as a by-value
-                // array param. The caller already built the pack as one
+                // Same rule as scanParamElemUse: an UNTYPED param erases to
+                // KIND_UNKNOWN, which isUnknownArrayElem also answers true for.
+                // Only a param the source actually hinted `array` may be
+                // narrowed from its call sites; `mixed` stays mixed.
+                //
+                // A VARIADIC pack qualifies too, and on the same terms: it IS an
+                // array by construction. The caller already built the pack as one
                 // array_lit whose type is known (`vec[assoc[cell,cell]]`) while
                 // the declared param says `vec[unknown]`; Monomorphize only
                 // closes that gap when it actually clones, so a callee it
                 // declines to clone (a lone user call site) read every pack
                 // element off an untyped buffer. Only the ELEMENT is refined —
                 // the pack ABI is one vec param either way.
-                if ($this->isUnknownArrayElem($p->type)) {
+                if (($p->arrayHinted || $p->variadic) && $this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
                 } elseif (!$p->variadic && $p->type->isArray()) {
                     // A param the per-fn heuristic already refined (e.g. vec[string]
@@ -741,6 +777,66 @@ trait InferScans
      * it so pure-read scopes carry the real type. Returns true if any global
      * gained a non-int type (→ re-infer).
      */
+    /**
+     * Type each uninitialised `static $x;` from the stores it receives.
+     *
+     * `static $x;` lowers hard to `int` (there is no initialiser to type it
+     * from), and unlike an ordinary local its value SURVIVES the call — so the
+     * read at the top of the next call is not flow-reachable from the store
+     * that filled it and keeps the int. symfony's ConsoleOutput is exactly
+     * this: `static $stdout; if ($stdout) return $stdout; return $stdout =
+     * \STDOUT;` handed the second caller the resource POINTER as an int, and
+     * StreamOutput's is_resource() check threw.
+     *
+     * The join is per FUNCTION, keyed by the decl's cell (already unique per
+     * function+var). Same shape as {@see scanGlobalTypes}; a global-backed decl
+     * is skipped, that scan owns it.
+     */
+    private function scanStaticLocalTypes(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            /** @var array<string,bool> $active */
+            $active = [];
+            /** @var array<string,string> $cells */
+            $cells = [];
+            $this->collectPlainStaticLocals($fn->body, $active, $cells);
+            if (\count($active) === 0) { continue; }
+            /** @var array<string,Type> $observed */
+            $observed = [];
+            /** @var array<string,Type> $elems */
+            $elems = [];
+            $elemBad = [];
+            $strKey = [];
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            foreach ($observed as $name => $t) {
+                if ($t->kind === Type::KIND_UNKNOWN) { continue; }
+                $cell = $cells[$name] ?? '';
+                if ($cell === '') { continue; }
+                $prev = $this->staticLocalTypes[$cell] ?? null;
+                if ($prev !== null && $prev->kind === $t->kind) { continue; }
+                $this->staticLocalTypes[$cell] = $t;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Uninitialised, non-global-backed static locals: name → true, name → cell.
+     *  @param array<string,bool>   $active
+     *  @param array<string,string> $cells */
+    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $d = $n;
+            if ($d->init === null && !\str_starts_with($d->cell, '@g_')) {
+                $active[$d->name] = true;
+                $cells[$d->name] = $d->cell;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells); }
+    }
+
     private function scanGlobalTypes(Module $module): bool
     {
         if (\count($module->globalVarNames) === 0) { return false; }
@@ -827,7 +923,24 @@ trait InferScans
             // A prelude local that needs a cell element says so at the source,
             // with a `/** @var mixed[] */` on its binding. See the prelude-linkage
             // note in docs/.
-            if ($fn->isPrelude) { continue; }
+            //
+            // EXCEPT a `$mono$` specialization. The whole hazard above is that a
+            // shared symbol would be specialized from information another module
+            // does not have — but a specialization's NAME encodes its parameter
+            // shape, so every module that emits `f$mono$p0_vec_cell` infers it
+            // from the same parameter types and arrives at the same body. That is
+            // exactly the contract that lets Monomorphize exist at all.
+            //
+            // Without this, `array_merge$mono$p0_vec_cell` left `$out` a
+            // `vec[unknown]`, so `$out[] = $v` took the plain `__mir_array_cow`
+            // instead of `_cell` and skipped the co-owning retain — every merged
+            // element was freed while the result still pointed at it (`$r[0]` read
+            // back `is_array` true, `count` 0, and every symfony Table cell was
+            // blank). The `@var mixed[]` annotation is NOT a substitute here: it
+            // would force cell elements on the CONCRETE clones too, and the
+            // compiler's own `array_merge(Type[], Type[])` sites then read boxed
+            // cells as raw object pointers.
+            if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
             // A PARAM is the CALLER's array — its elements keep whatever
             // representation the caller built, and storing a cell into it can't
             // retroactively make them cells. Forcing vec[cell] on one made the

@@ -88,14 +88,22 @@ final class NarrowReturns implements Pass
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
+            $roundT = \Compile\Stats::now();
             $changed = false;
+            $narrowed = 0;
             foreach ($module->functions as $fn) {
                 if (isset($generic[$fn->name])) { continue; }
-                if ($this->narrowFunction($fn)) { $changed = true; }
+                if ($this->narrowFunction($fn)) { $changed = true; $narrowed = $narrowed + 1; }
             }
+            \Compile\Stats::step('  narrow round ' . (string)$iters
+                . ' (narrowed ' . (string)$narrowed . ')', $roundT, -1, -1);
+            \Compile\Stats::bump('narrow.rounds', 1);
             if (!$changed) { break; }
             $infer = new InferTypes();
             $infer->run($module);
+        }
+        if ($iters >= $max) {
+            \Compile\Stats::line('narrow: HIT THE ROUND CAP (' . (string)$max . ')');
         }
         $module->markPassApplied(self::NAME);
         return $module;

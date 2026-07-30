@@ -137,6 +137,11 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        // The string behind an erased carrier ({@see EmitLlvmBuiltins::biUntagStr}).
+        if ($n === '__mir_untag_str') { return Type::string_(); }
+        // The bag holds NaN-boxed values under string keys — the same shape a
+        // `(array)` cast of a bag-only object used to answer.
+        if ($n === '__mir_obj_bag') { return Type::assoc(Type::string_(), Type::cell()); }
         // Fiber switch intrinsics: fctx/stack handles are raw addresses carried
         // as ints; current-fiber is a \Fiber obj (0 = none); the setters are void.
         if ($n === '__mir_fiber_make' || $n === '__mir_fiber_jump'
@@ -322,6 +327,13 @@ trait InferCalls
             if (\count($args) >= 1 && $args[0]->type->element !== null) {
                 return $args[0]->type->element;
             }
+            // A CELL container (a `mixed` slot holding an array, e.g.
+            // `$_SERVER['argv']`) has no static element, but its slots DO carry
+            // NaN-boxed cells — so the popped value is a cell, not a raw i64.
+            // Left unknown it read back as the tagged word's integer value.
+            if (\count($args) >= 1 && $args[0]->type->kind === Type::KIND_CELL) {
+                return Type::cell();
+            }
             return null;
         }
         // strpos is `int|false` — a tagged cell (Zend-faithful miss).
@@ -403,7 +415,14 @@ trait InferCalls
             $node->type = Type::cell();
             return $node->type;
         }
-        // A CELL/UNKNOWN-typed callee is a closure parked in an untyped slot —
+        // An ERASED callee — a `mixed`/`callable` param, an element out of a
+        // vec[cell], a static-prop slot. {@see EmitLlvmCalls::emitErasedInvoke}
+        // branches on the runtime tag and BOTH arms leave a tagged cell, so the
+        // invoke is a cell. Typing it `unknown` (the old fall-through) meant a
+        // `: string` caller returned the tagged word raw and the reader took the
+        // length header off the tag bits.
+        //
+        // The same shape reaches here as a closure parked in an untyped slot —
         // `\Runtime\AsyncHook::readable()` is the canonical one. It says nothing
         // about its return type, but the uniform closure ABI BOXES whatever the
         // callee returns, so leaving the invoke untyped made every caller read a
@@ -605,12 +624,25 @@ trait InferCalls
         // Generator iterator protocol: current()/send() yield the value type
         // (the Generator's element); key() an int; valid() a bool. next()/
         // rewind()/getReturn() are left as-is (void / unknown).
+        //
+        // No declared element means CELL, not unknown: `current`@16 holds a
+        // shallow-boxed cell ({@see EmitLlvmGenerator::emitYield}), so a bare
+        // `Generator` hint's reader must be told it is getting one. Same rule as
+        // the foreach value var ({@see InferNodes::inferForeach}).
         if ($objType->isGenerator()) {
             $m = $node->method;
             if ($m === 'current' || $m === 'send' || $m === 'throw') {
-                $node->type = $objType->element ?? Type::unknown();
+                $et = $objType->element;
+                if ($et === null || $et->kind === Type::KIND_UNKNOWN) { $et = Type::cell(); }
+                $node->type = $et;
             } elseif ($m === 'key') {
-                $node->type = Type::int_();
+                // `key`@24 is stored BOXED — a generator's keys have no single
+                // static type (`yield "a" => 1` beside the auto-incrementing
+                // int), which is why the yield boxes them. Typed int, `$g->key()`
+                // handed back the tag bits as an integer. The foreach key var is
+                // already cell ({@see InferNodes::inferForeach}); this is the
+                // method form of the same channel.
+                $node->type = Type::cell();
             } elseif ($m === 'valid') {
                 $node->type = Type::bool_();
             }
@@ -637,6 +669,10 @@ trait InferCalls
             // result as a float, so a string came out as a double's bit pattern.
             if ($cls === '') {
                 $recvIface = $objType->class;
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('inferCalls.iface_scan_sites', 1);
+                    \Compile\Stats::bump('inferCalls.iface_scan_classes', \count($this->classes));
+                }
                 foreach ($this->classes as $cd) {
                     if (!isset($cd->methodNames[$node->method])) { continue; }
                     if ($this->classImplementsT($cd->name, $recvIface)) { $cls = $cd->name; break; }
@@ -695,7 +731,16 @@ trait InferCalls
         // that declares it agrees, so `$cell->name()` reads its string result
         // correctly instead of as a raw pointer. Dispatch unboxes + class_id's
         // at runtime (EmitLlvm); a disagreement leaves the type unresolved.
-        if ($objType->kind === Type::KIND_CELL) {
+        // KIND_UNKNOWN is the same situation with less evidence — the element of
+        // a HETEROGENEOUS literal (`[new Arg(…), new Opt(…)]`) lands there, and
+        // `$item->getName()` then typed unknown even though every candidate
+        // declares `: string`. The caller read the result through the integer
+        // channel, so `$m[$item->getName()] = …` stored the string POINTER as an
+        // int key — symfony's InputDefinition::setDefinition, which is why every
+        // argument lookup missed. Dispatch is unaffected; only the caller's view
+        // of the result changes, and the per-arm boxing already agrees when the
+        // candidates agree.
+        if ($objType->kind === Type::KIND_CELL || $objType->kind === Type::KIND_UNKNOWN) {
             $rt = $this->cellMethodReturn($node->method);
             // Nothing declares it, but something declares __call: the emitter
             // reroutes the whole call there, so take __call's return type. Left

@@ -124,6 +124,9 @@ prints warnings without failing the build — `--no-analyze` turns it off, `--an
 makes error-severity findings fail the compile (rc=65). `analyze` adds `--deep` (also run the
 MIR type passes), `--json`, and `--baseline` / `--generate-baseline` to suppress known
 findings. `--backend=<mir|ast>` is still parsed but inert — MIR is the only backend.
+`build` also takes `--libs-only` (build the library targets and stop) and `--keep-ir`
+(leave the generated `<output>.dbg.ll` / `.dbg.o` next to the target instead of staging
+them in `/tmp` and deleting them — pair with `-O0` to get a binary lldb can walk).
 
 ⚠ The `dump-*` commands do **not** link the stdlib, so a call into it resolves as
 `unknown`. When that matters, read the final binary.

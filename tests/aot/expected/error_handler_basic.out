@@ -1,0 +1,20 @@
+start
+
+Notice: plain notice in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/error_handler_basic.php on line 9
+
+Warning: a warning in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/error_handler_basic.php on line 10
+
+Deprecated: a deprecation in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/error_handler_basic.php on line 11
+prev-null
+handled[512]: through the handler
+declining: declined
+
+Notice: declined in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/error_handler_basic.php on line 26
+handled[1024]: back to the first handler
+
+Notice: no handler again in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/error_handler_basic.php on line 32
+old=all
+
+Warning: still shown in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/error_handler_basic.php on line 38
+last=silenced
+end

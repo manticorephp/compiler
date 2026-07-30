@@ -1,0 +1,6 @@
+ok help / debug=Sym\HelpCommand / class=Sym\HelpCommand
+ok list / debug=Sym\ListCommand / class=Sym\ListCommand
+ok x / debug=Sym\Command / class=Sym\Command
+string(8) "Sym\Leaf"
+string(4) "null"
+string(6) "object"

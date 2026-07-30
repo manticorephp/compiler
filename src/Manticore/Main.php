@@ -328,6 +328,17 @@ function openssl_link_flags(): string {
 }
 
 /**
+ * Linker flags for the host iconv. Unlike pcre2 and openssl this is NOT a
+ * uniform `-l`: glibc implements iconv INSIDE libc, so `-liconv` there fails to
+ * resolve, while Darwin (and musl with gnu-libiconv) needs it. Host-conditional
+ * by construction rather than probed, because the answer is a property of the C
+ * library, not of what happens to be installed.
+ */
+function iconv_link_flags(): string {
+    return \Manticore\host_os() === "Darwin" ? "-liconv" : "";
+}
+
+/**
  * Resolve a set of `#[Ffi\Library]` names to `cc` link tokens.
  *
  * The two probes above stay the RESOLVERS — they exist because Homebrew keeps
@@ -367,6 +378,11 @@ function ffi_link_flags(array $libs, string $already = ""): string
             $seen["\0openssl"] = true;
         } elseif ($name === "pcre2-8") {
             $flags = pcre2_link_flags();
+        } elseif ($name === "iconv") {
+            // NOT a probe: glibc implements iconv inside libc, so `-liconv`
+            // there fails to resolve even though the symbols are present. The
+            // answer is a property of the C library, not of what is installed.
+            $flags = iconv_link_flags();
         } else {
             $flags = generic_link_flags($name);
         }
@@ -704,6 +720,15 @@ final class CompileArgs
      * readable/debuggable codegen (faster compile, no inlining/reordering).
      */
     public static string $optLevel = '2';
+
+    /**
+     * `--keep-ir` — write the intermediate `.ll`/`.o` next to the target
+     * (`<output>.dbg.ll` / `<output>.dbg.o`) and leave them there instead of
+     * staging them under a pid-derived /tmp path and deleting them. The one
+     * way to read the IR of a manifest build; pairs with `-O0` for a binary
+     * lldb can actually walk.
+     */
+    public static bool $keepIr = false;
 
     /**
      * `--emit-library` — build the bundled stdlib as a standalone `.o`
@@ -1066,11 +1091,13 @@ function cmd_compile(array $args): int {
             dprint("compile: program uses bundled stdlib but stdlib.o not found — link may fail");
         }
         // The bundled stdlib's own bindings — its preg_* wrappers reference
-        // libpcre2-8, its TLS transport libssl/libcrypto, its scheduler
+        // libpcre2-8, its TLS transport libssl/libcrypto, its iconv_* wrappers
+        // libiconv (on Darwin; glibc has it inside libc), its scheduler
         // signalfd — none of which this module names. They ride in the stdlib's
         // `.sig`, since the wrapper that calls them is emitted over there.
         // Dead-strip + --as-needed drop whichever the program never reaches.
-        foreach (stdlib_sig_list("libs", ["pcre2-8", "ssl", "crypto"]) as $l) {
+        foreach (stdlib_sig_list("libs",
+                 ["pcre2-8", "ssl", "crypto", "iconv"]) as $l) {
             $libs[] = $l;
         }
         foreach (stdlib_sig_list("weak",
@@ -1248,11 +1275,20 @@ function composer_path_join(string $base, string $rel): string
 }
 
 /**
- * The directories named by one composer `autoload` block — psr-4 / psr-0 roots
- * and classmap DIRECTORY entries — each prefixed with `$base`. `files` and
- * single-`*.php` classmap entries are deferred: whole-program AOT already pulls
- * in every declaration once a directory is scanned, and `files` side effects
- * have no analogue in a compiled program.
+ * The sources named by one composer `autoload` block — psr-4 / psr-0 roots,
+ * classmap entries, and `files` entries — each prefixed with `$base`.
+ *
+ * `files` entries used to be skipped, on the reasoning that their side effects
+ * have no analogue in a compiled program. That reasoning missed what they are
+ * mostly FOR: a `files` entry typically exists to DECLARE something that has no
+ * class to autoload. symfony/deprecation-contracts is exactly one function in
+ * exactly one `files` entry, and skipping it left every
+ * `trigger_deprecation(...)` call in the dependency tree undefined at link time.
+ * Whole-program AOT needs the declaration, so the file is compiled like any
+ * other source.
+ *
+ * A returned path may be a FILE rather than a directory; collect_php_sources
+ * handles both (its `find` accepts either).
  *
  * @param array<string,mixed> $autoload
  * @return string[]
@@ -1273,8 +1309,11 @@ function composer_autoload_dirs(array $autoload, string $base): array
     }
     $cm = isset($autoload["classmap"]) ? $autoload["classmap"] : [];
     foreach ($cm as $p) {
-        $ps = (string)$p;
-        if (\substr($ps, -4) !== ".php") { $out[] = composer_path_join($base, $ps); }
+        $out[] = composer_path_join($base, (string)$p);
+    }
+    $fl = isset($autoload["files"]) ? $autoload["files"] : [];
+    foreach ($fl as $p) {
+        $out[] = composer_path_join($base, (string)$p);
     }
     return $out;
 }
@@ -1386,23 +1425,33 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
     try {
+        $statT = \Compile\Stats::now();
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $ir = $emit->emit($module);
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
+        \Compile\Stats::step('EmitLlvm', $statT, \count($module->functions), -1);
+        \Compile\Stats::line('IR: ' . (string)\strlen($ir) . ' bytes');
     } catch (\Throwable $e) {
         dprint("build: emit failed for " . $output . ": " . $e->getMessage());
         return 65;
     }
     if (\strlen($ir) === 0) { dprint("build: empty IR for " . $output); return 65; }
-    $pid = getpid();
-    $base = "/tmp/manticore_buildobj_" . (string)$pid;
+    // Staging path for the IR and the intermediate object. Under --keep-ir they
+    // sit next to the target (stable, one per target, and not swept from /tmp);
+    // otherwise a pid-derived /tmp base, removed once the target links. The
+    // staged files are deliberately LEFT BEHIND on failure — they are the only
+    // record of what the compiler emitted for a build that did not finish.
+    $keep = CompileArgs::$keepIr;
+    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
     if (!write_file($llPath, $ir)) { dprint("build: cannot write " . $llPath); return 73; }
+    if ($keep) { dprint("build: kept IR " . $llPath); }
     if ($emitLibrary) {
         $rc = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }
+        if (!$keep) { system("rm -f " . $llPath); }
         // Emit the module-interface .sig next to the object so dependents
         // import this library's exported symbols without re-parsing it.
         // The .sig carries this library's LINK requirements alongside its
@@ -1417,7 +1466,9 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         return 0;
     }
     $objPath = $base . ".o";
+    $statT = \Compile\Stats::now();
     $rc1 = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
+    \Compile\Stats::step('clang -O' . CompileArgs::$optLevel . ' -c', $statT, -1, -1);
     if ($rc1 !== 0) { dprint("build: clang -c failed for " . $output); return 75; }
     $linkExtra = "";
     foreach ($linkObjs as $obj) { $linkExtra = $linkExtra . " " . $obj; }
@@ -1443,7 +1494,8 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         if ($stdObj !== "") { $linkExtra = $linkExtra . " " . $stdObj; }
         // Same requirements the single-file `compile` path picks up, from the
         // same place: the stdlib's own `.sig`.
-        foreach (stdlib_sig_list("libs", ["pcre2-8", "ssl", "crypto"]) as $l) {
+        foreach (stdlib_sig_list("libs",
+                 ["pcre2-8", "ssl", "crypto", "iconv"]) as $l) {
             $libs[] = $l;
         }
         foreach (stdlib_sig_list("weak",
@@ -1462,12 +1514,16 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
+    $statT = \Compile\Stats::now();
     if ($stubs !== "") {
         $rc2 = system("bash " . $stubs . " " . $output . " " . $objPath . $linkExtra);
     } else {
         $rc2 = system("cc " . $objPath . $linkExtra . " -o " . $output);
     }
+    \Compile\Stats::step('link', $statT, -1, -1);
+    \Compile\Stats::dumpCounters();
     if ($rc2 !== 0) { dprint("build: link failed for " . $output); return 76; }
+    if (!$keep) { system("rm -f " . $llPath . " " . $objPath); }
     return 0;
 }
 
@@ -1503,16 +1559,26 @@ function find_link_stubs_script(): string
  */
 function cmd_build(array $args): int
 {
-    // Parse: first non-flag arg = manifest path; `--libs-only` builds the
-    // library targets and stops (used by the cold seed to refresh stdlib.o
-    // without re-linking the applications).
-    $manifestPath = "manticore.json";
-    $libsOnly = false;
-    foreach ($args as $a) {
-        if ($a === "--libs-only") { $libsOnly = true; continue; }
-        if (\strlen($a) > 0 && $a[0] === '-') { dprint("build: unknown flag: " . $a); return 64; }
-        $manifestPath = $a;
-    }
+    // Parse: last positional = manifest path; `--libs-only` builds the library
+    // targets and stops (used by the cold seed to refresh stdlib.o without
+    // re-linking the applications). The shared compile spec rides along so a
+    // manifest build accepts `-O0` / `--memory` like `compile` does — same
+    // shape cmd_analyze uses.
+    $spec = compile_arg_spec();
+    $spec["libs-only"] = \Cli\ArgParse::FLAG;
+    $spec["keep-ir"] = \Cli\ArgParse::FLAG;
+    $p = \Cli\ArgParse::parse($args, $spec);
+    if ($p->error !== null) { dprint("build: " . $p->error); return 64; }
+    if (!apply_compile_args($p)) { return 64; }
+    // apply_compile_args fills $files from the positionals, and lower_module
+    // bakes $files[0] into $module->sourceFile — the text behind
+    // Throwable::getFile() and every "… in <file> on line N" diagnostic. A
+    // manifest path is not a source file, so clear it.
+    CompileArgs::$files = [];
+    $nPos = \count($p->positional);
+    $manifestPath = $nPos > 0 ? $p->positional[$nPos - 1] : "manticore.json";
+    $libsOnly = $p->flag("libs-only");
+    CompileArgs::$keepIr = $p->flag("keep-ir");
     $src = read_file($manifestPath);
     if ($src === null) {
         dprint("build: cannot read manifest: " . $manifestPath);
@@ -1789,6 +1855,28 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $stmts = [];
     $aliases = [];
     $docs = [];
+    $statT = \Compile\Stats::now();
+    $srcBytes = 0;
+    foreach ($sources as $source) { $srcBytes = $srcBytes + \strlen($source); }
+    \Compile\Stats::line('input: ' . (string)\count($sources) . ' file(s), '
+        . (string)$srcBytes . ' bytes');
+    // Every file's top-level statements are flattened into ONE `__main`, entry
+    // last. A top-level `return` in any file BEFORE the entry is an
+    // include-return — the value `require` hands back — and it must not
+    // terminate the program. This is not an edge case: composer's
+    // `vendor/autoload.php` returns the loader, and every `require`d DATA file
+    // (symfony/string's width tables, polyfill-intl-normalizer's unidata) is
+    // one `return [...]` of a few thousand entries. Flattened, the FIRST of
+    // them ended the program before the entry ran a single statement, with its
+    // truncated array pointer as the exit status.
+    //
+    // `require` is already a no-op here, so its value has no consumer: drop
+    // these returns outright. The ENTRY's own `return` is kept — it ends the
+    // script, which a mid-flatten one must not — but its VALUE is discarded too
+    // ({@see \Compile\Mir\Passes\EmitLlvmModule::emitReturn}): php CLI does not
+    // make a top-level return the exit status. Hence the test is "not the last
+    // source": position decides whether the statement survives, not its value.
+    $lastIdx = \count($sources) - 1;
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
@@ -1800,16 +1888,23 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             dprint($where . ": parse failed: " . $e->getMessage());
             return null;
         }
-        foreach ($program->statements as $s) { $stmts[] = $s; }
+        $isEntry = $i === $lastIdx;
+        foreach ($program->statements as $s) {
+            if (!$isEntry && $s->kind === 'Return') { continue; }
+            $stmts[] = $s;
+        }
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
         foreach ($program->docComments as $d) { $docs[] = $d; }
     }
+    \Compile\Stats::step('parse', $statT, \count($stmts), -1);
+    $statT = \Compile\Stats::now();
     // What the program DEMANDS of the prelude, asked of the tokens. A substring
     // gate cannot tell a call from a mention, and this compiler is made of the
     // names it implements — `var_dump(` in a doc comment used to pull the whole
     // var_dump runtime (per-class __mir_dump_object, ~58k IR lines) into the
     // compiler's own binary. See Compile\Mir\PreludeDemand.
     $demand = new \Compile\Mir\PreludeDemand($sources);
+    \Compile\Stats::step('prelude-demand (re-lex)', $statT, -1, -1);
 
     // The on-disk prelude sources. Reading them goes through the libc fopen
     // binding (a throwing stub under the Zend cold-seed), so guard: an
@@ -1831,6 +1926,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // Io\Poll (PHP 8.6 fd-readiness multiplexer) — DEMAND-GATED, namespaced class
     // tree (braced namespaces isolate it in the prelude blob).
     $ioPollSrc = prelude_src_or_empty("io_poll.php");
+    // Error / exception handlers + the shutdown queue. Gated on a CALL, like
+    // array_fns: the handlers hold CALLABLES, so the file cannot live in the
+    // stdlib .o, and a program that never touches them must not carry the
+    // static registries (nor the atexit hook that drains them).
+    $errorsSrc = prelude_src_or_empty("errors.php");
+    // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
+    // cannot cross the stdlib.o boundary.
+    $binarySrc = prelude_src_or_empty("binary.php");
     // Async\ (scheduler / tasks / channels / netpoller seam) — DEMAND-GATED,
     // braced-namespace tree. Built ON Fiber + Io\Poll, so it forces both on.
     $asyncSrc = prelude_src_or_empty("async.php");
@@ -1860,12 +1963,24 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // names either helper and the definedFunctions gate above cannot see the
     // demand. Gate on the name the program actually writes.
     if ($demand->callsAny(['array_multisort'])) { $useArrayFnsExt = true; }
-    $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject']);
+    $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
+        // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
+        // file (they drain a Traversable, so they cannot live in the stdlib).
+        // A program may call one without ever naming an SPL array class.
+        || $demand->callsAny(['iterator_to_array', 'iterator_count', 'iterator_apply']);
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);
     // `new \Io\Poll\Context`, a `use Io\Poll\...`, or `new StreamPollHandle` all
     // mention one of these identifiers.
     $useIoPoll = $demand->mentionsAny(['StreamPollHandle', 'Poll', 'IoException']);
+    // The error/shutdown family. `trigger_error` is included even though the
+    // lowering rewrites it to `__mc_trigger_error` — the gate reads the SOURCE,
+    // which still spells the php name.
+    $useBinary = $demand->callsAny(['pack', 'unpack']);
+    $useErrors = $demand->callsAny(['set_error_handler', 'restore_error_handler',
+                                    'set_exception_handler', 'restore_exception_handler',
+                                    'register_shutdown_function', 'trigger_error',
+                                    'error_reporting', 'error_get_last']);
     // Async\: `use function Async\spawn`, `\Async\async(...)`, `use Async\TaskGroup`
     // — the Lexer emits the namespace qualifier as its own Identifier, so the
     // `Async` mention is the reliable gate. NOT gated on definedFunctions(): this
@@ -1908,7 +2023,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // get an undefined symbol (which this toolchain stubs to `return 0`
         // rather than failing).
         || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
-                              'get_declared_traits']);
+                              'get_declared_traits', 'class_implements',
+                              'get_defined_constants']);
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
     // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely
     // compiler-side — the declarations matter only so reflection can hand back a
@@ -1957,7 +2073,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // an empty array literal and need nothing.
     $useCli = $demand->usesVar('argv') || $demand->usesVar('argc')
         || $demand->usesVar('_SERVER') || $demand->usesVar('_ENV')
-        || $demand->calls('getopt');
+        || $demand->calls('getopt')
+        // no-arg `getenv()` lowers to the $_ENV builder (__mc_env), which lives here.
+        || $demand->calls('getenv');
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
@@ -2012,6 +2130,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     try {
         $module = new \Compile\Mir\Module();
         $module->needsBacktrace = $useBacktrace;
+        $module->needsErrorHandlers = $useErrors;
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->includeVarDump = $useVarDump;
@@ -2033,6 +2152,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->resourceSrc = $resourceSrc;
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
+        $lower->errorsSrc = $useErrors ? $errorsSrc : "";
+        $lower->binarySrc = $useBinary ? $binarySrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
@@ -2053,17 +2174,25 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // Reserved-attribute errors (#[Override] with no parent, a bad target, a
         // repeat) abort the build by default; analysis collects them instead.
         if ($collect !== null) { $lower->attrCollectMode = true; }
+        $statT = \Compile\Stats::now();
         $module = $lower->run($module);
+        \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         if ($collect !== null) {
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
         }
         CompileArgs::$linkStdlib = $lower->externInjected;
+        $statT = \Compile\Stats::now();
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
+        \Compile\Stats::step('ConstFold', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $dse = new \Compile\Mir\Passes\DeadStore();
         $module = $dse->run($module);
+        \Compile\Stats::step('DeadStore', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $infer = new \Compile\Mir\Passes\InferTypes();
         $module = $infer->run($module);
+        \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
         // Narrow CONCRETE, param-independent bare-`array` returns now (a literal
         // `mk(){ return ["x"=>1]; }` → assoc[string,int]) so a call-site
         // `array_filter(mk(), …)` fuses on a concrete element and its result is
@@ -2071,26 +2200,38 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // as cells across a boxing boundary). Erased-param helpers (whose return
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\NarrowReturns(true))->run($module);
+        \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
+        \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
         // Eliminate the boxed-cell closure ABI where it's avoidable: inline
         // captureless single-expr arrow closures at known invoke sites, and
         // fuse array_map/array_filter/array_reduce over a concrete array with a
         // literal closure into a native typed loop. Re-infer so the spliced /
         // fused expressions type from their (now concrete) operands.
+        $statT = \Compile\Stats::now();
         $inlineCl = new \Compile\Mir\Passes\InlineClosures();
         $module = $inlineCl->run($module);
+        \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
+        \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
+        $statT = \Compile\Stats::now();
         $mono = new \Compile\Mir\Passes\Monomorphize();
         $module = $mono->run($module);
+        \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
         // Fuse implode(explode()) split-join round-trips into one native
         // str_replace (zero intermediate array/segment allocs). After Mono so
         // types + explode arg-counts are settled; before InferEffects so the
         // analysis sees the fused form.
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\FuseSplitJoin())->run($module);
+        \Compile\Stats::step('FuseSplitJoin', $statT, \count($module->functions), -1);
         // Gated compile-time type checker (MANTICORE_TYPECHECK=1). Off by
         // default — it never runs during a normal build / self-host. When on,
         // any genuinely-incompatible type use (array↔scalar / object↔scalar at
@@ -2118,9 +2259,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
         $tcOn = $collect !== null || (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0");
         {
+            $statT = \Compile\Stats::now();
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
             $module = $tc->run($module);
+            \Compile\Stats::step('TypeCheck', $statT, \count($module->functions), -1);
             if ($collect !== null) {
                 foreach ($tc->errors as $te) { $collect->lines[] = $te; }
             } elseif (\count($tc->errors) > 0) {
@@ -2128,16 +2271,20 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                 return null;
             }
         }
+        $statT = \Compile\Stats::now();
         $narrow = new \Compile\Mir\Passes\NarrowReturns();
         $module = $narrow->run($module);
+        \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         // The `#[TypeDef]` soundness gate: an erased value must never reach a
         // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a
         // `mixed` slot). Runs once types are final and before any memory pass —
         // a boxed cell downstream has already lost the marker. Throws; the catch
         // below turns it into a compile error.
+        $statT = \Compile\Stats::now();
         $checkTypeDefs = new \Compile\Mir\Passes\CheckTypeDefs();
         if ($collect !== null) { $checkTypeDefs->collectMode = true; }
         $module = $checkTypeDefs->run($module);
+        \Compile\Stats::step('CheckTypeDefs', $statT, \count($module->functions), -1);
         if ($collect !== null) {
             foreach ($checkTypeDefs->errors as $te) { $collect->lines[] = $te; }
             // Analysis needs nothing past the type checks; the memory passes are
@@ -2148,8 +2295,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
         // never sees the strings that are no longer created.
+        $statT = \Compile\Stats::now();
         $refl = new \Compile\Mir\Passes\ReflectAnalysis();
         $refl->run($module);
+        \Compile\Stats::step('ReflectAnalysis', $statT, -1, \count($module->classes));
         $module->reflectAll = $refl->all;
         $module->reflectNames = $refl->names;
         if (\Compile\Debug::$reflectReport) {
@@ -2168,17 +2317,29 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             dprint('reflect: ' . (string)\count($rnames) . ' class(es) carry metadata: '
                 . \implode(', ', $rnames));
         }
+        $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
+        \Compile\Stats::step('DemoteCharLocals', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
+        \Compile\Stats::step('InferEffects', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
         $module = $allocKind->run($module);
+        \Compile\Stats::step('InferAllocKind', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
         $module = $memMode->run($module);
+        \Compile\Stats::step('ApplyMemoryMode', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
         $module = $memOps->run($module);
+        \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
+        \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
         return $module;
     } catch (\Throwable $e) {
         dprint("compile failed: " . $e->getMessage());
@@ -2266,7 +2427,8 @@ function analyze_prelude_files(): array {
     $names = [
         "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
-        "datetime.php", "serialize.php", "unserialize.php",
+        "datetime.php", "errors.php", "binary.php",
+        "serialize.php", "unserialize.php",
         // \Fiber (fiber.php) and the Io\Poll\* class tree (io_poll.php) are
         // DEMAND-GATED at compile time (Main::lower_module), but the analyzer's
         // undefined-symbol rules run closed-world across the whole source set —

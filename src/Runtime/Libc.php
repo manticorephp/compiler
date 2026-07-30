@@ -82,14 +82,11 @@ function strchr(string $s, #[CType('int')] int $byte): Ptr {}
 #[Library('c'), Symbol('strrchr')]
 function strrchr(string $s, #[CType('int')] int $byte): Ptr {}
 
-// `strstr` returns NULL when not found. We type the return as `int`
-// (raw address) rather than Ptr so the PHP-side null check is a
-// plain `=== 0` instead of needing a Ptr-object wrap that doesn't
-// exist when libc hands us a null pointer.
-// `char *strstr(...)` returns a POINTER into the haystack (null when absent),
-// carried here as a PHP int the caller turns back into an offset. The token has
-// to say `ptr`: the codegen builtin that also emits strstr declares it that way,
-// and an i64 return would disagree with it.
+// `char *strstr(...)` returns a POINTER into the haystack, NULL when absent.
+// The return is typed `int` (the raw address) rather than Ptr so the PHP-side
+// check is a plain `=== 0` — libc hands back a null pointer, which no Ptr object
+// wraps. The CType token still has to say `ptr`: the codegen builtin that also
+// emits strstr declares it that way, and an i64 return would disagree with it.
 #[Library('c'), Symbol('strstr'), CType('ptr')]
 function strstr(string $hay, string $needle): int {}
 
@@ -651,3 +648,25 @@ function sys_alarm(#[CType('unsigned int')] int $seconds): int {}
 // random_bytes/random_int (getrandom is Linux-only, arc4random_buf BSD-only).
 #[Library('c'), Symbol('getentropy')]
 function sys_getentropy(Ptr $buf, #[CType('size_t')] int $buflen): int {}
+
+// ── Locale ─────────────────────────────────────────────────────────────
+// `char *setlocale(int category, const char *locale)` — sets (or, with a NULL
+// locale, reads) the process locale and returns the resulting name, or NULL on
+// failure. symfony/string saves LC_CTYPE, switches to "C" for a transliteration
+// and restores it, which needs the READ form as much as the write form.
+// Two PHP names for the one C symbol — the fwrite/fwrite_buf idiom — because
+// the locale argument is either a real string or a NULL, and those are carried
+// differently across the FFI boundary.
+#[Library('c'), Symbol('setlocale')]
+function sys_setlocale(#[CType('int')] int $category, string $locale): Ptr {}
+
+#[Library('c'), Symbol('setlocale')]
+function sys_setlocale_query(#[CType('int')] int $category, Ptr $locale): Ptr {}
+
+// ── Resource usage ─────────────────────────────────────────────────────
+// `int getrusage(int who, struct rusage *usage)` — 0 on success.
+// `struct rusage` opens with two `struct timeval` (16 bytes each on both
+// Darwin and glibc/x86_64), so `ru_maxrss` sits at offset 32 on both. Its UNIT
+// differs: bytes on Darwin, kilobytes on Linux.
+#[Library('c'), Symbol('getrusage')]
+function sys_getrusage(#[CType('int')] int $who, Ptr $usage): int {}

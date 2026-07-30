@@ -227,3 +227,89 @@ function parse_ini_file(string $filename, bool $process_sections = false, int $s
     }
     return \parse_ini_string((string)$raw, $process_sections, $scanner_mode);
 }
+
+/**
+ * php's runtime configuration surface.
+ *
+ * A compiled binary has NO php.ini — that is a project principle, not an
+ * omission — so `php_ini_loaded_file()` and `php_ini_scanned_files()` answer
+ * `false`, which is exactly what php answers when it was started with `-n`.
+ * `ini_get` reports the directives that are genuinely observable here and
+ * `false` for everything else, which is also php's answer for an unknown name.
+ */
+function __mc_ini_table(): array
+{
+    return [
+        // No arena limit: this binary allocates from the system allocator.
+        "memory_limit" => "-1",
+        "precision" => "14",
+        "serialize_precision" => "-1",
+        // Assertions are compiled out, matching php's production default.
+        "zend.assertions" => "-1",
+        // There is no mbstring extension to overload with.
+        "mbstring.func_overload" => "0",
+        "default_charset" => "UTF-8",
+        "display_errors" => "1",
+        "log_errors" => "0",
+        "max_execution_time" => "0",
+        "date.timezone" => "UTC",
+    ];
+}
+
+/** One ini directive's value as a string, or false when there is no such one. */
+function ini_get(string $option): mixed
+{
+    $t = __mc_ini_table();
+    if (isset($t[$option])) { return $t[$option]; }
+    // NOT special-cased to the live error_reporting() mask: that function
+    // lives in the demand-gated errors prelude, and a stdlib function must
+    // never demand a prelude — the stdlib is compiled on its own.
+    return false;
+}
+
+/**
+ * Every directive, in php's nested shape. `$details = false` flattens it to
+ * name => value, which is the form symfony/process reads.
+ * @return array<string,mixed>
+ */
+function ini_get_all(?string $extension = null, bool $details = true): array
+{
+    $out = [];
+    foreach (__mc_ini_table() as $k => $v) {
+        if ($details) {
+            $out[$k] = ["global_value" => $v, "local_value" => $v, "access" => 7];
+        } else {
+            $out[$k] = $v;
+        }
+    }
+    return $out;
+}
+
+/** Setting a directive is a no-op: there is nothing to set it in. */
+function ini_set(string $option, mixed $value): mixed
+{
+    return \ini_get($option);
+}
+
+/** Same, for the restore spelling. */
+function ini_restore(string $option): void
+{
+}
+
+/** No php.ini was loaded, because there is none. */
+function php_ini_loaded_file(): mixed
+{
+    return false;
+}
+
+/** Nor a scan directory. */
+function php_ini_scanned_files(): mixed
+{
+    return false;
+}
+
+/** php's get_cfg_var, which reads the same table. */
+function get_cfg_var(string $option): mixed
+{
+    return \ini_get($option);
+}

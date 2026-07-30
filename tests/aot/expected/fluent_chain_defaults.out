@@ -1,0 +1,12 @@
+arg name default='world'
+opt yell default=NULL sv=array (
+)
+opt times default='1' sv=array (
+)
+opt third default=NULL sv=array (
+)
+opt root-a default=NULL sv=array (
+)
+opt root-b default=NULL sv=array (
+)
+definition sink: untouched

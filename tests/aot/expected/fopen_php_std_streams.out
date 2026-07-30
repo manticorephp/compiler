@@ -1,0 +1,8 @@
+stdout is_resource=Y type=stream gettype=resource
+STDOUT-upper is_resource=Y type=stream gettype=resource
+output is_resource=Y type=stream gettype=resource
+stderr is_resource=Y type=stream gettype=resource
+via fwrite
+via echo
+memory is_resource=Y type=stream gettype=resource
+string(3) "abc"

@@ -244,6 +244,33 @@ final class LowerFromAst implements Pass
      */
     private array $constCallables = [];
 
+    /**
+     * Callable-literal bindings that survive control flow — a variable assigned a
+     * string / ternary-of-strings function name EXACTLY ONCE in the body, so its
+     * invoke resolves to a direct call even across an intervening `if`/`try`
+     * (which clears the straight-line {@see $constCallables}). Populated per body
+     * by {@see scanStableCallables}.
+     *
+     * FLAT `var → first candidate name`, never a nested info array: the value is
+     * read back inside the compiler's own hot path, and a nested assoc read out
+     * of a property erases natively — the lookup then silently missed and the
+     * out-param it exists to define stayed dangling (green under Zend, broken
+     * self-hosted). Both str_set arms share the by-ref layout, so one name is
+     * all this needs.
+     * @var array<string, string>
+     */
+    private array $stableCallables = [];
+
+    /** Declared parameter names of the body being lowered, in order. Backs the
+     *  `func_num_args()` / `func_get_arg($k)` fold.
+     *  @var string[] */
+    private array $currentLowerParams = [];
+
+    /** The str_set's SECOND candidate name, keyed the same way. Two flat maps,
+     *  not one map of pairs — see {@see $stableCallables}.
+     *  @var array<string, string> */
+    private array $stableCallablesAlt = [];
+
     /** `$var = new C(...)` → C, for a linear body — lets a later `$var->m(a,b)`
      *  pack its variadic against C's exact signature (a same-named variadic
      *  method elsewhere with a different arity otherwise defers the pack). Dropped
@@ -296,6 +323,17 @@ final class LowerFromAst implements Pass
     /** Io\Poll — DEMAND-GATED (empty unless the program mentions it). Namespaced
      *  class tree in braced `namespace {}` blocks. */
     public string $ioPollSrc = '';
+    /** Error / exception handlers + the shutdown queue — DEMAND-GATED. Non-empty
+     *  also means main() gets the atexit trampoline and the uncaught path
+     *  consults a user handler; {@see needsErrorHandlers}. */
+    public string $errorsSrc = '';
+    /** pack/unpack — DEMAND-GATED. */
+    public string $binarySrc = '';
+    /** Nesting depth of the `@` suppression operator around the expression being
+     *  lowered — read by the `trigger_error` rewrite ({@see LowerExprs}). */
+    private int $silenceDepth = 0;
+    /** The file name a diagnostic names, for the `trigger_error` rewrite. */
+    private string $lowerSourceFile = '';
     /** Async\ (scheduler / tasks / channels) — DEMAND-GATED. Braced-namespace
      *  tree like io_poll.php; implies fiberSrc + ioPollSrc. */
     public string $asyncSrc = '';
@@ -426,6 +464,7 @@ final class LowerFromAst implements Pass
     public function run(Module $module): Module
     {
         $this->module = $module;
+        $this->lowerSourceFile = $module->sourceFile;
         // Built-in Exception hierarchy (parsed prelude) is lowered like
         // any user class, so `throw` / `catch` / `getMessage` resolve
         // through the normal class machinery.
@@ -551,10 +590,18 @@ final class LowerFromAst implements Pass
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.
-        $clsIdx = 0;
-        foreach ($stmts as $stmt) {
+        // Build classes PARENT-FIRST, not in source order. buildClassDef copies
+        // the parent's slots to give the subclass the same field offsets, and it
+        // can only do that if the parent is already in classTable — source order
+        // used to be assumed. A composer app breaks that assumption immediately:
+        // `src/App\GreetCommand` sorts before `vendor/symfony/…/Command`, so the
+        // three probe commands were built with ZERO inherited slots and
+        // allocated 16 bytes (header only) while every inherited Command method
+        // wrote at +24…+136 — an out-of-bounds write on every command object,
+        // which corrupted malloc's own metadata and crashed far from the cause.
+        foreach ($this->classBuildOrder($stmts) as $clsIdx) {
+            $stmt = $stmts[$clsIdx];
             $this->inPreludeClass = $clsIdx < $preludeCount;
-            $clsIdx = $clsIdx + 1;
             if ($stmt->kind === 'Class') {
                 $decl = $stmt->decl;
                 $dkind = $decl->kind ?? 'class';
@@ -1318,6 +1365,8 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
+        $this->setCurrentLowerParams($m->params);
+        $this->scanStableCallables($m->body->statements);
         $this->localNewClasses = [];
         // Inside a `#[TypeDef]` body `$this` IS the carrier: there is no object to
         // point at. `__invoke` — the normaliser — takes no `$this` at all: it is a
@@ -1394,8 +1443,18 @@ final class LowerFromAst implements Pass
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
         $this->sawStaticUse = false;
+        $deadTail = false;
         foreach ($m->body->statements as $bodyStmt) {
-            $stmts[] = $this->lowerStmt($bodyStmt);
+            // A label heads live code even after a terminator — `goto` reaches it.
+            if ($deadTail && $bodyStmt->kind !== 'Label') { continue; }
+            $deadTail = false;
+            $lowered = $this->lowerStmt($bodyStmt);
+            $stmts[] = $lowered;
+            // Same dead-code cut as lowerBlockNode: skip after an unconditional
+            // terminator so trailing code behind a folded static guard (a
+            // `if (!function_exists('pcntl_signal')) return;` reducing to a bare
+            // return, then `[\SIGINT, …]`) is never lowered.
+            if ($this->nodeAlwaysTerminates($lowered)) { $deadTail = true; }
         }
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
@@ -1806,6 +1865,18 @@ final class LowerFromAst implements Pass
 
     private function lowerUnary(\Parser\Ast\UnaryOp $e): Node
     {
+        // `@expr` — suppression. Nothing in this runtime emits a diagnostic
+        // except an explicit `trigger_error`, so `@` is a marker the operand's
+        // lowering reads rather than a runtime state change: no counter, no
+        // cost, and no depth to leak when the operand throws. The marker is
+        // COUNTED, not set, so nested `@` (or `@` around an expression holding
+        // several calls) behaves.
+        if ($e->op === '@') {
+            $this->silenceDepth = $this->silenceDepth + 1;
+            $inner = $this->lowerExpr($e->operand);
+            $this->silenceDepth = $this->silenceDepth - 1;
+            return $inner;
+        }
         $operand = $this->lowerExpr($e->operand);
         $op = $e->op;
         if ($op === '-') {
@@ -1821,6 +1892,13 @@ final class LowerFromAst implements Pass
         }
         if ($op === '~') {
             return new BitNot_($operand, Type::int_());
+        }
+        // Throw expression (PHP 8.0): `$x ?? throw new E`, `fn() => throw …`,
+        // `cond ? … : throw …`. The parser models it as a unary `throw`. It
+        // never yields a value (a `never`-typed node); the enclosing
+        // coalesce/ternary takes the sibling arm's type (see infer*).
+        if ($op === 'throw') {
+            return new Throw_($operand, Type::void());
         }
         throw new \RuntimeException('MIR.lower: unsupported unary op ' . $op);
     }
@@ -2057,14 +2135,42 @@ final class LowerFromAst implements Pass
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */
     private function lowerStringCallable(string $name, array $astArgs): Node
     {
-        $args = [];
-        foreach ($astArgs as $a) { $args[] = $this->lowerExpr($a); }
         $cc = \strpos($name, '::');
         if ($cc !== false && $cc > 0) {
+            $args = [];
+            foreach ($astArgs as $a) { $args[] = $this->lowerExpr($a); }
             $cls = \ltrim(\substr($name, 0, $cc), '\\');
             return new StaticCall_($cls, \substr($name, $cc + 2), $args, Type::unknown(), $cls);
         }
-        return new Call($this->resolveCallName($name), $args, Type::unknown());
+        // Route through lowerCallArgs (not bare lowerExpr) so the callee's
+        // #[RefOut] out-params auto-vivify — `('preg_match')($p, $s, $matches)`
+        // must define $matches by ref exactly like a direct `preg_match(...)`.
+        $resolved = $this->resolveCallName($name);
+        return new Call($resolved, $this->lowerCallArgs($resolved, $astArgs), Type::unknown());
+    }
+
+    /**
+     * A `str_set` callable (`$fn = cond ? 'preg_match_all' : 'preg_match'`)
+     * applied to `$astArgs`: dispatch on `$fn`'s RUNTIME VALUE into the two
+     * DIRECT calls rather than emitting a dynamic invoke.
+     *
+     * A dynamic invoke passes every argument by value, so the callee's
+     * `#[RefOut]` out-param (preg_match's `$matches`) was never filled — the
+     * caller read an undefined local and printed denormal floats. Only a direct
+     * call carries the by-ref ABI, and only one arm ever executes, so the
+     * duplicated argument lowering costs nothing at run time.
+     */
+    private function lowerStrSetCallable(string $var, string $n1, string $n2, array $astArgs): Node
+    {
+        $c1 = $this->lowerStringCallable($n1, $astArgs);
+        if ($n2 === '' || $n2 === $n1) { return $c1; }
+        $c2 = $this->lowerStringCallable($n2, $astArgs);
+        $cond = new Cmp(
+            new LoadLocal($var, Type::string_()),
+            new StringConst($n1, Type::string_()),
+            '==='
+        );
+        return new Ternary($cond, $c1, $c2, Type::unknown());
     }
 
     /** An array callable `[$o,"m"]` / `["C","m"]` applied to `$astArgs`, or
@@ -2194,12 +2300,15 @@ final class LowerFromAst implements Pass
      */
     private function lowerStaticLocal(\Parser\Ast\StaticLocalStmt $stmt): Node
     {
-        $base = $this->currentLowerClass !== ''
-            ? '@' . $this->sanitizeSym($this->currentLowerClass . '__' . $this->currentLowerFn)
-            : '@' . $this->sanitizeSym($this->currentLowerFn);
+        // Sanitize the class+fn base like the static-PROPERTY path (__sp_): a
+        // namespaced class (`Symfony\Component\…`) has backslashes, which are
+        // illegal in an unquoted LLVM global name (`@…\… = global` → "expected '='").
+        $rawBase = $this->currentLowerClass !== ''
+            ? $this->currentLowerClass . '__' . $this->currentLowerFn
+            : $this->currentLowerFn;
         $nodes = [];
         foreach ($stmt->decls as $d) {
-            $cell = $base . '__sl_' . $d->name;
+            $cell = '@' . $this->sanitizeSym($rawBase . '__sl_' . $d->name);
             $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
             $guard = '';
             $init = null;
@@ -2299,7 +2408,12 @@ final class LowerFromAst implements Pass
     {
         unset($this->constCallables[$name]);
         $info = $this->callableLiteralInfo($value);
-        if ($info !== null) { $this->constCallables[$name] = $info; }
+        // `str_set` is NOT a straight-line binding — it is handled only via
+        // {@see scanStableCallables} + the dynamic-invoke fall-through in
+        // lowerInvoke (lowerConstCallable has no str_set arm). Keep it out of the
+        // straight-line tracker so it never reaches lowerConstCallable's
+        // string/array dispatch (which would misread its shape).
+        if ($info !== null && $info['kind'] !== 'str_set') { $this->constCallables[$name] = $info; }
         // Track a `$var = new C(...)` binding for receiver-class-aware variadic
         // packing; any other assignment drops it (a later `$var->m()` then falls
         // back to the by-name union).
@@ -2312,6 +2426,27 @@ final class LowerFromAst implements Pass
     {
         if ($value->kind === 'StringLiteral') {
             return ['kind' => 'str', 'name' => $this->strLitValue($value)];
+        }
+        // `$fn = cond ? 'preg_match_all' : 'preg_match'` — both arms name known
+        // functions. Track the pair so the invoke dispatches on `$fn`'s VALUE to
+        // DIRECT calls (a `#[RefOut]` out-arg like preg_match's `$matches` fills
+        // by reference — a dynamic `$fn(...)` invoke cannot pass one by ref).
+        if ($value->kind === 'Ternary') {
+            $tv = $value;
+            $thenE = $this->ternaryThenExpr($tv);
+            $elseE = $this->ternaryElseExpr($tv);
+            if ($thenE !== null && $thenE->kind === 'StringLiteral' && $elseE->kind === 'StringLiteral') {
+                $n1 = $this->strLitValue($thenE);
+                $n2 = $this->strLitValue($elseE);
+                if ($this->functionIsKnown($n1) && $this->functionIsKnown($n2)) {
+                    // Two FLAT string slots, never a nested `['names' => [...]]`:
+                    // this map's other arms are all `array<string, string>`, and a
+                    // single array-valued slot makes the whole return MIXED — the
+                    // reader then unboxes a raw string pointer as a cell and the
+                    // compiler SIGSEGVs on the unrelated `arr_obj` path.
+                    return ['kind' => 'str_set', 'name' => $n1, 'name2' => $n2];
+                }
+            }
         }
         if ($value->kind === 'ArrayLit') {
             $els = $this->arrayLitElements($value);
@@ -2332,6 +2467,52 @@ final class LowerFromAst implements Pass
         }
         return null;
     }
+
+    /**
+     * Record body-stable `str_set` callables (a var assigned a ternary of two
+     * function-name literals) from the top-level statements, so a `$fn(...)`
+     * invoke resolves to a direct dispatch even across an intervening `if`/`try`
+     * that clears the straight-line tracker. Only `str_set` is recorded — it
+     * dispatches on `$fn`'s RUNTIME value, so a later reassignment stays correct
+     * as long as `$fn` holds one of the two names (the symfony preg pattern);
+     * plain-string callables stay straight-line-only, where reassignment matters.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     */
+    /**
+     * Record the DECLARED parameter names of the body being lowered, in order,
+     * so `func_num_args()` / `func_get_arg($k)` resolve against them.
+     *
+     * @param \Parser\Ast\Param[] $params
+     */
+    private function setCurrentLowerParams(array $params): void
+    {
+        $this->currentLowerParams = [];
+        foreach ($params as $p) { $this->currentLowerParams[] = $p->name; }
+    }
+
+    private function scanStableCallables(array $stmts): void
+    {
+        $this->stableCallables = [];
+        $this->stableCallablesAlt = [];
+        foreach ($stmts as $s) {
+            if ($s->kind !== 'Expression') { continue; }
+            $e = $this->expressionStmtExpr($s);
+            if ($e->kind !== 'Assign') { continue; }
+            $t = $this->assignTarget($e);
+            if ($t->kind !== 'Variable') { continue; }
+            $info = $this->callableLiteralInfo($this->assignValue($e));
+            if ($info !== null && $info['kind'] === 'str_set') {
+                $vn = $this->varName($t);
+                $this->stableCallables[$vn] = $info['name'];
+                $this->stableCallablesAlt[$vn] = $info['name2'];
+            }
+        }
+    }
+
+    private function expressionStmtExpr(\Parser\Ast\ExpressionStmt $s): \Parser\Ast\Expr { return $s->expr; }
+    private function assignTarget(\Parser\Ast\Assign $a): \Parser\Ast\Expr { return $a->target; }
+    private function assignValue(\Parser\Ast\Assign $a): \Parser\Ast\Expr { return $a->value; }
 
     /** Lower a tracked callable variable `$var` invoked as `$var(args)` to the
      *  direct call. */
@@ -2392,12 +2573,12 @@ final class LowerFromAst implements Pass
     private function constIfBranch(\Parser\Ast\IfStmt $s): ?array
     {
         $c = $this->foldGuard($s->condition);
-        if ($c === null) { return null; }
-        if ($c === true) { return $s->then->statements; }
+        if ($c === self::GUARD_UNKNOWN) { return null; }
+        if ($c === self::GUARD_TRUE) { return $s->then->statements; }
         foreach ($s->elseifs as $arm) {
             $ac = $this->foldGuard($arm->condition);
-            if ($ac === null) { return null; }
-            if ($ac === true) { return $arm->body->statements; }
+            if ($ac === self::GUARD_UNKNOWN) { return null; }
+            if ($ac === self::GUARD_TRUE) { return $arm->body->statements; }
         }
         return $s->else !== null ? $s->else->statements : [];
     }
@@ -2415,41 +2596,225 @@ final class LowerFromAst implements Pass
         }
     }
 
+    /** foldGuard: not statically foldable — the guard stays for runtime. */
+    private const GUARD_UNKNOWN = -1;
+    private const GUARD_FALSE = 0;
+    private const GUARD_TRUE = 1;
+
     /**
-     * Compile-time truth of a declaration guard, or null when not statically
-     * foldable: `function_exists('X')` (same test the expression fold uses — the
-     * known user / stdlib-extern functions), bool literals, and `!` / `&&` / `||`
-     * over them. Anything else leaves the `if` for runtime (unexpanded).
+     * Compile-time truth of a declaration guard as a TRI-STATE:
+     * GUARD_TRUE / GUARD_FALSE / GUARD_UNKNOWN. Folds `function_exists('X')`
+     * (the same test the expression fold uses), `defined`, the `class_exists`
+     * family, `extension_loaded`, a constant `===`/`!==`, bool literals, and
+     * `!` / `&&` / `||` over any of those.
+     *
+     * The tri-state is an int ON PURPOSE. This used to return `?bool`, and a
+     * nullable scalar's null does NOT read back as null under the self-host
+     * (invisible under Zend, where the same code is correct) — so UNKNOWN
+     * arrived at the call sites as FALSE and folded away live branches: the
+     * compiler built by the compiler dropped `$n > 1` from
+     * `function_exists('have') && $n > 1`. Never widen this back to `?bool`.
      */
-    private function foldGuard(\Parser\Ast\Expr $e): ?bool
+    private function foldGuard(\Parser\Ast\Expr $e): int
     {
-        if ($e->kind === 'BoolLiteral') { return $e->value; }
-        if ($e->kind === 'UnaryOp' && $e->op === '!') {
-            $v = $this->foldGuard($e->operand);
-            return $v === null ? null : !$v;
-        }
-        if ($e->kind === 'BinaryOp' && ($e->op === '&&' || $e->op === 'and')) {
+        // Dispatch by kind into TYPED helpers. A subclass field read off a
+        // base-`Expr` receiver resolves by the wrong offset under the self-host
+        // (Expr declares only kind/span), so every access below happens behind a
+        // concrete parameter type.
+        $k = $e->kind;
+        if ($k === 'BoolLiteral') { return $this->boolLitValue($e) ? self::GUARD_TRUE : self::GUARD_FALSE; }
+        if ($k === 'UnaryOp')     { return $this->foldGuardUnary($e); }
+        if ($k === 'BinaryOp')    { return $this->foldGuardBinary($e); }
+        if ($k === 'Call')        { return $this->foldGuardCall($e); }
+        return self::GUARD_UNKNOWN;
+    }
+
+    private function boolLitValue(\Parser\Ast\BoolLiteral $b): bool { return $b->value; }
+
+    private function intLitValue(\Parser\Ast\IntLiteral $i): int { return $i->value; }
+
+    private function identifierName(\Parser\Ast\Identifier $i): string { return $i->name; }
+
+    private function guardOf(bool $v): int { return $v ? self::GUARD_TRUE : self::GUARD_FALSE; }
+
+    private function foldGuardUnary(\Parser\Ast\UnaryOp $e): int
+    {
+        if ($e->op !== '!') { return self::GUARD_UNKNOWN; }
+        $v = $this->foldGuard($e->operand);
+        if ($v === self::GUARD_UNKNOWN) { return self::GUARD_UNKNOWN; }
+        return $v === self::GUARD_TRUE ? self::GUARD_FALSE : self::GUARD_TRUE;
+    }
+
+    private function foldGuardBinary(\Parser\Ast\BinaryOp $e): int
+    {
+        $op = $e->op;
+        if ($op === '&&' || $op === 'and') {
             $l = $this->foldGuard($e->left);
-            if ($l === false) { return false; }
+            if ($l === self::GUARD_FALSE) { return self::GUARD_FALSE; }
             $r = $this->foldGuard($e->right);
-            if ($r === false) { return false; }
-            return ($l === null || $r === null) ? null : true;
+            if ($r === self::GUARD_FALSE) { return self::GUARD_FALSE; }
+            return ($l === self::GUARD_UNKNOWN || $r === self::GUARD_UNKNOWN)
+                ? self::GUARD_UNKNOWN : self::GUARD_TRUE;
         }
-        if ($e->kind === 'BinaryOp' && ($e->op === '||' || $e->op === 'or')) {
+        if ($op === '||' || $op === 'or') {
             $l = $this->foldGuard($e->left);
-            if ($l === true) { return true; }
+            if ($l === self::GUARD_TRUE) { return self::GUARD_TRUE; }
             $r = $this->foldGuard($e->right);
-            if ($r === true) { return true; }
-            return ($l === null || $r === null) ? null : false;
+            if ($r === self::GUARD_TRUE) { return self::GUARD_TRUE; }
+            return ($l === self::GUARD_UNKNOWN || $r === self::GUARD_UNKNOWN)
+                ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
         }
-        if ($e->kind === 'Call' && \count($e->args) === 1 && $e->args[0]->kind === 'StringLiteral') {
-            $fn = \ltrim($e->function, '\\');
+        // Constant strict comparison — `'\\' === DIRECTORY_SEPARATOR`,
+        // `PHP_OS_FAMILY === 'Windows'`. Both sides compile-time scalars ⇒ a
+        // definite bool, so the Windows / platform-specific dead branch (which
+        // often calls functions this target lacks) drops before lowering.
+        if ($op === '===' || $op === '!==') {
+            $lk = $this->constScalarKey($e->left);
+            $rk = $this->constScalarKey($e->right);
+            if ($lk === null || $rk === null) { return self::GUARD_UNKNOWN; }
+            $eq = $lk === $rk;
+            return $this->guardOf($op === '===' ? $eq : !$eq);
+        }
+        return self::GUARD_UNKNOWN;
+    }
+
+    private function foldGuardCall(\Parser\Ast\CallExpr $e): int
+    {
+        if (\count($e->args) !== 1) { return self::GUARD_UNKNOWN; }
+        if (true) {
+            // An unqualified builtin call inside a namespace resolves to
+            // `Ns\class_exists` in the AST (PHP falls back to the global at
+            // runtime); match on the trailing segment so the guard folds
+            // regardless of the enclosing namespace.
+            $qual = \ltrim($e->function, '\\');
+            $qpos = \strrpos($qual, '\\');
+            $fn = $qpos === false ? $qual : \substr($qual, $qpos + 1);
+            $a0 = $e->args[0];
             if ($fn === 'function_exists') {
-                return $this->functionIsKnown($this->stringLitValue($e->args[0]));
+                // The name is usually a string literal, but symfony writes
+                // `function_exists(u::class)` — a `::class` constant resolving to
+                // the fully-qualified function name. guardClassArgName handles both.
+                $cn = $this->guardClassArgName($a0);
+                if ($cn === null) { return self::GUARD_UNKNOWN; }
+                return $this->guardOf($this->functionIsKnown($cn));
             }
+            // `defined('NAME')` — whole-program AOT knows every constant, so an
+            // unknown name is definitively false (mirrors the expression fold in
+            // LowerExprs). Lets a `defined('SIGINT')`-guarded branch that names an
+            // undefined constant drop before that name reaches lowering.
+            if ($fn === 'defined' && $a0->kind === 'StringLiteral') {
+                $nm = $this->constBareName($this->stringLitValue($a0));
+                return $this->guardOf($this->predefinedConstant($nm) !== null || isset($this->userConstants[$nm]));
+            }
+            // `class_exists(X)` / interface_ / trait_ / enum_exists guarding an
+            // OPTIONAL-dependency branch (`if (class_exists(CliDumper::class)) {
+            // … CliDumper::CONST … }`). A name the whole-program build does NOT
+            // contain is definitively absent → fold FALSE so the dead branch
+            // (which references the missing class) never reaches lowering. A KNOWN
+            // name is left unfolded (null) — the branch compiles normally, so no
+            // guess about class-vs-interface truthiness is needed.
+            if ($fn === 'class_exists' || $fn === 'interface_exists'
+                || $fn === 'trait_exists' || $fn === 'enum_exists') {
+                $cn = $this->guardClassArgName($a0);
+                if ($cn === null) { return self::GUARD_UNKNOWN; }
+                $known = isset($this->knownClassNames[$cn]) || isset($this->traitTable[$cn]);
+                return $known ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
+            }
+            // `extension_loaded('X')`. A whole-program build has a FIXED set of
+            // built-in extensions — nothing can be dlopen'd later — so the answer
+            // is a compile-time constant. It matters because the polyfills gate
+            // on it: `if (extension_loaded('mbstring')) { … }` in
+            // symfony/polyfill-mbstring must fold FALSE so the polyfill's own
+            // implementation is the one that compiles, and pcntl's absence must
+            // drop a branch that names functions this build has no definition for.
+            if ($fn === 'extension_loaded' && $a0->kind === 'StringLiteral') {
+                return $this->guardOf($this->extensionIsBuiltIn(\strtolower($this->stringLitValue($a0))));
+            }
+        }
+        return self::GUARD_UNKNOWN;
+    }
+
+    /**
+     * The extensions a compiled binary genuinely carries. `pcre` is linked
+     * (pcre2), `json` / `ctype` are built in, `openssl` rides the TLS stack.
+     * Everything else — mbstring, intl, pcntl, dom — is absent, and a program
+     * that asks gets the honest answer rather than a link-time surprise.
+     */
+    private function extensionIsBuiltIn(string $ext): bool
+    {
+        return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
+            || $ext === 'openssl' || $ext === 'core' || $ext === 'standard';
+    }
+
+    /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),
+     *  or null when not a foldable constant. Used to strictly compare two
+     *  constants in a guard — same key ⇔ `===` true. */
+    private function constScalarKey(\Parser\Ast\Expr $e, int $depth = 0): ?string
+    {
+        if ($depth > 8) { return null; }   // guard mutually-recursive `define`s
+        $k = $e->kind;
+        if ($k === 'StringLiteral') { return 's:' . $this->stringLitValue($e); }
+        if ($k === 'IntLiteral')    { return 'i:' . (string)$this->intLitValue($e); }
+        if ($k === 'BoolLiteral')   { return 'b:' . ($this->boolLitValue($e) ? '1' : '0'); }
+        if ($k === 'NullLiteral')   { return 'n:'; }
+        if ($k === 'Identifier') {
+            $nm = $this->constBareName($this->identifierName($e));
+            if (isset($this->userConstants[$nm])) {
+                return $this->constScalarKey($this->userConstants[$nm], $depth + 1);
+            }
+            $pre = $this->predefinedConstant($nm);
+            if ($pre !== null) { return $this->nodeScalarKey($pre); }
+        }
+        // `X::class` folds to its resolved FQN string.
+        if ($k === 'StaticAccess' && \strtolower($this->staticAccessName($e)) === 'class') {
+            return 's:' . \ltrim($this->staticAccessClass($e), '\\');
         }
         return null;
     }
+
+    /** constScalarKey for an already-lowered constant Node (from predefinedConstant). */
+    private function nodeScalarKey(Node $n): ?string
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STRING_CONST) { return 's:' . $n->value; }
+        if ($k === Node::KIND_INT_CONST)    { return 'i:' . (string)$n->value; }
+        if ($k === Node::KIND_BOOL_CONST)   { return 'b:' . ($n->value ? '1' : '0'); }
+        if ($k === Node::KIND_NULL_CONST)   { return 'n:'; }
+        return null;
+    }
+
+    /** The class name a `class_exists(...)`-style guard tests: a string literal
+     *  or a `X::class` constant (already namespace-resolved), else null for a
+     *  runtime-only name. */
+    private function guardClassArgName(\Parser\Ast\Expr $a): ?string
+    {
+        if ($a->kind === 'StringLiteral') { return \ltrim($this->stringLitValue($a), '\\'); }
+        if ($a->kind === 'StaticAccess'
+            && \strtolower($this->staticAccessName($a)) === 'class') {
+            return \ltrim($this->staticAccessClass($a), '\\');
+        }
+        return null;
+    }
+
+    /**
+     * Functions the stdlib DEFINES but that must read as ABSENT.
+     *
+     * A guard the folder cannot reach still emits its call — `if ($cp) {
+     * sapi_windows_cp_set($cp); }` is guarded by a VALUE, not a predicate, so
+     * the symbol has to exist or the link fails. But letting `function_exists`
+     * see it would send the program down the Windows path it was trying to
+     * avoid. So: the body links, and every observer says it is not there — which
+     * is exactly true of this target.
+     *
+     * These four belong to the per-OS symbol table the target-abi work will own;
+     * until then the set is small enough to name.
+     */
+    private const HIDDEN_FNS = [
+        'sapi_windows_cp_conv' => true,
+        'sapi_windows_cp_get' => true,
+        'sapi_windows_cp_set' => true,
+        'sapi_windows_vt100_support' => true,
+    ];
 
     /** Whether a function name is already declared (user or stdlib extern / alias)
      *  — the same predicate the `function_exists` expression fold uses. */
@@ -2458,6 +2823,7 @@ final class LowerFromAst implements Pass
         $nm = \ltrim($name, '\\');
         $pos = \strrpos($nm, '\\');
         $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
+        if (isset(self::HIDDEN_FNS[$bare])) { return false; }
         return isset($this->fnDecls[$nm]) || isset($this->fnDecls[$bare])
             || (($this->fnAliasByBare[$bare] ?? '') !== '');
     }
@@ -2507,7 +2873,24 @@ final class LowerFromAst implements Pass
                 $pt = Type::vec(Type::cell());          // erased out-array → cell array
             } else {
                 $pt = $this->lowerTypeHint($hint);
-                if (!$pt->isArray()) { continue; }       // scalar out-param: leave it alone
+                if (!$pt->isArray()) {
+                    // A SCALAR #[RefOut] (`preg_replace(…, int &$count)`) is fresh-out
+                    // by the RefOut rule, so it may not exist at the call site. DEFINE
+                    // it with the type's zero — else a later read (`+ $count`) is a
+                    // dangling local. No array init here (that would corrupt the heap
+                    // when the callee writes a scalar through the ref); the callee
+                    // overwrites the zero, matching php's "0 when nothing matched".
+                    $k = $pt->kind;
+                    $zero = ($k === Type::KIND_INT || $k === Type::KIND_BOOL)
+                        ? new IntConst(0, $pt)
+                        : (($k === Type::KIND_FLOAT)
+                            ? new FloatConst(0.0, $pt)
+                            : new NullConst(Type::null_()));
+                    $sinit = new StoreLocal($this->variableName($a), $zero, $pt);
+                    $sinit->declaredType = $pt;
+                    $this->pendingCallInits[] = $sinit;
+                    continue;
+                }
             }
             // declaredType seeds the SLOT type (the `@var` path) so InferTypes
             // keeps `vec[cell]` — an empty `[]` literal otherwise re-infers to
@@ -2677,6 +3060,71 @@ final class LowerFromAst implements Pass
     private function classDeclMethods(\Parser\Ast\ClassDecl $d): array { return $d->methods; }
     /** @return string[] */
     private function classDeclExtends(\Parser\Ast\ClassDecl $d): array { return $d->extends; }
+
+    /**
+     * Indices of the `Class` statements in `$stmts`, ordered so a class is
+     * always built AFTER the class it extends. Bucketed by inheritance depth,
+     * source order preserved inside a bucket; non-class statements are dropped
+     * (the build loop ignores them anyway).
+     *
+     * buildClassDef prepends the parent's properties so a subclass shares the
+     * parent's field offsets, and it can only do that once the parent is in
+     * classTable. Source order happens to satisfy that in a single file and
+     * does NOT for a composer app, where `src/` sorts before `vendor/`.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @return int[]
+     */
+    private function classBuildOrder(array $stmts): array
+    {
+        /** @var int[] $idx */
+        $idx = [];
+        /** @var int[] $depths */
+        $depths = [];
+        $maxDepth = 0;
+        $i = -1;
+        foreach ($stmts as $stmt) {
+            $i = $i + 1;
+            if ($stmt->kind !== 'Class') { continue; }
+            $cdecl = $stmt->decl;
+            $d = $this->classDeclDepth($this->classDeclName($cdecl));
+            $idx[] = $i;
+            $depths[] = $d;
+            if ($d > $maxDepth) { $maxDepth = $d; }
+        }
+        /** @var int[] $out */
+        $out = [];
+        $lvl = 0;
+        while ($lvl <= $maxDepth) {
+            $k = 0;
+            foreach ($idx as $ix) {
+                if ($depths[$k] === $lvl) { $out[] = $ix; }
+                $k = $k + 1;
+            }
+            $lvl = $lvl + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * How many `extends` hops separate `$name` from a root. 0 for a class with
+     * no parent, or one whose parent is not declared in this module (nothing to
+     * wait for). Capped so a cyclic `extends` cannot spin.
+     */
+    private function classDeclDepth(string $name): int
+    {
+        $d = 0;
+        $cur = \ltrim($name, '\\');
+        while ($d < 64) {
+            $decl = $this->classDecls[$cur] ?? null;
+            if ($decl === null) { return $d; }
+            $ext = $this->classDeclExtends($decl);
+            if ($ext === []) { return $d; }
+            $cur = \ltrim($ext[0], '\\');
+            $d = $d + 1;
+        }
+        return $d;
+    }
     private function methodDeclName(\Parser\Ast\MethodDecl $m): string { return $m->name; }
     /** @return \Parser\Ast\Param[] */
     private function methodDeclParams(\Parser\Ast\MethodDecl $m): array { return $m->params; }
@@ -2741,8 +3189,19 @@ final class LowerFromAst implements Pass
         return new IncDec($operand->name, $op, $expr->prefix, Type::int_());
     }
 
+    /** Ternary arms via a typed param (self-host field offsets). */
+    private function ternaryThenExpr(\Parser\Ast\Ternary $t): ?\Parser\Ast\Expr { return $t->then; }
+    private function ternaryElseExpr(\Parser\Ast\Ternary $t): \Parser\Ast\Expr { return $t->else; }
+
     private function lowerTernary(\Parser\Ast\Ternary $expr): Node
     {
+        // A compile-time condition lowers ONLY the live arm — the dead one must
+        // not reach codegen. `$cp = \function_exists('sapi_windows_cp_set')
+        // ? sapi_windows_cp_get() : 0;` otherwise emitted a call to a function
+        // that exists on no unix target. Same purity argument as lowerBinary.
+        $cf = $this->foldGuard($expr->condition);
+        if ($cf === self::GUARD_TRUE && $expr->then !== null) { return $this->lowerExpr($expr->then); }
+        if ($cf === self::GUARD_FALSE) { return $this->lowerExpr($expr->else); }
         $cond = $this->lowerExpr($expr->condition);
         $else = $this->lowerExpr($expr->else);
         $type = $cond->type;
@@ -2902,7 +3361,7 @@ final class LowerFromAst implements Pass
         $cls = $this->resolveStaticClass($expr->class);
         $params = $this->resolveMethodParams($cls, '__construct');
         if ($params !== null) {
-            $args = $this->defaultFillArgs($params, $expr->args);
+            $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'));
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
@@ -2973,9 +3432,59 @@ final class LowerFromAst implements Pass
     private function receiverClassHint(\Parser\Ast\Expr $obj): string
     {
         if ($obj->kind === 'New') { return \ltrim($obj->class, '\\'); }
-        if ($obj->kind === 'MethodCall') { return $this->methodReturnClassByName($obj->method); }
-        if ($obj->kind === 'Variable') { return $this->localNewClasses[$this->varName($obj)] ?? ''; }
+        if ($obj->kind === 'MethodCall') {
+            // A FLUENT method returns `static` / `self` — the receiver of the
+            // next link is the same class as its own receiver, so recurse
+            // instead of giving up. Without this, the second and later calls of
+            // `$this->addOption(…)->addOption(…)` resolved no params, so their
+            // OMITTED arguments were never filled from the defaults: symfony's
+            // `mixed $default = null` arrived as raw 0, read back as 0.0, and
+            // every VALUE_NONE option threw "Cannot set a default value".
+            //
+            // Resolved against the INNER RECEIVER's class, not by method name:
+            // `addArgument` is fluent on Command and `: void` on
+            // InputDefinition, so any name-wide answer is no answer. The static
+            // class is right even for `static` — all this decides is which
+            // parameter list to pad against, and those are inherited.
+            $inner = $this->receiverClassHint($obj->object);
+            if ($inner !== '') {
+                $rt = $this->methodReturnTypeOn($inner, $obj->method);
+                if ($rt !== null) {
+                    $low = \strtolower(\ltrim($rt, '\\?'));
+                    if ($low === 'self' || $low === 'static') { return $inner; }
+                    $cls = \ltrim($rt, '\\?');
+                    if (isset($this->classDecls[$cls])) { return $cls; }
+                    return '';
+                }
+            }
+            return $this->methodReturnClassByName($obj->method);
+        }
+        if ($obj->kind === 'Variable') {
+            $vn = $this->varName($obj);
+            // `$this` is the class being lowered — the commonest fluent root.
+            if ($vn === 'this') { return $this->currentLowerClass; }
+            return $this->localNewClasses[$vn] ?? '';
+        }
         return '';
+    }
+
+    /** The declared return type of `$method` as resolved from `$class` (walking
+     *  the parent chain, like resolveMethodParams), or null when neither the
+     *  class nor an ancestor declares it. */
+    private function methodReturnTypeOn(string $class, string $method): ?string
+    {
+        $c = $class;
+        while ($c !== '' && isset($this->classDecls[$c])) {
+            $cd = $this->classDecls[$c];
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) === $method) {
+                    return $this->methodDeclReturnType($m);
+                }
+            }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return null;
     }
 
     /**
@@ -3022,6 +3531,26 @@ final class LowerFromAst implements Pass
             $c = ($ext !== []) ? $ext[0] : '';
         }
         return null;
+    }
+
+    /**
+     * Class that DECLARES `$method` (walking ancestors), or '' if unresolved.
+     * The `self`/`parent`/`static` scope for that method's param defaults —
+     * a default lowered at the call site must bind `self` to this, not the
+     * caller (mirrors {@see resolveMethodParams}'s walk).
+     */
+    private function resolveMethodDeclClass(string $class, string $method): string
+    {
+        $c = $class;
+        while ($c !== '' && isset($this->classDecls[$c])) {
+            $cd = $this->classDecls[$c];
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) === $method) { return $c; }
+            }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return '';
     }
 
     private function lowerPropertyAccess(\Parser\Ast\PropertyAccess $expr): PropertyAccess_
@@ -3084,10 +3613,12 @@ final class LowerFromAst implements Pass
         // InferTypes, so omitted trailing optionals on `$x->m()` are filled
         // later by the emit-time pad in emitMethodCall (emitDefaultArgPad).
         $params = null;
+        $mcClass = '';
         if ($expr->object->kind === 'Variable'
             && $expr->object->name === 'this'
             && $this->currentLowerClass !== '') {
             $params = $this->resolveMethodParams($this->currentLowerClass, $expr->method);
+            if ($params !== null) { $mcClass = $this->currentLowerClass; }
         }
         // A statically-knowable receiver (a `new C(...)` or a chained
         // `$x->getMethod(...)->` whose return class is unambiguous) packs against
@@ -3096,7 +3627,10 @@ final class LowerFromAst implements Pass
         // ReflectionFunction::invoke), where the by-name union below defers.
         if ($params === null) {
             $hint = $this->receiverClassHint($expr->object);
-            if ($hint !== '') { $params = $this->resolveMethodParams($hint, $expr->method); }
+            if ($hint !== '') {
+                $params = $this->resolveMethodParams($hint, $expr->method);
+                if ($params !== null) { $mcClass = $hint; }
+            }
         }
         // A variable-receiver variadic call (`$x->m(a,b,c)`) must STILL pack its
         // trailing args into a vec — but the receiver class isn't resolved until
@@ -3107,7 +3641,8 @@ final class LowerFromAst implements Pass
             $params = $this->variadicMethodParams($expr->method);
         }
         if ($params !== null) {
-            $args = $this->defaultFillArgs($params, $expr->args);
+            $selfCls = $mcClass !== '' ? $this->resolveMethodDeclClass($mcClass, $expr->method) : '';
+            $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
@@ -3166,7 +3701,8 @@ final class LowerFromAst implements Pass
         }
         $params = $this->resolveMethodParams($class, $expr->method);
         if ($params !== null) {
-            foreach ($this->defaultFillArgs($params, $expr->args) as $f) { $args[] = $f; }
+            $selfCls = $this->resolveMethodDeclClass($class, $expr->method);
+            foreach ($this->defaultFillArgs($params, $expr->args, $selfCls) as $f) { $args[] = $f; }
         } else {
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
         }
@@ -3213,16 +3749,45 @@ final class LowerFromAst implements Pass
         // side lives in a conditionally-emitted branch. Result is the
         // i64 0/1 bool manticore echoes as "0"/"1".
         if ($op === '&&' || $op === 'and') {
-            $left  = $this->lowerExpr($e->left);
-            $right = $this->lowerExpr($e->right);
+            // A statically-FALSE operand kills the expression, and the other
+            // side must then never be LOWERED — not merely never executed. This
+            // is the expression-position twin of the compile-time `if`: without
+            // it `\function_exists('sapi_windows_vt100_support') &&
+            // sapi_windows_vt100_support($h)` still emitted the call and the
+            // link failed on a branch that provably cannot run. foldGuard only
+            // answers for PURE predicates, so dropping the arm drops no effect.
+            $lf = $this->foldGuard($e->left);
+            if ($lf === self::GUARD_FALSE) { return new BoolConst(false, Type::bool_()); }
+            $rf = $this->foldGuard($e->right);
+            if ($rf === self::GUARD_FALSE && $lf !== self::GUARD_UNKNOWN) {
+                return new BoolConst(false, Type::bool_());
+            }
+            // A folded operand is replaced by its constant rather than dropped
+            // outright: the Ternary shape is what keeps the result BOOL through
+            // InferTypes (a bare Not_ chain widens and echoes "0").
+            $left = $lf === self::GUARD_UNKNOWN
+                ? $this->lowerExpr($e->left) : new BoolConst($lf === self::GUARD_TRUE, Type::bool_());
+            $right = $rf === self::GUARD_UNKNOWN
+                ? $this->truthy($this->lowerExpr($e->right))
+                : new BoolConst($rf === self::GUARD_TRUE, Type::bool_());
+            return new Ternary($left, $right, new BoolConst(false, Type::bool_()), Type::bool_());
             // Both arms bool so the Ternary stays bool through InferTypes
             // (a bool/int arm mismatch widens it to unknown → echoes "0").
             return new Ternary($left, $this->truthy($right), new BoolConst(false, Type::bool_()), Type::bool_());
         }
         if ($op === '||' || $op === 'or') {
-            $left  = $this->lowerExpr($e->left);
-            $right = $this->lowerExpr($e->right);
-            return new Ternary($left, new BoolConst(true, Type::bool_()), $this->truthy($right), Type::bool_());
+            $lf = $this->foldGuard($e->left);
+            if ($lf === self::GUARD_TRUE) { return new BoolConst(true, Type::bool_()); }
+            $rf = $this->foldGuard($e->right);
+            if ($rf === self::GUARD_TRUE && $lf !== self::GUARD_UNKNOWN) {
+                return new BoolConst(true, Type::bool_());
+            }
+            $left = $lf === self::GUARD_UNKNOWN
+                ? $this->lowerExpr($e->left) : new BoolConst($lf === self::GUARD_TRUE, Type::bool_());
+            $right = $rf === self::GUARD_UNKNOWN
+                ? $this->truthy($this->lowerExpr($e->right))
+                : new BoolConst($rf === self::GUARD_TRUE, Type::bool_());
+            return new Ternary($left, new BoolConst(true, Type::bool_()), $right, Type::bool_());
         }
         return $this->buildBinop($op, $this->lowerExpr($e->left), $this->lowerExpr($e->right));
     }

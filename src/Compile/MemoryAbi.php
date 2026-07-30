@@ -57,6 +57,17 @@ final class MemoryAbi
     public const ASSOC_TAG_MAGIC = 0x7E66000000000001;
 
     /**
+     * Sentinel at an enum-case singleton's `data-8`. A case mimics the object
+     * layout (descriptor at +0, ordinal at +16) but is a `constant` — immortal,
+     * never rc-touched. It used to carry a plain 0 here, which the rc helpers
+     * correctly skipped but which is indistinguishable from arbitrary memory: a
+     * RAW erased carrier holding an enum case could not be told apart from a
+     * bare pointer, so `instanceof` had to answer false for every case. A magic
+     * of its own says "descriptor at +0, but do NOT rc me".
+     */
+    public const ENUM_TAG_MAGIC = 0x7E66000000000004;
+
+    /**
      * The NaN-boxed NULL cell — header | tag(NULL=3), i.e. what
      * `@__manticore_box_null` returns. A cell carries its type in the tag, so a
      * cell-typed value that is null is NOT i64 0: `$x === null` on a
@@ -71,16 +82,43 @@ final class MemoryAbi
      */
     public const CELL_NULL = -3659174697238528;
 
-    // ─── String header (24 bytes) ─────────────────────────────────
+    /**
+     * Sentinel at a `#[Struct]` instance's `ptr-8`. A struct is a value type
+     * with NO header at all — no descriptor at +0, no rc at +8 — yet it is
+     * allocated through the same `__mir_alloc_tagged`, so it used to carry
+     * {@see RC_TAG_MAGIC} and advertise a header it does not have. Any consumer
+     * that self-routes on the tag (`__mir_cell_drop`, the raw `instanceof`
+     * carrier check) would then read a PROPERTY slot as a descriptor or an rc.
+     */
+    public const STRUCT_TAG_MAGIC = 0x7E66000000000005;
 
     /**
-     * Heap string layout: `[cap@-24, len@-16, rc@-8, bytes@0]`. The data ptr
-     * is `malloc_base + 24`. Strings are BINARY-SAFE: `len` is the content
+     * Sentinel in a GENERATOR FRAME's `cap@-24`. A frame borrows the string rc
+     * header so the existing string helpers free it, which leaves it with no
+     * identity of its own: `ptr-8` holds the rc COUNT, exactly like a string's,
+     * so a carrier of unknown repr could not be told apart from one.
+     *
+     * That mattered once `foreach` learned to drive a generator behind an erased
+     * carrier ({@see \Compile\Mir\Passes\EmitLlvmControl::genFrameProbeIr}) — the
+     * "no object magic at ptr-8" test alone would have claimed every raw ARRAY
+     * and every raw STRING as a frame. `cap` is unused by a frame (the creator
+     * stored 0 there) and is a small byte count for a real string, so it can
+     * carry this without disturbing either. Probe it only AFTER `ptr-8` has
+     * ruled out the container magics: strings and frames both have the full
+     * 32-byte header, so `-24` is in bounds for whatever is left.
+     */
+    public const GENERATOR_TAG_MAGIC = 0x7E66000000000006;
+
+    // ─── String header (32 bytes) ─────────────────────────────────
+
+    /**
+     * Heap string layout: `[hash@-32, cap@-24, len@-16, rc@-8, bytes@0]`. The
+     * data ptr is `malloc_base + 32`. Strings are BINARY-SAFE: `len` is the content
      * length and the single source of truth — `strlen()` / comparison read it,
      * NOT libc `strlen` (which stops at `\0`). A trailing NUL is kept only as a
      * convenience for libc interop (paths, printf `%s`). `rc@-8` and `bytes@0`
      * are unchanged so the rc/free string-vs-obj routing (it reads `ptr-8`)
-     * stays valid; only the FREE base moves to `p-24`. `cap` is the byte
+     * stays valid; only the FREE base moves to `p-32`. `cap` is the byte
      * capacity of the data region (content + NUL); amortized `.=` appends in
      * place when `rc==1` and `len+addlen < cap`. Immortal strings (literals,
      * arena) carry rc=-1; literals carry a full header so `len` reads are valid.
@@ -514,6 +552,24 @@ final class MemoryAbi
     public const ARRAY_REPR_OBJ  = 4;   // 2<<1 — raw obj ptrs → __mir_rc_release
     public const ARRAY_REPR_ARR  = 6;   // 3<<1 — raw nested arrays → __mir_array_release
     public const ARRAY_REPR_CELL = 8;   // 4<<1 — boxed cells → __mir_cell_drop (tag dispatch)
+
+    /**
+     * Bits 4-6: the ELEMENT-KIND HINT — what the elements ARE, with no claim
+     * about who owns them. The repr bits above cannot answer that question:
+     * they mean "this array drops its elements", which is exactly what the sort
+     * family relies on being FALSE (uasort moves elements into a fresh buffer
+     * and writes it back without retaining, so a stamped source would free the
+     * strings the result still points at). A CONCRETE-element array therefore
+     * stamps only the hint — its release keeps using the typed flavor — and an
+     * erased reader can still decode an element it finds through a cell channel
+     * ({@see UnifiedArrayRuntime::emitBoxByRepr}). Also in the low byte, so
+     * compaction's `and flags, 255` preserves it.
+     */
+    public const ARRAY_ELEM_HINT_MASK = 112;  // 0b111 << 4
+    public const ARRAY_ELEM_HINT_STR  = 16;   // 1<<4 — raw string pointers
+    public const ARRAY_ELEM_HINT_OBJ  = 32;   // 2<<4 — raw object pointers
+    public const ARRAY_ELEM_HINT_ARR  = 48;   // 3<<4 — raw nested arrays
+    public const ARRAY_ELEM_HINT_CELL = 64;   // 4<<4 — already self-describing
 
     /**
      * Bits 8-35 of the flags word: the TOMBSTONE COUNTER (how many KIND_DELETED

@@ -88,6 +88,7 @@ trait InferNodes
         while (true) {
             $this->loopPromoGrew = false;
             $this->inferFunctionOnce($fn);
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('infer.fn_body_passes', 1); }
             $rounds = $rounds + 1;
             if (!$this->loopPromoGrew || $rounds >= 4) { break; }
             $this->coercePromotedParams($fn);
@@ -126,6 +127,22 @@ trait InferNodes
         return false;
     }
 
+    /**
+     * Whether every atom of a union is an object — the one union shape that
+     * rides as a bare pointer. Any other mix (a string beside an array, an
+     * object beside a string, a scalar beside anything) has no common machine
+     * representation and travels NaN-boxed.
+     */
+    private function unionIsAllObj(Type $t): bool
+    {
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return false; }
+        foreach ($atoms as $a) {
+            if ($a->kind !== Type::KIND_OBJ) { return false; }
+        }
+        return true;
+    }
+
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
@@ -136,8 +153,23 @@ trait InferNodes
         $this->kindAliasOf = [];
         $this->currentParamTypes = [];
         foreach ($fn->params as $p) {
-            $this->localTypes[$p->name] = $p->type;
-            $this->currentParamTypes[$p->name] = $p->type;
+            // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
+            // arrives NaN-BOXED — the call site emits __manticore_box_array /
+            // box_ptr for it, because no single machine representation covers the
+            // atoms. The slot is therefore a CELL and every read has to unbox by
+            // tag. Left typed KIND_UNION the readers took the all-object path
+            // (EmitLlvmMemory: "a union value is a bare object pointer") and
+            // inttoptr'd the tag bits: `count($m)` on a `string|array` param
+            // SIGSEGV'd, `implode()` produced nothing, and a raw `$m = [$m]` store
+            // left the slot sometimes-cell / sometimes-raw. An ALL-OBJECT union
+            // (`A|B`) genuinely is a bare pointer and keeps its union type — the
+            // virtual-dispatch path reads its atoms.
+            $pt = $p->type;
+            if ($pt->kind === Type::KIND_UNION && !$this->unionIsAllObj($pt)) {
+                $pt = Type::cell();
+            }
+            $this->localTypes[$p->name] = $pt;
+            $this->currentParamTypes[$p->name] = $pt;
         }
         // Closure body: seed its capture params (the first N) with the value
         // types observed at the capture site (recorded in pass 1). Safe — this
@@ -643,6 +675,27 @@ trait InferNodes
             $node->type = $pt;
             return $pt;
         }
+        // A CONCRETE value stored into a CELL param slot. The caller NaN-boxed
+        // that argument (a `string|array` / `mixed` param has no single machine
+        // representation), so the slot is a cell on every path the store does not
+        // take. Re-typing the local to the stored value's concrete type made the
+        // two paths disagree: the reader took the raw path and inttoptr'd the tag
+        // bits of the boxed value. Keep the slot a cell and let emitStoreLocal's
+        // box-back tag the stored value.
+        //
+        //     function f(string|array $m) {          // symfony FormatterHelper
+        //         if (!is_array($m)) { $m = [$m]; }  // raw vec into a cell slot
+        //         return implode('|', $m);           // read the array arg as a ptr
+        //     }
+        //
+        // count() SIGSEGV'd, implode() returned ''.
+        if ($pt !== null && $pt->kind === Type::KIND_CELL
+            && $valueType->kind !== Type::KIND_CELL
+            && $valueType->kind !== Type::KIND_UNKNOWN) {
+            $this->localTypes[$node->name] = Type::cell();
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // An inline `/** @var T $x */` on the binding is authoritative: seed the
         // slot with the declared type (retyping an array-literal init to match
         // its shape) so later element reads resolve. Wins over the heuristics.
@@ -797,6 +850,13 @@ trait InferNodes
         elseif (\str_starts_with($n->cell, '@g_')
                 && isset($this->globalVarTypes[$n->name])) {
             $t = $this->globalVarTypes[$n->name];
+        }
+        // `static $x;` — no initialiser to type it from, and its value survives
+        // the call, so the read at the top of the NEXT call is not reachable
+        // from the store that filled it. Seed from the join of every store in
+        // this function ({@see scanStaticLocalTypes}).
+        elseif (isset($this->staticLocalTypes[$n->cell])) {
+            $t = $this->staticLocalTypes[$n->cell];
         }
         $this->localTypes[$n->name] = $t;
         $n->type = $t;
@@ -1102,6 +1162,12 @@ trait InferNodes
     {
         $lt = $this->inferNode($node->left);
         $rt = $this->inferNode($node->right);
+        // `$a ?? throw …`: the fallback diverges (never), so the result is
+        // simply the left's type — never the throw's void.
+        if ($node->right->kind === Node::KIND_THROW) {
+            $node->type = $lt;
+            return $lt;
+        }
         // `$a ?? $b` = `$a` when non-null, else `$b`. A null-typed left always
         // yields the fallback. An UNKNOWN-typed left carries no usable repr —
         // a `?string` local merges (null ∪ string) to unknown — so when the
@@ -1176,6 +1242,16 @@ trait InferNodes
         $this->narrowFromNegatedCond($node->cond);
         $e = $this->inferNode($node->else_);
         $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
+        // A `throw`-expression arm is `never` — it yields no value, so the
+        // result type is entirely the sibling arm's (`cond ? v : throw …`).
+        if ($node->then !== null && $node->then->kind === Node::KIND_THROW) {
+            $node->type = $e;
+            return $e;
+        }
+        if ($node->else_->kind === Node::KIND_THROW) {
+            $node->type = $t;
+            return $t;
+        }
         // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value
         // branch as a NULLABLE cell so the null case renders as NULL (not the
         // value type's zero); emitTernary boxes the value branch. A PLAIN ternary
@@ -1276,8 +1352,34 @@ trait InferNodes
                 // ClassDef — fall back to any implementer's sig.
                 $ic = $node->iterClass;
                 $elem = $this->iterMethodReturn($ic, 'current', $elem);
-                $keyT = $this->iterMethodReturn($ic, 'key', $keyT);
+                // An interface iterClass says nothing about the KEY either, and
+                // the int default was a claim, not knowledge: the iterator can
+                // be a Generator at runtime ({@see
+                // EmitLlvmControl::iterNeedsRuntimeClass}) and its `key`@24 is a
+                // boxed cell, which printed as its tag bits. Erased is the honest
+                // answer — every erased consumer classifies at runtime, and a
+                // genuinely-int key still renders as one.
+                $kd = isset($this->classes[$ic]) ? $keyT : Type::unknown();
+                $keyT = $this->iterMethodReturn($ic, 'key', $kd);
             }
+        }
+        // A GENERATOR yields keys of any type — `yield "a" => 1` beside an
+        // auto-incrementing int — so the key rides a tagged cell, boxed at the
+        // yield ({@see EmitLlvmGenerator}). Typed int (the old default) a string
+        // key came back as its raw POINTER and printed as a large integer.
+        if ($at->kind === Type::KIND_OBJ && ($at->class ?? '') === 'Generator') {
+            $keyT = Type::cell();
+            // `current`@16 holds a SHALLOW-boxed cell ({@see
+            // EmitLlvmGenerator::emitYield}) and each consumer unboxes to the
+            // channel it declares, so a KNOWN element type round-trips exactly.
+            // When it is not known — a bare `Generator` hint carries no element,
+            // as `function sum(Generator $g)` — the honest type is CELL, not
+            // unknown: the producer boxed, so an unknown-typed value var would
+            // hand `$t + $v` the tag bits. cell routes it through the tagged
+            // paths, which is what the slot really holds.
+            // ⚠ The producer and every consumer are one unit. Do not un-box the
+            // yield without moving all of them.
+            if ($elem->kind === Type::KIND_UNKNOWN) { $elem = Type::cell(); }
         }
         // Iterating a `mixed` (tagged cell) that holds an array: both the
         // value AND the key come back as tagged cells (a cell array's key is
@@ -1570,7 +1672,7 @@ trait InferNodes
     private function inferStoreElement(StoreElement $node): Type
     {
         $at = $this->inferNode($node->array);
-        $this->inferNode($node->index);
+        $it = $this->inferNode($node->index);
         $vt = $this->inferNode($node->value);
         // `$out[] = v` on a vec local refines its element type, so a
         // freshly-`[]`-built vec picks up its element shape (e.g. cell
@@ -1602,7 +1704,23 @@ trait InferNodes
                 $key = isset($this->cellKeyLocals[$name]) ? Type::cell()
                     : ($at->isAssoc() ? ($at->key ?? Type::string_()) : Type::string_());
                 $this->localTypes[$name] = Type::assoc($key, $elem);
-            } elseif ($at->isVec() || $at->kind === Type::KIND_UNKNOWN) {
+            } elseif ($at->isVec()
+                || ($at->kind === Type::KIND_UNKNOWN && $it->kind !== Type::KIND_STRING)) {
+                // A STRING-keyed store into an ERASED local says nothing about the
+                // container, and this arm would claim two things at once: that it is
+                // a VEC (it is not — the key is a string) and that its element type
+                // is the one value just stored. `arrayElemMerge(null, $vt)` returns
+                // $vt verbatim, so ONE store retypes the WHOLE local, which is only
+                // sound for a homogeneous container. symfony's TextDescriptor walks
+                // an erased `getNamespaces(): array` and writes
+                // `$namespace['commands'] = array_filter(...)` — that retyped
+                // $namespace to vec[array], so the SIBLING `$namespace['id']`, a
+                // string, became statically an ARRAY and rendered as its raw carrier
+                // word. Leaving the local UNKNOWN routes every subscript through the
+                // runtime render/classify path, which is what already works for the
+                // elements the same function reads without storing.
+                // A vec local (`$out[] = v` on a real vec) still refines: there the
+                // container shape is known, only the element is being learned.
                 $cur = $at->element ?? null;
                 $elem = isset($this->nestedCellVecLocals[$name])
                     ? Type::vec(Type::cell())

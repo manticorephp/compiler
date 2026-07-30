@@ -164,3 +164,88 @@ function set_file_buffer(\Resource $stream, int $size): int
 {
     return -1;
 }
+
+/**
+ * Run a command through the shell and return its stdout.
+ *
+ * Built on the popen/pclose pair above, so this is a REAL implementation and
+ * not a stub: symfony/console shells out to `stty` to size the terminal and to
+ * read a hidden password, and both need the output. php returns null when the
+ * command produced nothing, and false only when the pipe could not be opened.
+ */
+function shell_exec(string $command): mixed
+{
+    $fp = \Runtime\Libc\popen($command, "r");
+    if (\ptr_to_int($fp) === 0) { return false; }
+    $out = \__mc_drain_pipe($fp);
+    \Runtime\Libc\pclose($fp);
+    if ($out === "") { return null; }
+    return $out;
+}
+
+/** Read a FILE* to EOF. Shared by shell_exec / exec / system / passthru. */
+function __mc_drain_pipe(\Ffi\Ptr $fp): string
+{
+    $cap = 8192;
+    $buf = \Runtime\Libc\malloc($cap);
+    $out = "";
+    while (true) {
+        $n = \Runtime\Libc\fread($buf, 1, $cap, $fp);
+        if ($n <= 0) { break; }
+        $i = 0;
+        while ($i < $n) {
+            $out = $out . \chr(\peek_u8($buf, $i));
+            $i = $i + 1;
+        }
+        if ($n < $cap) { break; }
+    }
+    \Runtime\Libc\free($buf);
+    return $out;
+}
+
+/**
+ * php's exec(): the LAST line of output is returned, every line is appended to
+ * `$output`, and the exit status lands in `$result_code`.
+ */
+function exec(string $command, #[\Manticore\Attr\RefOut] array &$output = [], #[\Manticore\Attr\RefOut] int &$result_code = 0): mixed
+{
+    $fp = \Runtime\Libc\popen($command, "r");
+    if (\ptr_to_int($fp) === 0) { return false; }
+    $raw = \__mc_drain_pipe($fp);
+    $status = \Runtime\Libc\pclose($fp);
+    $result_code = $status >= 0 ? \intdiv($status, 256) : $status;
+    $last = "";
+    $lines = \explode("\n", \rtrim($raw, "\n"));
+    foreach ($lines as $l) {
+        if ($raw === "") { break; }
+        $output[] = $l;
+        $last = $l;
+    }
+    return $last;
+}
+
+/** php's system(): output goes straight to stdout, the last line is returned. */
+function system(string $command, #[\Manticore\Attr\RefOut] int &$result_code = 0): mixed
+{
+    $fp = \Runtime\Libc\popen($command, "r");
+    if (\ptr_to_int($fp) === 0) { return false; }
+    $raw = \__mc_drain_pipe($fp);
+    $status = \Runtime\Libc\pclose($fp);
+    $result_code = $status >= 0 ? \intdiv($status, 256) : $status;
+    echo $raw;
+    $trimmed = \rtrim($raw, "\n");
+    $nl = \strrpos($trimmed, "\n");
+    return $nl === false ? $trimmed : \substr($trimmed, $nl + 1);
+}
+
+/** php's passthru(): raw output to stdout, no return value. */
+function passthru(string $command, #[\Manticore\Attr\RefOut] int &$result_code = 0): mixed
+{
+    $fp = \Runtime\Libc\popen($command, "r");
+    if (\ptr_to_int($fp) === 0) { return false; }
+    $raw = \__mc_drain_pipe($fp);
+    $status = \Runtime\Libc\pclose($fp);
+    $result_code = $status >= 0 ? \intdiv($status, 256) : $status;
+    echo $raw;
+    return null;
+}

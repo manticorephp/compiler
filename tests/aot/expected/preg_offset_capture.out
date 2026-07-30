@@ -1,0 +1,13 @@
+n=4
+  [0] text='<info>' pos=0
+  [1] text='</info>' pos=11
+  [2] text='<comment>' pos=19
+  [3] text='</comment>' pos=33
+stripped='probe 1.0.0'
+n2=2
+  g='ab'@0
+  g='a'@0
+  g='b'@1
+  g='a'@3
+  g='a'@3
+n3=3 [1,22,333]

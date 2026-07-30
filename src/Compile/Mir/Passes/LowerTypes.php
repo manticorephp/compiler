@@ -214,6 +214,15 @@ trait LowerTypes
         if ($low === 'string') { return Type::string_(); }
         if ($low === 'void')   { return Type::void(); }
         if ($low === 'null')   { return Type::null_(); }
+        // `resource` is not a declarable PHP type, so it only ever arrives from a
+        // docblock — and we model every handle as the prelude's \Resource object.
+        // Without this it fell through to an unknown CLASS name and erased to
+        // KIND_UNKNOWN: symfony's `@param resource $stream` demoted the otherwise
+        // correctly-`mixed` untyped param, is_resource($stream) then read a raw
+        // pointer through box_int, and every console app threw "needs a stream as
+        // its first argument". A nullable/`resource|false` spelling rides the
+        // ordinary pointer rules for an object.
+        if ($low === 'resource') { return Type::obj('Resource'); }
         // `\Ffi\Ptr` is a built-in foreign handle (a libc FILE*/DIR*/raw addr):
         // an i64 pointer, excluded from rc, with a runtime null-compare. It must
         // resolve to obj<Ffi\Ptr> even in a module (the stdlib) that does NOT

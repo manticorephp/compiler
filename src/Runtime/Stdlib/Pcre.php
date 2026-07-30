@@ -227,10 +227,13 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
     $code = \__preg_compile($pattern);
     if ($code === 0) { return 0; }
     $setOrder = ($flags & 2) !== 0;               // PREG_SET_ORDER
+    $offsetCapture = ($flags & 256) !== 0;        // PREG_OFFSET_CAPTURE
     $len = \strlen($subject);
     $md = \Runtime\Pcre\matchDataCreate($code, 0);
 
-    // Collect each match's group strings as a local string[][].
+    // Collect each match's groups as a local mixed[][] — already CELLS, so the
+    // offset-capture pair (itself an array) and a plain string share one shape.
+    /** @var array<int, mixed[]> $rows */
     $rows = [];
     $ngroups = 0;
     while ($offset <= $len) {
@@ -238,11 +241,13 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
         if ($m === []) { break; }
         $rc = $m[0];
         if ($rc > $ngroups) { $ngroups = $rc; }
+        /** @var mixed[] $row */
         $row = [];
         for ($i = 0; $i < $rc; $i = $i + 1) {
             $s = $m[1 + $i * 2];
             $e = $m[2 + $i * 2];
-            $row[] = $s < 0 ? "" : \substr($subject, $s, $e - $s);
+            $str = $s < 0 ? "" : \substr($subject, $s, $e - $s);
+            $row[] = $offsetCapture ? \__mir_to_cell(\__preg_pair($str, $s)) : \__mir_to_cell($str);
         }
         $rows[] = $row;
         $offset = \__preg_advance($m[1], $m[2]);
@@ -251,22 +256,64 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
 
     $count = \count($rows);
     if ($setOrder) {
-        // matches[i] = [full, g1, g2, ...] for match i.
+        // matches[i] = [full, g1, g2, ...] for match i. The row is COPIED: the
+        // local $rows is released when this function returns, and boxing a row
+        // pointer straight into the out-param does not co-own it — the caller
+        // would be left holding a freed buffer (the release then walked garbage
+        // and blew the stack).
         for ($i = 0; $i < $count; $i = $i + 1) {
-            $matches[] = \__mir_to_cell(\__preg_cells($rows[$i]));
+            $matches[] = \__mir_to_cell(\__preg_copy_cells($rows[$i]));
         }
     } else {
         // PREG_PATTERN_ORDER (default): matches[g] = [g of match 0, g of match 1, ...].
         for ($g = 0; $g < $ngroups; $g = $g + 1) {
+            /** @var mixed[] $col */
             $col = [];
             for ($i = 0; $i < $count; $i = $i + 1) {
                 $r = $rows[$i];
-                $col[] = $g < \count($r) ? $r[$g] : "";
+                if ($g < \count($r)) {
+                    $col[] = $r[$g];
+                } else {
+                    $col[] = $offsetCapture ? \__mir_to_cell(\__preg_pair("", -1)) : \__mir_to_cell("");
+                }
             }
-            $matches[] = \__mir_to_cell(\__preg_cells($col));
+            // Copied for the same reason the set-order row above is: $col is a
+            // named LOCAL, released at return, so the out-param must not simply
+            // box its pointer.
+            $matches[] = \__mir_to_cell(\__preg_copy_cells($col));
         }
     }
     return $count;
+}
+
+/**
+ * One PREG_OFFSET_CAPTURE entry: php reports every group as `[text, byteOffset]`,
+ * with offset -1 for a group that did not participate. Returned already boxed,
+ * so it drops into the same cell row a plain string does.
+ *
+ * Without this the flag was silently IGNORED and `$m[0][1]` — which symfony's
+ * OutputFormatter reads as the match offset — indexed the matched STRING
+ * instead, handing it a one-character text and a letter for a position. Every
+ * style tag then survived into the output and `<` doubled around it.
+ */
+/** Copy a row of cells into a FRESH buffer the caller owns. The element store
+ *  co-owns each payload, so the source row's own release stays balanced.
+ *  @param mixed[] $cells @return mixed[] */
+function __preg_copy_cells(array $cells): array
+{
+    /** @var mixed[] $out */
+    $out = [];
+    foreach ($cells as $c) { $out[] = $c; }
+    return $out;
+}
+
+function __preg_pair(string $s, int $off): array
+{
+    /** @var mixed[] $pair */
+    $pair = [];
+    $pair[] = \__mir_to_cell($s);
+    $pair[] = \__mir_to_cell($off < 0 ? -1 : $off);
+    return $pair;
 }
 
 /** Box a string[] into a vec[cell] (NaN-boxed elements) for an erased sink.
@@ -450,8 +497,16 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
 // ── preg_grep ──────────────────────────────────────────────────────────────
 
 /**
- * @param string[] $array
- * @return array<int, string>
+ * ⚠ The parameter is deliberately left ERASED. A `string[]` declaration reads
+ * every element RAW, and the caller's array may hold BOXED cells —
+ * `array_keys()` answers `vec[cell]`, and symfony's `Application::find()` does
+ * `preg_grep(…, array_keys($this->commands))`, so preg_match dereferenced the
+ * NaN tag and `./app <unknown-command>` SIGSEGV'd before printing anything.
+ * `mixed[]` is not the answer either — it would force cells on the concrete
+ * callers. `__mir_untag_str` normalises whatever arrived to an OWNED raw
+ * string, which keeps the RESULT honestly `string[]` for its consumers.
+ *
+ * @return array<int|string, string>
  */
 function preg_grep(string $pattern, array $array, int $flags = 0): array
 {
@@ -459,8 +514,9 @@ function preg_grep(string $pattern, array $array, int $flags = 0): array
     $out = [];
     $tmp = [];
     foreach ($array as $key => $value) {
-        $hit = \preg_match($pattern, $value, $tmp) === 1;
-        if ($hit !== $invert) { $out[$key] = $value; }
+        $s = \__mir_untag_str($value);
+        $hit = \preg_match($pattern, $s, $tmp) === 1;
+        if ($hit !== $invert) { $out[$key] = $s; }
     }
     return $out;
 }

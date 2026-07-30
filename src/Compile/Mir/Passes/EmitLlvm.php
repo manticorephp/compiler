@@ -142,6 +142,21 @@ final class EmitLlvm implements EmitVisitor
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
     private string $cellTagReg = '';
 
+    // Out-slot for {@see plausiblePtrIr}: the i1 reg guarding a `ptr-8` probe.
+    private string $plausiblePtrReg = '';
+
+    // Out-slot for {@see arrayPtrOrEmptyIr}: array ptr, or the empty zero word.
+    private string $arrayPtrReg = '';
+
+    // Out-slot for {@see magicMatchIr}: the IR computing the `ptr-8` magic test.
+    private string $magicMatchOut = '';
+
+    // Out-slot for {@see genFrameProbeIr}: i1, "this iterator is a generator frame".
+    private string $genFrameReg = '';
+
+    // Out-slot for {@see objectProbeIr}: i1, "this erased word is an object".
+    private string $objectProbeReg = '';
+
     /** break/continue/finally targets of the current function (fresh each {@see emit}). */
     private ?ControlFlow $cf = null;
 
@@ -204,6 +219,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** Program source path (exception file() / trace frames). */
     private string $sourceFile = '';
+    /** The error/shutdown prelude is compiled in: main() gets the atexit
+     *  trampoline and the uncaught path consults set_exception_handler. */
+    private bool $needsErrorHandlers = false;
 
     /** True while emitting a `$r = &fn()` bind (suppress call-result deref). */
     private bool $rawRefCall = false;
@@ -271,6 +289,17 @@ final class EmitLlvm implements EmitVisitor
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */
     private string $vdResult = '';
+    /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
+    private string $vdArmList = '';
+    /**
+     * @var array<string,bool> params of the function being emitted whose
+     * DECLARED hint was a bare `array`. The lowered type erased to unknown
+     * (LowerTypes has no branch for a bare `array`), so the hint is the only
+     * remaining evidence that the i64 in the slot is an array pointer — which
+     * truthiness has to know, an empty array being falsy but its pointer
+     * non-null. Reset per function by emitFunction.
+     */
+    private array $arrayHintedParams = [];
     /** @var string[] module global cell names (static props/locals/global) */
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */
@@ -351,6 +380,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalVarNames = $module->globalVarNames;
         $this->rt->needsBacktrace = $module->needsBacktrace;
+        $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
@@ -428,16 +458,34 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropElemAsIndex = [];
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
+        // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
+        // it is emitted — the last line printed before a codegen SIGSEGV names the
+        // offending function. Off by default (one env read, not per-function).
+        $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
+        // Under MANTICORE_STATS, report every function whose IR crosses
+        // FAT_FN_IR bytes. A megamorphic dispatch site (one switch arm per
+        // implementing class) shows up here by name — the IR-size explosion is
+        // per-function, so a top-N list beats a total.
+        $fatFn = 262144;
         foreach ($module->functions as $fn) {
-            $functionBodies .= $this->emitFunction($fn);
+            if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
+            $body = $this->emitFunction($fn);
+            if (\Compile\Stats::$on && \strlen($body) >= $fatFn) {
+                \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
+            }
+            $functionBodies .= $body;
         }
+        \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
         // is linked against the prebuilt `stdlib.o` — both objects carry the
         // same preamble. Only the preamble block is rewritten; user / stdlib
         // PHP functions stay external (unique) and `@main` lives in the
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
+        $statT = \Compile\Stats::now();
         $preamble = $this->linkonceRuntime($this->emitPreamble());
+        \Compile\Stats::step('  emit preamble', $statT, -1, -1);
+        \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         return $preamble . $functionBodies;
     }
 
@@ -474,8 +522,11 @@ final class EmitLlvm implements EmitVisitor
      * pointer, and every generic object consumer (var_dump / ===) then derefs it
      * → SIGSEGV / wrong compare. Each singleton mimics the object layout so the
      * normal object machinery works uniformly:
-     *   data-8 : header sentinel 0 (NOT RC_TAG_MAGIC → cell_drop / rc ops SKIP it;
-     *            the case is a `constant`, immortal, never rc-touched)
+     *   data-8 : ENUM_TAG_MAGIC (NOT RC_TAG_MAGIC → cell_drop / rc ops SKIP it;
+     *            the case is a `constant`, immortal, never rc-touched). It used
+     *            to be a plain 0, which the rc helpers skipped just as well but
+     *            which a RAW erased carrier could not be told apart from junk —
+     *            so `instanceof` over an erased enum case answered false.
      *   data+0 : class descriptor ptr ({class_id, drop=null}) — instanceof /
      *            __mir_enum_name read class_id THROUGH it
      *   data+8 : rc (unused)
@@ -486,6 +537,10 @@ final class EmitLlvm implements EmitVisitor
     private function emitEnumCellSingletons(string $name, \Compile\Mir\EnumDef $ed): string
     {
         $cid = (string)$ed->classId;
+        // `$name` is the raw FQN — used for the class-descriptor DEDUP (classes are
+        // keyed by it) and the var_dump display string. `$en` mangles backslashes
+        // for the LLVM symbol spellings (must match EmitLlvmModule / EmitLlvmObjects).
+        $en = $this->mangle($name);
         $out = '';
         // Descriptor — reuse the class descriptor if a method-enum already
         // registered one (dropRuntime emits `@__mir_cd_<id>` for it); else emit.
@@ -505,7 +560,8 @@ final class EmitLlvm implements EmitVisitor
         $i = 0;
         foreach ($ed->caseNames as $cn) {
             $sym = '@' . $mn . '__case_' . (string)$i;
-            $out .= $sym . ' = linkonce_odr constant { i64, i64, i64, i64 } { i64 0, i64 '
+            $out .= $sym . ' = linkonce_odr constant { i64, i64, i64, i64 } { i64 '
+                  . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . ', i64 '
                   . $descI . ', i64 0, i64 ' . (string)$i . " }\n";
             $dataPtrs[] = 'i64 ptrtoint (ptr getelementptr (i8, ptr ' . $sym . ', i64 8) to i64)';
             $fq = '@' . $mn . '__fqn_' . (string)$i;
@@ -545,6 +601,15 @@ final class EmitLlvm implements EmitVisitor
         // read between the passes. A grow (str_alloc + memcpy + release old) is
         // amortized O(1) — the initial `8*len+16` estimate rarely regrows.
         $out .= "init:\n";
+        // The elements of an ERASED carrier are not self-describing: a concrete
+        // `vec[string]` literal reaching here through an erased alias stores raw
+        // pointers, which tagged_to_str reads as a denormal double and joins as
+        // "". Decode each element by the array's own element-kind hint first
+        // (the identity at hint 0 and on an already-boxed CELL).
+        $out .= "  %flagsp = getelementptr inbounds i8, ptr %arr, i64 "
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %flagsw = load i64, ptr %flagsp\n";
+        $out .= "  %repr = and i64 %flagsw, " . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
         $out .= "  %seplen = call i64 @__mir_strlen(ptr %sep)\n";
         $out .= "  %c0 = shl i64 %len, 3\n";
         $out .= "  %cap0 = add i64 %c0, 16\n";
@@ -557,7 +622,8 @@ final class EmitLlvm implements EmitVisitor
         $out .= "loop:\n  %i = load i64, ptr %ip\n  %ld = icmp sge i64 %i, %len\n";
         $out .= "  br i1 %ld, label %fin, label %body\n";
         $out .= "body:\n";
-        $out .= "  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
+        $out .= "  %ev0 = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
+        $out .= "  %ev = call i64 @__mir_box_by_repr(i64 %ev0, i64 %repr)\n";
         $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
         $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
         $out .= "  %isfirst = icmp eq i64 %i, 0\n";
@@ -1159,6 +1225,13 @@ final class EmitLlvm implements EmitVisitor
                 // paired retain-on-entry for the same reason; excluding the
                 // param here kills the release too, keeping them balanced.
                 if (isset($this->locals->refLocals[$mo->target->name])) { return; }
+                // A GLOBAL-BACKED name (`static $x;` / `global $g`) does not live
+                // in this frame: its storage is a module cell and its value
+                // outlives the call. There is no entry retain to balance, so a
+                // scope-exit release is a pure over-release — `static $out; …
+                // return $out = \STDOUT;` released the cached resource once per
+                // call and the teardown drop then trapped. The cell owns it.
+                if (isset($this->locals->globalBacked[$mo->target->name])) { return; }
                 // Store the MemoryOp node, not its flavor string — the
                 // self-host backend corrupts a short string round-tripped
                 // through an assoc value (a `'str'` read back mis-compares),
@@ -1800,7 +1873,18 @@ final class EmitLlvm implements EmitVisitor
         // on KIND_CELL (it is a raw i64 there, never inttoptr'd), so route it
         // through the tag-dispatched helper directly; it no-ops on an
         // int/float/bool/null cell. An OWNED producer's +1 transfers.
-        if ($k === Type::KIND_CELL) {
+        // KIND_UNKNOWN travels the same way and must retain for the same reason:
+        // the destination is a cell container, so its release runs
+        // `__mir_cell_drop` on this slot regardless of what the STATIC type
+        // called it. The identical body typed `$v` a cell as a module function
+        // and `unknown` as a monomorphised PRELUDE clone, so `array_merge`
+        // silently skipped the retain that `mymerge` emitted — every element of a
+        // merged array was freed while the result still pointed at it
+        // (`is_array($r[0])` true, `count($r[0])` 0, every symfony Table cell
+        // blank). Retaining by tag is safe in the erased case: the helper
+        // dispatches on the tag and no-ops on a raw / non-pointer payload, so it
+        // can only ever under-retain, never over-retain.
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
             // `__mir_to_cell($x)` is pure BOXING ({@see EmitLlvmBuiltins::biToCell}
             // = emit the arg, then boxToCell), so ownership follows its ARGUMENT.
             // Reading the call itself as an owned producer stored the payload with

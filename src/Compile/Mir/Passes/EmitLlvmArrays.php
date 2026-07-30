@@ -166,10 +166,50 @@ trait EmitLlvmArrays
         return null;
     }
 
+    /**
+     * Does this subscript key have to ride the CELL key channel — the one that
+     * dispatches int-vs-string on the NaN tag at runtime?
+     *
+     * A cell key obviously does. So does an ERASED one: a key read out of an
+     * erased container comes back NaN-boxed, and the int channel then hashed the
+     * tag bits. symfony's `$commands[$name]`, where `$name` is an element of an
+     * erased `$namespace['commands']`, missed every entry — `isset` answered
+     * false and the lookup returned null, which the next `->getName()` faulted on.
+     * The cell helpers treat an untagged word as an int key ({@see
+     * EmitLlvmExpr::cellKeyRuntime} → `__mir_ckey_unbox_int`), so this is the
+     * identity on a key that really was a raw int.
+     */
+    private function keyRidesCellChannel(Node $index): bool
+    {
+        $k = $index->type->kind;
+        return $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN;
+    }
+
     private function emitArrayLit(ArrayLit $n): string
     {
         $this->arena->vecAllocated = false;
         return $this->emitArrayLitUnified($n);
+    }
+
+    /**
+     * Lower the just-emitted subject of a subscript / isset / unset to the array
+     * POINTER it stands for.
+     *
+     * A CELL base obviously carries the pointer NaN-boxed. So does an UNKNOWN
+     * one: an `IteratorAggregate` whose `getIterator()` is declared
+     * `\Traversable` gives the foreach value var no type at all, and the word it
+     * holds is the generator's shallow-boxed `current` — a TAGGED array. The raw
+     * inttoptr then read the tag bits as an address, so `isset($row[$column])`
+     * answered false for every cell and symfony's Table computed every column
+     * width as 0 (` -- -- -- ` instead of ` -------- ----- ---------- `).
+     * The 48-bit payload mask is the identity on an already-raw pointer, so this
+     * is free for every other erased carrier.
+     */
+    private function arrayBaseToPtr(Type $baseType): string
+    {
+        $k = $baseType->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { return $this->cellToPtr(); }
+        return $this->coerceToPtr();
     }
 
     private function emitArrayAccess(ArrayAccess_ $n): string
@@ -406,8 +446,11 @@ trait EmitLlvmArrays
         }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
-        // Self-describe a cell-valued literal (see emitArrayLitDirect).
+        // Self-describe a cell-valued literal, and record the element SHAPE for
+        // every rc-shaped one (see emitArrayLitDirect).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
+        $litHint = $this->elementHintCodeForType($al->type->element);
+        if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($res, $litHint); }
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
         return $out;
@@ -509,7 +552,12 @@ trait EmitLlvmArrays
         // release/COW reaching it through the plain repr helper — e.g. this
         // record nested in an erased `vec[unknown]` — still drops its boxed
         // cells. (A typed-flavor release ignores the bits; no double drop.)
+        // The HINT rides alongside for every rc-shaped element type: it says
+        // what the elements are, so an erased READER can decode a raw one
+        // (symfony's Table rows are a concrete `vec[string]` read as cells).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
+        $litHint = $this->elementHintCodeForType($al->type->element);
+        if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($arr, $litHint); }
         $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
@@ -533,20 +581,30 @@ trait EmitLlvmArrays
         return false;
     }
 
+    /**
+     * Can an array of static type `$t` hold BOXED cells in slots a
+     * concrete-element consumer will read raw? True for a declared
+     * pointer-element array — the mismatch case — and false for a base that is
+     * already cell/erased (its consumers decode anyway) so those pay no call.
+     */
+    private function elemMayBeCell(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null) { return false; }
+        return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
+    }
+
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
     {
         $out = $this->emitNode($aa->array);
-        // A `mixed`/cell base (e.g. a nested value out of json_decode) carries
-        // the array pointer NaN-boxed — strip the tag to the payload ptr, not
-        // a raw inttoptr of the boxed bits (which faults in __mir_array_get).
-        if ($aa->array->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } else {
-            $out .= $this->coerceToPtr();
-        }
+        // A `mixed`/cell base (e.g. a nested value out of json_decode) — and an
+        // ERASED one, which may hold the very same boxed word — carries the
+        // array pointer NaN-boxed ({@see arrayBaseToPtr}).
+        $out .= $this->arrayBaseToPtr($aa->array->type);
         $arrPtr = $this->lastValue;
         // A `mixed`/cell index (int-OR-string at runtime) → dispatch helper.
-        $keyIsCell = $aa->index->type->kind === Type::KIND_CELL;
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         $out .= $this->emitNode($aa->index);
@@ -563,6 +621,33 @@ trait EmitLlvmArrays
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // ⚠ The element is NOT decoded into a CELL by the array's hint here. Two
+        // consumers proved a plain subscript cannot be: an UNKNOWN result is
+        // deref'd raw (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }`
+        // returns the word into a string slot), and a CELL result is written back
+        // into a raw-repr array by the sort family. That decode lives where a
+        // value is genuinely CONSUMED as a cell — array_pop/array_shift and
+        // implode — until the store side learns to re-encode.
+        //
+        // The OTHER direction is sound and is done: a result the static type
+        // already calls a STRING or an OBJECT must be a raw pointer, so if the
+        // array says its slots are boxed cells, strip the tag. Nothing
+        // downstream is told anything new — it was promised a pointer and now
+        // gets one. Two witnesses: symfony's `$this->headers[0]` (a declared
+        // `string[]` fed from cell rows) printed the tag bits, and a BY-REF
+        // array param written back from an erased local (`$read = $nr;` in
+        // stream_select) handed the caller boxed elements under a `vec[obj]`
+        // static type — `$r[0] instanceof R` then inttoptr'd the tag.
+        $rk = $self->type->kind;
+        if (($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ)
+            && $this->elemMayBeCell($aa->array->type)) {
+            $this->rt->needsElemUntag = true;
+            $u = $this->ssa->allocReg();
+            $out .= '  ' . $u . ' = call i64 @__mir_elem_untag(ptr ' . $arrPtr
+                  . ', i64 ' . $reg . ")\n";
+            $reg = $u;
+            $this->lastValue = $reg;
+        }
         if ($self->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -587,6 +672,13 @@ trait EmitLlvmArrays
      * stamp lets the plain repr release drop it. Homogeneity is guaranteed
      * upstream: a heterogeneous erased array is promoted to vec[cell] (the
      * array-repr-conflict check), so it never reaches this raw path.
+     *
+     * ⚠ OWNERSHIP, not shape — a concrete-element array must NOT be stamped
+     * here even though its elements are perfectly describable: `uasort` moves
+     * them into a fresh buffer and writes it back WITHOUT retaining, so a
+     * stamped source frees the strings the result still points at
+     * (`natsort` over a `vec[string]`). Shape is the separate hint nibble,
+     * {@see elementHintCodeForType}.
      */
     private function erasedReprCode(StoreElement $se): ?int
     {
@@ -617,6 +709,64 @@ trait EmitLlvmArrays
             return \Compile\MemoryAbi::ARRAY_REPR_OBJ;
         }
         return null;
+    }
+
+    /**
+     * The element-KIND HINT for an element type — what the elements ARE, said
+     * without any claim about ownership ({@see MemoryAbi::ARRAY_ELEM_HINT_MASK}).
+     * The exclusions mirror {@see EmitLlvm::discardReleaseFlavor}: a decoded
+     * cell is later DROPPED by tag, so anything without the rc header that tag
+     * implies — `#[Struct]`, `Ffi\Ptr`, a closure, an enum singleton, a
+     * Generator frame (str-style header, object tag) — must stay hintless and
+     * ride raw, exactly as it does today. Scalars have nothing to decode.
+     */
+    private function elementHintCodeForType(?Type $el): ?int
+    {
+        if ($el === null) { return null; }
+        $k = $el->kind;
+        if ($k === Type::KIND_STRING) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR; }
+        if ($k === Type::KIND_ARRAY) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR; }
+        if ($k === Type::KIND_CELL) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL; }
+        if ($k === Type::KIND_OBJ) {
+            $cls = $el->class;
+            if ($cls === null) { $cls = ''; }
+            if ($cls === 'Ffi\\Ptr' || $cls === 'Generator') { return null; }
+            if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return null; }
+            if ($this->isClosureClass($cls)) { return null; }
+            if ($this->isEnumClass($cls)) { return null; }
+            return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
+        }
+        return null;
+    }
+
+    /** The hint that matches an ownership repr code — the two nibbles are
+     *  stamped together on the erased path so a reader can decode what the
+     *  release will drop. */
+    private function hintForReprCode(int $repr): ?int
+    {
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_STR) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR; }
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_OBJ) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ; }
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_ARR) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR; }
+        if ($repr === \Compile\MemoryAbi::ARRAY_REPR_CELL) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL; }
+        return null;
+    }
+
+    /** Emit `flags = (flags & ~HINT_MASK) | code` on `$arrPtr` — record what
+     *  the elements ARE. Ownership-free: no release/retain/cow reads it. */
+    private function emitElemHintStamp(string $arrPtr, int $code): string
+    {
+        $fo = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
+        $fp = $this->ssa->allocReg();
+        $out  = '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $arrPtr . ', i64 ' . $fo . "\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $fp . "\n";
+        $cl = $this->ssa->allocReg();
+        $out .= '  ' . $cl . ' = and i64 ' . $fl . ', '
+              . (string)(~\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK) . "\n";
+        $nw = $this->ssa->allocReg();
+        $out .= '  ' . $nw . ' = or i64 ' . $cl . ', ' . (string)$code . "\n";
+        $out .= '  store i64 ' . $nw . ', ptr ' . $fp . "\n";
+        return $out;
     }
 
     /** Emit `flags = (flags & ~REPR_MASK) | code` on `$arrPtr` — stamp the
@@ -741,7 +891,7 @@ trait EmitLlvmArrays
             $arrPtr = $cow;
         }
         $isAppend = $se->index->kind === Node::KIND_NULL_CONST;
-        $keyIsCell = !$isAppend && $se->index->type->kind === Type::KIND_CELL;
+        $keyIsCell = !$isAppend && $this->keyRidesCellChannel($se->index);
         $keyIsString = !$isAppend && !$keyIsCell
             && ($se->index->type->kind === Type::KIND_STRING
                 || $se->index->kind === Node::KIND_STRING_CONST);
@@ -845,6 +995,29 @@ trait EmitLlvmArrays
         // release/retain/cow drop/co-own this erased array's raw elements.
         $reprCode = $this->erasedReprCode($se);
         if ($reprCode !== null) { $out .= $this->emitReprStamp($next, $reprCode); }
+        // The SHAPE hint is stamped whatever the ownership answer was: an
+        // erased store describes the value it just wrote, a concrete container
+        // describes its declared element, and a boxed (cell) store says so.
+        $hint = null;
+        if ($reprCode !== null) {
+            $hint = $this->hintForReprCode($reprCode);
+        } elseif ($boxVal) {
+            $hint = \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL;
+        } else {
+            $et = $se->array->type->element;
+            if ($et !== null && $et->kind !== Type::KIND_UNKNOWN) {
+                $hint = $this->elementHintCodeForType($et);
+            } else {
+                // An ERASED container is described by what actually lands in
+                // it, and a value with no describable shape (a scalar, or an
+                // erased word) CLEARS the hint rather than leaving a stale one:
+                // a mixed array whose last claim was STR would hand a reader an
+                // integer to dereference.
+                $hint = $this->elementHintCodeForType($se->value->type);
+                if ($hint === null) { $hint = 0; }
+            }
+        }
+        if ($hint !== null) { $out .= $this->emitElemHintStamp($next, $hint); }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
         $this->lastValue = $val;
         $this->lastValueType = 'i64';

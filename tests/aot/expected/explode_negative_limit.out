@@ -1,0 +1,58 @@
+array(0) {
+}
+array(1) {
+  [0]=>
+  string(6) "config"
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+}
+array(1) {
+  [0]=>
+  string(1) "a"
+}
+array(0) {
+}
+array(0) {
+}
+array(0) {
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+}
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(3) "b:c"
+}
+array(1) {
+  [0]=>
+  string(5) "a:b:c"
+}
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+}
+array(1) {
+  [0]=>
+  string(1) "x"
+}

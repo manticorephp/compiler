@@ -19,6 +19,11 @@ final class FunctionEmitFrame
     public ?Type $returnType = null;
     /** The fn returns by-ref: `emitReturn` yields an address, not a value. */
     public bool $returnsByRef = false;
+    /** This is `__main` (emitted as `i32 @main`). A top-level `return` here is a
+     *  whole-program include-return (require is a no-op) — evaluated for side
+     *  effects then IGNORED, never a mid-body `ret i64` that mismatches the i32
+     *  result AND would exit before the entry's own top-level runs. */
+    public bool $isMain = false;
     /** The fn is a closure — uniform ABI: scalar params/returns travel as
      *  tagged cells. */
     public bool $isClosure = false;

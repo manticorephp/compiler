@@ -1,0 +1,10 @@
+a,b;c,d,e;
+one|two
+1|2|3
+1.5|2.5
+mixed|7|2.5|1
+first=alpha|beta
+second=gamma
+keep-raw
+10-20
+nosep

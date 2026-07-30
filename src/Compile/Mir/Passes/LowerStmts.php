@@ -111,10 +111,40 @@ trait LowerStmts
     private function lowerBlockNode(\Parser\Ast\Block $block): Block
     {
         $stmts = [];
+        $dead = false;
         foreach ($block->statements as $stmt) {
-            $stmts[] = $this->lowerStmt($stmt);
+            // A LABEL re-enters the flow: `goto` may jump straight to it, so the
+            // statements it heads are live no matter what precedes them (the
+            // canonical early-exit idiom `return "pos"; neg: return "neg";`).
+            // Skipping a label emitted a `br` to a block that was never defined.
+            if ($dead && $stmt->kind !== 'Label') { continue; }
+            $dead = false;
+            $lowered = $this->lowerStmt($stmt);
+            $stmts[] = $lowered;
+            // Drop statements after an UNCONDITIONAL terminator (php treats
+            // them as dead too), up to the next label. Critical when a folded
+            // static guard — `if (!function_exists('pcntl_signal')) { return; }`
+            // — reduces to a bare `return`, leaving trailing code that names
+            // symbols this build has no definition for (`[\SIGINT, …]`): never
+            // lowering it avoids a spurious "unknown constant" on a branch that
+            // can never run.
+            if ($this->nodeAlwaysTerminates($lowered)) { $dead = true; }
         }
         return new Block($stmts, Type::void());
+    }
+
+    /** Whether a lowered statement unconditionally leaves the block — a
+     *  `return` / `throw`, or a block ending in one (a folded static guard). */
+    private function nodeAlwaysTerminates(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_RETURN || $k === Node::KIND_THROW) { return true; }
+        if ($k === Node::KIND_BLOCK) {
+            $ss = $n->stmts;
+            $c = \count($ss);
+            return $c > 0 && $this->nodeAlwaysTerminates($ss[$c - 1]);
+        }
+        return false;
     }
 
     private function lowerStmt(\Parser\Ast\Stmt $stmt): Node
@@ -205,22 +235,59 @@ trait LowerStmts
      * into `if cond { a } else { if c1 { b1 } else { if c2 { b2 } else { e } } }`.
      * Keeps the IR shape uniform and analysis straightforward.
      */
-    private function lowerIf(\Parser\Ast\IfStmt $stmt): If_
+    private function lowerIf(\Parser\Ast\IfStmt $stmt): Node
     {
-        $cond  = $this->lowerExpr($stmt->condition);
-        $then  = $this->lowerBlockNode($stmt->then);
+        // Statically-foldable guard (function_exists / defined / bool over
+        // && || !): lower ONLY the live branch, so a dead branch's
+        // unresolvable symbols — an undefined constant like SIGINT behind
+        // `defined('SIGINT')` — never reach codegen. Same fold flattenConstantIfs
+        // applies at top level, extended here to nested (method-body) `if`s.
+        $live = $this->constIfBranch($stmt);
+        if ($live !== null) {
+            $stmts = [];
+            foreach ($live as $s) { $stmts[] = $this->lowerStmt($s); }
+            return new Block($stmts, Type::void());
+        }
+        // Not every arm folds — but the ones that fold FALSE are still dead, and
+        // dropping them individually matters: symfony guards
+        // `if (function_exists('cli_set_process_title')) … elseif
+        // (function_exists('setproctitle')) … elseif ($runtimeCheck) …`, and the
+        // whole chain used to survive because the LAST arm is not foldable. The
+        // dead arms then referenced functions this build has no definition for
+        // and the link failed on an undefined symbol. Prune arm by arm; only a
+        // chain in which EVERY arm folds is resolved by constIfBranch above.
+        /** @var \Parser\Ast\Expr[] $armConds */
+        $armConds = [];
+        /** @var \Parser\Ast\Block[] $armBodies */
+        $armBodies = [];
+        if ($this->foldGuard($stmt->condition) !== self::GUARD_FALSE) {
+            $armConds[] = $stmt->condition;
+            $armBodies[] = $stmt->then;
+        }
+        foreach ($stmt->elseifs as $pair) {
+            if ($this->foldGuard($pair->condition) === self::GUARD_FALSE) { continue; }
+            $armConds[] = $pair->condition;
+            $armBodies[] = $pair->body;
+        }
         $else_ = $stmt->else === null ? null : $this->lowerBlockNode($stmt->else);
-        $elseifs = $stmt->elseifs;
-        for ($i = \count($elseifs) - 1; $i >= 0; $i = $i - 1) {
-            $pair = $elseifs[$i];
+        $n = \count($armConds);
+        if ($n === 0) {
+            // Every arm is statically dead — only the `else` can run.
+            return $else_ === null ? new Block([], Type::void()) : $else_;
+        }
+        for ($i = $n - 1; $i >= 1; $i = $i - 1) {
             $nested = new If_(
-                $this->lowerExpr($pair->condition),
-                $this->lowerBlockNode($pair->body),
+                $this->lowerExpr($armConds[$i]),
+                $this->lowerBlockNode($armBodies[$i]),
                 $else_,
             );
             $else_ = new Block([$nested], Type::void());
         }
-        return new If_($cond, $then, $else_);
+        return new If_(
+            $this->lowerExpr($armConds[0]),
+            $this->lowerBlockNode($armBodies[0]),
+            $else_,
+        );
     }
 
     private function lowerWhile(\Parser\Ast\WhileStmt $stmt): While_

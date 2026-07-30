@@ -154,6 +154,13 @@ trait LowerPrelude
             // whose interfaces DatePeriod implements.
             $src = $src . $this->dateTimeSrc;
         }
+        if ($this->binarySrc !== '') {
+            $src = $src . $this->binarySrc;
+        }
+        if ($this->errorsSrc !== '') {
+            // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
+            $src = $src . $this->errorsSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
@@ -227,7 +234,7 @@ trait LowerPrelude
                 // entries print after the declared slots. Without this the arm
                 // claimed the object and printed `(0) {}` — the bag walk below is
                 // only reached by a class with NO arm (stdClass).
-                $body = $body . "    \$bag = (array)\$v;\n"
+                $body = $body . "    \$bag = \\__mir_obj_bag(\$v);\n"
                     . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pc . " + count(\$bag)), \") {\\n\";\n";
             } else {
                 $body = $body . "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
@@ -245,7 +252,7 @@ trait LowerPrelude
             $ci = $ci + 1;
         }
         $body = $body
-            . "  \$arr = (array)\$v;\n"
+            . "  \$arr = \\__mir_obj_bag(\$v);\n"
             . "  echo 'object(stdClass)#1 (', (string)count(\$arr), \") {\\n\";\n"
             . "  foreach (\$arr as \$k => \$val) {\n"
             . "    echo \$pad, '  [\"', \$k, \"\\\"]=>\\n\", \$pad, '  ';\n"
@@ -433,11 +440,11 @@ trait LowerPrelude
             }
             if ($cd->usesBag()) {
                 // #[AllowDynamicProperties]: the declared slots, then the bag.
-                // `(array)$v` reads the BAG ONLY, which is exactly what is left
+                // `__mir_obj_bag($v)` reads the BAG ONLY, which is exactly what is left
                 // to append — and the count cannot be baked in.
                 $body = $body . "    \$b = ''\n" . $entries . "      ;\n"
                     . "    \$cnt = " . (string)\count($props) . ";\n"
-                    . "    foreach ((array)\$v as \$k => \$val) {\n"
+                    . "    foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
                     . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
                     . "      else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
                     . "      \$b = \$b . __mc_ser_val(\$val, \$st);\n"
@@ -453,7 +460,7 @@ trait LowerPrelude
         // An EXPLICIT arm, not the fallthrough — see the throw below.
         $body = $body
             . "  if (\$v instanceof \\stdClass) {\n"
-            . "    \$arr = (array)\$v;\n"
+            . "    \$arr = \\__mir_obj_bag(\$v);\n"
             . "    \$out = 'O:8:\"stdClass\":' . (string)count(\$arr) . ':{';\n"
             . "    foreach (\$arr as \$k => \$val) {\n"
             . "      if (is_int(\$k)) { \$out = \$out . 'i:' . (string)\$k . ';'; }\n"
@@ -508,8 +515,8 @@ trait LowerPrelude
             }
             if ($cd->usesBag()) {
                 // #[AllowDynamicProperties]: the declared slots, then the bag.
-                // `(array)$v` reads the BAG ONLY, which is what is left to add.
-                $body = $body . "    foreach ((array)\$v as \$bk => \$bv) {\n"
+                // `__mir_obj_bag($v)` reads the BAG ONLY, which is what is left to add.
+                $body = $body . "    foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
                     . "      \$ks = is_int(\$bk) ? (string)\$bk : (\"'\" . __mc_var_export_qstr((string)\$bk) . \"'\");\n"
                     . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
                     . "    }\n";
@@ -521,7 +528,7 @@ trait LowerPrelude
         $body = $body
             . "  if (\$v instanceof \\stdClass) {\n"
             . "    \$out = \$lead . \"(object) array(\\n\";\n"
-            . "    foreach ((array)\$v as \$k => \$val) {\n"
+            . "    foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
             . "      \$ks = is_int(\$k) ? (string)\$k : (\"'\" . __mc_var_export_qstr((string)\$k) . \"'\");\n"
             . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n"
             . "    }\n"
@@ -677,10 +684,50 @@ trait LowerPrelude
         // src/ never does, which is what keeps the Zend cold-seed alive (see
         // EmitLlvmModule's needsStdStreams block). A stdlib fn that mentioned
         // them would make src/ itself use a stream and kill the bootstrap.
-        if ($name === 'STDIN')  { return new Call('__mc_std_res', [new IntConst(0, Type::int_()), new Call('__mir_stdin',  [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
-        if ($name === 'STDOUT') { return new Call('__mc_std_res', [new IntConst(1, Type::int_()), new Call('__mir_stdout', [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
-        if ($name === 'STDERR') { return new Call('__mc_std_res', [new IntConst(2, Type::int_()), new Call('__mir_stderr', [], Type::obj('Ffi\\Ptr'))], Type::obj('Resource')); }
+        if ($name === 'STDIN')  { return $this->stdStreamNode(0); }
+        if ($name === 'STDOUT') { return $this->stdStreamNode(1); }
+        if ($name === 'STDERR') { return $this->stdStreamNode(2); }
 
+        return $this->preludeConstInt($name);
+    }
+
+    /**
+     * The cached `\Resource` for standard stream `$which` (0 in, 1 out, 2 err).
+     * The FILE* comes from the `__mir_std*` builtin emitted right here, at the
+     * mention — see the note above on why it must not come from the stdlib.
+     */
+    private function stdStreamNode(int $which): Node
+    {
+        $builtin = '__mir_stderr';
+        if ($which === 0) { $builtin = '__mir_stdin'; }
+        elseif ($which === 1) { $builtin = '__mir_stdout'; }
+        return new Call(
+            '__mc_std_res',
+            [
+                new IntConst($which, Type::int_()),
+                new Call($builtin, [], Type::obj('Ffi\\Ptr')),
+            ],
+            Type::obj('Resource'),
+        );
+    }
+
+    /**
+     * `php://stdout` / `php://output` / `php://stderr` / `php://stdin` (any
+     * case) → the standard-stream resource, so `fopen()` on the literal every
+     * console app uses answers the same handle the constant does. Null for any
+     * other target, which leaves the stdlib's fopen to handle it.
+     */
+    private function stdStreamResource(string $target): ?Node
+    {
+        $t = \strtolower($target);
+        if ($t === 'php://stdin')  { return $this->stdStreamNode(0); }
+        if ($t === 'php://stdout' || $t === 'php://output') { return $this->stdStreamNode(1); }
+        if ($t === 'php://stderr') { return $this->stdStreamNode(2); }
+        return null;
+    }
+
+    private function preludeConstInt(string $name): ?Node
+    {
         $ints = [
             // string padding
             'STR_PAD_RIGHT' => 1, 'STR_PAD_LEFT' => 0, 'STR_PAD_BOTH' => 2,
@@ -791,6 +838,46 @@ trait LowerPrelude
             'MSG_OOB' => 1, 'MSG_PEEK' => 2, 'MSG_DONTROUTE' => 4, 'MSG_EOR' => 8,
             'PHP_NORMAL_READ' => 1, 'PHP_BINARY_READ' => 2,
             'AI_PASSIVE' => 1, 'AI_CANONNAME' => 2, 'AI_NUMERICHOST' => 4,
+            // ext-filter — php's OWN constant values (host-invariant). filter_var
+            // uses the *_VALIDATE_* / *_DEFAULT filter ids + the NULL_ON_FAILURE
+            // and numeric flags.
+            'INPUT_POST' => 0, 'INPUT_GET' => 1, 'INPUT_COOKIE' => 2,
+            'INPUT_SERVER' => 5, 'INPUT_ENV' => 4,
+            'FILTER_DEFAULT' => 516, 'FILTER_UNSAFE_RAW' => 516,
+            'FILTER_FLAG_NONE' => 0, 'FILTER_CALLBACK' => 1024,
+            'FILTER_VALIDATE_INT' => 257, 'FILTER_VALIDATE_BOOLEAN' => 258,
+            'FILTER_VALIDATE_BOOL' => 258, 'FILTER_VALIDATE_FLOAT' => 259,
+            'FILTER_VALIDATE_REGEXP' => 272, 'FILTER_VALIDATE_DOMAIN' => 277,
+            'FILTER_VALIDATE_URL' => 273, 'FILTER_VALIDATE_EMAIL' => 274,
+            'FILTER_VALIDATE_IP' => 275, 'FILTER_VALIDATE_MAC' => 276,
+            'FILTER_SANITIZE_ENCODED' => 514, 'FILTER_SANITIZE_SPECIAL_CHARS' => 515,
+            'FILTER_SANITIZE_FULL_SPECIAL_CHARS' => 522, 'FILTER_SANITIZE_EMAIL' => 517,
+            'FILTER_SANITIZE_URL' => 518, 'FILTER_SANITIZE_NUMBER_INT' => 519,
+            'FILTER_SANITIZE_NUMBER_FLOAT' => 520, 'FILTER_SANITIZE_ADD_SLASHES' => 523,
+            'FILTER_REQUIRE_SCALAR' => 33554432, 'FILTER_REQUIRE_ARRAY' => 16777216,
+            'FILTER_FORCE_ARRAY' => 67108864, 'FILTER_NULL_ON_FAILURE' => 134217728,
+            'FILTER_FLAG_ALLOW_OCTAL' => 1, 'FILTER_FLAG_ALLOW_HEX' => 2,
+            'FILTER_FLAG_STRIP_LOW' => 4, 'FILTER_FLAG_STRIP_HIGH' => 8,
+            'FILTER_FLAG_ENCODE_LOW' => 16, 'FILTER_FLAG_ENCODE_HIGH' => 32,
+            'FILTER_FLAG_ENCODE_AMP' => 64, 'FILTER_FLAG_ALLOW_FRACTION' => 4096,
+            'FILTER_FLAG_ALLOW_THOUSAND' => 8192, 'FILTER_FLAG_ALLOW_SCIENTIFIC' => 16384,
+            'FILTER_FLAG_IPV4' => 1048576, 'FILTER_FLAG_IPV6' => 2097152,
+            'FILTER_FLAG_EMAIL_UNICODE' => 1048576,
+            // ext-intl grapheme_extract() type selector — php's own values
+            // (host-invariant). The intl-grapheme polyfill defines these behind
+            // `if (!defined(...))`, redundant once predefined here.
+            'GRAPHEME_EXTR_COUNT' => 0, 'GRAPHEME_EXTR_MAXBYTES' => 1,
+            'GRAPHEME_EXTR_MAXCHARS' => 2,
+            // ext-mbstring case-conversion modes + the (deprecated) overload
+            // selector — php's own values (host-invariant).
+            'MB_CASE_UPPER' => 0, 'MB_CASE_LOWER' => 1, 'MB_CASE_TITLE' => 2,
+            'MB_CASE_FOLD' => 3, 'MB_CASE_UPPER_SIMPLE' => 4,
+            'MB_CASE_LOWER_SIMPLE' => 5, 'MB_CASE_TITLE_SIMPLE' => 6,
+            'MB_CASE_FOLD_SIMPLE' => 7, 'MB_OVERLOAD_STRING' => 2,
+            // Linked pcre2 version — taken from the build host's pcre2 (the
+            // static lib manticore links). 10.44+ so intl-grapheme uses the `\X`
+            // grapheme-cluster shorthand.
+            'PCRE_VERSION_MAJOR' => 10, 'PCRE_VERSION_MINOR' => 47,
         ];
         if (isset($ints[$name])) { return new IntConst($ints[$name], Type::int_()); }
 
@@ -812,6 +899,11 @@ trait LowerPrelude
         $strs = [
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
             'PHP_VERSION' => '8.5.3', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PCRE_VERSION' => '10.47 2025-10-21',
+            // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
+            // path is unreachable in a manticore build. Empty keeps references
+            // compiling; a program that actually spawns `php` would need a real value.
+            'PHP_BINARY' => '', 'PHP_BINDIR' => '', 'PHP_PEAR_PHP_BIN' => '',
         ];
         if (isset($strs[$name])) { return new StringConst($strs[$name], Type::string_()); }
 
@@ -846,6 +938,23 @@ trait LowerPrelude
                 'FNM_NOMATCH' => 1,
             ];
             if (isset($fnm[$name])) { return new IntConst($fnm[$name], Type::int_()); }
+        }
+
+        // setlocale() category selectors — host-DIVERGENT: Darwin's <locale.h>
+        // orders the categories differently from glibc. Resolved against the
+        // build host like FNM_* / the socket constants below.
+        if (\substr($name, 0, 3) === 'LC_') {
+            $isDarwin = \Manticore\is_darwin();
+            $lc = [
+                'LC_ALL' => $isDarwin ? 0 : 6,
+                'LC_COLLATE' => $isDarwin ? 1 : 3,
+                'LC_CTYPE' => $isDarwin ? 2 : 0,
+                'LC_MONETARY' => $isDarwin ? 3 : 4,
+                'LC_NUMERIC' => $isDarwin ? 4 : 1,
+                'LC_TIME' => $isDarwin ? 5 : 2,
+                'LC_MESSAGES' => $isDarwin ? 6 : 5,
+            ];
+            if (isset($lc[$name])) { return new IntConst($lc[$name], Type::int_()); }
         }
 
         // ext/posix resource limits. Host-exposed like FNM_* above (php reads the
@@ -923,10 +1032,13 @@ trait LowerPrelude
                 'SIGPOLL' => $isDarwin ? 23 : 29,
                 'WNOHANG' => 1, 'WUNTRACED' => 2,
             ];
-            // Linux-only signals: php does not define them on Darwin either.
+            // Host-only signals: php does not define the other host's either.
             if (!$isDarwin) {
                 $sig['SIGPWR'] = 30;
                 $sig['SIGSTKFLT'] = 16;
+            } else {
+                $sig['SIGEMT'] = 7;
+                $sig['SIGINFO'] = 29;
             }
             if (isset($sig[$name])) { return new IntConst($sig[$name], Type::int_()); }
         }
