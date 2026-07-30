@@ -28,10 +28,23 @@ if ($server === false) {
         echo "http on :8080 (", WORKERS, " workers, prefork)\n";
     }
     async(function () use ($server) {
+        // A ceiling on connections in flight, per worker. It is deliberately far
+        // above anything a benchmark reaches — at 256 concurrent connections this
+        // never binds, and the number below is unchanged by it — but an accept loop
+        // with no bound answers a flood by spawning until the process dies, and
+        // this file is the one people copy. Past the ceiling the loop stops
+        // accepting and the kernel's backlog holds the queue, which is what
+        // backpressure is: a queue somewhere that is not the heap.
+        $inflight = new Async\Semaphore(4096);
         while (true) {
             $conn = Async\accept($server);
-            spawn(function () use ($conn) {
-                serve($conn);
+            $inflight->acquire();
+            spawn(function () use ($conn, $inflight) {
+                try {
+                    serve($conn);
+                } finally {
+                    $inflight->release();
+                }
             });
         }
     });

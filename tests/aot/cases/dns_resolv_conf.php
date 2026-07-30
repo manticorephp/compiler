@@ -55,6 +55,32 @@ echo 'rcode-noerror: ', __mc_dns_rcode("\x12\x34\x81\x80" . str_repeat("\x00", 8
 echo 'rcode-nxdomain: ', __mc_dns_rcode("\x12\x34\x81\x83" . str_repeat("\x00", 8)), "\n";
 echo 'rcode-short: ', __mc_dns_rcode("\x12"), "\n";
 
+// `options timeout:` / `attempts:` — the two the resolver used to ignore, so a
+// deployment that had tuned them got our numbers instead of its own.
+echo 'timeout-default: ', __mc_resolv_timeout("nameserver 1.1.1.1\n"), "\n";
+echo 'timeout-set: ', __mc_resolv_timeout("options timeout:7\n"), "\n";
+echo 'timeout-clamped: ', __mc_resolv_timeout("options timeout:99\n"), "\n";
+echo 'timeout-floor: ', __mc_resolv_timeout("options timeout:0\n"), "\n";
+echo 'attempts-default: ', __mc_resolv_attempts("options ndots:2\n"), "\n";
+echo 'attempts-set: ', __mc_resolv_attempts("options attempts:4\n"), "\n";
+echo 'attempts-clamped: ', __mc_resolv_attempts("options attempts:9\n"), "\n";
+$one = "options ndots:3 timeout:6 attempts:3\n";
+echo 'opts-one-line: ', __mc_resolv_timeout($one), ',', __mc_resolv_attempts($one),
+     ',', __mc_resolv_ndots($one), "\n";
+echo 'opts-last-wins: ', __mc_resolv_attempts("options attempts:2\noptions attempts:5\n"), "\n";
+echo 'opts-valueless: ', __mc_resolv_timeout("options rotate edns0 single-request\n"), "\n";
+
+// /etc/hosts is consulted for every CANDIDATE, the way glibc runs nsswitch — so a
+// short name can match a fully-qualified hosts line through the search list.
+$hosts = "127.0.0.1 localhost\n10.4.0.7 db.svc.cluster.local db\n::1 v6only\n# 9.9.9.9 commented\n";
+echo 'hosts-exact: ', __mc_hosts_lookup_in($hosts, 'localhost'), "\n";
+echo 'hosts-qualified: ', __mc_hosts_lookup_in($hosts, 'db.svc.cluster.local'), "\n";
+echo 'hosts-alias: ', __mc_hosts_lookup_in($hosts, 'db'), "\n";
+echo 'hosts-case: ', __mc_hosts_lookup_in($hosts, 'DB.SVC.Cluster.Local'), "\n";
+echo 'hosts-v6-skipped: [', __mc_hosts_lookup_in($hosts, 'v6only'), "]\n";
+echo 'hosts-comment: [', __mc_hosts_lookup_in($hosts, 'commented'), "]\n";
+echo 'hosts-miss: [', __mc_hosts_lookup_in($hosts, 'nope'), "]\n";
+
 // ...and through a real file, which is all __mc_resolv_text adds.
 $path = sys_get_temp_dir() . '/mc_resolv_conf_case';
 file_put_contents($path, "nameserver 192.0.2.53\nsearch svc.cluster.local cluster.local\noptions ndots:5\n");

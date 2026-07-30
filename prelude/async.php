@@ -355,6 +355,16 @@ namespace Async {
         public int $chanSlot = -1;
         /** @var Channel[] every channel a select() parked this task on */
         public array $selectChans = [];
+        /**
+         * The select() answer to $chanSlot: this task's index in EACH channel it is
+         * parked on, keyed `$channel->queueKey($send)` so one channel can hold the
+         * task in both its queues (a select may offer a send and a recv on the same
+         * channel). Empty for every ordinary park — allocated only on the select
+         * slow path, so a task that never selects pays one empty array for it.
+         *
+         * @var array<int,int>
+         */
+        public array $selectSlots = [];
 
         /** Position in owner->children, or -1 once pruned (O(1) removal). */
         public int $idx = -1;
@@ -827,9 +837,23 @@ namespace Async {
         private array $recvQ = [];
         private int $recvHead = 0;
 
+        /** Identity for {@see Task::$selectSlots}, which needs a key rather than an
+         *  object. Monotonic and never reused, so a stale entry can name a channel
+         *  that is gone but never a different live one. */
+        private int $id = 0;
+        private static int $nextId = 0;
+
         public function __construct(int $capacity = 0)
         {
             $this->cap = $capacity < 0 ? 0 : $capacity;
+            self::$nextId = self::$nextId + 1;
+            $this->id = self::$nextId;
+        }
+
+        /** The key this channel's send/recv queue occupies in a waiter's slot map. */
+        public function queueKey(bool $send): int
+        {
+            return $send ? $this->id * 2 + 1 : $this->id * 2;
         }
 
         public function isClosed(): bool
@@ -924,10 +948,18 @@ namespace Async {
             }
             /** @var array<int, Task|null> $live */
             $live = [];
+            $rk = $this->queueKey(false);
             for ($i = $this->recvHead; $i < $n; $i++) {
                 $r = $this->recvQ[$i];
                 if ($r === null) { continue; }
-                if ($r->chanSlot >= 0) { $r->chanSlot = \count($live); }
+                // Both slot channels move: a select waiter that kept a stale index
+                // here would silently fall back to the scan this compaction is
+                // supposed to be keeping short.
+                if ($r->chanSlot >= 0) {
+                    $r->chanSlot = \count($live);
+                } elseif (isset($r->selectSlots[$rk])) {
+                    $r->selectSlots[$rk] = \count($live);
+                }
                 $live[] = $r;
             }
             $this->recvQ = $live;
@@ -969,10 +1001,15 @@ namespace Async {
             $live = [];
             /** @var mixed[] $vals */
             $vals = [];
+            $sk = $this->queueKey(true);
             for ($i = $this->sendHead; $i < $n; $i++) {
                 $s = $this->sendQ[$i];
                 if ($s === null) { continue; }
-                if ($s->chanSlot >= 0) { $s->chanSlot = \count($live); }
+                if ($s->chanSlot >= 0) {
+                    $s->chanSlot = \count($live);
+                } elseif (isset($s->selectSlots[$sk])) {
+                    $s->selectSlots[$sk] = \count($live);
+                }
                 $live[] = $s;
                 $vals[] = $this->sendVal[$i];
             }
@@ -1125,6 +1162,7 @@ namespace Async {
         {
             $t->chanSlot = -1;   // in several queues at once — no single slot to hold
             $this->recvQ[] = $t;
+            $t->selectSlots[$this->queueKey(false)] = \count($this->recvQ) - 1;
         }
 
         /** Park $t on this channel's send queue offering $value (select() slow path). */
@@ -1133,17 +1171,19 @@ namespace Async {
             $t->chanSlot = -1;
             $this->sendQ[] = $t;
             $this->sendVal[] = $value;
+            $t->selectSlots[$this->queueKey(true)] = \count($this->sendQ) - 1;
         }
 
         /**
          * Remove a parked task from BOTH queues — a select loser, or a task the
-         * scheduler just cancelled. O(1) when the task carries this channel's slot
-         * ({@see Task::$chanSlot}), which is every ordinary send()/next() park.
+         * scheduler just cancelled. O(1) for every ordinary send()/next() park,
+         * which carries this channel's slot in {@see Task::$chanSlot}, and O(1) for
+         * a {@see select()} waiter too, which carries one slot PER QUEUE it sits in
+         * ({@see Task::$selectSlots}) because no single index can describe a task
+         * parked on several channels at once.
          *
-         * A task parked by {@see select()} sits in SEVERAL channels' queues at once
-         * and so cannot carry one slot; that path still scans, from the cursor
-         * rather than from zero. Select sets are small and this only walks the live
-         * tail, but it is the one case left that is not O(1).
+         * The scan below is the safety net, not the path: it survives a caller that
+         * removes a waiter some other way, and it walks only the live tail.
          */
         public function removeWaiter(Task $t): void
         {
@@ -1160,6 +1200,34 @@ namespace Async {
                     $t->chanSlot = -1;
                     return;
                 }
+            }
+            // A select waiter. Both keys are consulted: one select may offer a send
+            // AND a recv on the same channel, so this task can be in both queues.
+            // The `=== $t` test still gates every write — a stale index (the winner
+            // popped us, or the queue was compacted) then falls through to the scan
+            // rather than tombstoning whoever now holds that slot.
+            $hit = false;
+            $rk = $this->queueKey(false);
+            if (isset($t->selectSlots[$rk])) {
+                $rs = $t->selectSlots[$rk];
+                unset($t->selectSlots[$rk]);
+                if ($rs < \count($this->recvQ) && $this->recvQ[$rs] === $t) {
+                    $this->recvQ[$rs] = null;
+                    $hit = true;
+                }
+            }
+            $sk = $this->queueKey(true);
+            if (isset($t->selectSlots[$sk])) {
+                $ss = $t->selectSlots[$sk];
+                unset($t->selectSlots[$sk]);
+                if ($ss < \count($this->sendQ) && $this->sendQ[$ss] === $t) {
+                    $this->sendQ[$ss] = null;
+                    $this->sendVal[$ss] = null;
+                    $hit = true;
+                }
+            }
+            if ($hit) {
+                return;
             }
             $n = \count($this->recvQ);
             for ($i = $this->recvHead; $i < $n; $i++) {
@@ -2270,6 +2338,7 @@ namespace Async {
                     $ch->removeWaiter($task);
                 }
                 $task->selectChans = [];
+                $task->selectSlots = [];
             }
         }
 
@@ -3496,6 +3565,11 @@ namespace Async {
         foreach ($parked as $ch) {
             if ($ch !== $fired) { $ch->removeWaiter($me); }
         }
+        // The winner popped us without going through removeWaiter, so its keys are
+        // still here. Harmless — every write is gated on `=== $t` — but a long-lived
+        // task that selects in a loop would accumulate one entry per channel it ever
+        // won on, so the map is emptied with the rest of the select state.
+        $me->selectSlots = [];
         if ($fired === null) {
             return null;   // the deadline fired first
         }

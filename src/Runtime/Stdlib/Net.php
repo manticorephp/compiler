@@ -347,9 +347,17 @@ function __mc_is_numeric_host(string $host): bool
 function __mc_hosts_lookup(string $host): string
 {
     $c = \file_get_contents('/etc/hosts');
-    if ($c === false) {
-        return '';
-    }
+    return $c === false ? '' : \__mc_hosts_lookup_in((string)$c, $host);
+}
+
+/**
+ * {@see __mc_hosts_lookup} against hosts TEXT already in hand — the same seam
+ * `resolv.conf` parsing uses, for the same two reasons: a search walk consults the
+ * file once per CANDIDATE (glibc runs nsswitch per candidate name, not once for the
+ * bare one), and text in means the whole thing is testable with no filesystem.
+ */
+function __mc_hosts_lookup_in(string $c, string $host): string
+{
     $want = \strtolower($host);
     foreach (\explode("\n", $c) as $line) {
         $hash = \strpos($line, '#');
@@ -387,10 +395,6 @@ function __mc_hosts_lookup(string $host): string
  */
 function __mc_resolve_async(string $host): string
 {
-    $viaHosts = \__mc_hosts_lookup($host);
-    if ($viaHosts !== '') {
-        return $viaHosts;
-    }
     // A cache lives in the SCHEDULER (prelude), reached through the hook: a stdlib
     // static holding an assoc is the known repr trap, and the scheduler's lifetime is
     // exactly the right scope for a per-run cache. Entries carry their TTL.
@@ -403,16 +407,29 @@ function __mc_resolve_async(string $host): string
     $text = \__mc_resolv_text();
     $ns = \__mc_resolv_nameservers($text);
     if ($ns === '') { $ns = '8.8.8.8'; }
+    $timeout = \__mc_resolv_timeout($text);
+    $attempts = \__mc_resolv_attempts($text);
+    // Read ONCE, consulted per candidate below — /etc/hosts is a source in the same
+    // walk as DNS, not a special case for the bare name.
+    $hostsText = \file_get_contents('/etc/hosts');
+    $hosts = $hostsText === false ? '' : (string)$hostsText;
     $cands = \__mc_dns_candidates($host, \__mc_resolv_search($text), \__mc_resolv_ndots($text));
     foreach (\explode(',', $cands) as $cRaw) {
         $qname = (string)$cRaw;
         if ($qname === '') { continue; }
-        $ip = \__mc_resolve_query($qname, 1, $host, $ns);        // A
+        // glibc consults nsswitch for EVERY candidate the search list produces, so
+        // `db` with `search svc.cluster.local` finds a `db.svc.cluster.local` line in
+        // /etc/hosts. Checking only the bare name missed exactly that.
+        if ($hosts !== '') {
+            $viaHosts = \__mc_hosts_lookup_in($hosts, $qname);
+            if ($viaHosts !== '') { return $viaHosts; }
+        }
+        $ip = \__mc_resolve_query($qname, 1, $host, $ns, $timeout, $attempts);   // A
         if ($ip !== '') { return $ip; }
         // AAAA next: an IPv6-only name is common enough (and the literal we return
         // goes straight back into getaddrinfo, which takes v6 literals as happily as
         // v4 — so nothing downstream needs to know).
-        $ip = \__mc_resolve_query($qname, 28, $host, $ns);       // AAAA
+        $ip = \__mc_resolve_query($qname, 28, $host, $ns, $timeout, $attempts);  // AAAA
         if ($ip !== '') { return $ip; }
         // Keep walking on NXDOMAIN *and* on a NOERROR with no address (a name with
         // only MX/TXT is not an address, and a search list exists to keep going).
@@ -431,9 +448,10 @@ function __mc_resolve_async(string $host): string
  * each suffix separately would fill the table with per-suffix duplicates and miss on
  * the next lookup of the same short name.
  */
-function __mc_resolve_query(string $qname, int $qtype, string $cacheKey, string $nsCsv): string
+function __mc_resolve_query(string $qname, int $qtype, string $cacheKey, string $nsCsv,
+                            int $timeout = 2, int $attempts = 2): string
 {
-    $resp = \__mc_dns_query_via($qname, $qtype, $nsCsv);
+    $resp = \__mc_dns_query_via($qname, $qtype, $nsCsv, $timeout, $attempts);
     if ($resp === '') {
         return '';
     }
