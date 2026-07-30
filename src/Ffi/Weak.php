@@ -18,7 +18,7 @@ use Attribute;
  * with `-Wl,-U,_<sym>` (see the link step in Manticore\Main). GNU ld auto-binds
  * a weak-undefined to 0, so Linux needs no flag.
  */
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Weak
 {
 }

@@ -225,6 +225,33 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, string> libc symbol → declare line (builtins) */
     private array $libcExtra = [];
     /**
+     * C symbol → the FFI binding that declared it, so a SECOND binding of the
+     * same symbol with a different C signature can be reported instead of
+     * silently losing to whichever wrapper was emitted first.
+     * {@see EmitLlvmCalls::emitFfiWrapper}
+     * @var array<string, string>
+     */
+    private array $ffiDeclOwner = [];
+
+    /**
+     * Native libraries this module's `#[Ffi\Library]` bindings need at link
+     * time, as a name→true set. 'c' is never recorded — libc/libSystem is
+     * always linked. Read by the driver at the `cc` step, and carried into the
+     * module's `.sig` so a program that reaches these wrappers through a
+     * prebuilt `.o` still links the library they call.
+     * @var array<string, bool>
+     */
+    public array $ffiLibs = [];
+
+    /**
+     * C symbols this module declared `extern_weak` — from `#[Ffi\Weak]` and
+     * from the errno builtin, which is why the set is collected HERE and not
+     * off FunctionDef. Darwin's ld needs `-Wl,-U,_<sym>` to permit each one
+     * undefined; deriving the list means it cannot drift from the bindings.
+     * @var array<string, bool>
+     */
+    public array $weakSyms = [];
+    /**
      * Native FFI-boundary primitives (`manticore_rt_*`) called but not
      * PHP-defined. Declared as externs so the module assembles; the
      * tools/link_stubs.sh link-stubs them (the compiler never invokes the

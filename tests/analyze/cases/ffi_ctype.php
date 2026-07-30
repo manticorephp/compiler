@@ -40,6 +40,17 @@ function c_double_on_int(string $s): int { return 0; }
 #[\Ffi\Library('c'), \Ffi\Symbol('atoi'), \Ffi\CType('int')]
 function c_int_on_float(string $s): float { return 0.0; }
 
+// Parameter position is checked the same way, and `void` is a return type only.
+#[\Ffi\Library('c'), \Ffi\Symbol('free')]
+function c_void_param(#[\Ffi\CType('void')] \Ffi\Ptr $p): void {}
+
+#[\Ffi\Library('c'), \Ffi\Symbol('write')]
+function c_bad_param(#[\Ffi\CType('quux')] int $fd, string $b, int $n): int { return 0; }
+
+// The SSL_read rule again, on a parameter: a string carries a pointer.
+#[\Ffi\Library('c'), \Ffi\Symbol('puts')]
+function c_int_on_str_param(#[\Ffi\CType('int')] string $s): int { return 0; }
+
 // Accepted: every legal spelling, including the multi-word C forms, which ARE
 // aliased because their width is unambiguous.
 #[\Ffi\Library('c'), \Ffi\Symbol('atoi'), \Ffi\CType('int')]

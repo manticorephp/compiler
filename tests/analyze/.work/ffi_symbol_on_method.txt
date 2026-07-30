@@ -1,0 +1,7 @@
+tests/analyze/cases/ffi_symbol_on_method.php:19:0: error: #[Ffi\Library] on class BoundOnClass: the Ffi attributes describe a free-function binding, not a class
+tests/analyze/cases/ffi_symbol_on_method.php:22:0: error: #[Ffi\Library] on BoundOnClass::instanceBinding(): an FFI binding must be a free function — group bindings with a namespace, not a class
+tests/analyze/cases/ffi_symbol_on_method.php:22:0: error: #[Ffi\Symbol] on BoundOnClass::instanceBinding(): an FFI binding must be a free function — group bindings with a namespace, not a class
+tests/analyze/cases/ffi_symbol_on_method.php:25:0: error: #[Ffi\Symbol] on BoundOnClass::staticBinding(): an FFI binding must be a free function — group bindings with a namespace, not a class
+tests/analyze/cases/ffi_symbol_on_method.php:28:0: error: #[Ffi\CType] on BoundOnClass::ctypeOnMethod(): an FFI binding must be a free function — group bindings with a namespace, not a class
+
+Found 5 error(s), 0 warning(s).

@@ -2,23 +2,32 @@
 
 namespace Manticore;
 
+use Ffi\CType;
 use Ffi\Library;
 use Ffi\Symbol;
 use Parser\Parser;
 
 // ── libc bindings used by the driver ─────────────────────────────────
+//
+// These duplicate symbols `Runtime\Libc` also binds — the driver needs them
+// before the stdlib exists — so their C signatures must match it EXACTLY. The
+// emitter rejects a module where two bindings of one symbol disagree: the
+// declare is keyed by symbol, so otherwise whichever wrapper is emitted first
+// silently decides what every call site is typed against.
 
-#[Library('c'), Symbol('puts')]
+#[Library('c'), Symbol('puts'), CType('int')]
 function puts(string $s): int {}
 
-#[Library('c'), Symbol('fflush')]
+#[Library('c'), Symbol('fflush'), CType('int')]
 function fflush(\Ffi\Ptr $stream): int {}
 
 #[Library('c'), Symbol('write')]
-function write(int $fd, string $buf, int $n): int { return 0; }
+function write(#[CType('int')] int $fd, string $buf,
+               #[CType('size_t')] int $n): int { return 0; }
 
 #[Library('c'), Symbol('read')]
-function read(int $fd, \Ffi\Ptr $buf, int $n): int { return 0; }
+function read(#[CType('int')] int $fd, \Ffi\Ptr $buf,
+              #[CType('size_t')] int $n): int { return 0; }
 
 #[Library('c'), Symbol('malloc')]
 function malloc(int $size): \Ffi\Ptr {}
@@ -26,7 +35,7 @@ function malloc(int $size): \Ffi\Ptr {}
 #[Library('c'), Symbol('calloc')]
 function calloc(int $count, int $size): \Ffi\Ptr {}
 
-#[Library('c'), Symbol('uname')]
+#[Library('c'), Symbol('uname'), CType('int')]
 function uname(\Ffi\Ptr $buf): int { return 0; }
 
 #[Library('c'), Symbol('manticore_cli_argc')]
@@ -36,37 +45,40 @@ function argc(): int { return $GLOBALS['argc'] ?? 0; }
 #[Library('c'), Symbol('manticore_cli_argv')]
 function argv(int $i): \Ffi\Ptr {}
 
-#[Library('c'), Symbol('system')]
+#[Library('c'), Symbol('system'), CType('int')]
 function system(string $cmd): int { return 0; }
 
 #[Library('c'), Symbol('fopen')]
 function fopen(string $path, string $mode): \Ffi\Ptr {}
 
 #[Library('c'), Symbol('fwrite')]
-function fwrite(string $buf, int $size, int $count, \Ffi\Ptr $stream): int { return 0; }
+function fwrite(string $buf, #[CType('size_t')] int $size,
+                #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
 
 #[Library('c'), Symbol('fread')]
-function fread(\Ffi\Ptr $buf, int $size, int $count, \Ffi\Ptr $stream): int { return 0; }
+function fread(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
+               #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
 
-#[Library('c'), Symbol('fseek')]
-function fseek(\Ffi\Ptr $stream, int $offset, int $whence): int { return 0; }
+#[Library('c'), Symbol('fseek'), CType('int')]
+function fseek(\Ffi\Ptr $stream, #[CType('long')] int $offset,
+               #[CType('int')] int $whence): int { return 0; }
 
 #[Library('c'), Symbol('ftell')]
 function ftell(\Ffi\Ptr $stream): int { return 0; }
 
-#[Library('c'), Symbol('fclose')]
+#[Library('c'), Symbol('fclose'), CType('int')]
 function fclose(\Ffi\Ptr $stream): int { return 0; }
 
-#[Library('c'), Symbol('getpid')]
+#[Library('c'), Symbol('getpid'), CType('int')]
 function getpid(): int { return 0; }
 
-#[Library('c'), Symbol('access')]
-function access(string $path, int $mode): int { return -1; }
+#[Library('c'), Symbol('access'), CType('int')]
+function access(string $path, #[CType('int')] int $mode): int { return -1; }
 
 #[Library('c'), Symbol('opendir')]
 function opendir(string $path): \Ffi\Ptr {}
 
-#[Library('c'), Symbol('closedir')]
+#[Library('c'), Symbol('closedir'), CType('int')]
 function closedir(\Ffi\Ptr $dir): int { return 0; }
 
 /**
@@ -313,6 +325,133 @@ function openssl_link_flags(): string {
         }
     }
     return "-lssl -lcrypto";
+}
+
+/**
+ * Resolve a set of `#[Ffi\Library]` names to `cc` link tokens.
+ *
+ * The two probes above stay the RESOLVERS — they exist because Homebrew keeps
+ * openssl@3 and pcre2 off the default search path, so a bare `-lssl` would not
+ * link here. What changes is who asks: the flags used to be appended
+ * unconditionally from a "did we link stdlib.o" branch, which made
+ * `#[Ffi\Library]` decorative. Now the bindings that name a library are what
+ * pulls it in.
+ *
+ * Anything else resolves through `pkg-config`, then `<name>-config`, then a
+ * bare `-l<name>`. `$already` is a link-flag string the caller has ALREADY
+ * placed on the line — the manifest's `extensions[].link` — whose `-l<name>`
+ * tokens are skipped here, so an extension declaring both `"link": ["z"]` and
+ * `#[Library('z')]` yields one `-lz` rather than a duplicate-library warning.
+ *
+ * @param string[] $libs
+ */
+function ffi_link_flags(array $libs, string $already = ""): string
+{
+    $seen = [];
+    foreach (\explode(" ", $already) as $tok) {
+        $t = \trim($tok);
+        if (\strlen($t) > 2 && \substr($t, 0, 2) === "-l") {
+            $seen[\substr($t, 2)] = true;
+        }
+    }
+    $out = "";
+    foreach ($libs as $lib) {
+        $name = (string)$lib;
+        // libc/libSystem is always linked; naming it is documentation.
+        if ($name === "" || $name === "c") { continue; }
+        if (isset($seen[$name])) { continue; }
+        $seen[$name] = true;
+        if ($name === "ssl" || $name === "crypto") {
+            $flags = openssl_link_flags();   // one probe covers both
+            if (isset($seen["\0openssl"])) { continue; }
+            $seen["\0openssl"] = true;
+        } elseif ($name === "pcre2-8") {
+            $flags = pcre2_link_flags();
+        } else {
+            $flags = generic_link_flags($name);
+        }
+        if ($flags !== "") { $out = $out . " " . $flags; }
+    }
+    return $out;
+}
+
+/**
+ * Link flags for a library with no special-cased probe: `pkg-config`, then
+ * `<name>-config --libs`, then a bare `-l<name>`. The fallback is what makes an
+ * ordinary system library (`-lz`, `-lm`) work with no configuration at all.
+ */
+function generic_link_flags(string $name): string
+{
+    $listPath = "/tmp/manticore_lib_" . $name . "_" . (string)getpid() . ".txt";
+    $rc = system("pkg-config --libs " . $name . " > " . $listPath . " 2>/dev/null");
+    if ($rc === 0) {
+        $c = read_file($listPath);
+        if ($c !== null) {
+            $t = \trim($c);
+            if ($t !== "") { return $t; }
+        }
+    }
+    $rc = system($name . "-config --libs > " . $listPath . " 2>/dev/null");
+    if ($rc === 0) {
+        $c = read_file($listPath);
+        if ($c !== null) {
+            $t = \trim($c);
+            if ($t !== "") { return $t; }
+        }
+    }
+    return "-l" . $name;
+}
+
+/**
+ * Darwin's allowance for weak-undefined symbols, derived from what the module
+ * actually declared `extern_weak` rather than hand-maintained beside the
+ * bindings. ld64 errors on a weak-undefined unless `-U <sym>` permits it; the
+ * Mach-O leading underscore is added here. GNU ld auto-binds weak-undefined to
+ * 0, so this is Darwin-only and the Linux arm passes an empty set.
+ *
+ * A `-U` for a symbol that IS present is accepted silently (verified on
+ * ld-1267), so the derived set never needs filtering against the host.
+ *
+ * @param string[] $syms
+ */
+function weak_undef_flags(array $syms): string
+{
+    $out = "";
+    $seen = [];
+    foreach ($syms as $s) {
+        $name = (string)$s;
+        if ($name === "" || isset($seen[$name])) { continue; }
+        $seen[$name] = true;
+        $out = $out . " -Wl,-U,_" . $name;
+    }
+    return $out;
+}
+
+/**
+ * The link requirements the prebuilt stdlib `.sig` records — the libraries its
+ * FFI wrappers call, and the symbols it declared extern_weak.
+ *
+ * These must reach the FINAL link of a program that never names them: the
+ * pcre2/openssl/signalfd wrappers live inside `lib/manticore_stdlib.o`, and a
+ * user module that calls `preg_match` has no `#[Ffi\Library]` of its own.
+ *
+ * ⚠ The `$fallback` is load-bearing, not defensive. A `.sig` built before these
+ * keys existed has neither, and that is exactly the state during the first
+ * rebuild after this change — returning the old unconditional set reproduces
+ * the previous behaviour byte for byte instead of silently linking nothing.
+ *
+ * @param string[] $fallback
+ * @return string[]
+ */
+function stdlib_sig_list(string $key, array $fallback): array
+{
+    $sigPath = find_stdlib_sig();
+    if ($sigPath === "") { return $fallback; }
+    $sigJson = read_file($sigPath);
+    if ($sigJson === null) { return $fallback; }
+    $got = $key === "libs" ? Sig::libsFromJson($sigJson) : Sig::weakFromJson($sigJson);
+    if ($got === null) { return $fallback; }
+    return $got;
 }
 
 /**
@@ -580,6 +719,23 @@ final class CompileArgs
      * (the compiler's own source defines the stdlib) so no duplicate symbols.
      */
     public static bool $linkStdlib = false;
+
+    /**
+     * Native libraries this module's `#[Ffi\Library]` bindings need, captured
+     * from {@see \Compile\Mir\Passes\EmitLlvm::$ffiLibs} right after emission
+     * and resolved to `cc` tokens by {@see ffi_link_flags} at the link step.
+     * Mirrors how `$linkStdlib` rides from the front end to the linker.
+     * @var string[]
+     */
+    public static array $ffiLibs = [];
+
+    /**
+     * C symbols this module declared `extern_weak`, captured from
+     * {@see \Compile\Mir\Passes\EmitLlvm::$weakSyms}. Drives Darwin's
+     * `-Wl,-U,_<sym>` allowance so it cannot drift from the bindings.
+     * @var string[]
+     */
+    public static array $weakSyms = [];
 
     /**
      * Bundled-stdlib signatures for declare-only extern injection, collected
@@ -899,6 +1055,9 @@ function cmd_compile(array $args): int {
     // program (e.g. the compiler's own source, which defines the stdlib)
     // links without it — avoids duplicate symbols.
     $linkExtra = "";
+    // Native libraries this module's own `#[Ffi\Library]` bindings named.
+    $libs = CompileArgs::$ffiLibs;
+    $weak = CompileArgs::$weakSyms;
     if (CompileArgs::$linkStdlib) {
         $stdlibObj = find_stdlib_object();
         if ($stdlibObj !== "") {
@@ -906,18 +1065,22 @@ function cmd_compile(array $args): int {
         } else {
             dprint("compile: program uses bundled stdlib but stdlib.o not found — link may fail");
         }
-        // The bundled stdlib carries the preg_* FFI wrappers, which reference
-        // the host libpcre2-8. Dead-strip drops those wrappers (and the dylib
-        // load command, see the flags below) for a program that never calls a
-        // preg_* function, so this is harmless when regex is unused.
-        $pcre = pcre2_link_flags();
-        if ($pcre !== "") { $linkExtra .= " " . $pcre; }
-        // The bundled stdlib carries the TLS transport (https://), which references
-        // the host libssl/libcrypto. Dead-strip + --as-needed drop them for a
-        // program that opens no TLS stream, same as pcre2 above.
-        $ssl = openssl_link_flags();
-        if ($ssl !== "") { $linkExtra .= " " . $ssl; }
+        // The bundled stdlib's own bindings — its preg_* wrappers reference
+        // libpcre2-8, its TLS transport libssl/libcrypto, its scheduler
+        // signalfd — none of which this module names. They ride in the stdlib's
+        // `.sig`, since the wrapper that calls them is emitted over there.
+        // Dead-strip + --as-needed drop whichever the program never reaches.
+        foreach (stdlib_sig_list("libs", ["pcre2-8", "ssl", "crypto"]) as $l) {
+            $libs[] = $l;
+        }
+        foreach (stdlib_sig_list("weak",
+                 ["__errno_location", "epoll_create1", "epoll_ctl", "epoll_wait",
+                  "signalfd"]) as $w) {
+            $weak[] = $w;
+        }
     }
+    $libFlags = ffi_link_flags($libs);
+    if ($libFlags !== "") { $linkExtra .= $libFlags; }
     // Dead-strip unreferenced functions at link time — the prebuilt stdlib.o
     // is one object (linked wholesale), so without this a tiny program carries
     // the entire stdlib (~75 KB hello-world). macOS ld64 strips at the
@@ -926,26 +1089,25 @@ function cmd_compile(array $args): int {
     // `--as-needed` drop a linked-but-unreferenced dylib (e.g. libpcre2 in a
     // program that uses the stdlib but no preg_*).
     //
-    // errno's per-host accessor (__mc_errno) declares BOTH __error and
-    // __errno_location extern_weak; on Darwin the latter is a weak-undefined that
-    // ld64 still errors on unless allowed. `-U ___errno_location` permits exactly
-    // that one symbol undefined (it binds to 0, and the null-test branches away
-    // from it). GNU ld auto-binds weak-undefined to 0, so Linux needs no flag.
+    // Every extern_weak the module emitted is a weak-undefined ld64 rejects
+    // unless `-U <sym>` permits it: errno's per-host accessor (__mc_errno
+    // declares BOTH __error and __errno_location, null-tests, and calls
+    // whichever is present), plus Io\Poll's epoll backend and the scheduler's
+    // signalfd, which bind Linux-only symbols `#[Ffi\Weak]`. Each binds to 0 on
+    // the host that lacks it and the guarded branch never calls it.
+    //
+    // The set is DERIVED — it used to be a hand-written list sitting beside the
+    // bindings it duplicated, free to drift the moment someone added a weak one.
+    // Demand-gating falls out of that: a program that pulls in no weak binding
+    // now gets no -U flags at all.
+    //
+    // GNU ld auto-binds weak-undefined to 0, so Linux needs none of this.
     // -lm: libm is folded into libSystem on Darwin (auto-linked) but is a
     // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
     // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
     // undefined reference without it. `--as-needed` drops it when unreferenced.
-    // Io\Poll's epoll backend and the scheduler's signalfd bind Linux-only
-    // symbols with `#[Ffi\Weak]`
-    // (extern_weak). On a macOS build those are weak-undefined, which ld64
-    // rejects unless allowed — `-U _epoll_*` permits exactly them (they bind to
-    // 0 and the Linux-only branch never calls them). Harmless when unreferenced,
-    // exactly like ___errno_location. kqueue/kevent are present on Darwin (no
-    // flag); on Linux GNU ld auto-binds any weak-undefined to 0.
     $gc = is_darwin()
-        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs -Wl,-U,___errno_location"
-            . " -Wl,-U,_epoll_create1 -Wl,-U,_epoll_ctl -Wl,-U,_epoll_wait"
-            . " -Wl,-U,_signalfd"
+        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak)
         : " -Wl,--gc-sections -Wl,--as-needed -lm";
     $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
@@ -1227,6 +1389,8 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $ir = $emit->emit($module);
+        CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
+        CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
     } catch (\Throwable $e) {
         dprint("build: emit failed for " . $output . ": " . $e->getMessage());
         return 65;
@@ -1241,7 +1405,12 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }
         // Emit the module-interface .sig next to the object so dependents
         // import this library's exported symbols without re-parsing it.
-        if (!write_file($output . ".sig", Sig::emitModule($module))) {
+        // The .sig carries this library's LINK requirements alongside its
+        // symbols: a dependent's own module has no `#[Ffi\Library]` for a
+        // wrapper that lives in here, so without them the library it calls is
+        // simply never linked and link_stubs.sh quietly stubs the symbol to 0.
+        if (!write_file($output . ".sig", Sig::emitModule($module,
+                CompileArgs::$ffiLibs, CompileArgs::$weakSyms))) {
             dprint("build: cannot write " . $output . ".sig");
             return 73;
         }
@@ -1253,20 +1422,42 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     $linkExtra = "";
     foreach ($linkObjs as $obj) { $linkExtra = $linkExtra . " " . $obj; }
     if ($linkFlags !== "") { $linkExtra = $linkExtra . " " . $linkFlags; }
+    $libs = CompileArgs::$ffiLibs;
+    $weak = CompileArgs::$weakSyms;
+    // Every dependency object contributes the libraries ITS bindings call and
+    // the symbols it declared weak — they are emitted in that object, so this
+    // module never names them.
+    foreach ($linkObjs as $obj) {
+        $depSig = read_file($obj . ".sig");
+        if ($depSig === null) { continue; }
+        $dl = Sig::libsFromJson($depSig);
+        if ($dl !== null) { foreach ($dl as $l) { $libs[] = $l; } }
+        $dw = Sig::weakFromJson($depSig);
+        if ($dw !== null) { foreach ($dw as $w) { $weak[] = $w; } }
+    }
     // Link the bundled stdlib.o when a stdlib function was actually referenced
     // (lower_module sets linkStdlib from the injected externs) — a program that
     // touches no stdlib function links nothing extra.
     if ($withStdlib && CompileArgs::$linkStdlib) {
         $stdObj = find_stdlib_object();
         if ($stdObj !== "") { $linkExtra = $linkExtra . " " . $stdObj; }
-        // Same host libs the single-file `compile` path links: the bundled stdlib
-        // references libpcre2 (preg_*) and libssl/libcrypto (https://). Dead-strip
-        // + --as-needed drop whichever the program never reaches.
-        $pcre = pcre2_link_flags();
-        if ($pcre !== "") { $linkExtra = $linkExtra . " " . $pcre; }
-        $ssl = openssl_link_flags();
-        if ($ssl !== "") { $linkExtra = $linkExtra . " " . $ssl; }
+        // Same requirements the single-file `compile` path picks up, from the
+        // same place: the stdlib's own `.sig`.
+        foreach (stdlib_sig_list("libs", ["pcre2-8", "ssl", "crypto"]) as $l) {
+            $libs[] = $l;
+        }
+        foreach (stdlib_sig_list("weak",
+                 ["__errno_location", "epoll_create1", "epoll_ctl", "epoll_wait",
+                  "signalfd"]) as $w) {
+            $weak[] = $w;
+        }
     }
+    $libFlags = ffi_link_flags($libs, $linkFlags);
+    if ($libFlags !== "") { $linkExtra = $linkExtra . $libFlags; }
+    // Darwin's weak-undefined allowance, derived exactly as in cmd_compile.
+    // This path carried NO -U flags at all before, which is a divergence that
+    // only stayed invisible because link_stubs.sh defines what ld would reject.
+    if (is_darwin()) { $linkExtra = $linkExtra . weak_undef_flags($weak); }
     // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
@@ -2001,7 +2192,12 @@ function compile_via_mir(array $sources, array $paths = []): ?string {
     try {
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
-        return $emit->emit($module);
+        $ir = $emit->emit($module);
+        // The module's link requirements, captured before $emit goes out of
+        // scope — the cc step below runs long after emission.
+        CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
+        CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
+        return $ir;
     } catch (\Throwable $e) {
         dprint("compile failed (emit): " . $e->getMessage(). " ({$e->getFile()}:{$e->getLine()})");
         return null;
@@ -2034,6 +2230,9 @@ function cmd_dump_sig(array $args): int {
     if (\count($sources) === 0) { return 66; }
     $module = lower_module($sources);
     if ($module === null) { return 65; }
+    // Empty libs/weak: this command runs the front end only, and the link
+    // requirements are a property of what the EMITTER produced. Inspecting a
+    // module's signatures never links anything, so there is nothing to record.
     puts(Sig::emitModule($module));
     return 0;
 }

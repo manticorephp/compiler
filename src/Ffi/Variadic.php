@@ -25,7 +25,7 @@ use Attribute;
  *     function fcntl(#[CType('int')] int $fd, #[CType('int')] int $cmd,
  *                    #[CType('int')] int $arg): int { return -1; }
  */
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Variadic
 {
     public function __construct(

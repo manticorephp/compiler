@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Same app, but the extension declares NO link libraries: `-lz` has to come",
+    "from the `#[Ffi\\Library('z')]` on ext/zlib/crc32.php's binding alone.",
+    "Until that attribute drove linking it was read by nothing, and this build",
+    "would fail to resolve crc32 (or, through link_stubs.sh, quietly stub it to",
+    "0 and print the wrong checksum).",
+    "The manifest's `link` array stays the escape hatch for a library no",
+    "#[Ffi\\Library] names, or one whose flags are not a bare -l."
+  ],
+  "extensions": {
+    "zlib": { "src": "ext/zlib", "link": [], "static": false }
+  },
+  "applications": [{
+    "name": "zlibtest_attrlink",
+    "src": "ext/zlib_test",
+    "output": "/tmp/zlibtest_attrlink_bin",
+    "entry": "ext/zlib_test/main.php",
+    "libraries": [],
+    "extensions": ["zlib"]
+  }]
+}

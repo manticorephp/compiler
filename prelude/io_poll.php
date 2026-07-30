@@ -39,8 +39,8 @@ namespace {
 
     // Portable — closes the epoll/kqueue reactor fd. Bound here (not via the
     // Libc alias) so the symbol resolves cleanly in a demand-gated program.
-    #[\Ffi\Library('c'), \Ffi\Symbol('close')]
-    function __mc_iopoll_close(int $fd): int {}
+    #[\Ffi\Library('c'), \Ffi\Symbol('close'), \Ffi\CType('int')]
+    function __mc_iopoll_close(#[\Ffi\CType('int')] int $fd): int {}
 }
 
 namespace Io {

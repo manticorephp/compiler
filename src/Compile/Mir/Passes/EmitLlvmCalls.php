@@ -112,6 +112,12 @@ trait EmitLlvmCalls
     {
         $cSym = $fn->ffiSymbol;
         $ret = $fn->ffiRetCType;
+        // `#[Ffi\Library('name')]` → a link requirement. Collected at the
+        // WRAPPER, so the set is exactly what this module emitted rather than
+        // everything the source happened to declare. 'c' is implicit.
+        if ($fn->ffiLibrary !== '' && $fn->ffiLibrary !== 'c') {
+            $this->ffiLibs[$fn->ffiLibrary] = true;
+        }
         $paramSig = '';
         $first = true;
         foreach ($fn->params as $p) {
@@ -143,10 +149,22 @@ trait EmitLlvmCalls
                 $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = bitcast i64 ' . $src . " to double\n";
                 $cargs[] = 'double ' . $r;
-            } elseif ($ct === 'i1') {
+            } elseif ($ct === 'i1' || $ct === 'i8' || $ct === 'i16' || $ct === 'i32') {
+                // Narrow the i64 carrier to the C parameter's real width. The
+                // upper bits were never the callee's to read — AAPCS64 and SysV
+                // both leave them unspecified for a narrow argument — but a
+                // VARIADIC arg is read off the stack at its natural size, so the
+                // width has to be right there.
                 $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = trunc i64 ' . $src . " to i1\n";
-                $cargs[] = 'i1 ' . $r;
+                $out .= '  ' . $r . ' = trunc i64 ' . $src . ' to ' . $ct . "\n";
+                $cargs[] = $ct . ' ' . $r;
+            } elseif ($ct === 'float') {
+                // C `float` is 32-bit; the carrier holds a double's bit pattern.
+                $rd = $this->ssa->allocReg();
+                $r = $this->ssa->allocReg();
+                $out .= '  ' . $rd . ' = bitcast i64 ' . $src . " to double\n";
+                $out .= '  ' . $r . ' = fptrunc double ' . $rd . " to float\n";
+                $cargs[] = 'float ' . $r;
             } else {
                 $cargs[] = 'i64 ' . $src;
             }
@@ -181,8 +199,28 @@ trait EmitLlvmCalls
             // epoll_* on macOS) binds to null via extern_weak; the call is
             // guarded by a runtime OS branch so it never fires where absent.
             $weak = $fn->ffiWeak ? 'extern_weak ' : '';
-            $this->libcExtra[$cSym] = 'declare ' . $weak . $ret . ' @' . $cSym
-                . '(' . $declParams . ')';
+            if ($fn->ffiWeak) { $this->weakSyms[$cSym] = true; }
+            $line = 'declare ' . $weak . $ret . ' @' . $cSym . '(' . $declParams . ')';
+            // TWO bindings of one C symbol must agree about its C signature.
+            // libcExtra is keyed by symbol, so without this check the second
+            // binding's declare is simply dropped and whichever wrapper was
+            // emitted first decides what every call site is typed against —
+            // silently, and in emission order, which is not a property anyone
+            // reasons about. The mismatch is the SSL_read bug's shape: one
+            // binding says the callee returns i32, the other reads x0 as i64
+            // and gets whatever the upper half happened to hold.
+            $prev = $this->libcExtra[$cSym] ?? '';
+            if ($prev !== '' && $prev !== $line) {
+                throw new \RuntimeException(
+                    'conflicting FFI declarations for C symbol "' . $cSym . '": '
+                    . $fn->name . ' declares `' . $line . '` but '
+                    . ($this->ffiDeclOwner[$cSym] ?? '(a builtin)')
+                    . ' already declared `' . $prev
+                    . '`. Every binding of one C symbol must agree — annotate the'
+                    . ' parameters and return with #[Ffi\\CType] so they do.');
+            }
+            $this->libcExtra[$cSym] = $line;
+            $this->ffiDeclOwner[$cSym] = $fn->name;
         }
         $callArgs = \implode(', ', $cargs);
         if ($ret === 'void') {

@@ -10,7 +10,7 @@ use Attribute;
  * Used together with {@see Library}. The decorated function should have an
  * empty body — the compiler treats it as an extern declaration.
  */
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Symbol
 {
     public function __construct(

@@ -542,6 +542,12 @@ final class LowerFromAst implements Pass
         // so a fatal aborts ahead of the expensive work — and interfaces are
         // visible only here, since they never get a ClassDef.
         $this->checkAttributes($stmts, $preludeCount);
+        // The `Ffi\*` attributes are ours, not Zend's, so unlike the reserved
+        // set they are checked across the WHOLE statement list — prelude
+        // included. prelude/resource.php and prelude/io_poll.php carry them, and
+        // a broken binding there should fail at once rather than only when some
+        // user program happens to pull that prelude tier in.
+        $this->checkFfiAttrs($stmts);
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.
@@ -1557,6 +1563,26 @@ final class LowerFromAst implements Pass
             if ($arg->kind === 'StringLiteral') { return $this->strLitValue($arg); }
         }
         return null;
+    }
+
+    /**
+     * `#[Ffi\Library('name')]` → the native library this binding needs at link
+     * time, or '' when absent. 'c' is carried through and dropped later, at the
+     * one place that knows libc is implicit.
+     */
+    private function ffiLibraryOf(array $attributes): string
+    {
+        foreach ($attributes as $attr) {
+            if (!$this->attrIsOneOf($attr, ['Library', 'Ffi\\Library'])) { continue; }
+            $args = $this->attrArgs($attr);
+            if ($args === []) { continue; }
+            $arg = $args[0];
+            if ($arg->kind === 'NamedArg') { $arg = $this->namedArgValue($arg); }
+            // Subclass-typed read — a base-`Expr` `->value` picks the wrong
+            // offset under self-host (T5); the kind check proves the subclass.
+            if ($arg->kind === 'StringLiteral') { return $this->strLitValue($arg); }
+        }
+        return '';
     }
 
     /** True when a `#[Ffi\Weak]` attribute is present (extern_weak binding). */

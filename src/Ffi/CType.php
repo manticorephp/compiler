@@ -22,7 +22,7 @@ use Attribute;
  * Every other token, and every parameter-position use, is accepted and IGNORED.
  * See `docs/ffi.md`.
  */
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD | Attribute::TARGET_PARAMETER)]
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_PARAMETER)]
 final class CType
 {
     public function __construct(

@@ -6,5 +6,8 @@ tests/analyze/cases/ffi_ctype.php:29:0: error: #[Ffi\CType('int')] on c_int_on_p
 tests/analyze/cases/ffi_ctype.php:33:0: error: #[Ffi\CType('long')] on c_long_on_string(): the declared type is string, which carries a pointer — a pointer must not be extended or truncated (use 'ptr', or drop the attribute)
 tests/analyze/cases/ffi_ctype.php:37:0: error: #[Ffi\CType('double')] on c_double_on_int(): the declared type is int, which cannot carry a C double
 tests/analyze/cases/ffi_ctype.php:41:0: error: #[Ffi\CType('int')] on c_int_on_float(): the declared type is float, which cannot carry a C int
+tests/analyze/cases/ffi_ctype.php:45:0: error: #[Ffi\CType('void')] on parameter $p of c_void_param(): void is a return type only
+tests/analyze/cases/ffi_ctype.php:48:0: error: #[Ffi\CType('quux')] on parameter $fd of c_bad_param(): unknown C type. Known: void, bool, char, uchar, short, ushort, int, uint, long, ulong, longlong, ulonglong, size_t, ssize_t, off_t, float, double, ptr
+tests/analyze/cases/ffi_ctype.php:52:0: error: #[Ffi\CType('int')] on parameter $s of c_int_on_str_param(): the declared type is string, which carries a pointer — a pointer must not be extended or truncated (use 'ptr', or drop the attribute)
 
-Found 8 error(s), 0 warning(s).
+Found 11 error(s), 0 warning(s).

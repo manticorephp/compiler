@@ -116,6 +116,188 @@ trait LowerAttrChecks
         }
     }
 
+    // ── Ffi\* attribute checks ───────────────────────────────────────────────
+
+    /** The `Ffi\` attributes that only mean anything on an FFI binding. */
+    private function ffiAttrKind(\Parser\Ast\AttributeNode $a): string
+    {
+        $n = $this->attrFqn($a);
+        if ($n === 'Ffi\\Library'   || $n === 'Library')   { return 'Library'; }
+        if ($n === 'Ffi\\Symbol'    || $n === 'Symbol')    { return 'Symbol'; }
+        if ($n === 'Ffi\\CType'     || $n === 'CType')     { return 'CType'; }
+        if ($n === 'Ffi\\Weak'      || $n === 'Weak')      { return 'Weak'; }
+        if ($n === 'Ffi\\Variadic'  || $n === 'Variadic')  { return 'Variadic'; }
+        if ($n === 'Ffi\\Borrow'    || $n === 'Borrow')    { return 'Borrow'; }
+        if ($n === 'Ffi\\BorrowMut' || $n === 'BorrowMut') { return 'BorrowMut'; }
+        if ($n === 'Ffi\\Take'      || $n === 'Take')      { return 'Take'; }
+        if ($n === 'Ffi\\Give'      || $n === 'Give')      { return 'Give'; }
+        if ($n === 'Ffi\\StaticPtr' || $n === 'StaticPtr') { return 'StaticPtr'; }
+        return '';
+    }
+
+    /**
+     * Validate the `Ffi\*` attribute uses across the whole program.
+     *
+     * The ownership family — Borrow / BorrowMut / Take / Give / StaticPtr — is
+     * CHECKED here and lowered NOWHERE. Nothing is freed on your behalf, and
+     * this pass does not change a byte of emitted code; it exists so the
+     * attributes stop being decoration. Two of the rules are real safety rules
+     * rather than tidiness: a PHP string and a C-owned buffer have opposite
+     * memory disciplines, and writing `#[Take]` on a string or `#[Give]` on a
+     * string return asks the runtime to hand a refcounted block to `free()` (or
+     * to rc-release a block with no header), which corrupts the heap silently.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts  prelude ++ user, already ns-flattened
+     */
+    private function checkFfiAttrs(array $stmts): void
+    {
+        foreach ($stmts as $stmt) {
+            if ($stmt->kind === 'Function') {
+                $this->checkFfiBinding($this->fnStmtDecl($stmt));
+            } elseif ($stmt->kind === 'Class') {
+                $this->checkFfiOnClass($this->classStmtDecl($stmt));
+            }
+        }
+    }
+
+    /**
+     * An FFI binding must be a FREE FUNCTION. A method binding cannot work:
+     * the MIR function carries a receiver parameter with no C counterpart, and
+     * `Sig::emitModule` exports only `$module->functions`, so a class-based
+     * binding could never be imported across a `.o` boundary — which is the one
+     * property that makes `Runtime\Libc\*` usable at all.
+     */
+    private function checkFfiOnClass(\Parser\Ast\ClassDecl $d): void
+    {
+        $cls = \ltrim($this->declName($d), '\\');
+        foreach ($d->attributes as $a) {
+            $kind = $this->ffiAttrKind($a);
+            if ($kind === '') { continue; }
+            $this->attrFail('#[Ffi\\' . $kind . '] on class ' . $cls
+                . ': the Ffi attributes describe a free-function binding, not a class',
+                $d->span);
+        }
+        foreach ($d->methods as $m) {
+            foreach ($this->methodAttrs($m) as $a) {
+                $kind = $this->ffiAttrKind($a);
+                if ($kind === '') { continue; }
+                $this->attrFail('#[Ffi\\' . $kind . '] on ' . $cls . '::'
+                    . $this->methodDeclName($m) . '(): an FFI binding must be a free'
+                    . ' function — group bindings with a namespace, not a class',
+                    $this->methodSpan($m));
+            }
+        }
+    }
+
+    /** True when the PHP hint carries a raw address rather than a number. */
+    private function ffiHintIsPointer(?string $hint): bool
+    {
+        return $this->ffiCType($hint) === 'ptr';
+    }
+
+    /** True when the hint is a PHP `string` — refcount-owned, never C's to free. */
+    private function ffiHintIsPhpString(?string $hint): bool
+    {
+        if ($hint === null) { return false; }
+        return \strtolower(\ltrim($hint, '?\\')) === 'string';
+    }
+
+    /** Ownership + placement rules for one function declaration. */
+    private function checkFfiBinding(\Parser\Ast\FunctionDecl $d): void
+    {
+        $name = \ltrim($this->fnDeclName($d), '\\');
+        $where = $name . '()';
+        $span = $this->fnDeclSpan($d);
+        $attrs = $this->fnDeclAttrs($d);
+        $params = $this->fnDeclParams($d);
+
+        $isBinding = false;
+        $give = false;
+        $staticPtr = false;
+        foreach ($attrs as $a) {
+            $kind = $this->ffiAttrKind($a);
+            if ($kind === 'Symbol')    { $isBinding = true; }
+            if ($kind === 'Give')      { $give = true; }
+            if ($kind === 'StaticPtr') { $staticPtr = true; }
+        }
+        // O1 — an Ffi attribute anywhere on a declaration that is not a binding.
+        if (!$isBinding) {
+            foreach ($attrs as $a) {
+                $kind = $this->ffiAttrKind($a);
+                if ($kind === '') { continue; }
+                $this->attrFail('#[Ffi\\' . $kind . '] on ' . $where
+                    . ': the Ffi attributes describe an FFI binding, but ' . $where
+                    . ' has no #[Ffi\\Symbol]', $span);
+            }
+            foreach ($params as $p) {
+                foreach ($this->paramAttrs($p) as $a) {
+                    $kind = $this->ffiAttrKind($a);
+                    if ($kind === '') { continue; }
+                    $this->attrFail('#[Ffi\\' . $kind . '] on parameter $' . $p->name
+                        . ' of ' . $where . ': the Ffi attributes describe an FFI'
+                        . ' binding, but ' . $where . ' has no #[Ffi\\Symbol]', $span);
+                }
+            }
+            return;
+        }
+
+        $ret = $d->returnType;
+        // O2 — the callee cannot both hand ownership over and keep it forever.
+        if ($give && $staticPtr) {
+            $this->attrFail('#[Ffi\\Give] and #[Ffi\\StaticPtr] are mutually exclusive on '
+                . $where, $span);
+        }
+        // O5/O7 — a return-ownership claim needs something to own.
+        if ($give || $staticPtr) {
+            $claim = $give ? 'Give' : 'StaticPtr';
+            if ($this->ffiHintIsPhpString($ret)) {
+                $this->attrFail('#[Ffi\\' . $claim . '] on ' . $where
+                    . ': a C-owned buffer has no refcount header — declare the return'
+                    . ' \\Ffi\\Ptr, not string', $span);
+            } elseif (!$this->ffiHintIsPointer($ret)) {
+                $shown = $ret === null ? 'nothing' : \ltrim($ret, '\\');
+                $this->attrFail('#[Ffi\\' . $claim . '] on ' . $where
+                    . ': the binding returns ' . $shown . ', which carries no pointer',
+                    $span);
+            }
+        }
+
+        foreach ($params as $p) {
+            $own = '';
+            $dupe = false;
+            foreach ($this->paramAttrs($p) as $a) {
+                $kind = $this->ffiAttrKind($a);
+                if ($kind !== 'Borrow' && $kind !== 'BorrowMut' && $kind !== 'Take') {
+                    continue;
+                }
+                if ($own !== '') { $dupe = true; }
+                $own = $kind;
+            }
+            if ($own === '') { continue; }
+            $pWhere = 'parameter $' . $p->name . ' of ' . $where;
+            // O3 — one parameter, one ownership story.
+            if ($dupe) {
+                $this->attrFail('#[Ffi\\Borrow], #[Ffi\\BorrowMut] and #[Ffi\\Take] are'
+                    . ' mutually exclusive on ' . $pWhere, $this->paramSpan($p));
+                continue;
+            }
+            // O6 — a PHP string is refcount-owned; C must never free it.
+            if ($own === 'Take' && $this->ffiHintIsPhpString($p->typeHint)) {
+                $this->attrFail('#[Ffi\\Take] on ' . $pWhere
+                    . ': a PHP string is refcount-owned and must not be freed by C —'
+                    . ' declare it \\Ffi\\Ptr', $this->paramSpan($p));
+                continue;
+            }
+            // O4 — ownership is a property of a pointer, not of a number.
+            if (!$this->ffiHintIsPointer($p->typeHint)) {
+                $shown = $p->typeHint === null ? 'nothing' : \ltrim($p->typeHint, '\\');
+                $this->attrFail('#[Ffi\\' . $own . '] on ' . $pWhere
+                    . ': ownership applies to a pointer, but $' . $p->name
+                    . ' is declared ' . $shown, $this->paramSpan($p));
+            }
+        }
+    }
+
     /** Every attribute site a class declaration owns, plus the `#[Override]` checks. */
     private function checkClassDeclAttrs(\Parser\Ast\ClassDecl $d): void
     {

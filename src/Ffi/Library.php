@@ -12,7 +12,7 @@ use Attribute;
  * metadata; future codegen phases will use it to emit direct LLVM `call`
  * instructions to the linked symbol (see docs/ffi.md).
  */
-#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Library
 {
     public function __construct(

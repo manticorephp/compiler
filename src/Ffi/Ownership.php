@@ -37,12 +37,12 @@ final class Take
 {
 }
 
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Give
 {
 }
 
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class StaticPtr
 {
 }
