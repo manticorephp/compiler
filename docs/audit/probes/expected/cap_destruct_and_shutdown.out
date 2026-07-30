@@ -1,0 +1,5 @@
+destruct dropped
+after unset
+shutdown 1
+shutdown 2 arg
+destruct kept

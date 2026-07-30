@@ -1,0 +1,15 @@
+mb_strlen=present
+mb_substr=present
+mb_strtolower=present
+mb_strtoupper=present
+mb_strpos=present
+mb_str_split=present
+mb_convert_encoding=present
+mb_detect_encoding=present
+mb_internal_encoding=present
+mb_ord=present
+mb_strwidth=present
+strlen=13
+mb_strlen=11
+mb_substr=héll
+mb_strtoupper=HÉLLO WÖRLD

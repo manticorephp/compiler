@@ -1,0 +1,22 @@
+int(1)
+string(2) "en"
+string(1) "3"
+int(1)
+NULL
+int(1)
+array(2) {
+  [0]=>
+  string(1) "o"
+  [1]=>
+  int(1)
+}
+int(3)
+array(3) {
+  [0]=>
+  string(1) "1"
+  [1]=>
+  string(2) "22"
+  [2]=>
+  string(3) "333"
+}
+string(9) "a[1]b[22]"

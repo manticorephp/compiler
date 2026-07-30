@@ -1,0 +1,25 @@
+array(1) {
+  [0]=>
+  string(3) "str"
+}
+array(2) {
+  [0]=>
+  string(3) "pre"
+  [1]=>
+  string(3) "str"
+}
+array(1) {
+  [0]=>
+  string(3) "str"
+}
+array(2) {
+  [0]=>
+  string(3) "str"
+  ["k"]=>
+  int(7)
+}
+string(1) "s"
+array(1) {
+  [0]=>
+  string(1) "s"
+}
