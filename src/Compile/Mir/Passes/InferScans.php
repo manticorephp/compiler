@@ -1323,12 +1323,33 @@ trait InferScans
                 $el = $t->element;
                 if ($el === null) { continue; }
                 $ek = $el->kind;
-                if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
+                // A CELL element boxes anything — nothing to widen.
+                if ($ek === Type::KIND_CELL) { continue; }
+                // An ERASED element used to be skipped here, deferring to
+                // scanLocalElemFromStores. That deferral is unsound for exactly
+                // this shape: that scan is INTRA-procedural and reads the local's
+                // own stores, so a writer sitting inside a by-ref callee is
+                // invisible to it. `$out = []; collect($out);` therefore stayed
+                // vec[unknown], the callee wrote its string RAW, and the caller
+                // decoded the slot as erased and printed a denormal float. The
+                // accumulator idiom — the one symfony's event dispatcher, config
+                // merge and DI passes are built out of.
+                //
+                // `vec[unknown]` is only ever safe when local refinement can see
+                // every writer; a by-ref call is precisely when it cannot.
+                $erased = $ek === Type::KIND_UNKNOWN;
                 foreach ($foreign[$key] as $tok => $unused) {
                     if (\str_starts_with($tok, 'k:')) {
+                        // For an erased element the kind never matches, so this
+                        // widens — which is the point.
                         if (\substr($tok, 2) !== $ek) { $found[$a->name] = true; }
                         continue;
                     }
+                    // A param-sourced append says nothing on its own: what lands
+                    // is whatever THIS call site passed, and for an erased
+                    // element there is no mismatch to reason from. Left alone so
+                    // `array_push($erased, …)` does not widen on every call.
+                    if ($erased) { continue; }
                     $parts = \explode(':', $tok);
                     $j = (int)$parts[1];
                     $flag = $parts[2];

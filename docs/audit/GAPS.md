@@ -18,14 +18,14 @@ without a file behind it.
 
 **31 findings**: 7 S0, 8 S1, 14 S2, 1 S3, 1 S4.
 
-Capability probes: 1 PASS (`docs/audit/data/capability.tsv`).
+Capability probes: 1 DIFF (`docs/audit/data/capability.tsv`).
 
 ## Ranked
 
 | # | class | id | tier | depth | title | evidence |
 |---|---|---|---|---|---|---|
-| 1 | S0 | `empty-array-byref-elem-repr` | T0 | repr | an array that is EMPTY at the call site loses its element hint through a by-reference write; the caller reads raw bits | [`probes/cap_callback_byref_capture.php`](probes/cap_callback_byref_capture.php) |
-| 2 | S0 | `array-walk-recursive-callback` | T2 | repr | array_walk_recursive hands its callback values that read back as raw bits | [`probes/cap_array_recursion.php`](probes/cap_array_recursion.php) |
+| 1 | S0 | `array-walk-recursive-callback` | T2 | repr | array_walk_recursive hands its callback values that read back as raw bits (a witness of erased-byref-closure-capture, not a separate root) | [`probes/cap_array_recursion.php`](probes/cap_array_recursion.php) |
+| 2 | S0 | `erased-byref-closure-capture` | T2 | repr | same root through a different carrier: `use (&$erased)` in a closure invoked from the stdlib is a by-ref writer the widen scan never inspects, because it only walks CALL args and not Closure_ captures | [`probes/cap_array_recursion.php`](probes/cap_array_recursion.php) |
 | 3 | S0 | `preg-named-groups` | T2 | stdlib-leaf | preg_match named capture groups come back NULL, which makes symfony/routing unimplementable | [`probes/cap_preg_named_groups.php`](probes/cap_preg_named_groups.php) |
 | 4 | S0 | `preg-offset-capture-pair` | T2 | stdlib-leaf | PREG_OFFSET_CAPTURE returns the bare string instead of the [string, offset] pair | [`probes/cap_preg_named_groups.php`](probes/cap_preg_named_groups.php) |
 | 5 | S0 | `enum-exists-returns-int` | T3 | prelude | enum_exists returns an int where php returns bool | [`probes/cap_refl_enum.php`](probes/cap_refl_enum.php) |
@@ -67,6 +67,7 @@ in the same commit that closes its gap.
 |---|---|---|---|
 | `ffi-alias-capture-ret` | `bare-alias-capture` | `tests/aot/cases/cap_str_capture_family.php` | strstr/strchr/strrchr resolved to the raw C bindings and returned a pointer where PHP returns a string — global PHP-semantics implementations now win at resolveCallName |
 | `ffi-alias-capture-nul` | `bare-alias-capture` | `tests/aot/cases/cap_str_capture_family.php` | strcmp/strncmp/strcasecmp/strncasecmp compared NUL-terminated, so strcmp("a\0b","a\0c") answered 0 — now length-aware, unsigned, with PHP's prefix rule |
+| `empty-array-byref-elem-repr` | `element-repr` | `tests/aot/cases/cap_callback_byref_capture.php` | an erased local passed to a by-ref callee that appends a foreign kind stayed vec[unknown] — collectByRefWidenArgs skipped UNKNOWN, deferring to an INTRA-procedural scan that cannot see the callee's store |
 
 ## By owning epic
 
@@ -74,10 +75,10 @@ The ladder tier is the implementation order: a tier's dependency closure
 lies entirely in lower tiers, so a gap first seen at tier N blocks tiers
 N..8 and nothing below.
 
-### `element-repr` — 2 finding(s), first bites at T0
+### `element-repr` — 2 finding(s), first bites at T2
 
-- **S0** `empty-array-byref-elem-repr` — an array that is EMPTY at the call site loses its element hint through a by-reference write; the caller reads raw bits
-- **S0** `array-walk-recursive-callback` — array_walk_recursive hands its callback values that read back as raw bits
+- **S0** `array-walk-recursive-callback` — array_walk_recursive hands its callback values that read back as raw bits (a witness of erased-byref-closure-capture, not a separate root)
+- **S0** `erased-byref-closure-capture` — same root through a different carrier: `use (&$erased)` in a closure invoked from the stdlib is a by-ref writer the widen scan never inspects, because it only walks CALL args and not Closure_ captures
 
 ### `regex-surface` — 2 finding(s), first bites at T2
 
