@@ -203,12 +203,24 @@ trait EmitLlvmCalls
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = zext i1 ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
-            } elseif ($ret === 'i32') {
-                // A C `int` return: SIGN-extend. The callee wrote only w0, so its
-                // -1 has a zero upper half and an i64 read would answer
-                // 4294967295. {@see LowerFromAst::ffiRetIsInt32}
+            } elseif ($ret === 'float') {
+                // C `float` is 32-bit; the PHP carrier is a double bit-cast into
+                // i64. Widen first, then reinterpret.
+                $rd = $this->ssa->allocReg();
                 $ri = $this->ssa->allocReg();
-                $out .= '  ' . $ri . ' = sext i32 ' . $r . " to i64\n";
+                $out .= '  ' . $rd . ' = fpext float ' . $r . " to double\n";
+                $out .= '  ' . $ri . ' = bitcast double ' . $rd . " to i64\n";
+                $out .= '  ret i64 ' . $ri . "\n";
+            } elseif ($ret === 'i32' || $ret === 'i16' || $ret === 'i8') {
+                // A NARROW C integer return must be extended into the i64
+                // carrier, and the direction is the C type's signedness: the
+                // callee wrote only the low half, so a signed -1 read as i64
+                // would answer 4294967295. That is exactly how SSL_read's
+                // WANT_READ became a 4 GB memmove length.
+                // {@see LowerFromAst::ffiCTypeToken}
+                $ext = $fn->ffiRetUnsigned ? 'zext' : 'sext';
+                $ri = $this->ssa->allocReg();
+                $out .= '  ' . $ri . ' = ' . $ext . ' ' . $ret . ' ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
             } else {
                 $out .= '  ret i64 ' . $r . "\n";

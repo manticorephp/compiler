@@ -1,0 +1,8 @@
+htonl=4294967295
+atoi=-1
+atoi_big=2147483647
+atol=9007199254740993
+atol_neg=-9007199254740993
+atof=1.5
+strtof=2.5
+-- done --

@@ -1622,32 +1622,104 @@ final class LowerFromAst implements Pass
     }
 
     /**
-     * True when a FUNCTION-level `#[CType('int')]` declares the C RETURN as a
-     * 32-bit int, so the FFI wrapper must SIGN-EXTEND it into the i64 carrier.
+     * The FUNCTION-level `#[Ffi\CType]` token — the C type of the binding's
+     * RETURN — or '' when the attribute is absent.
      *
-     * This is not cosmetic. A C-compiled callee returning -1 does `mov w0, #-1`,
-     * which zeroes x0's upper half, so an `i64` declare reads 4294967295. That is
-     * how SSL_read's WANT_READ (-1) became a 4 GB length in __mc_stream_fill and
-     * memmove'd off the end of the heap. Hand-written libc syscall stubs happen to
-     * sign-extend (they write the full x0), which is why only the C libraries —
-     * OpenSSL, PCRE2 — were exposed.
-     *
-     * ⚠ Only for a callee whose C prototype really returns `int`. Never put it on
-     * one that returns a POINTER or a long/ssize_t carried as PHP `int`
-     * (SSL_CTX_new, SSL_new, recv, …) — the sext would truncate the value.
+     * This is not cosmetic. A C-compiled callee returning `int` -1 does
+     * `mov w0, #-1`, which zeroes x0's upper half, so an `i64` declare reads
+     * 4294967295. That is how SSL_read's WANT_READ (-1) became a 4 GB length in
+     * __mc_stream_fill and memmove'd off the end of the heap. Hand-written libc
+     * syscall stubs happen to sign-extend (they write the full x0), which is why
+     * only the C libraries — OpenSSL, PCRE2 — were exposed.
      */
-    private function ffiRetIsInt32(array $attributes): bool
+    private function ffiCTypeToken(array $attributes, string $where,
+                                   \Parser\Ast\Span $span): string
     {
         foreach ($attributes as $attr) {
-            $name = \ltrim($attr->name, '\\');
-            if ($name !== 'CType' && $name !== 'Ffi\\CType') { continue; }
-            if ($attr->args === []) { continue; }
-            $arg = $attr->args[0];
-            if ($arg->kind === 'StringLiteral' && $this->strLitValue($arg) === 'int') {
-                return true;
+            if (!$this->attrIsOneOf($attr, ['CType', 'Ffi\\CType'])) { continue; }
+            $args = $this->attrArgs($attr);
+            if ($args === []) {
+                $this->attrFail('#[Ffi\\CType] on ' . $where
+                    . ': requires a string literal argument', $span);
+                return '';
             }
+            // Read `->value` through a StringLiteral-typed accessor: a
+            // base-`Expr`-typed read resolves by the WRONG offset under
+            // self-host (T5). The kind check proves the subclass.
+            $arg = $args[0];
+            if ($arg->kind === 'NamedArg') { $arg = $this->namedArgValue($arg); }
+            if ($arg->kind !== 'StringLiteral') {
+                $this->attrFail('#[Ffi\\CType] on ' . $where
+                    . ': requires a string literal argument', $span);
+                return '';
+            }
+            return $this->strLitValue($arg);
         }
-        return false;
+        return '';
+    }
+
+    /** A PARAMETER-position `#[Ffi\CType]` token, or '' when absent. */
+    private function paramCTypeToken(\Parser\Ast\Param $p, string $where): string
+    {
+        return $this->ffiCTypeToken($this->paramAttrs($p), $where, $this->paramSpan($p));
+    }
+
+    /**
+     * Validate a written `#[Ffi\CType]` token against the PHP type hint that
+     * carries it, and answer the LLVM type the wrapper should declare. '' when
+     * the token is rejected — the caller then falls back to the hint, so a
+     * collected (analyze-mode) diagnostic does not also derail lowering.
+     *
+     * The carrier rules exist because the token and the hint describe the same
+     * value from two sides, and a disagreement is always a bug: `#[CType('int')]`
+     * on a `\Ffi\Ptr` return would sign-extend an address, which is the SSL_read
+     * failure written down as a rule.
+     */
+    private function ffiResolveCType(string $token, ?string $hint, bool $isReturn,
+                                     string $where, \Parser\Ast\Span $span): string
+    {
+        $llvm = \Compile\Mir\FfiCTypes::llvmType($token);
+        if ($llvm === '') {
+            $this->attrFail('#[Ffi\\CType(\'' . $token . '\')] on ' . $where
+                . ': unknown C type. Known: ' . \Compile\Mir\FfiCTypes::tokens(), $span);
+            return '';
+        }
+        if ($llvm === 'void' && !$isReturn) {
+            $this->attrFail('#[Ffi\\CType(\'void\')] on ' . $where
+                . ': void is a return type only', $span);
+            return '';
+        }
+        // No hint declares no intent, so there is nothing to contradict.
+        if ($hint === null) { return $llvm; }
+        $carrier = $this->ffiCType($hint);
+        $shown = \ltrim($hint, '\\');
+        if ($carrier === 'ptr' && $llvm !== 'ptr') {
+            // The SSL_read rule: a pointer carrier must never be narrowed or
+            // sign-extended, and a PHP string is not a number either.
+            $this->attrFail('#[Ffi\\CType(\'' . $token . '\')] on ' . $where
+                . ': the declared type is ' . $shown
+                . ', which carries a pointer — a pointer must not be extended or'
+                . ' truncated (use \'ptr\', or drop the attribute)', $span);
+            return '';
+        }
+        if ($carrier === 'void' && $llvm !== 'void') {
+            $this->attrFail('#[Ffi\\CType(\'' . $token . '\')] on ' . $where
+                . ': the declared type is void', $span);
+            return '';
+        }
+        if ($carrier === 'double' && !\Compile\Mir\FfiCTypes::isFloat($token)) {
+            $this->attrFail('#[Ffi\\CType(\'' . $token . '\')] on ' . $where
+                . ': the declared type is float, which cannot carry a C ' . $token, $span);
+            return '';
+        }
+        if (($carrier === 'i64' || $carrier === 'i1')
+            && (\Compile\Mir\FfiCTypes::isFloat($token) || $llvm === 'void')) {
+            $this->attrFail('#[Ffi\\CType(\'' . $token . '\')] on ' . $where
+                . ': the declared type is ' . $shown . ', which cannot carry a C '
+                . $token, $span);
+            return '';
+        }
+        return $llvm;
     }
 
     /** Subclass-typed read of a StringLiteral's value (correct offset). */

@@ -145,13 +145,23 @@ trait LowerFns
             $ctypes = [];
             foreach ($decl->params as $p) { $ctypes[] = $this->ffiCType($p->typeHint); }
             $fn->ffiParamCTypes = $ctypes;
-            // A FUNCTION-level `#[CType('int')]` states that the C RETURN is a
-            // 32-bit int, so the wrapper sign-extends it. Without that, a C
-            // function returning -1 in w0 (`mov w0, #-1` zeroes the top half)
-            // reads as 4294967295 through an i64 declare.
-            $fn->ffiRetCType = $this->ffiRetIsInt32($decl->attributes)
-                ? 'i32'
+            // A FUNCTION-level `#[Ffi\CType]` states the C RETURN's real type,
+            // which the PHP hint cannot: `int` covers C's char/short/int/long
+            // alike, and the wrapper has to know the width to extend correctly.
+            // Without it a C function returning -1 in w0 (`mov w0, #-1` zeroes
+            // the top half) reads as 4294967295 through an i64 declare.
+            $retTok = $this->ffiCTypeToken($decl->attributes,
+                $decl->name . '()', $decl->span);
+            $retLlvm = '';
+            if ($retTok !== '') {
+                $retLlvm = $this->ffiResolveCType($retTok, $decl->returnType, true,
+                    $decl->name . '()', $decl->span);
+            }
+            $fn->ffiRetCType = $retLlvm !== ''
+                ? $retLlvm
                 : $this->ffiCType($decl->returnType);
+            $fn->ffiRetUnsigned = $retLlvm !== ''
+                && \Compile\Mir\FfiCTypes::isUnsigned($retTok);
             return $fn;
         }
         $savedSawYield = $this->sawYield;
