@@ -98,6 +98,21 @@ trait EmitLlvmFiber
         $len = \strlen($msg) + 1;   // + the newline write(2) puts out
         $out .= '@__mir_fib_ovf_msg = linkonce_odr constant [' . (string)$len . ' x i8] c"'
              . $msg . '\0A"' . "\n";
+        // The guard page is the SECOND mapping every fiber costs: PROT_NONE is a
+        // different protection, so the mprotect splits the stack's VMA and no
+        // amount of slab allocation can merge them back. On Linux the stock
+        // `vm.max_map_count` of 65530 therefore caps a process at ~32 000
+        // concurrent tasks whatever the stack size is. MANTICORE_FIBER_GUARD=0
+        // trades the NAMED stack overflow for one mapping per fiber and twice the
+        // ceiling. Resolved once per process and cached here (0 unresolved, 1 on,
+        // 2 off) so the stack pool can never hold a mix — a pooled guarded mapping
+        // handed to an unguarded caller is exactly the class of silent corruption
+        // that the unrecorded pool LENGTH already caused once.
+        $out .= "@__mir_fib_guard_want = linkonce_odr global i64 0\n";
+        $env = 'MANTICORE_FIBER_GUARD';
+        $out .= '@__mir_fib_guard_env = linkonce_odr constant [' . (string)(\strlen($env) + 1)
+             . ' x i8] c"' . $env . '\00"' . "\n";
+        $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
         $out .= "declare i32 @sigaltstack(ptr, ptr)\n";
         $out .= "declare i32 @sigaction(i32, ptr, ptr)\n";
         $out .= "declare i32 @raise(i32)\n";
@@ -352,6 +367,12 @@ trait EmitLlvmFiber
         $check = $this->ssa->allocLabel('fibpool.check');
         $hit = $this->ssa->allocLabel('fibpool.hit');
         $miss = $this->ssa->allocLabel('fibpool.miss');
+        $guardq = $this->ssa->allocLabel('fibpool.guardq');
+        $resolve = $this->ssa->allocLabel('fibpool.gresolve');
+        $resChk = $this->ssa->allocLabel('fibpool.gcheck');
+        $resOn = $this->ssa->allocLabel('fibpool.gon');
+        $resStore = $this->ssa->allocLabel('fibpool.gstore');
+        $decided = $this->ssa->allocLabel('fibpool.gdecided');
         $guard = $this->ssa->allocLabel('fibpool.guard');
         $ok = $this->ssa->allocLabel('fibpool.ok');
         $unguarded = $this->ssa->allocLabel('fibpool.unguarded');
@@ -390,8 +411,45 @@ trait EmitLlvmFiber
         // MAP_FAILED is -1, not null: out of VA / over RLIMIT_AS / at
         // vm.max_map_count lands here.
         $bad = $this->ssa->allocReg();
-        $out .= '  ' . $bad . ' = icmp eq i64 ' . $fresh . ", -1\n";
-        $out .= '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $guard . "\n";
+        $out .= '  ' . $bad . ' = icmp eq i64 ' . $fresh . ', -1' . "\n";
+        $out .= '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $guardq . "\n";
+        // Guard or not — MANTICORE_FIBER_GUARD, read once and cached. Anything but
+        // a leading '0' means guarded, so an unset or empty variable keeps the
+        // protective default and only an explicit opt-out drops it.
+        $out .= $guardq . ":\n";
+        $want0 = $this->ssa->allocReg();
+        $out .= '  ' . $want0 . " = load i64, ptr @__mir_fib_guard_want\n";
+        $unres = $this->ssa->allocReg();
+        $out .= '  ' . $unres . ' = icmp eq i64 ' . $want0 . ", 0\n";
+        $out .= '  br i1 ' . $unres . ', label %' . $resolve . ', label %' . $decided . "\n";
+        $out .= $resolve . ":\n";
+        $ev = $this->ssa->allocReg();
+        $out .= '  ' . $ev . " = call ptr @getenv(ptr @__mir_fib_guard_env)\n";
+        $evnull = $this->ssa->allocReg();
+        $out .= '  ' . $evnull . ' = icmp eq ptr ' . $ev . ", null\n";
+        $out .= '  br i1 ' . $evnull . ', label %' . $resOn . ', label %' . $resChk . "\n";
+        $out .= $resChk . ":\n";
+        $c0 = $this->ssa->allocReg();
+        $out .= '  ' . $c0 . ' = load i8, ptr ' . $ev . "\n";
+        $isOff = $this->ssa->allocReg();
+        $out .= '  ' . $isOff . ' = icmp eq i8 ' . $c0 . ", 48\n";
+        $chk = $this->ssa->allocReg();
+        $out .= '  ' . $chk . ' = select i1 ' . $isOff . ", i64 2, i64 1\n";
+        $out .= '  br label %' . $resStore . "\n";
+        $out .= $resOn . ":\n";
+        $out .= '  br label %' . $resStore . "\n";
+        $out .= $resStore . ":\n";
+        $wv = $this->ssa->allocReg();
+        $out .= '  ' . $wv . ' = phi i64 [ 1, %' . $resOn . ' ], [ ' . $chk . ', %' . $resChk . " ]\n";
+        $out .= '  store i64 ' . $wv . ", ptr @__mir_fib_guard_want\n";
+        $out .= '  br label %' . $decided . "\n";
+        $out .= $decided . ":\n";
+        $want = $this->ssa->allocReg();
+        $out .= '  ' . $want . ' = phi i64 [ ' . $want0 . ', %' . $guardq . ' ], [ '
+             . $wv . ', %' . $resStore . " ]\n";
+        $doGuard = $this->ssa->allocReg();
+        $out .= '  ' . $doGuard . ' = icmp ne i64 ' . $want . ", 2\n";
+        $out .= '  br i1 ' . $doGuard . ', label %' . $guard . ', label %' . $ok . "\n";
         $out .= $guard . ":\n";
         // A stack without its guard page turns an overflow into heap corruption, so
         // a failed mprotect fails the whole allocation rather than running blind.

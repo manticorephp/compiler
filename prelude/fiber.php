@@ -84,7 +84,8 @@ class Fiber
             $this->state = 0;
             \__mir_fiber_ctx_free($this->saveCtx);
             $this->saveCtx = 0;
-            throw new \FiberError("Fiber stack allocation failed (" . (string)$len . " bytes)");
+            throw new \FiberError("Fiber stack allocation failed (" . (string)$len
+                . " bytes)" . self::stackFailureHint());
         }
         $this->stackBase = $base;
         $this->stackLen = $len;
@@ -230,10 +231,12 @@ class Fiber
      * {@see setStackSize()} — SUPERSET, {@see docs/superset.md}.
      *
      * A stack is virtual address space, not memory: pages are touched lazily and the
-     * mapping is pooled and reclaimed on termination. What it costs is VA and ONE
-     * MAPPING per live fiber, and the mapping is the real ceiling — Linux
-     * `vm.max_map_count` defaults to 65530, so the stack size is what decides how
-     * many concurrent tasks a process can hold. {@see tools/fiber_ceiling.php}.
+     * mapping is pooled and reclaimed on termination. What it costs is VA and TWO
+     * MAPPINGS per live fiber — the stack, and the guard page the mprotect splits
+     * off it — and the mapping count is the real ceiling: Linux `vm.max_map_count`
+     * defaults to 65530, which is ~32 000 concurrent tasks NO MATTER what this
+     * returns. Stack size buys address space and resident memory, not tasks;
+     * MANTICORE_FIBER_GUARD=0 is what buys tasks. {@see tools/fiber_ceiling.php}.
      */
     private static int $stackBytes = 0;
 
@@ -271,9 +274,37 @@ class Fiber
         self::$stackBytes = self::clampStack($bytes);
     }
 
+    /**
+     * Why a stack mapping failed, in whatever words the host can be asked for.
+     * "Allocation failed" alone is true and useless: the ceiling here is almost
+     * never memory, it is `vm.max_map_count`. Every fiber costs TWO mappings — the
+     * stack, plus the mprotect that splits its guard page off — so a stock 65530
+     * stops a process at ~32 000 concurrent tasks whatever the stack size is, and
+     * that is a sysctl away from being a non-problem. Linux only: Darwin has no
+     * /proc and no equivalent cap to read, so it gets the bare message.
+     */
+    private static function stackFailureHint(): string
+    {
+        $cap = @\file_get_contents('/proc/sys/vm/max_map_count');
+        if ($cap === false) { return ''; }
+        $maps = @\file_get_contents('/proc/self/maps');
+        if ($maps === false) { return ''; }
+        $limit = (int)\trim((string)$cap);
+        $used = \substr_count((string)$maps, "\n");
+        $hint = ' — ' . (string)$used . ' of ' . (string)$limit . ' mappings in use';
+        if ($limit > 0 && $used * 10 >= $limit * 9) {
+            $hint = $hint . '; this is vm.max_map_count, not memory. Raise the sysctl,'
+                . ' or set MANTICORE_FIBER_GUARD=0 to spend one mapping per fiber'
+                . ' instead of two and lose the named stack-overflow report';
+        }
+        return $hint;
+    }
+
     /** Round up to a 16 KiB multiple (the Apple-silicon page) and keep the guard
      *  page from eating the stack: the low 16 KiB is PROT_NONE, so anything near it
-     *  is a stack that faults before it is useful. */
+     *  is a stack that faults before it is useful. Unchanged when the guard is off
+     *  (MANTICORE_FIBER_GUARD=0) — the low pages are then usable stack, and the
+     *  rounding costs nothing worth a second code path. */
     private static function clampStack(int $bytes): int
     {
         if ($bytes < 65536) { $bytes = 65536; }

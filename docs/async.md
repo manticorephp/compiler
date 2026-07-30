@@ -106,6 +106,7 @@ async(function () {
 | `Async\stats(): array` | engine counters (spawned/wakes/reactor_waits/…) |
 | `Async\failure(): string` | which task raised the failure that escaped, and where it was spawned |
 | `Fiber::setStackSize(int)` | bytes of stack per fiber (`MANTICORE_FIBER_STACK` does the same) |
+| `MANTICORE_FIBER_GUARD=0` | one mapping per fiber instead of two — twice the task ceiling, no named overflow |
 | `fwrite($s, [$hdr, $body])` | vectored write — one `writev(2)`, no concat |
 
 ### Scopes, deadlines, cancellation
@@ -288,8 +289,9 @@ watchdog on it also goes to STDERR, on the same channel.
 
 A fiber is 1 MiB of stack by default — `MANTICORE_FIBER_STACK=<bytes>`, or
 `Fiber::setStackSize()` from code, both taking effect for fibers created afterwards.
-Stacks are `mmap`'d with a `PROT_NONE` guard page below them, pooled on termination,
-and paged in lazily, so what a parked task actually holds is far less than its size.
+Stacks are `mmap`'d with a `PROT_NONE` guard page below them (`MANTICORE_FIBER_GUARD=0`
+drops it — see below), pooled on termination, and paged in lazily, so what a parked
+task actually holds is far less than its size.
 
 The default is measured, not assumed (`tools/fiber_ceiling.php`). At 40 000
 concurrent tasks on Linux arm64:
@@ -316,6 +318,19 @@ mappings** (the guard page splits the VMA), so a stock Linux `vm.max_map_count` 
 65530 stops a process near 32 000 concurrent tasks whatever the stack size. Raise
 `vm.max_map_count` if you need more; container defaults are often higher already
 (Docker Desktop ships 262144).
+
+If you cannot raise the sysctl, **`MANTICORE_FIBER_GUARD=0`** skips the `mprotect`
+and spends one mapping per fiber instead of two, which doubles that ceiling. It is a
+real trade, not a free win: without the guard page an overflow is an ordinary fault
+in whatever the kernel put below the stack, so the named message above is gone and a
+deep enough recursion corrupts rather than dies. Default on; resolved once per
+process, so a program cannot end up holding a mix of guarded and unguarded stacks.
+
+Beyond the stack, a task's other cost is its **arena**: every fiber allocates on its
+own, and its first chunk is 4 KiB, doubling to a 64 KiB ceiling as the task actually
+allocates. A task that never allocates holds ~25 KiB; one that does holds ~31 KiB
+(macOS arm64, 1 MiB stacks, 10 000 and 20 000 concurrent tasks). A flat 64 KiB
+minimum chunk used to make that second number ~42 KiB.
 
 ### Bounded concurrency
 
