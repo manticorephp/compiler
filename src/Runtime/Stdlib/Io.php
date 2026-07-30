@@ -1391,8 +1391,17 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         // come here: php writes that straight to fd 1 and does not capture it,
         // and ordering is already right because `echo` shares stdout's stdio
         // buffer with it.
-        \__mir_out_write_str($len === \strlen($data) ? $data : \substr($data, 0, $len));
-        return $len;
+        // (int)$len, and an `if` rather than a ternary: $len derives from the
+        // `?int $length` param, so it types as a CELL — the same trap the
+        // KIND_MEMFILE branch below documents. Handing a cell to a `ptr` builtin
+        // inttoptr's the tagged word and the funnel dereferences garbage.
+        $wl = (int)$len;
+        if ($wl >= \strlen($data)) {
+            \__mir_out_write_str($data);
+        } else {
+            \__mir_out_write_str(\substr($data, 0, $wl));
+        }
+        return $wl;
     }
     if ($stream->kind === \Resource::KIND_MEMFILE) {
         // php://memory: overwrite $len bytes at the cursor, extending past the end;
