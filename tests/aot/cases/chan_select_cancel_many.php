@@ -62,11 +62,10 @@ async(function () {
     $both = [];
     for ($i = 0; $i < 50; $i++) {
         $both[] = spawn(function () use ($d) {
-            // Spelled with two explicit cases, not the `[$d, SelectCase::send(…)]`
-            // shorthand: a literal mixing a Channel and a SelectCase erases its
-            // element, and `instanceof` over an erased carrier answers false — a
-            // separate, pre-existing bug that has nothing to do with the queues.
-            select([SelectCase::recv($d), SelectCase::send($d, 1)]);
+            // The documented shorthand — a bare Channel beside a SelectCase — which
+            // is a literal of two unrelated classes, so it is also the shape that
+            // used to erase its element and SIGSEGV inside select().
+            select([$d, SelectCase::send($d, 1)]);
             return 'woke';
         });
     }
