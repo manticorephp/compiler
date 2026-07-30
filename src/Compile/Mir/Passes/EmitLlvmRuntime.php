@@ -518,6 +518,13 @@ trait EmitLlvmRuntime
         $out .= "  %nxp = getelementptr i8, ptr %cur, i64 0\n";
         $out .= "  %nx = load ptr, ptr %nxp\n";
         $out .= "  %nxnull = icmp eq ptr %nx, null\n";
+        // The next chunk doubles this one, up to the 64 KiB ceiling. Computed
+        // here because %cur is null on the other edge into newchunk.
+        $out .= "  %ccapp = getelementptr i8, ptr %cur, i64 8\n";
+        $out .= "  %curcap = load i64, ptr %ccapp\n";
+        $out .= "  %grow = shl i64 %curcap, 1\n";
+        $out .= "  %growbig = icmp ugt i64 %grow, 65536\n";
+        $out .= "  %grown = select i1 %growbig, i64 65536, i64 %grow\n";
         $out .= "  br i1 %nxnull, label %newchunk, label %reusen\n";
         $out .= "reusen:\n";
         $out .= "  %nu = getelementptr i8, ptr %nx, i64 16\n";
@@ -525,13 +532,26 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %nx, ptr @__mir_arena_cur\n";
         $out .= "  br label %retry\n";
         $out .= "newchunk:\n";
+        // An arena's FIRST chunk is small and every later one doubles it, to a
+        // 64 KiB ceiling. Every fiber runs on its own arena (prelude/fiber.php:10
+        // — a fresh ctx zeroes these globals), so a flat 64 KiB minimum was 64 KiB
+        // of first-touch per concurrent task, which at tens of thousands of tasks
+        // is the dominant per-task cost. A light task never leaves the first 4 KiB;
+        // an allocation-heavy one pays four extra mallocs to reach the same
+        // ceiling, and chunks are retained and reused, so the ramp is paid once
+        // per arena lifetime.
+        $out .= "  %base = phi i64 [ 4096, %fromhead ], [ %grown, %fromnext ]\n";
         // A big alloc gets 2x slack so a vec that outgrew its chunk (the
         // append-realloc copy path) has headroom to extend in place on the
         // next appends — otherwise an exact-sized chunk is full on arrival
         // and every further append re-copies to a fresh chunk (O(n^2)).
         $out .= "  %big = icmp ugt i64 %sz16, 65536\n";
         $out .= "  %dbl = shl i64 %sz16, 1\n";
-        $out .= "  %ncap = select i1 %big, i64 %dbl, i64 65536\n";
+        // %ncap >= %sz16 unconditionally: it is the loop invariant of the retry
+        // edge, and a chunk that cannot hold the request spins instead of failing.
+        $out .= "  %basefits = icmp uge i64 %base, %sz16\n";
+        $out .= "  %small = select i1 %basefits, i64 %base, i64 %sz16\n";
+        $out .= "  %ncap = select i1 %big, i64 %dbl, i64 %small\n";
         $out .= "  %tot = add i64 %ncap, 24\n";
         $out .= "  %chunk = call ptr @malloc(i64 %tot)\n";
         $out .= "  store ptr null, ptr %chunk\n";
