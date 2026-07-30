@@ -42,7 +42,7 @@ than a library you could publish on Packagist is that the primitives underneath 
 | what | Zend | here |
 |---|---|---|
 | green threads | `Fiber` (userland scheduler, no I/O integration) | `Fiber` on native `fcontext` (~2.8× a Zend fiber switch), stack pooled, guard page |
-| readiness | `stream_select` only | `Io\Poll` — kqueue / epoll / poll, edge-aware, a real reactor |
+| readiness | `stream_select` only | `Io\Poll` — kqueue / epoll / poll, edge-aware, a real reactor; a busy keep-alive connection never reaches it (2 syscalls/request, measured) |
 | blocking I/O | blocks the process | suspends the fiber (§1.3) |
 | task ownership | none | every task belongs to a scope; no fire-and-forget |
 | cancellation | none | delivered as `CancelledException` **at the suspend point**, sticky, re-raised at every later suspend |
@@ -108,9 +108,14 @@ Under it, and all superset:
 - **Network setup is async too** — non-blocking `connect(2)`, both TLS handshake directions
   driven through `WANT_READ`/`WANT_WRITE` parks (so a TLS *server* serves concurrent clients),
   and name resolution over the netpoller: `/etc/hosts`, a per-run cache held by the scheduler,
-  `search`/`ndots` expansion from `resolv.conf`, then A and AAAA across every nameserver
-  (two attempts each, TC → retry over TCP), with the blocking `getaddrinfo` walk as the last
-  resort.
+  the full `resolv.conf` (`search`, `ndots`, `timeout:`, `attempts:`) with `/etc/hosts`
+  consulted per CANDIDATE the way glibc runs nsswitch, then A and AAAA across every
+  nameserver — attempt-major, so a dead first entry costs one timeout per round rather than
+  two — TC → retry over TCP, with the blocking `getaddrinfo` walk as the last resort.
+- **`fwrite()` takes a vector.** `fwrite($s, [$headers, $body])` on a plain socket is one
+  `writev(2)`: no userspace concat of the two, and no second send. php's `fwrite` takes a
+  string and nothing else, so the array form is superset — a non-socket sink or a TLS stream
+  degrades to the concat, with an identical return value, which is what keeps it a drop-in.
 - **Every wait is bounded.** `stream_set_timeout()` sets the stream's timeout for reads *and*
   writes; a park that expires records `timed_out` and reports a short read/write. An unbounded
   park is a liveness hole, not a feature — a peer that stops reading would otherwise wedge a
