@@ -2763,9 +2763,35 @@ final class RuntimeLibrary
         $out .= "  store i64 %npos, ptr %pp\n";
         $out .= "  ret ptr %ns\n";
         // ── escaped: decode into a fresh buffer ──
+        // Size the buffer at THIS literal, not at the rest of the document: one
+        // bounded pre-scan to the closing quote (an escape consumes 2 input
+        // bytes, so it is skipped as a unit). Sizing it at `n - st` cost
+        // json_decode_records 1.1 GB — 5000 escaped strings per decode, each
+        // reserving the whole remaining 750 KB payload.
         $out .= "slow:\n";
         $out .= "  %si = load i64, ptr %kk\n";
-        $out .= "  %cap = sub i64 %n, %st\n";
+        $out .= "  store i64 %si, ptr %jj\n";
+        $out .= "  br label %qscan\n";
+        $out .= "qscan:\n";
+        $out .= "  %qi = load i64, ptr %jj\n";
+        $out .= "  %qend = icmp sge i64 %qi, %n\n";
+        $out .= "  br i1 %qend, label %qdone, label %qbody\n";
+        $out .= "qbody:\n";
+        $out .= "  %qcp = getelementptr inbounds i8, ptr %s, i64 %qi\n";
+        $out .= "  %qcb = load i8, ptr %qcp\n";
+        $out .= "  %qisq = icmp eq i8 %qcb, 34\n";
+        $out .= "  br i1 %qisq, label %qdone, label %qnext\n";
+        $out .= "qnext:\n";
+        $out .= "  %qisb = icmp eq i8 %qcb, 92\n";
+        $out .= "  %qstep = select i1 %qisb, i64 2, i64 1\n";
+        $out .= "  %qi2 = add i64 %qi, %qstep\n";
+        $out .= "  store i64 %qi2, ptr %jj\n";
+        $out .= "  br label %qscan\n";
+        $out .= "qdone:\n";
+        $out .= "  %qi3 = load i64, ptr %jj\n";
+        $out .= "  %qcl = icmp sgt i64 %qi3, %n\n";
+        $out .= "  %qlim = select i1 %qcl, i64 %n, i64 %qi3\n";
+        $out .= "  %cap = sub i64 %qlim, %st\n";
         $out .= "  %cap1 = add i64 %cap, 1\n";
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap1)\n";
         $out .= "  %pl = sub i64 %si, %st\n";
