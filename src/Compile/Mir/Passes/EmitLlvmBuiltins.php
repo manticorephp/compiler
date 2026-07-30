@@ -233,6 +233,7 @@ trait EmitLlvmBuiltins
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
         if ($name === '__mc_json_escape')             { return $this->biJsonEscape($args); }
         if ($name === 'json_encode' && \count($args) === 1) { return $this->biJsonEncode($args); }
+        if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
@@ -4972,6 +4973,51 @@ trait EmitLlvmBuiltins
      * with php's serialize_precision=-1). An OBJECT cell falls back to the
      * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
      */
+    /**
+     * Can this `json_decode()` call take the native path? The `$associative`
+     * flag is accepted and IGNORED (objects always decode to assoc arrays —
+     * documented behaviour of {@see \Runtime\Json\Parser}), so a second
+     * argument may only be dropped when it is a literal with no side effect to
+     * lose. Anything else falls through to the compiled PHP parser.
+     * @param Node[] $args
+     */
+    private function jsonDecodeNative(array $args): bool
+    {
+        $c = \count($args);
+        if ($c === 1) { return true; }
+        if ($c !== 2) { return false; }
+        $k = $args[1]->kind;
+        return $k === Node::KIND_BOOL_CONST || $k === Node::KIND_INT_CONST
+            || $k === Node::KIND_NULL_CONST;
+    }
+
+    /**
+     * `json_decode($json)` — native recursive-descent decoder
+     * ({@see \Compile\Mir\RuntimeLibrary::jsonDec}). Returns a NaN-boxed cell:
+     * objects become cell-repr assoc arrays, arrays cell-repr vecs, scalars
+     * their boxed selves. Replaces the five-PHP-calls-per-value
+     * `\Runtime\Json\Parser`, which stayed at php's own speed because every key
+     * and value cost a `substr` malloc. @param Node[] $args
+     */
+    private function biJsonDecode(array $args): string
+    {
+        $this->rt->needsJsonDec = true;
+        $this->rt->needsStrRc = true;     // __mir_rc_release_str on the key temp
+        $this->rt->needsConcat = true;    // __mir_strlen / __mir_str_new / set_len
+        $this->rt->needsTagged = true;    // the box_* helpers
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_json_decode(ptr ' . $sp . ")\n";
+        $out .= $this->freeStrTemp($args[0], $sp);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function biJsonEncode(array $args): string
     {
         $this->rt->needsJsonEnc = true;
