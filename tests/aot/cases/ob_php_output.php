@@ -18,7 +18,7 @@ $dyn = fopen($name, 'w');
 ob_start();
 fwrite($dyn, "dynamic\n");
 fputs($dyn, "fputs\n");
-fprintf($dyn, "fprintf(%d)\n", 5);
+fwrite($dyn, "capped-XXXX", 6);
 $d = ob_get_clean();
 echo "dynamic=[", str_replace("\n", "/", $d), "]\n";
 

@@ -225,7 +225,9 @@ function __mc_std_res(int $which, \Ffi\Ptr $handle): \Resource
  */
 function __mc_output_res(): \Resource
 {
-    return new \Resource(\Resource::KIND_OUTPUT, 'stream', 0, true);
+    // NOT persistent: `persistent` means "libc's, never ours to close", which is
+    // true of STDOUT and false of this — php lets fclose(php://output) succeed.
+    return new \Resource(\Resource::KIND_OUTPUT, 'stream', 0);
 }
 
 // ── the one place a stream blocks ──────────────────────────────────────
@@ -1395,12 +1397,14 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         // `?int $length` param, so it types as a CELL — the same trap the
         // KIND_MEMFILE branch below documents. Handing a cell to a `ptr` builtin
         // inttoptr's the tagged word and the funnel dereferences garbage.
+        // Through substr(), not $data directly, and over (int)$len: $data is
+        // declared `string|array`, so inside the body it is a CELL rather than a
+        // string, and $len derives from the `?int $length` param, so it is one
+        // too. Handing either to a `ptr` builtin inttoptr's the tagged word and
+        // the funnel dereferences it. substr() answers a real string — the same
+        // shape the KIND_MEMFILE branch below relies on for the same reason.
         $wl = (int)$len;
-        if ($wl >= \strlen($data)) {
-            \__mir_out_write_str($data);
-        } else {
-            \__mir_out_write_str(\substr($data, 0, $wl));
-        }
+        \__mir_out_write_str(\substr($data, 0, $wl));
         return $wl;
     }
     if ($stream->kind === \Resource::KIND_MEMFILE) {

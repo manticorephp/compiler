@@ -267,6 +267,15 @@ final class Resource
      */
     public function close(): bool
     {
+        // php://output has NO handle to release ($addr 0), yet fclose() on it
+        // succeeds in php — so it must be answered before the addr-0 guard
+        // below, which is there for an already-closed or handle-less stream.
+        if ($this->kind === self::KIND_OUTPUT) {
+            if ($this->closed) { return false; }
+            $this->closed = true;
+            $this->type = 'Unknown';
+            return true;
+        }
         if ($this->closed || $this->addr === 0 || $this->persistent) {
             return false;
         }
