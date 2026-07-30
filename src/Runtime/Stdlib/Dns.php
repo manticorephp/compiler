@@ -75,26 +75,58 @@ function __mc_resolv_search(string $text): string
 }
 
 /**
- * `options ndots:N` from $text — last one wins, clamped to 0..15 (glibc's range);
- * 1 when absent. Other options (timeout:, attempts:, rotate, edns0) are ignored;
- * mapping timeout/attempts onto __mc_dns_query's 2 s × 2 tries is a follow-up.
+ * One `options <name>:N` from $text — last one wins, clamped to $min..$max, $def
+ * when absent. Valueless options (rotate, edns0, inet6, …) are ignored: they change
+ * nothing we implement.
  */
-function __mc_resolv_ndots(string $text): int
+function __mc_resolv_option(string $text, string $name, int $def, int $min, int $max): int
 {
-    $nd = 1;
+    $prefix = $name . ':';
+    $plen = \strlen($prefix);
+    $out = $def;
     foreach (\explode("\n", $text) as $line) {
         $line = \trim($line);
         if (\strpos($line, 'options') !== 0) { continue; }
         foreach (\explode(' ', \str_replace("\t", ' ', \substr($line, 7))) as $tokRaw) {
             $tok = \trim((string)$tokRaw);
-            if (\strpos($tok, 'ndots:') !== 0) { continue; }
-            $v = (int)\substr($tok, 6);
-            if ($v < 0) { $v = 0; }
-            if ($v > 15) { $v = 15; }
-            $nd = $v;
+            if (\strpos($tok, $prefix) !== 0) { continue; }
+            $v = (int)\substr($tok, $plen);
+            if ($v < $min) { $v = $min; }
+            if ($v > $max) { $v = $max; }
+            $out = $v;
         }
     }
-    return $nd;
+    return $out;
+}
+
+/** `options ndots:N` — 1 when absent, clamped to glibc's 0..15. */
+function __mc_resolv_ndots(string $text): int
+{
+    return \__mc_resolv_option($text, 'ndots', 1, 0, 15);
+}
+
+/**
+ * `options timeout:N` — SECONDS to wait for one nameserver, clamped to glibc's
+ * 1..30 (RES_MAXRETRANS).
+ *
+ * ⚠ The DEFAULT is ours, not glibc's: 2 s where glibc waits 5. A runtime whose whole
+ * premise is that nothing blocks the loop should not hand a silent resolver five
+ * seconds of a request's budget, and every deployment that disagrees can say
+ * `options timeout:5`. An explicit value always wins.
+ */
+function __mc_resolv_timeout(string $text): int
+{
+    return \__mc_resolv_option($text, 'timeout', 2, 1, 30);
+}
+
+/**
+ * `options attempts:N` — how many times the whole nameserver list is walked,
+ * clamped to glibc's 1..5 (RES_MAXRETRY); 2 when absent, which is glibc's default
+ * too.
+ */
+function __mc_resolv_attempts(string $text): int
+{
+    return \__mc_resolv_option($text, 'attempts', 2, 1, 5);
 }
 
 /**
@@ -475,13 +507,16 @@ function __mc_dns_exchange_tcp(string $ns, string $query, float $timeout = 5.0):
 /**
  * Query the system nameservers for ($host, wire $qtype) and return the raw reply.
  *
- * Walks EVERY nameserver from resolv.conf, twice each, with a 2 s per-attempt budget:
- * a dead or slow first entry no longer fails the whole lookup (it used to take the
- * first line and give up). A truncated (TC) answer is retried over TCP.
+ * Walks EVERY nameserver from resolv.conf, `options attempts:` rounds over the list
+ * with `options timeout:` seconds per server: a dead or slow first entry no longer
+ * fails the whole lookup (it used to take the first line and give up). A truncated
+ * (TC) answer is retried over TCP.
  */
 function __mc_dns_query(string $host, int $qtype): string
 {
-    return \__mc_dns_query_via($host, $qtype, \__mc_dns_nameservers());
+    $text = \__mc_resolv_text();
+    return \__mc_dns_query_via($host, $qtype, \__mc_dns_nameservers(),
+        \__mc_resolv_timeout($text), \__mc_resolv_attempts($text));
 }
 
 /** A reply's RCODE: 0 NOERROR, 3 NXDOMAIN; -1 when the message is too short. */
@@ -496,22 +531,27 @@ function __mc_dns_rcode(string $msg): int
  * search list parses resolv.conf ONCE instead of once per candidate. Records the
  * reply's RCODE for that walk to read back.
  */
-function __mc_dns_query_via(string $host, int $qtype, string $nsCsv): string
+function __mc_dns_query_via(string $host, int $qtype, string $nsCsv,
+                           int $timeout = 2, int $attempts = 2): string
 {
     \__mc_dns_rcode_hold(true, -1);
     $servers = \explode(',', $nsCsv);
     $query = \__mc_dns_build_query($host, $qtype);
-    foreach ($servers as $nsRaw) {
-        $ns = (string)$nsRaw;
-        if ($ns === '') { continue; }
-        for ($try = 0; $try < 2; $try = $try + 1) {
+    // ATTEMPT-major, like glibc: every server is tried once per round, rather than
+    // one server twice before the next is touched at all. With a dead first entry
+    // that is the difference between the second nameserver answering after one
+    // timeout and answering after two.
+    for ($try = 0; $try < $attempts; $try = $try + 1) {
+        foreach ($servers as $nsRaw) {
+            $ns = (string)$nsRaw;
+            if ($ns === '') { continue; }
             $sock = \__mc_tcp_connect($ns, 53, 2);   // 2 = SOCK_DGRAM (connected UDP)
-            if ($sock === false) { break; }          // cannot reach it at all
-            $resp = \__mc_dns_exchange($sock, $query, 2.0);
+            if ($sock === false) { continue; }       // cannot reach it at all
+            $resp = \__mc_dns_exchange($sock, $query, (float)$timeout);
             \fclose($sock);
-            if ($resp === '') { continue; }          // timed out — retry this server
+            if ($resp === '') { continue; }          // timed out — next server
             if (\__mc_dns_truncated($resp)) {
-                $full = \__mc_dns_exchange_tcp($ns, $query, 2.0);
+                $full = \__mc_dns_exchange_tcp($ns, $query, (float)$timeout);
                 if ($full !== '') {
                     \__mc_dns_rcode_hold(true, \__mc_dns_rcode($full));
                     return $full;

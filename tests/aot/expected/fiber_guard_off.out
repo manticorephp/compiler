@@ -1,0 +1,7 @@
+suspend: 2016
+return: unguarded fiber ran
+maps: N
+held: 200
+guarded maps: N
+held: 200
+fewer mappings unguarded: yes

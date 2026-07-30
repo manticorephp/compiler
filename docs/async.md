@@ -102,6 +102,10 @@ async(function () {
 | `Async\dumpOn(int ...$signals)` | print that on a signal — `kill -QUIT <pid>` on a hung process |
 | `Async\watchdog(float $ms)` | name the task that HOLDS the loop longer than $ms |
 | `Async\stats(): array` | engine counters (spawned/wakes/reactor_waits/…) |
+| `Async\failure(): string` | which task raised the failure that escaped, and where it was spawned |
+| `Fiber::setStackSize(int)` | bytes of stack per fiber (`MANTICORE_FIBER_STACK` does the same) |
+| `MANTICORE_FIBER_GUARD=0` | one mapping per fiber instead of two — twice the task ceiling, no named overflow |
+| `fwrite($s, [$hdr, $body])` | vectored write — one `writev(2)`, no concat |
 
 ### Scopes, deadlines, cancellation
 
@@ -283,8 +287,9 @@ watchdog on it also goes to STDERR, on the same channel.
 
 A fiber is 1 MiB of stack by default — `MANTICORE_FIBER_STACK=<bytes>`, or
 `Fiber::setStackSize()` from code, both taking effect for fibers created afterwards.
-Stacks are `mmap`'d with a `PROT_NONE` guard page below them, pooled on termination,
-and paged in lazily, so what a parked task actually holds is far less than its size.
+Stacks are `mmap`'d with a `PROT_NONE` guard page below them (`MANTICORE_FIBER_GUARD=0`
+drops it — see below), pooled on termination, and paged in lazily, so what a parked
+task actually holds is far less than its size.
 
 The default is measured, not assumed (`tools/fiber_ceiling.php`). At 40 000
 concurrent tasks on Linux arm64:
@@ -311,6 +316,30 @@ mappings** (the guard page splits the VMA), so a stock Linux `vm.max_map_count` 
 65530 stops a process near 32 000 concurrent tasks whatever the stack size. Raise
 `vm.max_map_count` if you need more; container defaults are often higher already
 (Docker Desktop ships 262144).
+
+If you cannot raise the sysctl, **`MANTICORE_FIBER_GUARD=0`** skips the `mprotect`
+and spends one mapping per fiber instead of two, which doubles that ceiling. It is a
+real trade, not a free win: without the guard page an overflow is an ordinary fault
+in whatever the kernel put below the stack, so the named message above is gone and a
+deep enough recursion corrupts rather than dies. Default on; resolved once per
+process, so a program cannot end up holding a mix of guarded and unguarded stacks.
+
+Beyond the stack, a task's other cost is its **arena**: every fiber allocates on its
+own, and its first chunk is 4 KiB, doubling to a 64 KiB ceiling as the task actually
+allocates. How much that saves depends entirely on the host allocator, so both were
+measured — 1 MiB stacks, 10 000 and 20 000 concurrent tasks parked on a channel with
+a body that allocates:
+
+| | first chunk 64 KiB | first chunk 4 KiB |
+|---|---|---|
+| macOS arm64 | ~42 KiB / task | **~31 KiB / task** |
+| Linux arm64 (glibc) | ~14.4 KiB / task | **~14.2 KiB / task** |
+
+macOS commits far more than a bump allocator writes, so shrinking the request is most
+of the cost; glibc serves the same request from the heap and touches nothing, so a
+chunk nobody writes past the first page costs one page either way. The mapping count
+is identical in every column — arena chunks are `malloc`'d, not `mmap`'d, and do not
+count against `vm.max_map_count`.
 
 ### Bounded concurrency
 
@@ -365,11 +394,15 @@ Ordinary stream calls suspend the fiber instead of the process when a scheduler 
 `connect(2)` runs non-blocking, BOTH TLS handshake directions are driven through
 `WANT_READ`/`WANT_WRITE` parks (client `SSL_connect` and server `SSL_accept` — so a TLS
 server serves concurrent clients), and a hostname is resolved over the netpoller:
-`/etc/hosts`, a per-run cache held by the scheduler, the `search` list and `ndots` rule from
+a per-run cache held by the scheduler, then the `search` list and `ndots` rule from
 `resolv.conf` (so `db`, `redis`, `service.namespace` — the names compose and kubernetes hand
-you — resolve here instead of falling through to the blocking walk), then A and AAAA queries
-across **every** nameserver (two attempts each, 2 s apiece, TC → retry over TCP), falling
-back to the blocking `getaddrinfo` walk when none of that can answer. A search walk stops the
+you — resolve here instead of falling through to the blocking walk). `/etc/hosts` is
+consulted for EVERY candidate the search list produces, the way glibc runs nsswitch, so a
+short name matches a fully-qualified hosts line. Then A and AAAA queries across **every**
+nameserver, `options attempts:` rounds over the list with `options timeout:` seconds each
+(2 and 2 by default — glibc waits 5 s, which is too much of a request budget to hand a
+silent resolver), TC → retry over TCP, falling back to the blocking `getaddrinfo` walk when
+none of that can answer. A search walk stops the
 moment NO server answers: a dead resolver must not be multiplied by the suffix count.
 Two spawned HTTPS fetches to DIFFERENT hosts run 0.17s vs 0.34s sequential.
 
@@ -463,8 +496,8 @@ Regression coverage lives in the suite: `tests/aot/cases/async_*.php`
 
 ## Where it stands (macOS, 10-core, `wrk -t4`, plaintext keep-alive)
 
-Single-core keep-alive ~64.5k rps (2-syscall/req floor). Multi-process (8-worker prefork)
-same-box vs reference servers driven by the same `wrk`:
+Single-core keep-alive ~64.5k rps, at a **two-syscall floor** — counted, not assumed.
+Multi-process (8-worker prefork) same-box vs reference servers driven by the same `wrk`:
 
 | server                     | req/s        |
 |----------------------------|--------------|
@@ -477,6 +510,31 @@ Caveats: the load generator shares the box (the server used only ~2.7/10 cores �
 ceiling needs an off-box client); this server does minimal HTTP (single-byte routing, fixed
 headers) — legitimate for the TechEmpower `plaintext` case, not a full framework.
 
+### The two syscalls, counted
+
+`strace -c -f` on one worker (Linux arm64), the same run at two request counts so the
+constant startup cost subtracts out:
+
+| syscall | 2 000 requests | 6 000 requests | per extra request |
+|---|---|---|---|
+| `recvfrom` | 2 008 | 6 008 | **1.00** |
+| `sendto` | 2 001 | 6 001 | **1.00** |
+| `epoll_pwait` | 2 | 2 | 0 |
+| `epoll_ctl` | 1 | 1 | 0 |
+| `accept` / `fcntl` / `close` | 10 / 34 / 15 | 10 / 34 / 15 | 0 |
+
+Two syscalls per request, and **nothing else scales with load at all**. The reactor is
+entered twice in a whole run: the optimistic `recv` finds the next pipelined-or-not request
+already buffered in the kernel, so a busy keep-alive connection never parks — and because
+`ensureWatcher` only runs when a task actually parks, those connection fds are never
+registered with epoll in the first place (`epoll_ctl` 1 is the listener). The `+8` on
+`recvfrom` is one per connection: the read that reports the peer's close.
+
+To repeat it: `strace -c -f -o out.txt ./server` under `docker run --user root
+--cap-add=SYS_PTRACE --security-opt seccomp=unconfined`, then subtract two runs. The
+toolchain image has no `pkill`/`pgrep` — use `killall` or `kill $!`, or the script waits
+forever for a server nothing stopped.
+
 Signal delivery is reactor-native: a blocked-and-pending signal is a readiness event on
 both hosts — `EVFILT_SIGNAL` on kqueue, `signalfd(2)` on Linux — so the dispatch task parks
 on the reactor instead of ticking every 50 ms, and an idle process with a handler
@@ -487,10 +545,22 @@ is still there.
 
 ## Not yet
 
-Also: `writev`/`io_uring` to break the 2-syscall floor · `resolv.conf`'s `timeout:`/`attempts:`
-options (the search list and `ndots` are in; those two still hard-code 2 s × 2) · the search
-list applied to `/etc/hosts` the way glibc does · off-thread file I/O · shared-memory
-multithreading (a future compiler superset).
+Also: off-thread file I/O · shared-memory multithreading (a future compiler superset).
+
+**Below two syscalls per request.** Those two are `recvfrom` + `sendto` and nothing else
+(measured above). `writev(2)` is already here — `fwrite($s, [$hdr, $body])` sends headers and
+body in one syscall — but merging writes cannot help a request that only makes one. The floor
+moves for exactly two reasons, and neither is free:
+
+- **Pipelining.** Parse every complete request sitting in one `recv`, answer with one vectored
+  write of N responses: 2/N syscalls per request. Portable, and it needs nothing from the
+  compiler — but only a client that pipelines sees it.
+- **Completion-based I/O (`io_uring`).** The win is not a new `Io\Poll` backend. Our seam is
+  *readiness* — the hook says "ready", the caller then makes the syscall — and io_uring pays
+  when the operations themselves are submitted in batches, so one `io_uring_enter` covers the
+  recv and send of every ready connection in a turn. That means a second I/O path and a
+  different hook shape, Linux-only, with macOS left on the readiness path. Worth a design
+  document before a line of it.
 
 **`#[Async]`** — an attribute that turns a call into a spawned `Task` of the function's
 return type. The only piece here that cannot be a library: it needs the compiler to split
