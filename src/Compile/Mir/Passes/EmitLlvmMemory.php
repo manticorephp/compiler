@@ -167,7 +167,7 @@ trait EmitLlvmMemory
             // ({@see storeRetainFallback}): a CELL value is NaN-boxed, and its
             // co-ownership is boxToCell's business, not the element type's.
             $fallback = $this->storeRetainFallback($n);
-            $this->maybeTransfer($n->value, $fallback);
+            $this->maybeTransfer($n->value, $fallback, $this->storeElemBoxesValue($n));
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
             $pcls = $n->object->type->class ?? '';
             $propType = ($pcls !== '' && isset($this->classes[$pcls]))
@@ -176,7 +176,8 @@ trait EmitLlvmMemory
             $this->maybeTransfer($n->value, $propType);
         } elseif ($k === Node::KIND_ARRAY_LIT) {
             $fallback = $n->type->element ?? null;
-            foreach ($n->elements as $el) { $this->maybeTransfer($el->value, $fallback); }
+            $boxed = $this->litBoxesValues($n);
+            foreach ($n->elements as $el) { $this->maybeTransfer($el->value, $fallback, $boxed); }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectTransferredLocals($c); }
     }

@@ -1238,7 +1238,13 @@ trait EmitLlvmModule
         // restricted to a direct `return $x;`.
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
             ? $this->asLoadLocalNode($v)->name : null;
-        $leave = $this->emitRcReturnCleanup($this->returnedLocalNames($v));
+        // A REBUILT return hands back a fresh cell array, not the local — so the
+        // "ownership transfers to the caller" exemption does not apply and the
+        // local must be dropped like any other. `function mk(): mixed { $v = [];
+        // …; return $v; }` leaked the whole source vec plus one ref on every
+        // element, with its release stranded in the unreachable dead block.
+        $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        $leave = $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
         // arena_leave only covers fall-through). The return value is
@@ -1269,7 +1275,7 @@ trait EmitLlvmModule
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
-            $out .= $this->boxToCell($v->type);
+            $out .= $this->boxToCell($v->type, $v);
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
@@ -1291,7 +1297,7 @@ trait EmitLlvmModule
         // reader unboxes this arm's raw string pointers by tag. Rebuild it with
         // each element boxed, left raw (an array slot travels raw).
         if ($this->needsCellify($this->frame->returnType, $v->type)) {
-            $out .= $this->emitCellifyArrayRaw($v->type->element);
+            $out .= $this->emitCellifyArrayRaw($v->type->element, $this->cellifySourceFlavor($v));
             // The rebuild is a FRESH array (+1, owned by the caller — no retain,
             // unlike a borrowed passthrough), but it leaves a raw `ptr`: the ABI
             // returns a uniform i64, so it rides the carrier like every other
@@ -1330,7 +1336,8 @@ trait EmitLlvmModule
                 }
                 $out .= $this->boxUnknownIfRaw();
             } else {
-                $out .= $this->boxToCell($v->type);
+                // `$v` so a rebuilt concrete-element array releases its source.
+                $out .= $this->boxToCell($v->type, $v);
             }
         } else {
             // A BORROWED cell handed back from a `: mixed` fn — `return
@@ -1440,6 +1447,29 @@ trait EmitLlvmModule
      * NOT cellified — nothing is known to box, and an erased array must stay raw
      * (the `cow2` carve-out).
      */
+    /**
+     * Does {@see emitReturn} REBUILD the returned array into a fresh cell array?
+     * True for every arm below that reaches
+     * {@see EmitLlvmBuiltins::emitAssocToCellArrayUnified} — a concrete-element
+     * vec/assoc under a cellify boundary, a `mixed`/union declared return, or the
+     * uniform closure ABI. Drives the transfer-exemption above: what is handed
+     * back is the rebuild, so the source is dead on this path.
+     */
+    private function returnRebuildsArray(?Node $v): bool
+    {
+        if ($v === null) { return false; }
+        $t = $v->type;
+        if (!$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null || $el->kind === Type::KIND_CELL
+            || $el->kind === Type::KIND_UNKNOWN) { return false; }
+        if ($this->needsCellify($this->frame->returnType, $t)) { return true; }
+        $rt = $this->frame->returnType;
+        if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
+        return ($this->frame->isClosure || $this->frame->isTrampoline)
+            && $this->isCellBoxableArg($t);
+    }
+
     private function needsCellify(?Type $slot, ?Type $val): bool
     {
         if ($slot === null || $val === null) { return false; }

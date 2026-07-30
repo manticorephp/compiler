@@ -2417,4 +2417,844 @@ final class RuntimeLibrary
         $out .= "}\n";
         return $out;
     }
+
+    /**
+     * Native json_decode runtime — the mirror of {@see jsonEnc}.
+     *
+     * `@__mir_json_dec(ptr s, i64 n, ptr posSlot) -> i64` is a recursive
+     * descent that returns a NaN-boxed cell and advances `*posSlot`. Containers
+     * are built straight as CELL arrays (`__mir_array_alloc` + append for a
+     * list, `__mir_array_alloc_hashed` + `set_str` for an object) with the
+     * repr nibble stamped, so nothing downstream has to rebuild them.
+     *
+     * It replaces {@see \Runtime\Json\Parser}, which stayed at php's own speed
+     * because it was allocator-bound: `substr` minted a heap string per key and
+     * per value, every value crossed five PHP calls, and each container grew
+     * from zero. Here a string literal is ONE `__mir_str_new` over the scanned
+     * run (the escape path is the only one that copies twice), containers start
+     * at capacity 8, and an integer accumulates out of the digit scan with
+     * unsigned overflow detection so only a genuine overflow pays `strtod`.
+     *
+     * Malformed input DEGRADES rather than throwing, exactly as the PHP parser
+     * did — it is not a validator.
+     */
+    public function jsonDec(): string
+    {
+        $out = '';
+
+        // ── skip space / tab / LF / CR ──
+        $out .= "\ndefine void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp) {\n";
+        $out .= "entry:\n  br label %lp\n";
+        $out .= "lp:\n";
+        $out .= "  %i = load i64, ptr %pp\n";
+        $out .= "  %ge = icmp sge i64 %i, %n\n";
+        $out .= "  br i1 %ge, label %done, label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %p = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %b = load i8, ptr %p\n";
+        $out .= "  %bz = zext i8 %b to i64\n";
+        $out .= "  %c1 = icmp eq i64 %bz, 32\n";
+        $out .= "  %c2 = icmp eq i64 %bz, 9\n";
+        $out .= "  %c3 = icmp eq i64 %bz, 10\n";
+        $out .= "  %c4 = icmp eq i64 %bz, 13\n";
+        $out .= "  %o1 = or i1 %c1, %c2\n";
+        $out .= "  %o2 = or i1 %c3, %c4\n";
+        $out .= "  %o3 = or i1 %o1, %o2\n";
+        $out .= "  br i1 %o3, label %adv, label %done\n";
+        $out .= "adv:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  store i64 %i1, ptr %pp\n";
+        $out .= "  br label %lp\n";
+        $out .= "done:\n  ret void\n}\n";
+
+        // ── 4 hex digits at s[i..i+3] → codepoint, or -1 ──
+        $out .= "\ndefine i64 @__mir_jd_hex4(ptr %s, i64 %i, i64 %n) {\n";
+        $out .= "entry:\n";
+        $out .= "  %end = add i64 %i, 4\n";
+        $out .= "  %fits = icmp sle i64 %end, %n\n";
+        $out .= "  br i1 %fits, label %go, label %bad\n";
+        $out .= "bad:\n  ret i64 -1\n";
+        $out .= "go:\n";
+        $out .= "  %acc = alloca i64\n  store i64 0, ptr %acc\n";
+        $out .= "  %kk = alloca i64\n  store i64 0, ptr %kk\n";
+        $out .= "  br label %lp\n";
+        $out .= "lp:\n";
+        $out .= "  %k = load i64, ptr %kk\n";
+        $out .= "  %k4 = icmp sge i64 %k, 4\n";
+        $out .= "  br i1 %k4, label %fin, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %ix = add i64 %i, %k\n";
+        $out .= "  %p = getelementptr inbounds i8, ptr %s, i64 %ix\n";
+        $out .= "  %b = load i8, ptr %p\n";
+        $out .= "  %bz = zext i8 %b to i64\n";
+        $out .= "  %d0 = sub i64 %bz, 48\n";
+        $out .= "  %isd = icmp ult i64 %d0, 10\n";
+        $out .= "  %la = or i64 %bz, 32\n";                 // fold case
+        $out .= "  %d1 = sub i64 %la, 97\n";                // 'a'..'f' → 0..5
+        $out .= "  %ish = icmp ult i64 %d1, 6\n";
+        $out .= "  %hexok = or i1 %isd, %ish\n";
+        $out .= "  br i1 %hexok, label %acc1, label %bad2\n";
+        $out .= "bad2:\n  ret i64 -1\n";
+        $out .= "acc1:\n";
+        $out .= "  %dv0 = add i64 %d1, 10\n";
+        $out .= "  %dv = select i1 %isd, i64 %d0, i64 %dv0\n";
+        $out .= "  %a = load i64, ptr %acc\n";
+        $out .= "  %a16 = shl i64 %a, 4\n";
+        $out .= "  %a2 = or i64 %a16, %dv\n";
+        $out .= "  store i64 %a2, ptr %acc\n";
+        $out .= "  %k1 = add i64 %k, 1\n";
+        $out .= "  store i64 %k1, ptr %kk\n";
+        $out .= "  br label %lp\n";
+        $out .= "fin:\n";
+        $out .= "  %r = load i64, ptr %acc\n";
+        $out .= "  ret i64 %r\n}\n";
+
+        // ── UTF-8 encode %cp at %b+%j; returns the new j ──
+        $out .= "\ndefine i64 @__mir_jd_utf8(ptr %b, i64 %j, i64 %cp) {\n";
+        $out .= "entry:\n";
+        $out .= "  %l1 = icmp ult i64 %cp, 128\n";
+        $out .= "  br i1 %l1, label %one, label %t2\n";
+        $out .= "one:\n";
+        $out .= "  %d = getelementptr inbounds i8, ptr %b, i64 %j\n";
+        $out .= "  %c8 = trunc i64 %cp to i8\n";
+        $out .= "  store i8 %c8, ptr %d\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  ret i64 %j1\n";
+        $out .= "t2:\n";
+        $out .= "  %l2 = icmp ult i64 %cp, 2048\n";
+        $out .= "  br i1 %l2, label %two, label %t3\n";
+        $out .= "two:\n";
+        $out .= "  %a0 = lshr i64 %cp, 6\n";
+        $out .= "  %a1 = or i64 %a0, 192\n";
+        $out .= "  %a2 = and i64 %cp, 63\n";
+        $out .= "  %a3 = or i64 %a2, 128\n";
+        $out .= "  %p0 = getelementptr inbounds i8, ptr %b, i64 %j\n";
+        $out .= "  %t0 = trunc i64 %a1 to i8\n";
+        $out .= "  store i8 %t0, ptr %p0\n";
+        $out .= "  %jj = add i64 %j, 1\n";
+        $out .= "  %p1 = getelementptr inbounds i8, ptr %b, i64 %jj\n";
+        $out .= "  %t1 = trunc i64 %a3 to i8\n";
+        $out .= "  store i8 %t1, ptr %p1\n";
+        $out .= "  %j2 = add i64 %j, 2\n";
+        $out .= "  ret i64 %j2\n";
+        $out .= "t3:\n";
+        $out .= "  %l3 = icmp ult i64 %cp, 65536\n";
+        $out .= "  br i1 %l3, label %three, label %four\n";
+        $out .= "three:\n";
+        $out .= "  %b0 = lshr i64 %cp, 12\n";
+        $out .= "  %b1 = or i64 %b0, 224\n";
+        $out .= "  %b2 = lshr i64 %cp, 6\n";
+        $out .= "  %b3 = and i64 %b2, 63\n";
+        $out .= "  %b4 = or i64 %b3, 128\n";
+        $out .= "  %b5 = and i64 %cp, 63\n";
+        $out .= "  %b6 = or i64 %b5, 128\n";
+        $out .= "  %q0 = getelementptr inbounds i8, ptr %b, i64 %j\n";
+        $out .= "  %u0 = trunc i64 %b1 to i8\n";
+        $out .= "  store i8 %u0, ptr %q0\n";
+        $out .= "  %jq1 = add i64 %j, 1\n";
+        $out .= "  %q1 = getelementptr inbounds i8, ptr %b, i64 %jq1\n";
+        $out .= "  %u1 = trunc i64 %b4 to i8\n";
+        $out .= "  store i8 %u1, ptr %q1\n";
+        $out .= "  %jq2 = add i64 %j, 2\n";
+        $out .= "  %q2 = getelementptr inbounds i8, ptr %b, i64 %jq2\n";
+        $out .= "  %u2 = trunc i64 %b6 to i8\n";
+        $out .= "  store i8 %u2, ptr %q2\n";
+        $out .= "  %j3 = add i64 %j, 3\n";
+        $out .= "  ret i64 %j3\n";
+        $out .= "four:\n";
+        $out .= "  %e0 = lshr i64 %cp, 18\n";
+        $out .= "  %e1 = or i64 %e0, 240\n";
+        $out .= "  %e2 = lshr i64 %cp, 12\n";
+        $out .= "  %e3 = and i64 %e2, 63\n";
+        $out .= "  %e4 = or i64 %e3, 128\n";
+        $out .= "  %e5 = lshr i64 %cp, 6\n";
+        $out .= "  %e6 = and i64 %e5, 63\n";
+        $out .= "  %e7 = or i64 %e6, 128\n";
+        $out .= "  %e8 = and i64 %cp, 63\n";
+        $out .= "  %e9 = or i64 %e8, 128\n";
+        $out .= "  %r0 = getelementptr inbounds i8, ptr %b, i64 %j\n";
+        $out .= "  %v0 = trunc i64 %e1 to i8\n";
+        $out .= "  store i8 %v0, ptr %r0\n";
+        $out .= "  %jr1 = add i64 %j, 1\n";
+        $out .= "  %r1 = getelementptr inbounds i8, ptr %b, i64 %jr1\n";
+        $out .= "  %v1 = trunc i64 %e4 to i8\n";
+        $out .= "  store i8 %v1, ptr %r1\n";
+        $out .= "  %jr2 = add i64 %j, 2\n";
+        $out .= "  %r2 = getelementptr inbounds i8, ptr %b, i64 %jr2\n";
+        $out .= "  %v2 = trunc i64 %e7 to i8\n";
+        $out .= "  store i8 %v2, ptr %r2\n";
+        $out .= "  %jr3 = add i64 %j, 3\n";
+        $out .= "  %r3 = getelementptr inbounds i8, ptr %b, i64 %jr3\n";
+        $out .= "  %v3 = trunc i64 %e9 to i8\n";
+        $out .= "  store i8 %v3, ptr %r3\n";
+        $out .= "  %j4 = add i64 %j, 4\n";
+        $out .= "  ret i64 %j4\n}\n";
+
+        $out .= $this->jsonDecString();
+        $out .= $this->jsonDecKey();
+        $out .= $this->jsonDecNumber();
+        $out .= $this->jsonDecValue();
+        return $out;
+    }
+
+    /**
+     * `@__mir_jd_key(ptr s, i64 n, ptr pp) -> ptr` — an object KEY, interned.
+     *
+     * Record-shaped payloads repeat their key set once per row: the
+     * json_decode benchmark mints 40 000 key strings for FIVE distinct keys.
+     * This scans the key run WITHOUT allocating, hashes it (FNV-1a), and on a
+     * hit in a fixed 1024-slot direct-mapped table hands back the existing
+     * string — no malloc, no memcpy. A miss builds the string and takes the
+     * slot, releasing whatever it evicts.
+     *
+     * The returned reference is always +1, exactly like {@see jsonDecString},
+     * so the caller's release protocol is unchanged. The table's own reference
+     * keeps an interned key alive after every array holding it is freed, which
+     * is what makes the next document's lookup a hit. Interning is deliberately
+     * KEYS ONLY — values do not repeat, and would just thrash the table.
+     *
+     * Only applied to a clean run: an EMPTY key or one carrying a `\` escape
+     * falls through to the general string path.
+     */
+    private function jsonDecKey(): string
+    {
+        $out  = "\n@__mir_jd_itab = internal global [1024 x ptr] zeroinitializer\n";
+        $out .= "\ndefine ptr @__mir_jd_key(ptr %s, i64 %n, ptr %pp) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ii = alloca i64\n";
+        $out .= "  %hh = alloca i64\n";
+        $out .= "  %p0 = load i64, ptr %pp\n";
+        $out .= "  %inb = icmp slt i64 %p0, %n\n";
+        $out .= "  br i1 %inb, label %chk, label %fall\n";
+        $out .= "chk:\n";
+        $out .= "  %qp = getelementptr inbounds i8, ptr %s, i64 %p0\n";
+        $out .= "  %qb = load i8, ptr %qp\n";
+        $out .= "  %isq = icmp eq i8 %qb, 34\n";
+        $out .= "  br i1 %isq, label %scan0, label %fall\n";
+        $out .= "fall:\n";
+        $out .= "  %fs = call ptr @__mir_jd_str(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  ret ptr %fs\n";
+        $out .= "scan0:\n";
+        $out .= "  %st = add i64 %p0, 1\n";
+        $out .= "  store i64 %st, ptr %ii\n";
+        $out .= "  store i64 -3750763034362895579, ptr %hh\n";   // FNV-1a offset basis
+        $out .= "  br label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %i = load i64, ptr %ii\n";
+        $out .= "  %atend = icmp sge i64 %i, %n\n";
+        $out .= "  br i1 %atend, label %fall, label %sb\n";
+        $out .= "sb:\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %cb = load i8, ptr %cp\n";
+        $out .= "  %isq2 = icmp eq i8 %cb, 34\n";
+        $out .= "  br i1 %isq2, label %found, label %sb2\n";
+        $out .= "sb2:\n";
+        $out .= "  %isbs = icmp eq i8 %cb, 92\n";
+        $out .= "  br i1 %isbs, label %fall, label %hstep\n";
+        $out .= "hstep:\n";
+        $out .= "  %h = load i64, ptr %hh\n";
+        $out .= "  %bz = zext i8 %cb to i64\n";
+        $out .= "  %hx = xor i64 %h, %bz\n";
+        $out .= "  %hm = mul i64 %hx, 1099511628211\n";
+        $out .= "  store i64 %hm, ptr %hh\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  store i64 %i1, ptr %ii\n";
+        $out .= "  br label %scan\n";
+        $out .= "found:\n";
+        $out .= "  %len = sub i64 %i, %st\n";
+        $out .= "  %isemp = icmp eq i64 %len, 0\n";
+        $out .= "  br i1 %isemp, label %fall, label %look\n";
+        $out .= "look:\n";
+        $out .= "  %after = add i64 %i, 1\n";
+        $out .= "  store i64 %after, ptr %pp\n";
+        $out .= "  %hv = load i64, ptr %hh\n";
+        $out .= "  %slot = and i64 %hv, 1023\n";
+        $out .= "  %sp = getelementptr [1024 x ptr], ptr @__mir_jd_itab, i64 0, i64 %slot\n";
+        $out .= "  %occ = load ptr, ptr %sp\n";
+        $out .= "  %isn = icmp eq ptr %occ, null\n";
+        $out .= "  br i1 %isn, label %miss, label %maybe\n";
+        $out .= "maybe:\n";
+        $out .= "  %olen = call i64 @__mir_strlen(ptr %occ)\n";
+        $out .= "  %same = icmp eq i64 %olen, %len\n";
+        $out .= "  br i1 %same, label %cmpb, label %miss\n";
+        $out .= "cmpb:\n";
+        $out .= "  %rp = getelementptr inbounds i8, ptr %s, i64 %st\n";
+        $out .= "  %cr = call i32 @memcmp(ptr %occ, ptr %rp, i64 %len)\n";
+        $out .= "  %eqb = icmp eq i32 %cr, 0\n";
+        $out .= "  br i1 %eqb, label %hit, label %miss\n";
+        $out .= "hit:\n";
+        $out .= "  call void @__mir_rc_retain_str(ptr %occ)\n";
+        $out .= "  ret ptr %occ\n";
+        $out .= "miss:\n";
+        $out .= "  %rp2 = getelementptr inbounds i8, ptr %s, i64 %st\n";
+        $out .= "  %ns = call ptr @__mir_str_new(ptr %rp2, i64 %len)\n";
+        $out .= "  %old = load ptr, ptr %sp\n";
+        $out .= "  %hasold = icmp ne ptr %old, null\n";
+        $out .= "  br i1 %hasold, label %evict, label %take\n";
+        $out .= "evict:\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %old)\n";
+        $out .= "  br label %take\n";
+        $out .= "take:\n";
+        $out .= "  call void @__mir_rc_retain_str(ptr %ns)\n";
+        $out .= "  store ptr %ns, ptr %sp\n";
+        $out .= "  ret ptr %ns\n}\n";
+        return $out;
+    }
+
+    /**
+     * `@__mir_jd_str(ptr s, i64 n, ptr pp) -> ptr` — one JSON string literal.
+     *
+     * Scans to the first `"` or `\`. The overwhelmingly common case is a run
+     * with no escape at all, and it returns `__mir_str_new` over that run — one
+     * allocation, one memcpy, no intermediate. Only a literal that really
+     * carries a `\` takes the second path, which sizes a buffer at the
+     * remaining input (an escape never expands: 6 input bytes for `\uXXXX`
+     * produce at most 4 output bytes) and decodes in place. A high surrogate
+     * followed by its low pair combines into one 4-byte sequence, as php's own
+     * decoder does; an unpaired one passes through as its own codepoint.
+     */
+    private function jsonDecString(): string
+    {
+        $out  = "\ndefine ptr @__mir_jd_str(ptr %s, i64 %n, ptr %pp) {\n";
+        $out .= "entry:\n";
+        $out .= "  %jj = alloca i64\n";
+        $out .= "  %kk = alloca i64\n";
+        $out .= "  %p0 = load i64, ptr %pp\n";
+        $out .= "  %oob = icmp sge i64 %p0, %n\n";
+        $out .= "  br i1 %oob, label %empty, label %chkq\n";
+        $out .= "chkq:\n";
+        $out .= "  %qp = getelementptr inbounds i8, ptr %s, i64 %p0\n";
+        $out .= "  %qb = load i8, ptr %qp\n";
+        $out .= "  %isq = icmp eq i8 %qb, 34\n";
+        $out .= "  br i1 %isq, label %scan0, label %empty\n";
+        $out .= "empty:\n";
+        $out .= "  %es = call ptr @__mir_str_new(ptr %s, i64 0)\n";
+        $out .= "  ret ptr %es\n";
+        // ── scan for the terminator or the first escape ──
+        $out .= "scan0:\n";
+        $out .= "  %st = add i64 %p0, 1\n";
+        $out .= "  store i64 %st, ptr %kk\n";
+        $out .= "  br label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %i = load i64, ptr %kk\n";
+        $out .= "  %iend = icmp sge i64 %i, %n\n";
+        $out .= "  br i1 %iend, label %plain, label %scanb\n";
+        $out .= "scanb:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %sb = load i8, ptr %sp\n";
+        $out .= "  %isq2 = icmp eq i8 %sb, 34\n";
+        $out .= "  br i1 %isq2, label %plain, label %scanbs\n";
+        $out .= "scanbs:\n";
+        $out .= "  %isbs = icmp eq i8 %sb, 92\n";
+        $out .= "  br i1 %isbs, label %slow, label %scannext\n";
+        $out .= "scannext:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  store i64 %i1, ptr %kk\n";
+        $out .= "  br label %scan\n";
+        // ── no escape: the run IS the string ──
+        $out .= "plain:\n";
+        $out .= "  %pi = load i64, ptr %kk\n";
+        $out .= "  %rl = sub i64 %pi, %st\n";
+        $out .= "  %rp = getelementptr inbounds i8, ptr %s, i64 %st\n";
+        $out .= "  %ns = call ptr @__mir_str_new(ptr %rp, i64 %rl)\n";
+        $out .= "  %past = icmp sge i64 %pi, %n\n";
+        $out .= "  %pi1 = add i64 %pi, 1\n";
+        $out .= "  %npos = select i1 %past, i64 %pi, i64 %pi1\n";
+        $out .= "  store i64 %npos, ptr %pp\n";
+        $out .= "  ret ptr %ns\n";
+        // ── escaped: decode into a fresh buffer ──
+        // Size the buffer at THIS literal, not at the rest of the document: one
+        // bounded pre-scan to the closing quote (an escape consumes 2 input
+        // bytes, so it is skipped as a unit). Sizing it at `n - st` cost
+        // json_decode_records 1.1 GB — 5000 escaped strings per decode, each
+        // reserving the whole remaining 750 KB payload.
+        $out .= "slow:\n";
+        $out .= "  %si = load i64, ptr %kk\n";
+        $out .= "  store i64 %si, ptr %jj\n";
+        $out .= "  br label %qscan\n";
+        $out .= "qscan:\n";
+        $out .= "  %qi = load i64, ptr %jj\n";
+        $out .= "  %qend = icmp sge i64 %qi, %n\n";
+        $out .= "  br i1 %qend, label %qdone, label %qbody\n";
+        $out .= "qbody:\n";
+        $out .= "  %qcp = getelementptr inbounds i8, ptr %s, i64 %qi\n";
+        $out .= "  %qcb = load i8, ptr %qcp\n";
+        $out .= "  %qisq = icmp eq i8 %qcb, 34\n";
+        $out .= "  br i1 %qisq, label %qdone, label %qnext\n";
+        $out .= "qnext:\n";
+        $out .= "  %qisb = icmp eq i8 %qcb, 92\n";
+        $out .= "  %qstep = select i1 %qisb, i64 2, i64 1\n";
+        $out .= "  %qi2 = add i64 %qi, %qstep\n";
+        $out .= "  store i64 %qi2, ptr %jj\n";
+        $out .= "  br label %qscan\n";
+        $out .= "qdone:\n";
+        $out .= "  %qi3 = load i64, ptr %jj\n";
+        $out .= "  %qcl = icmp sgt i64 %qi3, %n\n";
+        $out .= "  %qlim = select i1 %qcl, i64 %n, i64 %qi3\n";
+        $out .= "  %cap = sub i64 %qlim, %st\n";
+        $out .= "  %cap1 = add i64 %cap, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap1)\n";
+        $out .= "  %pl = sub i64 %si, %st\n";
+        $out .= "  %pfx = getelementptr inbounds i8, ptr %s, i64 %st\n";
+        $out .= "  call ptr @memcpy(ptr %buf, ptr %pfx, i64 %pl)\n";
+        $out .= "  store i64 %pl, ptr %jj\n";
+        $out .= "  br label %eloop\n";
+        $out .= "eloop:\n";
+        $out .= "  %k = load i64, ptr %kk\n";
+        $out .= "  %kend = icmp sge i64 %k, %n\n";
+        $out .= "  br i1 %kend, label %efin, label %ebody\n";
+        $out .= "ebody:\n";
+        $out .= "  %cq = getelementptr inbounds i8, ptr %s, i64 %k\n";
+        $out .= "  %cb = load i8, ptr %cq\n";
+        $out .= "  %isq3 = icmp eq i8 %cb, 34\n";
+        $out .= "  br i1 %isq3, label %eclose, label %echk\n";
+        $out .= "eclose:\n";
+        $out .= "  %kq = add i64 %k, 1\n";
+        $out .= "  store i64 %kq, ptr %kk\n";
+        $out .= "  br label %efin\n";
+        $out .= "echk:\n";
+        $out .= "  %isbs2 = icmp eq i8 %cb, 92\n";
+        $out .= "  br i1 %isbs2, label %eesc, label %ecopy\n";
+        $out .= "ecopy:\n";
+        $out .= "  %j = load i64, ptr %jj\n";
+        $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 %cb, ptr %dp\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  store i64 %j1, ptr %jj\n";
+        $out .= "  %kc = add i64 %k, 1\n";
+        $out .= "  store i64 %kc, ptr %kk\n";
+        $out .= "  br label %eloop\n";
+        $out .= "eesc:\n";
+        $out .= "  %ke = add i64 %k, 1\n";
+        $out .= "  %keend = icmp sge i64 %ke, %n\n";
+        $out .= "  br i1 %keend, label %efin, label %eesc2\n";
+        $out .= "eesc2:\n";
+        $out .= "  %ep = getelementptr inbounds i8, ptr %s, i64 %ke\n";
+        $out .= "  %eb = load i8, ptr %ep\n";
+        $out .= "  %isu = icmp eq i8 %eb, 117\n";
+        $out .= "  br i1 %isu, label %eu, label %esimple\n";
+        $out .= "esimple:\n";
+        $out .= "  %ez = zext i8 %eb to i64\n";
+        $out .= "  %mn = icmp eq i64 %ez, 110\n";
+        $out .= "  %mt = icmp eq i64 %ez, 116\n";
+        $out .= "  %mr = icmp eq i64 %ez, 114\n";
+        $out .= "  %mb = icmp eq i64 %ez, 98\n";
+        $out .= "  %mf = icmp eq i64 %ez, 102\n";
+        $out .= "  %s0 = select i1 %mn, i64 10, i64 %ez\n";
+        $out .= "  %s1 = select i1 %mt, i64 9, i64 %s0\n";
+        $out .= "  %s2 = select i1 %mr, i64 13, i64 %s1\n";
+        $out .= "  %s3 = select i1 %mb, i64 8, i64 %s2\n";
+        $out .= "  %s4 = select i1 %mf, i64 12, i64 %s3\n";
+        $out .= "  %sj = load i64, ptr %jj\n";
+        $out .= "  %sd = getelementptr inbounds i8, ptr %buf, i64 %sj\n";
+        $out .= "  %s8 = trunc i64 %s4 to i8\n";
+        $out .= "  store i8 %s8, ptr %sd\n";
+        $out .= "  %sj1 = add i64 %sj, 1\n";
+        $out .= "  store i64 %sj1, ptr %jj\n";
+        $out .= "  %ks = add i64 %ke, 1\n";
+        $out .= "  store i64 %ks, ptr %kk\n";
+        $out .= "  br label %eloop\n";
+        $out .= "eu:\n";
+        $out .= "  %hs = add i64 %ke, 1\n";
+        $out .= "  %cp0 = call i64 @__mir_jd_hex4(ptr %s, i64 %hs, i64 %n)\n";
+        $out .= "  %hbad = icmp slt i64 %cp0, 0\n";
+        $out .= "  br i1 %hbad, label %eubad, label %eok\n";
+        $out .= "eubad:\n";                                   // not 4 hex digits — drop the escape
+        $out .= "  %kb = add i64 %ke, 1\n";
+        $out .= "  store i64 %kb, ptr %kk\n";
+        $out .= "  br label %eloop\n";
+        $out .= "eok:\n";
+        $out .= "  %kh = add i64 %hs, 4\n";
+        $out .= "  %hi1 = icmp uge i64 %cp0, 55296\n";        // 0xD800
+        $out .= "  %hi2 = icmp ule i64 %cp0, 56319\n";        // 0xDBFF
+        $out .= "  %ishi = and i1 %hi1, %hi2\n";
+        $out .= "  br i1 %ishi, label %esur, label %ewrite\n";
+        $out .= "esur:\n";
+        $out .= "  %need = add i64 %kh, 6\n";
+        $out .= "  %sfits = icmp sle i64 %need, %n\n";
+        $out .= "  br i1 %sfits, label %esur2, label %ewrite\n";
+        $out .= "esur2:\n";
+        $out .= "  %bsp = getelementptr inbounds i8, ptr %s, i64 %kh\n";
+        $out .= "  %bsb = load i8, ptr %bsp\n";
+        $out .= "  %isbs3 = icmp eq i8 %bsb, 92\n";
+        $out .= "  %kh1 = add i64 %kh, 1\n";
+        $out .= "  %usp = getelementptr inbounds i8, ptr %s, i64 %kh1\n";
+        $out .= "  %usb = load i8, ptr %usp\n";
+        $out .= "  %isu2 = icmp eq i8 %usb, 117\n";
+        $out .= "  %pair = and i1 %isbs3, %isu2\n";
+        $out .= "  br i1 %pair, label %esur3, label %ewrite\n";
+        $out .= "esur3:\n";
+        $out .= "  %kh2 = add i64 %kh, 2\n";
+        $out .= "  %lo = call i64 @__mir_jd_hex4(ptr %s, i64 %kh2, i64 %n)\n";
+        $out .= "  %lo1 = icmp uge i64 %lo, 56320\n";         // 0xDC00
+        $out .= "  %lo2 = icmp ule i64 %lo, 57343\n";         // 0xDFFF
+        $out .= "  %islo = and i1 %lo1, %lo2\n";
+        $out .= "  %hb = sub i64 %cp0, 55296\n";
+        $out .= "  %hb10 = shl i64 %hb, 10\n";
+        $out .= "  %lb = sub i64 %lo, 56320\n";
+        $out .= "  %comb0 = add i64 %hb10, %lb\n";
+        $out .= "  %comb = add i64 %comb0, 65536\n";
+        $out .= "  %cpp = select i1 %islo, i64 %comb, i64 %cp0\n";
+        $out .= "  %khp = select i1 %islo, i64 %need, i64 %kh\n";
+        $out .= "  br label %ewrite\n";
+        $out .= "ewrite:\n";
+        $out .= "  %cpf = phi i64 [%cp0, %eok], [%cp0, %esur], [%cp0, %esur2], [%cpp, %esur3]\n";
+        $out .= "  %kf = phi i64 [%kh, %eok], [%kh, %esur], [%kh, %esur2], [%khp, %esur3]\n";
+        $out .= "  %wj = load i64, ptr %jj\n";
+        $out .= "  %wj2 = call i64 @__mir_jd_utf8(ptr %buf, i64 %wj, i64 %cpf)\n";
+        $out .= "  store i64 %wj2, ptr %jj\n";
+        $out .= "  store i64 %kf, ptr %kk\n";
+        $out .= "  br label %eloop\n";
+        $out .= "efin:\n";
+        $out .= "  %fk = load i64, ptr %kk\n";
+        $out .= "  %fkc = icmp sgt i64 %fk, %n\n";
+        $out .= "  %fkp = select i1 %fkc, i64 %n, i64 %fk\n";
+        $out .= "  store i64 %fkp, ptr %pp\n";
+        $out .= "  %fj = load i64, ptr %jj\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %fj)\n";
+        $out .= "  %fnp = getelementptr inbounds i8, ptr %buf, i64 %fj\n";
+        $out .= "  store i8 0, ptr %fnp\n";
+        $out .= "  ret ptr %buf\n}\n";
+        return $out;
+    }
+
+    /**
+     * `@__mir_jd_num(ptr s, i64 n, ptr pp) -> i64` — one JSON number, boxed.
+     *
+     * The integer accumulates straight out of the digit scan; only a token that
+     * carries `.`/`e`/`E` or that OVERFLOWS materializes the bytes for `strtod`
+     * (into a stack buffer — no heap). Overflow is checked unsigned against the
+     * exact bound, so `-9223372036854775808` stays an int and one more digit
+     * becomes a float, matching php.
+     */
+    private function jsonDecNumber(): string
+    {
+        $out  = "\ndefine i64 @__mir_jd_num(ptr %s, i64 %n, ptr %pp) {\n";
+        $out .= "entry:\n";
+        $out .= "  %tok = alloca [80 x i8]\n";
+        $out .= "  %ii = alloca i64\n";
+        $out .= "  %acc = alloca i64\n";
+        $out .= "  %flt = alloca i64\n";
+        $out .= "  %ovf = alloca i64\n";
+        $out .= "  %neg = alloca i64\n";
+        $out .= "  %st = load i64, ptr %pp\n";
+        $out .= "  store i64 %st, ptr %ii\n";
+        $out .= "  store i64 0, ptr %acc\n";
+        $out .= "  store i64 0, ptr %flt\n";
+        $out .= "  store i64 0, ptr %ovf\n";
+        $out .= "  store i64 0, ptr %neg\n";
+        $out .= "  %m0 = icmp slt i64 %st, %n\n";
+        $out .= "  br i1 %m0, label %chkneg, label %scan\n";
+        $out .= "chkneg:\n";
+        $out .= "  %mp = getelementptr inbounds i8, ptr %s, i64 %st\n";
+        $out .= "  %mb = load i8, ptr %mp\n";
+        $out .= "  %ism = icmp eq i8 %mb, 45\n";
+        $out .= "  br i1 %ism, label %doneg, label %scan\n";
+        $out .= "doneg:\n";
+        $out .= "  store i64 1, ptr %neg\n";
+        $out .= "  %st1 = add i64 %st, 1\n";
+        $out .= "  store i64 %st1, ptr %ii\n";
+        $out .= "  br label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %i = load i64, ptr %ii\n";
+        $out .= "  %iend = icmp sge i64 %i, %n\n";
+        $out .= "  br i1 %iend, label %fin, label %sbody\n";
+        $out .= "sbody:\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %cb = load i8, ptr %cp\n";
+        $out .= "  %cz = zext i8 %cb to i64\n";
+        $out .= "  %dg = sub i64 %cz, 48\n";
+        $out .= "  %isd = icmp ult i64 %dg, 10\n";
+        $out .= "  br i1 %isd, label %digit, label %sother\n";
+        $out .= "digit:\n";
+        // unsigned overflow guard against the exact magnitude bound
+        $out .= "  %a = load i64, ptr %acc\n";
+        $out .= "  %ng = load i64, ptr %neg\n";
+        $out .= "  %isneg = icmp ne i64 %ng, 0\n";
+        $out .= "  %bound = select i1 %isneg, i64 -9223372036854775808, i64 9223372036854775807\n";
+        $out .= "  %q = udiv i64 %bound, 10\n";
+        $out .= "  %rr = urem i64 %bound, 10\n";
+        $out .= "  %tooBig = icmp ugt i64 %a, %q\n";
+        $out .= "  %atQ = icmp eq i64 %a, %q\n";
+        $out .= "  %dgHi = icmp ugt i64 %dg, %rr\n";
+        $out .= "  %edge = and i1 %atQ, %dgHi\n";
+        $out .= "  %over = or i1 %tooBig, %edge\n";
+        $out .= "  %ovOld = load i64, ptr %ovf\n";
+        $out .= "  %ovNew = select i1 %over, i64 1, i64 %ovOld\n";
+        $out .= "  store i64 %ovNew, ptr %ovf\n";
+        $out .= "  %a10 = mul i64 %a, 10\n";
+        $out .= "  %a2 = add i64 %a10, %dg\n";
+        $out .= "  store i64 %a2, ptr %acc\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  store i64 %i1, ptr %ii\n";
+        $out .= "  br label %scan\n";
+        $out .= "sother:\n";
+        $out .= "  %isdot = icmp eq i64 %cz, 46\n";
+        $out .= "  %ise = icmp eq i64 %cz, 101\n";
+        $out .= "  %isE = icmp eq i64 %cz, 69\n";
+        $out .= "  %isp = icmp eq i64 %cz, 43\n";
+        $out .= "  %ismi = icmp eq i64 %cz, 45\n";
+        $out .= "  %f1 = or i1 %isdot, %ise\n";
+        $out .= "  %f2 = or i1 %isE, %isp\n";
+        $out .= "  %f3 = or i1 %f1, %f2\n";
+        $out .= "  %f4 = or i1 %f3, %ismi\n";
+        $out .= "  br i1 %f4, label %sfloat, label %fin\n";
+        $out .= "sfloat:\n";
+        $out .= "  store i64 1, ptr %flt\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  store i64 %i2, ptr %ii\n";
+        $out .= "  br label %scan\n";
+        $out .= "fin:\n";
+        $out .= "  %e = load i64, ptr %ii\n";
+        $out .= "  store i64 %e, ptr %pp\n";
+        $out .= "  %fl = load i64, ptr %flt\n";
+        $out .= "  %ov = load i64, ptr %ovf\n";
+        $out .= "  %fo = or i64 %fl, %ov\n";
+        $out .= "  %isf = icmp ne i64 %fo, 0\n";
+        $out .= "  br i1 %isf, label %asdouble, label %asint\n";
+        $out .= "asdouble:\n";
+        $out .= "  %tl0 = sub i64 %e, %st\n";
+        $out .= "  %big = icmp sgt i64 %tl0, 79\n";
+        $out .= "  %tl = select i1 %big, i64 79, i64 %tl0\n";
+        $out .= "  %src = getelementptr inbounds i8, ptr %s, i64 %st\n";
+        $out .= "  call ptr @memcpy(ptr %tok, ptr %src, i64 %tl)\n";
+        $out .= "  %tz = getelementptr inbounds i8, ptr %tok, i64 %tl\n";
+        $out .= "  store i8 0, ptr %tz\n";
+        $out .= "  %dv = call double @strtod(ptr %tok, ptr null)\n";
+        $out .= "  %bx = call i64 @__manticore_box_float(double %dv)\n";
+        $out .= "  ret i64 %bx\n";
+        $out .= "asint:\n";
+        $out .= "  %av = load i64, ptr %acc\n";
+        $out .= "  %ng2 = load i64, ptr %neg\n";
+        $out .= "  %isn2 = icmp ne i64 %ng2, 0\n";
+        $out .= "  %nv = sub i64 0, %av\n";
+        $out .= "  %iv = select i1 %isn2, i64 %nv, i64 %av\n";
+        $out .= "  %bi = call i64 @__manticore_box_int(i64 %iv)\n";
+        $out .= "  ret i64 %bi\n}\n";
+        return $out;
+    }
+
+    /**
+     * `@__mir_json_dec(ptr s, i64 n, ptr pp) -> i64` — one value, boxed, with
+     * `*pp` advanced past it. Containers are built as CELL arrays directly
+     * (repr nibble stamped at {@see \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET}) so
+     * no consumer has to rebuild them, and both start at capacity 8 instead of
+     * growing from zero. An object's key is handed to `__mir_array_set_str`,
+     * which takes its own reference, so the parser drops the one it minted.
+     */
+    private function jsonDecValue(): string
+    {
+        $cellRepr = (string)\Compile\MemoryAbi::ARRAY_REPR_CELL;
+        $notRepr  = (string)(~\Compile\MemoryAbi::ARRAY_REPR_MASK);
+        $flagsOff = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
+
+        $stamp = static function (string $tag, string $arr) use ($cellRepr, $notRepr, $flagsOff): string {
+            $o  = "  %fp$tag = getelementptr inbounds i8, ptr $arr, i64 $flagsOff\n";
+            $o .= "  %fv$tag = load i64, ptr %fp$tag\n";
+            $o .= "  %fc$tag = and i64 %fv$tag, $notRepr\n";
+            $o .= "  %fs$tag = or i64 %fc$tag, $cellRepr\n";
+            $o .= "  store i64 %fs$tag, ptr %fp$tag\n";
+            return $o;
+        };
+
+        $out  = "\ndefine i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ap = alloca ptr\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %p = load i64, ptr %pp\n";
+        $out .= "  %oob = icmp sge i64 %p, %n\n";
+        $out .= "  br i1 %oob, label %retnull, label %disp\n";
+        $out .= "retnull:\n";
+        $out .= "  %nz = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %nz\n";
+        $out .= "disp:\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %p\n";
+        $out .= "  %cb = load i8, ptr %cp\n";
+        $out .= "  %isob = icmp eq i8 %cb, 123\n";            // {
+        $out .= "  br i1 %isob, label %obj, label %d2\n";
+        $out .= "d2:\n";
+        $out .= "  %isar = icmp eq i8 %cb, 91\n";             // [
+        $out .= "  br i1 %isar, label %arr, label %d3\n";
+        $out .= "d3:\n";
+        $out .= "  %isst = icmp eq i8 %cb, 34\n";             // "
+        $out .= "  br i1 %isst, label %str, label %d4\n";
+        $out .= "d4:\n";
+        $out .= "  %ist = icmp eq i8 %cb, 116\n";             // t
+        $out .= "  br i1 %ist, label %kwt, label %d5\n";
+        $out .= "d5:\n";
+        $out .= "  %isf = icmp eq i8 %cb, 102\n";             // f
+        $out .= "  br i1 %isf, label %kwf, label %d6\n";
+        $out .= "d6:\n";
+        $out .= "  %isn = icmp eq i8 %cb, 110\n";             // n
+        $out .= "  br i1 %isn, label %kwn, label %num\n";
+        $out .= "str:\n";
+        $out .= "  %sv = call ptr @__mir_jd_str(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %sc = call i64 @__manticore_box_ptr(ptr %sv)\n";
+        $out .= "  ret i64 %sc\n";
+        $out .= "kwt:\n";
+        $out .= "  %pt = add i64 %p, 4\n";
+        $out .= "  store i64 %pt, ptr %pp\n";
+        $out .= "  %tv = call i64 @__manticore_box_bool(i64 1)\n";
+        $out .= "  ret i64 %tv\n";
+        $out .= "kwf:\n";
+        $out .= "  %pf = add i64 %p, 5\n";
+        $out .= "  store i64 %pf, ptr %pp\n";
+        $out .= "  %fv = call i64 @__manticore_box_bool(i64 0)\n";
+        $out .= "  ret i64 %fv\n";
+        $out .= "kwn:\n";
+        $out .= "  %pn = add i64 %p, 4\n";
+        $out .= "  store i64 %pn, ptr %pp\n";
+        $out .= "  %nv = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %nv\n";
+        $out .= "num:\n";
+        $out .= "  %numv = call i64 @__mir_jd_num(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  ret i64 %numv\n";
+        // ── [ … ] ──
+        $out .= "arr:\n";
+        $out .= "  %a0 = call ptr @__mir_array_alloc(i64 8)\n";
+        $out .= "  store ptr %a0, ptr %ap\n";
+        $out .= "  %ap1 = add i64 %p, 1\n";
+        $out .= "  store i64 %ap1, ptr %pp\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %aq = load i64, ptr %pp\n";
+        $out .= "  %aoob = icmp sge i64 %aq, %n\n";
+        $out .= "  br i1 %aoob, label %adone, label %achk\n";
+        $out .= "achk:\n";
+        $out .= "  %acp = getelementptr inbounds i8, ptr %s, i64 %aq\n";
+        $out .= "  %acb = load i8, ptr %acp\n";
+        $out .= "  %aend = icmp eq i8 %acb, 93\n";            // ]
+        $out .= "  br i1 %aend, label %aeat, label %aloop\n";
+        $out .= "aeat:\n";
+        $out .= "  %aq1 = add i64 %aq, 1\n";
+        $out .= "  store i64 %aq1, ptr %pp\n";
+        $out .= "  br label %adone\n";
+        $out .= "aloop:\n";
+        $out .= "  %al = load i64, ptr %pp\n";
+        $out .= "  %alend = icmp sge i64 %al, %n\n";
+        $out .= "  br i1 %alend, label %atail, label %abody\n";
+        $out .= "abody:\n";
+        $out .= "  %av = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %acur = load ptr, ptr %ap\n";
+        $out .= "  %anx = call ptr @__mir_array_append(ptr %acur, i64 %av)\n";
+        $out .= "  store ptr %anx, ptr %ap\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %ac = load i64, ptr %pp\n";
+        $out .= "  %acoob = icmp sge i64 %ac, %n\n";
+        $out .= "  br i1 %acoob, label %atail, label %acomma\n";
+        $out .= "acomma:\n";
+        $out .= "  %accp = getelementptr inbounds i8, ptr %s, i64 %ac\n";
+        $out .= "  %accb = load i8, ptr %accp\n";
+        $out .= "  %isc = icmp eq i8 %accb, 44\n";            // ,
+        $out .= "  br i1 %isc, label %anext, label %atail\n";
+        $out .= "anext:\n";
+        $out .= "  %ac1 = add i64 %ac, 1\n";
+        $out .= "  store i64 %ac1, ptr %pp\n";
+        $out .= "  br label %aloop\n";
+        $out .= "atail:\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %at = load i64, ptr %pp\n";
+        $out .= "  %atoob = icmp sge i64 %at, %n\n";
+        $out .= "  br i1 %atoob, label %adone, label %atchk\n";
+        $out .= "atchk:\n";
+        $out .= "  %atp = getelementptr inbounds i8, ptr %s, i64 %at\n";
+        $out .= "  %atb = load i8, ptr %atp\n";
+        $out .= "  %atend = icmp eq i8 %atb, 93\n";
+        $out .= "  br i1 %atend, label %ateat, label %adone\n";
+        $out .= "ateat:\n";
+        $out .= "  %at1 = add i64 %at, 1\n";
+        $out .= "  store i64 %at1, ptr %pp\n";
+        $out .= "  br label %adone\n";
+        $out .= "adone:\n";
+        $out .= "  %afin = load ptr, ptr %ap\n";
+        $out .= $stamp('a', '%afin');
+        $out .= "  %abx = call i64 @__manticore_box_array(ptr %afin)\n";
+        $out .= "  ret i64 %abx\n";
+        // ── { … } ──
+        $out .= "obj:\n";
+        $out .= "  %o0 = call ptr @__mir_array_alloc_hashed(i64 8)\n";
+        $out .= "  store ptr %o0, ptr %ap\n";
+        $out .= "  %op1 = add i64 %p, 1\n";
+        $out .= "  store i64 %op1, ptr %pp\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %oq = load i64, ptr %pp\n";
+        $out .= "  %ooob = icmp sge i64 %oq, %n\n";
+        $out .= "  br i1 %ooob, label %odone, label %ochk\n";
+        $out .= "ochk:\n";
+        $out .= "  %ocp = getelementptr inbounds i8, ptr %s, i64 %oq\n";
+        $out .= "  %ocb = load i8, ptr %ocp\n";
+        $out .= "  %oend = icmp eq i8 %ocb, 125\n";           // }
+        $out .= "  br i1 %oend, label %oeat, label %oloop\n";
+        $out .= "oeat:\n";
+        $out .= "  %oq1 = add i64 %oq, 1\n";
+        $out .= "  store i64 %oq1, ptr %pp\n";
+        $out .= "  br label %odone\n";
+        $out .= "oloop:\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %ol = load i64, ptr %pp\n";
+        $out .= "  %olend = icmp sge i64 %ol, %n\n";
+        $out .= "  br i1 %olend, label %otail, label %obody\n";
+        $out .= "obody:\n";
+        $out .= "  %okey = call ptr @__mir_jd_key(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %oc0 = load i64, ptr %pp\n";
+        $out .= "  %oc0ok = icmp slt i64 %oc0, %n\n";
+        $out .= "  br i1 %oc0ok, label %ocolon, label %oval\n";
+        $out .= "ocolon:\n";
+        $out .= "  %ocp2 = getelementptr inbounds i8, ptr %s, i64 %oc0\n";
+        $out .= "  %ocb2 = load i8, ptr %ocp2\n";
+        $out .= "  %iscol = icmp eq i8 %ocb2, 58\n";          // :
+        $out .= "  %oc1 = add i64 %oc0, 1\n";
+        $out .= "  %ocn = select i1 %iscol, i64 %oc1, i64 %oc0\n";
+        $out .= "  store i64 %ocn, ptr %pp\n";
+        $out .= "  br label %oval\n";
+        $out .= "oval:\n";
+        $out .= "  %ov = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %ocur = load ptr, ptr %ap\n";
+        $out .= "  %onx = call ptr @__mir_array_set_str(ptr %ocur, ptr %okey, i64 %ov, i64 0, i64 0)\n";
+        $out .= "  store ptr %onx, ptr %ap\n";
+        // set_str took its own reference on the key; drop the one jd_str minted.
+        $out .= "  call void @__mir_rc_release_str(ptr %okey)\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %occ = load i64, ptr %pp\n";
+        $out .= "  %occoob = icmp sge i64 %occ, %n\n";
+        $out .= "  br i1 %occoob, label %otail, label %ocomma\n";
+        $out .= "ocomma:\n";
+        $out .= "  %occp = getelementptr inbounds i8, ptr %s, i64 %occ\n";
+        $out .= "  %occb = load i8, ptr %occp\n";
+        $out .= "  %oisc = icmp eq i8 %occb, 44\n";
+        $out .= "  br i1 %oisc, label %onext, label %otail\n";
+        $out .= "onext:\n";
+        $out .= "  %occ1 = add i64 %occ, 1\n";
+        $out .= "  store i64 %occ1, ptr %pp\n";
+        $out .= "  br label %oloop\n";
+        $out .= "otail:\n";
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %ot = load i64, ptr %pp\n";
+        $out .= "  %otoob = icmp sge i64 %ot, %n\n";
+        $out .= "  br i1 %otoob, label %odone, label %otchk\n";
+        $out .= "otchk:\n";
+        $out .= "  %otp = getelementptr inbounds i8, ptr %s, i64 %ot\n";
+        $out .= "  %otb = load i8, ptr %otp\n";
+        $out .= "  %otend = icmp eq i8 %otb, 125\n";
+        $out .= "  br i1 %otend, label %oteat, label %odone\n";
+        $out .= "oteat:\n";
+        $out .= "  %ot1 = add i64 %ot, 1\n";
+        $out .= "  store i64 %ot1, ptr %pp\n";
+        $out .= "  br label %odone\n";
+        $out .= "odone:\n";
+        $out .= "  %ofin = load ptr, ptr %ap\n";
+        $out .= $stamp('o', '%ofin');
+        $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
+        $out .= "  ret i64 %obx\n}\n";
+
+        // ── entry point: whole document ──
+        $out .= "\ndefine i64 @__mir_json_decode(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %pp = alloca i64\n";
+        $out .= "  store i64 0, ptr %pp\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %r = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  ret i64 %r\n}\n";
+        return $out;
+    }
 }
