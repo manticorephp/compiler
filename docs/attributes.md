@@ -286,7 +286,7 @@ carried in the `.sig` exactly like `byref` / `refout`. Used across
 
 ## FFI
 
-The `Ffi\*` attributes — `#[Library]`, `#[Symbol]`, `#[CType]`, `#[Weak]`, plus
-the declared-but-inert `#[Variadic]` and the `Ownership` family — are documented
-in **[`ffi.md`](ffi.md)**, together with the type mapping, linking and the
-raw-buffer memory rule.
+The `Ffi\*` attributes — `#[Library]`, `#[Symbol]`, `#[CType]`, `#[Weak]`,
+`#[Variadic]`, and the `Ownership` family (checked, never lowered) — are
+documented in **[`ffi.md`](ffi.md)**, together with the type vocabulary,
+linking and the raw-buffer memory rule.

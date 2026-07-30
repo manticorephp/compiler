@@ -51,7 +51,15 @@ Heterogeneous returns flatten to i64 in self-host today, so parsed args land in 
 - `compile` and `analyze` extend the shared spec: `--no-analyze` / `--analyze-strict` on the former, `--deep` / `--json` / `--baseline` / `--generate-baseline` on the latter.
 - Unknown flag → false (rc 64).
 
-`$linkStdlib` (set when any bundled-stdlib extern was injected) and `$externDecls` (collected by `cmd_compile` on the native path) are internal carry-over fields, not CLI flags.
+`$linkStdlib` (set when any bundled-stdlib extern was injected), `$externDecls` (collected by `cmd_compile` on the native path), and `$ffiLibs` / `$weakSyms` (captured off the emitter right after `emit()`) are internal carry-over fields, not CLI flags.
+
+## FFI link requirements
+
+`#[Ffi\Library]` and `#[Ffi\Weak]` are collected per emitted wrapper into `EmitLlvm::$ffiLibs` / `$weakSyms`, captured into `CompileArgs`, then resolved at the `cc` step:
+
+- `ffi_link_flags($libs, $already)` — `'c'` skipped (implicit); `ssl`/`crypto` and `pcre2-8` go through the existing `openssl_link_flags()` / `pcre2_link_flags()` probes; anything else through `generic_link_flags()` (`pkg-config`, `<name>-config`, `-l<name>`). `$already` carries the manifest's `extensions[].link` string so both sources dedupe by `-l<name>`.
+- `weak_undef_flags($syms)` — Darwin's `-Wl,-U,_<sym>` allowance, derived rather than hand-listed. Applied on **both** link paths (`cmd_compile` and `build_compile_module`; the latter previously had none).
+- A library's `.sig` carries `libs` / `weak` (additive keys, no schema bump). Linking is whole-program while a wrapper is emitted once, in the module owning the source, so a dependent that never names the library still links it. `stdlib_sig_list()` reads them with a **load-bearing** fallback: a `.sig` predating these keys is exactly the state during the first rebuild after the change, and the fallback reproduces the old unconditional set.
 
 ## Stdlib bundling
 

@@ -8,17 +8,33 @@ symbol, plus an opaque-pointer type. End-user guide: [`docs/ffi.md`](../../docs/
 Attributes (wired into codegen):
 
 - `Ffi\Library(string $name, ?string $version = null)` — names the library the
-  symbol lives in. The name is documentation today; the actual `-l<lib>` link
-  flag comes from the manifest's `extensions` (libc needs none).
+  symbol lives in, and that is what puts it on the link line: `pkg-config`, then
+  `<name>-config`, then a bare `-l<name>`. `'c'` is implicit. The requirement is
+  carried in the module's `.sig`, so a program reaching the wrapper through a
+  prebuilt `.o` still links what it calls.
 - `Ffi\Symbol(string $name)` — names the C symbol. A decorated **free function**
   is an extern forwarder: the compiler emits a direct call to the symbol and
-  ignores the (Zend-fallback) PHP body. Only top-level function declarations are
-  lowered this way — `#[Symbol]` on a method does nothing.
-- `Ffi\CType('int')` at FUNCTION level — the C return is a 32-bit `int`, so the
-  wrapper sign-extends it. The only token acted on; see `CType.php` for the
-  hazard.
+  ignores the (Zend-fallback) PHP body. Free functions only — `#[Symbol]` on a
+  method is a compile error.
+- `Ffi\CType(string $type)` — the C type, at FUNCTION level for the return and
+  on individual parameters. Closed vocabulary (`void` `bool` `char` `uchar`
+  `short` `ushort` `int` `uint` `long` `ulong` `longlong` `ulonglong` `size_t`
+  `ssize_t` `off_t` `float` `double` `ptr`, plus the multi-word C spellings);
+  an unknown token is a compile error. The table lives in
+  `Compile\Mir\FfiCTypes`. See `CType.php` for the sign-extension hazard.
 - `Ffi\Weak` — emit `declare extern_weak`, so a symbol absent on this target
-  resolves to null instead of failing the link.
+  resolves to null instead of failing the link. Darwin's `-Wl,-U` allowance is
+  derived from these.
+- `Ffi\Variadic(int $fixed)` — the named-param count of a C variadic callee
+  (those before the `...`), driving the LLVM variadic call type. Validated
+  against the binding's arity.
+
+Checked, but NOT lowered — no code is emitted and nothing is freed:
+
+- `Ffi\Ownership` (`Borrow` / `BorrowMut` / `Take` / `Give` / `StaticPtr`) —
+  who owns a pointer across the boundary. The checker enforces placement and
+  consistency (see `Ownership.php`); two of its rules are memory-safety rules,
+  because a PHP string is refcount-owned and a C buffer has no rc header.
 
 Types:
 
@@ -26,20 +42,12 @@ Types:
   `offset(int)`. A raw handle for things you never dereference from PHP (a
   `FILE*`, a dir stream). No automatic free — the caller owns the lifetime.
 
-## Declared, NOT consumed by codegen
-
-- `Ffi\Variadic(int $fixed)` — the named-param count of a C variadic callee.
-  Inert: the emitter keys variadic arity off the C symbol name instead
-  (`EmitLlvmCalls::ffiVariadicFixed`, which knows only `fcntl`).
-- `Ffi\Ownership` (`Borrow` / `BorrowMut` / `Take` / `Give` / `StaticPtr`) —
-  ownership hints to drive free / refcount at the boundary once the memory plan
-  extends to FFI. Advisory only; nothing is freed on your behalf.
-- `Ffi\CType` with any token other than `'int'`, and in parameter position.
-
 ## Type mapping
 
-`int → i64`, `float`/`double → double`, `bool → i1`, `void → void`,
-`string`/`\Ffi\Ptr`/class → `ptr`. The wrapper converts both ways. See
+Without a `#[CType]`, the PHP hint decides: `int → i64`, `float`/`double →
+double`, `bool → i1`, `void → void`, `string`/`\Ffi\Ptr`/class → `ptr`. A
+`#[CType]` overrides it, and the two must agree — an integer token on a
+pointer-carrying hint is rejected. The wrapper converts both ways. See
 [`docs/ffi.md`](../../docs/ffi.md) for the binding model, linking, and the
 raw-buffer memory rule.
 

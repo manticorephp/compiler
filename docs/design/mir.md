@@ -44,7 +44,7 @@ is not part of it.
 | Type | File | Role |
 |---|---|---|
 | `Module` | `Module.php` | Whole-program unit: functions, classes, enums, interface/trait names, closure-capture counts, module-level global cells, and a `passesApplied` set. |
-| `FunctionDef` | `FunctionDef.php` | One function: name, params, return type, body `Block`. Flags: `returnsByRef`, `isPrelude`, `isExtern` (declare-only stdlib import), `isGenerator`, `ffiSymbol` (+ C types) for `#[Symbol]` FFI. Aggregate `effects` filled by InferEffects. |
+| `FunctionDef` | `FunctionDef.php` | One function: name, params, return type, body `Block`. Flags: `returnsByRef`, `isPrelude`, `isExtern` (declare-only stdlib import), `isGenerator`, and the `#[Ffi\Symbol]` carriers `ffiSymbol` / `ffiParamCTypes` / `ffiRetCType` / `ffiWeak` / `ffiVariadicFixed` / `ffiRetUnsigned` / `ffiLibrary`. Aggregate `effects` filled by InferEffects. |
 | `ClassDef` / `EnumDef` / `Param` | resp. | Layout descriptors and parameters. |
 | `Node` (abstract) | `Node.php` | IR node base: `kind`, `type`, plus `effects` (InferEffects), `allocKind` (InferAllocKind), and `line` (source line for diagnostics). |
 
