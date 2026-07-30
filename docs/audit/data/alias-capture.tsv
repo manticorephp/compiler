@@ -3,10 +3,3 @@ checkdnsrr	Runtime\Stdlib\checkdnsrr	-	(string,string):bool	(string,string):bool
 dns_check_record	Runtime\Stdlib\dns_check_record	-	(string,string):bool	(string,string):bool	BY-DESIGN-php-impl
 dns_get_record	Runtime\Stdlib\dns_get_record	-	(string,int,&,&,bool):mixed	(string,int,&mixed,&mixed,bool):array|false	BY-DESIGN-php-impl
 getmxrr	Runtime\Stdlib\getmxrr	-	(string,&string[],&int[]):bool	(string,&mixed,&mixed):bool	BY-DESIGN-php-impl
-strcasecmp	Runtime\Libc\strcasecmp	strcasecmp	(string,string):int	(string,string):int	S0-c-semantics
-strcmp	Runtime\Libc\strcmp	strcmp	(string,string):int	(string,string):int	S0-c-semantics
-strncasecmp	Runtime\Libc\strncasecmp	strncasecmp	(string,string,int):int	(string,string,int):int	S0-c-semantics
-strncmp	Runtime\Libc\strncmp	strncmp	(string,string,int):int	(string,string,int):int	S0-c-semantics
-strchr	Runtime\Libc\strchr	strchr	(string,int):\Ffi\Ptr	(string,string,bool):string|false	S0-ret-shape
-strrchr	Runtime\Libc\strrchr	strrchr	(string,int):\Ffi\Ptr	(string,string,bool):string|false	S0-ret-shape
-strstr	Runtime\Libc\strstr	strstr	(string,string):int	(string,string,bool):string|false	S0-ret-shape

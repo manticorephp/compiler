@@ -21,8 +21,8 @@
 #
 # id	class	tier	depth	packages	epic	evidence	title
 
-ffi-alias-capture-ret	S0	0	compiler-root	0	bare-alias-capture	data/alias-capture.tsv	strstr/strchr/strrchr resolve to the raw C bindings and return a pointer where PHP returns a string
-ffi-alias-capture-nul	S0	0	compiler-root	0	bare-alias-capture	data/alias-capture.tsv	strcmp/strncmp/strcasecmp/strncasecmp compare NUL-terminated, so strcmp("a\0b","a\0c") answers 0
+ffi-alias-capture-ret	FIXED	0	compiler-root	0	bare-alias-capture	tests/aot/cases/cap_str_capture_family.php	strstr/strchr/strrchr resolved to the raw C bindings and returned a pointer where PHP returns a string — global PHP-semantics implementations now win at resolveCallName
+ffi-alias-capture-nul	FIXED	0	compiler-root	0	bare-alias-capture	tests/aot/cases/cap_str_capture_family.php	strcmp/strncmp/strcasecmp/strncasecmp compared NUL-terminated, so strcmp("a\0b","a\0c") answered 0 — now length-aware, unsigned, with PHP's prefix rule
 empty-array-byref-elem-repr	S0	0	repr	0	element-repr	probes/cap_callback_byref_capture.php	an array that is EMPTY at the call site loses its element hint through a by-reference write; the caller reads raw bits
 preg-named-groups	S0	2	stdlib-leaf	0	regex-surface	probes/cap_preg_named_groups.php	preg_match named capture groups come back NULL, which makes symfony/routing unimplementable
 preg-offset-capture-pair	S0	2	stdlib-leaf	0	regex-surface	probes/cap_preg_named_groups.php	PREG_OFFSET_CAPTURE returns the bare string instead of the [string, offset] pair

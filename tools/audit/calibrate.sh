@@ -50,6 +50,15 @@ fi
 
 RC=0
 
+# A bare-name alias that binds a raw C function under a PHP name is the
+# highest-severity thing this repo can ship: it compiles, it links, it runs, and
+# it answers wrong. The scan is 0.1s, so it gates every phase rather than living
+# in a report nobody re-runs.
+echo "== FFI ALIAS CAPTURE =="
+php tools/audit/alias_scan.php 2>&1 | grep -Ev '^  BY-DESIGN'
+[ "${PIPESTATUS[0]}" -ne 0 ] && RC=1
+
+echo
 echo "== SYNC =="
 php -r '
 $root = getcwd();

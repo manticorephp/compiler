@@ -25,12 +25,20 @@ $depthWeight = ['compiler-root' => 5, 'repr' => 4, 'parser' => 3, 'prelude' => 2
 $classNum = ['S0' => 0, 'S1' => 1, 'S2' => 2, 'S3' => 3, 'S4' => 4];
 
 $rows = [];
+$closed = [];
 foreach (file('docs/audit/findings.tsv') as $line) {
     $line = rtrim($line, "\n");
     if ($line === '' || $line[0] === '#') { continue; }
     $p = explode("\t", $line);
     if (count($p) < 8) { continue; }
     [$id, $class, $tier, $depth, $packages, $epic, $evidence, $title] = $p;
+    // A closed finding stays in the file rather than being deleted: the audit
+    // is a record of what was found, and a row that vanishes is indistinguishable
+    // from one that was never written.
+    if ($class === 'FIXED') {
+        $closed[] = ['id' => $id, 'epic' => $epic, 'evidence' => $evidence, 'title' => $title];
+        continue;
+    }
     $rows[] = [
         'id' => $id, 'class' => $class, 'tier' => (int)$tier, 'depth' => $depth,
         'packages' => (int)$packages, 'epic' => $epic, 'evidence' => $evidence,
@@ -92,6 +100,18 @@ foreach ($rows as $i => $r) {
     $md .= sprintf("| %d | %s | `%s` | T%d | %s | %s | [`%s`](%s) |\n",
         $i + 1, $r['class'], $r['id'], $r['tier'], $r['depth'], $r['title'],
         $r['evidence'], $r['evidence']);
+}
+
+if ($closed) {
+    $md .= "\n## Closed\n\n";
+    $md .= "Kept rather than deleted: a row that vanishes is indistinguishable from\n";
+    $md .= "one that was never written. Each carries the probe that now gates it —\n";
+    $md .= "the promotion rule from `README.md` moves a probe into `tests/aot/cases/`\n";
+    $md .= "in the same commit that closes its gap.\n\n";
+    $md .= "| id | epic | now gated by | what it was |\n|---|---|---|---|\n";
+    foreach ($closed as $c) {
+        $md .= "| `{$c['id']}` | `{$c['epic']}` | `{$c['evidence']}` | {$c['title']} |\n";
+    }
 }
 
 $md .= "\n## By owning epic\n\n";
