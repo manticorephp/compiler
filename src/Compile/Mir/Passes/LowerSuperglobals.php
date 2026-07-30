@@ -58,10 +58,33 @@ trait LowerSuperglobals
     private function injectSuperglobals(Module $module): void
     {
         $names = $this->superglobalNames();
+        // Demand is MODULE-WIDE and must be computed before anything is
+        // injected: the seed lives in `__main`, but a function may read
+        // `$_SERVER` while top-level code never mentions it. Keying the seed off
+        // __main's own statements — as this did — meant a program whose entry
+        // file never names a superglobal never initialised the cell at all, so
+        // every function read an uninitialised `int`. symfony's ArgvInput reads
+        // `$_SERVER['argv']` and no console entry point mentions it, so argv was
+        // empty and every command fell through to the application default.
+        $demanded = [];
         foreach ($module->functions as $fn) {
-            $used = [];
             foreach ($names as $sg) {
                 if ($this->nodeReadsLocal($fn->body, $sg)
+                    || $this->nodeWritesLocal($fn->body, $sg)) {
+                    $demanded[$sg] = true;
+                }
+            }
+        }
+        if ($demanded === []) { return; }
+        foreach ($module->functions as $fn) {
+            $isMain = $fn->name === '__main';
+            $used = [];
+            foreach ($names as $sg) {
+                if (!isset($demanded[$sg])) { continue; }
+                // __main binds every DEMANDED name so it can seed it; every
+                // other scope binds only what it actually touches.
+                if ($isMain
+                    || $this->nodeReadsLocal($fn->body, $sg)
                     || $this->nodeWritesLocal($fn->body, $sg)) {
                     $used[] = $sg;
                 }
@@ -71,9 +94,15 @@ trait LowerSuperglobals
             foreach ($used as $sg) {
                 $cell = '@g_' . $sg;
                 $module->addGlobalCell($cell, new IntConst(0, Type::int_()));
+                // A superglobal IS an implicit `global $x`, so register the name
+                // as one. Without it scanGlobalTypes bails on its
+                // `globalVarNames === []` guard and never unifies the type, so
+                // every scope kept the decl's hard-lowered `int` and read the
+                // seeded array as an integer.
+                $module->addGlobalVarName($sg);
                 $pre[] = new StaticLocalDecl_($sg, $cell, '', null, Type::int_());
                 // `__main` seeds the cell; every other scope only binds to it.
-                if ($fn->name === '__main') {
+                if ($isMain) {
                     $pre[] = new StoreLocal($sg, $this->superglobalInit($sg), Type::assoc(Type::string_(), Type::cell()));
                 }
             }

@@ -73,7 +73,13 @@ function __mc_server(): array
     $out['SCRIPT_FILENAME'] = $self;
     $out['PATH_TRANSLATED'] = $self;
     $out['DOCUMENT_ROOT'] = '';
-    $out['argv'] = __mir_to_cell($argv);
+    // A FRESH call, not `$argv`: boxing a named LOCAL's pointer into a value
+    // that outlives the frame does not co-own it, so the local's scope-exit
+    // release freed every element string. argv[0] survived only because
+    // PHP_SELF above retained it — argv[1..] came back EMPTY, which is why
+    // ArgvInput saw no tokens and every command fell through to the default.
+    // A call RESULT is a temp and transfers.
+    $out['argv'] = __mir_to_cell(__mc_argv());
     $out['argc'] = __mir_argc();
     // php stamps the request time once, at startup; here that IS process start,
     // since __main seeds $_SERVER before any user statement runs.

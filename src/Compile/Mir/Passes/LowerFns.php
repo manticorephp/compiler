@@ -93,6 +93,8 @@ trait LowerFns
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->constCallables = [];
+        $this->setCurrentLowerParams($decl->params);
+        $this->scanStableCallables($decl->body->statements);
         // `#[RefOut('a', 'b')]` names the pure-output by-ref params (portable
         // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side
         // equivalent.
@@ -454,6 +456,16 @@ trait LowerFns
         // `"C::m"(x)`, `[$o,"m"](x)`, `["C","m"](x)` → the matching call.
         $calleeAst = $expr->callee;
         $ck = $calleeAst->kind;
+        // First-class callable on a value: `$code(...)` / `$obj->m(...)` reached
+        // through Invoke. A string/array literal builds the concrete closure;
+        // any other callable VALUE is already invokable, so it passes through
+        // (identity for a closure — the common `$c(...)` normalise). NOTE: a raw
+        // string/array callable held in a var stays that value rather than a
+        // Closure object, so `instanceof Closure` on the result is not modelled.
+        if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
+            $cc = $this->coerceCallableArg(Type::closure(), $calleeAst);
+            return $cc !== null ? $cc : $this->lowerExpr($calleeAst);
+        }
         if ($ck === 'StringLiteral') {
             return $this->lowerStringCallable($this->strLitValue($calleeAst), $expr->args);
         }
@@ -464,8 +476,18 @@ trait LowerFns
         // A local tracked as holding a callable literal (straight-line).
         if ($ck === 'Variable') {
             $vn = $this->varName($calleeAst);
-            $info = $this->constCallables[$vn] ?? null;
-            if ($info !== null) { return $this->lowerConstCallable($vn, $info, $expr->args); }
+            if (isset($this->constCallables[$vn])) {
+                return $this->lowerConstCallable($vn, $this->constCallables[$vn], $expr->args);
+            }
+            // A body-stable `str_set` (`$fn = cond ? 'preg_match_all' : 'preg_match'`)
+            // that survived an intervening if/try. Dispatch on `$fn`'s runtime
+            // value into the two DIRECT calls — a dynamic invoke cannot carry a
+            // by-ref out-param, so preg_match's `$matches` came back undefined.
+            $stableName = $this->stableCallables[$vn] ?? '';
+            if ($stableName !== '') {
+                return $this->lowerStrSetCallable($vn, $stableName,
+                    $this->stableCallablesAlt[$vn] ?? '', $expr->args);
+            }
         }
         $callee = $this->lowerExpr($calleeAst);
         $args = [];
@@ -508,6 +530,19 @@ trait LowerFns
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
             return $out;
         }
+        // Static call / `new` args carry free vars too — an arrow fn body of
+        // `fn() => Helper::width(Helper::removeDecoration($formatter, $h))` captures
+        // `$formatter` through the static-call argument (else it dangles).
+        if ($k === 'StaticCall') {
+            $out = [];
+            foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
+        if ($k === 'New') {
+            $out = [];
+            foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
         if ($k === 'Invoke') {
             $out = $this->collectVars($e->callee);
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
@@ -547,7 +582,26 @@ trait LowerFns
      * @param \Parser\Ast\Expr[]  $astArgs
      * @return Node[]
      */
-    private function defaultFillArgs(array $params, array $astArgs): array
+    /**
+     * Lower one argument, converting a callable LITERAL into a closure when the
+     * parameter at this position is `callable`-typed. lowerCallArgs does this on
+     * its fast positional path, but every call that omits a DEFAULTED parameter
+     * lands here instead — and then a string like `"strlen"` was passed through
+     * as a plain string. The callee invokes a `callable` param through the
+     * closure ABI, so it jumped to the address of the string's own bytes:
+     * `array_filter($a, "strlen")` (three params, two arguments — symfony's
+     * InputOption constructor) crashed on the literal "strlen".
+     */
+    private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
+    {
+        if ($p !== null) {
+            $conv = $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($p)), $a);
+            if ($conv !== null) { return $conv; }
+        }
+        return $this->lowerExpr($a);
+    }
+
+    private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
         $hasNamed = false;
         foreach ($astArgs as $a) {
@@ -561,7 +615,7 @@ trait LowerFns
             $packed = [];
             $i = 0;
             foreach ($astArgs as $a) {
-                if ($i < $vidx) { $out[] = $this->lowerExpr($a); }
+                if ($i < $vidx) { $out[] = $this->lowerArgForParam($params[$i] ?? null, $a); }
                 else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
                 $i = $i + 1;
             }
@@ -572,7 +626,11 @@ trait LowerFns
         // reordered; otherwise lower positionally.
         if (!$hasNamed && \count($astArgs) >= \count($params)) {
             $out = [];
-            foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
+            $i = 0;
+            foreach ($astArgs as $a) {
+                $out[] = $this->lowerArgForParam($params[$i] ?? null, $a);
+                $i = $i + 1;
+            }
             return $out;
         }
         // Dense parallel slots (sparse int-key isset is unreliable in
@@ -594,7 +652,7 @@ trait LowerFns
                 $idx = 0;
                 foreach ($params as $p) {
                     if ($this->paramName($p) === $an) {
-                        $slotNode[$idx] = $this->lowerExpr($av);
+                        $slotNode[$idx] = $this->lowerArgForParam($p, $av);
                         $slotSet[$idx] = true;
                         break;
                     }
@@ -602,7 +660,7 @@ trait LowerFns
                 }
                 continue;
             }
-            $slotNode[$pos] = $this->lowerExpr($a);
+            $slotNode[$pos] = $this->lowerArgForParam($params[$pos] ?? null, $a);
             $slotSet[$pos] = true;
             $pos = $pos + 1;
         }
@@ -613,7 +671,18 @@ trait LowerFns
             if ($slotSet[$i]) {
                 $out[] = $slotNode[$i];
             } elseif ($pd !== null) {
-                $out[] = $this->lowerExpr($pd);
+                // A `self::CONST` / `parent::` / `static::` in an omitted param's
+                // default resolves against the callee's DECLARING class, not the
+                // call site — bind `self` to it while lowering (empty for plain
+                // functions keeps the caller context).
+                if ($selfClass !== '') {
+                    $prevSelf = $this->currentLowerClass;
+                    $this->currentLowerClass = $selfClass;
+                    $out[] = $this->lowerExpr($pd);
+                    $this->currentLowerClass = $prevSelf;
+                } else {
+                    $out[] = $this->lowerExpr($pd);
+                }
             } else {
                 $out[] = new NullConst(Type::null_());
             }

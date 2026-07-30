@@ -1,0 +1,8 @@
+Base::defaultName -> class=Base static=Y sameAsQueried=Y
+Mid::defaultName -> class=Base static=Y sameAsQueried=n
+Leaf::defaultName -> class=Base static=Y sameAsQueried=n
+Leaf::own -> class=Base static=n sameAsQueried=n
+Leaf::m -> class=Mid static=n sameAsQueried=n
+Mid::own -> class=Base static=n sameAsQueried=n
+missing: Property Leaf::$nope does not exist
+from obj class=Base

@@ -495,6 +495,33 @@ function arsort(array &$arr, int $flags = 0): bool
 }
 
 /**
+ * `array_merge(...$arrays)`. PRELUDE, not the stdlib .o, for the reason spelled
+ * out at the top of Runtime/Stdlib/Arrays.php: an extern's `array` param erases
+ * its element, so a re-stored value reads back with the WRONG repr. As an extern
+ * this returned an array of RAW object pointers under a CELL-repr result, and
+ * every `instanceof` over the merged elements answered false — symfony's
+ * `Table::render()` merges `$this->headers + [$divider] + $this->rows` and then
+ * asks `$row instanceof TableSeparator`, so the separator sorted as a data row
+ * and `getNumberOfColumns()` walked off the buffer. The identical body compiles
+ * correctly in-module, where call-site element inference types the parameter.
+ * Being variadic it could not live in the stdlib .o anyway (same rule as `pack`).
+ */
+function array_merge(array ...$arrays): array
+{
+    $out = [];
+    foreach ($arrays as $arr) {
+        foreach ($arr as $k => $v) {
+            if (\is_int($k)) {
+                $out[] = $v;
+            } else {
+                $out[$k] = $v;
+            }
+        }
+    }
+    return $out;
+}
+
+/**
  * `array_reverse(arr)` — values in reverse order, reindexed. In the PRELUDE so
  * call-site element inference / monomorphization types `$a` CONCRETELY (vec[int]
  * etc.) — array_values then re-boxes each typed element to a tagged cell. A

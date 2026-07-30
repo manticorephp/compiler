@@ -80,6 +80,9 @@ final class RuntimeFeatures
     public bool $needsClock = false;
     public bool $needsStdStreams = false;
     public bool $needsStrpos = false;
+    /** A concrete-element subscript read has to ask the array whether its slots
+     *  are actually boxed cells ({@see EmitLlvmRuntime::elemUntagRuntime}). */
+    public bool $needsElemUntag = false;
     public bool $needsStrcspn = false;
     public bool $needsStrExplode = false;
 

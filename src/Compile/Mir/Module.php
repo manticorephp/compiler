@@ -84,6 +84,12 @@ final class Module
      *  needles here so a self-build does not trip its own gate). */
     public bool $needsBacktrace = false;
 
+    /** The error/shutdown prelude is compiled in, so main() registers the
+     *  atexit trampoline that drains register_shutdown_function's queue and the
+     *  uncaught path offers the Throwable to a set_exception_handler() first.
+     *  Off for every program that never touches them — no hook, no cost. */
+    public bool $needsErrorHandlers = false;
+
     /** Source file path, for exception file() / trace frames. */
     public string $sourceFile = '';
 

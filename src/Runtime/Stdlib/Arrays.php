@@ -90,22 +90,7 @@ function array_values(array $arr): array
     return $out;
 }
 
-function array_merge(array ...$arrays): array
-{
-    $out = [];
-    foreach ($arrays as $arr) {
-        foreach ($arr as $k => $v) {
-            if (\is_int($k)) {
-                $out[] = $v;
-            } else {
-                $out[$k] = $v;
-            }
-        }
-    }
-    return $out;
-}
-
-// array_slice / array_map / array_filter live in prelude/array_fns.php
+// array_merge / array_slice / array_map / array_filter live in prelude/array_fns.php
 // (PRELUDE-injected), NOT here: as a stdlib extern the `array` param's element
 // erases to unknown, so re-stored values read back as garbage (a raw int → a
 // denormal float under NaN-boxing) and a callback crosses the closure ABI. In
@@ -118,6 +103,23 @@ function array_merge(array ...$arrays): array
 // array header (flags bits 36-63), which a PHP-level helper cannot reach — and
 // the old walking `reset`/`end` could not move the cursor at all, so a
 // following `current()` disagreed with them.
+
+// current() / key() answer from the FIRST entry, the same simplification
+// reset() and end() already make: an array here carries no internal pointer, so
+// there is no cursor for next()/prev() to move. That covers the overwhelmingly
+// common `key($arr)` / `current($arr)` on a freshly built array (symfony reads
+// `key(class_implements($x))` exactly so) and is honest about the rest.
+function current(array &$arr): mixed
+{
+    foreach ($arr as $v) { return $v; }
+    return false;
+}
+
+function key(array &$arr): mixed
+{
+    foreach ($arr as $k => $v) { return $k; }
+    return null;
+}
 
 /**
  * `array_is_list` — true iff `$a`'s keys are the integers 0..n-1 in order
@@ -365,4 +367,22 @@ function __mc_minmax_of(mixed $arr, bool $isMax): mixed
         }
     }
     return $acc;
+}
+
+/**
+ * The `+` array-union operator: every key of $a, then each key of $b that $a
+ * does NOT already have (first-wins, and int keys are NOT renumbered — unlike
+ * array_merge). A fresh array is built so neither operand is mutated.
+ * @param array<int|string, mixed> $a
+ * @param array<int|string, mixed> $b
+ * @return array<int|string, mixed>
+ */
+function __mir_array_union(array $a, array $b): array
+{
+    $out = [];
+    foreach ($a as $k => $v) { $out[$k] = $v; }
+    foreach ($b as $k => $v) {
+        if (!\array_key_exists($k, $out)) { $out[$k] = $v; }
+    }
+    return $out;
 }

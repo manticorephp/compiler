@@ -1,0 +1,34 @@
+0: string text len=4
+1: int 42
+2: float 3.5
+3: bool true
+4: null
+5: array(2) a|b
+6: object 7,9
+current=string(4) "text"
+after next=int(42)
+key=int(1)
+valid=bool(true)
+array(6) {
+  [0]=>
+  string(4) "text"
+  [1]=>
+  int(42)
+  [2]=>
+  float(3.5)
+  [3]=>
+  bool(true)
+  [4]=>
+  NULL
+  [5]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    string(1) "b"
+  }
+}
+first
+got sent
+second
+done

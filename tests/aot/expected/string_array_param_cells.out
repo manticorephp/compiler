@@ -1,0 +1,10 @@
+config:set,list:items,greet
+3
+list:items
+0
+[]
+a-b-c
+b
+config:set|list:items|greet
+config:set|list:items|greet
+done

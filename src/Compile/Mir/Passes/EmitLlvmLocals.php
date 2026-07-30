@@ -171,6 +171,24 @@ trait EmitLlvmLocals
                 $this->locals->slots[$n->keyVar] = $ks;
                 $out .= '  ' . $ks . " = alloca i64\n";
             }
+            // The OBJECT path also holds the iterator in a synthetic local, and
+            // that slot needs hoisting for the very same reason — more sharply,
+            // in fact: inside a generator the resume switch jumps back into the
+            // loop from `entry`, bypassing whatever branch the foreach sits in,
+            // so an alloca left there dominates none of the loop's own blocks.
+            // Named HERE so emission and preallocation cannot drift apart.
+            // Unconditionally, NOT gated on iterClass: InferTypes and the
+            // emitter reach the object path through two different predicates
+            // and can disagree, so a foreach can take it with iterClass still
+            // ''. An unused 8-byte slot costs nothing — LLVM drops it — while a
+            // missed hoist is an invalid-IR build failure.
+            if ($n->iterName === '') {
+                $n->iterName = '@it.' . (string)$this->iterCounter;
+                $this->iterCounter = $this->iterCounter + 1;
+                $is = $this->ssa->allocReg();
+                $this->locals->slots[$n->iterName] = $is;
+                $out .= '  ' . $is . " = alloca i64\n";
+            }
             return $out . $this->preallocateLocals($n->body);
         }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
@@ -271,6 +289,14 @@ trait EmitLlvmLocals
         }
         if ($k === Node::KIND_METHOD_CALL) {
             $out = $this->preallocateLocals($n->object);
+            foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
+            return $out;
+        }
+        // A static call's args can hold an assignment (`Helper::x($f = $o->m())`) —
+        // recurse so a local FIRST bound inside a static-call arg gets its entry
+        // slot (without this its StoreLocal emits `store …, ptr ` with no slot).
+        if ($k === Node::KIND_STATIC_CALL) {
+            $out = '';
             foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
@@ -531,17 +557,34 @@ trait EmitLlvmLocals
         // string, wrote rc into the string (the enum backing "int"→"jnt").
         $aliasObjStr = $v->kind === Node::KIND_LOAD_LOCAL
             && ($v->type->kind === Type::KIND_OBJ || $v->type->kind === Type::KIND_STRING);
-        // `$saved = $this->map` — a snapshot of an assoc PROPERTY. Co-own it
-        // too (rc>1) so a later `$this->map[$k]=…` copy-on-writes instead of
+        // `$saved = $this->map` — a snapshot of an array PROPERTY. Co-own it
+        // (rc>1) so a later mutation of the property copy-on-writes instead of
         // clobbering the snapshot's shared buffer (the InferTypes localTypes
-        // snapshot UAF). Restricted to assoc — obj/string property reads have
-        // their own retain discipline elsewhere.
-        $aliasAssocProp = $v->kind === Node::KIND_PROPERTY_ACCESS
-            && $v->type->isAssoc();
-        if ($aliasObjStr || $aliasAssocProp) {
+        // snapshot UAF). Obj/string property reads have their own retain
+        // discipline elsewhere.
+        //
+        // VEC as well as assoc: `$tokens = $this->tokens;` then
+        // `array_shift($tokens)` is symfony's ArgvInput::getParameterOption, and
+        // with rc stuck at 1 the shift's copy-on-write saw a unique buffer, so
+        // it drained the PROPERTY and then freed a buffer the property still
+        // held. A refcount-based COW is inert unless the alias co-owns.
+        // A bare `array` hint erases to KIND_UNKNOWN, so isArray() alone misses
+        // exactly the declaration symfony uses (`private array $tokens = []`) —
+        // ask the slot, the same way the store path does.
+        $aliasArrayProp = $v->kind === Node::KIND_PROPERTY_ACCESS
+            && ($v->type->isArray()
+                || $this->slotIsArrayHinted($v->object, $v->property, $v->type));
+        if ($aliasObjStr || $aliasArrayProp) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;
-            $out .= $this->rcRetainByType($v, $aliasV, null, 0);
+            // An array-HINTED slot whose type erased to unknown carries no kind
+            // for rcRetainByType to dispatch on, so it emitted nothing at all —
+            // name the array explicitly for that case.
+            $fallback = null;
+            if ($aliasArrayProp && !$v->type->isArray()) {
+                $fallback = Type::vec(Type::unknown());
+            }
+            $out .= $this->rcRetainByType($v, $aliasV, $fallback, 0);
             $this->lastValue = $aliasV;
             $this->lastValueType = 'i64';
         }

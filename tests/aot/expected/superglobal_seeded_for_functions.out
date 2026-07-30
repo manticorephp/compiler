@@ -1,0 +1,4 @@
+fn: is_array=Y has0=Y argc_matches=Y
+method: is_array=Y count>0=Y
+env: is_array=Y
+closure: is_array=Y

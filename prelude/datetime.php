@@ -27,6 +27,24 @@
 
 interface DateTimeInterface
 {
+    // The named format constants live on the interface in PHP 8; DateTime /
+    // DateTimeImmutable inherit them (so both `DateTimeInterface::RFC3339` and
+    // `DateTime::RFC3339` resolve through the implements walk).
+    public const ATOM = 'Y-m-d\TH:i:sP';
+    public const COOKIE = 'l, d-M-Y H:i:s T';
+    public const ISO8601 = 'Y-m-d\TH:i:sO';
+    public const ISO8601_EXPANDED = 'X-m-d\TH:i:sP';
+    public const RFC822 = 'D, d M y H:i:s O';
+    public const RFC850 = 'l, d-M-y H:i:s T';
+    public const RFC1036 = 'D, d M y H:i:s O';
+    public const RFC1123 = 'D, d M Y H:i:s O';
+    public const RFC7231 = 'D, d M Y H:i:s \G\M\T';
+    public const RFC2822 = 'D, d M Y H:i:s O';
+    public const RFC3339 = 'Y-m-d\TH:i:sP';
+    public const RFC3339_EXTENDED = 'Y-m-d\TH:i:s.vP';
+    public const RSS = 'D, d M Y H:i:s O';
+    public const W3C = 'Y-m-d\TH:i:sP';
+
     public function format(string $format): string;
     public function getTimestamp(): int;
     public function getOffset(): int;
@@ -308,20 +326,6 @@ class DateInterval
 /** A mutable date and time. */
 class DateTime implements DateTimeInterface
 {
-    public const ATOM = 'Y-m-d\TH:i:sP';
-    public const COOKIE = 'l, d-M-Y H:i:s T';
-    public const ISO8601 = 'Y-m-d\TH:i:sO';
-    public const RFC822 = 'D, d M y H:i:s O';
-    public const RFC850 = 'l, d-M-y H:i:s T';
-    public const RFC1036 = 'D, d M y H:i:s O';
-    public const RFC1123 = 'D, d M Y H:i:s O';
-    public const RFC7231 = 'D, d M Y H:i:s \G\M\T';
-    public const RFC2822 = 'D, d M Y H:i:s O';
-    public const RFC3339 = 'Y-m-d\TH:i:sP';
-    public const RFC3339_EXTENDED = 'Y-m-d\TH:i:s.vP';
-    public const RSS = 'D, d M Y H:i:s O';
-    public const W3C = 'Y-m-d\TH:i:sP';
-
     private int $ts = 0;
     private int $us = 0;
     private int $zid = 0;
@@ -505,20 +509,6 @@ class DateTime implements DateTimeInterface
 /** An immutable date and time: every mutator returns a NEW instance. */
 class DateTimeImmutable implements DateTimeInterface
 {
-    public const ATOM = 'Y-m-d\TH:i:sP';
-    public const COOKIE = 'l, d-M-Y H:i:s T';
-    public const ISO8601 = 'Y-m-d\TH:i:sO';
-    public const RFC822 = 'D, d M y H:i:s O';
-    public const RFC850 = 'l, d-M-y H:i:s T';
-    public const RFC1036 = 'D, d M y H:i:s O';
-    public const RFC1123 = 'D, d M Y H:i:s O';
-    public const RFC7231 = 'D, d M Y H:i:s \G\M\T';
-    public const RFC2822 = 'D, d M Y H:i:s O';
-    public const RFC3339 = 'Y-m-d\TH:i:sP';
-    public const RFC3339_EXTENDED = 'Y-m-d\TH:i:s.vP';
-    public const RSS = 'D, d M Y H:i:s O';
-    public const W3C = 'Y-m-d\TH:i:sP';
-
     private int $ts = 0;
     private int $us = 0;
     private int $zid = 0;

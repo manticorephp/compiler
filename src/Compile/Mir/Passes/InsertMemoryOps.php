@@ -138,6 +138,33 @@ final class InsertMemoryOps implements Pass
 
         $this->scanStores($fn->body);
 
+        // ONE exception to the blanket param block above: a BY-VALUE string
+        // param the body self-appends to (`$out .= …`). The append takes
+        // __mir_str_append's in-place fast path whenever rc == 1 — and rc IS 1
+        // there, because that single reference is the CALLER'S. The callee then
+        // wrote into the caller's buffer (`$a = 'hello'; app($a); // $a is now
+        // 'helloWORLD'` — PHP value semantics silently violated) and, once the
+        // append outgrew the capacity, the grow path freed the buffer the caller
+        // still pointed at, so the caller's own release hit a dead pointer.
+        //
+        // Registering the param here gives it the entry retain + scope-exit
+        // release that {@see EmitLlvmMemory::initRcObjSlots} already implements
+        // for reassigned params: rc becomes 2, so the first append COPIES (and
+        // releases our entry reference), leaving the frame a private buffer that
+        // every later append may mutate in place. Correctness with the amortized
+        // append intact.
+        $selfAppended = [];
+        $this->collectSelfAppendedStrings($fn->body, $selfAppended);
+        foreach ($fn->params as $p) {
+            if ($p->byRef || $p->variadic) { continue; }
+            if (!isset($selfAppended[$p->name])) { continue; }
+            unset($this->rcObjBlocked[$p->name]);
+            if (!isset($this->rcObjType[$p->name])) {
+                $this->rcObjOrder[] = $p->name;
+                $this->rcObjType[$p->name] = Type::string_();
+            }
+        }
+
         // A `$x = null;` / `$x = '';` seed neither owns nor borrows, so it must
         // not disqualify the local: the slot then holds 0, an immortal literal
         // (both self-guarded by every release helper) or a genuine +1. Without
@@ -210,6 +237,31 @@ final class InsertMemoryOps implements Pass
         }
 
         $fn->body->stmts = $stmts;
+    }
+
+    /**
+     * Names self-appended as strings anywhere in `$n`: `$s = $s . …`, the shape
+     * {@see EmitLlvmLocals::emitStoreLocal} turns into an in-place
+     * `__mir_str_append`. Only the LEFTMOST leaf counts — that is the one the
+     * append mutates.
+     *
+     * @param array<string, bool> $out
+     */
+    private function collectSelfAppendedStrings(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $v = $n->value;
+            if ($v->kind === Node::KIND_CONCAT && $v->type->kind === Type::KIND_STRING) {
+                $leaf = $v;
+                while ($leaf->kind === Node::KIND_CONCAT) { $leaf = $leaf->left; }
+                if ($leaf->kind === Node::KIND_LOAD_LOCAL
+                    && $leaf->type->kind === Type::KIND_STRING
+                    && $leaf->name === $n->name) {
+                    $out[$n->name] = true;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectSelfAppendedStrings($c, $out); }
     }
 
     /**

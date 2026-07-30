@@ -1,0 +1,21 @@
+array(3) {
+  [0]=>
+  string(5) "alpha"
+  [1]=>
+  string(2) "be"
+  [2]=>
+  string(5) "gamma"
+}
+array(3) {
+  ["alpha"]=>
+  int(5)
+  ["be"]=>
+  int(2)
+  ["gamma"]=>
+  int(5)
+}
+array(1) {
+  [0]=>
+  string(5) "delta"
+}
+int(1)

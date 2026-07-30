@@ -1,0 +1,6 @@
+before
+after silent deprecation
+deprecation: Since acme/lib 2.0: Use bar instead.
+
+Deprecated: visible in /Users/taras/var/projects/manticore-symfony/tests/aot/cases/trigger_deprecation_shape.php on line 28
+done
