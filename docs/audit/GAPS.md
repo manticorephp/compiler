@@ -16,7 +16,7 @@ without a file behind it.
 | S3 | static finding with no observed runtime effect |
 | S4 | advisory / analyzer residue |
 
-**28 findings**: 3 S0, 8 S1, 14 S2, 1 S3, 2 S4.
+**27 findings**: 2 S0, 8 S1, 14 S2, 1 S3, 2 S4.
 
 Capability probes: 1 DIFF (`docs/audit/data/capability.tsv`).
 
@@ -24,34 +24,33 @@ Capability probes: 1 DIFF (`docs/audit/data/capability.tsv`).
 
 | # | class | id | tier | depth | title | evidence |
 |---|---|---|---|---|---|---|
-| 1 | S0 | `enum-exists-returns-int` | T3 | prelude | enum_exists returns an int where php returns bool | [`probes/cap_refl_enum.php`](probes/cap_refl_enum.php) |
-| 2 | S0 | `reflection-type-tostring` | T3 | prelude | (string) on a ReflectionNamedType prints a raw pointer | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
-| 3 | S0 | `shutdown-order-and-args` | T4 | prelude | register_shutdown_function runs after destructors instead of before, and its bound argument is corrupted | [`probes/cap_destruct_and_shutdown.php`](probes/cap_destruct_and_shutdown.php) |
-| 4 | S1 | `autoload-absent` | T1 | stdlib-leaf | spl_autoload_register does not exist; class_exists($n, true) can never fire a resolver | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
-| 5 | S1 | `func-args-absent` | T1 | stdlib-leaf | func_num_args/func_get_arg absent; symfony/console alone calls func_num_args 15 times to detect omitted arguments | [`probes/cap_func_args.php`](probes/cap_func_args.php) |
-| 6 | S1 | `trigger-error-absent` | T1 | stdlib-leaf | trigger_error absent; every symfony package routes deprecations through it | [`probes/cap_trigger_error_handler.php`](probes/cap_trigger_error_handler.php) |
-| 7 | S1 | `iterator-double-foreach-sigbus` | T2 | repr | two foreach loops over one IteratorAggregate SIGBUS | [`probes/cap_iterator_protocol.php`](probes/cap_iterator_protocol.php) |
-| 8 | S1 | `superglobals-unseeded` | T3 | compiler-root | $_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys | [`probes/cap_superglobal_server_web.php`](probes/cap_superglobal_server_web.php) |
-| 9 | S1 | `sapi-fns-absent` | T3 | stdlib-leaf | header/headers_sent/http_response_code/setcookie/ob_*/session_* all absent | [`SAPI-REQUIREMENTS.md`](SAPI-REQUIREMENTS.md) |
-| 10 | S1 | `include-returns-null` | T4 | compiler-root | require/include lower to null, so config/bundles.php, config/*.php closures and the dumped DI container never load | [`probes/cap_include_returns_value.php`](probes/cap_include_returns_value.php) |
-| 11 | S1 | `putenv-absent` | T4 | stdlib-leaf | putenv absent, so SHELL_VERBOSITY never round-trips through getenv | [`probes/cap_putenv.php`](probes/cap_putenv.php) |
-| 12 | S2 | `parser-ref-in-array-literal` | T1 | parser | `[&$a[$k], $v]` (reference inside an array literal) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 13 | S2 | `spl-classes-absent` | T1 | prelude | OutOfBoundsException, BadMethodCallException, IteratorIterator, DirectoryIterator and friends are absent | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 14 | S2 | `globals-whole-array` | T3 | compiler-root | a whole-array $GLOBALS read is a hard compile error | [`probes/cap_globals_array_read.php`](probes/cap_globals_array_read.php) |
-| 15 | S2 | `parser-byref-arrow-fn` | T3 | parser | `fn &() => ...` (by-reference arrow function) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 16 | S2 | `parser-high-byte-identifier` | T3 | parser | an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9` | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 17 | S2 | `parser-reserved-enum-case` | T3 | parser | an enum case named with a reserved word (`case ARRAY = 'array';`) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 18 | S2 | `parser-xor-operator` | T3 | parser | the `xor` operator is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 19 | S2 | `refl-param-attributes` | T3 | prelude | ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work | [`probes/cap_refl_param_attributes.php`](probes/cap_refl_param_attributes.php) |
-| 20 | S2 | `refl-param-default` | T3 | prelude | ReflectionParameter::getDefaultValue/getDeclaringClass absent | [`probes/cap_refl_param_default.php`](probes/cap_refl_param_default.php) |
-| 21 | S2 | `refl-union-type` | T3 | prelude | no ReflectionUnionType / ReflectionIntersectionType | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
-| 22 | S2 | `parser-const-gaps` | T6 | parser | `expected const name` / `expected ';' after const` in doctrine/dbal Types and nette/utils Image | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 23 | S2 | `refl-enum-absent` | T6 | prelude | ReflectionEnum absent; doctrine enum types and form choices need it | [`probes/cap_refl_enum.php`](probes/cap_refl_enum.php) |
-| 24 | S2 | `refl-hydration` | T6 | prelude | newInstanceWithoutConstructor absent; doctrine hydration and var-exporter need it | [`probes/cap_refl_hydration.php`](probes/cap_refl_hydration.php) |
-| 25 | S2 | `pdo-absent` | T6 | stdlib-leaf | no PDO, PDOStatement, PDOException or sqlite binding exists at all | [`PDO-SQLITE-REQUIREMENTS.md`](PDO-SQLITE-REQUIREMENTS.md) |
-| 26 | S3 | `refl-attr-is-instanceof` | T4 | prelude | ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only | [`probes/cap_refl_attr_is_instanceof.php`](probes/cap_refl_attr_is_instanceof.php) |
-| 27 | S4 | `analyzer-use-function` | T1 | compiler-root | the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs | [`data/calibration-residue.txt`](data/calibration-residue.txt) |
-| 28 | S4 | `preg-match-cell-boxing-cost` | T2 | stdlib-leaf | preg_match $matches had to become cell-element so PREG_OFFSET_CAPTURE can hold its [text,offset] pairs; measured 0.088s -> 0.102s (+16%) on a 300k-iteration match loop. Recoverable by specializing on a constant $flags argument, which is compiler work, not stdlib work | [`tests/aot/cases/cap_preg_named_groups.php`](tests/aot/cases/cap_preg_named_groups.php) |
+| 1 | S0 | `prelude-method-return-loses-class` | T3 | compiler-root | a PRELUDE class method degrades its declared return type to bare `object`, so any dispatch keyed on the static class silently misfires — (string)$reflectionType prints a raw pointer while $t->__toString() is correct, and a directly-constructed instance works. get_debug_type says S for a user method returning ?S, and `object` for a prelude one | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
+| 2 | S0 | `shutdown-order-and-args` | T4 | prelude | register_shutdown_function runs after destructors instead of before, and its bound argument is corrupted | [`probes/cap_destruct_and_shutdown.php`](probes/cap_destruct_and_shutdown.php) |
+| 3 | S1 | `autoload-absent` | T1 | stdlib-leaf | spl_autoload_register does not exist; class_exists($n, true) can never fire a resolver | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
+| 4 | S1 | `func-args-absent` | T1 | stdlib-leaf | func_num_args/func_get_arg absent; symfony/console alone calls func_num_args 15 times to detect omitted arguments | [`probes/cap_func_args.php`](probes/cap_func_args.php) |
+| 5 | S1 | `trigger-error-absent` | T1 | stdlib-leaf | trigger_error absent; every symfony package routes deprecations through it | [`probes/cap_trigger_error_handler.php`](probes/cap_trigger_error_handler.php) |
+| 6 | S1 | `iterator-double-foreach-sigbus` | T2 | repr | two foreach loops over one IteratorAggregate SIGBUS | [`probes/cap_iterator_protocol.php`](probes/cap_iterator_protocol.php) |
+| 7 | S1 | `superglobals-unseeded` | T3 | compiler-root | $_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys | [`probes/cap_superglobal_server_web.php`](probes/cap_superglobal_server_web.php) |
+| 8 | S1 | `sapi-fns-absent` | T3 | stdlib-leaf | header/headers_sent/http_response_code/setcookie/ob_*/session_* all absent | [`SAPI-REQUIREMENTS.md`](SAPI-REQUIREMENTS.md) |
+| 9 | S1 | `include-returns-null` | T4 | compiler-root | require/include lower to null, so config/bundles.php, config/*.php closures and the dumped DI container never load | [`probes/cap_include_returns_value.php`](probes/cap_include_returns_value.php) |
+| 10 | S1 | `putenv-absent` | T4 | stdlib-leaf | putenv absent, so SHELL_VERBOSITY never round-trips through getenv | [`probes/cap_putenv.php`](probes/cap_putenv.php) |
+| 11 | S2 | `parser-ref-in-array-literal` | T1 | parser | `[&$a[$k], $v]` (reference inside an array literal) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 12 | S2 | `spl-classes-absent` | T1 | prelude | OutOfBoundsException, BadMethodCallException, IteratorIterator, DirectoryIterator and friends are absent | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 13 | S2 | `globals-whole-array` | T3 | compiler-root | a whole-array $GLOBALS read is a hard compile error | [`probes/cap_globals_array_read.php`](probes/cap_globals_array_read.php) |
+| 14 | S2 | `parser-byref-arrow-fn` | T3 | parser | `fn &() => ...` (by-reference arrow function) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 15 | S2 | `parser-high-byte-identifier` | T3 | parser | an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9` | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 16 | S2 | `parser-reserved-enum-case` | T3 | parser | an enum case named with a reserved word (`case ARRAY = 'array';`) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 17 | S2 | `parser-xor-operator` | T3 | parser | the `xor` operator is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 18 | S2 | `refl-param-attributes` | T3 | prelude | ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work | [`probes/cap_refl_param_attributes.php`](probes/cap_refl_param_attributes.php) |
+| 19 | S2 | `refl-param-default` | T3 | prelude | ReflectionParameter::getDefaultValue/getDeclaringClass absent | [`probes/cap_refl_param_default.php`](probes/cap_refl_param_default.php) |
+| 20 | S2 | `refl-union-type` | T3 | prelude | no ReflectionUnionType / ReflectionIntersectionType | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
+| 21 | S2 | `parser-const-gaps` | T6 | parser | `expected const name` / `expected ';' after const` in doctrine/dbal Types and nette/utils Image | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 22 | S2 | `refl-enum-absent` | T6 | prelude | ReflectionEnum absent; doctrine enum types and form choices need it | [`probes/cap_refl_enum.php`](probes/cap_refl_enum.php) |
+| 23 | S2 | `refl-hydration` | T6 | prelude | newInstanceWithoutConstructor absent; doctrine hydration and var-exporter need it | [`probes/cap_refl_hydration.php`](probes/cap_refl_hydration.php) |
+| 24 | S2 | `pdo-absent` | T6 | stdlib-leaf | no PDO, PDOStatement, PDOException or sqlite binding exists at all | [`PDO-SQLITE-REQUIREMENTS.md`](PDO-SQLITE-REQUIREMENTS.md) |
+| 25 | S3 | `refl-attr-is-instanceof` | T4 | prelude | ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only | [`probes/cap_refl_attr_is_instanceof.php`](probes/cap_refl_attr_is_instanceof.php) |
+| 26 | S4 | `analyzer-use-function` | T1 | compiler-root | the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs | [`data/calibration-residue.txt`](data/calibration-residue.txt) |
+| 27 | S4 | `preg-match-cell-boxing-cost` | T2 | stdlib-leaf | preg_match $matches had to become cell-element so PREG_OFFSET_CAPTURE can hold its [text,offset] pairs; measured 0.088s -> 0.102s (+16%) on a 300k-iteration match loop. Recoverable by specializing on a constant $flags argument, which is compiler work, not stdlib work | [`tests/aot/cases/cap_preg_named_groups.php`](tests/aot/cases/cap_preg_named_groups.php) |
 
 ## Closed
 
@@ -76,10 +75,9 @@ The ladder tier is the implementation order: a tier's dependency closure
 lies entirely in lower tiers, so a gap first seen at tier N blocks tiers
 N..8 and nothing below.
 
-### `reflection-tier4` — 8 finding(s), first bites at T3
+### `reflection-tier4` — 7 finding(s), first bites at T3
 
-- **S0** `enum-exists-returns-int` — enum_exists returns an int where php returns bool
-- **S0** `reflection-type-tostring` — (string) on a ReflectionNamedType prints a raw pointer
+- **S0** `prelude-method-return-loses-class` — a PRELUDE class method degrades its declared return type to bare `object`, so any dispatch keyed on the static class silently misfires — (string)$reflectionType prints a raw pointer while $t->__toString() is correct, and a directly-constructed instance works. get_debug_type says S for a user method returning ?S, and `object` for a prelude one
 - **S2** `refl-param-attributes` — ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work
 - **S2** `refl-param-default` — ReflectionParameter::getDefaultValue/getDeclaringClass absent
 - **S2** `refl-union-type` — no ReflectionUnionType / ReflectionIntersectionType
