@@ -3,7 +3,7 @@
 /**
  * Pure-PHP implementations of common PHP filesystem std functions on top
  * of libc primitives bound via #[Ffi\Library, Symbol] in {@see Runtime\Libc}.
- * No Rust runtime, no external libs — the same compile-time-FFI mechanism the
+ * No external runtime, no external libs — the same compile-time-FFI mechanism the
  * compiler uses internally (Manticore\read_file).
  *
  * Global namespace so user code calling `file_get_contents($p)` resolves here

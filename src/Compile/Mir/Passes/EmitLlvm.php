@@ -227,7 +227,7 @@ final class EmitLlvm implements EmitVisitor
     /**
      * Native FFI-boundary primitives (`manticore_rt_*`) called but not
      * PHP-defined. Declared as externs so the module assembles; the
-     * no-Rust bootstrap link-stubs them (the compiler never invokes the
+     * tools/link_stubs.sh link-stubs them (the compiler never invokes the
      * FFI path at compile time). symbol → declare line.
      * @var array<string, string>
      */

@@ -39,6 +39,13 @@ A confined allocation goes to a process arena — a growing bump-pointer region.
 Allocation is a pointer add; nothing is individually freed. At the owning scope's
 exit the arena is rewound in bulk. This is why confined temporaries are cheap.
 
+**Arrays reach the arena too**, not just scalars and strings. An array is
+arena-eligible when `InferAllocKind::isArenaEligibleType()` says so, which today
+means a flat int / float / bool array with integer keys — deliberately a first
+cut, not every non-escaping array. An arena array carries its own tag, so the
+refcount helpers recognise it and bail: it is never rc-bumped and never `free()`d.
+Disable with `MANTICORE_ARENA_ARRAYS=0`.
+
 ---
 
 ## Choosing a strategy
@@ -106,17 +113,41 @@ the global mode + `gc_collect_cycles()` are the levers.
 
 ---
 
+## Compile-time knobs
+
+Six environment variables are read once at startup (`src/Compile/Debug.php`).
+Only the first is something you would normally touch:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `MANTICORE_MEMORY` | `hybrid` | allocation strategy; same as `--memory=<rc\|arena\|hybrid>` |
+| `MANTICORE_ARENA_ARRAYS` | on | arena-allocate eligible non-escaping arrays |
+| `MANTICORE_EMPTY_SINGLETON` | on | share one immortal buffer for every empty `[]` |
+| `MANTICORE_DEBUG_VERIFY` | off | plant slow-path invariant checks at every memory op |
+| `MANTICORE_PROFILE` | off | thread-local refcount / allocation counters |
+| `MANTICORE_REFLECT_REPORT` | off | report which classes reflection kept alive |
+
+---
+
 ## Under the hood (reference)
 
-- Object header: `[ptr class-descriptor, i64 refcount, …properties]`. The
-  descriptor (`{class_id, drop_fn}`) drives type checks and an indirect,
-  link-composable destructor.
-- Strings: an 8-byte refcount precedes the bytes; the value pointer is at the
-  data, so `strlen`/`memcpy` see a plain C string. Immortal strings (literals,
-  arena) carry refcount `-1` and are skipped by retain/release.
-- Arrays: one unified `PhpArray` (vec + assoc) with a refcount and copy-on-write.
-- Exact offsets and tag encodings: `src/Compile/MemoryAbi.php` (the single source
-  of truth; `manticore version` reports its ABI version).
-- Passes: `InferAllocKind` (escape analysis) → `ApplyMemoryMode` (mode overlay)
-  → `InsertMemoryOps` (retain/release/CoW insertion). Design notes under
-  `docs/bootstrap/`.
+- **Object header — 16 bytes:** `[ptr class-descriptor @0, i64 rc_word @8,
+  …properties @16]`. The descriptor (`{class_id, drop_fn, rmeta}`, 24 bytes) is a
+  static `linkonce_odr` global, so type checks and an indirect, link-composable
+  destructor both compose across separately-linked objects. The rc word packs
+  `rc | color | buffered` — the colour bits are the cycle collector's.
+- **String header — 32 bytes**, all before the data pointer: cached hash at −32,
+  capacity at −24, length at −16, refcount at −8. The value pointer is the data,
+  so `strlen`/`memcpy` see a plain C string; the capacity is what makes `.=`
+  amortized. Immortal strings (literals, arena) carry refcount `-1`.
+- **Arrays:** one unified `PhpArray` (packed ↔ hashed under a 56-byte header) with
+  the refcount at one fixed offset regardless of mode, plus copy-on-write. The
+  immortal empty-array singleton uses a saturated refcount, **not** `-1`.
+- **Exact offsets and tag encodings:** `src/Compile/MemoryAbi.php` is the single
+  source of truth, `MemoryAbi::VERSION` is currently 7. It is not surfaced by any
+  command today — `manticore version` prints the release version only.
+- **Passes:** `InferEffects` → `InferAllocKind` (escape analysis) →
+  `ApplyMemoryMode` (mode overlay) → `InsertMemoryOps` (retain/release/CoW
+  insertion) → `Verify`.
+- **Design notes:** [`design/memory-abi.md`](design/memory-abi.md) for the layout
+  contract, [`design/refcount-cow.md`](design/refcount-cow.md) for why this model.

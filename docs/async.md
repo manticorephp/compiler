@@ -11,8 +11,6 @@ It ships in **`prelude/async.php`** and is demand-gated: a program that never na
 `Async\` carries none of it (naming it also forces `\Fiber` and `Io\Poll` on). Nothing to
 install, nothing to link — `use function Async\spawn;` is enough.
 
-This directory holds the examples and benchmarks.
-
 Everything here is **superset**: `php` has `Fiber` and nothing else of it, so `difftest` cannot
 check a single line — these cases carry hand-written expected output instead.
 [docs/superset.md](superset.md) catalogues that whole surface (concurrency, attributes, FFI,
@@ -394,9 +392,11 @@ re-arming readiness is a hot spin that starves every sibling task and never even
 watchdog, because it suspends on every iteration. It shows up only as `stats()['wakes']`
 climbing with wall time instead of with connections.
 
-The seam is `\Runtime\AsyncHook` (five callbacks installed by the scheduler — readable,
-writable, close, bounded-readable, sleep; one null check per would-block when no scheduler is
-running).
+The seam is `\Runtime\AsyncHook` — eleven callbacks installed by the scheduler:
+`waitReadable` / `waitWritable`, their bounded variants `waitReadableFor` /
+`waitWritableFor`, `onClose`, `sleeper`, the DNS-cache pair `dnsGet` / `dnsPut`, and the
+`select` trio `selectAdd` / `selectWait` / `selectDone`. With no scheduler running it costs
+one null check per would-block.
 
 Plain streams **are** the API. `Async\read/write/accept/connect/close` also exist, bypassing
 the stream layer for raw `recv`/`send` on the fd — worth roughly 2× when you are counting

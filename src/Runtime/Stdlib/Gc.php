@@ -1,15 +1,14 @@
 <?php
 
 /**
- * PHP `gc_*` family. Stubs only today — the surrounding refcount
- * layer reclaims every non-cyclic graph on `rc == 0`; cycles leak
- * until the Bacon-Rajan collector lands (see
- * `docs/bootstrap/11-cycle-collector-design.md` for the design and
- * `docs/ROADMAP.md` for the dependency
- * order).
+ * PHP `gc_*` family. The surrounding refcount layer reclaims every
+ * non-cyclic graph on `rc == 0`; cycles are reclaimed by the
+ * Bacon-Rajan collector, which `gc_collect_cycles()` drives (see
+ * `docs/design/memory-abi.md` §7). Collection is manual-trigger only
+ * and does not scan static/global roots — `docs/ROADMAP.md`.
  *
- * `gc_enable` / `gc_disable` / `gc_mem_caches` are no-ops in AOT
- * mode — there is no runtime-tunable collector to toggle. The
+ * Every function here except `gc_collect_cycles` is a genuine no-op in
+ * AOT mode — there is no runtime-tunable collector to toggle. The
  * presence of these symbols keeps user PHP that calls them
  * compiling.
  */

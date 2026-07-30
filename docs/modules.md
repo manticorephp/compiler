@@ -56,6 +56,8 @@ executable that imports its dependencies' `.sig` and links their `.o`).
 | `exclude` | *optional* — path prefixes to skip in the `src` scan (e.g. a subtree compiled separately as a library) |
 | `libraries` | *optional* — which **user** library targets to import + link. **Omit ⇒ all, `[]` ⇒ none**, a named subset ⇒ just those. Independent of the stdlib (see below). |
 | `stdlib` | *optional* — set `false` to opt OUT of the always-on stdlib runtime. Only the self-contained compiler (which embeds `src/Runtime`) needs this. |
+| `composer` | *optional* — `true` also compiles the Composer view of the project (see below); the object form `{ "vendor": false }` narrows it |
+| `extensions` | *optional* — names of native extensions to bind and link. Every name must exist in the manifest's top-level `extensions` map, or the build fails |
 
 ### Library fields
 
@@ -64,24 +66,33 @@ executable that imports its dependencies' `.sig` and links their `.o`).
 A library marked `"runtime": true` is the bundled stdlib — built, but treated as
 the always-on runtime rather than a normal dependency (see below).
 
-### Why `"libraries": []` matters
+### Two independent opt-outs: `"stdlib"` and `"libraries"`
 
-An application that embeds a copy of a library's source in its own `src` must
-**opt out** of linking that library, or the same symbols are defined twice. The
-compiler itself does exactly this — it bundles `src/Runtime` (the stdlib)
-directly, so its app target sets `"libraries": []`:
+They are **not** the same switch, and confusing them is the usual manifest bug.
+
+- **`"stdlib": false`** on an application opts out of the always-on runtime.
+  A `"runtime": true` library is injected and linked into every app regardless of
+  the `libraries` selection, so `"libraries": ["mylib"]` can never accidentally
+  drop the stdlib. You opt out only when your app already embeds that source.
+- **`"libraries"`** selects among the *other* (non-runtime) libraries: omit the
+  key ⇒ all of them, `[]` ⇒ none, a list of names ⇒ just those. An application
+  that embeds a copy of a library's source must exclude it here, or the same
+  symbols are defined twice.
+
+The compiler's own manifest is the worked example — it bundles `src/Runtime`
+directly, so it opts out of the runtime, and it has no other libraries to select:
 
 ```json
 {
   "libraries": [{ "name": "stdlib", "src": "src/Runtime",
-                  "output": "lib/manticore_stdlib.o", "exclude": [] }],
+                  "output": "lib/manticore_stdlib.o", "exclude": [],
+                  "runtime": true }],
   "applications": [{ "name": "compiler", "src": "src", "output": "bin/manticore",
-                     "entry": "src/zzz_entry.php", "libraries": [] }]
+                     "entry": "src/zzz_entry.php", "stdlib": false }]
 }
 ```
 
-The `stdlib` library still builds (for *user* programs to link); the compiler
-just doesn't link it into itself.
+The `stdlib` library still builds — that is what *user* programs link.
 
 ---
 
@@ -99,6 +110,35 @@ against the bundled stdlib. You can inspect a `.sig` with:
 ```bash
 manticore dump-sig src/Util/*.php
 ```
+
+⚠ **A `.sig` carries FUNCTIONS ONLY** — the emitted JSON is
+`{"schema":1,"functions":[…]}`. Classes, interfaces, traits, enums and constants
+do **not** cross a compiled-library boundary today. A library whose public API is
+a class has to be compiled into the application as source (`src` / `exclude`)
+rather than linked as a `.o`. Tracked in `docs/ROADMAP.md`.
+
+---
+
+## Composer projects
+
+Set `"composer": true` on an application and Manticore builds the project the way
+Composer sees it: the project's own `composer.json` `autoload` roots (psr-4,
+psr-0 and classmap directories) **and** every installed package listed in
+`composer.lock`, rooted at `vendor/<name>/`.
+
+```json
+{ "applications": [{ "name": "app", "src": "src", "output": "bin/app",
+                     "entry": "src/main.php", "composer": true }] }
+```
+
+The object form narrows it: `{ "vendor": false }` takes only the project's own
+autoload — useful while a dependency uses PHP the compiler does not support yet.
+
+The key point: **`vendor/` is source to compile, not an autoload map evaluated at
+runtime.** Those directories are unioned into the same whole-program source set
+as `src`, and a directory already covered by `src` is skipped, so an
+`"App\\": "src/"` mapping does not double-scan. The build prints each directory
+it adds (`build: + composer autoload '…'`).
 
 ---
 

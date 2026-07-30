@@ -8,19 +8,17 @@ use Codegen\Llvm\Value;
 
 /**
  * Environment contract for the standalone runtime emitters
- * ({@see AssocRuntime}, and later vec/obj). It abstracts the two
- * things a hand-emitted runtime helper needs from its backend:
+ * ({@see UnifiedArrayRuntime}). It abstracts the two things a
+ * hand-emitted runtime helper needs from its backend:
  *
  *   1. **Allocation** — `rtAlloc` / `rtRealloc` / `rtArenaBypass`.
- *      The AST backend routes these through its arena / MemoryOp
- *      machinery; the MIR backend uses plain libc malloc.
  *   2. **Instrumentation + labels** — `rtFreshLabel`,
- *      `rtDebugDprintf`, `rtProfileBump`. The AST backend wires
- *      these to its debug / profile tooling; MIR no-ops them.
+ *      `rtDebugDprintf`, `rtProfileBump`.
  *
- * Two implementations: the {@see \Compile\Compiler} itself (AST,
- * preserves every -Z flag + arena/verify behaviour byte-for-byte)
- * and {@see BareHost} (MIR: libc malloc, no instrumentation).
+ * One implementation today: {@see BareHost} (libc malloc, no
+ * instrumentation). The seam predates the removal of the AST backend,
+ * which was the second host; it is kept because the runtime emitters
+ * are backend-agnostic by construction and cheap to keep that way.
  *
  * This is the "AllocStrategy" seam — folded into one host because
  * the helper bodies interleave allocation with trace/profile calls;

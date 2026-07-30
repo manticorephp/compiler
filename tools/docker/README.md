@@ -131,8 +131,11 @@ notes.
 
 | file | role |
 |---|---|
-| `run_tests.sh` | driver: build in a container, run the full AOT suite |
+| `run_tests.sh` | driver: build in a container, run the full AOT suite (`--gate` for the full gate) |
 | `PROBE_RESULTS.md` | committed libc measurements that `src/` hard-codes from |
+| `iopoll/` | a second, self-contained harness for the epoll/kqueue reactor: its own `Dockerfile`, `run.sh`, `in_container.sh`, `diag.sh` and `cases/` |
 
-The image is the root `Dockerfile` (`--target toolchain`), not a file here --
-one image definition serves both users and this harness.
+The main image is the root `Dockerfile` (`--target toolchain`), not a file here —
+one image definition serves both users and this harness. `iopoll/` is the
+exception: it ships its own minimal Dockerfile because it tests the reactor
+against a specific kernel surface rather than the whole toolchain.

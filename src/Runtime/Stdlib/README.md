@@ -1,44 +1,70 @@
 # Runtime\Stdlib
 
-Pure-PHP reimplementations of PHP std-functions. Global namespace, no
-dependencies on extension code. Compiled into every binary; resolves
-through PHP's global function lookup so user code can call them by
-their canonical PHP names.
+Pure-PHP reimplementations of PHP std-functions. Global namespace, no dependency
+on extension code. Compiled once into `lib/manticore_stdlib.o` and auto-linked
+into every binary; the accompanying `.o.sig` exposes them to user programs with
+no import and no registration.
 
 ## Files
 
-- `Arrays.php` — `in_array`, `array_key_exists`, `array_keys`, `array_values`,
-  `array_merge`, `array_slice`, `reset`, `end`. (`array_map` / `array_filter`
-  moved to `prelude/array_fns.php` — a callback can't cross the stdlib.o
-  boundary.)
-- `Ctype.php` — `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_digit`,
-  `ctype_lower`, `ctype_upper`, `ctype_graph`, `ctype_print`, `ctype_punct`,
-  `ctype_space`, `ctype_xdigit`. Internal `__manticore_ctype_to_bytes`,
-  `__manticore_ctype_all`.
-- `Gc.php` — `gc_enabled`, `gc_enable`, `gc_disable`, `gc_collect_cycles`,
-  `gc_mem_caches`. Only `gc_collect_cycles` is non-trivial — drives the
-  Bacon-Rajan cycle collector.
-- `Strings.php` — `str_starts_with`, `str_ends_with`, `str_contains`,
-  `ltrim`, `rtrim`, `trim`, `strpos`, `strrpos`, `str_replace`, `explode`.
-  Internal `__mask_has_byte`.
+33 files, grouped by surface:
+
+| Group | Files |
+|---|---|
+| Arrays | `Arrays.php` |
+| Strings | `Strings.php`, `StringsExtra.php`, `NatCompare.php`, `Format.php` (the `printf` family), `Scanf.php`, `Encoding.php` |
+| Character classes | `Ctype.php` |
+| Regex | `Pcre.php` (the `preg_*` family over host PCRE2) |
+| Math / random | `MathExtra.php`, `Random.php` |
+| Date & time | `Time.php`, `DateCivil.php`, `DateFormat.php`, `DateFuncs.php`, `DateOps.php`, `DateParse.php`, `TzIf.php`, `TzInfo.php` |
+| Filesystem | `Io.php`, `Fs.php`, `FsRest.php`, `Stat.php`, `Path.php` |
+| Structured formats | `Csv.php`, `Ini.php` |
+| Networking | `Net.php`, `Sockets.php`, `Dns.php` |
+| Hashing | `Hash.php` |
+| Process | `Pcntl.php` |
+| Misc | `Gc.php`, `VarExtra.php` |
+
+`Io.php` (64 KB), `Net.php` (95 KB) and `Sockets.php` (50 KB) are the three that
+carry most of the surface; start there when looking for a stream or socket
+function.
 
 ## Invariants
 
 - Functions live in the **global namespace** so a user `str_starts_with($a, $b)`
   resolves directly here.
-- Compiler `tryCompileBuiltin` fires first for inlinable builtins; these
-  PHP-level versions catch the fall-through path.
-- `strpos` / `strrpos` return **`-1`** for "not found", not PHP's `false`.
-  Compiler union-typing for return values is still in flight; callers
-  wanting PHP-strict semantics wrap.
+- The compiler's `tryCompileBuiltin` fires first for inlinable builtins; these
+  PHP-level versions catch the fall-through path. A function can therefore exist
+  in both tiers — the codegen builtin wins.
+- **Signatures are php-faithful.** `strpos` / `strrpos` return `int|false`, not a
+  `-1` sentinel; `preg_match` returns `int|false`. Do not "simplify" a return
+  type to dodge a union.
+- **A variadic cannot cross the `stdlib.o` boundary**, and neither can a callback
+  — that is why `array_map` / `array_filter` / `array_reduce` live in
+  `prelude/array_fns.php` rather than here.
+- An element-**consuming** `array` parameter (one whose values get cast or
+  stringified) must be marked `#[\Manticore\Attr\CellArg]`, or a caller passing a
+  concrete-element array will have its raw slots decoded as cells. See
+  `docs/attributes.md`.
 - Empty-string predicates match Zend: `ctype_digit('')` → `false`,
   `str_starts_with('', '')` → `true`.
-- Integer args to `ctype_*` in `[-128, 255]` treated as a single byte
-  (signed wrap via `+256`); ints outside that range coerced to
-  decimal-string then scanned.
-- `in_array` today is string-needle / string-haystack only.
-- `array_key_last` deliberately omitted: PHP returns `int|string|null`,
-  the compiler doesn't track that union.
-- `gc_collect_cycles` calls `__manticore_cc_collect_cycles()` — a runtime
-  helper emitted by `AssocHelpers::emitCcAlgorithmHelpers()` (see
-  `docs/bootstrap/11-cycle-collector-design.md`).
+- Integer args to `ctype_*` in `[-128, 255]` are treated as a single byte (signed
+  wrap via `+256`); ints outside that range are coerced to a decimal string and
+  scanned.
+- `gc_collect_cycles` is shadowed by a codegen builtin that calls
+  `@__manticore_cc_collect_cycles`, emitted by
+  `Compile\Mir\Passes\EmitLlvmRuntime`; the PHP body here is the Zend fallback.
+  Contract: `docs/design/memory-abi.md` §7.
+
+## Adding a function
+
+Two tiers — pick by what the function needs:
+
+1. **Codegen builtin** — a primitive, an LLVM intrinsic, or a libc call worth
+   inlining. Dispatch plus emitter in
+   `src/Compile/Mir/Passes/EmitLlvmBuiltins.php`, return type in
+   `InferTypes::builtinReturnType`.
+2. **PHP stdlib** — anything better expressed in PHP. Add a global-namespace
+   `function` to one of the files above; it is exposed automatically.
+
+Then rebuild and test a **user** program that calls it, plus `tools/difftest.sh`
+for parity with `php`.

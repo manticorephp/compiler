@@ -151,12 +151,10 @@ function array_is_list(array $a): bool
 // when the program names them, where call-site element inference types the
 // param and the result rides the element type. Mirrors usort / array_reduce.
 
-// `array_key_last` deliberately omitted: PHP returns int|string|null,
-// our compiler doesn't yet track that union, and the call sites that
-// matter (Compile\Compiler::emitDispatchChain) want an int key. They
-// can be rewritten in PHP to use a `foreach (... as $k => $_) { $last
-// = $k; }` loop when the time comes. Bringing back the helper with a
-// fixed return type would silently break those call sites.
+// `array_key_first` / `array_key_last` are NOT here: they are codegen
+// builtins ({@see \Compile\Mir\Passes\EmitLlvmBuiltins} → biArrayEndpoint),
+// so they read the key channel directly instead of paying a PHP-level
+// walk. Do not add PHP-level shadows — the builtin already wins.
 
 /**
  * `range(start, end, step)` — an inclusive list ascending or descending (the

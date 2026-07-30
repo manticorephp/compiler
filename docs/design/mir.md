@@ -123,17 +123,21 @@ dependency pass names), `run(Module): Module`. Each stamps `markPassApplied`.
 | 1 | **LowerFromAst** | `LowerFromAst.php` | AST → MIR. Seeds types as `unknown`, stamps `line`. Injects prelude sources, resolves stdlib externs (`isExtern`), marks generators, wires FFI `#[Symbol]`. |
 | 2 | **ConstFold** | `ConstFold.php` | Fold constant expressions (`interface_exists`/`trait_exists` too). |
 | 3 | **DeadStore** | `DeadStore.php` | Dead-store elimination. |
-| 4 | **InferTypes** | `InferTypes.php` | The big type-inference pass (~148KB). Refines every node's `Type`; sets `Foreach_` iterator dispatch. |
+| 4 | **InferTypes** | `InferTypes.php` | The big type-inference pass, split across `InferTypes` / `InferNodes` / `InferScans` / `InferCalls` / `InferNarrow` (~300 KB together). Refines every node's `Type`; sets `Foreach_` iterator dispatch. |
 | 5 | **NarrowReturns(preMono=true)** | `NarrowReturns.php` | Narrow concrete, param-independent bare-`array` returns early so call-site fusion sees a concrete element. Then **re-run InferTypes**. |
 | 6 | **InlineClosures** | `InlineClosures.php` | Inline captureless arrow closures at known invoke sites; fuse `array_map`/`filter`/`reduce` over a concrete array + literal closure into a native typed loop. Then **re-run InferTypes**. |
-| 7 | **Monomorphize** | `Monomorphize.php` | Specialize erased-array / polymorphic functions per call-site shape; repoints calls; re-runs InferTypes internally when it specializes. |
-| 8 | **TypeCheck** *(gated)* | `TypeCheck.php` | `MANTICORE_TYPECHECK=1` only. Strict static analyzer; a real type error is fatal. Off during normal build / self-host. |
-| 9 | **NarrowReturns** | `NarrowReturns.php` | Full post-Mono return narrowing. |
-| 10 | **InferEffects** | `InferEffects.php` | Fill each node's `Effects` + the function aggregate (§6). |
-| 11 | **InferAllocKind** | `InferAllocKind.php` | Escape analysis → `allocKind` on allocating nodes (§6). |
-| 12 | **ApplyMemoryMode** | `ApplyMemoryMode.php` | Overlay the `--memory` mode (rc/arena/hybrid) onto the verdicts (§6). |
-| 13 | **InsertMemoryOps** | `InsertMemoryOps.php` | Materialize `MemoryOp_` nodes (retain/release/cow/arena_enter/leave) from the verdicts. |
-| 14 | **Verify** | `Verify.php` | Sanity gate before codegen. |
+| 7 | **Monomorphize** | `Monomorphize.php` | Specialize erased-array / polymorphic functions per call-site shape (`<name>$mono$<key>`); repoints calls; re-runs InferTypes internally when it specializes. |
+| 8 | **FuseSplitJoin** | `FuseSplitJoin.php` | Fuse an `implode(explode(…))` round-trip into one native `str_replace` — no intermediate array. |
+| 9 | **TypeCheck** | `TypeCheck.php` | Always runs in `reprOnly` mode: an array-REPRESENTATION conflict is FATAL, because it means the callee walks the buffer at the wrong type. `MANTICORE_TYPECHECK=1` enables the full strict checker (string arithmetic, arg/return array-ness), off by default. |
+| 10 | **NarrowReturns** | `NarrowReturns.php` | Full post-Mono return narrowing. |
+| 11 | **CheckTypeDefs** | `CheckTypeDefs.php` | The `#[TypeDef]` soundness gate: refuse every site that would observe an erased value AS AN OBJECT. Runs before any memory pass, since a boxed cell downstream has already lost the marker. |
+| 12 | **ReflectAnalysis** | `ReflectAnalysis.php` | Decide which classes carry reflection metadata. Fails OPEN — one unresolvable name puts every class back in (`MANTICORE_REFLECT_REPORT=1` to see why). |
+| 13 | **DemoteCharLocals** | `DemoteCharLocals.php` | A `$s[$i]` only compared to a one-char literal or passed to `ord()` becomes a byte read, not a fresh 1-char string. Before the memory passes, so rc never sees strings that are no longer created. |
+| 14 | **InferEffects** | `InferEffects.php` | Fill each node's `Effects` + the function aggregate (§6). |
+| 15 | **InferAllocKind** | `InferAllocKind.php` | Escape analysis → `allocKind` on allocating nodes (§6). |
+| 16 | **ApplyMemoryMode** | `ApplyMemoryMode.php` | Overlay the `--memory` mode (rc/arena/hybrid) onto the verdicts (§6). |
+| 17 | **InsertMemoryOps** | `InsertMemoryOps.php` | Materialize `MemoryOp_` nodes (retain/release/cow/arena_enter/leave) from the verdicts. |
+| 18 | **Verify** | `Verify.php` | Sanity gate before codegen. |
 
 Then `EmitLlvm` (not a `Pass`) emits LLVM IR.
 
@@ -184,16 +188,22 @@ enter/leave).
 ## 7. Inspecting MIR
 
 ```bash
-bin/manticore dump-mir prog.php                 # MIR after the full pipeline
-bin/manticore dump-mir prog.php --after=<pass>  # MIR state after a named pass
-bin/manticore dump-ast prog.php                 # the AST it lowered from
-bin/manticore dump-llvm-mir prog.php            # MIR pipeline + EmitLlvm → LLVM IR
-bin/manticore dump-sig prog.php                 # inferred signatures
+bin/manticore dump-mir prog.php            # MIR after the full pipeline
+bin/manticore dump-mir prog.php --prelude  # include the Throwable hierarchy
+bin/manticore dump-mir prog.php --effects  # annotate each op with inferred effects
+bin/manticore dump-ast prog.php            # the AST it lowered from
+bin/manticore dump-llvm-mir prog.php       # MIR pipeline + EmitLlvm → LLVM IR
+bin/manticore dump-sig prog.php            # the exported symbol table
+bin/manticore analyze prog.php             # static diagnostics, no codegen
 ```
 
-`--after=<pass>` uses each pass's `name()` (`lower-from-ast`, `infer-types`,
-`infer-alloc-kind`, …). The printer is `Dump.php`; type rendering is
-`Type::toString()`.
+The printer is `Dump.php`; type rendering is `Type::toString()`.
+
+⚠ `dump-mir --after=<pass>` is **not implemented** — `dump-mir` always prints the
+state after the full pipeline. Landing it is a roadmap item.
+
+⚠ The `dump-*` commands do not link the stdlib, so a call into it resolves as
+`unknown`. When that matters, read the final binary.
 
 ---
 

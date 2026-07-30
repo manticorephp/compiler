@@ -467,7 +467,7 @@ trait EmitLlvmModule
             $out .= $this->concatRuntime();
         }
         $out .= $this->stringBuiltinRuntime();
-        // Unified PhpArray runtime (docs/bootstrap/16) — the ONLY array
+        // Unified PhpArray runtime (docs/design/memory-abi.md §4) — the ONLY array
         // runtime; driven by a BareHost (libc malloc, no arena / rc-trace
         // / profile). Render functions only; the external declares above
         // own the libc symbols.

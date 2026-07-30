@@ -30,9 +30,17 @@ PHP source text → `Token[]`. Byte-oriented scanner, no regex, no unicode walk.
 - Every operator/delimiter in `TokenKind`, including `**` / `**=` (`StarStar` / `StarStarEquals`), shifts, null-coalesce `??` / `??=`, spaceship `<=>`, nullsafe `?->`.
 - Attribute opener `#[`.
 
-## Out of scope (yet)
+- Heredoc / nowdoc (`heredocAhead()` / `scanHeredoc()`), including the PHP 7.3
+  flexible closing marker with per-line dedent. The body is normalised to a
+  double- or single-quoted `StringLiteral`, so the parser reuses its ordinary
+  interpolation / literal handling.
+- Inline HTML between tags (`TokenKind::InlineHtml`).
 
-Heredoc/nowdoc, inline HTML between tags. The lexer never tokenizes string interiors — double-quoted interpolation reaches the parser as one raw `StringLiteral` lexeme, which the parser sub-lexes on demand.
+## Boundary
+
+The lexer never tokenizes string INTERIORS — double-quoted interpolation reaches
+the parser as one raw `StringLiteral` lexeme, which the parser sub-lexes on
+demand.
 
 ## Usage
 

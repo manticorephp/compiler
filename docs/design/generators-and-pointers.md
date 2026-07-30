@@ -1,8 +1,20 @@
 # Generators + an explicit frame pointer — design plan
 
-Status: **design only, not built.** Generators are a large feature; this captures
-the plan and the dependency on an explicit (non-rc) frame pointer so we build
-them in the right order.
+Status: **two features, opposite outcomes.**
+
+- **Generators — SHIPPED**, including the staged "hard cases last" items.
+  `EmitLlvmGenerator` + `GeneratorContext` implement them, `Yield_` is a MIR
+  node, `parseYield` / `YieldExpr` are in the parser, and `yield from`, `send()`,
+  generator methods, typed generators and exceptions through a suspended frame
+  are all covered by `tests/aot/cases/generators*.php` and
+  `generator_throw_scopes.php`.
+- **The explicit `#[Ptr]` frame pointer (§2a) — NOT built, and abandoned.** No
+  `#[Pointer]`/`#[Ptr]` parameter attribute, no `paramIsPointer`, no
+  `CheckBorrows` pass exists. The performance it was for came instead from
+  `#[Struct]`, the `DemoteCharLocals` pass and amortized `.=` (§5a, correctly
+  marked shipped below).
+
+Read the generator sections as history, and §2a as a road not taken.
 
 ---
 

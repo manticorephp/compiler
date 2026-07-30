@@ -1130,7 +1130,7 @@ trait EmitLlvmCalls
         $mangled = $this->mangle($c->function);
         // A `manticore_rt_*` callee with no PHP definition is a native
         // FFI-boundary primitive — declare it as an extern so the module
-        // assembles (link-stubbed on the no-Rust bootstrap).
+        // assembles (link-stubbed by tools/link_stubs.sh).
         if (!isset($this->definedFns[$mangled])
             && \substr($mangled, 0, 13) === 'manticore_rt_'
             && !isset($this->rtExterns[$mangled])

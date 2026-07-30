@@ -11,10 +11,10 @@ from `src/Lexer/`, produces a typed AST tree under `Parser\Ast`.
 | `Dump` | `Dump::program(Program)` returns textual AST for regression tests |
 | `ParseError` | Syntax-error exception (extends `\RuntimeException`), carries line + column |
 | `Ast\Program` | Root node — list of `Stmt` |
-| `Ast\Stmt` | Abstract base for statement variants (`IfStmt`, `WhileStmt`, `ForStmt`, `ForeachStmt`, `TryCatchStmt`, `SwitchStmt`, `ClassStmt`, `FunctionStmt`, `NamespaceStmt`, `UseDeclStmt`, `BreakStmt`, `ContinueStmt`, `ThrowStmt`, `EchoStmt`, `ReturnStmt`, `ExpressionStmt`, `StaticLocalStmt`) |
-| `Ast\Expr` | Abstract base for expression variants (literals, `Variable`, `BinaryOp`, `UnaryOp`, `Ternary`, `NullCoalesce`, `Cast`, `Assign`, `CompoundAssign`, `RefAssign`, `IncDec`, `ArrayLit`, `ArrayAccess`, `CallExpr`, `MethodCallExpr`, `PropertyAccess`, `StaticCall`, `StaticAccess`, `NewExpr`, `Invoke`, `ArrowFn`, `Closure`, `InstanceofExpr`, `MagicConstant`, `Identifier`) |
+| `Ast\Stmt` | Abstract base for statement variants: `ExpressionStmt`, `EchoStmt`, `ReturnStmt`, `IfStmt`, `ElseIfArm`, `WhileStmt`, `DoWhileStmt`, `ForStmt`, `ForeachStmt`, `FunctionStmt`, `NamespaceStmt`, `UseDeclStmt`, `ClassStmt`, `BreakStmt`, `ContinueStmt`, `ThrowStmt`, `TryCatchStmt`, `CatchClause`, `SwitchStmt`, `SwitchArm`, `StaticLocalStmt`, `StaticLocalDecl`, `GlobalStmt`, `GotoStmt`, `LabelStmt` |
+| `Ast\Expr` | Abstract base for expression variants: the five literals, `Variable`, `Identifier`, `MagicConstant`, `BinaryOp`, `UnaryOp`, `Ternary`, `NullCoalesce`, `Cast`, `InstanceofExpr`, `Assign`, `CompoundAssign`, `RefAssign`, `IncDec`, `ArrayLit`, `ArrayElement`, `ArrayAccess`, `CallExpr`, `MethodCallExpr`, `PropertyAccess`, `DynProp`, `StaticCall`, `StaticAccess`, `DynamicStaticAccess`, `DynamicStaticCall`, `NewExpr`, `NewDynExpr`, `Invoke`, `CloneExpr`, `ArrowFn`, `Closure`, `ClosureUse`, `MatchExpr`, `MatchArm`, `NamedArg`, `Ellipsis`, `Spread`, `YieldExpr` |
 | `Ast\Block` | Statement list with span |
-| `Ast\ClassDecl` / `MethodDecl` / `PropertyDecl` / `FunctionDecl` / `ConstDecl` / `Param` / `AttributeNode` / `UseItem` / `Span` | Supporting node types |
+| `Ast\ClassDecl` / `MethodDecl` / `PropertyDecl` / `PropertyHook` / `FunctionDecl` / `ConstDecl` / `EnumCase` / `TraitAdaptation` / `Param` / `AttributeNode` / `UseItem` / `Span` | Supporting node types |
 
 ## Key invariants
 
@@ -57,14 +57,16 @@ modules expect. Notable parsed forms:
   attributes (`#[Foo(arg)]`, multi-attribute groups), enum cases with
   backing values, trait `use`
 
-## Not yet supported
+Also parsed, and covered by `tests/aot/cases/`: heredoc / nowdoc,
+`yield` / `yield from` (`parseYield`), reference returns (`function &foo()` →
+`FunctionDecl::$returnsByRef`), `goto` + labels, `global`, DNF types
+(`(A & B) | C`), property hooks, asymmetric visibility, anonymous classes, and
+the pipe operator `|>`.
 
-- Heredoc / nowdoc strings
-- `yield` / `yield from`
-- Reference returns (`function &foo()`)
-- `goto`, `global`
-- DNF types (`(A & B) | C`)
-- Inline HTML between PHP tags
+## Not supported
+
+- **Inline HTML between PHP tags.** `TokenKind::InlineHtml` exists, but nothing
+  produces or consumes it — a file is PHP from `<?php` to the end.
 
 ## Usage
 
@@ -76,8 +78,8 @@ $program = Parser::parseSource('<?php echo 1 + 2;');
 echo Dump::program($program);
 ```
 
-Run parser tests via Zend PHP:
+Parser coverage is exercised through the AOT suite:
 
 ```
-bash tools/test_bootstrap.sh parser
+bash tests/aot/run.sh -k parse
 ```

@@ -15,11 +15,9 @@ namespace Lexer;
  * a `enum TokenKind: string` form without changing callers — every
  * constant value is the same string used today.
  *
- * Mirrors the categories of the Rust lexer in
- * `crates/manticore-parser/src/lexer.rs` for eventual byte-for-byte
- * parity. Some narrow variants are folded into a single kind here
- * (notably all keywords share the Keyword tag, with the keyword text in
- * the Token lexeme).
+ * Some narrow variants are folded into a single kind (notably all
+ * keywords share the Keyword tag, with the keyword text in the Token
+ * lexeme).
  */
 final class TokenKind
 {

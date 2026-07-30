@@ -11,8 +11,7 @@
  *   - String argument is scanned byte-by-byte; every byte must satisfy the
  *     predicate, otherwise false.
  *
- * No regex dependency. Replaces `extensions/ctype.php` and the now-deleted
- * `crates/manticore-runtime/src/builtins/ctype.rs`.
+ * No regex dependency.
  */
 
 /**

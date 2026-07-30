@@ -13,12 +13,20 @@ namespace Compile;
  *
  * Env vars:
  *   MANTICORE_MEMORY=<rc|arena|hybrid>  — allocation strategy (also `--memory`).
+ *                                         Empty ⇒ `hybrid`, resolved in the driver.
+ *   MANTICORE_ARENA_ARRAYS=0            — opt OUT of arena-allocating eligible
+ *                                         non-escaping arrays. ON by default.
+ *   MANTICORE_EMPTY_SINGLETON=0         — opt OUT of the shared immortal empty
+ *                                         `[]` buffer. ON by default.
  *   MANTICORE_PROFILE=1                 — emit thread-local rc/alloc counters +
  *                                         an atexit tally (memory-traffic profile).
  *   MANTICORE_DEBUG_VERIFY=1            — slow-path invariant checks at memory ops
  *                                         (abort on failure); bisects rc-balance bugs.
+ *   MANTICORE_REFLECT_REPORT=1          — report which classes reflection kept alive.
  *
- * All off by default.
+ * The two array flags are ON by default; every other switch is off.
+ * `MANTICORE_TYPECHECK=1` gates the TypeCheck pass and is read in the driver,
+ * not here. User-facing documentation: `docs/memory.md`.
  */
 final class Debug
 {
@@ -59,6 +67,12 @@ final class Debug
     public const MEM_ARENA  = 'arena';
     public const MEM_HYBRID = 'hybrid';
 
+    /**
+     * NOT the effective default. The driver always resolves the mode through
+     * {@see \Compile\Mir\MemoryMode::resolve()}, which answers `hybrid` for an
+     * empty selector, and calls {@see applyMemoryMode()} before any pass runs.
+     * This initialiser only covers a host that constructs passes directly.
+     */
     public static string $memoryMode = self::MEM_RC;
 
     /**
@@ -67,8 +81,8 @@ final class Debug
      * its frame bump-allocates in the arena (tag {@see \Compile\MemoryAbi::
      * ARRAY_TAG_ARENA}) and is bulk-freed at scope exit — no malloc/rc/free.
      * Mirrors the arena path strings already take. Off ⇒ every array is
-     * malloc+rc. DEFAULT ON (proven: self-hosts, fixpoint byte-identical,
-     * 363/363, difftest 354/0/0). Disable with `MANTICORE_ARENA_ARRAYS=0`.
+     * malloc+rc. DEFAULT ON (gated green: self-hosts, fixpoint byte-identical,
+     * suite + difftest clean). Disable with `MANTICORE_ARENA_ARRAYS=0`.
      * First cut: only FLAT int/float/bool int-keyed arrays go arena; nested /
      * string-value / string-key / object arrays stay rc-heap (see
      * InferAllocKind::isArenaScalarArray).
@@ -93,7 +107,7 @@ final class Debug
      * libmalloc — so {@see \Compile\Runtime\UnifiedArrayRuntime::emitDeimmortal}
      * swaps it for a fresh rc=1 empty at the entry of set_int / set_str / unshift.
      * DEFAULT ON (measured: kills 60.3% of ALL array mallocs during self-build;
-     * gated: fixpoint byte-identical, AOT 514/0, difftest 500/0). Disable with
+     * gated green: fixpoint byte-identical, suite + difftest clean). Disable with
      * `MANTICORE_EMPTY_SINGLETON=0`.
      */
     public static bool $emptyArraySingleton = true;
