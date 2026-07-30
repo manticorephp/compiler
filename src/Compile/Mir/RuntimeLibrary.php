@@ -2490,8 +2490,8 @@ final class RuntimeLibrary
         $out .= "  %d0 = sub i64 %bz, 48\n";
         $out .= "  %isd = icmp ult i64 %d0, 10\n";
         $out .= "  %la = or i64 %bz, 32\n";                 // fold case
-        $out .= "  %d1 = sub i64 %la, 87\n";
-        $out .= "  %ish = icmp ult i64 %d1, 6\n";            // 'a'..'f' → 0..5
+        $out .= "  %d1 = sub i64 %la, 97\n";                // 'a'..'f' → 0..5
+        $out .= "  %ish = icmp ult i64 %d1, 6\n";
         $out .= "  %hexok = or i1 %isd, %ish\n";
         $out .= "  br i1 %hexok, label %acc1, label %bad2\n";
         $out .= "bad2:\n  ret i64 -1\n";
