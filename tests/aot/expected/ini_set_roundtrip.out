@@ -1,0 +1,17 @@
+string(9) "PHPSESSID"
+string(6) "MCSESS"
+string(6) "MCSESS"
+string(9) "PHPSESSID"
+string(4) "1440"
+string(2) "60"
+string(1) "0"
+string(1) "1"
+string(1) "1"
+string(0) ""
+string(0) ""
+string(9) "x.example"
+string(0) ""
+bool(false)
+bool(false)
+string(6) "FROMFN"
+string(12) "/tmp/a b=c%d"
