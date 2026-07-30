@@ -1043,7 +1043,8 @@ trait EmitLlvmControl
         // param walks cells — and it hands nothing downstream that the static
         // type did not already promise. {@see EmitLlvmArrays::emitArrayAccessUnified}
         $fel = $fe->array->type->element ?? null;
-        if ($fel !== null && $fel->kind === Type::KIND_STRING) {
+        if ($fel !== null
+            && ($fel->kind === Type::KIND_STRING || $fel->kind === Type::KIND_OBJ)) {
             $this->rt->needsElemUntag = true;
             $eu = $this->ssa->allocReg();
             $out .= '  ' . $eu . ' = call i64 @__mir_elem_untag(ptr ' . $arr

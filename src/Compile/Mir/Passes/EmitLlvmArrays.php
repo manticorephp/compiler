@@ -592,7 +592,7 @@ trait EmitLlvmArrays
         if (!$t->isArray()) { return false; }
         $el = $t->element;
         if ($el === null) { return false; }
-        return $el->kind === Type::KIND_STRING;
+        return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
     }
 
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
@@ -630,12 +630,17 @@ trait EmitLlvmArrays
         // implode — until the store side learns to re-encode.
         //
         // The OTHER direction is sound and is done: a result the static type
-        // already calls a STRING must be a raw pointer, so if the array says its
-        // slots are boxed cells, strip the tag. Nothing downstream is told
-        // anything new — it was promised a string and now gets one. symfony's
-        // `$this->headers[0]` (a declared `string[]` fed from cell rows) is the
-        // witness; the definition-list labels printed the tag bits.
-        if ($self->type->kind === Type::KIND_STRING && $this->elemMayBeCell($aa->array->type)) {
+        // already calls a STRING or an OBJECT must be a raw pointer, so if the
+        // array says its slots are boxed cells, strip the tag. Nothing
+        // downstream is told anything new — it was promised a pointer and now
+        // gets one. Two witnesses: symfony's `$this->headers[0]` (a declared
+        // `string[]` fed from cell rows) printed the tag bits, and a BY-REF
+        // array param written back from an erased local (`$read = $nr;` in
+        // stream_select) handed the caller boxed elements under a `vec[obj]`
+        // static type — `$r[0] instanceof R` then inttoptr'd the tag.
+        $rk = $self->type->kind;
+        if (($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ)
+            && $this->elemMayBeCell($aa->array->type)) {
             $this->rt->needsElemUntag = true;
             $u = $this->ssa->allocReg();
             $out .= '  ' . $u . ' = call i64 @__mir_elem_untag(ptr ' . $arrPtr
