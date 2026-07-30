@@ -1,0 +1,6 @@
+tests/analyze/cases/ffi_variadic.php:10:0: error: #[Ffi\Variadic(3)] on v_past_end(): $fixed must be between 0 and the declared arity (2)
+tests/analyze/cases/ffi_variadic.php:14:0: error: #[Ffi\Variadic(-1)] on v_negative(): $fixed must be between 0 and the declared arity (2)
+tests/analyze/cases/ffi_variadic.php:18:0: error: #[Ffi\Variadic] on v_not_int(): requires an integer literal argument
+tests/analyze/cases/ffi_variadic.php:22:0: error: #[Ffi\Variadic] on v_no_arg(): requires an integer literal argument
+
+Found 4 error(s), 0 warning(s).

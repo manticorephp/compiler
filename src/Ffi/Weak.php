@@ -15,10 +15,13 @@ use Attribute;
  * {@see Symbol}: e.g. epoll_* (Linux-only) referenced from a macOS build.
  *
  * On Darwin, ld64 still errors on a weak-undefined symbol unless it is allowed
- * with `-Wl,-U,_<sym>` (see the link step in Manticore\Main). GNU ld auto-binds
- * a weak-undefined to 0, so Linux needs no flag.
+ * with `-Wl,-U,_<sym>`. That allowance is DERIVED from every `extern_weak` the
+ * module actually emitted and carried across a library's `.sig`, so it cannot
+ * drift from the bindings the way a hand-written list did — and a program that
+ * pulls in no weak binding gets no `-U` flags at all. GNU ld auto-binds a
+ * weak-undefined to 0, so Linux needs no flag.
  */
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Weak
 {
 }

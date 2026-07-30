@@ -17,13 +17,15 @@ use Attribute;
  * must emit an LLVM variadic call type — `call ret (t0, …, ...) @sym(...)` — so
  * the backend applies the correct per-target ABI.
  *
- * ⚠ NOT CONSUMED. The emitter keys variadic arity off the C SYMBOL NAME instead
- * ({@see \Compile\Mir\Passes\EmitLlvmCalls::ffiVariadicFixed}), because a
- * FunctionDef field for it mistyped every wrapper's return-type read under the
- * self-built compiler. Binding another variadic C function means adding a case
- * there, not adding this attribute.
+ * `$fixed` must be between 0 and the binding's declared arity; anything else is
+ * a compile error. Both the positional form `#[Variadic(2)]` and the named form
+ * `#[Variadic(fixed: 2)]` are accepted.
+ *
+ *     #[Library('c'), Symbol('fcntl'), Variadic(2), CType('int')]
+ *     function fcntl(#[CType('int')] int $fd, #[CType('int')] int $cmd,
+ *                    #[CType('int')] int $arg): int { return -1; }
  */
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+#[Attribute(Attribute::TARGET_FUNCTION)]
 final class Variadic
 {
     public function __construct(

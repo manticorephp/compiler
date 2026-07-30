@@ -3593,16 +3593,25 @@ namespace Async {
     // had buffered.
     // ═══════════════════════════════════════════════════════════════════════
 
+    // recv/send return ssize_t (already the i64 carrier's width); their fd and
+    // flags are C `int`. fork/getpid return pid_t, which is `int`, so their
+    // result needs the sign extension a bare i64 read would skip. Every one of
+    // these binds a symbol `Runtime\Libc` also binds, and the emitter requires
+    // all bindings of a C symbol to declare the same signature.
     #[\Ffi\Library('c'), \Ffi\Symbol('recv')]
-    function sys_recv(int $fd, \Ffi\Ptr $buf, int $len, int $flags): int {}
+    function sys_recv(#[\Ffi\CType('int')] int $fd, \Ffi\Ptr $buf,
+                      #[\Ffi\CType('size_t')] int $len,
+                      #[\Ffi\CType('int')] int $flags): int {}
 
     #[\Ffi\Library('c'), \Ffi\Symbol('send')]
-    function sys_send(int $fd, string $buf, int $len, int $flags): int {}
+    function sys_send(#[\Ffi\CType('int')] int $fd, string $buf,
+                      #[\Ffi\CType('size_t')] int $len,
+                      #[\Ffi\CType('int')] int $flags): int {}
 
-    #[\Ffi\Library('c'), \Ffi\Symbol('fork')]
+    #[\Ffi\Library('c'), \Ffi\Symbol('fork'), \Ffi\CType('int')]
     function sys_fork(): int {}
 
-    #[\Ffi\Library('c'), \Ffi\Symbol('getpid')]
+    #[\Ffi\Library('c'), \Ffi\Symbol('getpid'), \Ffi\CType('int')]
     function sys_getpid(): int {}
 
     /** @internal Connect to $addr (e.g. "tcp://127.0.0.1:8080"), non-blocking. */

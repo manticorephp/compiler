@@ -142,16 +142,44 @@ trait LowerFns
             );
             $fn->ffiSymbol = $ffiSymbol;
             $fn->ffiWeak = $this->ffiIsWeak($decl->attributes);
+            $fn->ffiLibrary = $this->ffiLibraryOf($decl->attributes);
+            $fn->ffiVariadicFixed = $this->ffiVariadicFixed(
+                $decl->attributes, \count($decl->params), $decl->span, $decl->name);
+            // A PARAMETER-level `#[Ffi\CType]` names the C prototype's own type
+            // for that argument; the PHP hint is only the fallback, and `int`
+            // cannot distinguish C's char/short/int/long. Getting it right
+            // matters most for a VARIADIC arg, where the callee's `va_arg(ap, T)`
+            // reads a fixed width off the stack rather than a register the ABI
+            // was free to leave dirty.
             $ctypes = [];
-            foreach ($decl->params as $p) { $ctypes[] = $this->ffiCType($p->typeHint); }
+            foreach ($decl->params as $p) {
+                $where = 'parameter $' . $p->name . ' of ' . $decl->name . '()';
+                $tok = $this->paramCTypeToken($p, $where);
+                $llvm = '';
+                if ($tok !== '') {
+                    $llvm = $this->ffiResolveCType($tok, $p->typeHint, false,
+                        $where, $p->span);
+                }
+                $ctypes[] = $llvm !== '' ? $llvm : $this->ffiCType($p->typeHint);
+            }
             $fn->ffiParamCTypes = $ctypes;
-            // A FUNCTION-level `#[CType('int')]` states that the C RETURN is a
-            // 32-bit int, so the wrapper sign-extends it. Without that, a C
-            // function returning -1 in w0 (`mov w0, #-1` zeroes the top half)
-            // reads as 4294967295 through an i64 declare.
-            $fn->ffiRetCType = $this->ffiRetIsInt32($decl->attributes)
-                ? 'i32'
+            // A FUNCTION-level `#[Ffi\CType]` states the C RETURN's real type,
+            // which the PHP hint cannot: `int` covers C's char/short/int/long
+            // alike, and the wrapper has to know the width to extend correctly.
+            // Without it a C function returning -1 in w0 (`mov w0, #-1` zeroes
+            // the top half) reads as 4294967295 through an i64 declare.
+            $retTok = $this->ffiCTypeToken($decl->attributes,
+                $decl->name . '()', $decl->span);
+            $retLlvm = '';
+            if ($retTok !== '') {
+                $retLlvm = $this->ffiResolveCType($retTok, $decl->returnType, true,
+                    $decl->name . '()', $decl->span);
+            }
+            $fn->ffiRetCType = $retLlvm !== ''
+                ? $retLlvm
                 : $this->ffiCType($decl->returnType);
+            $fn->ffiRetUnsigned = $retLlvm !== ''
+                && \Compile\Mir\FfiCTypes::isUnsigned($retTok);
             return $fn;
         }
         $savedSawYield = $this->sawYield;

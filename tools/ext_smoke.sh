@@ -18,3 +18,17 @@ if [[ "$GOT" != "$EXPECTED" ]]; then
     exit 1
 fi
 echo "EXT SMOKE OK: zlib extension links + crc32 = $EXPECTED"
+
+# The same app with `"link": []` — `-lz` can only come from the
+# `#[Ffi\Library('z')]` on the binding. Until that attribute drove linking this
+# build resolved crc32 through link_stubs.sh's generated `return 0` stub and
+# printed 0, so check the OUTPUT, not just the exit status.
+OUT2="/tmp/zlibtest_attrlink_bin"
+rm -f "$OUT2"
+bin/manticore build ext/zlib_test/manticore_attrlink.json >/dev/null
+GOT2="$("$OUT2")"
+if [[ "$GOT2" != "$EXPECTED" ]]; then
+    echo "EXT SMOKE FAIL (#[Ffi\\Library] link): crc32(\"hello\") = '$GOT2', expected '$EXPECTED'" >&2
+    exit 1
+fi
+echo "EXT SMOKE OK: #[Ffi\\Library('z')] alone links libz + crc32 = $EXPECTED"

@@ -112,6 +112,12 @@ trait EmitLlvmCalls
     {
         $cSym = $fn->ffiSymbol;
         $ret = $fn->ffiRetCType;
+        // `#[Ffi\Library('name')]` → a link requirement. Collected at the
+        // WRAPPER, so the set is exactly what this module emitted rather than
+        // everything the source happened to declare. 'c' is implicit.
+        if ($fn->ffiLibrary !== '' && $fn->ffiLibrary !== 'c') {
+            $this->ffiLibs[$fn->ffiLibrary] = true;
+        }
         $paramSig = '';
         $first = true;
         foreach ($fn->params as $p) {
@@ -143,36 +149,40 @@ trait EmitLlvmCalls
                 $r = $this->ssa->allocReg();
                 $out .= '  ' . $r . ' = bitcast i64 ' . $src . " to double\n";
                 $cargs[] = 'double ' . $r;
-            } elseif ($ct === 'i1') {
+            } elseif ($ct === 'i1' || $ct === 'i8' || $ct === 'i16' || $ct === 'i32') {
+                // Narrow the i64 carrier to the C parameter's real width. The
+                // upper bits were never the callee's to read — AAPCS64 and SysV
+                // both leave them unspecified for a narrow argument — but a
+                // VARIADIC arg is read off the stack at its natural size, so the
+                // width has to be right there.
                 $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = trunc i64 ' . $src . " to i1\n";
-                $cargs[] = 'i1 ' . $r;
+                $out .= '  ' . $r . ' = trunc i64 ' . $src . ' to ' . $ct . "\n";
+                $cargs[] = $ct . ' ' . $r;
+            } elseif ($ct === 'float') {
+                // C `float` is 32-bit; the carrier holds a double's bit pattern.
+                $rd = $this->ssa->allocReg();
+                $r = $this->ssa->allocReg();
+                $out .= '  ' . $rd . ' = bitcast i64 ' . $src . " to double\n";
+                $out .= '  ' . $r . ' = fptrunc double ' . $rd . " to float\n";
+                $cargs[] = 'float ' . $r;
             } else {
                 $cargs[] = 'i64 ' . $src;
             }
             $idx = $idx + 1;
         }
-        // A VARIADIC C function: declare and CALL with an explicit variadic
-        // function type — `ret (t0, …, ...)` — so the target ABI places the
-        // variadic args correctly (Darwin arm64 puts them on the stack, not in
-        // registers; a plain fixed-arity call hands the callee register garbage
-        // where it does va_arg). The value is the count of NAMED params (before
-        // the `...`). Keyed by C symbol rather than carried on FunctionDef: a new
-        // FunctionDef field mistyped every FFI wrapper's return-type read under
-        // the self-built compiler, so the small, controlled set of variadic libc
-        // symbols we bind is listed here instead.
-        // The type token between `call` and the callee, and the declare's param
-        // list. For a NON-variadic symbol these are just `$ret` and the plain
-        // param types (unchanged from the original path). For a variadic C
-        // function they become the FULL function type `ret (t0, …, ...)` and a
-        // `..."-terminated param list, so LLVM binds the extra args as varargs and
-        // applies the target's variadic ABI (Darwin arm64 puts varargs on the
-        // stack; a plain fixed-arity call hands the callee register garbage where
-        // it does va_arg). Both branches assign PLAIN STRINGS — a `?string`
-        // (null-initialised then maybe-set) local read as garbage under the
-        // self-built compiler (the string was read as a raw pointer in `call
-        // <ptr> @fclose`). $variadicFixed = named-param count, or -1.
-        $variadicFixed = $this->ffiVariadicFixed($cSym);
+        // A VARIADIC C function (`#[Ffi\Variadic($fixed)]`): declare and CALL
+        // with an explicit variadic function type — `ret (t0, …, ...)` — so the
+        // backend applies the target's variadic ABI. Darwin arm64 passes varargs
+        // on the STACK, so a plain fixed-arity call hands the callee register
+        // garbage where it does `va_arg`. `$variadicFixed` is the count of NAMED
+        // params (those before the `...`), or -1 for an ordinary symbol.
+        //
+        // The two locals below are the call-type token and the declare's param
+        // list. Both branches assign PLAIN STRINGS, never a maybe-null local — a
+        // `?string` here once read as garbage under the self-built compiler and
+        // the wrapper emitted `call <ptr> @fclose`. Same rule as the carrier
+        // field itself; {@see \Compile\Mir\FunctionDef}.
+        $variadicFixed = $fn->ffiVariadicFixed;
         $callTypeTok = $ret;
         $declParams = \implode(', ', $fn->ffiParamCTypes);
         if ($variadicFixed >= 0) {
@@ -189,8 +199,28 @@ trait EmitLlvmCalls
             // epoll_* on macOS) binds to null via extern_weak; the call is
             // guarded by a runtime OS branch so it never fires where absent.
             $weak = $fn->ffiWeak ? 'extern_weak ' : '';
-            $this->libcExtra[$cSym] = 'declare ' . $weak . $ret . ' @' . $cSym
-                . '(' . $declParams . ')';
+            if ($fn->ffiWeak) { $this->weakSyms[$cSym] = true; }
+            $line = 'declare ' . $weak . $ret . ' @' . $cSym . '(' . $declParams . ')';
+            // TWO bindings of one C symbol must agree about its C signature.
+            // libcExtra is keyed by symbol, so without this check the second
+            // binding's declare is simply dropped and whichever wrapper was
+            // emitted first decides what every call site is typed against —
+            // silently, and in emission order, which is not a property anyone
+            // reasons about. The mismatch is the SSL_read bug's shape: one
+            // binding says the callee returns i32, the other reads x0 as i64
+            // and gets whatever the upper half happened to hold.
+            $prev = $this->libcExtra[$cSym] ?? '';
+            if ($prev !== '' && $prev !== $line) {
+                throw new \RuntimeException(
+                    'conflicting FFI declarations for C symbol "' . $cSym . '": '
+                    . $fn->name . ' declares `' . $line . '` but '
+                    . ($this->ffiDeclOwner[$cSym] ?? '(a builtin)')
+                    . ' already declared `' . $prev
+                    . '`. Every binding of one C symbol must agree — annotate the'
+                    . ' parameters and return with #[Ffi\\CType] so they do.');
+            }
+            $this->libcExtra[$cSym] = $line;
+            $this->ffiDeclOwner[$cSym] = $fn->name;
         }
         $callArgs = \implode(', ', $cargs);
         if ($ret === 'void') {
@@ -211,12 +241,24 @@ trait EmitLlvmCalls
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = zext i1 ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
-            } elseif ($ret === 'i32') {
-                // A C `int` return: SIGN-extend. The callee wrote only w0, so its
-                // -1 has a zero upper half and an i64 read would answer
-                // 4294967295. {@see LowerFromAst::ffiRetIsInt32}
+            } elseif ($ret === 'float') {
+                // C `float` is 32-bit; the PHP carrier is a double bit-cast into
+                // i64. Widen first, then reinterpret.
+                $rd = $this->ssa->allocReg();
                 $ri = $this->ssa->allocReg();
-                $out .= '  ' . $ri . ' = sext i32 ' . $r . " to i64\n";
+                $out .= '  ' . $rd . ' = fpext float ' . $r . " to double\n";
+                $out .= '  ' . $ri . ' = bitcast double ' . $rd . " to i64\n";
+                $out .= '  ret i64 ' . $ri . "\n";
+            } elseif ($ret === 'i32' || $ret === 'i16' || $ret === 'i8') {
+                // A NARROW C integer return must be extended into the i64
+                // carrier, and the direction is the C type's signedness: the
+                // callee wrote only the low half, so a signed -1 read as i64
+                // would answer 4294967295. That is exactly how SSL_read's
+                // WANT_READ became a 4 GB memmove length.
+                // {@see LowerFromAst::ffiCTypeToken}
+                $ext = $fn->ffiRetUnsigned ? 'zext' : 'sext';
+                $ri = $this->ssa->allocReg();
+                $out .= '  ' . $ri . ' = ' . $ext . ' ' . $ret . ' ' . $r . " to i64\n";
                 $out .= '  ret i64 ' . $ri . "\n";
             } else {
                 $out .= '  ret i64 ' . $r . "\n";
@@ -224,20 +266,6 @@ trait EmitLlvmCalls
         }
         $out .= "}\n\n";
         return $out;
-    }
-
-    /**
-     * The NAMED-param count for a variadic libc symbol (the count before the C
-     * `...`), or -1 when the symbol is not variadic. Drives the variadic call
-     * type in {@see emitFfiWrapper}. Keyed by C symbol because a FunctionDef
-     * field for this mistyped every wrapper's return-type read under the
-     * self-built compiler. The set of variadic C functions the FFI layer binds
-     * is small and controlled (all in Runtime\Libc), so it lives here.
-     */
-    private function ffiVariadicFixed(string $cSym): int
-    {
-        if ($cSym === 'fcntl') { return 2; }   // int fcntl(int fd, int cmd, ...)
-        return -1;
     }
 
     /**

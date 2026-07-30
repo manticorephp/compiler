@@ -1275,6 +1275,12 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['__error'] = 'declare extern_weak ptr @__error()';
         $this->libcExtra['__errno_location'] = 'declare extern_weak ptr @__errno_location()';
+        // These two are extern_weak without an `#[Ffi\Weak]` binding behind them,
+        // which is why the driver's `-Wl,-U` set is collected from the EMITTER
+        // rather than from FunctionDef: a set derived from the attribute alone
+        // would silently drop the errno pair.
+        $this->weakSyms['__error'] = true;
+        $this->weakSyms['__errno_location'] = true;
         $slot = $this->ssa->allocReg();
         $out = '  ' . $slot . " = alloca ptr\n";
         $has = $this->ssa->allocReg();

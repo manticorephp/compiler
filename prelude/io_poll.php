@@ -10,7 +10,12 @@
 
 namespace {
     #[\Ffi\Library('c'), \Ffi\Symbol('poll')]
-    function __mc_iopoll_poll(\Ffi\Ptr $fds, #[\Ffi\CType('nfds_t')] int $nfds, #[\Ffi\CType('int')] int $timeout): int {}
+    // `nfds_t` is not one width: glibc types it `unsigned long`, Darwin types it
+    // `unsigned int`. Bind the WIDER one — a callee that reads the narrow half
+    // ignores the upper bits, whereas the reverse leaves them dirty on the host
+    // that needs them. This is why the CType vocabulary refuses platform
+    // typedefs outright: only the binding author can make this call.
+    function __mc_iopoll_poll(\Ffi\Ptr $fds, #[\Ffi\CType('ulong')] int $nfds, #[\Ffi\CType('int')] int $timeout): int {}
 
     // ── epoll (Linux) — bound #[Ffi\Weak]: absent on macOS ⇒ extern_weak (null),
     //    never called off-Linux (Backend::Epoll only reachable when PHP_OS_FAMILY
@@ -34,8 +39,8 @@ namespace {
 
     // Portable — closes the epoll/kqueue reactor fd. Bound here (not via the
     // Libc alias) so the symbol resolves cleanly in a demand-gated program.
-    #[\Ffi\Library('c'), \Ffi\Symbol('close')]
-    function __mc_iopoll_close(int $fd): int {}
+    #[\Ffi\Library('c'), \Ffi\Symbol('close'), \Ffi\CType('int')]
+    function __mc_iopoll_close(#[\Ffi\CType('int')] int $fd): int {}
 }
 
 namespace Io {

@@ -68,6 +68,8 @@ hydrates it and resolves calls IDENTICALLY to having the source in-module.
       "params": [ {"name":"a","type":"string"}, {"name":"b","type":"string"}, {"name":"n","type":"int"} ],
       "ret": "int" }                                    // namespaced/FFI exported too
   ],
+  "libs":  ["pcre2-8", "ssl", "crypto"],  // #[Ffi\Library] of the wrappers in here
+  "weak":  ["signalfd", "__errno_location"], // extern_weak symbols it declared
   "classes": [],     // v2: cross-lib classes (layout + method sigs)
   "constants": []    // v2
 }
@@ -84,6 +86,13 @@ Rules (these are exactly what unblocks the compiler self-build):
   exprs) and stored as a literal `{k,v}`; the consumer reconstructs a literal
   node for default-fill. No expr parsing on the consumer side.
 - Per-param `byref` / `variadic` / tagged(cell) flags for the call ABI.
+- **`libs` / `weak` are the library's LINK requirements**, not part of its call
+  interface. They ride here because linking is a whole-program property while an
+  FFI wrapper is emitted exactly once — in the module owning the source. A
+  program calling `preg_match` gets the pcre2 wrapper out of the stdlib `.o` and
+  has no `#[Ffi\Library]` of its own to derive `-lpcre2-8` from. Both keys are
+  additive: a reader that finds them absent falls back to the old unconditional
+  set rather than linking nothing.
 - `compiler_abi` mismatch ⇒ rebuild from source (never link a stale `.o`).
 
 ## manticore.json

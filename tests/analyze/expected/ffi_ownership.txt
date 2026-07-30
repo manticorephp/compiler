@@ -1,0 +1,15 @@
+tests/analyze/cases/ffi_ownership.php:15:0: error: #[Ffi\Give] on o1_no_symbol(): the Ffi attributes describe an FFI binding, but o1_no_symbol() has no #[Ffi\Symbol]
+tests/analyze/cases/ffi_ownership.php:17:0: error: #[Ffi\Take] on parameter $p of o1_param_no_symbol(): the Ffi attributes describe an FFI binding, but o1_param_no_symbol() has no #[Ffi\Symbol]
+tests/analyze/cases/ffi_ownership.php:22:0: error: #[Ffi\Give] and #[Ffi\StaticPtr] are mutually exclusive on o2_both()
+tests/analyze/cases/ffi_ownership.php:26:0: error: #[Ffi\Borrow], #[Ffi\BorrowMut] and #[Ffi\Take] are mutually exclusive on parameter $p of o3_two_on_one()
+tests/analyze/cases/ffi_ownership.php:30:0: error: #[Ffi\Take] on parameter $fd of o4_on_int(): ownership applies to a pointer, but $fd is declared int
+tests/analyze/cases/ffi_ownership.php:34:0: error: #[Ffi\Give] on o5_give_on_int(): the binding returns int, which carries no pointer
+tests/analyze/cases/ffi_ownership.php:37:0: error: #[Ffi\StaticPtr] on o5_staticptr_on_void(): the binding returns void, which carries no pointer
+tests/analyze/cases/ffi_ownership.php:43:0: error: #[Ffi\Take] on parameter $s of o6_take_string(): a PHP string is refcount-owned and must not be freed by C — declare it \Ffi\Ptr
+tests/analyze/cases/ffi_ownership.php:47:0: error: #[Ffi\Give] on o7_give_string(): a C-owned buffer has no refcount header — declare the return \Ffi\Ptr, not string
+tests/analyze/cases/ffi_ownership.php:54:0: error: #[Ffi\Library] on class Ffi_OnClass: the Ffi attributes describe a free-function binding, not a class
+tests/analyze/cases/ffi_ownership.php:57:0: error: #[Ffi\Library] on Ffi_OnClass::bound(): an FFI binding must be a free function — group bindings with a namespace, not a class
+tests/analyze/cases/ffi_ownership.php:57:0: error: #[Ffi\Symbol] on Ffi_OnClass::bound(): an FFI binding must be a free function — group bindings with a namespace, not a class
+tests/analyze/cases/ffi_ownership.php:60:0: error: #[Ffi\Symbol] on Ffi_OnClass::boundStatic(): an FFI binding must be a free function — group bindings with a namespace, not a class
+
+Found 13 error(s), 0 warning(s).

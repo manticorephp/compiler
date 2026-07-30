@@ -160,17 +160,19 @@ for compiler instructions: the file still parses and runs under `php`.
 | `#[Manticore\Attr\Struct]` | a class with **no object header** — a value laid out like a C struct | none |
 | `#[TypeDef]` | the object ERASED to the one value it wraps: no allocation, no refcount, no class id. Carries a `repr` for a narrow property slot, a `__invoke` normaliser for refinement types, and a dedicated soundness gate (`CheckTypeDefs`) that refuses every site which would observe it as an object | none |
 | `#[Manticore\Attr\RefOut]` | an out-parameter that is auto-vivified for the callee (how `preg_match($s, $p, $m)` fills `$m` natively) | the engine's own C-level by-ref |
-| `#[Ffi\Library]` | which native library a binding links against | `ext/ffi` + `php.ini` |
+| `#[Ffi\Library]` | which native library a binding links against — and what puts it on the link line, resolved via `pkg-config` / `<name>-config` / `-l<name>` | `ext/ffi` + `php.ini` |
 | `#[Ffi\Symbol]` | the C symbol behind a PHP function, per target | `FFI::cdef` string |
-| `#[Ffi\CType('int')]` | function-level: the C return is a 32-bit `int`, so sign-extend it — **not cosmetic**, without it `-1` reads as `4294967295` | C declaration |
-| `#[Ffi\Weak]` | `declare extern_weak`, so a symbol absent on this target resolves to null instead of failing the link | nothing |
+| `#[Ffi\CType]` | the real C type of a return or parameter, from a closed vocabulary — PHP's `int` covers C's `char`/`short`/`int`/`long` alike and the wrapper needs the width. **Not cosmetic**: without it a C `int` `-1` reads as `4294967295` | C declaration |
+| `#[Ffi\Weak]` | `declare extern_weak`, so a symbol absent on this target resolves to null instead of failing the link; Darwin's `-Wl,-U` allowance is derived from these | nothing |
+| `#[Ffi\Variadic($fixed)]` | the named-param count of a C variadic callee, so the call gets a variadic type and its varargs land where `va_arg` looks | C declaration |
 | `#[Manticore\Attr\CellArg]` | an element-CONSUMING `array` parameter: the call site boxes each element so a compiled-once stdlib callee always sees self-describing cells | nothing — the representation question does not exist in Zend |
 
-Declared but **not consumed** by codegen, kept for intent: `#[Ffi\Variadic]` (the emitter keys
-variadic arity off the C symbol name instead) and the ownership family `#[Ffi\Borrow]` /
-`BorrowMut` / `Take` / `Give` / `StaticPtr`. The latter is the one with no analogue anywhere in
-PHP — the plan is to let a native pointer join the same rc discipline as a PHP value — but
-nothing is freed on your behalf today.
+**Checked, never lowered:** the ownership family `#[Ffi\Borrow]` / `BorrowMut` / `Take` /
+`Give` / `StaticPtr`, the one with no analogue anywhere in PHP. The compiler enforces where
+each may appear and that they do not contradict each other — including two rules that are
+memory safety, since a PHP string is refcount-owned and a C buffer has no rc header — but
+**nothing is freed on your behalf**. Letting a native pointer join the same rc discipline as a
+PHP value remains a plan, not a feature.
 
 ---
 

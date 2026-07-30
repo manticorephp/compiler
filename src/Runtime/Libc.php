@@ -82,11 +82,12 @@ function strchr(string $s, #[CType('int')] int $byte): Ptr {}
 #[Library('c'), Symbol('strrchr')]
 function strrchr(string $s, #[CType('int')] int $byte): Ptr {}
 
-// `strstr` returns NULL when not found. We type the return as `int`
-// (raw address) rather than Ptr so the PHP-side null check is a
-// plain `=== 0` instead of needing a Ptr-object wrap that doesn't
-// exist when libc hands us a null pointer.
-#[Library('c'), Symbol('strstr')]
+// `char *strstr(...)` returns a POINTER into the haystack, NULL when absent.
+// The return is typed `int` (the raw address) rather than Ptr so the PHP-side
+// check is a plain `=== 0` — libc hands back a null pointer, which no Ptr object
+// wraps. The CType token still has to say `ptr`: the codegen builtin that also
+// emits strstr declares it that way, and an i64 return would disagree with it.
+#[Library('c'), Symbol('strstr'), CType('ptr')]
 function strstr(string $hay, string $needle): int {}
 
 #[Library('c'), Symbol('strdup'), Give]
@@ -103,7 +104,7 @@ function strcat(Ptr $dst, string $src): Ptr {}
 
 // ── stdio ──────────────────────────────────────────────────────────────
 
-#[Library('c'), Symbol('puts')]
+#[Library('c'), Symbol('puts'), CType('int')]
 function puts(string $s): int {}
 
 #[Library('c'), Symbol('write')]
@@ -277,7 +278,7 @@ function sys_rewinddir(Ptr $dir): void {}
 // `uname(struct utsname*)` — fills the buffer; `sysname` ("Darwin"/"Linux")
 // is the first member at offset 0, NUL-terminated. The caller passes a
 // generously-sized zeroed buffer (utsname is ~1.3 KB on macOS).
-#[Library('c'), Symbol('uname')]
+#[Library('c'), Symbol('uname'), CType('int')]
 function uname(Ptr $buf): int {}
 
 #[Library('c'), Symbol('unlink'), CType('int')]
@@ -631,7 +632,7 @@ function sys_fork(): int {}
 #[Library('c'), Symbol('waitpid')]
 function sys_waitpid(#[CType('int')] int $pid, Ptr $status, #[CType('int')] int $options): int {}
 
-#[Library('c'), Symbol('getpid')]
+#[Library('c'), Symbol('getpid'), CType('int')]
 function sys_getpid(): int {}
 
 #[Library('c'), Symbol('getppid')]

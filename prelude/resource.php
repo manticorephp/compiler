@@ -46,13 +46,17 @@
 // Attributes are fully qualified because the prelude is concatenated into ONE blob:
 // there is nowhere to put a `use`.
 
-#[\Ffi\Library('c'), \Ffi\Symbol('fclose')]
+// All three C callees return `int`, so the wrapper must SIGN-EXTEND the result:
+// a 32-bit -1 sitting in x0 with a zero upper half reads as 4294967295. They
+// also bind the same symbols as `Runtime\Libc`, and every binding of one C
+// symbol has to agree about its signature or the emitter rejects the module.
+#[\Ffi\Library('c'), \Ffi\Symbol('fclose'), \Ffi\CType('int')]
 function __mc_libc_fclose(#[\Ffi\Take] \Ffi\Ptr $stream): int {}
 
-#[\Ffi\Library('c'), \Ffi\Symbol('closedir')]
+#[\Ffi\Library('c'), \Ffi\Symbol('closedir'), \Ffi\CType('int')]
 function __mc_libc_closedir(#[\Ffi\Take] \Ffi\Ptr $dir): int {}
 
-#[\Ffi\Library('c'), \Ffi\Symbol('close')]
+#[\Ffi\Library('c'), \Ffi\Symbol('close'), \Ffi\CType('int')]
 function __mc_libc_close(#[\Ffi\CType('int')] int $fd): int {}
 
 /**

@@ -40,8 +40,23 @@ use Parser\Ast\NullLiteral;
  */
 final class Sig
 {
-    /** Serialize a module's exported functions to `.sig` JSON. */
-    public static function emitModule(Module $module): string
+    /**
+     * Serialize a module's exported functions to `.sig` JSON.
+     *
+     * `$libs` / `$weak` come from the emitter ({@see EmitLlvm::$ffiLibs},
+     * {@see EmitLlvm::$weakSyms}) and are the module's LINK requirements. They
+     * have to ride along because linking is a whole-program property while an
+     * FFI wrapper is emitted once, in the module that owns the source: a program
+     * calling `preg_match` gets the pcre2 wrapper out of `stdlib.o` and has no
+     * `#[Ffi\Library]` of its own to derive `-lpcre2-8` from. Both keys are
+     * purely additive, so the schema does not bump — an older reader ignores
+     * them and a newer one falls back when they are absent.
+     *
+     * @param string[] $libs  native library names ('c' already dropped)
+     * @param string[] $weak  C symbols declared extern_weak
+     */
+    public static function emitModule(Module $module, array $libs = [],
+                                      array $weak = []): string
     {
         $out = "{\"schema\":1,\"functions\":[";
         $first = true;
@@ -51,7 +66,54 @@ final class Sig
             $first = false;
             $out = $out . self::emitFunction($fn);
         }
-        $out = $out . "]}\n";
+        $out = $out . "],\"libs\":[" . self::jsonStrList($libs)
+            . "],\"weak\":[" . self::jsonStrList($weak) . "]}\n";
+        return $out;
+    }
+
+    /** A JSON list body (no brackets) of quoted strings. */
+    private static function jsonStrList(array $names): string
+    {
+        $out = '';
+        $first = true;
+        foreach ($names as $n) {
+            if (!$first) { $out = $out . ','; }
+            $first = false;
+            $out = $out . self::jsonStr((string)$n);
+        }
+        return $out;
+    }
+
+    /**
+     * The native libraries a `.sig` records, or `null` when the key is absent —
+     * which is what an OLD `.sig` looks like, and the caller must then fall back
+     * to the unconditional behaviour rather than link nothing.
+     * @return string[]|null
+     */
+    public static function libsFromJson(string $json): ?array
+    {
+        return self::strListFromJson($json, 'libs');
+    }
+
+    /**
+     * The extern_weak C symbols a `.sig` records, or `null` when absent.
+     * @return string[]|null
+     */
+    public static function weakFromJson(string $json): ?array
+    {
+        return self::strListFromJson($json, 'weak');
+    }
+
+    /** @return string[]|null */
+    private static function strListFromJson(string $json, string $key): ?array
+    {
+        $data = \json_decode($json, true);
+        if (!\is_array($data)) { return null; }
+        if (!isset($data[$key])) { return null; }
+        $raw = $data[$key];
+        if (!\is_array($raw)) { return null; }
+        $out = [];
+        foreach ($raw as $v) { $out[] = (string)$v; }
         return $out;
     }
 

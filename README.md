@@ -189,8 +189,8 @@ spawned. An 8-worker prefork HTTP server does **150–160k rps** (`wrk`, plainte
 keep-alive). See [`docs/async.md`](docs/async.md).
 
 **Native libraries** (zlib, libcurl, …) bind through FFI — `#[Library, Symbol]`
-attributes compile to direct C calls, declared as manifest `extensions`; mechanism and
-type mapping in [`docs/ffi.md`](docs/ffi.md). The **module system**
+attributes compile to direct C calls, and `#[Library]` is what puts the library on the
+link line; mechanism and C-type vocabulary in [`docs/ffi.md`](docs/ffi.md). The **module system**
 ([`docs/modules.md`](docs/modules.md)) is a cargo-style `manticore.json` with
 `applications` and `libraries`, `.sig` module interfaces so a dependent target resolves
 cross-unit calls without re-parsing sources, and a distributable compiler that ships
