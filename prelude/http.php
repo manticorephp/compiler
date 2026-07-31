@@ -1585,4 +1585,366 @@ final class Parser
     }
 }
 
+/**
+ * An HTTP/1.1 server: `(new Server($addr))->serve($handler)`, where `$handler`
+ * is `callable(Request): Response`.
+ *
+ * Written on ORDINARY blocking-style stream I/O — `stream_socket_accept`,
+ * `fread`, `fwrite`, `fclose` — never `Async\read`/`Async\write`. Inside
+ * `Async\async()` every one of those routes its would-block through the
+ * netpoller and suspends the fiber, so this reads like a blocking server and
+ * runs like an evented one. It also means a `tls://` listener works: the raw
+ * async path carries neither buffering nor TLS.
+ *
+ * Concurrency is a per-connection task under one {@see \Async\TaskGroup}, so
+ * the scope cannot close while a request is in flight and cancelling it
+ * cancels every connection. The permit is taken BEFORE the accept: at the
+ * ceiling this worker simply stops accepting and the queue stays in the
+ * kernel's backlog, which is what backpressure means for a server.
+ */
+final class Server
+{
+    /** Bytes asked of the socket per read. */
+    private const READ_CHUNK = 8192;
+
+    private string $addr;
+    private mixed $context;
+    private ?\Resource $listener = null;
+    private bool $ownsListener = true;
+
+    private mixed $handler = null;
+    private mixed $onError = null;
+
+    private int $workerCount = 0;
+    private int $maxConnections = 256;
+    private bool $compat = false;
+    private bool $captureEcho = true;
+    private float $idleTimeout = 5.0;
+    private float $headerTimeout = 10.0;
+    private float $writeTimeout = 30.0;
+    private int $maxHeaderBytes = 16384;
+    private int $maxHeaderCount = 100;
+    private int $maxBodySize = 8388608;
+    private bool $streamBodies = false;
+    private int $keepAliveMax = 100;
+    private string $serverName = 'manticore';
+    private bool $secure = false;
+
+    /** How long one `accept` waits before the loop re-reads {@see $stopped}.
+     *  This — not closing the listener out from under a parked accept — is what
+     *  bounds shutdown latency, and it is the only part of the loop a caller on
+     *  another task can affect without racing the reactor. */
+    private float $acceptWait = 0.25;
+
+    private bool $stopped = false;
+    private int $statServed = 0;
+    private int $statOpen = 0;
+    private int $statAccepted = 0;
+    private int $statErrors = 0;
+
+    public function __construct(string $addr = 'tcp://127.0.0.1:8080', mixed $context = null)
+    {
+        $this->addr = $addr;
+        $this->context = $context;
+        $this->secure = \strncmp($addr, 'tls://', 6) === 0 || \strncmp($addr, 'ssl://', 6) === 0;
+    }
+
+    /**
+     * Serve an ALREADY-BOUND listener.
+     *
+     * What socket activation needs, and what makes this testable: a case binds
+     * its own port (scanning for a free one), hands the resource over and keeps
+     * the client side in the same process. The Server does not close a listener
+     * it did not open.
+     */
+    public static function onListener(\Resource $listener, bool $secure = false): Server
+    {
+        $s = new Server('', null);
+        $s->listener = $listener;
+        $s->ownsListener = false;
+        $s->secure = $secure;
+        return $s;
+    }
+
+    public function workers(int $n): Server { $this->workerCount = $n; return $this; }
+    public function maxConnections(int $n): Server { $this->maxConnections = $n < 1 ? 1 : $n; return $this; }
+    public function compat(bool $on): Server { $this->compat = $on; return $this; }
+    public function captureEcho(bool $on): Server { $this->captureEcho = $on; return $this; }
+    public function idleTimeout(float $s): Server { $this->idleTimeout = $s; return $this; }
+    public function headerTimeout(float $s): Server { $this->headerTimeout = $s; return $this; }
+    public function writeTimeout(float $s): Server { $this->writeTimeout = $s; return $this; }
+    public function maxHeaderBytes(int $n): Server { $this->maxHeaderBytes = $n; return $this; }
+    public function maxHeaderCount(int $n): Server { $this->maxHeaderCount = $n; return $this; }
+    public function maxBodySize(int $n): Server { $this->maxBodySize = $n; return $this; }
+    public function streamBodies(bool $on): Server { $this->streamBodies = $on; return $this; }
+    public function keepAliveMax(int $n): Server { $this->keepAliveMax = $n; return $this; }
+    /** '' omits the `Server:` header entirely. */
+    public function serverName(string $s): Server { $this->serverName = $s; return $this; }
+    public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
+    /** `callable(\Throwable, ?Request): Response` */
+    public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
+
+    /**
+     * Run until {@see stop} (or cancellation). `$handler` is
+     * `callable(Request): Response`.
+     *
+     * Reentrant on purpose: called from INSIDE an `Async\async()` scope it just
+     * runs the loop as a task of that scope — which is what lets one process
+     * host both the server and its client, i.e. what makes the suite offline.
+     * Called from outside it opens its own scope and installs the shutdown
+     * signals, which is what an application wants.
+     */
+    public function serve(callable $handler): void
+    {
+        $this->handler = $handler;
+        if (\Async\Context::currentScope() !== null) {
+            $this->loop();
+            return;
+        }
+        \Async\async(function () {
+            \Async\shutdownOn(\SIGTERM, \SIGINT);
+            $this->loop();
+        });
+    }
+
+    /**
+     * Ask the accept loop to wind down. In-flight requests are NOT interrupted:
+     * the group joins them, which is what graceful means.
+     */
+    public function stop(): void
+    {
+        $this->stopped = true;
+    }
+
+    /** @return array<string,int> served / open / accepted / errors / stopped */
+    public function stats(): array<string, int>
+    {
+        $out = [];
+        $out['served'] = $this->statServed;
+        $out['open'] = $this->statOpen;
+        $out['accepted'] = $this->statAccepted;
+        $out['errors'] = $this->statErrors;
+        $out['stopped'] = $this->stopped ? 1 : 0;
+        return $out;
+    }
+
+    private function loop(): void
+    {
+        $listener = $this->listener;
+        if ($listener === null) {
+            if ($this->workerCount > 0) {
+                // Fork BEFORE any reactor exists — the only safe order.
+                \Process\workers($this->workerCount);
+            }
+            $errno = 0;
+            $errstr = '';
+            $l = $this->context === null
+                ? \stream_socket_server($this->addr, $errno, $errstr)
+                : \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $this->context);
+            if ($l === false) {
+                throw new \RuntimeException('Http\\Server: cannot bind ' . $this->addr . ': ' . $errstr);
+            }
+            $listener = $l;
+            $this->listener = $l;
+            \stream_set_blocking($listener, false);
+        }
+        $gate = new \Async\Semaphore($this->maxConnections);
+        try {
+            \Async\group(function (\Async\TaskGroup $g) use ($listener, $gate) {
+                while (!$this->stopped) {
+                    // The permit BEFORE the accept: at the ceiling we stop
+                    // accepting and the backlog is the queue. Released in the
+                    // CHILD's finally — the parent's would run once, at scope exit.
+                    $gate->acquire();
+                    $conn = \stream_socket_accept($listener, $this->acceptWait);
+                    if ($conn === false) {
+                        // A timeout (the shutdown tick) or a classified accept
+                        // failure the stream layer already backed off for.
+                        $gate->release();
+                        continue;
+                    }
+                    $this->statAccepted = $this->statAccepted + 1;
+                    \stream_set_blocking($conn, false);
+                    $g->spawn(function () use ($conn, $gate) {
+                        $this->statOpen = $this->statOpen + 1;
+                        try {
+                            $this->connection($conn);
+                        } finally {
+                            $this->statOpen = $this->statOpen - 1;
+                            $gate->release();
+                            \fclose($conn);
+                        }
+                    });
+                }
+            });
+        } catch (\Async\CancelledException $e) {
+            // Expected: SIGTERM, or an enclosing scope going down.
+        }
+        if ($this->ownsListener) {
+            \fclose($listener);
+        }
+    }
+
+    /** One connection: parse, dispatch and answer until it must close. */
+    private function connection(\Resource $conn): void
+    {
+        $buf = new \Buffer\ByteBuffer();
+        $remote = '';
+        $handled = 0;
+        while (!$this->stopped) {
+            $parser = new Parser(
+                $buf,
+                $remote,
+                $this->secure,
+                $this->maxHeaderBytes,
+                $this->maxHeaderCount,
+                $this->maxBodySize,
+            );
+            // The FIRST read of a request waits idleTimeout (a kept-alive
+            // connection may sit silent for a long time and that is not an
+            // error); once bytes have arrived the rest of the head is on
+            // headerTimeout, so a client that dribbles a head cannot hold a
+            // slot open. A silent client is closed silently, as nginx does.
+            $first = $buf->isEmpty();
+            \stream_set_timeout($conn, (int)($first ? $this->idleTimeout : $this->headerTimeout));
+            $code = $parser->parse();
+            $got = !$first;
+            while ($code === Parser::NEED) {
+                $chunk = \fread($conn, self::READ_CHUNK);
+                if ($chunk === '') {
+                    if (!$got && $this->timedOut($conn)) {
+                        return;                     // idle keep-alive expiry
+                    }
+                    if (!$got) {
+                        return;                     // peer closed between requests
+                    }
+                    if ($this->timedOut($conn)) {
+                        $this->writeError($conn, 408);
+                        return;
+                    }
+                    return;                         // peer closed mid-request
+                }
+                if (!$got) {
+                    $got = true;
+                    \stream_set_timeout($conn, (int)$this->headerTimeout);
+                }
+                $buf->append($chunk);
+                $code = $parser->parse();
+            }
+            if ($code !== Parser::READY) {
+                $this->statErrors = $this->statErrors + 1;
+                $this->writeError($conn, $code);
+                return;
+            }
+            $req = $parser->request();
+            if ($req === null) {
+                return;
+            }
+            $handled = $handled + 1;
+            $res = $this->dispatch($req);
+            $keep = $req->isKeepAlive()
+                && !$res->wantsClose()
+                && !$this->stopped
+                && $handled < $this->keepAliveMax;
+            \stream_set_timeout($conn, (int)$this->writeTimeout);
+            $this->writeResponse($conn, $req, $res, $keep);
+            $this->statServed = $this->statServed + 1;
+            if (!$keep) {
+                return;
+            }
+            // compact(), never clear(): bytes already read past this request are
+            // the NEXT one's head, and a pipelining client sends both at once.
+            $buf->compact();
+        }
+    }
+
+    /** Run the handler, turning any escape into a response rather than a crash. */
+    private function dispatch(Request $req): Response
+    {
+        $h = $this->handler;
+        try {
+            return $h($req);
+        } catch (\Async\CancelledException $e) {
+            // The scope is going down mid-request. The write suspends, so it
+            // has to be shielded, and then the cancellation continues.
+            \Async\shield(function () { });
+            throw $e;
+        } catch (\Throwable $e) {
+            $this->statErrors = $this->statErrors + 1;
+            $eh = $this->onError;
+            if ($eh !== null) {
+                try {
+                    return $eh($e, $req);
+                } catch (\Throwable $e2) {
+                    // One level, no recursion: a broken error handler gets the
+                    // canned response like anything else.
+                }
+            }
+            return (new Response(500))->text("Internal Server Error\n")->close();
+        }
+    }
+
+    /**
+     * Head + body in ONE `fwrite` — a literal two-element array is a
+     * `writev(2)`, so a response costs one syscall rather than two.
+     */
+    private function writeResponse(\Resource $conn, Request $req, Response $res, bool $keep): void
+    {
+        $body = $res->getBody();
+        $hasBody = Status::hasBody($res->status);
+        if (!$hasBody) {
+            $body = '';
+        }
+        $head = $this->renderHead($res, $req->version, $keep, \strlen($body), $hasBody);
+        // HEAD carries the headers of the GET it mirrors — Content-Length
+        // included — and no body at all.
+        if ($req->method === 'HEAD' || $body === '') {
+            \fwrite($conn, $head);
+            return;
+        }
+        \fwrite($conn, [$head, $body]);
+    }
+
+    private function renderHead(Response $res, string $version, bool $keep, int $len, bool $hasBody): string
+    {
+        $h = $res->headers;
+        if ($hasBody && !$h->has('content-length')) {
+            $h->set('Content-Length', (string)$len);
+        }
+        if (!$h->has('date')) {
+            $h->set('Date', httpDate(\time()));
+        }
+        if ($this->serverName !== '' && !$h->has('server')) {
+            $h->set('Server', $this->serverName);
+        }
+        $h->set('Connection', $keep ? 'keep-alive' : 'close');
+        return statusLine($res->status, $version) . $h->render();
+    }
+
+    /**
+     * A refusal the handler never sees. One string, one write, no allocation
+     * beyond the concat — an error path that allocates is an error path a
+     * client can turn into a cost.
+     */
+    private function writeError(\Resource $conn, int $code): void
+    {
+        $reason = reason($code);
+        if ($reason === '') {
+            $reason = 'Error';
+        }
+        \fwrite(
+            $conn,
+            'HTTP/1.1 ' . $code . ' ' . $reason . "\r\n"
+            . "Connection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+    }
+
+    /** Whether the last short read was a TIMEOUT rather than a close. */
+    private function timedOut(\Resource $conn): bool
+    {
+        $meta = \stream_get_meta_data($conn);
+        return isset($meta['timed_out']) && $meta['timed_out'];
+    }
+}
+
 }
