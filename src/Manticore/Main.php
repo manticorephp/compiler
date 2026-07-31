@@ -1209,6 +1209,26 @@ function is_darwin(): bool {
  * @param string[] $excludes
  * @return string[]
  */
+/**
+ * Prefix-match `$path` against a manifest `exclude` entry, with a leading `./`
+ * meaning nothing on either side.
+ *
+ * The normalisation is the whole point. A VENDOR package's autoload root
+ * arrives as `./vendor/name/src` — its base is `./vendor/name` — but the
+ * PROJECT's own root arrives as bare `src`, because {@see composer_path_join}
+ * drops a `.` base entirely. So `"exclude": ["./src"]` silently matched nothing
+ * while the identical spelling worked for every vendor package, and a directory
+ * the manifest plainly excluded was compiled anyway.
+ */
+function exclude_matches(string $path, string $ex): bool
+{
+    if (\strlen($ex) === 0) { return false; }
+    $p = \str_starts_with($path, "./") ? \substr($path, 2) : $path;
+    $e = \str_starts_with($ex, "./") ? \substr($ex, 2) : $ex;
+    if (\strlen($e) === 0) { return false; }
+    return \str_starts_with($p, $e);
+}
+
 function collect_php_sources(string $dir, array $excludes): array
 {
     /** @var string[] $out */
@@ -1221,7 +1241,7 @@ function collect_php_sources(string $dir, array $excludes): array
         if (\strlen($path) === 0) { continue; }
         $skip = false;
         foreach ($excludes as $ex) {
-            if (\strlen($ex) > 0 && \str_starts_with($path, $ex)) { $skip = true; break; }
+            if (exclude_matches($path, $ex)) { $skip = true; break; }
         }
         if ($skip) { continue; }
         $src = read_file($path);
@@ -1252,7 +1272,7 @@ function collect_php_source_files(string $dir, array $excludes): array
         if (\strlen($path) === 0) { continue; }
         $skip = false;
         foreach ($excludes as $ex) {
-            if (\strlen($ex) > 0 && \str_starts_with($path, $ex)) { $skip = true; break; }
+            if (exclude_matches($path, $ex)) { $skip = true; break; }
         }
         if ($skip) { continue; }
         $src = read_file($path);

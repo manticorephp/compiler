@@ -55,10 +55,32 @@ foreach ($j['tiers'] as $name => $info) {
     if ($name === $tierKey) { $seenTier = true; }
 }
 
+// Packages the FRONT END cannot parse yet. Excluded so the rest of the tier can
+// still be measured — a build that dies on file one measures nothing at all.
+//
+// This is a declared, reproducible skip, not a hand-edit of a generated file,
+// and every entry names the finding that owns it. `run_tier.sh` prints the list
+// on every run: the audit's rule is that a bounded measurement says so out loud,
+// because a silent skip reads exactly like a clean result.
+$parseBlocked = [
+    // `[&$refs[$k], $value, &$value]` — a reference inside an array literal.
+    // finding: parser-ref-in-array-literal
+    './vendor/symfony/polyfill-deepclone' => 'parser-ref-in-array-literal',
+];
+foreach ($parseBlocked as $d => $finding) { $exclude[$d] = true; }
+fwrite(STDERR, "gen_manifest: parse-blocked skips: "
+    . implode(', ', array_map(
+        static fn ($d, $f) => $d . ' (' . $f . ')',
+        array_keys($parseBlocked), array_values($parseBlocked))) . "\n");
+
 // The application's own code is T8. Below that, exclude it too, or every tier
 // would drag in the whole app and stop being a tier.
 if ($tierKey !== 'T8') {
-    foreach (['./src', './config', './templates', './tests', './migrations'] as $d) {
+    // `./var` holds the warmed cache — the dumped DI container and compiled
+    // templates. Those are the APPLICATION's build artifacts (T8) and reference
+    // every tier above the one under test, so leaving them in put the whole app
+    // back into every tier and made T1 fail on a T4 construct.
+    foreach (['./src', './config', './templates', './tests', './migrations', './var'] as $d) {
         $exclude[$d] = true;
     }
 }

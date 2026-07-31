@@ -91,8 +91,14 @@ fi
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
     echo "-- lane (b) manifest build + stubs --"
-    php tools/audit/gen_manifest.php "$TIER" --app "$APP" --out "$PROBE/manticore.t$TIER.json" || exit 1
-    ( cd "$PROBE" && STUBS_PREFIX="$PROBE/audit-data/t$TIER" \
+    # The manifest lives in, and the build runs from, the APP root — not the
+    # probe root. Its paths are relative and `composer: true`, and composer.json,
+    # vendor/ and the generated tiers/ entry are all under app/. Written one
+    # level up, `entry: tiers/tN_smoke.php` resolved to a file that was never
+    # there and the build died before the link stage, which is the whole reason
+    # lane (b) had never produced a single stub list.
+    php tools/audit/gen_manifest.php "$TIER" --app "$APP" --out "$APP/manticore.t$TIER.json" || exit 1
+    ( cd "$APP" && STUBS_PREFIX="$PROBE/audit-data/t$TIER" \
         "$MC" build "manticore.t$TIER.json" > "$PROBE/audit-data/build-t$TIER.log" 2>&1 )
     RC=$?
     echo "   build rc=$RC"
