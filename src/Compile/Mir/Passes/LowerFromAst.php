@@ -2905,6 +2905,9 @@ final class LowerFromAst implements Pass
         // polyfill idiom tests (`if (!function_exists('X')) { function X(){} }`),
         // and any `function_exists('X') ? fast : slow` picked the slow arm.
         if ($this->isCodegenBuiltin($bare)) { return true; }
+        // …and the rest of the emitBuiltin dispatch, which isCodegenBuiltin does
+        // not list because it answers a different question ({@see LowerFns}).
+        if ($this->isEmitterInlineName(\strtolower($bare))) { return true; }
         return isset($this->fnDecls[$nm]) || isset($this->fnDecls[$bare])
             || (($this->fnAliasByBare[$bare] ?? '') !== '');
     }

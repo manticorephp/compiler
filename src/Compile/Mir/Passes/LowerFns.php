@@ -282,6 +282,42 @@ trait LowerFns
      * worse, registering it would change default-arg filling at every call
      * site. Mirrors the emitBuiltin if-chain — keep in sync.
      */
+    /**
+     * A name `emitBuiltin` handles inline that {@see isCodegenBuiltin} does NOT
+     * list — the two sets differ on purpose. isCodegenBuiltin decides whether to
+     * skip injecting a stdlib extern; this one answers the different question
+     * `function_exists` asks: will a call to this name resolve at all?
+     *
+     * Without it `function_exists('floor')`, `('var_dump')`, `('explode')`,
+     * `('json_encode')` and forty others answered FALSE for functions that
+     * plainly work, because a builtin is emitted inline and so is declared
+     * nowhere. That is exactly the predicate the polyfill idiom tests.
+     *
+     * Internal names (`__mir_*`, `__mc_*`, `manticore_*`) are left out: nobody
+     * writes them in a function_exists guard. `tools/audit/calibrate.sh` gates
+     * the union of the two lists against the real dispatch, so adding a builtin
+     * without updating one of them fails there rather than here.
+     */
+    private function isEmitterInlineName(string $n): bool
+    {
+        $names = [
+            'acos', 'array_first', 'array_key_first', 'array_key_last',
+            'array_keys', 'array_last', 'array_values', 'asin', 'atan',
+            'atan2', 'ceil', 'cos', 'cosh', 'debug_backtrace', 'deg2rad',
+            'exp', 'explode', 'floor', 'flush', 'fmod', 'hypot',
+            'int_to_ptr', 'is_numeric', 'json_decode', 'json_encode', 'log',
+            'log10', 'peek_i16', 'peek_i32', 'peek_i64', 'peek_i8',
+            'peek_u16', 'peek_u32', 'peek_u8', 'pi', 'poke_i16', 'poke_i32',
+            'poke_i64', 'poke_i8', 'print_r', 'ptr_offset',
+            'ptr_to_int', 'rad2deg', 'round', 'sin', 'sinh', 'sqrt', 'tan',
+            'tanh', 'var_dump',
+        ];
+        foreach ($names as $k) {
+            if ($k === $n) { return true; }
+        }
+        return false;
+    }
+
     private function isCodegenBuiltin(string $name): bool
     {
         $n = \strtolower($name);

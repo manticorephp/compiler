@@ -84,6 +84,42 @@ if ($missing) {
     echo "ok   Analyze\\Builtins covers all ", count($disp), " emitBuiltin dispatch names\n";
 }
 
+// The compiler answers `function_exists` from TWO hand-written sets —
+// LowerFns::isCodegenBuiltin (extern-injection) and ::isEmitterInlineName (the
+// rest of the dispatch). Their UNION has to cover every USER-VISIBLE dispatch
+// name, or function_exists reports a working builtin as absent, which is the
+// predicate every polyfill guard tests.
+$lf = (string)file_get_contents("$root/src/Compile/Mir/Passes/LowerFns.php");
+$known = [];
+$s1 = strpos($lf, "function isCodegenBuiltin");
+$e1 = strpos($lf, "\n    }", $s1);
+preg_match_all("/\\\$n === .([a-z_0-9]+)./", substr($lf, $s1, $e1 - $s1), $m1);
+foreach ($m1[1] as $n) { $known[$n] = true; }
+$s2 = strpos($lf, "function isEmitterInlineName");
+if ($s2 !== false) {
+    $e2 = strpos($lf, "\n    }", $s2);
+    preg_match_all("/.([a-z_0-9]+)./", substr($lf, $s2, $e2 - $s2), $m2);
+    foreach ($m2[1] as $n) { $known[$n] = true; }
+}
+// The bar is the answer from the interpreter this gate runs under, not a
+// hand-kept exemption list. A dispatch name that php does NOT expose as a
+// function (print is a language construct) must NOT be claimed to exist, so it
+// falls out of scope here rather than being excused by name.
+$userVisible = [];
+foreach (array_keys($disp) as $n) {
+    if (str_starts_with($n, "__") || str_starts_with($n, "manticore_")) { continue; }
+    if (!function_exists($n)) { continue; }
+    if (!isset($known[$n])) { $userVisible[] = $n; }
+}
+if ($userVisible) {
+    $fail = 1;
+    echo "FAIL function_exists cannot see ", count($userVisible), " inline builtin(s):\n";
+    echo "     ", implode(", ", $userVisible), "\n";
+    echo "     A polyfill guard around one would redefine a working function.\n";
+} else {
+    echo "ok   function_exists covers every user-visible emitBuiltin name\n";
+}
+
 $listed = [];
 $main = (string)file_get_contents("$root/src/Manticore/Main.php");
 $s = strpos($main, "function analyze_prelude_files");
