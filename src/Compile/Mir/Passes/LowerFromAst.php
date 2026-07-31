@@ -1852,7 +1852,12 @@ final class LowerFromAst implements Pass
         $n = \strlen($name);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $c = \substr($name, $i, 1);
-            $out .= $c === '\\' ? '_' : $c;
+            if ($c === '\\') { $out .= '_'; continue; }
+            // Same escape as {@see \Compile\Mir\Passes\EmitLlvm::mangle} — a php
+            // identifier may hold any byte >= 0x80, an LLVM one may not.
+            $b = \ord($c);
+            if ($b >= 0x80) { $out .= '_u' . \strtoupper(\dechex($b)); continue; }
+            $out .= $c;
         }
         return $out;
     }

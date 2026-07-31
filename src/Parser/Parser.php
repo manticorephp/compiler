@@ -600,7 +600,7 @@ final class Parser
 
             if ($this->checkKeyword('case') && $kindKw === 'enum') {
                 $this->advance();
-                $caseNameTok = $this->expect(TokenKind::Identifier, 'expected enum case name');
+                $caseNameTok = $this->expectMemberName('expected enum case name');
                 $value = null;
                 if ($this->match(TokenKind::Equals)) {
                     $value = $this->parseExpression();
@@ -834,7 +834,7 @@ final class Parser
                 $typeHint = $this->parseTypeHint();
             }
         }
-        $nameTok = $this->expect(TokenKind::Identifier, 'expected const name');
+        $nameTok = $this->expectMemberName('expected const name');
         $this->expect(TokenKind::Equals, "expected '=' in const");
         $value = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after const");
@@ -1378,7 +1378,7 @@ final class Parser
     {
         $span = $this->span();
         $this->advance(); // 'const'
-        $nameTok = $this->expect(TokenKind::Identifier, 'expected const name');
+        $nameTok = $this->expectMemberName('expected const name');
         $this->expect(TokenKind::Equals, "expected '=' in const declaration");
         $value = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after const declaration");
@@ -3094,6 +3094,27 @@ final class Parser
             throw $this->error($message);
         }
         return $this->advance();
+    }
+
+    /**
+     * A MEMBER name — a class constant or an enum case.
+     *
+     * php lets a reserved word stand here: `case ARRAY = 'array';` in
+     * doctrine/dbal's ArrayParameterType, `const LIST = …`, `case MATCH`. The
+     * lexer classifies those as Keyword, not Identifier, so requiring an
+     * Identifier rejected code the interpreter accepts — six sites across
+     * doctrine/dbal and nette/utils in symfony-demo alone.
+     *
+     * Deliberately NOT used for a plain identifier position: `class array` is
+     * still a syntax error in php, and accepting it here would only turn a
+     * clean parse error into a confusing one further along.
+     */
+    private function expectMemberName(string $message): Token
+    {
+        if ($this->check(TokenKind::Identifier) || $this->check(TokenKind::Keyword)) {
+            return $this->advance();
+        }
+        throw $this->error($message);
     }
 
     private function span(): Span

@@ -16,7 +16,7 @@ without a file behind it.
 | S3 | static finding with no observed runtime effect |
 | S4 | advisory / analyzer residue |
 
-**24 findings**: 1 S0, 6 S1, 13 S2, 2 S3, 2 S4.
+**21 findings**: 1 S0, 6 S1, 10 S2, 2 S3, 2 S4.
 
 Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capability.tsv`).
 
@@ -35,19 +35,16 @@ Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capabili
 | 9 | S2 | `spl-classes-absent` | T1 | prelude | PARTIAL: the 10 missing SPL EXCEPTIONS are declared with php parentage (BadMethodCall/Domain/Length/BadFunctionCall under LogicException; OutOfBounds/Overflow/Range/Underflow/UnexpectedValue under RuntimeException; JsonException under Exception). Still absent: the SPL ITERATORS and DirectoryIterator/DOMDocument/ReflectionExtension | [`tests/aot/cases/spl_exception_tree.php`](tests/aot/cases/spl_exception_tree.php) |
 | 10 | S2 | `globals-whole-array` | T3 | compiler-root | a whole-array $GLOBALS read is a hard compile error | [`probes/cap_globals_array_read.php`](probes/cap_globals_array_read.php) |
 | 11 | S2 | `parser-byref-arrow-fn` | T3 | parser | `fn &() => ...` (by-reference arrow function) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 12 | S2 | `parser-high-byte-identifier` | T3 | parser | an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9` | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 13 | S2 | `parser-reserved-enum-case` | T3 | parser | an enum case named with a reserved word (`case ARRAY = 'array';`) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 14 | S2 | `refl-param-attributes` | T3 | prelude | ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work | [`probes/cap_refl_param_attributes.php`](probes/cap_refl_param_attributes.php) |
-| 15 | S2 | `refl-param-default` | T3 | prelude | ReflectionParameter::getDefaultValue/getDeclaringClass absent | [`probes/cap_refl_param_default.php`](probes/cap_refl_param_default.php) |
-| 16 | S2 | `refl-union-type` | T3 | prelude | no ReflectionUnionType / ReflectionIntersectionType | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
-| 17 | S2 | `parser-const-gaps` | T6 | parser | `expected const name` / `expected ';' after const` in doctrine/dbal Types and nette/utils Image | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 18 | S2 | `refl-enum-absent` | T6 | prelude | ReflectionEnum absent; doctrine enum types and form choices need it | [`probes/cap_refl_enum.php`](probes/cap_refl_enum.php) |
-| 19 | S2 | `refl-hydration` | T6 | prelude | newInstanceWithoutConstructor absent; doctrine hydration and var-exporter need it | [`probes/cap_refl_hydration.php`](probes/cap_refl_hydration.php) |
-| 20 | S2 | `pdo-absent` | T6 | stdlib-leaf | no PDO, PDOStatement, PDOException or sqlite binding exists at all | [`PDO-SQLITE-REQUIREMENTS.md`](PDO-SQLITE-REQUIREMENTS.md) |
-| 21 | S3 | `autoload-queue-never-drained` | T1 | compiler-root | PARTIAL: spl_autoload_register/unregister/functions now exist (prelude/autoload.php), so composer ClassLoader::register() compiles and registers instead of being a hard compile error. class_exists($n, true) still does not DRAIN the queue: the lookup is an emit-time fold into a static table and the guard machinery depends on it staying constant-foldable, so firing it is a design call. Bounded impact — ahead of time an autoloader can never define a class, so only the callback side effects are lost | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
-| 22 | S3 | `refl-attr-is-instanceof` | T4 | prelude | ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only | [`probes/cap_refl_attr_is_instanceof.php`](probes/cap_refl_attr_is_instanceof.php) |
-| 23 | S4 | `analyzer-use-function` | T1 | compiler-root | the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs | [`data/calibration-residue.txt`](data/calibration-residue.txt) |
-| 24 | S4 | `preg-match-cell-boxing-cost` | T2 | stdlib-leaf | preg_match $matches had to become cell-element so PREG_OFFSET_CAPTURE can hold its [text,offset] pairs; measured 0.088s -> 0.102s (+16%) on a 300k-iteration match loop. Recoverable by specializing on a constant $flags argument, which is compiler work, not stdlib work | [`tests/aot/cases/cap_preg_named_groups.php`](tests/aot/cases/cap_preg_named_groups.php) |
+| 12 | S2 | `refl-param-attributes` | T3 | prelude | ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work | [`probes/cap_refl_param_attributes.php`](probes/cap_refl_param_attributes.php) |
+| 13 | S2 | `refl-param-default` | T3 | prelude | ReflectionParameter::getDefaultValue/getDeclaringClass absent | [`probes/cap_refl_param_default.php`](probes/cap_refl_param_default.php) |
+| 14 | S2 | `refl-union-type` | T3 | prelude | no ReflectionUnionType / ReflectionIntersectionType | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
+| 15 | S2 | `refl-enum-absent` | T6 | prelude | ReflectionEnum absent; doctrine enum types and form choices need it | [`probes/cap_refl_enum.php`](probes/cap_refl_enum.php) |
+| 16 | S2 | `refl-hydration` | T6 | prelude | newInstanceWithoutConstructor absent; doctrine hydration and var-exporter need it | [`probes/cap_refl_hydration.php`](probes/cap_refl_hydration.php) |
+| 17 | S2 | `pdo-absent` | T6 | stdlib-leaf | no PDO, PDOStatement, PDOException or sqlite binding exists at all | [`PDO-SQLITE-REQUIREMENTS.md`](PDO-SQLITE-REQUIREMENTS.md) |
+| 18 | S3 | `autoload-queue-never-drained` | T1 | compiler-root | PARTIAL: spl_autoload_register/unregister/functions now exist (prelude/autoload.php), so composer ClassLoader::register() compiles and registers instead of being a hard compile error. class_exists($n, true) still does not DRAIN the queue: the lookup is an emit-time fold into a static table and the guard machinery depends on it staying constant-foldable, so firing it is a design call. Bounded impact — ahead of time an autoloader can never define a class, so only the callback side effects are lost | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
+| 19 | S3 | `refl-attr-is-instanceof` | T4 | prelude | ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only | [`probes/cap_refl_attr_is_instanceof.php`](probes/cap_refl_attr_is_instanceof.php) |
+| 20 | S4 | `analyzer-use-function` | T1 | compiler-root | the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs | [`data/calibration-residue.txt`](data/calibration-residue.txt) |
+| 21 | S4 | `preg-match-cell-boxing-cost` | T2 | stdlib-leaf | preg_match $matches had to become cell-element so PREG_OFFSET_CAPTURE can hold its [text,offset] pairs; measured 0.088s -> 0.102s (+16%) on a 300k-iteration match loop. Recoverable by specializing on a constant $flags argument, which is compiler work, not stdlib work | [`tests/aot/cases/cap_preg_named_groups.php`](tests/aot/cases/cap_preg_named_groups.php) |
 
 ## Closed
 
@@ -68,6 +65,9 @@ in the same commit that closes its gap.
 | `shutdown-order-and-args` | `lifecycle` | `tests/aot/cases/cap_destruct_and_shutdown.php` | the queue ran only from an atexit hook, so it fired AFTER main returned and after every trailing release had run its destructors; and register_shutdown_function dropped its ...$args, so a callback parameter read an unbound slot |
 | `array-walk-recursive-callback` | `element-repr` | `tests/aot/cases/cap_array_recursion.php` | array_walk_recursive handed its callback values that read back as raw bits — a witness of erased-byref-closure-capture, closed with it; array_push into an erased local was the same bug and is closed too |
 | `parser-xor-operator` | `parser-gaps` | `tests/aot/cases/word_operators.php` | closed on main by cf74105 (`and`/`or`/`xor`), not by this branch — re-verified byte-exact after the merge |
+| `parser-reserved-enum-case` | `parser-gaps` | `tests/aot/cases/reserved_member_names.php` | a reserved word may name a class constant or an enum case in php; the lexer emits Keyword and the parser demanded Identifier. expectMemberName() accepts both, and only in member position — `class array` stays a syntax error |
+| `parser-high-byte-identifier` | `parser-gaps` | `tests/aot/cases/high_byte_identifier.php` | two halves: isIdentStart admitted ASCII only (php grammar is [a-zA-Z_\x80-\xff]), and once parsed the raw bytes reached the LLVM symbol — mangle/sanitizeSym now hex-escape any byte >= 0x80 |
+| `parser-const-gaps` | `parser-gaps` | `tests/aot/cases/reserved_member_names.php` | same root as parser-reserved-enum-case — the const-name positions demanded Identifier where php allows a reserved word |
 
 ## By owning epic
 
@@ -98,13 +98,10 @@ N..8 and nothing below.
 
 - **S1** `include-returns-null` — require/include lower to null, so config/bundles.php, config/*.php closures and the dumped DI container never load
 
-### `parser-gaps` — 5 finding(s), first bites at T1
+### `parser-gaps` — 2 finding(s), first bites at T1
 
 - **S2** `parser-ref-in-array-literal` — `[&$a[$k], $v]` (reference inside an array literal) is not parsed
 - **S2** `parser-byref-arrow-fn` — `fn &() => ...` (by-reference arrow function) is not parsed
-- **S2** `parser-high-byte-identifier` — an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9`
-- **S2** `parser-reserved-enum-case` — an enum case named with a reserved word (`case ARRAY = 'array';`) is not parsed
-- **S2** `parser-const-gaps` — `expected const name` / `expected ';' after const` in doctrine/dbal Types and nette/utils Image
 
 ### `spl-classes` — 1 finding(s), first bites at T1
 

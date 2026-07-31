@@ -940,7 +940,15 @@ final class EmitLlvm implements EmitVisitor
         $n = \strlen($name);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $c = \substr($name, $i, 1);
-            if ($c === '\\') { $out .= '_'; } else { $out .= $c; }
+            if ($c === '\\') { $out .= '_'; continue; }
+            // php identifiers admit every byte >= 0x80, so a class can be named
+            // in UTF-8 — symfony/cache declares `class \xa9`. An LLVM identifier
+            // cannot carry those bytes raw, so they are hex-escaped into a
+            // still-unique ASCII name. `$u` keeps the escape from colliding with
+            // an ordinary `_XX` in a source name.
+            $b = \ord($c);
+            if ($b >= 0x80) { $out .= '_u' . \strtoupper(\dechex($b)); continue; }
+            $out .= $c;
         }
         return $out;
     }

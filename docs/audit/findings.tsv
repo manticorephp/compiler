@@ -40,9 +40,9 @@ array-walk-recursive-callback	FIXED	2	repr	0	element-repr	tests/aot/cases/cap_ar
 parser-xor-operator	FIXED	3	parser	0	parser-gaps	tests/aot/cases/word_operators.php	closed on main by cf74105 (`and`/`or`/`xor`), not by this branch — re-verified byte-exact after the merge
 parser-byref-arrow-fn	S2	3	parser	0	parser-gaps	data/analyze-t8.json	`fn &() => ...` (by-reference arrow function) is not parsed
 parser-ref-in-array-literal	S2	1	parser	0	parser-gaps	data/analyze-t8.json	`[&$a[$k], $v]` (reference inside an array literal) is not parsed
-parser-reserved-enum-case	S2	3	parser	0	parser-gaps	data/analyze-t8.json	an enum case named with a reserved word (`case ARRAY = 'array';`) is not parsed
-parser-high-byte-identifier	S2	3	parser	0	parser-gaps	data/analyze-t8.json	an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9`
-parser-const-gaps	S2	6	parser	0	parser-gaps	data/analyze-t8.json	`expected const name` / `expected ';' after const` in doctrine/dbal Types and nette/utils Image
+parser-reserved-enum-case	FIXED	3	parser	0	parser-gaps	tests/aot/cases/reserved_member_names.php	a reserved word may name a class constant or an enum case in php; the lexer emits Keyword and the parser demanded Identifier. expectMemberName() accepts both, and only in member position — `class array` stays a syntax error
+parser-high-byte-identifier	FIXED	3	parser	0	parser-gaps	tests/aot/cases/high_byte_identifier.php	two halves: isIdentStart admitted ASCII only (php grammar is [a-zA-Z_\x80-\xff]), and once parsed the raw bytes reached the LLVM symbol — mangle/sanitizeSym now hex-escape any byte >= 0x80
+parser-const-gaps	FIXED	6	parser	0	parser-gaps	tests/aot/cases/reserved_member_names.php	same root as parser-reserved-enum-case — the const-name positions demanded Identifier where php allows a reserved word
 refl-param-attributes	S2	3	prelude	0	reflection-tier4	probes/cap_refl_param_attributes.php	ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work
 refl-param-default	S2	3	prelude	0	reflection-tier4	probes/cap_refl_param_default.php	ReflectionParameter::getDefaultValue/getDeclaringClass absent
 refl-union-type	S2	3	prelude	0	reflection-tier4	probes/cap_refl_union_type.php	no ReflectionUnionType / ReflectionIntersectionType
