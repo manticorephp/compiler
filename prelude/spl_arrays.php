@@ -179,13 +179,25 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
  * typed parameter re-types it at the callee, the same trick the guard folder
  * needed for its AST nodes.
  *
- * ⚠ LIMITATION: every non-array argument takes that generator path, because
- * nothing can tell a Generator from another Traversable at run time — a
- * Generator is compiler-synthesised state with NO class descriptor, so
- * `instanceof \Generator` and `get_class($gen)` both answer as if it were not
- * one (false and ''), even for a concrete generator. A user Iterator /
- * IteratorAggregate is therefore not supported here yet; giving Generator a
- * real descriptor is the fix, and it is its own piece of work.
+ * A Generator still cannot be recognised POSITIVELY — it is compiler-
+ * synthesised state with no class descriptor, so `instanceof \Generator` and
+ * `get_class($gen)` both answer as if it were not one. But the question only
+ * has to be decided in the other direction: a user Iterator / IteratorAggregate
+ * DOES have a descriptor and answers `instanceof` correctly, so the two
+ * interface arms are taken first and the generator funnel becomes the default.
+ *
+ * Without those arms a `CapBag implements IteratorAggregate` was read as a
+ * generator frame — `state@8` was really its refcount, and the resume step
+ * loaded slot 0 (the class DESCRIPTOR pointer) and called it, jumping into a
+ * read-only data page. SIGBUS, which is why this looked like a foreach bug:
+ * the crash landed several statements after the two loops that were blamed for
+ * it, and both of those are correct.
+ *
+ * Deliberately decided by `instanceof` rather than by letting an erased
+ * `foreach` classify at run time: this body is linkonce_odr, and the erased
+ * iterator arm is emitted only for a module that already knows a Traversable
+ * class ({@see EmitLlvmControl::hasTraversableClasses}) — which is exactly the
+ * shape that gives one symbol two different bodies.
  */
 function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
 {
@@ -195,7 +207,40 @@ function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
         foreach ($iterator as $v) { $out[] = $v; }
         return $out;
     }
+    if ($iterator instanceof \IteratorAggregate) {
+        // php unwraps as many aggregate layers as it finds, so recurse rather
+        // than assume getIterator() hands back a Generator.
+        return iterator_to_array($iterator->getIterator(), $preserve_keys);
+    }
+    if ($iterator instanceof \Iterator) {
+        return __mc_iter_obj_to_array($iterator, $preserve_keys);
+    }
     return __mc_iter_gen_to_array($iterator, $preserve_keys);
+}
+
+/**
+ * The user-Iterator arm: the protocol driven by explicit method calls, so it
+ * does not depend on how `foreach` classifies an interface-typed subject.
+ * @return array<int|string,mixed>
+ */
+function __mc_iter_obj_to_array(\Iterator $it, bool $preserve_keys): array
+{
+    /** @var array<int|string,mixed> $out */
+    $out = [];
+    $it->rewind();
+    while ($it->valid()) {
+        $v = $it->current();
+        if ($preserve_keys) {
+            // Same reason as the generator arm: a bare cell key gives the index
+            // store no concrete layout to pick.
+            $k = $it->key();
+            if (\is_int($k)) { $out[(int)$k] = $v; } else { $out[(string)$k] = $v; }
+        } else {
+            $out[] = $v;
+        }
+        $it->next();
+    }
+    return $out;
 }
 
 /** The generator arm of iterator_to_array, behind a TYPED parameter. */

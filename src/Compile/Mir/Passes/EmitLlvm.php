@@ -1529,6 +1529,17 @@ final class EmitLlvm implements EmitVisitor
         if ($target === 'Stringable') {
             return $this->resolveMethodClass($name, '__toString') !== '';
         }
+        // `Traversable` is php's implicit base of Iterator and IteratorAggregate.
+        // Neither of those is a declared interface here — they are built-ins, so
+        // they are absent from `$this->classes` and the interface-parent walk
+        // below never reaches Traversable from a class that names one of them on
+        // its `implements`. php forbids implementing Traversable directly, so
+        // those two ARE the whole membership rule.
+        if ($target === 'Traversable') {
+            return $this->classImplements($name, 'Iterator')
+                || $this->classImplements($name, 'IteratorAggregate')
+                || $this->classImplements($name, 'Traversable');
+        }
         $c = $name;
         while ($c !== '') {
             // `isset`, NOT `$cd = … ?? null` + `$cd === null`: a `ClassDef|null`
