@@ -1097,7 +1097,7 @@ trait EmitLlvmModule
             // them all unwinds here instead of computing an OOB slot -1.
             $header .= "  store i64 1, ptr @__mir_jmp_depth\n";
             $header .= "  %__basebuf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
-            $header .= "  %__basesj = call i32 @setjmp(ptr %__basebuf)\n";
+            $header .= "  %__basesj = call i32 @_setjmp(ptr %__basebuf)\n";
             $header .= "  %__caught = icmp ne i32 %__basesj, 0\n";
             $header .= "  br i1 %__caught, label %__uncaught, label %__run\n";
             $header .= "__uncaught:\n";
