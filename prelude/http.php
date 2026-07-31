@@ -756,6 +756,13 @@ final class Headers
     /** @var array<int,string> wire lines, "Name: value", insertion order */
     private array<int, string> $lines = [];
 
+    /** The reset values, as properties rather than `[]` literals: an empty
+     *  literal types its element `unknown`, and the stores that follow would
+     *  then write raw values under readers that expect strings. Same reason
+     *  {@see \__McSapi::$empty} exists. */
+    private static array<string, string> $emptyMap = [];
+    private static array<int, string> $emptyLines = [];
+
     /** Build from wire lines, as they came off the head. */
     public static function fromLines(array<int, string> $lines): Headers
     {
@@ -859,6 +866,31 @@ final class Headers
     public function render(): string
     {
         return renderLines($this->lines);
+    }
+
+    /** Drop every field. */
+    public function clear(): void
+    {
+        $this->map = self::$emptyMap;
+        $this->lines = self::$emptyLines;
+    }
+
+    /**
+     * Become a copy of `$o`.
+     *
+     * Through the public wire lines rather than the private fields, so repeats
+     * and their order survive exactly — which is what the SAPI absorption needs
+     * (`Set-Cookie` accumulates, everything else replaces).
+     */
+    public function copyFrom(Headers $o): void
+    {
+        $this->clear();
+        foreach ($o->lines() as $line) {
+            $kv = headerSplit($line);
+            if (\count($kv) === 2) {
+                $this->add($kv[0], $kv[1]);
+            }
+        }
     }
 
     /**
@@ -1959,32 +1991,15 @@ final class Server
                 return;
             }
             $handled = $handled + 1;
-            $res = $this->dispatch($req);
-            $keep = $req->isKeepAlive()
-                && !$res->wantsClose()
-                && !$this->stopped
-                && $handled < $this->keepAliveMax;
-            // A streamed body an HTTP/1.0 peer cannot frame has only the close
-            // to end it.
-            if ($res->isStreaming() && $req->version !== '1.1') {
-                $keep = false;
+            // The SAPI context stays live across the WRITE, not just the
+            // handler: a streaming body runs during the write, and inside it
+            // headers_sent() has to answer true.
+            $this->beginRequest($req);
+            try {
+                $keep = $this->serveOne($conn, $req, $handled);
+            } finally {
+                \__mc_request_end();
             }
-            // A body the handler ignored is still on the wire, and the next
-            // request cannot be read until it is off. Drained BEFORE the
-            // response, so the peer is not made to wait on a socket we are
-            // about to read anyway.
-            if ($req->streamed && $keep) {
-                $rd = $req->stream();
-                if ($rd !== null) {
-                    $rd->discard();
-                    if ($rd->over) {
-                        $keep = false;
-                    }
-                }
-            }
-            \stream_set_timeout($conn, (int)$this->writeTimeout);
-            $keep = $this->writeResponse($conn, $req, $res, $keep);
-            $this->statServed = $this->statServed + 1;
             if (!$keep) {
                 return;
             }
@@ -1994,8 +2009,131 @@ final class Server
         }
     }
 
+    /**
+     * One request, from handler to written response, inside a live SAPI
+     * context.
+     *
+     * @return bool whether the connection may be reused
+     */
+    private function serveOne(\Resource $conn, Request $req, int $handled): bool
+    {
+        $res = $this->dispatch($req);
+        $keep = $req->isKeepAlive()
+            && !$res->wantsClose()
+            && !$this->stopped
+            && $handled < $this->keepAliveMax;
+        // A streamed body an HTTP/1.0 peer cannot frame has only the close
+        // to end it.
+        if ($res->isStreaming() && $req->version !== '1.1') {
+            $keep = false;
+        }
+        // A body the handler ignored is still on the wire, and the next
+        // request cannot be read until it is off. Drained BEFORE the
+        // response, so the peer is not made to wait on a socket we are
+        // about to read anyway.
+        if ($req->streamed && $keep) {
+            $rd = $req->stream();
+            if ($rd !== null) {
+                $rd->discard();
+                if ($rd->over) {
+                    $keep = false;
+                }
+            }
+        }
+        \stream_set_timeout($conn, (int)$this->writeTimeout);
+        $keep = $this->writeResponse($conn, $req, $res, $keep);
+        $this->statServed = $this->statServed + 1;
+        return $keep;
+    }
+
+    /**
+     * Open the request's SAPI context.
+     *
+     * `header()`, `header_remove()`, `headers_list()`, `http_response_code()`,
+     * `setcookie()` and `setrawcookie()` are live in EVERY handler — that is
+     * what `__mc_response_begin()` costs: an empty header block and a status.
+     * The superglobals are opt-in (`compat(true)`), because seeding four of
+     * them per request for code that never reads them is pure cost.
+     */
+    private function beginRequest(Request $req): void
+    {
+        if (!$this->compat) {
+            \__mc_response_begin();
+            return;
+        }
+        // ⚠ Do NOT reimplement the seeding: __mc_request_begin boxes element by
+        // element on purpose (a whole-array store into a cell-element
+        // superglobal leaves the elements raw, and `echo $_GET['a']` then
+        // prints 2.1E-314).
+        \__mc_request_begin(
+            $this->serverVars($req),
+            $req->queries(),
+            $this->postVars($req),
+            $req->cookies(),
+        );
+    }
+
+    /** @return array<string,string> php's $_SERVER for this request */
+    private function serverVars(Request $req): array<string, string>
+    {
+        $out = [];
+        $out['REQUEST_METHOD'] = $req->method;
+        $out['REQUEST_URI'] = $req->target;
+        $out['SERVER_PROTOCOL'] = 'HTTP/' . $req->version;
+        $out['QUERY_STRING'] = $req->queryString;
+        $out['REMOTE_ADDR'] = $req->remoteAddr;
+        $out['HTTPS'] = $req->secure ? 'on' : '';
+        $out['CONTENT_TYPE'] = $req->header('Content-Type');
+        $out['CONTENT_LENGTH'] = $req->header('Content-Length');
+        $host = $req->header('Host');
+        $colon = \strrpos($host, ':');
+        if ($colon !== false && $colon > 0) {
+            $out['SERVER_NAME'] = \substr($host, 0, $colon);
+            $out['SERVER_PORT'] = \substr($host, $colon + 1);
+        } else {
+            $out['SERVER_NAME'] = $host;
+            $out['SERVER_PORT'] = $req->secure ? '443' : '80';
+        }
+        foreach ($req->headers->all() as $k => $v) {
+            $out['HTTP_' . \strtoupper(\str_replace('-', '_', $k))] = $v;
+        }
+        return $out;
+    }
+
+    /**
+     * @return array<string,string> php's $_POST — a urlencoded form body, and
+     * nothing else. multipart waits for the parser that would produce it.
+     */
+    private function postVars(Request $req): array<string, string>
+    {
+        if ($req->contentType() !== 'application/x-www-form-urlencoded') {
+            // A DECLARED empty, not a `[]` literal: an empty literal in a
+            // return position erases the element type for every caller.
+            return parseQuery('');
+        }
+        return parseQuery($req->body());
+    }
+
     /** Run the handler, turning any escape into a response rather than a crash. */
     private function dispatch(Request $req): Response
+    {
+        $capture = $this->captureEcho;
+        if ($capture) {
+            \ob_start();
+        }
+        $res = $this->runHandler($req);
+        $echoed = '';
+        if ($capture) {
+            $got = \ob_get_clean();
+            if ($got !== false) {
+                $echoed = $got;
+            }
+        }
+        return $this->absorb($res, $echoed);
+    }
+
+    /** The handler call itself, with every escape turned into a response. */
+    private function runHandler(Request $req): Response
     {
         $h = $this->handler;
         try {
@@ -2021,6 +2159,55 @@ final class Server
     }
 
     /**
+     * Fold what the handler did AMBIENTLY — `header()`, `setcookie()`,
+     * `http_response_code()`, `echo` — into the Response it returned.
+     *
+     * The rule, and it is the same one three times: the EXPLICIT API wins.
+     *
+     *  - Headers: the ambient lines go in first, the Response's own apply on
+     *    top with replace semantics. `Set-Cookie` is the exception — §5.2
+     *    excludes it from joining, and a handler that called `setcookie()` AND
+     *    `->cookie()` means both.
+     *  - Status: the Response's, if it set one; otherwise
+     *    `http_response_code()`'s.
+     *  - Body: what was echoed becomes the body ONLY if the Response has none
+     *    and is not streaming. Both together is a handler bug — the explicit
+     *    body wins and the echoed bytes are dropped, never silently merged.
+     */
+    private function absorb(Response $res, string $echoed): Response
+    {
+        $lines = \__mc_response_headers();
+        if (\count($lines) > 0) {
+            $merged = new Headers();
+            foreach ($lines as $line) {
+                $kv = headerSplit($line);
+                if (\count($kv) === 2) {
+                    $merged->add($kv[0], $kv[1]);
+                }
+            }
+            foreach ($res->headers->lines() as $line) {
+                $kv = headerSplit($line);
+                if (\count($kv) !== 2) {
+                    continue;
+                }
+                if (\strtolower($kv[0]) === 'set-cookie') {
+                    $merged->add($kv[0], $kv[1]);
+                } else {
+                    $merged->set($kv[0], $kv[1]);
+                }
+            }
+            $res->headers->copyFrom($merged);
+        }
+        if (!$res->statusWasSet()) {
+            $res->status(\__mc_response_status());
+        }
+        if ($echoed !== '' && $res->getBody() === '' && !$res->isStreaming()) {
+            $res->body($echoed);
+        }
+        return $res;
+    }
+
+    /**
      * Head + body in ONE `fwrite` — a literal two-element array is a
      * `writev(2)`, so a response costs one syscall rather than two.
      */
@@ -2035,6 +2222,7 @@ final class Server
             $body = '';
         }
         $head = $this->renderHead($res, $req->version, $keep, \strlen($body), $hasBody);
+        \__mc_response_sent();
         // HEAD carries the headers of the GET it mirrors — Content-Length
         // included — and no body at all.
         if ($req->method === 'HEAD' || $body === '') {
@@ -2065,6 +2253,10 @@ final class Server
             $h->set('Transfer-Encoding', 'chunked');
         }
         $head = $this->renderHead($res, $req->version, $keep, -1, false);
+        // The head is gone the moment it is written — which is what makes
+        // headers_sent() honest INSIDE the body closure below, and what stops
+        // header() from recording into a block already on the wire.
+        \__mc_response_sent();
         \fwrite($conn, $head);
         if ($req->method === 'HEAD') {
             return $keep;

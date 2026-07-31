@@ -43,6 +43,105 @@ class __McOb
      * ever calling the handler. All three verified against the oracle.
      */
     public static array $started = [];
+
+    /** @var array<int,array<int,string>> parked buffer CONTENTS, innermost
+     *  first, by task id. {@see __mc_ob_ctx_switch} */
+    public static array $savedBufs = [];
+
+    /** @var array<int,array<int,mixed>> parked $handlers, by task id */
+    public static array $savedHandlers = [];
+
+    /** @var array<int,array<int,mixed>> parked $chunks, by task id */
+    public static array $savedChunks = [];
+
+    /** @var array<int,array<int,mixed>> parked $flags, by task id */
+    public static array $savedFlags = [];
+
+    /** @var array<int,array<int,mixed>> parked $names, by task id */
+    public static array $savedNames = [];
+
+    /** @var array<int,array<int,mixed>> parked $started, by task id */
+    public static array $savedStarted = [];
+
+    /** The reset value for a metadata column. A property rather than a `[]`
+     *  literal for the reason {@see \__McSapi::$empty} documents: an empty
+     *  literal types its element `unknown`, and the appends that follow would
+     *  then write raw values under readers that decode cells.
+     *  @var array<int,mixed> */
+    public static array<int, mixed> $emptyMeta = [];
+
+    /** @var array<int,string> the reset value for a parked-contents list */
+    public static array<int, string> $emptyBufs = [];
+}
+
+/**
+ * Park the calling flow's whole output-buffer stack and restore $to's.
+ *
+ * `@__mir_ob_depth` and `@__mir_ob_stack` are PROCESS-global linkonce_odr
+ * (EmitLlvmRuntime), not per-fiber — they have to be, because `echo` inside the
+ * prebuilt stdlib.o was lowered against them at stdlib-build time. Two
+ * concurrent request handlers with open buffers therefore share one stack, and
+ * fiber A's `echo` lands in fiber B's buffer. Everything needed to keep them
+ * apart is already a PHP-callable builtin, so this is plain PHP and costs
+ * codegen nothing.
+ *
+ * `__mir_ob_take` is a MOVE — the level is emptied and we own the string — so
+ * parking cannot alias a buffer that is still live. Restoring re-pushes
+ * OUTERMOST first and writes each contents back into the level just pushed,
+ * which is what `__mir_out_write_str` targets.
+ *
+ * Called from `__mc_sapi_ctx_switch`, guarded by function_exists, so a program
+ * that never buffers never links it.
+ */
+function __mc_ob_ctx_switch(int $from, int $to): void
+{
+    if ($from === $to) {
+        return;
+    }
+    if (\__mir_ob_level() > 0) {
+        $bufs = __McOb::$emptyBufs;
+        while (true) {
+            $l = \__mir_ob_level();
+            if ($l === 0) {
+                break;
+            }
+            $bufs[] = \__mir_ob_take($l);
+            \__mir_ob_pop();
+        }
+        __McOb::$savedBufs[$from] = $bufs;
+        __McOb::$savedHandlers[$from] = __McOb::$handlers;
+        __McOb::$savedChunks[$from] = __McOb::$chunks;
+        __McOb::$savedFlags[$from] = __McOb::$flags;
+        __McOb::$savedNames[$from] = __McOb::$names;
+        __McOb::$savedStarted[$from] = __McOb::$started;
+        __McOb::$handlers = __McOb::$emptyMeta;
+        __McOb::$chunks = __McOb::$emptyMeta;
+        __McOb::$flags = __McOb::$emptyMeta;
+        __McOb::$names = __McOb::$emptyMeta;
+        __McOb::$started = __McOb::$emptyMeta;
+    }
+    if (!isset(__McOb::$savedBufs[$to])) {
+        return;
+    }
+    $bufs = __McOb::$savedBufs[$to];
+    __McOb::$handlers = __McOb::$savedHandlers[$to];
+    __McOb::$chunks = __McOb::$savedChunks[$to];
+    __McOb::$flags = __McOb::$savedFlags[$to];
+    __McOb::$names = __McOb::$savedNames[$to];
+    __McOb::$started = __McOb::$savedStarted[$to];
+    unset(__McOb::$savedBufs[$to]);
+    unset(__McOb::$savedHandlers[$to]);
+    unset(__McOb::$savedChunks[$to]);
+    unset(__McOb::$savedFlags[$to]);
+    unset(__McOb::$savedNames[$to]);
+    unset(__McOb::$savedStarted[$to]);
+    // $bufs is innermost-first; push in the other order so each level is
+    // recreated under the one that enclosed it.
+    $n = \count($bufs);
+    for ($i = $n - 1; $i >= 0; $i = $i - 1) {
+        \__mir_ob_push();
+        \__mir_out_write_str($bufs[$i]);
+    }
 }
 
 /** php's name for a handler, as ob_list_handlers()/ob_get_status() report it. */
