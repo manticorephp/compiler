@@ -1,0 +1,54 @@
+OK|Request Header Fields Too Large||
+110000
+50
+[GET / HTTP/1.1]
+[Host: a]
+[X-Long: one two]
+[X-B: 2]
+0
+GET /a?b=1 v1.1
+POST / v1.0
+OPTIONS * v1.1
+BAD
+BAD
+BAD
+BAD
+BAD
+<Host>=<example.com>
+<X-Empty>=<>
+BAD
+BAD
+BAD
+<X-Pad>=<spaced>
+</a/b>?<x=1&y=2>
+</a/b>?<>
+</>?<>
+<*>?<>
+/a/b
+/b
+/etc/passwd
+/a/b/
+/
+/a
+/x
+/a/b
+*
+a=2;b=hello world;c=;d=/;
+0
+sid=abc;theme=dark;e=a b;
+11 26
+-1 -1
+-2
+-1
+-1
+3|hey|
+0||
+HTTP/1.1 204 No Content|
+HTTP/1.0 599|
+Content-Type: text/plain|Content-Length: 3||
+Thu, 01 Jan 1970 00:00:00 GMT
+Wed, 01 Jan 2025 00:00:00 GMT
+010101
+11000
+5;0;12;5;-1;-1;-1;-1;-1;-1;
+done

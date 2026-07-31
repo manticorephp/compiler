@@ -1,0 +1,26 @@
+0E
+11 [hello] [hello world]
+[hello ] len=5 pos=6
+[world] len=5
+[world] len=0 E
+[] []
+23 16 -1
+7 0
+7
+[Host: a
+
+BODY]
+72 111 -1 -1
+[Host: a
+
+BODY] len=15
+[Host: a||BODY] E
+0E
+110 len=10 [1234567890]
+1 len=5
+pos=4000 len=5000
+pos=0 len=800
+pos=0 len=0 E
+5 0 3 2
+1280000
+done

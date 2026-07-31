@@ -84,6 +84,7 @@ trait InferNodes
         $this->cellLoopLocals = [];
         $this->floatLoopLocals = [];
         $this->nullLoopLocals = [];
+        $this->elemLoopLocals = [];
         $rounds = 0;
         while (true) {
             $this->loopPromoGrew = false;
@@ -348,6 +349,9 @@ trait InferNodes
         $this->scanKeyUsedLocals($fn->body);
         $this->arithUsedLocals = [];
         $this->scanArithUsedLocals($fn->body);
+        // Which arrays this function builds from `[]` — the soundness gate on the
+        // elemLoopLocals pin below ({@see scanLocalBuiltArrays}).
+        $this->scanLocalBuiltArrays($fn->body);
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
         // re-kinds is a cell from function ENTRY — its reads dispatch by tag
@@ -370,6 +374,16 @@ trait InferNodes
         foreach ($this->nullLoopLocals as $nln => $nty) {
             if ($this->isParamName($fn, $nln)) { continue; }
             $this->localTypes[$nln] = $nty;
+        }
+        // Same discipline for an array whose ELEMENT only the loop body proves
+        // ({@see loopMerge}): `$out = []` seeds the element unknown, so an index
+        // read inside that loop decodes the erased channel unless the name carries
+        // the merged array type from ENTRY. The `[]` store itself then builds an
+        // array of the right element shape, which is the point — an empty array
+        // has no element for the re-type to contradict.
+        foreach ($this->elemLoopLocals as $eln => $ety) {
+            if ($this->isParamName($fn, $eln)) { continue; }
+            $this->localTypes[$eln] = $ety;
         }
         $this->inferNode($fn->body);
         // A function returning a CLOSURE loses the concrete `obj<__closure_N>`
@@ -655,6 +669,19 @@ trait InferNodes
             $nty = $this->nullLoopLocals[$node->name];
             $this->localTypes[$node->name] = $nty;
             $node->type = $nty;
+            return $node->type;
+        }
+        // An array whose ELEMENT a loop proves ({@see loopMerge}): the entry seed
+        // in inferFunctionOnce is not enough on its own, because the `$out = []`
+        // store that follows it re-types the slot from the literal — and an empty
+        // literal is `vec[unknown]`, which is exactly the type being escaped. Pin
+        // the store the way the cell and null cases above pin theirs, so the slot
+        // holds the merged element from its FIRST write and the index reads inside
+        // the loop decode by it.
+        if (isset($this->elemLoopLocals[$node->name])) {
+            $ety = $this->elemLoopLocals[$node->name];
+            $this->localTypes[$node->name] = $ety;
+            $node->type = $ety;
             return $node->type;
         }
         if (isset($this->incStrLocals[$node->name])) {
