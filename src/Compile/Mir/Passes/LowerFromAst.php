@@ -327,6 +327,9 @@ final class LowerFromAst implements Pass
      *  also means main() gets the atexit trampoline and the uncaught path
      *  consults a user handler; {@see needsErrorHandlers}. */
     public string $errorsSrc = '';
+    /** ob_* — DEMAND-GATED. Non-empty also means main() gets the atexit
+     *  trampoline that drains any buffer still open at exit. */
+    public string $obSrc = '';
     /** pack/unpack — DEMAND-GATED. */
     public string $binarySrc = '';
     /** Nesting depth of the `@` suppression operator around the expression being
@@ -1899,6 +1902,13 @@ final class LowerFromAst implements Pass
         // coalesce/ternary takes the sibling arm's type (see infer*).
         if ($op === 'throw') {
             return new Throw_($operand, Type::void());
+        }
+        // `print $x` — echo with a value: prints the operand, yields int 1.
+        // Lowered to the `print` codegen builtin rather than a new node kind,
+        // because a Call is already walked, cloned, typed and folded by every
+        // pass; a new kind would mean touching all of them for no gain.
+        if ($op === 'print') {
+            return new Call('print', [$operand], Type::int_());
         }
         throw new \RuntimeException('MIR.lower: unsupported unary op ' . $op);
     }

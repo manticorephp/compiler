@@ -448,6 +448,10 @@ trait EmitLlvmRuntime
                 $out .= "  %vbad = icmp sle i64 %rc, 0\n";
                 $out .= "  br i1 %vbad, label %vfail, label %vok\n";
                 $out .= "vfail:\n";
+                // Drain stdout first — abort() discards the stdio buffer, so
+                // without this the output leading up to the over-release is lost
+                // and the trace reads as if nothing had been printed.
+                if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
                 $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr " . $fmt . ", ptr %p, i64 %rc)\n";
                 $out .= "  call void @abort()\n";
                 $out .= "  unreachable\n";
@@ -1731,6 +1735,389 @@ trait EmitLlvmRuntime
         return $out;
     }
 
+    /**
+     * The output funnel: THE single place a byte destined for stdout passes
+     * through, plus the `ob_start()` buffer state it consults.
+     *
+     * Before this existed, bytes reached fd 1 from twelve emit sites under two
+     * incompatible disciplines — a string `echo` did `fflush(NULL)` + an
+     * unbuffered `write(1, …)` (one syscall per echo), everything else did a
+     * stdio `printf`, and the per-echo `fflush(NULL)` existed only to order the
+     * two against each other. Both are gone: everything renders bytes first and
+     * calls `@__mir_out_write`, which either hands them to stdout's ONE stdio
+     * stream or appends them to the innermost open buffer.
+     *
+     * ⚠ Every body here must be renderable from nothing but this file — no
+     * module-local information, no conditional reference to a PHP-level symbol.
+     * These are `linkonce_odr` ({@see EmitLlvm::linkonceRuntime}) and the linker
+     * keeps exactly one across the user `.o` and the prebuilt stdlib `.o`; two
+     * bodies that disagree is the shape of the `__mir_rc_release` bug that freed
+     * objects at refcount 5. The state globals carry the linkage explicitly, for
+     * the same reason `@__mir_strpool0` does.
+     */
+    private function outBufRuntime(): string
+    {
+        $n     = (string)\Compile\MemoryAbi::OB_MAX_LEVELS;
+        $arrP  = '[' . $n . ' x ptr]';
+        $arrI  = '[' . $n . ' x i64]';
+        $hashOff = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
+
+        $out  = "\n@__mir_ob_depth = linkonce_odr global i64 0\n";
+        $out .= '@__mir_ob_stack = linkonce_odr global ' . $arrP . " zeroinitializer\n";
+        // Per-level "a flush is draining me right now" flag. ob_flush() keeps its
+        // level open while it hands the bytes downstream, so a handler that
+        // echoes must NOT land back in the buffer it is handling — the target
+        // walk below skips any level marked in use. That closes the one
+        // reentrancy hazard structurally, with no guard the caller can forget.
+        $out .= '@__mir_ob_inuse = linkonce_odr global ' . $arrI . " zeroinitializer\n";
+        $out .= "@__mir_ob_implicit = linkonce_odr global i64 0\n";
+        // Non-zero while an ob_start() handler is running. php DISCARDS whatever
+        // a handler echoes — it does not forward it downstream, and it does not
+        // fold it back into the buffer being handled (verified against the
+        // oracle: a handler echoing "[side]" contributes nothing, at any nesting
+        // depth). So this is a hard drop at the funnel's door, not a routing
+        // decision like @__mir_ob_inuse below it.
+        $out .= "@__mir_ob_incb = linkonce_odr global i64 0\n";
+
+        // Innermost buffer accepting bytes, or 0 for "write to stdout".
+        $out .= "\ndefine i64 @__mir_ob_target() {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  %any = icmp sgt i64 %d, 0\n";
+        $out .= "  br i1 %any, label %loop, label %none\n";
+        $out .= "none:\n  ret i64 0\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ %d, %entry ], [ %i1, %next ]\n";
+        $out .= "  %idx = sub i64 %i, 1\n";
+        $out .= '  %up = getelementptr inbounds ' . $arrI
+              . ", ptr @__mir_ob_inuse, i64 0, i64 %idx\n";
+        $out .= "  %u = load i64, ptr %up\n";
+        $out .= "  %busy = icmp ne i64 %u, 0\n";
+        $out .= "  br i1 %busy, label %next, label %found\n";
+        $out .= "found:\n  ret i64 %i\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = sub i64 %i, 1\n";
+        $out .= "  %more = icmp sgt i64 %i1, 0\n";
+        $out .= "  br i1 %more, label %loop, label %none\n";
+        $out .= "}\n";
+
+        // Append %n bytes at %d onto the level accumulator %s, returning the
+        // (possibly new) accumulator. Same amortized in-place/grow shape as
+        // {@see RuntimeLibrary::strAppend}, but it takes a (data, len) pair
+        // rather than a headered chunk — so it is binary-safe by construction,
+        // never reading a NUL as an end — and tolerates a null accumulator,
+        // which is what an untouched level holds.
+        $out .= "\ndefine ptr @__mir_ob_append(ptr %s, ptr %d, i64 %n) {\n";
+        $out .= "entry:\n";
+        $out .= "  %fresh = icmp eq ptr %s, null\n";
+        $out .= "  br i1 %fresh, label %new, label %have\n";
+        $out .= "new:\n";
+        $out .= "  %fdbl = shl i64 %n, 1\n";
+        $out .= "  %fcap = add i64 %fdbl, 1\n";
+        $out .= "  %fbuf = call ptr @__mir_str_alloc(i64 %fcap)\n";
+        $out .= "  call ptr @memcpy(ptr %fbuf, ptr %d, i64 %n)\n";
+        $out .= "  %fnul = getelementptr inbounds i8, ptr %fbuf, i64 %n\n";
+        $out .= "  store i8 0, ptr %fnul\n";
+        $out .= "  call void @__mir_str_set_len(ptr %fbuf, i64 %n)\n";
+        $out .= "  ret ptr %fbuf\n";
+        $out .= "have:\n";
+        // Sole ownership? rc@-8 == 1. A live ob_get_contents() borrow makes this
+        // 2, which forces the copy path — that is what keeps the returned string
+        // from mutating under the caller.
+        $out .= "  %rcp = getelementptr i8, ptr %s, i64 -8\n";
+        $out .= "  %rc = load i64, ptr %rcp\n";
+        $out .= "  %sole = icmp eq i64 %rc, 1\n";
+        $out .= "  br i1 %sole, label %chkcap, label %grow\n";
+        $out .= "chkcap:\n";
+        $out .= "  %la = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %need = add i64 %la, %n\n";
+        $out .= "  %capp = getelementptr i8, ptr %s, i64 -24\n";
+        $out .= "  %cap = load i64, ptr %capp\n";
+        $out .= "  %fits = icmp slt i64 %need, %cap\n";  // need + NUL <= cap
+        $out .= "  br i1 %fits, label %inplace, label %grow\n";
+        $out .= "inplace:\n";
+        $out .= "  %dst = getelementptr inbounds i8, ptr %s, i64 %la\n";
+        $out .= "  call ptr @memcpy(ptr %dst, ptr %d, i64 %n)\n";
+        $out .= "  %inul = getelementptr inbounds i8, ptr %s, i64 %need\n";
+        $out .= "  store i8 0, ptr %inul\n";
+        $out .= "  call void @__mir_str_set_len(ptr %s, i64 %need)\n";
+        // Content changed under the same ptr → invalidate the cached hash.
+        $out .= '  %hinv = getelementptr inbounds i8, ptr %s, i64 ' . $hashOff . "\n";
+        $out .= "  store i64 0, ptr %hinv\n";
+        $out .= "  ret ptr %s\n";
+        $out .= "grow:\n";
+        $out .= "  %la2 = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %sum = add i64 %la2, %n\n";
+        $out .= "  %dbl = shl i64 %sum, 1\n";           // over-allocate ~2×
+        $out .= "  %ncap = add i64 %dbl, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %ncap)\n";
+        $out .= "  call ptr @memcpy(ptr %buf, ptr %s, i64 %la2)\n";
+        $out .= "  %dst2 = getelementptr inbounds i8, ptr %buf, i64 %la2\n";
+        $out .= "  call ptr @memcpy(ptr %dst2, ptr %d, i64 %n)\n";
+        $out .= "  %gnul = getelementptr inbounds i8, ptr %buf, i64 %sum\n";
+        $out .= "  store i8 0, ptr %gnul\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %sum)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+
+        // THE choke point.
+        $out .= "\ndefine void @__mir_out_write(ptr %d, i64 %n) {\n";
+        $out .= "entry:\n";
+        $out .= "  %empty = icmp sle i64 %n, 0\n";
+        $out .= "  br i1 %empty, label %done, label %live\n";
+        $out .= "live:\n";
+        $out .= "  %cb = load i64, ptr @__mir_ob_incb\n";
+        $out .= "  %incb = icmp ne i64 %cb, 0\n";
+        $out .= "  br i1 %incb, label %done, label %go\n";
+        $out .= "go:\n";
+        $out .= "  %lvl = call i64 @__mir_ob_target()\n";
+        $out .= "  %buffered = icmp sgt i64 %lvl, 0\n";
+        $out .= "  br i1 %buffered, label %buf, label %std\n";
+        $out .= "std:\n";
+        // One stdio stream for every producer, so ordering between echo, printf
+        // and a user fwrite(STDOUT, …) is the stream's problem, not ours.
+        $out .= "  %f = call ptr @manticore_stdout()\n";
+        $out .= "  call i64 @fwrite(ptr %d, i64 1, i64 %n, ptr %f)\n";
+        $out .= "  %imp = load i64, ptr @__mir_ob_implicit\n";
+        $out .= "  %doimp = icmp ne i64 %imp, 0\n";
+        $out .= "  br i1 %doimp, label %impf, label %done\n";
+        $out .= "impf:\n";
+        $out .= "  call i32 @fflush(ptr %f)\n";
+        $out .= "  br label %done\n";
+        $out .= "buf:\n";
+        $out .= "  %bidx = sub i64 %lvl, 1\n";
+        $out .= '  %sp = getelementptr inbounds ' . $arrP
+              . ", ptr @__mir_ob_stack, i64 0, i64 %bidx\n";
+        $out .= "  %cur = load ptr, ptr %sp\n";
+        $out .= "  %new = call ptr @__mir_ob_append(ptr %cur, ptr %d, i64 %n)\n";
+        $out .= "  store ptr %new, ptr %sp\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+
+        // A headered string, whole. Binary-safe: len@-16, never a NUL scan —
+        // `printf("%s")` truncated a string holding an image or a protocol frame
+        // at its first zero byte, and the tagged echo helper did exactly that.
+        $out .= "\ndefine void @__mir_out_str(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %z = icmp eq ptr %s, null\n";
+        $out .= "  br i1 %z, label %done, label %go\n";
+        $out .= "go:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  call void @__mir_out_write(ptr %s, i64 %n)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+
+        // Decimal, via the same digit loop a concat uses: no printf format
+        // parse, no allocation, and an entry-block alloca that costs nothing.
+        $out .= "\ndefine void @__mir_out_int(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %buf = alloca [24 x i8], align 8\n";
+        $out .= "  %n = call i64 @__mir_int_len(i64 %v)\n";
+        $out .= "  call void @__mir_int_fmt(ptr %buf, i64 0, i64 %v)\n";
+        $out .= "  call void @__mir_out_write(ptr %buf, i64 %n)\n";
+        $out .= "  ret void\n}\n";
+
+        // PHP `echo` of a bool prints "1" for true and nothing for false.
+        $out .= "\ndefine void @__mir_out_bool(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %nz = icmp ne i64 %v, 0\n";
+        $out .= "  br i1 %nz, label %yes, label %done\n";
+        $out .= "yes:\n";
+        $out .= "  call void @__mir_out_write(ptr @.str.one, i64 1)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+
+        // Via __mir_float_to_str, not "%.14g": PHP's echo scientific form is
+        // "1.0E+20", which C's %g does not produce.
+        $out .= "\ndefine void @__mir_out_float(double %d) {\n";
+        $out .= "entry:\n";
+        $out .= "  %s = call ptr @__mir_float_to_str(double %d)\n";
+        $out .= "  call void @__mir_out_str(ptr %s)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  ret void\n}\n";
+
+        // fflush(stdout), NOT fflush(NULL): draining every stream would also
+        // push a user's half-written file buffers, which `flush()` does not mean.
+        $out .= "\ndefine void @__mir_out_flush() {\n";
+        $out .= "entry:\n";
+        $out .= "  %f = call ptr @manticore_stdout()\n";
+        $out .= "  call i32 @fflush(ptr %f)\n";
+        $out .= "  ret void\n}\n";
+
+        return $out . $this->obApiRuntime();
+    }
+
+    /**
+     * The `ob_*` accessors — the seam between the C-level byte stack above and
+     * `prelude/ob.php`, which owns the handler callables (a callable cannot
+     * cross the stdlib.o boundary, so the split is forced: bytes here, handlers
+     * there, and nothing but an integer depth shared between them).
+     *
+     * Emitted with the funnel rather than on their own demand: they are a few
+     * dozen instructions, and a separate gate would be one more way for a
+     * module to carry the state without the accessors that maintain it.
+     */
+    private function obApiRuntime(): string
+    {
+        $n    = (string)\Compile\MemoryAbi::OB_MAX_LEVELS;
+        $arrP = '[' . $n . ' x ptr]';
+        $arrI = '[' . $n . ' x i64]';
+
+        $out  = "\ndefine i64 @__mir_ob_level() {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  ret i64 %d\n}\n";
+
+        // 0 answers "refused" — ob_start() reports false rather than smashing
+        // past the end of a linkonce_odr array whose extent is an ABI fact.
+        $out .= "\ndefine i64 @__mir_ob_push() {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= '  %full = icmp sge i64 %d, ' . $n . "\n";
+        $out .= "  br i1 %full, label %no, label %ok\n";
+        $out .= "no:\n  ret i64 0\n";
+        $out .= "ok:\n";
+        $out .= '  %sp = getelementptr inbounds ' . $arrP
+              . ", ptr @__mir_ob_stack, i64 0, i64 %d\n";
+        $out .= "  store ptr null, ptr %sp\n";
+        $out .= '  %up = getelementptr inbounds ' . $arrI
+              . ", ptr @__mir_ob_inuse, i64 0, i64 %d\n";
+        $out .= "  store i64 0, ptr %up\n";
+        $out .= "  %d1 = add i64 %d, 1\n";
+        $out .= "  store i64 %d1, ptr @__mir_ob_depth\n";
+        $out .= "  ret i64 %d1\n}\n";
+
+        // Releases whatever the level still holds, so a pop without a take
+        // cannot leak. ob_get_clean()'s take has already nulled the slot.
+        $out .= "\ndefine i64 @__mir_ob_pop() {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  %none = icmp sle i64 %d, 0\n";
+        $out .= "  br i1 %none, label %no, label %ok\n";
+        $out .= "no:\n  ret i64 0\n";
+        $out .= "ok:\n";
+        $out .= "  %idx = sub i64 %d, 1\n";
+        $out .= '  %sp = getelementptr inbounds ' . $arrP
+              . ", ptr @__mir_ob_stack, i64 0, i64 %idx\n";
+        $out .= "  %cur = load ptr, ptr %sp\n";
+        $out .= "  %held = icmp ne ptr %cur, null\n";
+        $out .= "  br i1 %held, label %drop, label %fin\n";
+        $out .= "drop:\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %cur)\n";
+        $out .= "  br label %fin\n";
+        $out .= "fin:\n";
+        $out .= "  store ptr null, ptr %sp\n";
+        $out .= '  %up = getelementptr inbounds ' . $arrI
+              . ", ptr @__mir_ob_inuse, i64 0, i64 %idx\n";
+        $out .= "  store i64 0, ptr %up\n";
+        $out .= "  store i64 %idx, ptr @__mir_ob_depth\n";
+        $out .= "  ret i64 %idx\n}\n";
+
+        // Levels are 1-based on the PHP side, matching ob_get_level().
+        $out .= "\ndefine i64 @__mir_ob_len(i64 %l) {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  %lo = icmp slt i64 %l, 1\n";
+        $out .= "  %hi = icmp sgt i64 %l, %d\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %no, label %ok\n";
+        $out .= "no:\n  ret i64 0\n";
+        $out .= "ok:\n";
+        $out .= "  %idx = sub i64 %l, 1\n";
+        $out .= '  %sp = getelementptr inbounds ' . $arrP
+              . ", ptr @__mir_ob_stack, i64 0, i64 %idx\n";
+        $out .= "  %cur = load ptr, ptr %sp\n";
+        $out .= "  %z = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %z, label %no, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %cur)\n";
+        $out .= "  ret i64 %n\n}\n";
+
+        // A BORROW: the caller gets a +1, which also forces the next append off
+        // the in-place path (rc != 1), so the string it is holding cannot change
+        // under it. That is ob_get_contents(), and it is why peek retains.
+        $out .= "\ndefine ptr @__mir_ob_peek(i64 %l) {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  %lo = icmp slt i64 %l, 1\n";
+        $out .= "  %hi = icmp sgt i64 %l, %d\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %empty, label %ok\n";
+        $out .= "empty:\n";
+        $out .= '  ret ptr ' . $this->strSymBytes('@.cstr.empty') . "\n";
+        $out .= "ok:\n";
+        $out .= "  %idx = sub i64 %l, 1\n";
+        $out .= '  %sp = getelementptr inbounds ' . $arrP
+              . ", ptr @__mir_ob_stack, i64 0, i64 %idx\n";
+        $out .= "  %cur = load ptr, ptr %sp\n";
+        $out .= "  %z = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %z, label %empty, label %have\n";
+        $out .= "have:\n";
+        $out .= "  call void @__mir_rc_retain_str(ptr %cur)\n";
+        $out .= "  ret ptr %cur\n}\n";
+
+        // A MOVE: the level is emptied and the caller owns the string outright,
+        // so ob_get_clean() costs no copy at all.
+        $out .= "\ndefine ptr @__mir_ob_take(i64 %l) {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  %lo = icmp slt i64 %l, 1\n";
+        $out .= "  %hi = icmp sgt i64 %l, %d\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %empty, label %ok\n";
+        $out .= "empty:\n";
+        $out .= '  ret ptr ' . $this->strSymBytes('@.cstr.empty') . "\n";
+        $out .= "ok:\n";
+        $out .= "  %idx = sub i64 %l, 1\n";
+        $out .= '  %sp = getelementptr inbounds ' . $arrP
+              . ", ptr @__mir_ob_stack, i64 0, i64 %idx\n";
+        $out .= "  %cur = load ptr, ptr %sp\n";
+        $out .= "  store ptr null, ptr %sp\n";
+        $out .= "  %z = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %z, label %empty, label %have\n";
+        $out .= "have:\n";
+        $out .= "  ret ptr %cur\n}\n";
+
+        $out .= "\ndefine void @__mir_ob_clean(i64 %l) {\n";
+        $out .= "entry:\n";
+        $out .= "  %s = call ptr @__mir_ob_take(i64 %l)\n";
+        // take() answers the immortal empty sentinel for an empty level; its rc
+        // is -1, and release skips an immortal, so this needs no extra guard.
+        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  ret void\n}\n";
+
+        // `_set_` in the name, not just `@__mir_ob_inuse`: LLVM has ONE global
+        // namespace for values, so a function may not share a symbol with the
+        // global it writes. Same for the implicit-flush flag below.
+        $out .= "\ndefine void @__mir_ob_set_inuse(i64 %l, i64 %f) {\n";
+        $out .= "entry:\n";
+        $out .= "  %d = load i64, ptr @__mir_ob_depth\n";
+        $out .= "  %lo = icmp slt i64 %l, 1\n";
+        $out .= "  %hi = icmp sgt i64 %l, %d\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %done, label %ok\n";
+        $out .= "ok:\n";
+        $out .= "  %idx = sub i64 %l, 1\n";
+        $out .= '  %up = getelementptr inbounds ' . $arrI
+              . ", ptr @__mir_ob_inuse, i64 0, i64 %idx\n";
+        $out .= "  store i64 %f, ptr %up\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+
+        $out .= "\ndefine void @__mir_ob_set_implicit(i64 %f) {\n";
+        $out .= "entry:\n";
+        $out .= "  store i64 %f, ptr @__mir_ob_implicit\n";
+        $out .= "  ret void\n}\n";
+
+        $out .= "\ndefine void @__mir_ob_set_incb(i64 %f) {\n";
+        $out .= "entry:\n";
+        $out .= "  store i64 %f, ptr @__mir_ob_incb\n";
+        $out .= "  ret void\n}\n";
+
+        return $out;
+    }
+
     private function concatRuntime(): string
     {
         $out = $this->concatImpl('@__mir_concat', '@__mir_str_alloc');
@@ -1849,6 +2236,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
+        if ($this->rt->needsJsonDec) { $out .= $this->lib->jsonDec(); }
         if ($this->rt->needsStrReplaceOne) { $out .= $this->lib->strReplaceOne(); }
         if ($this->rt->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),

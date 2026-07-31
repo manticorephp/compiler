@@ -418,7 +418,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-            $out .= $this->boxToCell($sl->value->type);
+            $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
             $out .= '  store i64 ' . $boxed . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             $this->lastValue = $boxed;

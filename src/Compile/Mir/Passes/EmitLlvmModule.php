@@ -112,6 +112,25 @@ trait EmitLlvmModule
         // (→ __mir_rc_release); force both — the unified runtime always emits.
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
+        // Settle the output funnel's own demand BEFORE anything below reads a
+        // flag. @__mir_out_write calls @manticore_stdout(), whose shim is gated
+        // by needsStdStreams a hundred lines down; @__mir_out_int uses the
+        // int_len/int_fmt pair; @__mir_out_float the PHP float formatter and the
+        // string rc. Deriving it here rather than at the emit site keeps the
+        // funnel's body identical in every module — it must be, since the linker
+        // keeps one copy across user.o and stdlib.o.
+        // The tagged-echo helper renders every arm through the funnel.
+        if ($this->rt->needsTaggedEcho) { $this->rt->needsOutBuf = true; }
+        if ($this->rt->needsOutBuf) {
+            $this->rt->needsStdStreams = true;
+            $this->rt->needsFloatStr = true;
+            // Routed through libcExtra, not libcDecls, so the FFI binding check
+            // ({@see EmitLlvmCalls}) sees them: `Runtime\Libc\fwrite` declares
+            // this same C symbol, and two spellings of one symbol is precisely
+            // what that check exists to catch.
+            $this->libcExtra['fwrite'] = 'declare i64 @fwrite(ptr, i64, i64, ptr)';
+            $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
+        }
         $out  = "; ModuleID = 'mir'\n";
         $out .= "source_filename = \"mir\"\n\n";
         $out .= "@.fmt.d = private unnamed_addr constant [5 x i8] c\"%lld\\00\", align 1\n";
@@ -411,7 +430,11 @@ trait EmitLlvmModule
         }
         $out .= $this->profileRuntime();
         $out .= $this->shutdownRuntime();
+        $out .= $this->obShutdownRuntime();
         $out .= $this->allocRuntime();
+        if ($this->rt->needsOutBuf) {
+            $out .= $this->outBufRuntime();
+        }
         if ($this->rt->needsFloatStr) {
             $out .= $this->floatToStrImpl('@__mir_float_to_str', '@__mir_str_alloc');
             if ($this->rt->needsArena) {
@@ -423,6 +446,9 @@ trait EmitLlvmModule
         }
         if ($this->rt->needsIntToStr()) {
             $out .= $this->intToStrRuntime();
+        }
+        if ($this->rt->needsIntToStr() || $this->rt->needsOutBuf) {
+            $out .= $this->intFmtRuntime();
         }
         if ($this->rt->needsBoxInt()) {
             $out .= $this->boxIntRuntime();
@@ -885,6 +911,20 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /**
+     * atexit trampoline for the ob drain — same one-line bridge as
+     * {@see shutdownRuntime}, and PHP for the same reason: `ob_end_flush()`
+     * invokes user handlers.
+     */
+    private function obShutdownRuntime(): string
+    {
+        if (!$this->needsOb) { return ''; }
+        $out  = "define void @__manticore_ob_shutdown() {\nentry:\n";
+        $out .= "  %r = call i64 @manticore___mc_ob_shutdown()\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
     private function profileRuntime(): string
     {
         if (!\Compile\Debug::$profile) { return ''; }
@@ -919,6 +959,8 @@ trait EmitLlvmModule
         $out .= "  store i64 %v1, ptr %p\n";
         $out .= "  ret void\n}\n";
         $out .= "define void @__manticore_profile_dump() {\nentry:\n";
+        // Ordered after the program's own output, not spliced into it.
+        if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
         for ($j = 0; $j < 16; $j = $j + 1) {
             $out .= '  %p' . (string)$j . ' = getelementptr inbounds [14 x i64], ptr @__prof, i64 0, i64 '
                   . (string)$j . "\n";
@@ -955,6 +997,12 @@ trait EmitLlvmModule
         $out .= "  %bad = or i1 %lo, %hi\n";
         $out .= "  br i1 %bad, label %oflow, label %ok\n";
         $out .= "oflow:\n";
+        // fd 2 bypasses stdout's stdio buffer; drain it so the fatal line does
+        // not overtake output that logically came first. Emitted only when the
+        // module actually has a funnel — a program with no output has nothing
+        // to drain, and referencing the helper would be an undefined symbol
+        // that link_stubs.sh would quietly resolve to `return 0`.
+        if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
         $out .= "  %p = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.jmpof)\n";
         $out .= "  call void @exit(i32 255)\n";
         $out .= "  unreachable\n";
@@ -1028,6 +1076,10 @@ trait EmitLlvmModule
         $out .= "  br label %print\n";
         $out .= "print:\n";
         $out .= '  %m = phi ptr [ ' . $empty . ', %named ], [ %msgf, %msg ]' . "\n";
+        // Drain stdout before the fd-2 fatal line, so what the program printed
+        // before throwing still comes first. {@see emitJmpSlotGuard} for why
+        // this is conditional.
+        if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
         $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.uncaught, ptr %cname, ptr %m)\n";
         $out .= "  call void @exit(i32 255)\n";
         $out .= "  unreachable\n}\n";
@@ -1061,6 +1113,15 @@ trait EmitLlvmModule
         // uncaught exception") true by construction here: `ret i32 0` runs
         // atexit handlers, biExit calls libc exit(), and the uncaught path ends
         // in exit(255). One registration covers all three.
+        // BEFORE the shutdown queue's registration, so it runs AFTER it: atexit
+        // is LIFO, and php drains open output buffers last — a
+        // register_shutdown_function() that echoes still lands in the buffer
+        // that was open when it ran. Both run before libc flushes stdio, so the
+        // drained bytes reach stdout on every exit path the queue covers.
+        if ($this->needsOb) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $header .= "  call i32 @atexit(ptr @__manticore_ob_shutdown)\n";
+        }
         if ($this->needsErrorHandlers) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";
@@ -1238,7 +1299,13 @@ trait EmitLlvmModule
         // restricted to a direct `return $x;`.
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
             ? $this->asLoadLocalNode($v)->name : null;
-        $leave = $this->emitRcReturnCleanup($this->returnedLocalNames($v));
+        // A REBUILT return hands back a fresh cell array, not the local — so the
+        // "ownership transfers to the caller" exemption does not apply and the
+        // local must be dropped like any other. `function mk(): mixed { $v = [];
+        // …; return $v; }` leaked the whole source vec plus one ref on every
+        // element, with its release stranded in the unreachable dead block.
+        $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        $leave = $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
         // arena_leave only covers fall-through). The return value is
@@ -1269,7 +1336,7 @@ trait EmitLlvmModule
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
-            $out .= $this->boxToCell($v->type);
+            $out .= $this->boxToCell($v->type, $v);
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
@@ -1291,7 +1358,7 @@ trait EmitLlvmModule
         // reader unboxes this arm's raw string pointers by tag. Rebuild it with
         // each element boxed, left raw (an array slot travels raw).
         if ($this->needsCellify($this->frame->returnType, $v->type)) {
-            $out .= $this->emitCellifyArrayRaw($v->type->element);
+            $out .= $this->emitCellifyArrayRaw($v->type->element, $this->cellifySourceFlavor($v));
             // The rebuild is a FRESH array (+1, owned by the caller — no retain,
             // unlike a borrowed passthrough), but it leaves a raw `ptr`: the ABI
             // returns a uniform i64, so it rides the carrier like every other
@@ -1330,7 +1397,8 @@ trait EmitLlvmModule
                 }
                 $out .= $this->boxUnknownIfRaw();
             } else {
-                $out .= $this->boxToCell($v->type);
+                // `$v` so a rebuilt concrete-element array releases its source.
+                $out .= $this->boxToCell($v->type, $v);
             }
         } else {
             // A BORROWED cell handed back from a `: mixed` fn — `return
@@ -1440,6 +1508,29 @@ trait EmitLlvmModule
      * NOT cellified — nothing is known to box, and an erased array must stay raw
      * (the `cow2` carve-out).
      */
+    /**
+     * Does {@see emitReturn} REBUILD the returned array into a fresh cell array?
+     * True for every arm below that reaches
+     * {@see EmitLlvmBuiltins::emitAssocToCellArrayUnified} — a concrete-element
+     * vec/assoc under a cellify boundary, a `mixed`/union declared return, or the
+     * uniform closure ABI. Drives the transfer-exemption above: what is handed
+     * back is the rebuild, so the source is dead on this path.
+     */
+    private function returnRebuildsArray(?Node $v): bool
+    {
+        if ($v === null) { return false; }
+        $t = $v->type;
+        if (!$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null || $el->kind === Type::KIND_CELL
+            || $el->kind === Type::KIND_UNKNOWN) { return false; }
+        if ($this->needsCellify($this->frame->returnType, $t)) { return true; }
+        $rt = $this->frame->returnType;
+        if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
+        return ($this->frame->isClosure || $this->frame->isTrampoline)
+            && $this->isCellBoxableArg($t);
+    }
+
     private function needsCellify(?Type $slot, ?Type $val): bool
     {
         if ($slot === null || $val === null) { return false; }

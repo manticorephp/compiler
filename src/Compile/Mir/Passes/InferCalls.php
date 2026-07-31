@@ -137,6 +137,19 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        // `print` always yields int 1 in PHP — that is what makes it usable in
+        // `$c and print "x"` and `$ok = print "y"`.
+        if ($n === 'print') { return Type::int_(); }
+        // Output-buffer primitives ({@see EmitLlvmBuiltins::biOb}). peek/take
+        // answer an OWNED string — peek retained it, take moved it — so both
+        // must type `string`, or the result is flavoured obj and released as one.
+        if ($n === '__mir_ob_peek' || $n === '__mir_ob_take') { return Type::string_(); }
+        if ($n === '__mir_ob_push' || $n === '__mir_ob_pop'
+            || $n === '__mir_ob_level' || $n === '__mir_ob_len') { return Type::int_(); }
+        if ($n === '__mir_ob_clean' || $n === '__mir_ob_inuse'
+            || $n === '__mir_ob_implicit' || $n === '__mir_ob_incb'
+            || $n === '__mir_out_write_str'
+            || $n === 'flush') { return Type::void(); }
         // The string behind an erased carrier ({@see EmitLlvmBuiltins::biUntagStr}).
         if ($n === '__mir_untag_str') { return Type::string_(); }
         // The bag holds NaN-boxed values under string keys — the same shape a

@@ -1,0 +1,6 @@
+literal-php-output
+captured=[captured-via-output] len=20
+dynamic=[dynamic/fputs/capped]
+bool(true)
+bool(true)
+order=abc

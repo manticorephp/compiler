@@ -529,7 +529,7 @@ trait EmitLlvmObjects
             $out .= $this->emitNode($pair->value);
             if ($pt !== null && $pt->kind === Type::KIND_CELL
                 && $pair->value->type->kind !== Type::KIND_CELL) {
-                $out .= $this->boxToCell($pair->value->type);
+                $out .= $this->boxToCell($pair->value->type, $pair->value);
             } else {
                 $out .= $this->coerceToI64();
             }
@@ -1046,7 +1046,7 @@ trait EmitLlvmObjects
         $out .= $this->rcRetainByType($n->value, $raw, $n->value->type, 4);
         $this->lastValue = $raw;
         $this->lastValueType = 'i64';
-        $out .= $this->boxToCell($n->value->type);
+        $out .= $this->boxToCell($n->value->type, $n->value);
         $cellVal = $this->lastValue;
         // Property overloading on an ERASED receiver: a class that declares
         // __set but not $prop takes the write through the method.
@@ -1161,7 +1161,7 @@ trait EmitLlvmObjects
             $this->lastValue = $raw;
             $this->lastValueType = 'i64';
         }
-        return $out . $this->boxToCell($value->type);
+        return $out . $this->boxToCell($value->type, $value);
     }
 
     /** Default-arm dynamic-bag store (`__mir_array_set_str` by the static prop
@@ -1471,7 +1471,7 @@ trait EmitLlvmObjects
                 $out .= $this->coerceToPtr();
                 $objPtr = $this->lastValue;
                 $out .= $this->emitNode($n->value);
-                $out .= $this->boxToCell($n->value->type);
+                $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
                 $out .= $this->emitMagicCall($setCls, '__set', $objPtr, $n->property, $val);
                 $this->lastValue = $val;
@@ -1512,11 +1512,11 @@ trait EmitLlvmObjects
                 $out .= $this->rcRetainByType($n->value, $raw, $propType, 4);
                 $this->lastValue = $raw;
                 $this->lastValueType = 'i64';
-                $out .= $this->boxToCell($n->value->type);
+                $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
             } else {
                 // Non-rc scalar (int/float/bool/null) — box, no retain.
-                $out .= $this->boxToCell($n->value->type);
+                $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
             }
         } else {
@@ -2534,7 +2534,7 @@ trait EmitLlvmObjects
         // hand box_float the bit pattern as an integer (1.5 stored as 4.6e18).
         // Floats are not rc-managed, so nothing is owed to the retain below.
         if ($box && $n->value->type->kind === Type::KIND_FLOAT) {
-            $out .= $this->boxToCell($n->value->type);
+            $out .= $this->boxToCell($n->value->type, $n->value);
             $val = $this->lastValue;
             $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
             $this->lastValue = $val;
@@ -2548,7 +2548,7 @@ trait EmitLlvmObjects
         // mis-locate the rc header (same rule as the instance-property store).
         $out .= $this->rcRetainByType($n->value, $val, null, 5);
         if ($box) {
-            $out .= $this->boxToCell($n->value->type);
+            $out .= $this->boxToCell($n->value->type, $n->value);
             $val = $this->lastValue;
         }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";

@@ -1,0 +1,6 @@
+captured len=28
+---
+from-readfile
+vprintf(vp,3)
+---
+level=0

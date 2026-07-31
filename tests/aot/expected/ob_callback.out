@@ -1,0 +1,11 @@
+A(p=9)|end_flush
+B(p=9)|get_flush returns the ORIGINAL: B
+C(p=5)D(p=8)|two-phase
+F(p=8)|after-clean
+[method]|
+erusolc|
+untouched|
+nested=[re#]
+L{lvl=1}|
+get_clean=[G]
+end_clean ran, nothing printed

@@ -196,9 +196,16 @@ function vprintf(string $format, #[\Manticore\Attr\CellArg] array $args): int
 
 /**
  * Write a formatted string to $stream; returns the byte count.
+ *
+ * ⚠ `#[CellArg]`, like every other entry point here. A variadic collects its
+ * arguments into an array, and a HOMOGENEOUS one (`fprintf($f, "%d", 5)`) packs
+ * them RAW — while `__mc_format` reads cells. Without the attribute the raw int
+ * was unboxed as a tagged word and every single-int fprintf printed 0; two args
+ * of different types happened to work, because a heterogeneous literal boxes.
+ *
  * @param mixed ...$args
  */
-function fprintf(\Resource $stream, string $format, ...$args): int
+function fprintf(\Resource $stream, string $format, #[\Manticore\Attr\CellArg] ...$args): int
 {
     return \fwrite($stream, \__mc_format($format, $args));
 }
