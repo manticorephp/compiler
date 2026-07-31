@@ -2453,6 +2453,7 @@ function analyze_prelude_files(): array {
         // attribute classes — against code that runs correctly.
         // `tools/audit/calibrate.sh` gates this list against `prelude/*.php`.
         "array_fns_ext.php", "attributes.php", "backtrace_stub.php", "var_export.php",
+        "ob.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

@@ -914,6 +914,7 @@ final class LowerFromAst implements Pass
         $this->emitLsbSpecializations($module);
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
+        $mainStmts = $this->injectShutdownDrain($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
         $module->addFunction(new FunctionDef(
             name: '__main',
@@ -1991,6 +1992,45 @@ final class LowerFromAst implements Pass
      * @param \Compile\Mir\Node[] $mainStmts
      * @return \Compile\Mir\Node[]
      */
+    /**
+     * Drain the shutdown queue at the END of `__main`'s body — before the
+     * scope's releases, and therefore before the destructors of everything
+     * still alive.
+     *
+     * php's order is: registered shutdown functions first, then the remaining
+     * objects are destroyed. The queue already runs from an `atexit` hook, but
+     * atexit fires AFTER main returns, by which point the trailing
+     * `mem_rc_release`s have already run every destructor — so `$kernel`'s
+     * __destruct beat Kernel::terminate, and a doctrine or monolog flush
+     * registered at shutdown found its subject already torn down.
+     *
+     * The atexit hook stays: it is what covers `exit()` and the uncaught path.
+     * `__mc_run_shutdown` is idempotent (`$shutdownRan`), so on a normal return
+     * this call wins and the hook is a no-op.
+     *
+     * Inserted BEFORE a trailing top-level `return` — appending after it would
+     * be dead code, and a top-level return is a real shape here.
+     *
+     * @param \Compile\Mir\Node[] $mainStmts
+     * @return \Compile\Mir\Node[]
+     */
+    private function injectShutdownDrain(array $mainStmts): array
+    {
+        if (!$this->module->needsErrorHandlers) { return $mainStmts; }
+        $drain = new Call('__mc_run_shutdown', [], Type::void());
+        $n = \count($mainStmts);
+        $last = $n > 0 ? $mainStmts[$n - 1] : null;
+        if ($last !== null && $last->kind === Node::KIND_RETURN) {
+            $out = [];
+            for ($i = 0; $i < $n - 1; $i = $i + 1) { $out[] = $mainStmts[$i]; }
+            $out[] = $drain;
+            $out[] = $last;
+            return $out;
+        }
+        $mainStmts[] = $drain;
+        return $mainStmts;
+    }
+
     private function injectGlobalDecls(array $mainStmts): array
     {
         $pre = [];
