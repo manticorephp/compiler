@@ -103,6 +103,30 @@ function reason(int $code): string
 }
 
 /**
+ * `strtolower`, but free when there is nothing to lower.
+ *
+ * Header lookups are the hottest string operation in the server, and almost
+ * all of them pass a name that is ALREADY lowercase — every `get('host')`,
+ * `get('content-length')`, `has('connection')` in this file, plus the map key
+ * of any field a client sent lowercase. `strtolower` allocates a fresh string
+ * regardless, so those were an allocation each, per request. Scanning for an
+ * uppercase byte first is a read-only pass that usually ends the work.
+ *
+ * @internal
+ */
+function lowerName(string $s): string
+{
+    $n = \strlen($s);
+    for ($i = 0; $i < $n; $i++) {
+        $c = \ord($s[$i]);
+        if ($c >= 65 && $c <= 90) {
+            return \strtolower($s);
+        }
+    }
+    return $s;
+}
+
+/**
  * Whether every byte of $s is an RFC 7230 `tchar`.
  *
  * The method name and every header field name must pass this. It is not
@@ -753,8 +777,19 @@ final class Headers
     /** @var array<string,string> lowercased name => value, repeats comma-joined */
     private array<string, string> $map = [];
 
-    /** @var array<int,string> wire lines, "Name: value", insertion order */
-    private array<int, string> $lines = [];
+    /**
+     * The wire block: `Name: value\r\n` per field, insertion order, no
+     * terminator.
+     *
+     * A STRING, not an array of lines, and it is the hot path that decides
+     * that. Every field appended cost an array slot and every render() walked
+     * them to concatenate — with two Headers per request, array_set_int was
+     * the single biggest source of malloc traffic in the server profile.
+     * `.=` on a property is the amortized in-place append, so building the
+     * block IS the render. lines() still answers the array form for the rare
+     * caller that wants it.
+     */
+    private string $block = '';
 
     /** The reset values, as properties rather than `[]` literals: an empty
      *  literal types its element `unknown`, and the stores that follow would
@@ -778,12 +813,12 @@ final class Headers
 
     public function has(string $n): bool
     {
-        return isset($this->map[\strtolower($n)]);
+        return isset($this->map[lowerName($n)]);
     }
 
     public function get(string $n, string $default = ''): string
     {
-        $k = \strtolower($n);
+        $k = lowerName($n);
         if (!isset($this->map[$k])) {
             return $default;
         }
@@ -793,7 +828,7 @@ final class Headers
     /** The value as an int, or $default when absent or not all digits. */
     public function int(string $n, int $default = 0): int
     {
-        $k = \strtolower($n);
+        $k = lowerName($n);
         if (!isset($this->map[$k])) {
             return $default;
         }
@@ -816,10 +851,10 @@ final class Headers
     /** Replace every occurrence of $n with a single line. */
     public function set(string $n, string $v): void
     {
-        $k = \strtolower($n);
+        $k = lowerName($n);
         $this->dropLines($k);
         $this->map[$k] = $v;
-        $this->lines[] = $n . ': ' . $v;
+        $this->block .= $n . ': ' . $v . "\r\n";
     }
 
     /**
@@ -828,18 +863,18 @@ final class Headers
      */
     public function add(string $n, string $v): void
     {
-        $k = \strtolower($n);
+        $k = lowerName($n);
         if (isset($this->map[$k])) {
             $this->map[$k] = $this->map[$k] . ', ' . $v;
         } else {
             $this->map[$k] = $v;
         }
-        $this->lines[] = $n . ': ' . $v;
+        $this->block .= $n . ': ' . $v . "\r\n";
     }
 
     public function remove(string $n): void
     {
-        $k = \strtolower($n);
+        $k = lowerName($n);
         unset($this->map[$k]);
         $this->dropLines($k);
     }
@@ -856,23 +891,40 @@ final class Headers
         return $this->map;
     }
 
-    /** @return array<int,string> the wire lines, in order */
+    /**
+     * @return array<int,string> the wire lines, in order
+     *
+     * Split on demand. Nothing on the response path calls this — render()
+     * hands the block over whole — so the array only ever exists for a caller
+     * that genuinely wants one (the SAPI absorption, a test).
+     */
     public function lines(): array<int, string>
     {
-        return $this->lines;
+        $out = [];
+        if ($this->block === '') {
+            return $out;
+        }
+        $n = 0;
+        foreach (splitStr("\r\n", $this->block) as $line) {
+            if ($line !== '') {
+                $out[$n] = $line;
+                $n++;
+            }
+        }
+        return $out;
     }
 
     /** The wire block, terminating CRLF included. */
     public function render(): string
     {
-        return renderLines($this->lines);
+        return $this->block . "\r\n";
     }
 
     /** Drop every field. */
     public function clear(): void
     {
         $this->map = self::$emptyMap;
-        $this->lines = self::$emptyLines;
+        $this->block = '';
     }
 
     /**
@@ -902,17 +954,26 @@ final class Headers
      */
     private function dropLines(string $lower): void
     {
-        $out = [];
-        $n = 0;
-        foreach ($this->lines as $line) {
-            $c = \strpos($line, ':');
-            if ($c !== false && \strtolower(\substr($line, 0, $c)) === $lower) {
-                continue;
-            }
-            $out[$n] = $line;
-            $n++;
+        if ($this->block === '') {
+            return;
         }
-        $this->lines = $out;
+        $kept = '';
+        $pos = 0;
+        $len = \strlen($this->block);
+        while ($pos < $len) {
+            $eol = \strpos($this->block, "\r\n", $pos);
+            if ($eol === false) {
+                break;
+            }
+            $c = \strpos($this->block, ':', $pos);
+            $drop = $c !== false && $c < $eol
+                && lowerName(\substr($this->block, $pos, $c - $pos)) === $lower;
+            if (!$drop) {
+                $kept .= \substr($this->block, $pos, $eol + 2 - $pos);
+            }
+            $pos = $eol + 2;
+        }
+        $this->block = $kept;
     }
 }
 
@@ -2337,7 +2398,7 @@ final class Server
                 if (\count($kv) !== 2) {
                     continue;
                 }
-                if (\strtolower($kv[0]) === 'set-cookie') {
+                if (lowerName($kv[0]) === 'set-cookie') {
                     $merged->add($kv[0], $kv[1]);
                 } else {
                     $merged->set($kv[0], $kv[1]);
