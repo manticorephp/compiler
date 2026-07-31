@@ -1233,6 +1233,9 @@ final class Parser
 {
     /** More bytes needed; nothing is wrong. */
     public const NEED = 0;
+    /** The head is in and framed, and the client asked to be invited: write
+     *  `HTTP/1.1 100 Continue\r\n\r\n` and call {@see parse} again. */
+    public const CONTINUE_ = 100;
     /** A complete request is available from {@see request}. */
     public const READY = 200;
 
@@ -1267,6 +1270,13 @@ final class Parser
     private string $body = '';
     private int $need = 0;
     private ?Request $req = null;
+    private bool $streamed = false;
+    private ?\Buffer\Reader $reader = null;
+
+    /** The connection, when there is one. Only a STREAMED body needs it — the
+     *  Reader handed to the handler reads on past what the buffer holds. */
+    private ?\Resource $conn = null;
+    private bool $streamBodies = false;
 
     public function __construct(
         \Buffer\ByteBuffer $buf,
@@ -1275,6 +1285,8 @@ final class Parser
         int $maxHeaderBytes = 16384,
         int $maxHeaderCount = 100,
         int $maxBodySize = 8388608,
+        ?\Resource $conn = null,
+        bool $streamBodies = false,
     ) {
         $this->buf = $buf;
         $this->remoteAddr = $remoteAddr;
@@ -1282,6 +1294,8 @@ final class Parser
         $this->maxHeaderBytes = $maxHeaderBytes;
         $this->maxHeaderCount = $maxHeaderCount;
         $this->maxBodySize = $maxBodySize;
+        $this->conn = $conn;
+        $this->streamBodies = $streamBodies;
     }
 
     /** The request, once {@see parse} has answered {@see READY}. */
@@ -1304,6 +1318,8 @@ final class Parser
         $this->body = '';
         $this->need = 0;
         $this->req = null;
+        $this->streamed = false;
+        $this->reader = null;
     }
 
     /**
@@ -1433,7 +1449,29 @@ final class Parser
         if ($r !== self::READY) {
             return $r;
         }
-        return $this->framing($h);
+        $r = $this->framing($h);
+        if ($r !== self::READY || $this->state === self::ST_DONE) {
+            // Either a refusal, or a message with no body at all — in both
+            // cases there is nothing to invite. NEVER answer 100 for a request
+            // whose framing already produced a 413/411/400: inviting a body you
+            // have decided to refuse is how a client is made to send megabytes
+            // into a closed socket.
+            return $r;
+        }
+        $expect = \trim(\strtolower($h->get('expect')));
+        if ($expect === '') {
+            return self::READY;
+        }
+        if ($expect !== '100-continue') {
+            return 417;
+        }
+        if ($this->version !== '1.1') {
+            // 1.0 has no Expect. Ignore it and read the body.
+            return self::READY;
+        }
+        // The caller writes the interim response and calls parse() again; the
+        // state is already the body's, so nothing is re-parsed.
+        return self::CONTINUE_;
     }
 
     /**
@@ -1512,7 +1550,16 @@ final class Parser
                 return 400;
             }
             if ($len > $this->maxBodySize) {
-                return 413;
+                // Too big to buffer. With streaming on it is handed over as a
+                // Reader with the length as its budget, so the handler decides
+                // what to do with it; otherwise the answer is 413.
+                if (!$this->streamBodies || $this->conn === null) {
+                    return 413;
+                }
+                $this->reader = new \Buffer\Reader($this->conn, $this->buf, $len);
+                $this->streamed = true;
+                $this->finish();
+                return self::READY;
             }
             if ($len === 0) {
                 $this->finish();
@@ -1576,12 +1623,76 @@ final class Parser
             $this->version,
             $h,
             $this->body,
-            false,
+            $this->streamed,
             $this->remoteAddr,
             $this->secure,
-            null,
+            $this->reader,
         );
         $this->state = self::ST_DONE;
+    }
+}
+
+/**
+ * The writer a streaming response body is handed.
+ *
+ * Chunked framing lives HERE rather than in `Buffer\Writer`, and deliberately:
+ * `Buffer\` is parsed before `Http\`, so a buffer that knew about
+ * `Transfer-Encoding` would invert the dependency. This composes the plain
+ * writer instead.
+ *
+ * `$framed` is false for an HTTP/1.0 peer, which has no chunked encoding: the
+ * bytes go out raw and the connection close IS the framing, which is why the
+ * Server forces `Connection: close` on that path.
+ */
+final class ChunkedWriter
+{
+    private \Buffer\Writer $w;
+    private bool $framed;
+    private bool $ended = false;
+
+    public function __construct(\Buffer\Writer $w, bool $framed = true)
+    {
+        $this->w = $w;
+        $this->framed = $framed;
+    }
+
+    /** Write one chunk. An empty write is dropped — a zero-length chunk is the
+     *  TERMINATOR, so sending one here would end the body early. */
+    public function write(string $s): void
+    {
+        if ($s === '') {
+            return;
+        }
+        $this->w->write($this->framed ? chunkFrame($s) : $s);
+    }
+
+    /** Push what is queued to the socket — what makes streaming observable. */
+    public function flush(): void
+    {
+        $this->w->flush();
+    }
+
+    /** The terminating zero-length chunk. Idempotent; the Server calls it. */
+    public function end(): void
+    {
+        if ($this->ended) {
+            return;
+        }
+        $this->ended = true;
+        if ($this->framed) {
+            $this->w->write("0\r\n\r\n");
+        }
+        $this->w->flush();
+    }
+
+    public function bytesWritten(): int
+    {
+        return $this->w->bytesWritten();
+    }
+
+    public function isChunked(): bool
+    {
+        return $this->framed;
     }
 }
 
@@ -1799,6 +1910,8 @@ final class Server
                 $this->maxHeaderBytes,
                 $this->maxHeaderCount,
                 $this->maxBodySize,
+                $conn,
+                $this->streamBodies,
             );
             // The FIRST read of a request waits idleTimeout (a kept-alive
             // connection may sit silent for a long time and that is not an
@@ -1809,20 +1922,25 @@ final class Server
             \stream_set_timeout($conn, (int)($first ? $this->idleTimeout : $this->headerTimeout));
             $code = $parser->parse();
             $got = !$first;
-            while ($code === Parser::NEED) {
+            while ($code === Parser::NEED || $code === Parser::CONTINUE_) {
+                if ($code === Parser::CONTINUE_) {
+                    // `Expect: 100-continue`, and the framing was ACCEPTED —
+                    // the parser only asks once the head is framed, so this is
+                    // never an invitation to a body already refused. Parsing
+                    // resumes where it stopped; the head is not re-read.
+                    \fwrite($conn, "HTTP/1.1 100 Continue\r\n\r\n");
+                    $code = $parser->parse();
+                    continue;
+                }
                 $chunk = \fread($conn, self::READ_CHUNK);
                 if ($chunk === '') {
-                    if (!$got && $this->timedOut($conn)) {
-                        return;                     // idle keep-alive expiry
-                    }
-                    if (!$got) {
-                        return;                     // peer closed between requests
-                    }
-                    if ($this->timedOut($conn)) {
+                    // A client that connected and said nothing is closed
+                    // silently, as nginx does; one that stopped MID-request and
+                    // ran out its clock gets a 408.
+                    if ($got && $this->timedOut($conn)) {
                         $this->writeError($conn, 408);
-                        return;
                     }
-                    return;                         // peer closed mid-request
+                    return;
                 }
                 if (!$got) {
                     $got = true;
@@ -1846,8 +1964,26 @@ final class Server
                 && !$res->wantsClose()
                 && !$this->stopped
                 && $handled < $this->keepAliveMax;
+            // A streamed body an HTTP/1.0 peer cannot frame has only the close
+            // to end it.
+            if ($res->isStreaming() && $req->version !== '1.1') {
+                $keep = false;
+            }
+            // A body the handler ignored is still on the wire, and the next
+            // request cannot be read until it is off. Drained BEFORE the
+            // response, so the peer is not made to wait on a socket we are
+            // about to read anyway.
+            if ($req->streamed && $keep) {
+                $rd = $req->stream();
+                if ($rd !== null) {
+                    $rd->discard();
+                    if ($rd->over) {
+                        $keep = false;
+                    }
+                }
+            }
             \stream_set_timeout($conn, (int)$this->writeTimeout);
-            $this->writeResponse($conn, $req, $res, $keep);
+            $keep = $this->writeResponse($conn, $req, $res, $keep);
             $this->statServed = $this->statServed + 1;
             if (!$keep) {
                 return;
@@ -1888,8 +2024,11 @@ final class Server
      * Head + body in ONE `fwrite` — a literal two-element array is a
      * `writev(2)`, so a response costs one syscall rather than two.
      */
-    private function writeResponse(\Resource $conn, Request $req, Response $res, bool $keep): void
+    private function writeResponse(\Resource $conn, Request $req, Response $res, bool $keep): bool
     {
+        if ($res->isStreaming() && Status::hasBody($res->status)) {
+            return $this->writeStreamed($conn, $req, $res, $keep);
+        }
         $body = $res->getBody();
         $hasBody = Status::hasBody($res->status);
         if (!$hasBody) {
@@ -1900,15 +2039,63 @@ final class Server
         // included — and no body at all.
         if ($req->method === 'HEAD' || $body === '') {
             \fwrite($conn, $head);
-            return;
+            return $keep;
         }
         \fwrite($conn, [$head, $body]);
+        return $keep;
+    }
+
+    /**
+     * A body produced by a closure, framed as it goes.
+     *
+     * There is no Content-Length: the length is not knowable until the closure
+     * has run, and buffering it to find out is the thing streaming exists to
+     * avoid. An HTTP/1.1 peer gets `Transfer-Encoding: chunked`; a 1.0 peer has
+     * no such encoding, so the bytes go raw and the CLOSE is the framing (the
+     * caller has already forced `Connection: close` for that).
+     *
+     * @return bool whether the connection may still be reused
+     */
+    private function writeStreamed(\Resource $conn, Request $req, Response $res, bool $keep): bool
+    {
+        $chunked = $req->version === '1.1';
+        $h = $res->headers;
+        $h->remove('content-length');
+        if ($chunked) {
+            $h->set('Transfer-Encoding', 'chunked');
+        }
+        $head = $this->renderHead($res, $req->version, $keep, -1, false);
+        \fwrite($conn, $head);
+        if ($req->method === 'HEAD') {
+            return $keep;
+        }
+        $w = new ChunkedWriter(new \Buffer\Writer($conn), $chunked);
+        $fn = $res->bodyFn();
+        try {
+            $fn($w);
+        } catch (\Async\CancelledException $e) {
+            $w->end();
+            throw $e;
+        } catch (\Throwable $e) {
+            // The head is already on the wire, so there is no status left to
+            // change and no 500 to send — the only honest thing is to end the
+            // framing and drop the connection. It does NOT propagate: one
+            // handler's mistake must not take the accept loop down with it.
+            $this->statErrors = $this->statErrors + 1;
+            $w->end();
+            return false;
+        }
+        // The terminator is the SERVER's to write, always: a closure that
+        // returned without ending still has to leave the framing valid, or the
+        // peer waits for a body that never ends.
+        $w->end();
+        return $keep;
     }
 
     private function renderHead(Response $res, string $version, bool $keep, int $len, bool $hasBody): string
     {
         $h = $res->headers;
-        if ($hasBody && !$h->has('content-length')) {
+        if ($hasBody && $len >= 0 && !$h->has('content-length')) {
             $h->set('Content-Length', (string)$len);
         }
         if (!$h->has('date')) {
