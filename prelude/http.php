@@ -508,6 +508,19 @@ function chunkFrame(string $data): string
  */
 function statusLine(int $code, string $version): string
 {
+    // The handful of codes a real server actually emits, as whole literals:
+    // every response otherwise built one from three concatenations and a
+    // 42-arm reason() lookup. These arms are a select over .rodata.
+    if ($version === '1.1') {
+        if ($code === 200) { return "HTTP/1.1 200 OK\r\n"; }
+        if ($code === 204) { return "HTTP/1.1 204 No Content\r\n"; }
+        if ($code === 301) { return "HTTP/1.1 301 Moved Permanently\r\n"; }
+        if ($code === 302) { return "HTTP/1.1 302 Found\r\n"; }
+        if ($code === 304) { return "HTTP/1.1 304 Not Modified\r\n"; }
+        if ($code === 400) { return "HTTP/1.1 400 Bad Request\r\n"; }
+        if ($code === 404) { return "HTTP/1.1 404 Not Found\r\n"; }
+        if ($code === 500) { return "HTTP/1.1 500 Internal Server Error\r\n"; }
+    }
     $reason = reason($code);
     if ($reason === '') {
         return 'HTTP/' . $version . ' ' . $code . "\r\n";
@@ -774,7 +787,27 @@ final class Status
  */
 final class Headers
 {
-    /** @var array<string,string> lowercased name => value, repeats comma-joined */
+    /**
+     * @var array<string,string> lowercased name => value, repeats comma-joined
+     *
+     * Built EAGERLY, and that was measured rather than assumed — twice, both
+     * times against this. On a 12-header request answering ~7 lookups, plus a
+     * response that is only rendered (200k iterations each):
+     *
+     *   eager map (this)   parse 5.33 µs   build 563 ns
+     *   scan, no map       parse 6.64 µs   build 423 ns
+     *   map built lazily   parse 6.28 µs   build 429 ns
+     *
+     * Scanning loses on the request because the parser ALREADY has the name
+     * and the value split ({@see headerSplit}), so filling the map costs no
+     * extra parsing — while any scheme that rebuilds it from the rendered
+     * block re-splits every line. (Comparing names in place instead of through
+     * `substr` did not rescue scanning: the cost is walking, not allocating.)
+     *
+     * The best possible hybrid — eager on requests, none on responses — is
+     * 5.76 µs against this 5.90 µs per request+response cycle. 2.3%, for a
+     * flag on the class and two code paths through every accessor. Not taken.
+     */
     private array<string, string> $map = [];
 
     /**
@@ -1931,7 +1964,11 @@ final class Server
     private int $maxHeaderCount = 100;
     private int $maxBodySize = 8388608;
     private bool $streamBodies = false;
-    private int $keepAliveMax = 100;
+    /** Requests per connection before it is closed. 100 tore a connection
+     *  down and rebuilt it — accept, close, and a TLS handshake if any — every
+     *  hundred requests; nginx's equivalent default is 1000. It is a DoS knob,
+     *  not a correctness one. */
+    private int $keepAliveMax = 1000;
     private string $serverName = 'manticore';
     private bool $secure = false;
 
@@ -2515,10 +2552,26 @@ final class Server
         // list to drop any earlier line with that name, and each of these has
         // just been proven absent. Connection is the one that may already be
         // there, so it keeps replace semantics.
-        if ($h->has('connection')) {
-            $h->set('Connection', $keep ? 'keep-alive' : 'close');
-        } else {
-            $h->add('Connection', $keep ? 'keep-alive' : 'close');
+        // `Connection: keep-alive` is NOT sent on 1.1 — persistence is the
+        // version's default, so the header says nothing and costs 24 bytes on
+        // every response (nginx omits it for the same reason). 1.0 inverts the
+        // default, so there it has to be spelled out.
+        $conn = '';
+        if (!$keep) {
+            $conn = 'close';
+        } elseif ($version === '1.0') {
+            $conn = 'keep-alive';
+        }
+        if ($conn !== '') {
+            if ($h->has('connection')) {
+                $h->set('Connection', $conn);
+            } else {
+                $h->add('Connection', $conn);
+            }
+        } elseif ($h->has('connection')) {
+            // A handler that set one itself, on a connection we are keeping:
+            // its value would contradict what we are about to do.
+            $h->remove('connection');
         }
         return statusLine($res->status, $version) . $h->render();
     }

@@ -1,4 +1,4 @@
-ok: HTTP/1.1 200 OK conn=keep-alive len=4 after=4
+ok: HTTP/1.1 200 OK conn=? len=4 after=4
 big-declared: HTTP/1.1 413 Content Too Large conn=close len=0 after=0
 big-chunked: HTTP/1.1 413 Content Too Large conn=close len=0 after=0
 header-count: HTTP/1.1 431 Request Header Fields Too Large conn=close len=0 after=0
