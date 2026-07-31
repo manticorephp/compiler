@@ -1643,6 +1643,28 @@ trait EmitLlvmExpr
         return true;
     }
 
+    /**
+     * Whether a cell-typed operand reads a property slot that is NOT
+     * self-describing — i.e. one {@see cellPropBoxed} keeps raw.
+     *
+     * The read side has to agree with the store side about a slot's shape. A
+     * raw slot holds a bare pointer (or a bare 0 for its `null` default), so a
+     * NaN-tag decode over it answers whatever the pointer bits happen to look
+     * like: `null` reads as tag 6 (a double), which is never tag 3, so
+     * `=== null` was permanently false and `!== null` permanently true. Only
+     * property reads can be raw this way; every other cell operand is boxed by
+     * construction.
+     */
+    private function cellOperandIsRawSlot(Node $n): bool
+    {
+        if ($n->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        $cls = $n->object->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return false; }
+        $pt = $this->classes[$cls]->propertyTypes[$n->property] ?? null;
+        if ($pt === null || $pt->kind !== Type::KIND_CELL) { return false; }
+        return !$this->cellPropBoxed($pt, $cls, $n->property);
+    }
+
     private function emitStringConst(StringConst $n): string
     {
         $sc = $n;
@@ -3325,7 +3347,18 @@ trait EmitLlvmExpr
             // A `mixed`/cell operand carries its type in a NaN tag — a boxed
             // null (tag NULL=3) is NOT i64 0, so compare the tag at runtime.
             // (`$o === null` in an SPL offsetSet is the canonical case.)
-            if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL) {
+            //
+            // …UNLESS the operand is a cell PROPERTY whose slot is not
+            // self-describing. A `mixed` property with even one store the
+            // NaN-boxing cannot take — a `\Closure`, which is a header-less
+            // struct and never rc-managed — keeps the WHOLE slot raw
+            // ({@see cellPropBoxed}), so its `null` default is a bare 0 and the
+            // tag decode reads that as a double: kind 6, never 3, and
+            // `$this->fn !== null` answered TRUE on a freshly-constructed
+            // object. Such a slot carries either shape, so it takes the same
+            // dual test as an erased operand below.
+            if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL
+                && !$this->cellOperandIsRawSlot($other)) {
                 $out = $this->emitNode($other);
                 $out .= $this->coerceToI64();
                 $out .= $this->cellTagIr($this->lastValue);
@@ -3345,7 +3378,9 @@ trait EmitLlvmExpr
             // empty array answers one, and symfony's
             // `while (null !== $token = array_shift($this->parsed))` therefore
             // ran forever past the end of its token list.
-            if (!($leftNull && $rightNull) && $ok === Type::KIND_UNKNOWN) {
+            if (!($leftNull && $rightNull)
+                && ($ok === Type::KIND_UNKNOWN
+                    || ($ok === Type::KIND_CELL && $this->cellOperandIsRawSlot($other)))) {
                 $out = $this->emitNode($other);
                 $out .= $this->coerceToI64();
                 $cv = $this->lastValue;
