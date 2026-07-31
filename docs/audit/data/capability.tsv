@@ -1,2 +1,7 @@
 probe	location	status	owning_epic	php_out_sha	mc_out_sha
-cap_trigger_error_handler	audit	DIFF	error-handling	19571bee	b2169fcd
+cap_refl_attr_is_instanceof	audit	DIFF	reflection-tier4	81e6a06b	c1823850
+cap_refl_enum	audit	DIFF	reflection-tier4	94826e1e	da3f6b63
+cap_refl_hydration	audit	COMPILE	reflection-tier4	059ab67e	9ffc007d
+cap_refl_param_attributes	audit	COMPILE	reflection-tier4	806b4764	f7e7ddaf
+cap_refl_param_default	audit	COMPILE	reflection-tier4	6b4c27b0	82b56ae2
+cap_refl_union_type	audit	DIFF	reflection-tier4	1ba6a4d0	e32315bd

@@ -996,6 +996,12 @@ class ReflectionNamedType
 
     public function allowsNull(): bool
     {
+        // `mixed` and `null` admit null by definition, whether or not the
+        // declaration was spelled with a `?` — php reports allowsNull() true for
+        // both, and a `?mixed` is a syntax error precisely because the `?` would
+        // be redundant.
+        $n = \strtolower($this->name);
+        if ($n === "mixed" || $n === "null") { return true; }
         return $this->nullable;
     }
 

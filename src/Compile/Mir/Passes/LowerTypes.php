@@ -105,6 +105,48 @@ trait LowerTypes
         return $this->lowerTypeHint($eff)->eraseTypeVars();
     }
 
+    /**
+     * Split a type hint on its TOP-LEVEL `|` only.
+     *
+     * Depth matters: `array<int, string|null>` and `callable(A|B): C` carry a
+     * `|` that belongs to an inner type, and splitting there would invent arms
+     * that do not exist.
+     *
+     * @return string[]
+     */
+    private function topLevelUnionArms(string $hint): array
+    {
+        $arms = [];
+        $depth = 0;
+        $cur = '';
+        $n = \strlen($hint);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $c = $hint[$i];
+            if ($c === '<' || $c === '(' || $c === '[') { $depth = $depth + 1; }
+            elseif ($c === '>' || $c === ')' || $c === ']') { $depth = $depth - 1; }
+            if ($c === '|' && $depth === 0) { $arms[] = \trim($cur); $cur = ''; continue; }
+            $cur = $cur . $c;
+        }
+        $arms[] = \trim($cur);
+        return $arms;
+    }
+
+    /**
+     * The single non-null arm of a `T|null` / `null|T` union, or null when the
+     * hint is not that shape. `A|B|null` has two live arms and stays a cell —
+     * there is no one class to dispatch on.
+     */
+    private function nullableUnionArm(string $hint): ?string
+    {
+        $arms = $this->topLevelUnionArms($hint);
+        if (\count($arms) !== 2) { return null; }
+        $a0 = \strtolower(\ltrim($arms[0], '\\'));
+        $a1 = \strtolower(\ltrim($arms[1], '\\'));
+        if ($a1 === 'null' && $a0 !== 'null' && $arms[0] !== '') { return $arms[0]; }
+        if ($a0 === 'null' && $a1 !== 'null' && $arms[1] !== '') { return $arms[1]; }
+        return null;
+    }
+
     /** True if `$hint` is a union (`a|b|…`) whose every arm is an ARRAY shape
      *  (`X[]` or `array<…>`) — e.g. `int[]|float[]`, `string[]|int[]`. */
     private function isArrayUnion(string $hint): bool
@@ -163,6 +205,19 @@ trait LowerTypes
         // (InferTypes), so e.g. array_sum's float specialization returns a raw
         // double instead of a mantissa-truncating box_float.
         if (\strpos($hint, '|') > 0) {
+            // `S|null` IS `?S` — php treats the two spellings as one type. Only
+            // the shorthand was modelled, so the union spelling fell through to
+            // a plain cell and the class was gone: `(string)$x` on a value from
+            // a `S|null` method emitted the raw pointer because toStringClassOf
+            // saw no class, `get_debug_type` said `object`, and
+            // `method_exists($x, '__toString')` read false — while the RUNTIME
+            // object was intact all along (get_class and instanceof both right).
+            //
+            // prelude/reflection.php spells every one of its optional returns
+            // this way (`ReflectionNamedType|null`), which is how a
+            // compiler-wide type bug surfaced as "reflection is broken".
+            $arm = $this->nullableUnionArm($hint);
+            if ($arm !== null) { return $this->lowerTypeHint('?' . $arm); }
             // A union whose every arm is an ARRAY shape (`int[]|float[]`,
             // `string[]|int[]`) is still an ARRAY, not a scalar cell — lower it
             // to an erased `vec[unknown]` so call-site element inference /
