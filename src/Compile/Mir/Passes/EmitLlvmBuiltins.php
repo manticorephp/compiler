@@ -250,6 +250,7 @@ trait EmitLlvmBuiltins
         if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
+        if ($name === 'putenv')                       { return $this->biPutenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
         if ($name === 'var_export')                   { return $this->biVarExport($args); }
         // Reflection Tier-1: compile-time class queries folded from the static
@@ -1371,9 +1372,11 @@ trait EmitLlvmBuiltins
      * compared RESOLVED — a program reaches one file by several spellings
      * (`__DIR__ . '/x.php'`, `./x.php`), and the slot is keyed on the real path.
      *
-     * No match answers php's `int(1)`, which is what including a file that does
-     * not return gives — the honest answer here, since the file's declarations
-     * and top-level effects are in the binary either way.
+     * Three answers, matching php's three: a compile unit that returned a value
+     * gives it; one that returned nothing gives `int(1)`; a path that is not a
+     * compile unit at all gives `false`, which is what php's `include` of a
+     * missing file gives. The middle and the last are only distinguishable
+     * because every compiled path is registered, not just the ones that return.
      * @param Node[] $args
      */
     private function biRequireValue(array $args): string
@@ -1383,12 +1386,18 @@ trait EmitLlvmBuiltins
         $pathP = $this->lastValue;
         $slots = $this->includeSlots;
         if (\count($slots) === 0) {
-            return $this->finishI64($out, '1');
+            $this->rt->needsTagged = true;
+            $f = $this->ssa->allocReg();
+            $out .= '  ' . $f . " = call i64 @__manticore_box_bool(i64 0)\n";
+            return $this->finishI64($out, $f);
         }
+        $this->rt->needsTagged = true;
         $this->rt->needsStrcmp = true;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
-        $out .= '  store i64 1, ptr ' . $res . "\n";
+        $notFound = $this->ssa->allocReg();
+        $out .= '  ' . $notFound . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $out .= '  store i64 ' . $notFound . ', ptr ' . $res . "\n";
         // Resolve the incoming path the same way the keys were resolved, so a
         // relative spelling still matches. A NULL result (the file is gone)
         // leaves the original pointer, which then simply matches nothing.
@@ -1410,9 +1419,16 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $v = $this->ssa->allocReg();
-            $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
-            $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
+            if ($slot === '') {
+                // A compile unit with no top-level return — php's int(1).
+                $one = $this->ssa->allocReg();
+                $out .= '  ' . $one . " = call i64 @__manticore_box_int(i64 1)\n";
+                $out .= '  store i64 ' . $one . ', ptr ' . $res . "\n";
+            } else {
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
+                $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
+            }
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
@@ -4862,6 +4878,84 @@ trait EmitLlvmBuiltins
         $this->lastValue = $nl;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * `putenv("NAME=value")` sets, `putenv("NAME")` unsets — php's own split on
+     * the first `=`. Returns bool.
+     *
+     * Straight through to libc, with NO shadow table, and that is the whole
+     * reason it round-trips: `getenv` ({@see biGetenv}) reads the real environ
+     * and `$_SERVER`/`$_ENV` are built from it, so one store is visible to all
+     * three. Note php behaves the same way about the arrays — they are a
+     * snapshot taken at startup, so a later putenv does not appear in them.
+     *
+     * `setenv`/`unsetenv` rather than C's `putenv`: C's takes ownership of the
+     * buffer it is handed, and ours is an rc'd MIR string that will be freed.
+     * @param Node[] $args
+     */
+    private function biPutenv(array $args): string
+    {
+        $this->libcExtra['setenv'] = 'declare i32 @setenv(ptr, ptr, i32)';
+        $this->libcExtra['unsetenv'] = 'declare i32 @unsetenv(ptr)';
+        $this->libcExtra['strchr'] = 'declare ptr @strchr(ptr, i32)';
+        $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
+        $this->libcExtra['free'] = 'declare void @free(ptr)';
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $eq = $this->ssa->allocReg();
+        $out .= '  ' . $eq . ' = call ptr @strchr(ptr ' . $s . ", i32 61)\n";
+        $hasEq = $this->ssa->allocReg();
+        $out .= '  ' . $hasEq . ' = icmp ne ptr ' . $eq . ", null\n";
+        $lSet = $this->ssa->allocLabel('penv.set');
+        $lUnset = $this->ssa->allocLabel('penv.unset');
+        $lEnd = $this->ssa->allocLabel('penv.end');
+        $out .= '  br i1 ' . $hasEq . ', label %' . $lSet . ', label %' . $lUnset . "\n";
+        $out .= $lSet . ":\n";
+        // The name has to be its OWN NUL-terminated buffer. Splitting in place
+        // by writing a NUL over the '=' is what a C program would do and it is
+        // wrong here: the argument is usually a STRING LITERAL, which is
+        // immutable, so the store is UB — LLVM keeps the original bytes and
+        // setenv then receives "NAME=value" as the NAME. A name containing '='
+        // is EINVAL, so putenv answered false and nothing was ever set.
+        $nameLen = $this->ssa->allocReg();
+        $eqI = $this->ssa->allocReg();
+        $sI = $this->ssa->allocReg();
+        $out .= '  ' . $eqI . ' = ptrtoint ptr ' . $eq . " to i64\n";
+        $out .= '  ' . $sI . ' = ptrtoint ptr ' . $s . " to i64\n";
+        $out .= '  ' . $nameLen . ' = sub i64 ' . $eqI . ', ' . $sI . "\n";
+        $bufSz = $this->ssa->allocReg();
+        $out .= '  ' . $bufSz . ' = add i64 ' . $nameLen . ", 1\n";
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . ' = call ptr @malloc(i64 ' . $bufSz . ")\n";
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = call ptr @memcpy(ptr ' . $buf . ', ptr ' . $s
+              . ', i64 ' . $nameLen . ")\n";
+        $term = $this->ssa->allocReg();
+        $out .= '  ' . $term . ' = getelementptr inbounds i8, ptr ' . $buf
+              . ', i64 ' . $nameLen . "\n";
+        $out .= '  store i8 0, ptr ' . $term . "\n";
+        $val = $this->ssa->allocReg();
+        $out .= '  ' . $val . ' = getelementptr inbounds i8, ptr ' . $eq . ", i64 1\n";
+        $rc1 = $this->ssa->allocReg();
+        $out .= '  ' . $rc1 . ' = call i32 @setenv(ptr ' . $buf . ', ptr ' . $val . ", i32 1)\n";
+        $out .= '  call void @free(ptr ' . $buf . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lUnset . ":\n";
+        $rc2 = $this->ssa->allocReg();
+        $out .= '  ' . $rc2 . ' = call i32 @unsetenv(ptr ' . $s . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $rc = $this->ssa->allocReg();
+        $out .= '  ' . $rc . ' = phi i32 [' . $rc1 . ', %' . $lSet . '], ['
+              . $rc2 . ', %' . $lUnset . "]\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp eq i32 ' . $rc . ", 0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $ok . " to i64\n";
+        return $this->finishI64($out, $r);
     }
 
     /** @param Node[] $args  getenv($name) — `string|false` tagged cell:

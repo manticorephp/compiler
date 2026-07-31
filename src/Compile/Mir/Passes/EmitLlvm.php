@@ -2147,20 +2147,66 @@ final class EmitLlvm implements EmitVisitor
      * lowering path did not record one, and a callee that never asks leaves the
      * channel alone.
      */
-    private function faPush(string $callee, int $srcArgc, ?Node $extra = null): string
+    private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0): string
     {
         if ($srcArgc < 0) { return ''; }
         if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return ''; }
         $this->rt->needsFuncArgs = true;
         $out = '';
-        if ($extra !== null) {
-            // Build the overflow vec first: it is ordinary array construction
-            // and may itself call, which would clobber the count word.
-            $out .= $this->emitNode($extra);
+        // Arguments past the callee's real arity have no parameter to land in.
+        // Decided HERE and not at lowering: a stdlib entry routinely declares
+        // fewer parameters than php accepts and lets its emitter builtin read
+        // the rest, so "surplus" is only meaningful once the callee is known to
+        // read them back.
+        //
+        // `$recvParams` is how many leading parameters the callee has that the
+        // node's argument list does NOT carry — 1 for an instance method or a
+        // constructor, whose params[0] is `this`, and 0 for a free or static
+        // call. Without it every instance method looked one argument short of
+        // its own arity and its overflow was never built.
+        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if ($arity < 0) { $arity = 0; }
+        $over = [];
+        $ai = 0;
+        foreach ($args as $a) {
+            if ($ai >= $arity) { $over[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $ai = $ai + 1;
+        }
+        if (\count($over) > 0) {
+            // Built first: it is ordinary array construction and may itself
+            // call, which would clobber the count word.
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($over, Type::vec(Type::cell())));
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
         }
         return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
+    }
+
+    /** The prefix of `$args` the callee actually has parameters for, when the
+     *  surplus has been diverted to the func-args overflow channel; `$args`
+     *  unchanged otherwise. Keeps the emitted call matching its `declare`.
+     *  @param Node[] $args @return Node[] */
+    private function faCallArgs(string $callee, array $args, int $recvParams = 0): array
+    {
+        if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return $args; }
+        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if ($arity < 0) { $arity = 0; }
+        if (\count($args) <= $arity) { return $args; }
+        $kept = [];
+        $ai = 0;
+        foreach ($args as $a) {
+            if ($ai >= $arity) { break; }
+            $kept[] = $a;
+            $ai = $ai + 1;
+        }
+        return $kept;
+    }
+
+    /** {@see faCallArgs} for a callee whose params[0] is the receiver.
+     *  @param Node[] $args @return Node[] */
+    private function faCallArgsRecv(string $callee, array $args): array
+    {
+        return $this->faCallArgs($callee, $args, 1);
     }
 
     /**
@@ -2190,11 +2236,11 @@ final class EmitLlvm implements EmitVisitor
      *
      * @param string[] $callees
      */
-    private function faPushAny(array $callees, int $srcArgc, ?Node $extra = null): string
+    private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0): string
     {
         foreach ($callees as $cal) {
             if ($this->sigs->usesFuncArgs[$cal] ?? false) {
-                return $this->faPush($cal, $srcArgc, $extra);
+                return $this->faPush($cal, $srcArgc, $args, $recvParams);
             }
         }
         return '';

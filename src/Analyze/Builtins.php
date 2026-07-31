@@ -82,7 +82,7 @@ final class Builtins
             '__mir_ob_push', '__mir_ob_pop', '__mir_ob_level', '__mir_ob_len',
             '__mir_ob_peek', '__mir_ob_take', '__mir_ob_clean', '__mir_ob_inuse',
             '__mir_ob_implicit', '__mir_ob_incb',
-            'get_object_vars', 'get_parent_class', 'get_class_methods', 'getenv',
+            'get_object_vars', 'get_parent_class', 'get_class_methods', 'getenv', 'putenv',
             'array_keys', 'array_values', 'array_pop', 'array_shift',
             'array_unshift', 'array_first', 'array_last', 'array_key_first',
             'array_key_last', 'debug_backtrace', 'spl_object_id',

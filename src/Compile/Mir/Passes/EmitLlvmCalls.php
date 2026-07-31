@@ -1145,7 +1145,11 @@ trait EmitLlvmCalls
         // dead once the call returns. Parallel reg/flavor arrays.
         $rcArgRegs = [];
         $rcArgFlavs = [];
-        foreach ($c->args as $a) {
+        // A func-args callee's surplus arguments ride the overflow channel, so
+        // they must not also ride the call — the callee has no parameter for
+        // them and the emitted call would not match its `declare`.
+        $callArgs = $this->faCallArgs($c->function, $c->args);
+        foreach ($callArgs as $a) {
             // Argument unpacking `f(...$arr)`: expand the array into the callee's
             // remaining positional params (arr[0], arr[1], …). Fixed-arity; the
             // element values pass raw (matches int/string/cell params).
@@ -1308,7 +1312,7 @@ trait EmitLlvmCalls
             if ($bs !== false) { $btName = \substr($btName, $bs + 1); }
             $out .= $this->btPush($btName, $n->line);
         }
-        $out .= $this->faPush($c->function, $c->srcArgc, $c->extraArgs);
+        $out .= $this->faPush($c->function, $c->srcArgc, $c->args);
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }

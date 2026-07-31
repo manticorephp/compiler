@@ -335,12 +335,6 @@ final class Call extends Node
      *  emit time `$args` is always exactly arity-many. Declared LAST. */
     public int $srcArgc = -1;
 
-    /** Arguments written PAST the callee's declared parameter list, packed as a
-     *  vec[cell] — they have no parameter local to live in, so they ride the
-     *  overflow side channel instead ({@see Passes\EmitLlvm::faPush}). Only
-     *  built for a callee that reads them back with `func_get_arg` /
-     *  `func_get_args`. Declared LAST. */
-    public ?Node $extraArgs = null;
 
     public function accept(EmitVisitor $v): string
     {
@@ -1131,8 +1125,6 @@ final class NewObj extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
-    /** See {@see Call::$extraArgs}. Declared LAST. */
-    public ?Node $extraArgs = null;
 
     public function accept(EmitVisitor $v): string
     {
@@ -1252,8 +1244,6 @@ final class MethodCall_ extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
-    /** See {@see Call::$extraArgs}. Declared LAST. */
-    public ?Node $extraArgs = null;
 
     public function accept(EmitVisitor $v): string
     {
@@ -1288,8 +1278,6 @@ final class StaticCall_ extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
-    /** See {@see Call::$extraArgs}. Declared LAST. */
-    public ?Node $extraArgs = null;
 
     public function accept(EmitVisitor $v): string
     {

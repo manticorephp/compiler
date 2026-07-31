@@ -523,7 +523,6 @@ trait LowerExprs
             // knows it. The overflow is read here and nowhere later: the next
             // lowering of any call overwrites it.
             $call->srcArgc = \count($expr->args);
-            $call->extraArgs = $this->lastCallOverflow;
             return $call;
         }
         if ($expr->kind === 'Spread')         { return new Spread_($this->lowerExpr($expr->value), Type::unknown()); }

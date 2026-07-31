@@ -1905,6 +1905,16 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         }
         $isEntry = $i === $lastIdx;
         $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '');
+        $incAbs = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
+        // Every compiled file is registered, with an EMPTY slot until one of its
+        // top-level `return`s claims it. That distinction is the difference
+        // between php's three answers: a file that returned a value gives it, a
+        // file that returned nothing gives int(1), and a path that is not a
+        // compile unit at all gives false — which is what php's `include` of a
+        // missing file gives. Without the full path set the last two collapse.
+        if ($incAbs !== '' && !$isEntry && !isset($includeSlots[$incAbs])) {
+            $includeSlots[$incAbs] = '';
+        }
         foreach ($program->statements as $s) {
             if (!$isEntry && $s->kind === 'Return') {
                 // Its VALUE is what `require`/`include` of this file evaluates
@@ -1915,7 +1925,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                 // be read back. Written through $GLOBALS so a `require` inside
                 // any FUNCTION can reach it, not just __main's own scope.
                 if ($incSlot !== '' && $s->value !== null) {
-                    $includeSlots[__mc_abs_source_path($paths[$i])] = $incSlot;
+                    $includeSlots[$incAbs] = $incSlot;
                     $stmts[] = \Parser\Ast\Stmt::expression(
                         \Parser\Ast\Expr::assign(
                             \Parser\Ast\Expr::arrayAccess(

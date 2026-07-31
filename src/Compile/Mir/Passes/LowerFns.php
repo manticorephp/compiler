@@ -306,6 +306,68 @@ trait LowerFns
      * the union of the two lists against the real dispatch, so adding a builtin
      * without updating one of them fails there rather than here.
      */
+    /**
+     * Function names the PRELUDE declares, whether or not this program pulled
+     * the file in.
+     *
+     * The prelude is DEMAND-GATED on a mention that looks like use, and a name
+     * appearing only inside `function_exists('x')` deliberately does not
+     * count — injecting a whole prelude file because someone asked after it
+     * would undo the gating. But then the answer must not be derived from
+     * whether injection happened, or `function_exists('ob_start')` says false
+     * in a program that would run ob_start perfectly well the moment it called
+     * it. It measured its own gate. 23 names answered wrong that way, the whole
+     * header/session/ob/error-handler surface among them.
+     *
+     * Answering true here is safe in the direction that matters: a program that
+     * goes on to CALL the name makes a real mention, which injects the file.
+     *
+     * Hardcoded rather than scanned: listing prelude/ from inside the compiled
+     * binary would add a cold-seed bootstrap dependency. `tools/audit/calibrate.sh`
+     * derives this set from prelude/*.php and fails on drift — hardcode at
+     * runtime, derive at gate time, the same contract {@see isEmitterInlineName}
+     * has.
+     */
+    private function isPreludeProvidedName(string $n): bool
+    {
+        $names = [
+            'array_all', 'array_any', 'array_change_key_case', 'array_chunk', 'array_combine',
+            'array_count_values', 'array_diff', 'array_diff_assoc', 'array_diff_key', 'array_diff_uassoc',
+            'array_diff_ukey', 'array_fill_keys', 'array_filter', 'array_find', 'array_find_key',
+            'array_flip', 'array_intersect', 'array_intersect_assoc', 'array_intersect_key', 'array_intersect_uassoc',
+            'array_intersect_ukey', 'array_map', 'array_merge', 'array_merge_recursive', 'array_pad',
+            'array_product', 'array_push', 'array_rand', 'array_reduce', 'array_replace',
+            'array_replace_recursive', 'array_reverse', 'array_slice', 'array_splice', 'array_sum',
+            'array_udiff', 'array_udiff_assoc', 'array_udiff_uassoc', 'array_uintersect', 'array_uintersect_assoc',
+            'array_uintersect_uassoc', 'array_unique', 'array_walk', 'array_walk_recursive', 'arsort',
+            'asort', 'assert', 'class_implements', 'date_add', 'date_create',
+            'date_create_from_format', 'date_create_immutable', 'date_date_set', 'date_diff', 'date_format',
+            'date_interval_create_from_date_string', 'date_interval_format', 'date_isodate_set', 'date_modify', 'date_offset_get',
+            'date_parse', 'date_parse_from_format', 'date_sub', 'date_time_set', 'date_timestamp_get',
+            'date_timestamp_set', 'date_timezone_get', 'date_timezone_set', 'error_get_last', 'error_reporting',
+            'explode', 'get_declared_classes', 'get_declared_interfaces', 'get_declared_traits', 'get_defined_constants',
+            'getopt', 'header', 'header_remove', 'headers_list', 'headers_sent',
+            'http_response_code', 'iterator_apply', 'iterator_count', 'iterator_to_array', 'krsort',
+            'ksort', 'ob_clean', 'ob_end_clean', 'ob_end_flush', 'ob_flush',
+            'ob_get_clean', 'ob_get_contents', 'ob_get_flush', 'ob_get_length', 'ob_get_level',
+            'ob_get_status', 'ob_implicit_flush', 'ob_list_handlers', 'ob_start', 'pack',
+            'register_shutdown_function', 'restore_error_handler', 'restore_exception_handler', 'rsort', 'serialize',
+            'session_abort', 'session_cache_expire', 'session_cache_limiter', 'session_commit', 'session_create_id',
+            'session_decode', 'session_destroy', 'session_encode', 'session_gc', 'session_get_cookie_params',
+            'session_id', 'session_module_name', 'session_name', 'session_regenerate_id', 'session_register_shutdown',
+            'session_reset', 'session_save_path', 'session_set_cookie_params', 'session_set_save_handler', 'session_start',
+            'session_status', 'session_unset', 'session_write_close', 'set_error_handler', 'set_exception_handler',
+            'setcookie', 'setrawcookie', 'shuffle', 'sort', 'spl_autoload_functions',
+            'spl_autoload_register', 'spl_autoload_unregister', 'str_split', 'timezone_location_get', 'timezone_name_get',
+            'timezone_offset_get', 'timezone_open', 'timezone_transitions_get', 'uasort', 'uksort',
+            'unpack', 'unserialize', 'usort',
+        ];
+        foreach ($names as $k) {
+            if ($k === $n) { return true; }
+        }
+        return false;
+    }
+
     private function isEmitterInlineName(string $n): bool
     {
         $names = [
@@ -357,6 +419,7 @@ trait LowerFns
             || $n === 'gc_collect_cycles' || $n === 'spl_object_id'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
+            || $n === 'putenv'
             || $n === 'get_object_vars' || $n === 'var_export'
             || $n === 'class_exists' || $n === 'enum_exists'
             || $n === 'interface_exists' || $n === 'trait_exists'
@@ -768,7 +831,6 @@ trait LowerFns
 
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
-        $this->lastCallOverflow = null;
         $hasNamed = false;
         foreach ($astArgs as $a) {
             if ($a->kind === 'NamedArg') { $hasNamed = true; break; }
@@ -792,19 +854,13 @@ trait LowerFns
         // reordered; otherwise lower positionally.
         if (!$hasNamed && \count($astArgs) >= \count($params)) {
             $out = [];
-            $over = [];
-            $np2 = \count($params);
             $i = 0;
             foreach ($astArgs as $a) {
-                $lowered = $this->lowerArgForParam($params[$i] ?? null, $a);
-                // Past the parameter list: no slot to receive it, but php still
-                // counts it and hands it back. See lowerCallArgs.
-                if ($i < $np2) { $out[] = $lowered; } else { $over[] = new ArrayElement_(null, $lowered); }
+                $out[] = $this->lowerArgForParam($params[$i] ?? null, $a);
                 $i = $i + 1;
             }
-            if (\count($over) > 0) {
-                $this->lastCallOverflow = new ArrayLit($over, Type::vec(Type::cell()));
-            }
+            // Surplus arguments stay on the call — see lowerCallArgs for why
+            // diverting them here was a regression.
             return $out;
         }
         // Dense parallel slots (sparse int-key isset is unreliable in

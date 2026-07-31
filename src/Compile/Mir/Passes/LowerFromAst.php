@@ -271,11 +271,6 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
-    /** Arguments the call just lowered by {@see lowerCallArgs} wrote PAST the
-     *  callee's parameter list, packed as a vec[cell] — or null. Read by the
-     *  IMMEDIATELY following node construction and never later: any further
-     *  lowering overwrites it. */
-    private ?Node $lastCallOverflow = null;
 
     /** The body being lowered called one of the func-args family, so it needs
      *  the argument-count prologue. Saved/restored around every nested body the
@@ -2981,6 +2976,11 @@ final class LowerFromAst implements Pass
         // …and the rest of the emitBuiltin dispatch, which isCodegenBuiltin does
         // not list because it answers a different question ({@see LowerFns}).
         if ($this->isEmitterInlineName(\strtolower($bare))) { return true; }
+        // …and what the PRELUDE would declare. Not what it HAS declared: the
+        // prelude is injected on demand, and a name mentioned only here does
+        // not create demand, so deriving the answer from injection makes this
+        // measure its own gate rather than the language.
+        if ($this->isPreludeProvidedName($bare)) { return true; }
         return isset($this->fnDecls[$nm]) || isset($this->fnDecls[$bare])
             || (($this->fnAliasByBare[$bare] ?? '') !== '');
     }
@@ -3066,7 +3066,6 @@ final class LowerFromAst implements Pass
 
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
-        $this->lastCallOverflow = null;
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
             foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
@@ -3084,23 +3083,21 @@ final class LowerFromAst implements Pass
         $variadic = $np > 0 && $this->paramVariadic($params[$np - 1]);
         if (!$hasNamed && !$variadic && \count($astArgs) >= $np) {
             $out = [];
-            $over = [];
             $i = 0;
             foreach ($astArgs as $a) {
                 $conv = $i < $np ? $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
-                $lowered = $conv !== null ? $conv : $this->lowerExpr($a);
-                // Past the declared list there is no parameter to receive it.
-                // php still counts it and hands it back from func_get_arg(), so
-                // it goes to the overflow channel instead of onto a call whose
-                // callee has no slot for it. Lowered exactly once, HERE — a
-                // second lowering at the construction site would run any side
-                // effect in the argument twice.
-                if ($i < $np) { $out[] = $lowered; } else { $over[] = new ArrayElement_(null, $lowered); }
+                $out[] = $conv !== null ? $conv : $this->lowerExpr($a);
                 $i = $i + 1;
             }
-            if (\count($over) > 0) {
-                $this->lastCallOverflow = new ArrayLit($over, Type::vec(Type::cell()));
-            }
+            // Arguments past the declared list stay ON the call. Diverting them
+            // here to the func-args overflow channel looked right and was a
+            // REGRESSION: a great many stdlib entries declare fewer parameters
+            // than php accepts and let the emitter's builtin read the rest —
+            // `array_keys(array $arr)` is one parameter, and dropping the second
+            // argument sent `array_keys($a, $needle)` to the one-argument
+            // builtin, which answers every key. The emitter decides instead
+            // ({@see EmitLlvm::faPush}), where the callee's real arity and
+            // whether it reads them back are both known.
             return $out;
         }
         return $this->defaultFillArgs($params, $astArgs);
@@ -3556,7 +3553,6 @@ final class LowerFromAst implements Pass
         }
         $no = new NewObj($cls, $args, Type::obj($cls));
         $no->srcArgc = \count($expr->args);
-        $no->extraArgs = $this->lastCallOverflow;
         return $no;
     }
 
@@ -3821,7 +3817,6 @@ final class LowerFromAst implements Pass
         }
         $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
         $mc->srcArgc = \count($expr->args);
-        $mc->extraArgs = $this->lastCallOverflow;
         return $mc;
     }
 
@@ -3896,7 +3891,6 @@ final class LowerFromAst implements Pass
         }
         $sc = new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
         $sc->srcArgc = \count($expr->args);
-        $sc->extraArgs = $this->lastCallOverflow;
         return $sc;
     }
 

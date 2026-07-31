@@ -200,7 +200,7 @@ trait EmitLlvmObjects
                 $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
                 $argList .= $this->lastPadArgs;
                 $out .= $this->faPush($this->lsbTarget($ctorClass, '__construct', $cd->name),
-                    $n->srcArgc, $n->extraArgs);
+                    $n->srcArgc, $n->args, 1);
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
@@ -300,7 +300,7 @@ trait EmitLlvmObjects
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
-            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->extraArgs);
+            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1);
             $cr = $this->ssa->allocReg();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
@@ -2817,7 +2817,7 @@ trait EmitLlvmObjects
         $ahmask = $this->sigs->arrayHintedParams[$cls . '__' . $n->method] ?? [];
         $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
         $ai = 0;
-        foreach ($n->args as $a) {
+        foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
@@ -2864,7 +2864,7 @@ trait EmitLlvmObjects
             $btName = $n->class . '::' . $n->method;
             $out .= $this->btPush($btName, $n->line);
         }
-        $out .= $this->faPush($target, $n->srcArgc, $n->extraArgs);
+        $out .= $this->faPush($target, $n->srcArgc, $n->args);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
@@ -3385,7 +3385,7 @@ trait EmitLlvmObjects
         // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
         $argOutTypes = [];
         $ai = 0;
-        foreach ($mc->args as $a) {
+        foreach ($this->faCallArgsRecv($fallbackFull, $mc->args) as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
@@ -3552,7 +3552,7 @@ trait EmitLlvmObjects
         }
         $faCands = $distinct;
         $faCands[] = $fallbackFull;
-        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->extraArgs);
+        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->args, 1);
         // A CELL result over candidates whose declared returns disagree: each
         // dispatch arm boxes its raw return by its own type (a mixed-repr raw
         // merge would mis-read). The result is then a uniform self-describing cell.
