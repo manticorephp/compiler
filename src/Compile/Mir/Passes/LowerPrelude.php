@@ -199,6 +199,19 @@ trait LowerPrelude
             $as = \Parser\Parser::parseSource("<?php\n" . $this->asyncSrc);
             foreach ($as->statements as $s) { $stmts[] = $s; }
         }
+        // Buffer\ — braced namespace, no dependencies of its own; parsed before
+        // Http\, which names Buffer\ByteBuffer in its signatures.
+        if ($this->bufferSrc !== '') {
+            $bf = \Parser\Parser::parseSource("<?php\n" . $this->bufferSrc);
+            foreach ($bf->statements as $s) { $stmts[] = $s; }
+        }
+        // Http\ — LAST of the braced tier. Its Server rides Async\ (Semaphore,
+        // TaskGroup, shutdownOn) and its parser rides Buffer\ByteBuffer, so both
+        // must already be registered when its signatures are lowered.
+        if ($this->httpSrc !== '') {
+            $ht = \Parser\Parser::parseSource("<?php\n" . $this->httpSrc);
+            foreach ($ht->statements as $s) { $stmts[] = $s; }
+        }
         return $stmts;
     }
 

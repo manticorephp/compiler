@@ -223,6 +223,23 @@ final class InferTypes implements Pass
      *  rides that slot raw as ptr 0 — so pin the name to the BODY type for the
      *  whole function and re-infer. Value is that type, not a bool. */
     private array $nullLoopLocals = [];
+    /** @var array<string,Type> arrays built from `[]` whose ELEMENT type only the
+     *  loop body proves (`$out = []; foreach (…) { $out[$n] = $line; … $out[$i] }`).
+     *  Both sides of the back-edge are KIND_ARRAY, so the kind test in
+     *  {@see loopMerge} sees no change and the entry's `vec[unknown]` stands —
+     *  every index READ inside that same loop then rides the erased channel and
+     *  hands back a raw pointer (a folded header printed as `4317833696 two`).
+     *  Value is the merged ARRAY type, pinned from function entry, so the reads
+     *  decode by the element the stores actually prove. Restricted to names in
+     *  {@see localBuiltArrays}: re-typing an array that arrived from ANYWHERE
+     *  else would claim its existing elements have a repr they do not have. */
+    private array $elemLoopLocals = [];
+    /** @var array<string,bool> locals whose every whole-value store in this
+     *  function is an EMPTY array literal, and which are never handed to a call.
+     *  Their entire content therefore comes from element stores right here, which
+     *  is what makes {@see elemLoopLocals} sound: an empty array has no element
+     *  whose representation a re-type could contradict. */
+    private array $localBuiltArrays = [];
     /** Set when a loop promoted a NEW name this round (re-infer needed). */
     private bool $loopPromoGrew = false;
     /** @var array<string,bool> "fn|param" already boxed at entry — a promoted
@@ -851,6 +868,20 @@ final class InferTypes implements Pass
             return $e === null || $e->kind === Type::KIND_UNKNOWN;
         }
         return false;
+    }
+
+    /**
+     * Whether an array type carries no usable element type.
+     *
+     * Deliberately NOT {@see isUnknownArrayElem}: that one answers true for a
+     * bare KIND_UNKNOWN and only inspects a VEC, so an assoc built from `[]`
+     * slipped past it. This asks one question about either shape.
+     */
+    private function arrayElemUnknown(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $e = $t->element;
+        return $e === null || $e->kind === Type::KIND_UNKNOWN;
     }
 
     /** @param array<string,int> $cand */
@@ -1664,6 +1695,28 @@ final class InferTypes implements Pass
                     && !isset($this->floatLoopLocals[$name])
                     && !isset($this->assocLocals[$name])) {
                     $this->floatLoopLocals[$name] = true;
+                    $this->loopPromoGrew = true;
+                }
+                continue;
+            }
+            // An ARRAY the loop body proves the ELEMENT of. `$out = []` types its
+            // element unknown, and the loop's own `$out[$n] = <string>` is the only
+            // evidence there is — but both sides are KIND_ARRAY, so the kind test
+            // below sees no change, the entry element stands, and an index READ in
+            // that same loop decodes the erased channel as a raw pointer. Pin the
+            // name to the merged array type from entry and re-infer, the way a
+            // re-kinded scalar is pinned as a cell.
+            //
+            // Only for an array this function BUILT from `[]` ({@see
+            // localBuiltArrays}). An array that arrived from a bare-`array` callee
+            // is erased for a reason — its elements may be NaN-boxed cells — and
+            // claiming they are strings would read a tag as a pointer.
+            if ($st->isArray() && $bt->isArray()
+                && isset($this->localBuiltArrays[$name])
+                && $this->arrayElemUnknown($st) && !$this->arrayElemUnknown($bt)) {
+                $out[$name] = $bt;
+                if (!isset($this->elemLoopLocals[$name])) {
+                    $this->elemLoopLocals[$name] = $bt;
                     $this->loopPromoGrew = true;
                 }
                 continue;

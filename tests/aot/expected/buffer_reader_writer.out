@@ -1,0 +1,21 @@
+10 -
+[HELL] rem=6 read=4
+[O-BODY] rem=0 E
+[]
+surplus=[next-request-here]
+[next] [-request-here]
+E read=17
+[0123456789] over=0
+[] over=1
+1 gone=2990 E
+-1 [till-the-end] E
+pending=3 written=0
+pending=5 written=0
+pending=0 written=17
+[abcdefghijklmnopq]
+pending=0 written=21
+[tail]
+n=10 pending=0 written=32
+[QHEAD|BODY]
+written=32
+done
