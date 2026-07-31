@@ -3385,7 +3385,7 @@ trait EmitLlvmObjects
         // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
         $argOutTypes = [];
         $ai = 0;
-        foreach ($this->faCallArgsRecv($fallbackFull, $mc->args) as $a) {
+        foreach ($this->faCallArgsRecv($fallback . '__' . $mc->method, $mc->args) as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
