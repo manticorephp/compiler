@@ -229,13 +229,19 @@ function parse_ini_file(string $filename, bool $process_sections = false, int $s
 }
 
 /**
- * php's runtime configuration surface.
+ * php's runtime configuration surface — the compiled-in defaults.
  *
  * A compiled binary has NO php.ini — that is a project principle, not an
  * omission — so `php_ini_loaded_file()` and `php_ini_scanned_files()` answer
  * `false`, which is exactly what php answers when it was started with `-n`.
- * `ini_get` reports the directives that are genuinely observable here and
- * `false` for everything else, which is also php's answer for an unknown name.
+ * This table is therefore the *default* layer; `ini_set` writes an override
+ * layer on top of it (see `__mc_ini_store`). `ini_get` reports the directives
+ * that are genuinely observable here and `false` for everything else, which is
+ * also php's answer for an unknown name.
+ *
+ * The `session.*` block carries php 8.5's own defaults verbatim, because the
+ * session extension reads its whole configuration through `ini_get`/`ini_set`
+ * rather than keeping a second copy of it.
  */
 function __mc_ini_table(): array
 {
@@ -253,12 +259,109 @@ function __mc_ini_table(): array
         "log_errors" => "0",
         "max_execution_time" => "0",
         "date.timezone" => "UTC",
+        "session.name" => "PHPSESSID",
+        // Empty means "the system temp dir", resolved when the store opens.
+        "session.save_path" => "",
+        "session.save_handler" => "files",
+        "session.serialize_handler" => "php",
+        "session.auto_start" => "0",
+        "session.gc_probability" => "1",
+        "session.gc_divisor" => "1000",
+        "session.gc_maxlifetime" => "1440",
+        "session.lazy_write" => "1",
+        "session.use_strict_mode" => "0",
+        "session.use_cookies" => "1",
+        "session.use_only_cookies" => "1",
+        "session.cookie_lifetime" => "0",
+        "session.cookie_path" => "/",
+        "session.cookie_domain" => "",
+        "session.cookie_secure" => "0",
+        // php's built-in default really is empty, not "0", unlike cookie_secure.
+        "session.cookie_httponly" => "",
+        "session.cookie_samesite" => "",
+        "session.cache_limiter" => "nocache",
+        "session.cache_expire" => "180",
+        "session.sid_length" => "32",
+        "session.sid_bits_per_character" => "4",
     ];
+}
+
+/**
+ * The mutable half of the ini surface: one process-wide override store.
+ *
+ * ⚠ Kept as a `static string` blob of `key=percent-encoded-value` lines, not as
+ * a `static array`, and that is not style: an array BUILT INSIDE the stdlib does
+ * not survive being parked in a static (the same trap `__mc_http_headers_store`
+ * documents in Net.php). ini traffic is cold, so re-scanning the blob costs
+ * nothing measurable, and it keeps the store where `ini_get` has to live —
+ * inside the stdlib, because a stdlib function may never demand a prelude.
+ *
+ * $op: 0 = read, 1 = write, 2 = drop, 3 = dump the raw blob.
+ * A read returns the override, or "\x00" when the key has none — "" is a legal
+ * ini value (`session.save_path`), so absence needs a value no directive holds.
+ */
+function __mc_ini_store(int $op, string $key, string $val): string
+{
+    static $blob = '';
+    if ($op === 3) {
+        return $blob;
+    }
+    $found = "\x00";
+    $out = '';
+    // Scanned with strpos/substr rather than explode(): inside the stdlib the
+    // `$blob === '' ? [] : explode(...)` union erased the element type, and the
+    // rebuilt blob then carried a raw POINTER where the first line belonged
+    // ("4348863856" instead of session.save_path=…), silently dropping every
+    // override but the last. Pure string scanning has no element to erase.
+    $n = \strlen($blob);
+    $i = 0;
+    while ($i < $n) {
+        $nl = \strpos($blob, "\n", $i);
+        $end = ($nl === false) ? $n : $nl;
+        $line = \substr($blob, $i, $end - $i);
+        $i = $end + 1;
+        if ($line === '') {
+            continue;
+        }
+        $eq = \strpos($line, '=');
+        if ($eq === false) {
+            continue;
+        }
+        if (\substr($line, 0, $eq) === $key) {
+            $found = \rawurldecode(\substr($line, $eq + 1));
+            continue; // dropped here; a write re-appends it below
+        }
+        $out .= $line . "\n";
+    }
+    if ($op === 0) {
+        return $found;
+    }
+    if ($op === 1) {
+        $out .= $key . '=' . \rawurlencode($val) . "\n";
+    }
+    $blob = $out;
+    return $found;
+}
+
+/** php's string coercion for an ini value: bool and null are '1'/''. */
+function __mc_ini_str(mixed $value): string
+{
+    if (\is_bool($value)) {
+        return $value ? '1' : '';
+    }
+    if ($value === null) {
+        return '';
+    }
+    return (string)$value;
 }
 
 /** One ini directive's value as a string, or false when there is no such one. */
 function ini_get(string $option): mixed
 {
+    $ov = \__mc_ini_store(0, $option, '');
+    if ($ov !== "\x00") {
+        return $ov;
+    }
     $t = __mc_ini_table();
     if (isset($t[$option])) { return $t[$option]; }
     // NOT special-cased to the live error_reporting() mask: that function
@@ -269,31 +372,70 @@ function ini_get(string $option): mixed
 
 /**
  * Every directive, in php's nested shape. `$details = false` flattens it to
- * name => value, which is the form symfony/process reads.
+ * name => value, which is the form symfony/process reads. `$extension` filters
+ * by directive prefix, so `ini_get_all('session')` is the session block.
  * @return array<string,mixed>
  */
 function ini_get_all(?string $extension = null, bool $details = true): array
 {
+    $prefix = ($extension === null || $extension === '') ? '' : $extension . '.';
     $out = [];
     foreach (__mc_ini_table() as $k => $v) {
+        if ($prefix !== '' && \strncmp($k, $prefix, \strlen($prefix)) !== 0) {
+            continue;
+        }
+        $live = \ini_get($k);
+        $sv = ($live === false) ? $v : (string)$live;
         if ($details) {
-            $out[$k] = ["global_value" => $v, "local_value" => $v, "access" => 7];
+            $out[$k] = ["global_value" => $v, "local_value" => $sv, "access" => 7];
         } else {
-            $out[$k] = $v;
+            $out[$k] = $sv;
         }
     }
     return $out;
 }
 
-/** Setting a directive is a no-op: there is nothing to set it in. */
-function ini_set(string $option, mixed $value): mixed
+/** Whether a directive is one php freezes once output has started. */
+function __mc_ini_frozen(string $option): bool
 {
-    return \ini_get($option);
+    return \strncmp($option, 'session.', 8) === 0 && \__mc_out_sent(0) === 1;
 }
 
-/** Same, for the restore spelling. */
+/**
+ * Set a directive for the rest of the process, returning the OLD value, or
+ * false for a directive this binary does not carry (php's answer too).
+ *
+ * A directive the runtime never reads changes only what `ini_get` reports —
+ * `memory_limit` and `max_execution_time` have nothing to act on here. The
+ * `session.*` block and `date.timezone` are live.
+ *
+ * `session.*` is frozen once output has gone out, exactly as php freezes it;
+ * php also warns, and the false return is the half that carries information —
+ * the diagnostic is the half this runtime drops.
+ */
+function ini_set(string $option, mixed $value): mixed
+{
+    $old = \ini_get($option);
+    if ($old === false || \__mc_ini_frozen($option)) {
+        return false;
+    }
+    $sv = \__mc_ini_str($value);
+    // date.timezone and date_default_timezone_set() are ONE value in php, so a
+    // write here has to reach the live slot or the two APIs would disagree.
+    if ($option === 'date.timezone' && !\date_default_timezone_set($sv)) {
+        return false;
+    }
+    \__mc_ini_store(1, $option, $sv);
+    return $old;
+}
+
+/** Drop the override, so the compiled-in default is visible again. */
 function ini_restore(string $option): void
 {
+    if (\__mc_ini_frozen($option)) {
+        return;
+    }
+    \__mc_ini_store(2, $option, '');
 }
 
 /** No php.ini was loaded, because there is none. */

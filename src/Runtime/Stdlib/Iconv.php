@@ -16,6 +16,20 @@
 /** Grow-and-retry conversion. Returns the converted bytes, or false. */
 function __mc_iconv_run(string $to, string $from, string $s): mixed
 {
+    // glibc reads its //TRANSLIT table out of LC_CTYPE, and in the C locale it
+    // has none: `iconv -t ASCII//TRANSLIT` answers `na?ve caf?` there and
+    // `naive cafe` under C.UTF-8 — php answers the latter on the same host, so
+    // matching php means holding a UTF-8 LC_CTYPE across the conversion. Darwin
+    // transliterates without consulting a locale (`na\"ive caf'e`), and
+    // C.UTF-8 does not exist there, so the switch fails and changes nothing.
+    $cat = \__mc_host_is_darwin() ? 2 : 0;
+    $savedLoc = '';
+    if (\stripos($to, '//TRANSLIT') !== false) {
+        $cur = \setlocale($cat, 0);
+        $want = \setlocale($cat, 'C.UTF-8');
+        if ($want === false) { $want = \setlocale($cat, 'en_US.UTF-8'); }
+        if ($want !== false && $cur !== false) { $savedLoc = (string)$cur; }
+    }
     $cd = \Runtime\Iconv\iconv_open($to, $from);
     // iconv_open reports failure as (iconv_t)-1, which arrives here as the
     // unsigned all-ones word: test both spellings rather than assume the
@@ -40,14 +54,36 @@ function __mc_iconv_run(string $to, string $from, string $s): mixed
     \poke_i64($pInLeft, 0, $inLen);
     \poke_i64($pOut, 0, \ptr_to_int($outBuf));
     \poke_i64($pOutLeft, 0, $outCap);
-    $r = \Runtime\Iconv\iconv_convert($cd, $pIn, $pInLeft, $pOut, $pOutLeft);
-    $left = \peek_i64($pOutLeft, 0);
-    $written = $outCap - $left;
+    // One call is not enough. iconv() stops on THREE conditions and reports all
+    // of them as (size_t)-1: an illegal sequence, an incomplete tail, and a full
+    // output buffer. The first cut kept only a clean run's bytes and answered
+    // false otherwise, which made `//IGNORE` return "" where php returns "ab":
+    // glibc SKIPS the bad bytes, converts the rest, and still ends in -1.
+    //
+    // So drain and retry. Progress is the discriminator errno would otherwise
+    // give us: a round that consumed input is a full output buffer and simply
+    // resumes, a round that consumed nothing is a bad sequence — skipped one
+    // byte at a time under //IGNORE, fatal without it.
+    $ignore = \stripos($to, '//IGNORE') !== false;
     $out = "";
-    if ($r !== -1 && $r !== 4294967295 && $written >= 0) {
-        $out = \__mc_iconv_read($outBuf, $written);
+    $ok = true;
+    while (true) {
+        $beforeIn = \peek_i64($pInLeft, 0);
+        $r = \Runtime\Iconv\iconv_convert($cd, $pIn, $pInLeft, $pOut, $pOutLeft);
+        $written = $outCap - \peek_i64($pOutLeft, 0);
+        if ($written > 0) {
+            $out = $out . \__mc_iconv_read($outBuf, $written);
+            \poke_i64($pOut, 0, \ptr_to_int($outBuf));
+            \poke_i64($pOutLeft, 0, $outCap);
+        }
+        if ($r !== -1 && $r !== 4294967295) { break; }
+        $leftIn = \peek_i64($pInLeft, 0);
+        if ($leftIn <= 0) { break; }
+        if ($leftIn < $beforeIn) { continue; }
+        if (!$ignore) { $ok = false; break; }
+        \poke_i64($pIn, 0, \peek_i64($pIn, 0) + 1);
+        \poke_i64($pInLeft, 0, $leftIn - 1);
     }
-    $ok = $r !== -1 && $r !== 4294967295;
     \Runtime\Libc\free($pIn);
     \Runtime\Libc\free($pInLeft);
     \Runtime\Libc\free($pOut);
@@ -55,6 +91,7 @@ function __mc_iconv_run(string $to, string $from, string $s): mixed
     \Runtime\Libc\free($inBuf);
     \Runtime\Libc\free($outBuf);
     \Runtime\Iconv\iconv_close($cd);
+    if ($savedLoc !== '') { \setlocale($cat, $savedLoc); }
     if (!$ok) { return false; }
     return $out;
 }

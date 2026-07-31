@@ -1934,6 +1934,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // pack/unpack — prelude, not stdlib: `pack` is variadic and a variadic
     // cannot cross the stdlib.o boundary.
     $binarySrc = prelude_src_or_empty("binary.php");
+    // ext/session — DEMAND-GATED. Interfaces + a handler OBJECT + user CALLABLES
+    // + $_SESSION + serialize(): every one of those is a reason it cannot live in
+    // the stdlib .o. Implies sapi (setcookie/headers_sent), serialize/unserialize
+    // (the encoders) and errors (the end-of-request write-close).
+    $sessionSrc = prelude_src_or_empty("session.php");
+    // Response headers / cookies / the per-request context — DEMAND-GATED. Holds
+    // ARRAYS (the header block, the parked superglobals), so the stdlib .o cannot
+    // carry it; the one scalar it needs there is __mc_out_sent.
+    $sapiSrc = prelude_src_or_empty("sapi.php");
     // Async\ (scheduler / tasks / channels / netpoller seam) — DEMAND-GATED,
     // braced-namespace tree. Built ON Fiber + Io\Poll, so it forces both on.
     $asyncSrc = prelude_src_or_empty("async.php");
@@ -2008,6 +2017,29 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         if (\str_starts_with($fn, 'pcntl_') || \str_starts_with($fn, 'posix_')) { $pcntlFns[] = $fn; }
     }
     $usePcntl = $demand->callsAny($pcntlFns) || $demand->mentions('Process');
+    // header/setcookie/the request seam, gated on the functions the FILE defines.
+    //
+    // A program that DEFINES one of those names gets its own — php would fatal
+    // ("Cannot redeclare function header()"), and injecting on top of it emits
+    // two definitions of one symbol, which fails in clang with no useful
+    // diagnostic. Bowing out is the readable answer.
+    $sapiFns = \Compile\Mir\PreludeDemand::definedFunctions($sapiSrc);
+    $ownFns = [];
+    foreach ($sources as $usrc) {
+        foreach (\Compile\Mir\PreludeDemand::definedFunctions($usrc) as $fn) { $ownFns[$fn] = true; }
+    }
+    $sapiClash = false;
+    foreach ($sapiFns as $fn) { if (isset($ownFns[$fn])) { $sapiClash = true; } }
+    $useSapi = !$sapiClash && $demand->callsAny($sapiFns);
+    // session_* + the handler interfaces a program may only MENTION (a class that
+    // implements SessionHandlerInterface without calling a session_* function).
+    $sessionFns = \Compile\Mir\PreludeDemand::definedFunctions($sessionSrc);
+    $sessionClash = $sapiClash;
+    foreach ($sessionFns as $fn) { if (isset($ownFns[$fn])) { $sessionClash = true; } }
+    $useSession = !$sessionClash && ($demand->callsAny($sessionFns)
+        || $demand->mentionsAny(['SessionHandler', 'SessionHandlerInterface',
+                                'SessionIdInterface', 'SessionUpdateTimestampHandlerInterface'])
+        || $demand->usesVar('_SESSION'));
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
         // without either, whatever the program itself mentions. It also dispatches
@@ -2015,6 +2047,15 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $useFiber = true;
         $useIoPoll = true;
         $usePcntl = true;
+    }
+    if ($useSession) {
+        // ext/session is built ON the request seam (setcookie, headers_sent,
+        // __McSapi::$empty) and on the shutdown queue (the implicit
+        // end-of-request write-close). Forced HERE, before $useCli, which reads
+        // $useSapi; the serialize tiers are forced below, after their own gates
+        // have run — forcing them here would be overwritten.
+        $useSapi = true;
+        $useErrors = true;
     }
     // Reflection is gated on a MENTION, like the array classes: `new
     // ReflectionClass(...)` / a `ReflectionClass` hint / a catch of
@@ -2079,6 +2120,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // and `unserialize(` does not match `serialize`.
     $useSerialize = $demand->calls('serialize');
     $useUnserialize = $demand->calls('unserialize');
+    if ($useSession) {
+        // The session encoders ARE serialize/unserialize — the `php` handler is
+        // `key|serialize(v)` runs, and decoding drives the unserialize prelude's
+        // own cursor (__McUnSt) to find where one value ends and the next key
+        // begins. A program that never spells either name still needs both.
+        $useSerialize = true;
+        $useUnserialize = true;
+    }
     // CLI prelude (__mc_argv / getopt): $_SERVER and $_ENV are BUILT by it
     // (__mc_server / __mc_env), so they gate it too; the other superglobals seed
     // an empty array literal and need nothing.
@@ -2086,7 +2135,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         || $demand->usesVar('_SERVER') || $demand->usesVar('_ENV')
         || $demand->calls('getopt')
         // no-arg `getenv()` lowers to the $_ENV builder (__mc_env), which lives here.
-        || $demand->calls('getenv');
+        || $demand->calls('getenv')
+        // sapi.php MENTIONS $_SERVER, and superglobal demand is module-wide: the
+        // seed for it is __mc_server(), which lives in cli.php. Without this the
+        // request seam would link against an undefined symbol.
+        || $useSapi;
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
@@ -2118,6 +2171,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     }
     if ($useVarExport && $varExportSrc === "") {
         dprint("compile failed: prelude: cannot read var_export.php");
+        return null;
+    }
+    if ($useSapi && $sapiSrc === "") {
+        dprint("compile failed: prelude: cannot read sapi.php");
+        return null;
+    }
+    if ($useSession && $sessionSrc === "") {
+        dprint("compile failed: prelude: cannot read session.php");
         return null;
     }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
@@ -2168,6 +2229,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->obSrc = $useOb ? $obSrc : "";
         $lower->autoloadSrc = $useAutoload ? $autoloadSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
+        $lower->sapiSrc = $useSapi ? $sapiSrc : "";
+        $lower->sessionSrc = $useSession ? $sessionSrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->backtraceSrc = $backtraceSrc;

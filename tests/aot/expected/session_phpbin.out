@@ -1,0 +1,10 @@
+true
+'ii:42;strs:3:"a|b";arra:1:{s:1:"x";i:1;}'
+true
+'ii:42;strs:3:"a|b";arra:1:{s:1:"x";i:1;}'
+true
+42
+'a|b'
+1
+true
+false

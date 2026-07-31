@@ -172,6 +172,16 @@ trait LowerPrelude
             // else in the prelude.
             $src = $src . $this->autoloadSrc;
         }
+        if ($this->sapiSrc !== '') {
+            // After exceptions.php (setcookie throws ValueError) and after
+            // cli.php, which Main forces on: the request context seeds $_SERVER.
+            $src = $src . $this->sapiSrc;
+        }
+        if ($this->sessionSrc !== '') {
+            // LAST: it names __McSapi (sapi.php), __McUnSt (unserialize.php) and
+            // the Throwable hierarchy, and Main forces every one of those on.
+            $src = $src . $this->sessionSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).

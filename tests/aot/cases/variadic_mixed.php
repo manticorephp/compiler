@@ -1,6 +1,6 @@
 <?php
-function header(string $tag, int ...$ns): string {
+function tally(string $tag, int ...$ns): string {
     $t = 0; foreach ($ns as $n) { $t = $t + $n; }
     return $tag . "=" . $t;
 }
-echo header("total", 10, 20, 30);
+echo tally("total", 10, 20, 30);

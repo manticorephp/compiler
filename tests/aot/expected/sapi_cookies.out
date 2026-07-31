@@ -1,0 +1,13 @@
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+array(0) {
+}
+bool(false)
+bool(true)
+ValueError: setcookie(): Argument #1 ($name) cannot contain "=", ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+ValueError: setcookie(): Argument #1 ($name) cannot contain "=", ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+ValueError: setrawcookie(): Argument #2 ($value) cannot contain ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+ValueError: setcookie(): option "nope" is invalid

@@ -1,0 +1,17 @@
+1 2 abc123
+12
+/x?a=1 POST
+script-name-kept
+7 queued
+int(418)
+status=418
+Content-Type: text/plain
+X-A: 2
+X-A: 3
+Set-Cookie: s=v; expires=Sun, 09 Sep 2001 01:46:40 GMT; Max-Age=0; path=/; HttpOnly; SameSite=Lax
+Set-Cookie: del=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0
+Set-Cookie: enc=a%20b%2Fc%3Dd%26e
+Set-Cookie: raw=a-b_c.d
+array(0) {
+}
+bool(false)
