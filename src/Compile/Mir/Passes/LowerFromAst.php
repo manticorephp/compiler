@@ -2866,6 +2866,21 @@ final class LowerFromAst implements Pass
         'sapi_windows_vt100_support' => true,
     ];
 
+    /**
+     * Names the compiler always resolves even though nothing DECLARES them:
+     * a construct the parser turns into a Call, or a call it rewrites to an
+     * internal helper (`trigger_error` → `__mc_trigger_error`).
+     *
+     * Without these `function_exists` answered false for functions that plainly
+     * work — `trigger_error` routes through set_error_handler correctly, yet
+     * every guard around it took the "not available" branch.
+     */
+    private const RESOLVED_FNS = [
+        'function_exists' => true, 'defined' => true, 'constant' => true,
+        'compact' => true, 'call_user_func' => true, 'call_user_func_array' => true,
+        'trigger_error' => true,
+    ];
+
     /** Whether a function name is already declared (user or stdlib extern / alias)
      *  — the same predicate the `function_exists` expression fold uses. */
     private function functionIsKnown(string $name): bool
@@ -2874,6 +2889,14 @@ final class LowerFromAst implements Pass
         $pos = \strrpos($nm, '\\');
         $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
         if (isset(self::HIDDEN_FNS[$bare])) { return false; }
+        if (isset(self::RESOLVED_FNS[\strtolower($bare)])) { return true; }
+        // A CODEGEN BUILTIN is emitted inline, so it is declared nowhere and
+        // used to read as absent: `function_exists('strlen')` was false, and so
+        // was count/substr/implode/min/max/ord/chr/get_class/… — 28 of the 44
+        // names measured against the interpreter. That is the exact shape the
+        // polyfill idiom tests (`if (!function_exists('X')) { function X(){} }`),
+        // and any `function_exists('X') ? fast : slow` picked the slow arm.
+        if ($this->isCodegenBuiltin($bare)) { return true; }
         return isset($this->fnDecls[$nm]) || isset($this->fnDecls[$bare])
             || (($this->fnAliasByBare[$bare] ?? '') !== '');
     }

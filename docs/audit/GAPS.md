@@ -16,7 +16,7 @@ without a file behind it.
 | S3 | static finding with no observed runtime effect |
 | S4 | advisory / analyzer residue |
 
-**24 findings**: 8 S1, 13 S2, 1 S3, 2 S4.
+**24 findings**: 1 S0, 7 S1, 13 S2, 1 S3, 2 S4.
 
 Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capability.tsv`).
 
@@ -24,9 +24,9 @@ Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capabili
 
 | # | class | id | tier | depth | title | evidence |
 |---|---|---|---|---|---|---|
-| 1 | S1 | `autoload-absent` | T1 | stdlib-leaf | spl_autoload_register does not exist; class_exists($n, true) can never fire a resolver | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
-| 2 | S1 | `func-args-absent` | T1 | stdlib-leaf | func_num_args/func_get_arg absent; symfony/console alone calls func_num_args 15 times to detect omitted arguments | [`probes/cap_func_args.php`](probes/cap_func_args.php) |
-| 3 | S1 | `trigger-error-absent` | T1 | stdlib-leaf | trigger_error absent; every symfony package routes deprecations through it | [`probes/cap_trigger_error_handler.php`](probes/cap_trigger_error_handler.php) |
+| 1 | S0 | `function-exists-lies` | T1 | compiler-root | FIXED-PARTIAL: function_exists answered false for 44 of 53 common PHP functions — every codegen builtin and every compiler-rewritten name. trigger_error was never absent, it works and is rewritten to __mc_trigger_error; the probe measured PRESENCE and I recorded the wrong thing. Now 10 remain: emitBuiltin-only names (var_dump, print_r, floor, sqrt, debug_backtrace — isCodegenBuiltin is a strict subset of the emit dispatch) and demand-gated prelude names never called by the program (error_reporting, register_shutdown_function, ob_get_clean) | [`probes/cap_trigger_error_handler.php`](probes/cap_trigger_error_handler.php) |
+| 2 | S1 | `autoload-absent` | T1 | stdlib-leaf | spl_autoload_register does not exist; class_exists($n, true) can never fire a resolver | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
+| 3 | S1 | `func-args-absent` | T1 | stdlib-leaf | func_num_args/func_get_arg absent; symfony/console alone calls func_num_args 15 times to detect omitted arguments | [`probes/cap_func_args.php`](probes/cap_func_args.php) |
 | 4 | S1 | `iterator-double-foreach-sigbus` | T2 | repr | two foreach loops over one IteratorAggregate SIGBUS | [`probes/cap_iterator_protocol.php`](probes/cap_iterator_protocol.php) |
 | 5 | S1 | `superglobals-unseeded` | T3 | compiler-root | $_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys | [`probes/cap_superglobal_server_web.php`](probes/cap_superglobal_server_web.php) |
 | 6 | S1 | `sapi-fns-absent` | T3 | stdlib-leaf | header/headers_sent/http_response_code/setcookie/ob_*/session_* all absent | [`SAPI-REQUIREMENTS.md`](SAPI-REQUIREMENTS.md) |
@@ -75,6 +75,10 @@ The ladder tier is the implementation order: a tier's dependency closure
 lies entirely in lower tiers, so a gap first seen at tier N blocks tiers
 N..8 and nothing below.
 
+### `error-handling` — 1 finding(s), first bites at T1
+
+- **S0** `function-exists-lies` — FIXED-PARTIAL: function_exists answered false for 44 of 53 common PHP functions — every codegen builtin and every compiler-rewritten name. trigger_error was never absent, it works and is rewritten to __mc_trigger_error; the probe measured PRESENCE and I recorded the wrong thing. Now 10 remain: emitBuiltin-only names (var_dump, print_r, floor, sqrt, debug_backtrace — isCodegenBuiltin is a strict subset of the emit dispatch) and demand-gated prelude names never called by the program (error_reporting, register_shutdown_function, ob_get_clean)
+
 ### `autoload-semantics` — 1 finding(s), first bites at T1
 
 - **S1** `autoload-absent` — spl_autoload_register does not exist; class_exists($n, true) can never fire a resolver
@@ -82,10 +86,6 @@ N..8 and nothing below.
 ### `language-core` — 1 finding(s), first bites at T1
 
 - **S1** `func-args-absent` — func_num_args/func_get_arg absent; symfony/console alone calls func_num_args 15 times to detect omitted arguments
-
-### `error-handling` — 1 finding(s), first bites at T1
-
-- **S1** `trigger-error-absent` — trigger_error absent; every symfony package routes deprecations through it
 
 ### `iteration` — 1 finding(s), first bites at T2
 
