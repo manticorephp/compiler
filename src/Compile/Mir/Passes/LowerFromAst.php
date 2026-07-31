@@ -261,10 +261,27 @@ final class LowerFromAst implements Pass
      */
     private array $stableCallables = [];
 
-    /** Declared parameter names of the body being lowered, in order. Backs the
-     *  `func_num_args()` / `func_get_arg($k)` fold.
+    /** Declared parameter names of the body being lowered, in order. Backs
+     *  `func_num_args()` / `func_get_arg($k)` / `func_get_args()`.
      *  @var string[] */
     private array $currentLowerParams = [];
+
+    /** Declared type hint of each entry in {@see $currentLowerParams} ('' when
+     *  untyped), parallel by index.
+     *  @var string[] */
+    private array $currentLowerParamHints = [];
+
+    /** Arguments the call just lowered by {@see lowerCallArgs} wrote PAST the
+     *  callee's parameter list, packed as a vec[cell] — or null. Read by the
+     *  IMMEDIATELY following node construction and never later: any further
+     *  lowering overwrites it. */
+    private ?Node $lastCallOverflow = null;
+
+    /** The body being lowered called one of the func-args family, so it needs
+     *  the argument-count prologue. Saved/restored around every nested body the
+     *  same way {@see $sawYield} is — a closure that asks must not mark its
+     *  enclosing function, and vice versa. */
+    private bool $sawFuncArgs = false;
 
     /** The str_set's SECOND candidate name, keyed the same way. Two flat maps,
      *  not one map of pairs — see {@see $stableCallables}.
@@ -1454,6 +1471,8 @@ final class LowerFromAst implements Pass
         }
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
+        $savedSawFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = false;
         $this->sawStaticUse = false;
         $deadTail = false;
         foreach ($m->body->statements as $bodyStmt) {
@@ -1470,6 +1489,8 @@ final class LowerFromAst implements Pass
         }
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
+        $usesFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = $savedSawFuncArgs;
         $mret = $this->lowerTypeHint($this->effectiveHint(
             $m->returnType,
             $this->docTagType($m->docComment, '@return', ''),
@@ -1491,14 +1512,23 @@ final class LowerFromAst implements Pass
         // longer resolves against the class it came from.
         if ($tdInvoke) { $mret = $this->typeDefCarrier($decl->name); }
         $this->currentTypeDefClass = '';
+        $mbody = new Block($stmts, Type::void());
+        if ($usesFuncArgs) {
+            // FIRST statement, ahead of the promoted-property stores too: those
+            // can contain calls, and the channel must be taken before any of
+            // them can overwrite it. `$this` is not an argument, so the declared
+            // count is the SOURCE parameter count, not $params.
+            $mbody = $this->withFuncArgsPrologue($mbody, \count($m->params));
+        }
         $mfn = new FunctionDef(
             name: $fnName,
             params: $params,
             returnType: $mret,
-            body: new Block($stmts, Type::void()),
+            body: $mbody,
             returnsByRef: (bool)($m->returnsByRef ?? false),
         );
         $mfn->isGenerator = $isGen;
+        $mfn->usesFuncArgs = $usesFuncArgs;
         return $mfn;
     }
 
@@ -1949,11 +1979,25 @@ final class LowerFromAst implements Pass
         // closure, not the enclosing function.
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
+        // Same isolation for the parameter scope: a closure has its OWN
+        // parameters, so `func_num_args()` inside one must not answer for the
+        // enclosing function. Restored after, because the enclosing body keeps
+        // lowering once this expression is done.
+        $savedParams = $this->currentLowerParams;
+        $savedSawFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = false;
+        $this->setCurrentLowerParams($expr->params);
         $body = $this->lowerBlockNode($expr->body);
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
+        $clUsesFa = $this->sawFuncArgs;
+        if ($clUsesFa) {
+            $body = $this->withFuncArgsPrologue($body, \count($expr->params));
+        }
+        $this->sawFuncArgs = $savedSawFuncArgs;
+        $this->currentLowerParams = $savedParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
-            (bool)($expr->returnsByRef ?? false));
+            (bool)($expr->returnsByRef ?? false), $clUsesFa);
     }
 
     private function lowerArrowFn(\Parser\Ast\ArrowFn $expr): Node
@@ -1969,12 +2013,23 @@ final class LowerFromAst implements Pass
             $seen[$v] = true;
             $free[] = $v;
         }
+        // Its own parameter scope, like a full closure — see lowerClosure.
+        $savedParams = $this->currentLowerParams;
+        $savedSawFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = false;
+        $this->setCurrentLowerParams($expr->params);
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $afUsesFa = $this->sawFuncArgs;
+        if ($afUsesFa) {
+            $body = $this->withFuncArgsPrologue($body, \count($expr->params));
+        }
+        $this->sawFuncArgs = $savedSawFuncArgs;
+        $this->currentLowerParams = $savedParams;
         // An arrow fn has no captures list and cannot be a generator, so the two
         // middle arguments stay at their defaults; the by-ref RETURN is the one
         // thing it can carry.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], false,
-            (bool)($expr->returnsByRef ?? false));
+            (bool)($expr->returnsByRef ?? false), $afUsesFa);
     }
 
     /** Whether the lowered node tree reads the local `$this`. */
@@ -2556,7 +2611,15 @@ final class LowerFromAst implements Pass
     private function setCurrentLowerParams(array $params): void
     {
         $this->currentLowerParams = [];
-        foreach ($params as $p) { $this->currentLowerParams[] = $p->name; }
+        $this->currentLowerParamHints = [];
+        foreach ($params as $p) {
+            $this->currentLowerParams[] = $p->name;
+            // The hint travels WITH the name: func_get_args() boxes each
+            // parameter into a cell array, and a load typed `unknown` puts the
+            // raw word in the slot — an int then renders as the float its bits
+            // spell (`4.4465908125712E-323` for 9).
+            $this->currentLowerParamHints[] = (string)($p->typeHint ?? '');
+        }
     }
 
     private function scanStableCallables(array $stmts): void
@@ -3003,6 +3066,7 @@ final class LowerFromAst implements Pass
 
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
+        $this->lastCallOverflow = null;
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
             foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
@@ -3020,11 +3084,22 @@ final class LowerFromAst implements Pass
         $variadic = $np > 0 && $this->paramVariadic($params[$np - 1]);
         if (!$hasNamed && !$variadic && \count($astArgs) >= $np) {
             $out = [];
+            $over = [];
             $i = 0;
             foreach ($astArgs as $a) {
                 $conv = $i < $np ? $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
-                $out[] = $conv !== null ? $conv : $this->lowerExpr($a);
+                $lowered = $conv !== null ? $conv : $this->lowerExpr($a);
+                // Past the declared list there is no parameter to receive it.
+                // php still counts it and hands it back from func_get_arg(), so
+                // it goes to the overflow channel instead of onto a call whose
+                // callee has no slot for it. Lowered exactly once, HERE — a
+                // second lowering at the construction site would run any side
+                // effect in the argument twice.
+                if ($i < $np) { $out[] = $lowered; } else { $over[] = new ArrayElement_(null, $lowered); }
                 $i = $i + 1;
+            }
+            if (\count($over) > 0) {
+                $this->lastCallOverflow = new ArrayLit($over, Type::vec(Type::cell()));
             }
             return $out;
         }
@@ -3479,7 +3554,10 @@ final class LowerFromAst implements Pass
                 $this->typeDefCarrier($cls),
             );
         }
-        return new NewObj($cls, $args, Type::obj($cls));
+        $no = new NewObj($cls, $args, Type::obj($cls));
+        $no->srcArgc = \count($expr->args);
+        $no->extraArgs = $this->lastCallOverflow;
+        return $no;
     }
 
     /**
@@ -3741,7 +3819,10 @@ final class LowerFromAst implements Pass
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
         }
-        return new MethodCall_($obj, $expr->method, $args, Type::unknown());
+        $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
+        $mc->srcArgc = \count($expr->args);
+        $mc->extraArgs = $this->lastCallOverflow;
+        return $mc;
     }
 
     private function lowerStaticCall(\Parser\Ast\StaticCall $expr): Node
@@ -3813,7 +3894,10 @@ final class LowerFromAst implements Pass
                 return new StaticCall_($class, 'runAt', $sited, Type::unknown(), $scope);
             }
         }
-        return new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
+        $sc = new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
+        $sc->srcArgc = \count($expr->args);
+        $sc->extraArgs = $this->lastCallOverflow;
+        return $sc;
     }
 
     /** Whether `$method` resolved from `$class` (walking ancestors) is a

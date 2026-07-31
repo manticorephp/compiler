@@ -761,6 +761,15 @@ trait EmitLlvmCalls
             $argTypes .= ', i64';
             $pi = $pi + 1;
         }
+        // The closure invoke pushes on ARITY, not on identity: a known callee is
+        // asked directly, and for a dynamic one no target name exists at this
+        // site, so the channel is armed whenever the module has any func-args
+        // callee at all. {@see EmitLlvm::faPop} makes over-arming safe.
+        $faN = \count($iv->args);
+        $out .= $known
+            ? $this->faPush($fn, $faN)
+            : ($this->rt->needsFuncArgs
+                ? '  store i64 ' . (string)$faN . ", ptr @__mir_fa_argc\n" : '');
         $reg = $this->ssa->allocReg();
         if ($known) {
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList . ")\n";
@@ -774,6 +783,7 @@ trait EmitLlvmCalls
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
         }
+        $out .= $this->faPop();
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // The closure returned a scalar as a tagged cell (uniform ABI). Unbox
@@ -1298,6 +1308,7 @@ trait EmitLlvmCalls
             if ($bs !== false) { $btName = \substr($btName, $bs + 1); }
             $out .= $this->btPush($btName, $n->line);
         }
+        $out .= $this->faPush($c->function, $c->srcArgc, $c->extraArgs);
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }

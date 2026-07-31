@@ -398,35 +398,50 @@ trait LowerExprs
                 }
                 return new NullConst(Type::null_());
             }
-            // `func_num_args()` / `func_get_arg($k)` — resolved against the
-            // enclosing function's DECLARED parameters.
+            // `func_num_args()` / `func_get_arg($k)` / `func_get_args()`.
             //
-            // Zend counts what the caller actually PASSED, which a compiled
-            // binary cannot know: an omitted optional arrives already filled
-            // from its default, indistinguishable from one passed explicitly.
-            // Answering with the declared count reads every call as "all
-            // arguments given". That is the useful direction — symfony's
-            // `if (1 > \func_num_args()) { trigger_deprecation(...) }` guards are
-            // BC shims for callers that omit a new parameter, and this build
-            // always fills it — and it is the only one that keeps
-            // `func_get_arg($k)` a real value rather than a stub.
+            // The count Zend reports is what the CALLER wrote, and the callee
+            // cannot see it directly: an omitted optional arrives already
+            // filled from its default ({@see LowerFns::defaultFillArgs}), so by
+            // the time the body runs every argument list is exactly arity-many.
+            // It travels on a side channel instead — the call site pushes its
+            // as-written count and {@see prologueFuncArgs} takes it off into
+            // `__mc_argc` before the body's first nested call can overwrite it.
+            //
+            // The VALUES come from the parameter locals: PHP >= 7 hands back a
+            // parameter's CURRENT value, not the one originally passed, so the
+            // locals are the correct source and no separate argument buffer is
+            // needed. Args past the declared list have no local and ride the
+            // overflow channel `__mc_argx`.
+            //
             // Matched on the BARE name: a namespaced file qualifies an
             // unqualified call, so `func_get_arg(` inside
             // `namespace Symfony\…;` arrives as `Symfony\…\func_get_arg`.
             $fnBarePos = \strrpos($fn, '\\');
             $fnBare = $fnBarePos === false ? $fn : \substr($fn, $fnBarePos + 1);
             if ($fnBare === 'func_num_args' && \count($expr->args) === 0) {
-                return new IntConst(\count($this->currentLowerParams), Type::int_());
+                $this->sawFuncArgs = true;
+                return new LoadLocal($this->argcLocalName(), Type::int_());
             }
-            if ($fnBare === 'func_get_arg' && \count($expr->args) === 1
-                && $expr->args[0]->kind === 'IntLiteral') {
-                $idx = (int)$expr->args[0]->value;
-                if ($idx >= 0 && $idx < \count($this->currentLowerParams)) {
-                    return new LoadLocal($this->currentLowerParams[$idx], Type::unknown());
-                }
-                // Out of range: php throws ArgumentCountError. Nothing here can
-                // hold that value, so hand back null rather than a wild read.
-                return new NullConst(Type::null_());
+            if ($fnBare === 'func_get_args' && \count($expr->args) === 0) {
+                $this->sawFuncArgs = true;
+                return new Call('__mc_func_get_args',
+                    [$this->funcArgsVector(), new LoadLocal($this->argcLocalName(), Type::int_())],
+                    Type::vec(Type::cell()));
+            }
+            if ($fnBare === 'func_get_arg' && \count($expr->args) === 1) {
+                $this->sawFuncArgs = true;
+                // Any index expression, not just a literal: the idiomatic
+                // `for ($i = 0; $i < func_num_args(); $i++) func_get_arg($i)`
+                // passes a loop variable, which used to fall through to an
+                // undefined `@manticore_func_get_arg` and fail the link.
+                return new Call('__mc_func_get_arg',
+                    [
+                        $this->funcArgsVector(),
+                        new LoadLocal($this->argcLocalName(), Type::int_()),
+                        $this->lowerExpr($expr->args[0]),
+                    ],
+                    Type::cell());
             }
             // `trigger_error($msg[, $level])` → `__mc_trigger_error($msg,
             // $level, <file>, <line>, <silenced>)`. A prelude function cannot
@@ -502,7 +517,14 @@ trait LowerExprs
                     return new Call($sited, $withSite, Type::unknown());
                 }
             }
-            return new Call($callee, $args, Type::unknown());
+            $call = new Call($callee, $args, Type::unknown());
+            // Before defaultFillArgs padded it — the callee's func_num_args()
+            // needs what the SOURCE wrote, and this is the last point that
+            // knows it. The overflow is read here and nowhere later: the next
+            // lowering of any call overwrites it.
+            $call->srcArgc = \count($expr->args);
+            $call->extraArgs = $this->lastCallOverflow;
+            return $call;
         }
         if ($expr->kind === 'Spread')         { return new Spread_($this->lowerExpr($expr->value), Type::unknown()); }
         if ($expr->kind === 'ArrayLit')       { return $this->lowerArrayLit($expr); }

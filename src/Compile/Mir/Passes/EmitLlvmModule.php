@@ -222,6 +222,38 @@ trait EmitLlvmModule
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
         }
+        if ($this->rt->needsFuncArgs) {
+            // The func-args side channel. A call site targeting a callee that
+            // asks stores its as-written argument count here; the callee's
+            // prologue takes it, in its FIRST statement, before any nested call
+            // can overwrite it. That ordering is the whole safety argument —
+            // nothing executes between the store and the take, so generators
+            // and fibers need no per-frame stack and one word is enough.
+            //
+            // Empty is -1, and the take RESETS it to -1. A frame entered from a
+            // call site that did not push (a path the emitter does not
+            // instrument) therefore reads -1 and falls back to its declared
+            // parameter count — the answer this compiler gave before the
+            // channel existed, rather than a stale count from an unrelated call.
+            // linkonce_odr so user.o and stdlib.o share one slot.
+            $out .= "@__mir_fa_argc = linkonce_odr global i64 -1\n";
+            // Companion slot for arguments written past the callee's parameter
+            // list, as a vec[cell] pointer (0 = none). Cleared by the same take
+            // so it can never be read by a later, unrelated frame.
+            $out .= "@__mir_fa_argx = linkonce_odr global i64 0\n";
+            $out .= "define i64 @__mir_fa_take(i64 %declared) {\n";
+            $out .= "entry:\n";
+            $out .= "  %n = load i64, ptr @__mir_fa_argc\n";
+            $out .= "  store i64 -1, ptr @__mir_fa_argc\n";
+            $out .= "  %empty = icmp slt i64 %n, 0\n";
+            $out .= "  %r = select i1 %empty, i64 %declared, i64 %n\n";
+            $out .= "  ret i64 %r\n}\n";
+            $out .= "define i64 @__mir_fa_takex() {\n";
+            $out .= "entry:\n";
+            $out .= "  %x = load i64, ptr @__mir_fa_argx\n";
+            $out .= "  store i64 0, ptr @__mir_fa_argx\n";
+            $out .= "  ret i64 %x\n}\n";
+        }
         if ($this->rt->needsFibers) {
             $out .= $this->fiberRuntime();
         }

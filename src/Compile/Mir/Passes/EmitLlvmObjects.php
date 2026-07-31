@@ -199,6 +199,8 @@ trait EmitLlvmObjects
                 // `$this`, provided args cover [1 .. argc]).
                 $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
                 $argList .= $this->lastPadArgs;
+                $out .= $this->faPush($this->lsbTarget($ctorClass, '__construct', $cd->name),
+                    $n->srcArgc, $n->extraArgs);
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
@@ -298,6 +300,7 @@ trait EmitLlvmObjects
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
+            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->extraArgs);
             $cr = $this->ssa->allocReg();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
@@ -2861,6 +2864,7 @@ trait EmitLlvmObjects
             $btName = $n->class . '::' . $n->method;
             $out .= $this->btPush($btName, $n->line);
         }
+        $out .= $this->faPush($target, $n->srcArgc, $n->extraArgs);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
@@ -3546,6 +3550,9 @@ trait EmitLlvmObjects
             $btName = $mc->method;
             $out .= $this->btPush($btName, $n->line);
         }
+        $faCands = $distinct;
+        $faCands[] = $fallbackFull;
+        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->extraArgs);
         // A CELL result over candidates whose declared returns disagree: each
         // dispatch arm boxes its raw return by its own type (a mixed-repr raw
         // merge would mis-read). The result is then a uniform self-describing cell.

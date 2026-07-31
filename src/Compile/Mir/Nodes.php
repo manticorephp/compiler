@@ -329,6 +329,19 @@ final class Call extends Node
      *  every later offset, a self-host layout hazard. */
     public bool $voidCast = false;
 
+    /** How many arguments the SOURCE wrote at this call site, before
+     *  {@see Passes\LowerFns::defaultFillArgs} padded the list out to the
+     *  parameter count. -1 = not recorded. The only carrier of that fact: by
+     *  emit time `$args` is always exactly arity-many. Declared LAST. */
+    public int $srcArgc = -1;
+
+    /** Arguments written PAST the callee's declared parameter list, packed as a
+     *  vec[cell] — they have no parameter local to live in, so they ride the
+     *  overflow side channel instead ({@see Passes\EmitLlvm::faPush}). Only
+     *  built for a callee that reads them back with `func_get_arg` /
+     *  `func_get_args`. Declared LAST. */
+    public ?Node $extraArgs = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCall($this);
@@ -1115,6 +1128,12 @@ final class NewObj extends Node
      *  load-bearing) does not shift. */
     public bool $bare = false;
 
+    /** See {@see Call::$srcArgc}. Declared LAST. */
+    public int $srcArgc = -1;
+
+    /** See {@see Call::$extraArgs}. Declared LAST. */
+    public ?Node $extraArgs = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNewObj($this);
@@ -1230,6 +1249,12 @@ final class MethodCall_ extends Node
     /** See {@see Call::$voidCast}. Declared LAST. */
     public bool $voidCast = false;
 
+    /** See {@see Call::$srcArgc}. Declared LAST. */
+    public int $srcArgc = -1;
+
+    /** See {@see Call::$extraArgs}. Declared LAST. */
+    public ?Node $extraArgs = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitMethodCall($this);
@@ -1259,6 +1284,12 @@ final class StaticCall_ extends Node
 
     /** See {@see Call::$voidCast}. Declared LAST. */
     public bool $voidCast = false;
+
+    /** See {@see Call::$srcArgc}. Declared LAST. */
+    public int $srcArgc = -1;
+
+    /** See {@see Call::$extraArgs}. Declared LAST. */
+    public ?Node $extraArgs = null;
 
     public function accept(EmitVisitor $v): string
     {

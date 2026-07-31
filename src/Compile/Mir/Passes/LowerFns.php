@@ -184,9 +184,16 @@ trait LowerFns
         }
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
+        $savedSawFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = false;
         $loweredBody = $this->lowerBlockNode($decl->body);
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
+        $usesFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = $savedSawFuncArgs;
+        if ($usesFuncArgs) {
+            $loweredBody = $this->withFuncArgsPrologue($loweredBody, \count($params));
+        }
         $fn = new FunctionDef(
             name: $decl->name,
             params: $params,
@@ -198,6 +205,7 @@ trait LowerFns
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
         $fn->isGenerator = $isGen;
+        $fn->usesFuncArgs = $usesFuncArgs;
         if ($fn->isGenerator) {
             // A generator CALL returns a Generator (its frame ptr); type it so
             // foreach / InferTypes route through the iterator-protocol path.
@@ -304,7 +312,8 @@ trait LowerFns
             'acos', 'array_first', 'array_key_first', 'array_key_last',
             'array_keys', 'array_last', 'array_values', 'asin', 'atan',
             'atan2', 'ceil', 'cos', 'cosh', 'debug_backtrace', 'deg2rad',
-            'exp', 'explode', 'floor', 'flush', 'fmod', 'hypot',
+            'exp', 'explode', 'floor', 'flush', 'fmod',
+            'func_get_arg', 'func_get_args', 'func_num_args', 'hypot',
             'int_to_ptr', 'is_numeric', 'json_decode', 'json_encode', 'log',
             'log10', 'peek_i16', 'peek_i32', 'peek_i64', 'peek_i8',
             'peek_u16', 'peek_u32', 'peek_u8', 'pi', 'poke_i16', 'poke_i32',
@@ -367,7 +376,7 @@ trait LowerFns
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -436,6 +445,7 @@ trait LowerFns
             returnsByRef: $returnsByRef,
         );
         $clFn->isGenerator = $isGenerator;
+        $clFn->usesFuncArgs = $usesFuncArgs;
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
@@ -681,8 +691,84 @@ trait LowerFns
         return $this->lowerExpr($a);
     }
 
+    /**
+     * The synthetic local holding this frame's real argument count, taken off
+     * the side channel by the prologue. A plain local name (not an `@`-prefixed
+     * emitter temp) so InferTypes types it and the usual local machinery
+     * allocates it.
+     */
+    private function argcLocalName(): string { return '__mc_argc'; }
+
+    /** Companion local holding the overflow arguments — those written past this
+     *  frame's declared parameters, which have no local of their own. */
+    private function argxLocalName(): string { return '__mc_argx'; }
+
+    /**
+     * `[$p0, $p1, …]` over the declared parameters of the body being lowered —
+     * the argument vector `func_get_args()` / `func_get_arg($i)` index into.
+     * Boxed to cells: the parameters are heterogeneously typed and a PHP
+     * argument list is a `mixed` array.
+     */
+    private function funcArgsVector(): Node
+    {
+        $elems = [];
+        $i = 0;
+        foreach ($this->currentLowerParams as $pn) {
+            $hint = $this->currentLowerParamHints[$i] ?? '';
+            $pt = $hint !== '' ? $this->lowerParamType($hint) : Type::cell();
+            $elems[] = new ArrayElement_(null, new LoadLocal($pn, $pt));
+            $i = $i + 1;
+        }
+        $declared = new ArrayLit($elems, Type::vec(Type::cell()));
+        // The parameters answer for the arguments that HAVE a local — and they
+        // answer with the parameter's CURRENT value, which is what php >= 7
+        // reports. Anything the caller wrote past them arrives separately.
+        return new Call('__mc_func_args_join',
+            [$declared, new LoadLocal($this->argxLocalName(), Type::vec(Type::cell()))],
+            Type::vec(Type::cell()));
+    }
+
+    /**
+     * The statement that opens any body using the func-args family:
+     * `$__mc_argc = __mir_argc_take(<declared count>)`.
+     *
+     * It must run BEFORE the body's first nested call, which is what makes a
+     * single global slot safe — nothing can execute between a call site's push
+     * and this take, so generators and fibers need no per-frame stack. The
+     * declared count is the fallback the builtin returns when the channel is
+     * empty (-1), i.e. when this frame was entered from a call site that did
+     * not push; that degrades to exactly the old declared-count answer rather
+     * than to garbage.
+     */
+    private function funcArgsPrologue(int $declared): Node
+    {
+        return new StoreLocal(
+            $this->argcLocalName(),
+            new Call('__mir_fa_take', [new IntConst($declared, Type::int_())], Type::int_()),
+            Type::int_(),
+        );
+    }
+
+    /** `$body` with {@see funcArgsPrologue} spliced in as its first statements. */
+    private function withFuncArgsPrologue(Block $body, int $declared): Block
+    {
+        $stmts = [
+            $this->funcArgsPrologue($declared),
+            // Taken in the same breath as the count, and for the same reason:
+            // both slots must be emptied before anything else can run.
+            new StoreLocal(
+                $this->argxLocalName(),
+                new Call('__mir_fa_takex', [], Type::vec(Type::cell())),
+                Type::vec(Type::cell()),
+            ),
+        ];
+        foreach ($body->stmts as $s) { $stmts[] = $s; }
+        return new Block($stmts, $body->type);
+    }
+
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
+        $this->lastCallOverflow = null;
         $hasNamed = false;
         foreach ($astArgs as $a) {
             if ($a->kind === 'NamedArg') { $hasNamed = true; break; }
@@ -706,10 +792,18 @@ trait LowerFns
         // reordered; otherwise lower positionally.
         if (!$hasNamed && \count($astArgs) >= \count($params)) {
             $out = [];
+            $over = [];
+            $np2 = \count($params);
             $i = 0;
             foreach ($astArgs as $a) {
-                $out[] = $this->lowerArgForParam($params[$i] ?? null, $a);
+                $lowered = $this->lowerArgForParam($params[$i] ?? null, $a);
+                // Past the parameter list: no slot to receive it, but php still
+                // counts it and hands it back. See lowerCallArgs.
+                if ($i < $np2) { $out[] = $lowered; } else { $over[] = new ArrayElement_(null, $lowered); }
                 $i = $i + 1;
+            }
+            if (\count($over) > 0) {
+                $this->lastCallOverflow = new ArrayLit($over, Type::vec(Type::cell()));
             }
             return $out;
         }

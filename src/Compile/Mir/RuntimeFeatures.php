@@ -100,6 +100,16 @@ final class RuntimeFeatures
     public bool $needsStrcspn = false;
     public bool $needsStrExplode = false;
 
+    /**
+     * Some function in the module calls `func_num_args` / `func_get_arg` /
+     * `func_get_args` — emit the `@__mir_fa_argc` side channel and its take
+     * helper. The count cannot ride the signature: the caller has already
+     * filled every omitted default by the time the callee runs, and the
+     * closure struct is fixed-arity so an indirect call could not carry an
+     * extra parameter anyway.
+     */
+    public bool $needsFuncArgs = false;
+
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union
     // once here keeps the subtle "why" with the flags instead of re-deriving

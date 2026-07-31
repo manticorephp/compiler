@@ -63,6 +63,8 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_stdout')                 { return $this->biStdStream('stdout'); }
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
         if ($name === '__mir_argc')                   { return $this->biCliArgc(); }
+        if ($name === '__mir_fa_take')                { return $this->biFuncArgsTake($args); }
+        if ($name === '__mir_fa_takex')               { return $this->biFuncArgsTakeExtra(); }
         if ($name === '__mir_argv_at')                { return $this->biCliArgvAt($args); }
         if ($name === '__mir_env_count')              { return $this->biEnvCount(); }
         if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
@@ -1332,6 +1334,39 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         return $out;
+    }
+
+    /**
+     * `__mir_fa_take($declared)` — the func-args prologue. Takes this frame's
+     * argument count off the side channel and empties it, falling back to the
+     * declared parameter count when no call site pushed one.
+     *
+     * Emitted as a CALL to the shared `@__mir_fa_take` (not inlined here): the
+     * global it clears is `linkonce_odr`, so user.o and stdlib.o must reach the
+     * same slot through the same body.
+     * @param Node[] $args
+     */
+    private function biFuncArgsTake(array $args): string
+    {
+        $this->rt->needsFuncArgs = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_fa_take(i64 ' . $this->lastValue . ")\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `__mir_fa_takex()` — the overflow half of the func-args prologue: the
+     * vec[cell] of arguments written past this frame's parameter list, or a
+     * null vec when the caller wrote none.
+     */
+    private function biFuncArgsTakeExtra(): string
+    {
+        $this->rt->needsFuncArgs = true;
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . " = call i64 @__mir_fa_takex()\n";
+        return $this->finishI64($out, $r);
     }
 
     /** `$argc` source: the captured process argc (preamble cli_argv block). */

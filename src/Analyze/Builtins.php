@@ -72,6 +72,10 @@ final class Builtins
             'is_callable', 'gettype', 'get_debug_type', 'min', 'max',
             'var_dump', 'var_export', 'print', 'print_r', 'json_encode', 'json_decode',
             'get_class',
+            // Lowered against the frame's argument channel, not declared
+            // anywhere ({@see \Compile\Mir\Passes\LowerExprs}).
+            'func_num_args', 'func_get_arg', 'func_get_args',
+            '__mir_fa_take', '__mir_fa_takex',
             'flush', '__mir_out_write_str',
             '__mir_ob_push', '__mir_ob_pop', '__mir_ob_level', '__mir_ob_len',
             '__mir_ob_peek', '__mir_ob_take', '__mir_ob_clean', '__mir_ob_inuse',

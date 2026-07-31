@@ -409,6 +409,11 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->sigs->returnType[$fn->name] = $fn->returnType;
+            $this->sigs->usesFuncArgs[$fn->name] = $fn->usesFuncArgs;
+            // One callee that asks arms the channel for the whole module: the
+            // push is per-call-site, but the global and its take helper are
+            // emitted once, here, before any body is.
+            if ($fn->usesFuncArgs) { $this->rt->needsFuncArgs = true; }
             $this->definedFns[$this->mangle($fn->name)] = true;
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
             // The demand-gated fiber prelude is present iff the program uses
@@ -2113,6 +2118,69 @@ final class EmitLlvm implements EmitVisitor
     private function btPop(): string
     {
         return $this->rt->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
+    }
+
+    /**
+     * Push this call site's as-written argument count onto the func-args side
+     * channel, for a callee whose body asks for it. Emitted IMMEDIATELY before
+     * the call — the callee takes it in its first statement, so nothing may run
+     * in between.
+     *
+     * Silent (and free) for every other callee: `$srcArgc` is -1 when the
+     * lowering path did not record one, and a callee that never asks leaves the
+     * channel alone.
+     */
+    private function faPush(string $callee, int $srcArgc, ?Node $extra = null): string
+    {
+        if ($srcArgc < 0) { return ''; }
+        if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return ''; }
+        $this->rt->needsFuncArgs = true;
+        $out = '';
+        if ($extra !== null) {
+            // Build the overflow vec first: it is ordinary array construction
+            // and may itself call, which would clobber the count word.
+            $out .= $this->emitNode($extra);
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
+        }
+        return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
+    }
+
+    /**
+     * Clear the channel after the call returns, pairing {@see faPush} the way
+     * {@see btPop} pairs {@see btPush}.
+     *
+     * The callee's prologue normally empties it on the way in, so this is a
+     * no-op — except when the push reached a callee that does NOT read it
+     * (an indirect closure invoke, where the target is not known at the call
+     * site). Without the pop that count would still be sitting there when some
+     * later frame took it, and a stale count is far worse than no count: the
+     * empty channel has a defined meaning (fall back to the declared arity)
+     * and a stale one does not.
+     */
+    private function faPop(): string
+    {
+        if (!$this->rt->needsFuncArgs) { return ''; }
+        return "  store i64 -1, ptr @__mir_fa_argc\n"
+             . "  store i64 0, ptr @__mir_fa_argx\n";
+    }
+
+    /**
+     * {@see faPush} for a virtual dispatch: the receiver's class is not known
+     * here, so the channel is armed if ANY candidate reads it. Arming it for a
+     * callee that does not is harmless — the value is only ever read by a
+     * prologue that asked for it, and {@see faPop} clears what is left.
+     *
+     * @param string[] $callees
+     */
+    private function faPushAny(array $callees, int $srcArgc, ?Node $extra = null): string
+    {
+        foreach ($callees as $cal) {
+            if ($this->sigs->usesFuncArgs[$cal] ?? false) {
+                return $this->faPush($cal, $srcArgc, $extra);
+            }
+        }
+        return '';
     }
 
     /**
