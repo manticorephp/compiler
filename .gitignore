@@ -13,8 +13,9 @@ graphify-out/
 !tests/bootstrap/expected/*.out
 !tests/aot/expected/*.out
 
-# Compiled example binaries (rebuilt via examples/async/build.sh)
+# Compiled example binaries (rebuilt via examples/*/build.sh)
 examples/async/*_bin
+examples/http/*_bin
 
 # OS
 **/.DS_Store

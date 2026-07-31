@@ -470,6 +470,17 @@ parks once, and releases the lot on the way out — so a readiness edge costs on
 instead of up to 10 ms of backoff, and a select no longer competes for the per-fd waiter slot
 that a real reader holds. The non-blocking form (`0, 0`) never touches the reactor at all.
 
+## The server on top of this
+
+`docs/http.md` — `Http\Server`, `Request`, `Response`, written on exactly the
+transparent-I/O path below: one fiber per connection under a `TaskGroup`, a
+`Semaphore` taken before `accept`, plain `fread`/`fwrite`. A handler is
+`callable(Request): Response`, and php's `header()` / `setcookie()` / `$_GET` /
+`echo` work inside it, per request, with many in flight.
+
+The examples here stay the layer underneath: `http_transparent.php` is what a
+server looks like with no parser at all.
+
 ## Examples
 
 ```bash
