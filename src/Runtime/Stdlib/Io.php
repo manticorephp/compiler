@@ -209,6 +209,27 @@ function __mc_std_res(int $which, \Ffi\Ptr $handle): \Resource
     return $err;
 }
 
+/**
+ * php://output — a write-only sink whose writes go through the output layer, so
+ * ob_start() captures them the way it captures `echo`.
+ *
+ * No FILE* is involved, which is the point: a stdlib function must never name
+ * `__mir_stdout` (resolving libc's platform-specific stdout global is emitter
+ * work, and doing it here kills the cold bootstrap) — and this stream has no
+ * handle to resolve at all.
+ *
+ * A FRESH resource per open, unlike {@see __mc_std_res}, which caches so that
+ * STDOUT === STDOUT. There is no handle to share here, and php hands out a
+ * distinct resource per fopen — so caching one would make an fclose() on any of
+ * them silence every other.
+ */
+function __mc_output_res(): \Resource
+{
+    // NOT persistent: `persistent` means "libc's, never ours to close", which is
+    // true of STDOUT and false of this — php lets fclose(php://output) succeed.
+    return new \Resource(\Resource::KIND_OUTPUT, 'stream', 0);
+}
+
 // ── the one place a stream blocks ──────────────────────────────────────
 //
 // EVERY socket read goes through __mc_stream_fill(). That is a rule, not a
@@ -264,8 +285,12 @@ function __mc_stream_is_net(\Resource $s): bool
  */
 function __mc_stream_is_buffered(\Resource $s): bool
 {
+    // KIND_OUTPUT belongs here for a different reason than the rest: it is not
+    // buffered, it has NO HANDLE AT ALL ($addr 0). Every reader/seeker below
+    // funnels through this predicate to decide whether it may touch libc, so
+    // answering true is what keeps ftell/rewind/fseek/fread off int_to_ptr(0).
     return $s->kind === \Resource::KIND_SOCKET || $s->kind === \Resource::KIND_TLS
-        || $s->kind === \Resource::KIND_MEMORY;
+        || $s->kind === \Resource::KIND_MEMORY || $s->kind === \Resource::KIND_OUTPUT;
 }
 
 /**
@@ -748,7 +773,8 @@ function stream_is_local(\Resource $stream): bool
 {
     $k = $stream->kind;
     return $k === \Resource::KIND_FILE || $k === \Resource::KIND_DIR
-        || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY;
+        || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY
+        || $k === \Resource::KIND_OUTPUT;
 }
 
 /** Whether $stream supports flock() — only a FILE-backed stream does. */
@@ -1256,6 +1282,14 @@ function fopen(string $filename, string $mode)
         if ($lower === 'php://memory' || \strpos($lower, 'php://temp') === 0) {
             return new \Resource(\Resource::KIND_MEMFILE, 'stream', 0);
         }
+        // php://output CAN be handled here, unlike its stdin/out/err neighbours:
+        // it has no FILE* to resolve, so naming it costs the cold bootstrap
+        // nothing. This is the path a RUNTIME-computed name takes — LowerPrelude
+        // folds only a literal, so `$n = 'php://output'; fopen($n, 'w')` would
+        // otherwise fall through to the `return false` below.
+        if ($lower === 'php://output') {
+            return \__mc_output_res();
+        }
         return false;
     }
     if ($scheme === 'http' || $scheme === 'https') {
@@ -1351,6 +1385,27 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
     $len = \strlen($data);
     if ($length !== null && $length >= 0 && $length < $len) {
         $len = $length;
+    }
+    if ($stream->kind === \Resource::KIND_OUTPUT) {
+        // php://output goes through the OUTPUT LAYER, so an open ob_start()
+        // captures it. Tested BEFORE __mc_stream_is_net() below, which must
+        // never see this kind. Note fwrite(STDOUT, …) deliberately does NOT
+        // come here: php writes that straight to fd 1 and does not capture it,
+        // and ordering is already right because `echo` shares stdout's stdio
+        // buffer with it.
+        // (int)$len, and an `if` rather than a ternary: $len derives from the
+        // `?int $length` param, so it types as a CELL — the same trap the
+        // KIND_MEMFILE branch below documents. Handing a cell to a `ptr` builtin
+        // inttoptr's the tagged word and the funnel dereferences garbage.
+        // Through substr(), not $data directly, and over (int)$len: $data is
+        // declared `string|array`, so inside the body it is a CELL rather than a
+        // string, and $len derives from the `?int $length` param, so it is one
+        // too. Handing either to a `ptr` builtin inttoptr's the tagged word and
+        // the funnel dereferences it. substr() answers a real string — the same
+        // shape the KIND_MEMFILE branch below relies on for the same reason.
+        $wl = (int)$len;
+        \__mir_out_write_str(\substr($data, 0, $wl));
+        return $wl;
     }
     if ($stream->kind === \Resource::KIND_MEMFILE) {
         // php://memory: overwrite $len bytes at the cursor, extending past the end;

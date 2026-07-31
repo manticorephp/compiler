@@ -80,6 +80,19 @@ final class RuntimeFeatures
      *  clock_gettime wrapper. */
     public bool $needsClock = false;
     public bool $needsStdStreams = false;
+
+    /**
+     * Any byte destined for stdout was emitted — gates the `@__mir_out_*`
+     * funnel family and the `@__mir_ob_*` buffer state.
+     *
+     * Set INSIDE the emitOut* helpers ({@see EmitLlvmExpr::emitOutWrite}), never
+     * at a call site: they are the only way to reach the funnel, so demand and
+     * definition cannot drift apart. That matters more here than for other
+     * flags — `tools/link_stubs.sh` resolves an unknown symbol to a `return 0`
+     * stub, so a demanded-but-undefined funnel would make every byte of program
+     * output vanish with no diagnostic at all.
+     */
+    public bool $needsOutBuf = false;
     public bool $needsStrpos = false;
     /** A concrete-element subscript read has to ask the array whether its slots
      *  are actually boxed cells ({@see EmitLlvmRuntime::elemUntagRuntime}). */

@@ -1,0 +1,5 @@
+len=6 ord0=0 ord3=255
+big=200000
+head=0123456789 tail=0123456789
+snap=100 full=200
+snap-unchanged=yes

@@ -155,6 +155,19 @@ final class MemoryAbi
     public const STRING_RC_AT    = self::STRING_HEADER_SIZE + self::STRING_RC_OFFSET;
 
     /**
+     * `ob_start()` nesting limit — the extent of the `@__mir_ob_stack` /
+     * `@__mir_ob_inuse` arrays.
+     *
+     * ⚠ ABI, not a tuning knob. Those arrays are `linkonce_odr`, so the linker
+     * keeps ONE definition across the user `.o` and the prebuilt stdlib `.o`;
+     * if the two modules rendered different extents every accessor would index
+     * whichever copy survived. The constant exists so no emitter can spell the
+     * bound itself. Same lesson as the rc word's layout: a shared body's shape
+     * is a fact about the link, not about the module emitting it.
+     */
+    public const OB_MAX_LEVELS = 64;
+
+    /**
      * Small-string free-list size classes: two malloc bucket sizes that recycle
      * freed buffers (the pooled analogue of emalloc). A class's DATA capacity is
      * `alloc - STRING_HEADER_SIZE`; a freed buffer is recognised by that cap.

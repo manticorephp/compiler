@@ -1,0 +1,20 @@
+str-421.51
+[str -42 1.50]|after-printf
+1.0E+20
+0.3
+float(1.5)
+|after-var_dump
+Array
+(
+    [0] => 1
+    [1] => two
+    [2] => 3.5
+)
+|after-print_r
+array (
+  'k' => 1,
+  'v' => 'x',
+)|after-var_export
+1.234568e+4
+1.234568e+4
+0:a 1:b 2:c 

@@ -222,6 +222,8 @@ final class EmitLlvm implements EmitVisitor
     /** The error/shutdown prelude is compiled in: main() gets the atexit
      *  trampoline and the uncaught path consults set_exception_handler. */
     private bool $needsErrorHandlers = false;
+    /** prelude/ob.php is compiled in: main() gets the atexit drain. */
+    private bool $needsOb = false;
 
     /** True while emitting a `$r = &fn()` bind (suppress call-result deref). */
     private bool $rawRefCall = false;
@@ -381,6 +383,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalVarNames = $module->globalVarNames;
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
+        $this->needsOb = $module->needsOb;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
@@ -681,11 +684,13 @@ final class EmitLlvm implements EmitVisitor
 
     private function intToStrRuntime(): string
     {
+        // NOT intFmtRuntime() — the int_len/int_fmt pair has a second consumer
+        // (@__mir_out_int) that does not want the whole int_to_str machinery, so
+        // the caller emits it, once, for either demand.
         $out = $this->intToStrImpl('@__mir_int_to_str', '@__mir_str_alloc');
         if ($this->rt->needsArena) {
             $out .= $this->intToStrImpl('@__mir_int_to_str_arena', '@__mir_str_alloc_arena');
         }
-        $out .= $this->intFmtRuntime();
         return $out;
     }
 

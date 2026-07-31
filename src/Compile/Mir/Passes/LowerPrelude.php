@@ -161,6 +161,12 @@ trait LowerPrelude
             // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
             $src = $src . $this->errorsSrc;
         }
+        if ($this->obSrc !== '') {
+            // After errors.php: both are drained from the same atexit family,
+            // and __mc_ob_shutdown must run after the shutdown queue it may be
+            // buffering the output of.
+            $src = $src . $this->obSrc;
+        }
         if ($this->sapiSrc !== '') {
             // After exceptions.php (setcookie throws ValueError) and after
             // cli.php, which Main forces on: the request context seeds $_SERVER.
@@ -726,13 +732,21 @@ trait LowerPrelude
      * case) → the standard-stream resource, so `fopen()` on the literal every
      * console app uses answers the same handle the constant does. Null for any
      * other target, which leaves the stdlib's fopen to handle it.
+     *
+     * ⚠ `php://output` is NOT `php://stdout`, though this folded both to fd 1
+     * until output buffering existed. php sends php://output through the output
+     * layer — so ob_start() captures it — and php://stdout straight to fd 1,
+     * where it is not captured. One node each.
      */
     private function stdStreamResource(string $target): ?Node
     {
         $t = \strtolower($target);
         if ($t === 'php://stdin')  { return $this->stdStreamNode(0); }
-        if ($t === 'php://stdout' || $t === 'php://output') { return $this->stdStreamNode(1); }
+        if ($t === 'php://stdout') { return $this->stdStreamNode(1); }
         if ($t === 'php://stderr') { return $this->stdStreamNode(2); }
+        if ($t === 'php://output') {
+            return new Call('__mc_output_res', [], Type::obj('Resource'));
+        }
         return null;
     }
 
@@ -789,6 +803,15 @@ trait LowerPrelude
             'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3, 'LOCK_NB' => 4,
             'SCANDIR_SORT_ASCENDING' => 0, 'SCANDIR_SORT_DESCENDING' => 1,
             'SCANDIR_SORT_NONE' => 2,
+            // ob_start() handler phases + flags. START is set on the FIRST
+            // handler call for a buffer, so a first ob_end_flush() sees 9 and a
+            // flush after one already happened sees 8 — {@see prelude/ob.php}.
+            'PHP_OUTPUT_HANDLER_START' => 1, 'PHP_OUTPUT_HANDLER_WRITE' => 0,
+            'PHP_OUTPUT_HANDLER_FLUSH' => 4, 'PHP_OUTPUT_HANDLER_CLEAN' => 2,
+            'PHP_OUTPUT_HANDLER_FINAL' => 8, 'PHP_OUTPUT_HANDLER_CONT' => 0,
+            'PHP_OUTPUT_HANDLER_END' => 8,
+            'PHP_OUTPUT_HANDLER_CLEANABLE' => 16, 'PHP_OUTPUT_HANDLER_FLUSHABLE' => 32,
+            'PHP_OUTPUT_HANDLER_REMOVABLE' => 64, 'PHP_OUTPUT_HANDLER_STDFLAGS' => 112,
             // parse_ini_* scanner modes
             'INI_SCANNER_NORMAL' => 0, 'INI_SCANNER_RAW' => 1, 'INI_SCANNER_TYPED' => 2,
             // stream_socket_server / _client flags — php's own values. A udp://

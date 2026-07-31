@@ -1472,7 +1472,68 @@ final class Parser
 
     public function parseExpression(): Expr
     {
-        return $this->parseAssign();
+        return $this->parseWordOr();
+    }
+
+    /** Whether the cursor is on the word operator $word (`and` / `or` / `xor`). */
+    private function checkWordOp(string $word): bool
+    {
+        $tok = $this->peek();
+        return $tok->kind === TokenKind::Keyword && \strtolower($tok->lexeme) === $word;
+    }
+
+    /**
+     * `or` / `xor` / `and` — PHP's word operators, and the only three things
+     * that bind LOOSER than `=`. That is the whole point of them:
+     * `$ok = fopen(…) or die(…)` assigns the fopen result and only then tests
+     * it, where `||` would assign the comparison. So they sit above
+     * {@see parseAssign} rather than beside `&&` / `||`.
+     *
+     * Precedence among themselves, loosest first: `or`, `xor`, `and`.
+     */
+    private function parseWordOr(): Expr
+    {
+        $left = $this->parseWordXor();
+        while ($this->checkWordOp('or')) {
+            $span = $this->span();
+            $this->advance();
+            $right = $this->parseWordXor();
+            $left = Expr::binary('||', $left, $right, $span);
+        }
+        return $left;
+    }
+
+    private function parseWordXor(): Expr
+    {
+        $left = $this->parseWordAnd();
+        while ($this->checkWordOp('xor')) {
+            $span = $this->span();
+            $this->advance();
+            $right = $this->parseWordAnd();
+            // `xor` does NOT short-circuit and has no `^^` counterpart to reuse
+            // (`^` is the BITWISE one and would answer an int). Desugared to
+            // `!$a !== !$b`, which is exactly logical xor over truthiness and
+            // needs no new node kind, no new lowering, and no new inference.
+            $left = Expr::binary(
+                '!==',
+                Expr::unary('!', $left, $span),
+                Expr::unary('!', $right, $span),
+                $span,
+            );
+        }
+        return $left;
+    }
+
+    private function parseWordAnd(): Expr
+    {
+        $left = $this->parseAssign();
+        while ($this->checkWordOp('and')) {
+            $span = $this->span();
+            $this->advance();
+            $right = $this->parseAssign();
+            $left = Expr::binary('&&', $left, $right, $span);
+        }
+        return $left;
     }
 
     /**
@@ -2347,6 +2408,21 @@ final class Parser
                 $this->advance();
                 $inner = $this->parseExpression();
                 return Expr::unary('throw', $inner, $span);
+            }
+            // `print` is an EXPRESSION, not a statement: it prints one operand
+            // and yields int 1, so `$ok = print "x";` and `$c and print "y";`
+            // are both legal. Lowest precedence and right-associative, which
+            // falls out of consuming the operand with parseExpression — the
+            // same shape `throw` above uses. The statement form `print "x";`
+            // needs nothing extra: parseStatement has no `print` arm, so it
+            // already falls through to the expression statement.
+            if ($lower === 'print') {
+                $this->advance();
+                // parseAssign, NOT parseExpression: `print` binds TIGHTER than
+                // the word operators, so `print $a and $b` is `(print $a) and $b`.
+                // Taking a full expression here would swallow the `and`.
+                $inner = $this->parseAssign();
+                return Expr::unary('print', $inner, $span);
             }
             if ($lower === 'static') {
                 $next = $this->tokens[$this->pos + 1] ?? null;

@@ -1083,25 +1083,20 @@ trait EmitLlvmCalls
      *     "\n<Level>: <body> in <file> on line <N>\n"
      *
      * Message, file and line are all compile-time constants, so the whole line
-     * is ONE interned literal and a `write` — no runtime formatting, and it
-     * dead-strips with the call if the call goes away.
+     * is ONE interned literal and one funnel call — no runtime formatting, and
+     * it dead-strips with the call if the call goes away.
      *
-     * Emitted through the same fflush + write(1, …) pair `echo` uses for a
-     * string. A `dprintf(2, …)` would look right in isolation and INTERLEAVE
-     * WRONG the moment a program mixes echo with a diagnostic.
+     * Through the output funnel, like `echo`, for two reasons: it interleaves
+     * correctly with program output (a `dprintf(2, …)` looks right in isolation
+     * and lands in the wrong place the moment a program mixes the two), and
+     * `ob_start()` captures it — which is what php does with display_errors set
+     * to STDOUT.
      */
     private function emitDiagnosticLine(string $level, string $body, int $line): string
     {
         $text = "\n" . $level . ': ' . $body . ' in ' . $this->sourceFile
               . ' on line ' . (string)$line . "\n";
-        $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
-        $this->libcExtra['write'] = 'declare i64 @write(i32, ptr, i64)';
-        $ptr = $this->strLitId($this->pool->intern($text));
-        $out = "  call i32 @fflush(ptr null)\n";
-        $wr = $this->ssa->allocReg();
-        $out .= '  ' . $wr . ' = call i64 @write(i32 1, ptr ' . $ptr
-              . ', i64 ' . (string)\strlen($text) . ")\n";
-        return $out;
+        return $this->emitOutLit($text);
     }
 
     /** The `#[\Deprecated]` line for a free function call, or ''. */

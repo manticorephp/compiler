@@ -90,6 +90,10 @@ final class Module
      *  Off for every program that never touches them — no hook, no cost. */
     public bool $needsErrorHandlers = false;
 
+    /** prelude/ob.php is compiled in, so main() registers the atexit trampoline
+     *  that flushes any buffer still open at exit (php's own behaviour). */
+    public bool $needsOb = false;
+
     /** Source file path, for exception file() / trace frames. */
     public string $sourceFile = '';
 
