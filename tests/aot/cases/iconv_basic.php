@@ -16,6 +16,11 @@ echo iconv("Windows-1252", "UTF-8", $cp), "\n";
 
 // //TRANSLIT is the reason this is a binding and not a reimplementation:
 // symfony/string's ascii() throws without it.
+//
+// ⚠ //TRANSLIT is where the two hosts disagree, and php disagrees with
+// ITSELF the same way: glibc renders "na\u{ef}ve caf\u{e9}" as `naive cafe`,
+// macOS libiconv as `na\"ive caf'e`. Both are the host library speaking, so
+// the expectation is split — expected/iconv_basic.linux.out carries glibc's.
 echo iconv("UTF-8", "ASCII//TRANSLIT", "na\u{ef}ve caf\u{e9}"), "\n";
 echo iconv("UTF-8", "ASCII//IGNORE", "a\u{e9}b"), "\n";
 
