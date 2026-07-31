@@ -357,6 +357,12 @@ trait InferCalls
         if ($n === 'getenv') {
             return Type::cell();
         }
+        // `require`/`include` evaluates to whatever the target file returned —
+        // an array, a closure, a scalar, or php's int(1) when it returned
+        // nothing. Nothing static covers that, so it stays self-describing.
+        if ($n === '__mc_require_value') {
+            return Type::cell();
+        }
         // Math: floor/ceil/round/sqrt/fmod all return float in PHP (e.g.
         // floor(4.5) === 4.0). Emitted as LLVM intrinsics — no libm link.
         if ($n === 'floatval' || $n === 'floor' || $n === 'ceil'

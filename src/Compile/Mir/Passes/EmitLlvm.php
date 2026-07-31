@@ -234,6 +234,11 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, int> closure fn name → capture count */
     private array $closureCaptures = [];
+
+    /** Resolved source path → the global slot holding that file's top-level
+     *  `return` value ({@see Module::$includeSlots}). Read by the
+     *  `require`/`include` builtin. @var array<string, string> */
+    private array $includeSlots = [];
     /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
     private array $closureHasThis = [];
 
@@ -381,6 +386,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalDefaults = $module->globalDefaults;
         $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalVarNames = $module->globalVarNames;
+        $this->includeSlots = $module->includeSlots;
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;

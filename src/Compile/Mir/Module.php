@@ -37,6 +37,13 @@ final class Module
      *  `trait_exists` fold). */
     public array $traitNames = [];
 
+    /** Resolved source path → the global slot holding that file's top-level
+     *  `return` value, i.e. what `require`/`include` of it evaluates to.
+     *  Only files that actually return are listed; everything else answers
+     *  php's `int(1)`.
+     *  @var array<string, string> */
+    public array $includeSlots = [];
+
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 

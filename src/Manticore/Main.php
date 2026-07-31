@@ -1851,6 +1851,19 @@ function __mc_abs_source_path(string $path): string {
     return $real === false ? $path : $real;
 }
 
+/**
+ * The global slot name holding what `require`/`include` of `$path` evaluates
+ * to. Keyed on the RESOLVED path so the two spellings a program reaches one
+ * file by (`__DIR__ . '/x.php'` and `./x.php`) name the same slot — the same
+ * normalisation `__FILE__` already gets. '' for a source with no path, which
+ * simply has no slot.
+ */
+function __mc_include_slot(string $path): string {
+    $abs = __mc_abs_source_path($path);
+    if ($abs === '') { return ''; }
+    return '__mc_incl_' . \substr(\sha1($abs), 0, 16);
+}
+
 function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
@@ -1877,6 +1890,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // make a top-level return the exit status. Hence the test is "not the last
     // source": position decides whether the statement survives, not its value.
     $lastIdx = \count($sources) - 1;
+    /** @var array<string, string> resolved path → value-slot global name */
+    $includeSlots = [];
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
@@ -1889,8 +1904,38 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             return null;
         }
         $isEntry = $i === $lastIdx;
+        $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '');
         foreach ($program->statements as $s) {
-            if (!$isEntry && $s->kind === 'Return') { continue; }
+            if (!$isEntry && $s->kind === 'Return') {
+                // Its VALUE is what `require`/`include` of this file evaluates
+                // to, and it used to be thrown away with the statement. Keep the
+                // value in a per-file global instead: the statements around it
+                // still run inline, in the same order, so nothing about when
+                // this file executes changes — only that its result survives to
+                // be read back. Written through $GLOBALS so a `require` inside
+                // any FUNCTION can reach it, not just __main's own scope.
+                if ($incSlot !== '' && $s->value !== null) {
+                    $includeSlots[__mc_abs_source_path($paths[$i])] = $incSlot;
+                    $stmts[] = \Parser\Ast\Stmt::expression(
+                        \Parser\Ast\Expr::assign(
+                            \Parser\Ast\Expr::arrayAccess(
+                                \Parser\Ast\Expr::variable('GLOBALS', $s->span),
+                                \Parser\Ast\Expr::string($incSlot, $s->span),
+                                $s->span,
+                            ),
+                            // Boxed on the way in: the slot has to hold an
+                            // array, a closure or a scalar interchangeably, and
+                            // the reader (a `require` expression) is typed cell
+                            // because nothing static covers that union. Stored
+                            // raw, an array pointer read back as its own bits.
+                            \Parser\Ast\Expr::call('__mir_to_cell', [$s->value], $s->span),
+                            $s->span,
+                        ),
+                        $s->span,
+                    );
+                }
+                continue;
+            }
             $stmts[] = $s;
         }
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
@@ -2253,6 +2298,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         if ($collect !== null) { $lower->attrCollectMode = true; }
         $statT = \Compile\Stats::now();
         $module = $lower->run($module);
+        // Path → value-slot map for `require`/`include`. Set after lowering
+        // because that is when the Module exists; the map itself was built at
+        // parse-merge time, the only point that still knows which file each
+        // top-level statement came from.
+        $module->includeSlots = $includeSlots;
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         if ($collect !== null) {
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }

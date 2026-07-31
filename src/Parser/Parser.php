@@ -2379,18 +2379,20 @@ final class Parser
             }
             // require / include (+ _once): in whole-program AOT the target's
             // declarations are already compiled in — composer discovery and the
-            // src scan pull every autoload file, including the one being required
-            // — so the runtime load is redundant. Parse and DISCARD the path
-            // operand, lowering to a no-op that yields null (PHP's include of a
-            // file with no `return` yields int 1; nothing downstream in a compiled
-            // program depends on that). A future step could resolve the path at
-            // compile time and merge a genuinely external file into the build; the
-            // value-returning `$x = require 'data.php'` form is not modelled yet.
+            // src scan pull every autoload file, including the one being
+            // required — so the LOAD is redundant. Its VALUE is not: a file
+            // ending in `return [...]` (symfony's config/bundles.php, every
+            // dumped-container data file) or `return function (…) {…}` is the
+            // whole point of the expression, and this used to yield null.
+            //
+            // The path operand is now EVALUATED (it can have side effects, and
+            // php evaluates it) and handed to `__mc_require_value`, which maps a
+            // path to the slot holding that file's top-level return value
+            // ({@see \Manticore\__mc_include_slot}).
             if ($lower === 'require' || $lower === 'require_once'
                     || $lower === 'include' || $lower === 'include_once') {
                 $this->advance();
-                $this->parseExpression(); // consume + discard the path
-                return Expr::null($span);
+                return Expr::call('__mc_require_value', [$this->parseExpression()], $span);
             }
             // Legacy long-array syntax `array(a, b, k => v)` — identical to
             // `[a, b, k => v]`; still common in generated / data files.

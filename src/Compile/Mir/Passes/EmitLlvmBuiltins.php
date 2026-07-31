@@ -63,6 +63,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_stdout')                 { return $this->biStdStream('stdout'); }
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
         if ($name === '__mir_argc')                   { return $this->biCliArgc(); }
+        if ($name === '__mc_require_value')           { return $this->biRequireValue($args); }
         if ($name === '__mir_fa_take')                { return $this->biFuncArgsTake($args); }
         if ($name === '__mir_fa_takex')               { return $this->biFuncArgsTakeExtra(); }
         if ($name === '__mir_argv_at')                { return $this->biCliArgvAt($args); }
@@ -1354,6 +1355,72 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__mir_fa_take(i64 ' . $this->lastValue . ")\n";
         return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `require`/`include <path>` — what the expression EVALUATES to.
+     *
+     * Whole-program AOT already compiled the target's declarations in, and its
+     * top-level statements already ran inline; what was missing is the value a
+     * file ending in `return [...]` / `return function (…) {…}` hands back.
+     * Each such file stores that value in a global ({@see
+     * \Manticore\__mc_include_slot}), and this resolves a path to the right one.
+     *
+     * A chain rather than a table because the set is closed and small, and it
+     * is the same shape the dynamic function-name dispatch uses. The path is
+     * compared RESOLVED — a program reaches one file by several spellings
+     * (`__DIR__ . '/x.php'`, `./x.php`), and the slot is keyed on the real path.
+     *
+     * No match answers php's `int(1)`, which is what including a file that does
+     * not return gives — the honest answer here, since the file's declarations
+     * and top-level effects are in the binary either way.
+     * @param Node[] $args
+     */
+    private function biRequireValue(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $pathP = $this->lastValue;
+        $slots = $this->includeSlots;
+        if (\count($slots) === 0) {
+            return $this->finishI64($out, '1');
+        }
+        $this->rt->needsStrcmp = true;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 1, ptr ' . $res . "\n";
+        // Resolve the incoming path the same way the keys were resolved, so a
+        // relative spelling still matches. A NULL result (the file is gone)
+        // leaves the original pointer, which then simply matches nothing.
+        $this->libcExtra['realpath'] = 'declare ptr @realpath(ptr, ptr)';
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = call ptr @realpath(ptr ' . $pathP . ", ptr null)\n";
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rp . ", null\n";
+        $keyP = $this->ssa->allocReg();
+        $out .= '  ' . $keyP . ' = select i1 ' . $isNull . ', ptr ' . $pathP . ', ptr ' . $rp . "\n";
+        $endL = $this->ssa->allocLabel('incl.end');
+        foreach ($slots as $absPath => $slot) {
+            $hitL = $this->ssa->allocLabel('incl.hit');
+            $nextL = $this->ssa->allocLabel('incl.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr '
+                  . $this->litStr($absPath) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
+            $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        return $this->finishI64($out, $loaded);
     }
 
     /**

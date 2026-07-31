@@ -76,6 +76,8 @@ final class Builtins
             // anywhere ({@see \Compile\Mir\Passes\LowerExprs}).
             'func_num_args', 'func_get_arg', 'func_get_args',
             '__mir_fa_take', '__mir_fa_takex',
+            // What the parser turns `require`/`include <path>` into.
+            '__mc_require_value',
             'flush', '__mir_out_write_str',
             '__mir_ob_push', '__mir_ob_pop', '__mir_ob_level', '__mir_ob_len',
             '__mir_ob_peek', '__mir_ob_take', '__mir_ob_clean', '__mir_ob_inuse',
