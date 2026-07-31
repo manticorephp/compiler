@@ -1665,6 +1665,85 @@ final class Parser
 }
 
 /**
+ * One connection's outbound queue: parts in, one `writev(2)` out.
+ *
+ * A keep-alive client that PIPELINES sends several requests in one packet, and
+ * the parser answers all of them from one buffer — but a `fwrite` per response
+ * turns that back into one syscall each. Queuing the parts and handing the
+ * vector to the kernel once collapses a batch of N responses into ONE write,
+ * which is the same trick the head+body vector already plays within a single
+ * response.
+ *
+ * The parts are NOT concatenated: `fwrite`'s array form is a real `writev`, so
+ * a 1 MiB body is never copied into a staging buffer. The two ceilings are
+ * what keep that honest — a queue is flushed once it is either long enough to
+ * approach `IOV_MAX` or big enough that holding it buys nothing.
+ *
+ * @internal
+ */
+final class Outbox
+{
+    /** Well under IOV_MAX (1024 on both hosts), so a vector never has to be
+     *  split by the kernel. */
+    private const MAX_PARTS = 64;
+
+    /** Past this the queue is already worth a syscall on its own. */
+    private const MAX_BYTES = 262144;
+
+    private static array<int, string> $empty = [];
+
+    private \Resource $conn;
+    private array<int, string> $parts = [];
+    private int $n = 0;
+    private int $bytes = 0;
+
+    public function __construct(\Resource $conn)
+    {
+        $this->conn = $conn;
+    }
+
+    public function add(string $s): void
+    {
+        if ($s === '') {
+            return;
+        }
+        $this->parts[$this->n] = $s;
+        $this->n = $this->n + 1;
+        $this->bytes = $this->bytes + \strlen($s);
+        if ($this->n >= self::MAX_PARTS || $this->bytes >= self::MAX_BYTES) {
+            $this->flush();
+        }
+    }
+
+    /** Queue and send in one go — for anything a peer is WAITING on. */
+    public function sendNow(string $s): void
+    {
+        $this->add($s);
+        $this->flush();
+    }
+
+    public function flush(): void
+    {
+        if ($this->n === 0) {
+            return;
+        }
+        if ($this->n === 1) {
+            \fwrite($this->conn, $this->parts[0]);
+        } else {
+            \fwrite($this->conn, $this->parts);
+        }
+        $this->parts = self::$empty;
+        $this->n = 0;
+        $this->bytes = 0;
+    }
+
+    public function pending(): int
+    {
+        return $this->bytes;
+    }
+}
+
+/**
  * The Request being served on this flow, or null outside one.
  *
  * The ambient reader for code too deep to be handed the Request — a logger, a
@@ -1962,8 +2041,8 @@ final class Server
     private function connection(\Resource $conn): void
     {
         $buf = new \Buffer\ByteBuffer();
+        $out = new Outbox($conn);
         $remote = '';
-        $handled = 0;
         // ONE parser for the connection, reset between messages. Its limits and
         // its buffer do not change, so a fresh object per request was four
         // allocations and a zeroed field block for nothing.
@@ -1977,6 +2056,20 @@ final class Server
             $conn,
             $this->streamBodies,
         );
+        try {
+            $this->pump($conn, $buf, $out, $parser);
+        } finally {
+            // Whatever is queued goes out before the socket does, on EVERY
+            // exit — an early return with a response still in the vector is a
+            // client waiting forever.
+            $out->flush();
+        }
+    }
+
+    /** The keep-alive loop proper. {@see connection} owns the flush contract. */
+    private function pump(\Resource $conn, \Buffer\ByteBuffer $buf, Outbox $out, Parser $parser): void
+    {
+        $handled = 0;
         while (!$this->stopped) {
             $parser->reset();
             // The FIRST read of a request waits idleTimeout (a kept-alive
@@ -1994,7 +2087,7 @@ final class Server
                     // the parser only asks once the head is framed, so this is
                     // never an invitation to a body already refused. Parsing
                     // resumes where it stopped; the head is not re-read.
-                    \fwrite($conn, "HTTP/1.1 100 Continue\r\n\r\n");
+                    $out->sendNow("HTTP/1.1 100 Continue\r\n\r\n");
                     $code = $parser->parse();
                     continue;
                 }
@@ -2005,7 +2098,7 @@ final class Server
                     // ran out its clock gets a 408.
                     if ($got && $this->timedOut($conn)) {
                         $this->statErrors = $this->statErrors + 1;
-                        $this->writeError($conn, 408);
+                        $this->writeError($out, 408);
                     }
                     return;
                 }
@@ -2018,7 +2111,7 @@ final class Server
             }
             if ($code !== Parser::READY) {
                 $this->statErrors = $this->statErrors + 1;
-                $this->writeError($conn, $code);
+                $this->writeError($out, $code);
                 return;
             }
             $req = $parser->request();
@@ -2040,8 +2133,8 @@ final class Server
                 $keep = (bool)\Async\Context::withValue(
                     self::CTX_REQUEST,
                     $req,
-                    function () use ($conn, $req, $handled) {
-                        return $this->serveOne($conn, $req, $handled);
+                    function () use ($conn, $out, $req, $handled) {
+                        return $this->serveOne($conn, $out, $req, $handled);
                     },
                 );
             } finally {
@@ -2053,6 +2146,13 @@ final class Server
             // compact(), never clear(): bytes already read past this request are
             // the NEXT one's head, and a pipelining client sends both at once.
             $buf->compact();
+            // Nothing else is already in hand to answer, so the queue has
+            // nothing left to join: send it. When the buffer DOES still hold a
+            // request, holding on collapses the whole pipelined batch into one
+            // writev.
+            if ($buf->isEmpty()) {
+                $out->flush();
+            }
         }
     }
 
@@ -2062,7 +2162,7 @@ final class Server
      *
      * @return bool whether the connection may be reused
      */
-    private function serveOne(\Resource $conn, Request $req, int $handled): bool
+    private function serveOne(\Resource $conn, Outbox $out, Request $req, int $handled): bool
     {
         $res = $this->dispatch($req);
         $keep = $req->isKeepAlive()
@@ -2088,7 +2188,7 @@ final class Server
             }
         }
         $this->setTimeout($conn, $this->writeTimeout);
-        $keep = $this->writeResponse($conn, $req, $res, $keep);
+        $keep = $this->writeResponse($conn, $out, $req, $res, $keep);
         $this->statServed = $this->statServed + 1;
         return $keep;
     }
@@ -2258,10 +2358,10 @@ final class Server
      * Head + body in ONE `fwrite` — a literal two-element array is a
      * `writev(2)`, so a response costs one syscall rather than two.
      */
-    private function writeResponse(\Resource $conn, Request $req, Response $res, bool $keep): bool
+    private function writeResponse(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
     {
         if ($res->isStreaming() && Status::hasBody($res->status)) {
-            return $this->writeStreamed($conn, $req, $res, $keep);
+            return $this->writeStreamed($conn, $out, $req, $res, $keep);
         }
         $body = $res->getBody();
         $hasBody = Status::hasBody($res->status);
@@ -2272,11 +2372,10 @@ final class Server
         \__mc_response_sent();
         // HEAD carries the headers of the GET it mirrors — Content-Length
         // included — and no body at all.
-        if ($req->method === 'HEAD' || $body === '') {
-            \fwrite($conn, $head);
-            return $keep;
+        $out->add($head);
+        if ($req->method !== 'HEAD') {
+            $out->add($body);
         }
-        \fwrite($conn, [$head, $body]);
         return $keep;
     }
 
@@ -2291,7 +2390,7 @@ final class Server
      *
      * @return bool whether the connection may still be reused
      */
-    private function writeStreamed(\Resource $conn, Request $req, Response $res, bool $keep): bool
+    private function writeStreamed(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
     {
         $chunked = $req->version === '1.1';
         $h = $res->headers;
@@ -2304,7 +2403,10 @@ final class Server
         // headers_sent() honest INSIDE the body closure below, and what stops
         // header() from recording into a block already on the wire.
         \__mc_response_sent();
-        \fwrite($conn, $head);
+        // The queue drains BEFORE the body closure runs: from here the bytes
+        // go straight to the socket through the writer below, and a queued
+        // head would then arrive AFTER them.
+        $out->sendNow($head);
         if ($req->method === 'HEAD') {
             return $keep;
         }
@@ -2368,9 +2470,9 @@ final class Server
      * allocates is an error path a client can turn into a cost. The strings sit
      * in .rodata; the arm is a select.
      */
-    private function writeError(\Resource $conn, int $code): void
+    private function writeError(Outbox $out, int $code): void
     {
-        \fwrite($conn, match ($code) {
+        $out->sendNow(match ($code) {
             400 => "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
             405 => "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
             408 => "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
