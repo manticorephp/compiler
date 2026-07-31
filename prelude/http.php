@@ -1973,7 +1973,7 @@ final class Server
             // headerTimeout, so a client that dribbles a head cannot hold a
             // slot open. A silent client is closed silently, as nginx does.
             $first = $buf->isEmpty();
-            \stream_set_timeout($conn, (int)($first ? $this->idleTimeout : $this->headerTimeout));
+            $this->setTimeout($conn, $first ? $this->idleTimeout : $this->headerTimeout);
             $code = $parser->parse();
             $got = !$first;
             while ($code === Parser::NEED || $code === Parser::CONTINUE_) {
@@ -1992,13 +1992,14 @@ final class Server
                     // silently, as nginx does; one that stopped MID-request and
                     // ran out its clock gets a 408.
                     if ($got && $this->timedOut($conn)) {
+                        $this->statErrors = $this->statErrors + 1;
                         $this->writeError($conn, 408);
                     }
                     return;
                 }
                 if (!$got) {
                     $got = true;
-                    \stream_set_timeout($conn, (int)$this->headerTimeout);
+                    $this->setTimeout($conn, $this->headerTimeout);
                 }
                 $buf->append($chunk);
                 $code = $parser->parse();
@@ -2074,7 +2075,7 @@ final class Server
                 }
             }
         }
-        \stream_set_timeout($conn, (int)$this->writeTimeout);
+        $this->setTimeout($conn, $this->writeTimeout);
         $keep = $this->writeResponse($conn, $req, $res, $keep);
         $this->statServed = $this->statServed + 1;
         return $keep;
@@ -2335,21 +2336,44 @@ final class Server
     }
 
     /**
-     * A refusal the handler never sees. One string, one write, no allocation
-     * beyond the concat — an error path that allocates is an error path a
-     * client can turn into a cost.
+     * A refusal the handler never sees: one PRECOMPUTED constant, one write.
+     *
+     * A `match` over literals, not a concat, and that is the point — every one
+     * of these is reachable by an unauthenticated peer, and an error path that
+     * allocates is an error path a client can turn into a cost. The strings sit
+     * in .rodata; the arm is a select.
      */
     private function writeError(\Resource $conn, int $code): void
     {
-        $reason = reason($code);
-        if ($reason === '') {
-            $reason = 'Error';
-        }
-        \fwrite(
-            $conn,
-            'HTTP/1.1 ' . $code . ' ' . $reason . "\r\n"
-            . "Connection: close\r\nContent-Length: 0\r\n\r\n",
-        );
+        \fwrite($conn, match ($code) {
+            400 => "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            405 => "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            408 => "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            411 => "HTTP/1.1 411 Length Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            413 => "HTTP/1.1 413 Content Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            414 => "HTTP/1.1 414 URI Too Long\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            417 => "HTTP/1.1 417 Expectation Failed\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            431 => "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            500 => "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            501 => "HTTP/1.1 501 Not Implemented\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            503 => "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            505 => "HTTP/1.1 505 HTTP Version Not Supported\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            default => 'HTTP/1.1 ' . $code . " Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        });
+    }
+
+    /**
+     * Bound the next operation on this connection.
+     *
+     * Seconds AND microseconds, because the fractional part is the whole
+     * setting for a test and for anyone who wants a sub-second idle window: an
+     * `(int)` cast alone turns 0.3 into 0, which php reads as "no timeout".
+     */
+    private function setTimeout(\Resource $conn, float $seconds): void
+    {
+        $whole = (int)$seconds;
+        $micro = (int)(($seconds - $whole) * 1000000.0);
+        \stream_set_timeout($conn, $whole, $micro);
     }
 
     /** Whether the last short read was a TIMEOUT rather than a close. */
