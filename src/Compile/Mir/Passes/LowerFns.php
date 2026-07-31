@@ -367,7 +367,7 @@ trait LowerFns
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -413,11 +413,27 @@ trait LowerFns
             $elem = $retType->isGenerator() ? $retType->element : null;
             $retType = Type::generator($elem);
         }
+        // `fn &()` / `function &()` PARSES now, but the closure invoke path does
+        // not honour a by-reference return the way the named-function one does:
+        // the alias came back a copy, so `$r = &$f(); $r[] = x;` left the
+        // original untouched. Silently. A loud stop is strictly better than a
+        // wrong answer — and better than the old parse error, which pointed at
+        // the `&` with no explanation.
+        //
+        // What is missing is the closure ABI half, not the parser: named
+        // functions and methods already return by reference correctly.
+        if ($returnsByRef) {
+            throw new \RuntimeException(
+                'unsupported: a closure or arrow function cannot return by reference yet '
+                . '(the named-function form does). Its caller would receive a copy, not an alias.'
+            );
+        }
         $clFn = new FunctionDef(
             name: $fnName,
             params: $params,
             returnType: $retType,
             body: $body,
+            returnsByRef: $returnsByRef,
         );
         $clFn->isGenerator = $isGenerator;
         $this->module->addFunction($clFn);

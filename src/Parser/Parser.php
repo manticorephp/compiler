@@ -2466,6 +2466,12 @@ final class Parser
     private function parseArrowFn(bool $isStatic, Span $span): Expr
     {
         $this->advance(); // 'fn'
+        // `fn &() => …` returns by reference, exactly as `function &f()` does —
+        // the machinery already exists for named functions and methods, only
+        // the closure forms never parsed the `&`. symfony/dependency-injection
+        // uses it twice to alias a private property out of a bound closure:
+        // `$x = &\Closure::bind(fn &() => $this->instanceof, $o, $o)();`
+        $returnsByRef = $this->match(TokenKind::Ampersand);
         $params = $this->parseParenParamList();
         $returnType = null;
         if ($this->match(TokenKind::Colon)) {
@@ -2473,12 +2479,14 @@ final class Parser
         }
         $this->expect(TokenKind::DoubleArrow, "expected '=>' in arrow function");
         $body = $this->parseExpression();
-        return Expr::arrowFn($isStatic, $params, $returnType, $body, $span);
+        return Expr::arrowFn($isStatic, $params, $returnType, $body, $span, $returnsByRef);
     }
 
     private function parseClosure(bool $isStatic, Span $span): Expr
     {
         $this->advance(); // 'function'
+        // `function &() {…}` — same by-reference return as the named form.
+        $returnsByRef = $this->match(TokenKind::Ampersand);
         $params = $this->parseParenParamList();
         $uses = [];
         if ($this->checkKeyword('use')) {
@@ -2498,7 +2506,7 @@ final class Parser
             $returnType = $this->parseTypeHint();
         }
         $body = $this->parseBlock();
-        return Expr::closure($isStatic, $params, $uses, $returnType, $body, $span);
+        return Expr::closure($isStatic, $params, $uses, $returnType, $body, $span, $returnsByRef);
     }
 
     private function parseClosureUse(): ClosureUse

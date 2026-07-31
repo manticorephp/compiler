@@ -1947,7 +1947,8 @@ final class LowerFromAst implements Pass
         $body = $this->lowerBlockNode($expr->body);
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
-        return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen);
+        return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
+            (bool)($expr->returnsByRef ?? false));
     }
 
     private function lowerArrowFn(\Parser\Ast\ArrowFn $expr): Node
@@ -1964,7 +1965,11 @@ final class LowerFromAst implements Pass
             $free[] = $v;
         }
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
-        return $this->finishClosure($free, $expr->params, $body, $expr->returnType);
+        // An arrow fn has no captures list and cannot be a generator, so the two
+        // middle arguments stay at their defaults; the by-ref RETURN is the one
+        // thing it can carry.
+        return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], false,
+            (bool)($expr->returnsByRef ?? false));
     }
 
     /** Whether the lowered node tree reads the local `$this`. */

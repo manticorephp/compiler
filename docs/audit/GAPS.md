@@ -33,7 +33,7 @@ Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capabili
 | 7 | S2 | `parser-ref-in-array-literal` | T1 | parser | `[&$a[$k], $v]` (reference inside an array literal) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
 | 8 | S2 | `spl-classes-absent` | T1 | prelude | PARTIAL: the 10 missing SPL EXCEPTIONS are declared with php parentage (BadMethodCall/Domain/Length/BadFunctionCall under LogicException; OutOfBounds/Overflow/Range/Underflow/UnexpectedValue under RuntimeException; JsonException under Exception). Still absent: the SPL ITERATORS and DirectoryIterator/DOMDocument/ReflectionExtension | [`tests/aot/cases/spl_exception_tree.php`](tests/aot/cases/spl_exception_tree.php) |
 | 9 | S2 | `globals-whole-array` | T3 | compiler-root | a whole-array $GLOBALS read is a hard compile error | [`probes/cap_globals_array_read.php`](probes/cap_globals_array_read.php) |
-| 10 | S2 | `parser-byref-arrow-fn` | T3 | parser | `fn &() => ...` (by-reference arrow function) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 10 | S2 | `parser-byref-arrow-fn` | T3 | parser | PARTIAL: `fn &()` / `function &()` now PARSE and carry returnsByRef; lowering refuses them with a precise message instead of compiling silently wrong code. Shipping the parse alone was measured and rejected — the alias came back a COPY, so $r = &$f(); $r[] = x left the original untouched. The missing half is the closure ABI, not the parser: named functions and methods already return by reference correctly | [`data/analyze-t8.json`](data/analyze-t8.json) |
 | 11 | S2 | `refl-param-attributes` | T3 | prelude | ReflectionParameter::getAttributes absent; DI autowiring and controller argument resolution cannot work | [`probes/cap_refl_param_attributes.php`](probes/cap_refl_param_attributes.php) |
 | 12 | S2 | `refl-param-default` | T3 | prelude | ReflectionParameter::getDefaultValue/getDeclaringClass absent | [`probes/cap_refl_param_default.php`](probes/cap_refl_param_default.php) |
 | 13 | S2 | `refl-union-type` | T3 | prelude | no ReflectionUnionType / ReflectionIntersectionType | [`probes/cap_refl_union_type.php`](probes/cap_refl_union_type.php) |
@@ -97,7 +97,7 @@ N..8 and nothing below.
 ### `parser-gaps` — 2 finding(s), first bites at T1
 
 - **S2** `parser-ref-in-array-literal` — `[&$a[$k], $v]` (reference inside an array literal) is not parsed
-- **S2** `parser-byref-arrow-fn` — `fn &() => ...` (by-reference arrow function) is not parsed
+- **S2** `parser-byref-arrow-fn` — PARTIAL: `fn &()` / `function &()` now PARSE and carry returnsByRef; lowering refuses them with a precise message instead of compiling silently wrong code. Shipping the parse alone was measured and rejected — the alias came back a COPY, so $r = &$f(); $r[] = x left the original untouched. The missing half is the closure ABI, not the parser: named functions and methods already return by reference correctly
 
 ### `spl-classes` — 1 finding(s), first bites at T1
 
