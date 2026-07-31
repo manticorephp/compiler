@@ -32,7 +32,7 @@ Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capabili
 | 6 | S1 | `include-returns-null` | T4 | compiler-root | require/include lower to null, so config/bundles.php, config/*.php closures and the dumped DI container never load | [`probes/cap_include_returns_value.php`](probes/cap_include_returns_value.php) |
 | 7 | S1 | `putenv-absent` | T4 | stdlib-leaf | putenv absent, so SHELL_VERBOSITY never round-trips through getenv | [`probes/cap_putenv.php`](probes/cap_putenv.php) |
 | 8 | S2 | `parser-ref-in-array-literal` | T1 | parser | `[&$a[$k], $v]` (reference inside an array literal) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
-| 9 | S2 | `spl-classes-absent` | T1 | prelude | OutOfBoundsException, BadMethodCallException, IteratorIterator, DirectoryIterator and friends are absent | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 9 | S2 | `spl-classes-absent` | T1 | prelude | PARTIAL: the 10 missing SPL EXCEPTIONS are declared with php parentage (BadMethodCall/Domain/Length/BadFunctionCall under LogicException; OutOfBounds/Overflow/Range/Underflow/UnexpectedValue under RuntimeException; JsonException under Exception). Still absent: the SPL ITERATORS and DirectoryIterator/DOMDocument/ReflectionExtension | [`tests/aot/cases/spl_exception_tree.php`](tests/aot/cases/spl_exception_tree.php) |
 | 10 | S2 | `globals-whole-array` | T3 | compiler-root | a whole-array $GLOBALS read is a hard compile error | [`probes/cap_globals_array_read.php`](probes/cap_globals_array_read.php) |
 | 11 | S2 | `parser-byref-arrow-fn` | T3 | parser | `fn &() => ...` (by-reference arrow function) is not parsed | [`data/analyze-t8.json`](data/analyze-t8.json) |
 | 12 | S2 | `parser-high-byte-identifier` | T3 | parser | an identifier containing bytes >= 0x80 is rejected; symfony/cache declares `class \xa9` | [`data/analyze-t8.json`](data/analyze-t8.json) |
@@ -108,7 +108,7 @@ N..8 and nothing below.
 
 ### `spl-classes` — 1 finding(s), first bites at T1
 
-- **S2** `spl-classes-absent` — OutOfBoundsException, BadMethodCallException, IteratorIterator, DirectoryIterator and friends are absent
+- **S2** `spl-classes-absent` — PARTIAL: the 10 missing SPL EXCEPTIONS are declared with php parentage (BadMethodCall/Domain/Length/BadFunctionCall under LogicException; OutOfBounds/Overflow/Range/Underflow/UnexpectedValue under RuntimeException; JsonException under Exception). Still absent: the SPL ITERATORS and DirectoryIterator/DOMDocument/ReflectionExtension
 
 ### `reflection-tier4` — 6 finding(s), first bites at T3
 

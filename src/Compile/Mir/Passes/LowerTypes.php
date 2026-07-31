@@ -142,9 +142,30 @@ trait LowerTypes
         if (\count($arms) !== 2) { return null; }
         $a0 = \strtolower(\ltrim($arms[0], '\\'));
         $a1 = \strtolower(\ltrim($arms[1], '\\'));
-        if ($a1 === 'null' && $a0 !== 'null' && $arms[0] !== '') { return $arms[0]; }
-        if ($a0 === 'null' && $a1 !== 'null' && $arms[1] !== '') { return $arms[1]; }
-        return null;
+        $live = null;
+        if ($a1 === 'null' && $a0 !== 'null' && $arms[0] !== '') { $live = $arms[0]; }
+        elseif ($a0 === 'null' && $a1 !== 'null' && $arms[1] !== '') { $live = $arms[1]; }
+        if ($live === null) { return null; }
+        // A nullable CONTAINER keeps its old cell lowering. `string[]|null` and
+        // `array<string,mixed>|null` never matched isArrayUnion — that wants
+        // EVERY arm to be an array and `null` is not — so they fell through to a
+        // cell, and the tree is built on that. Collapsing them to `?string[]`
+        // hands back a raw array pointer where a null still has to be
+        // representable.
+        //
+        // This is what broke async TLS, and it took a single-variable rebuild to
+        // see: of the fifteen hints the collapse fires on tree-wide, TWELVE are
+        // containers and five of those sit in Runtime/Stdlib/Net.php. The three
+        // that remain — ReflectionNamedType|null, ReflectionMethod|null,
+        // string|null — are exactly the cases the fix exists for.
+        if ($this->looksLikeArrayElemType($live)) { return null; }
+        // A CALLABLE SIGNATURE arm does not survive the round trip either: the
+        // collapse re-lowers as `?<arm>`, and lowerCallableSignature — which runs
+        // BEFORE the union branch — does not recognise its own syntax behind a
+        // leading `?`. src/Cli/Command.php spells its handler field
+        // `\Closure(array<int, string>): int | null`.
+        if (\strpos($live, '(') !== false) { return null; }
+        return $live;
     }
 
     /** True if `$hint` is a union (`a|b|…`) whose every arm is an ARRAY shape
