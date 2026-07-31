@@ -16,7 +16,7 @@ without a file behind it.
 | S3 | static finding with no observed runtime effect |
 | S4 | advisory / analyzer residue |
 
-**21 findings**: 6 S1, 10 S2, 3 S3, 2 S4.
+**22 findings**: 6 S1, 10 S2, 4 S3, 2 S4.
 
 Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capability.tsv`).
 
@@ -42,9 +42,10 @@ Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capabili
 | 16 | S2 | `pdo-absent` | T6 | stdlib-leaf | no PDO, PDOStatement, PDOException or sqlite binding exists at all | [`PDO-SQLITE-REQUIREMENTS.md`](PDO-SQLITE-REQUIREMENTS.md) |
 | 17 | S3 | `autoload-queue-never-drained` | T1 | compiler-root | PARTIAL: spl_autoload_register/unregister/functions now exist (prelude/autoload.php), so composer ClassLoader::register() compiles and registers instead of being a hard compile error. class_exists($n, true) still does not DRAIN the queue: the lookup is an emit-time fold into a static table and the guard machinery depends on it staying constant-foldable, so firing it is a design call. Bounded impact — ahead of time an autoloader can never define a class, so only the callback side effects are lost | [`probes/cap_spl_autoload_register.php`](probes/cap_spl_autoload_register.php) |
 | 18 | S3 | `function-exists-lies` | T1 | compiler-root | NEARLY CLOSED: was 44 of 53 common functions answering false; now 5. Fixed by teaching functionIsKnown the codegen builtins, the rest of the emitBuiltin dispatch and the compiler rewrites. The 5 left are DEMAND-GATED prelude names (error_reporting, register_shutdown_function, set_error_handler, ob_start, ob_get_clean) that the program only MENTIONS inside function_exists without calling — the prelude is then never injected. Measuring caught an over-inclusion too: `print` is a construct php does not expose, so claiming it exists was a regression of its own | [`tests/aot/cases/cap_trigger_error_handler.php`](tests/aot/cases/cap_trigger_error_handler.php) |
-| 19 | S3 | `refl-attr-is-instanceof` | T4 | prelude | ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only | [`probes/cap_refl_attr_is_instanceof.php`](probes/cap_refl_attr_is_instanceof.php) |
-| 20 | S4 | `analyzer-use-function` | T1 | compiler-root | the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs | [`data/calibration-residue.txt`](data/calibration-residue.txt) |
-| 21 | S4 | `preg-match-cell-boxing-cost` | T2 | stdlib-leaf | preg_match $matches had to become cell-element so PREG_OFFSET_CAPTURE can hold its [text,offset] pairs; measured 0.088s -> 0.102s (+16%) on a 300k-iteration match loop. Recoverable by specializing on a constant $flags argument, which is compiler work, not stdlib work | [`tests/aot/cases/cap_preg_named_groups.php`](tests/aot/cases/cap_preg_named_groups.php) |
+| 19 | S3 | `vardump-ref-marker` | T1 | repr | var_dump does not mark a slot that IS a reference: php prints &int(99) for $a[1] after $r = &$a[1], manticore prints int(99). The ALIAS itself is correct — the value changes through the reference — so this is a display divergence, but it is the same missing fact (which slot is a reference) that a `[&$a[$k], $v]` literal would have to preserve, which is why parser-ref-in-array-literal is not just a parser gap | [`data/analyze-t8.json`](data/analyze-t8.json) |
+| 20 | S3 | `refl-attr-is-instanceof` | T4 | prelude | ReflectionAttribute::IS_INSTANCEOF is declared but the filter matches exact names only | [`probes/cap_refl_attr_is_instanceof.php`](probes/cap_refl_attr_is_instanceof.php) |
+| 21 | S4 | `analyzer-use-function` | T1 | compiler-root | the analyzer does not model `use function Ns\name` imports; 10 sites, code compiles and runs | [`data/calibration-residue.txt`](data/calibration-residue.txt) |
+| 22 | S4 | `preg-match-cell-boxing-cost` | T2 | stdlib-leaf | preg_match $matches had to become cell-element so PREG_OFFSET_CAPTURE can hold its [text,offset] pairs; measured 0.088s -> 0.102s (+16%) on a 300k-iteration match loop. Recoverable by specializing on a constant $flags argument, which is compiler work, not stdlib work | [`tests/aot/cases/cap_preg_named_groups.php`](tests/aot/cases/cap_preg_named_groups.php) |
 
 ## Closed
 
@@ -123,6 +124,10 @@ N..8 and nothing below.
 ### `error-handling` — 1 finding(s), first bites at T1
 
 - **S3** `function-exists-lies` — NEARLY CLOSED: was 44 of 53 common functions answering false; now 5. Fixed by teaching functionIsKnown the codegen builtins, the rest of the emitBuiltin dispatch and the compiler rewrites. The 5 left are DEMAND-GATED prelude names (error_reporting, register_shutdown_function, set_error_handler, ob_start, ob_get_clean) that the program only MENTIONS inside function_exists without calling — the prelude is then never injected. Measuring caught an over-inclusion too: `print` is a construct php does not expose, so claiming it exists was a regression of its own
+
+### `references` — 1 finding(s), first bites at T1
+
+- **S3** `vardump-ref-marker` — var_dump does not mark a slot that IS a reference: php prints &int(99) for $a[1] after $r = &$a[1], manticore prints int(99). The ALIAS itself is correct — the value changes through the reference — so this is a display divergence, but it is the same missing fact (which slot is a reference) that a `[&$a[$k], $v]` literal would have to preserve, which is why parser-ref-in-array-literal is not just a parser gap
 
 ### `analyzer` — 1 finding(s), first bites at T1
 
