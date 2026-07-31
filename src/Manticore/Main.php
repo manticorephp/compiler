@@ -1858,10 +1858,32 @@ function __mc_abs_source_path(string $path): string {
  * normalisation `__FILE__` already gets. '' for a source with no path, which
  * simply has no slot.
  */
-function __mc_include_slot(string $path): string {
+function __mc_include_slot(string $path, int $index): string {
     $abs = __mc_abs_source_path($path);
     if ($abs === '') { return ''; }
-    return '__mc_incl_' . \substr(\sha1($abs), 0, 16);
+    // Derived from the source INDEX plus a sanitised tail of the path — no hash.
+    //
+    // This used to be substr(sha1($abs), 0, 16), which is correct everywhere
+    // except the one place that matters: sha1() routes through OpenSSL's EVP,
+    // and tools/link_stubs.sh stubs EVP_sha1 to `return 0` when linking the
+    // SELF-HOSTED compiler. Inside that compiler every path hashed to the same
+    // string, so every file shared one slot and the include case SEGFAULTED —
+    // and only under self-host, which is why the normal suite stayed green and
+    // the fixpoint gate caught it.
+    //
+    // The index makes it unique by construction (one compile, one list), so
+    // there is no collision to reason about; the tail is only there to keep the
+    // emitted IR readable.
+    $tail = '';
+    $n = \strlen($abs);
+    $from = $n > 40 ? $n - 40 : 0;
+    for ($i = $from; $i < $n; $i = $i + 1) {
+        $c = $abs[$i];
+        $ok = ($c >= 'a' && $c <= 'z') || ($c >= 'A' && $c <= 'Z')
+            || ($c >= '0' && $c <= '9');
+        $tail = $tail . ($ok ? $c : '_');
+    }
+    return '__mc_incl_' . (string)$index . '_' . $tail;
 }
 
 function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
@@ -1904,7 +1926,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             return null;
         }
         $isEntry = $i === $lastIdx;
-        $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '');
+        $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '', $i);
         $incAbs = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
         // Every compiled file is registered, with an EMPTY slot until one of its
         // top-level `return`s claims it. That distinction is the difference
