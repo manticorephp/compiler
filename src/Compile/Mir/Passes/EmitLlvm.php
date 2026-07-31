@@ -239,6 +239,10 @@ final class EmitLlvm implements EmitVisitor
      *  `return` value ({@see Module::$includeSlots}). Read by the
      *  `require`/`include` builtin. @var array<string, string> */
     private array $includeSlots = [];
+
+    /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
+     *  @var string[] */
+    private array $knownFnNames = [];
     /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
     private array $closureHasThis = [];
 
@@ -387,6 +391,8 @@ final class EmitLlvm implements EmitVisitor
         $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalVarNames = $module->globalVarNames;
         $this->includeSlots = $module->includeSlots;
+        $this->knownFnNames = $module->knownFnNames;
+        if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;

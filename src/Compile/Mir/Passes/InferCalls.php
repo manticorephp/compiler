@@ -360,6 +360,9 @@ trait InferCalls
         if ($n === 'putenv') {
             return Type::bool_();
         }
+        if ($n === '__mir_fn_exists') {
+            return Type::bool_();
+        }
         // `require`/`include` evaluates to whatever the target file returned —
         // an array, a closure, a scalar, or php's int(1) when it returned
         // nothing. Nothing static covers that, so it stays self-describing.

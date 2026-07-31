@@ -95,7 +95,11 @@ $s1 = strpos($lf, "function isCodegenBuiltin");
 $e1 = strpos($lf, "\n    }", $s1);
 preg_match_all("/\\\$n === .([a-z_0-9]+)./", substr($lf, $s1, $e1 - $s1), $m1);
 foreach ($m1[1] as $n) { $known[$n] = true; }
-$s2 = strpos($lf, "function isEmitterInlineName");
+// The list lives in emitterInlineNames(); isEmitterInlineName() is now a thin
+ // predicate over it. Scrape the ACCESSOR — scraping the predicate silently
+ // found an empty body and reported all 36 names as missing.
+ $s2 = strpos($lf, "function emitterInlineNames");
+ if ($s2 === false) { $s2 = strpos($lf, "function isEmitterInlineName"); }
 if ($s2 !== false) {
     $e2 = strpos($lf, "\n    }", $s2);
     preg_match_all("/.([a-z_0-9]+)./", substr($lf, $s2, $e2 - $s2), $m2);

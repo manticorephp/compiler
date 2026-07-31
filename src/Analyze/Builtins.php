@@ -33,6 +33,16 @@ final class Builtins
         return isset($set[$lowerName]);
     }
 
+    /**
+     * The same set as a flat list, for a consumer that must ENUMERATE it rather
+     * than ask about one name ({@see \Compile\Mir\Passes\LowerFromAst::collectKnownFnNames}).
+     * @return string[]
+     */
+    public static function functionNames(): array
+    {
+        return \array_keys(self::functionSet());
+    }
+
     /** @return array<string, bool> */
     private static function classSet(): array
     {
@@ -78,6 +88,8 @@ final class Builtins
             '__mir_fa_take', '__mir_fa_takex',
             // What the parser turns `require`/`include <path>` into.
             '__mc_require_value',
+            // The dynamic-argument arm of function_exists.
+            '__mir_fn_exists',
             'flush', '__mir_out_write_str',
             '__mir_ob_push', '__mir_ob_pop', '__mir_ob_level', '__mir_ob_len',
             '__mir_ob_peek', '__mir_ob_take', '__mir_ob_clean', '__mir_ob_inuse',

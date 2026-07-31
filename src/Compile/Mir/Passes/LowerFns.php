@@ -328,9 +328,19 @@ trait LowerFns
      * runtime, derive at gate time, the same contract {@see isEmitterInlineName}
      * has.
      */
+    /** Whether the prelude declares $n (see {@see preludeProvidedNames}). */
     private function isPreludeProvidedName(string $n): bool
     {
-        $names = [
+        foreach ($this->preludeProvidedNames() as $k) {
+            if ($k === $n) { return true; }
+        }
+        return false;
+    }
+
+    /** @return string[] */
+    private function preludeProvidedNames(): array
+    {
+        return [
             'array_all', 'array_any', 'array_change_key_case', 'array_chunk', 'array_combine',
             'array_count_values', 'array_diff', 'array_diff_assoc', 'array_diff_key', 'array_diff_uassoc',
             'array_diff_ukey', 'array_fill_keys', 'array_filter', 'array_find', 'array_find_key',
@@ -362,15 +372,21 @@ trait LowerFns
             'timezone_offset_get', 'timezone_open', 'timezone_transitions_get', 'uasort', 'uksort',
             'unpack', 'unserialize', 'usort',
         ];
-        foreach ($names as $k) {
+    }
+
+    /** Whether $n is emitted inline (see {@see emitterInlineNames}). */
+    private function isEmitterInlineName(string $n): bool
+    {
+        foreach ($this->emitterInlineNames() as $k) {
             if ($k === $n) { return true; }
         }
         return false;
     }
 
-    private function isEmitterInlineName(string $n): bool
+    /** @return string[] */
+    private function emitterInlineNames(): array
     {
-        $names = [
+        return [
             'acos', 'array_first', 'array_key_first', 'array_key_last',
             'array_keys', 'array_last', 'array_values', 'asin', 'atan',
             'atan2', 'ceil', 'cos', 'cosh', 'debug_backtrace', 'deg2rad',
@@ -383,10 +399,6 @@ trait LowerFns
             'ptr_to_int', 'rad2deg', 'round', 'sin', 'sinh', 'sqrt', 'tan',
             'tanh', 'var_dump',
         ];
-        foreach ($names as $k) {
-            if ($k === $n) { return true; }
-        }
-        return false;
     }
 
     private function isCodegenBuiltin(string $name): bool
@@ -419,7 +431,7 @@ trait LowerFns
             || $n === 'gc_collect_cycles' || $n === 'spl_object_id'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
-            || $n === 'putenv'
+            || $n === 'putenv' || $n === '__mir_fn_exists'
             || $n === 'get_object_vars' || $n === 'var_export'
             || $n === 'class_exists' || $n === 'enum_exists'
             || $n === 'interface_exists' || $n === 'trait_exists'

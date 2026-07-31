@@ -472,12 +472,22 @@ trait LowerExprs
             // link-only Windows stub) reads absent in both.
             if ($fn === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
-                $known = 0;
-                if ($a0->kind === 'StringLiteral'
-                    && $this->functionIsKnown($this->stringLitValue($a0))) {
-                    $known = 1;
+                if ($a0->kind === 'StringLiteral') {
+                    return new IntConst(
+                        $this->functionIsKnown($this->stringLitValue($a0)) ? 1 : 0,
+                        Type::bool_());
                 }
-                return new IntConst($known, Type::bool_());
+                // A NON-literal argument used to fold to false, described as
+                // conservative. Conservative is the wrong word for an answer
+                // that is simply wrong: a loop over a list of names reported
+                // strlen, count and floor all missing, and it is what made this
+                // project's own SAPI presence probe claim trigger_error was
+                // absent. The function set is CLOSED at compile time, so the
+                // honest answer is a lookup — the same name-table-and-scan shape
+                // the dynamic function-name dispatch and the include resolver
+                // already use.
+                $this->sawDynFnExists = true;
+                return new Call('__mir_fn_exists', [$this->lowerExpr($a0)], Type::bool_());
             }
             // `var_dump($a, $b, …)` stays a `var_dump` call — EmitLlvm's biVarDump
             // dumps each arg by its static type (a typed FLOAT goes straight to a

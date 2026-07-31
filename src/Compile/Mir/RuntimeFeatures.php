@@ -110,6 +110,12 @@ final class RuntimeFeatures
      */
     public bool $needsFuncArgs = false;
 
+    /**
+     * The program asks `function_exists($var)` with a non-literal name — emit
+     * the closed-world name table and the scan over it.
+     */
+    public bool $needsFnExists = false;
+
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union
     // once here keeps the subtle "why" with the flags instead of re-deriving

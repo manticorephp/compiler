@@ -1,0 +1,14 @@
+strlen=y
+count=y
+floor=y
+trigger_error=y
+ob_start=y
+header=y
+session_start=y
+array_map=y
+preg_match=y
+str_contains=y
+no_such_function_zzz=n
+bool(true)
+bool(true)
+bool(true)

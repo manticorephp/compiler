@@ -44,6 +44,13 @@ final class Module
      *  @var array<string, string> */
     public array $includeSlots = [];
 
+    /** Every function name `function_exists()` should answer true for, for a
+     *  program that asks with a NON-literal argument. Filtered through the same
+     *  predicate the literal fold uses, so the two forms cannot disagree.
+     *  Empty unless the program actually asks dynamically.
+     *  @var string[] */
+    public array $knownFnNames = [];
+
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 

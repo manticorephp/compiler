@@ -182,6 +182,18 @@ trait EmitLlvmModule
             $gi = $gi + 1;
             $globalCells .= $gname . ' = ' . $linkage . 'global i64 ' . $this->globalInit($def) . "\n";
         }
+        // Intern the function-name table BEFORE the pool renders, for the same
+        // reason the global initialisers are computed above it: a name interned
+        // after the pool has been written gets no @.str.N definition at all.
+        $fnNamesRows = '';
+        $fnNamesCount = 0;
+        if ($this->rt->needsFnExists) {
+            foreach ($this->knownFnNames as $fname) {
+                if ($fnNamesCount > 0) { $fnNamesRows .= ', '; }
+                $fnNamesRows .= 'ptr ' . $this->litStr($fname);
+                $fnNamesCount = $fnNamesCount + 1;
+            }
+        }
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
         // literal share one layout so retain/release work on either.
@@ -253,6 +265,39 @@ trait EmitLlvmModule
             $out .= "  %x = load i64, ptr @__mir_fa_argx\n";
             $out .= "  store i64 0, ptr @__mir_fa_argx\n";
             $out .= "  ret i64 %x\n}\n";
+        }
+        if ($this->rt->needsFnExists && $fnNamesCount > 0) {
+            // The closed-world function-name table, for `function_exists($var)`.
+            // A flat array plus a scan rather than an unrolled strcmp chain:
+            // the set runs to ~a thousand names, and this is never hot — one
+            // presence check is not worth a thousand emitted basic blocks.
+            // The rows were interned above, before the pool was rendered.
+            $n = $fnNamesCount;
+            $out .= '@__mir_fn_names = internal constant [' . (string)$n . ' x ptr] ['
+                  . $fnNamesRows . "]\n";
+            $out .= "define i64 @__mir_fn_exists(ptr %name) {\n";
+            $out .= "entry:\n";
+            $out .= "  %isnull = icmp eq ptr %name, null\n";
+            $out .= "  br i1 %isnull, label %miss, label %loop\n";
+            $out .= "loop:\n";
+            $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
+            $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+            $out .= "  br i1 %done, label %miss, label %body\n";
+            $out .= "body:\n";
+            $out .= '  %p = getelementptr inbounds [' . (string)$n
+                  . " x ptr], ptr @__mir_fn_names, i64 0, i64 %i\n";
+            $out .= "  %cand = load ptr, ptr %p\n";
+            $out .= "  %c = call i32 @strcmp(ptr %name, ptr %cand)\n";
+            $out .= "  %eq = icmp eq i32 %c, 0\n";
+            $out .= "  br i1 %eq, label %hit, label %next\n";
+            $out .= "next:\n";
+            $out .= "  %i1 = add i64 %i, 1\n";
+            $out .= "  br label %loop\n";
+            $out .= "hit:\n";
+            $out .= "  ret i64 1\n";
+            $out .= "miss:\n";
+            $out .= "  ret i64 0\n}\n";
+            $this->rt->needsStrcmp = true;
         }
         if ($this->rt->needsFibers) {
             $out .= $this->fiberRuntime();

@@ -272,6 +272,10 @@ final class LowerFromAst implements Pass
     private array $currentLowerParamHints = [];
 
 
+    /** The program calls `function_exists()` with a NON-literal argument, so it
+     *  needs the runtime name table rather than the compile-time fold. */
+    private bool $sawDynFnExists = false;
+
     /** The body being lowered called one of the func-args family, so it needs
      *  the argument-count prologue. Saved/restored around every nested body the
      *  same way {@see $sawYield} is — a closure that asks must not mark its
@@ -973,8 +977,55 @@ final class LowerFromAst implements Pass
                 }
             }
         }
+        if ($this->sawDynFnExists) {
+            $module->knownFnNames = $this->collectKnownFnNames();
+        }
         $module->markPassApplied(self::NAME);
         return $module;
+    }
+
+    /**
+     * The names a dynamic `function_exists($v)` must answer true for.
+     *
+     * Every candidate is run through {@see functionIsKnown} — the same
+     * predicate the literal fold uses — so the two forms cannot give different
+     * answers for the same name. This only assembles the candidate set; the
+     * predicate remains the single authority on membership.
+     *
+     * Internal names are left out: nobody asks after `__mir_*` / `__mc_*`, and
+     * shipping them would let a program discover the compiler's own plumbing.
+     * @return string[]
+     */
+    private function collectKnownFnNames(): array
+    {
+        $cand = [];
+        foreach ($this->fnDecls as $n => $ignored) { $cand[$this->bareName($n)] = true; }
+        foreach ($this->fnAliasByBare as $n => $ignored) { $cand[$n] = true; }
+        foreach (self::RESOLVED_FNS as $n => $ignored) { $cand[$n] = true; }
+        // The codegen builtins come from Analyze\Builtins rather than from
+        // isCodegenBuiltin's chained ||: it is the same set as an enumerable
+        // array, and calibrate.sh already gates it against the real emitBuiltin
+        // dispatch, so it cannot silently drift out from under this.
+        foreach (\Analyze\Builtins::functionNames() as $n) { $cand[$n] = true; }
+        foreach ($this->emitterInlineNames() as $n) { $cand[$n] = true; }
+        foreach ($this->preludeProvidedNames() as $n) { $cand[$n] = true; }
+        $out = [];
+        foreach ($cand as $n => $ignored) {
+            if ($n === '') { continue; }
+            if (\strncmp($n, '__mir_', 6) === 0 || \strncmp($n, '__mc_', 5) === 0
+                || \strncmp($n, 'manticore_', 10) === 0) { continue; }
+            if (!$this->functionIsKnown($n)) { continue; }
+            $out[] = $n;
+        }
+        return $out;
+    }
+
+    /** Trailing segment of a possibly-namespaced name. */
+    private function bareName(string $n): string
+    {
+        $nm = \ltrim($n, '\\');
+        $pos = \strrpos($nm, '\\');
+        return $pos === false ? $nm : \substr($nm, $pos + 1);
     }
 
     /** Depth of a class in its inheritance chain (0 = no parent). */

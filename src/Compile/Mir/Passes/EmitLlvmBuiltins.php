@@ -64,6 +64,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
         if ($name === '__mir_argc')                   { return $this->biCliArgc(); }
         if ($name === '__mc_require_value')           { return $this->biRequireValue($args); }
+        if ($name === '__mir_fn_exists')              { return $this->biFnExists($args); }
         if ($name === '__mir_fa_take')                { return $this->biFuncArgsTake($args); }
         if ($name === '__mir_fa_takex')               { return $this->biFuncArgsTakeExtra(); }
         if ($name === '__mir_argv_at')                { return $this->biCliArgvAt($args); }
@@ -1355,6 +1356,23 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceToI64();
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__mir_fa_take(i64 ' . $this->lastValue . ")\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `function_exists($var)` with a non-literal name — a scan of the
+     * closed-world table ({@see EmitLlvmModule}). The literal form still folds
+     * at compile time; both are decided by the same predicate, so they agree.
+     * @param Node[] $args
+     */
+    private function biFnExists(array $args): string
+    {
+        $this->rt->needsFnExists = true;
+        $out = $this->emitPtrArg($args[0]);
+        $nm = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_fn_exists(ptr ' . $nm . ")\n";
+        $out .= $this->freeStrTemp($args[0], $nm);
         return $this->finishI64($out, $r);
     }
 
