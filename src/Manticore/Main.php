@@ -1952,6 +1952,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // ob_start() handler is a CALLABLE; the buffered BYTES live in the codegen
     // runtime instead, which is the only thing both objects can see.
     $obSrc = prelude_src_or_empty("ob.php");
+    $autoloadSrc = prelude_src_or_empty("autoload.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -1965,6 +1966,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // Same definedFunctions gate: adding an ob_* function to prelude/ob.php
     // needs no second edit here.
     $useOb = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($obSrc));
+    // Same definedFunctions gate: adding a function to prelude/autoload.php
+    // enrols it automatically, no second list to keep in step.
+    $useAutoload = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($autoloadSrc));
     // `array_multisort` is DESUGARED at the call site (LowerExprs) into
     // __mc_multisort_order + __mc_multisort_apply, so the user's source never
     // names either helper and the definedFunctions gate above cannot see the
@@ -2162,6 +2166,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->obSrc = $useOb ? $obSrc : "";
+        $lower->autoloadSrc = $useAutoload ? $autoloadSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
@@ -2453,7 +2458,7 @@ function analyze_prelude_files(): array {
         // attribute classes — against code that runs correctly.
         // `tools/audit/calibrate.sh` gates this list against `prelude/*.php`.
         "array_fns_ext.php", "attributes.php", "backtrace_stub.php", "var_export.php",
-        "ob.php",
+        "ob.php", "autoload.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

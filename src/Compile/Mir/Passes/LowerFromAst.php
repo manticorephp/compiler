@@ -330,6 +330,9 @@ final class LowerFromAst implements Pass
     /** ob_* — DEMAND-GATED. Non-empty also means main() gets the atexit
      *  trampoline that drains any buffer still open at exit. */
     public string $obSrc = '';
+
+    /** prelude/autoload.php — the spl_autoload_* queue. Demand-gated. */
+    public string $autoloadSrc = '';
     /** pack/unpack — DEMAND-GATED. */
     public string $binarySrc = '';
     /** Nesting depth of the `@` suppression operator around the expression being

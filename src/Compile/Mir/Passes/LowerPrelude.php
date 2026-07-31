@@ -167,6 +167,11 @@ trait LowerPrelude
             // buffering the output of.
             $src = $src . $this->obSrc;
         }
+        if ($this->autoloadSrc !== '') {
+            // Order-independent — the queue holds callables and calls nothing
+            // else in the prelude.
+            $src = $src . $this->autoloadSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
