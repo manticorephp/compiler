@@ -1665,6 +1665,25 @@ final class Parser
 }
 
 /**
+ * The Request being served on this flow, or null outside one.
+ *
+ * The ambient reader for code too deep to be handed the Request — a logger, a
+ * repository, an error page. It reads the per-request `Async\Context` scope
+ * {@see Server} opens, so it is visible inside any task the handler spawns and
+ * in nothing outside that request, which is what makes it safe with many
+ * requests in flight at once. Bind your own the same way:
+ * `Async\Context::withValue('app.user', $u, fn() => …)`.
+ */
+function request(): ?Request
+{
+    $v = \Async\Context::value(Server::CTX_REQUEST);
+    if ($v instanceof Request) {
+        return $v;
+    }
+    return null;
+}
+
+/**
  * The writer a streaming response body is handed.
  *
  * Chunked framing lives HERE rather than in `Buffer\Writer`, and deliberately:
@@ -1749,6 +1768,9 @@ final class Server
 {
     /** Bytes asked of the socket per read. */
     private const READ_CHUNK = 8192;
+
+    /** The Async\Context key the current Request is bound under. {@see request} */
+    public const CTX_REQUEST = 'http.request';
 
     private string $addr;
     private mixed $context;
@@ -1996,7 +2018,19 @@ final class Server
             // headers_sent() has to answer true.
             $this->beginRequest($req);
             try {
-                $keep = $this->serveOne($conn, $req, $handled);
+                // A per-request scope, so anything a handler binds with
+                // Async\Context::withValue() — a correlation id, the
+                // authenticated user, a transaction — is visible to every task
+                // it spawns and to NOTHING outside this request. The whole
+                // serveOne is inside it, not just the handler call, so a
+                // streaming body (which runs during the WRITE) sees it too.
+                $keep = (bool)\Async\Context::withValue(
+                    self::CTX_REQUEST,
+                    $req,
+                    function () use ($conn, $req, $handled) {
+                        return $this->serveOne($conn, $req, $handled);
+                    },
+                );
             } finally {
                 \__mc_request_end();
             }
