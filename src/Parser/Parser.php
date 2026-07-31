@@ -1788,7 +1788,19 @@ final class Parser
         if ($this->check(TokenKind::DoubleQuestion)) {
             $span = $this->span();
             $this->advance();
-            $right = $this->parseNullCoalesce(); // right-associative
+            // Right-associative, and the right operand is a full ASSIGNMENT
+            // expression — php's grammar puts `expr` there, and assignment is an
+            // expression. The memoise idiom depends on it:
+            //     $d = self::$d ?? self::$d = require '…';
+            // parses as `$d = (self::$d ?? (self::$d = require …))`. Recursing
+            // into parseNullCoalesce instead stopped below `=`, so the `=` was
+            // left for the CALLER and the whole coalesce became an assignment
+            // TARGET — "unsupported assign target kind NullCoalesce", which is
+            // what blocked tier 1 of the audit ladder.
+            //
+            // parseAssign, not parseExpression: `and` / `or` / `xor` bind looser
+            // than this, so `$a ?? $b and $c` must stay `($a ?? $b) and $c`.
+            $right = $this->parseAssign();
             return Expr::nullCoalesce($left, $right, $span);
         }
         return $left;

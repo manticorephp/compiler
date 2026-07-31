@@ -16,7 +16,7 @@ without a file behind it.
 | S3 | static finding with no observed runtime effect |
 | S4 | advisory / analyzer residue |
 
-**23 findings**: 1 S1, 11 S2, 9 S3, 2 S4.
+**23 findings**: 2 S1, 10 S2, 9 S3, 2 S4.
 
 Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capability.tsv`).
 
@@ -24,8 +24,8 @@ Capability probes: 9 COMPILE, 1 CRASH, 9 DIFF, 7 PASS (`docs/audit/data/capabili
 
 | # | class | id | tier | depth | title | evidence |
 |---|---|---|---|---|---|---|
-| 1 | S1 | `superglobals-unseeded` | T3 | compiler-root | $_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys | [`probes/cap_superglobal_server_web.php`](probes/cap_superglobal_server_web.php) |
-| 2 | S2 | `assign-null-coalesce` | T1 | compiler-root | `$a ??= $b` parses but does not lower: MIR.lower: unsupported assign target kind NullCoalesce. Found by lane (b), which is the only lane that could — it parses cleanly, so lane (a) sees nothing, and no capability probe covered it. Blocks T1 at vendor/autoload_runtime.php:25, i.e. composer's own runtime bootstrap, and symfony/service-contracts uses it in two subscriber traits. A core operator since php 7.4 | [`docs/audit/data/build-t1.log`](docs/audit/data/build-t1.log) |
+| 1 | S1 | `assign-as-expression-static-prop` | T1 | compiler-root | a static-property assignment used as an EXPRESSION SEGFAULTS: plain `$v = (M::$d = 'x');` is rc=139 while php answers x. PRE-EXISTING and independent of `??` — the coalesce precedence fix merely made the polyfill-intl-icu idiom reach it. A local (`$v = ($s = 'x')`) is fine and a plain `M::$d = 'x';` statement is fine, so it is specifically StoreStaticProp_ in value position. Next blocker for T1 | [`tests/aot/cases/coalesce_assign_rhs.php`](tests/aot/cases/coalesce_assign_rhs.php) |
+| 2 | S1 | `superglobals-unseeded` | T3 | compiler-root | $_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys | [`probes/cap_superglobal_server_web.php`](probes/cap_superglobal_server_web.php) |
 | 3 | S2 | `parser-ref-in-array-literal` | T1 | parser | `[&$a[$k], $v]` (reference inside an array literal) is not parsed. ⚠ LANE (b) UPGRADE: this is not a quiet static finding — it HARD-BLOCKS the T1 build. symfony/polyfill-deepclone/DeepClone.php:631 is `[&$refs[$k], $value, &$value]`, and the front end dies there before reaching the link stage, so no tier could produce a stub list at all. gen_manifest.php now declares it a parse-blocked skip (printed on every run) so the rest of the tier can still be measured | [`data/analyze-t8.json`](data/analyze-t8.json) |
 | 4 | S2 | `spl-classes-absent` | T1 | prelude | PARTIAL: the 10 missing SPL EXCEPTIONS are declared with php parentage (BadMethodCall/Domain/Length/BadFunctionCall under LogicException; OutOfBounds/Overflow/Range/Underflow/UnexpectedValue under RuntimeException; JsonException under Exception). Still absent: the SPL ITERATORS and DirectoryIterator/DOMDocument/ReflectionExtension | [`tests/aot/cases/spl_exception_tree.php`](tests/aot/cases/spl_exception_tree.php) |
 | 5 | S2 | `globals-whole-array` | T3 | compiler-root | a whole-array $GLOBALS read is a hard compile error | [`probes/cap_globals_array_read.php`](probes/cap_globals_array_read.php) |
@@ -78,6 +78,7 @@ in the same commit that closes its gap.
 | `parser-high-byte-identifier` | `parser-gaps` | `tests/aot/cases/high_byte_identifier.php` | two halves: isIdentStart admitted ASCII only (php grammar is [a-zA-Z_\x80-\xff]), and once parsed the raw bytes reached the LLVM symbol — mangle/sanitizeSym now hex-escape any byte >= 0x80 |
 | `parser-const-gaps` | `parser-gaps` | `tests/aot/cases/reserved_member_names.php` | same root as parser-reserved-enum-case — the const-name positions demanded Identifier where php allows a reserved word |
 | `function-exists-dynamic-arg` | `error-handling` | `tests/aot/cases/cap_function_exists_dynamic.php` | a non-literal argument folded to false for EVERY function, builtins included — a loop over names reported strlen, count and floor all missing, which is what made this audit's own SAPI presence probe claim trigger_error was absent. The set is CLOSED at compile time, so it is now a lookup: LowerFromAst assembles the candidate universe (fnDecls, bare aliases, RESOLVED_FNS, Analyze\Builtins::functionNames, the emitter-inline list, the prelude-provided list) and runs EVERY candidate through functionIsKnown — the same predicate the literal fold uses, so the two forms cannot disagree by construction. Emitted as a flat name table plus a scan rather than an unrolled strcmp chain: ~1000 names, and one presence check is not worth a thousand basic blocks. Demand-gated, so a program that never asks dynamically pays nothing. ⚠ the names must be interned BEFORE the string pool renders, exactly like the global initialisers above it |
+| `coalesce-assign-rhs` | `language-core` | `tests/aot/cases/coalesce_assign_rhs.php` | MISDIAGNOSED as a ??= gap. `??=` was always fine; the blocker was PRECEDENCE. php puts a full expression on the right of `??`, and assignment is an expression, so `$d = self::$d ?? self::$d = require …` parses as `$d = (self::$d ?? (self::$d = …))`. parseNullCoalesce recursed into ITSELF for the right operand, which stops below `=`, so the `=` was left for the caller and the whole coalesce became an assignment TARGET — hence the misleading `unsupported assign target kind NullCoalesce`. Right operand now parses at parseAssign level (NOT parseExpression: and/or/xor bind looser, so `$a ?? $b and $c` must stay `($a ?? $b) and $c`). Blocked T1 through polyfill-intl-icu, and needs the include-value work to be useful, since the idiom memoises a `require` |
 | `audit-lane-b-never-ran` | `audit-tooling` | `tools/audit/run_tier.sh` | lane (b) had never produced a single stub list, and the reason was mechanical: run_tier.sh wrote the generated manifest to the PROBE root and built from there, while composer.json, vendor/ and the generated tiers/ entry all live under app/. `entry: tiers/tN_smoke.php` resolved to a file that was never there and the build died before the link stage every time. Manifest and cwd are now both the app root |
 | `manifest-exclude-project-root` | `audit-tooling` | `src/Manticore/Main.php` | a manifest `exclude` written `./src` silently matched NOTHING for the project's own autoload roots, while the identical spelling worked for every vendor package. composer_path_join drops a `.` base, so a vendor root arrives as ./vendor/name/src but the project's arrives as bare src, and the exclude was a raw str_starts_with. Every tier was therefore compiling the whole application: T1 failed on Command::SUCCESS, a T4 construct. exclude_matches() now normalises a leading ./ on both sides. Not audit-only — any user excluding their own directory was being ignored |
 | `audit-tier-var-cache` | `audit-tooling` | `tools/audit/gen_manifest.php` | ./var (the warmed cache: dumped DI container, compiled templates) is an APPLICATION artifact referencing every tier, and it was not in the non-T8 exclusion list beside ./src and ./config — so it put the whole app back into every tier |
@@ -88,14 +89,14 @@ The ladder tier is the implementation order: a tier's dependency closure
 lies entirely in lower tiers, so a gap first seen at tier N blocks tiers
 N..8 and nothing below.
 
+### `language-core` — 1 finding(s), first bites at T1
+
+- **S1** `assign-as-expression-static-prop` — a static-property assignment used as an EXPRESSION SEGFAULTS: plain `$v = (M::$d = 'x');` is rc=139 while php answers x. PRE-EXISTING and independent of `??` — the coalesce precedence fix merely made the polyfill-intl-icu idiom reach it. A local (`$v = ($s = 'x')`) is fine and a plain `M::$d = 'x';` statement is fine, so it is specifically StoreStaticProp_ in value position. Next blocker for T1
+
 ### `sapi-layer` — 2 finding(s), first bites at T3
 
 - **S1** `superglobals-unseeded` — $_GET/$_POST/$_COOKIE/$_FILES/$_REQUEST are always []; $_SERVER carries a CLI shape with no web keys
 - **S2** `globals-whole-array` — a whole-array $GLOBALS read is a hard compile error
-
-### `language-core` — 1 finding(s), first bites at T1
-
-- **S2** `assign-null-coalesce` — `$a ??= $b` parses but does not lower: MIR.lower: unsupported assign target kind NullCoalesce. Found by lane (b), which is the only lane that could — it parses cleanly, so lane (a) sees nothing, and no capability probe covered it. Blocks T1 at vendor/autoload_runtime.php:25, i.e. composer's own runtime bootstrap, and symfony/service-contracts uses it in two subscriber traits. A core operator since php 7.4
 
 ### `parser-gaps` — 2 finding(s), first bites at T1
 

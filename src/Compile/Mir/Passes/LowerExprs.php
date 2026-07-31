@@ -772,9 +772,14 @@ trait LowerExprs
         if ($target->kind === 'ArrayLit') {
             return $this->lowerDestructure($target, $value);
         }
+        // Name the FILE, not just the line. A whole-program build merges
+        // thousands of files into one module, so "at line 25" sent three
+        // separate searches to the wrong file before this was added — the
+        // parse error has always named its file and this had no reason not to.
         throw new \RuntimeException(
             'MIR.lower: unsupported assign target kind ' . $target->kind
-            . ' at line ' . (string)$target->span->line
+            . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : '<source>')
+            . ':' . (string)$target->span->line
         );
     }
 
