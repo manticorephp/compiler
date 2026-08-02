@@ -1,0 +1,6 @@
+outside: null
+deep: /deep q=7
+A: child=alpha/alpha here=alpha other=null
+B: child=beta/beta here=beta other=null
+after: null
+done

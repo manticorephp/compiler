@@ -1312,6 +1312,20 @@ trait EmitLlvmControl
                             // string cond: tag-guarded strcmp (a non-string
                             // subject is never strictly === a string).
                             $out .= $this->emitCellStrEq($subj, $c, $eq);
+                        } elseif ($vk === Type::KIND_OBJ
+                            && isset($this->enums[$c->type->class ?? ''])) {
+                            // ENUM cond against a cell subject (`match ($m)`
+                            // where `$m` is a `?Enum`, hence a cell). The cond
+                            // is a raw ORDINAL and the subject is
+                            // box_object(singleton), so unbox_int below would
+                            // compare a tagged pointer with a small int and
+                            // every arm fell to `default`. Box the cond to its
+                            // own singleton cell and compare carriers — the
+                            // same identity rule `===` uses (EmitLlvmExpr).
+                            $out .= $this->emitNode($c);
+                            $out .= $this->boxToCell($c->type);
+                            $out .= $this->coerceToI64();
+                            $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $this->lastValue . "\n";
                         } else {
                             // int/bool/null cond: unbox the subject's payload
                             // once, then `icmp eq` against the raw cond value.

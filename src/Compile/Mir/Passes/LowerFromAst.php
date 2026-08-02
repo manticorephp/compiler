@@ -290,6 +290,12 @@ final class LowerFromAst implements Pass
     /** @var array<string, EnumDef> enum name → case table (pre-pass) */
     private array $enumTable = [];
 
+    /** @var array<string, bool> enum NAMES, registered in the declaration
+     *  pre-pass — before any signature is lowered, which {@see $enumTable} is
+     *  not (it fills during the class BUILD, and a hint can be read first).
+     *  {@see LowerTypes::lowerTypeHint} needs it to make `?Enum` a cell. */
+    private array $enumNames = [];
+
     /** @var array<string, \Parser\Ast\ClassDecl> trait name → decl (pre-pass) */
     private array $traitTable = [];
 
@@ -585,6 +591,10 @@ final class LowerFromAst implements Pass
                     $ename = $this->classDeclName($cdecl);
                     $this->classDecls[$ename] = $cdecl;
                     $this->knownClassNames[$ename] = true;
+                    // The NAME, here and not at build time: a `?Enum` hint has
+                    // to know this is an enum to lower to a cell, and a class
+                    // built earlier in the order may already spell one.
+                    $this->enumNames[\ltrim($ename, '\\')] = true;
                 }
             }
         }

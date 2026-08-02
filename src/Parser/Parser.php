@@ -834,7 +834,15 @@ final class Parser
                 $typeHint = $this->parseTypeHint();
             }
         }
-        $nameTok = $this->expect(TokenKind::Identifier, 'expected const name');
+        // A class constant may be named with a semi-reserved word — `const
+        // CONTINUE`, `const LIST`, `const PRINT` are all legal php, because a
+        // constant is only ever reached through `Cls::NAME` and there is no
+        // ambiguity to resolve. parseMethod() already takes a Keyword here for
+        // the same reason; this path was the outlier.
+        $nameTok = $this->advance();
+        if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword) {
+            throw $this->error('expected const name');
+        }
         $this->expect(TokenKind::Equals, "expected '=' in const");
         $value = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after const");

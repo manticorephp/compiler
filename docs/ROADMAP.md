@@ -34,6 +34,13 @@ generation does not know the symbol, so the stdlib `.o` build dies on an undefin
 
 ### Recently completed (2026-07)
 
+- **`Http\` — an HTTP/1.1 server** (`docs/http.md`). A handler is
+  `callable(Request): Response`; one process serves many requests at once, and php's
+  `header()`/`setcookie()`/`http_response_code()`/`headers_sent()`/`echo` work inside it
+  per request — as do `$_GET`/`$_POST`/`$_COOKIE`/`$_SERVER`/`$_SESSION` under
+  `compat(true)`. Streamed request and response bodies, chunked framing,
+  `Expect: 100-continue`, keep-alive with pipelining, and every limit answered by a
+  precomputed refusal. `Buffer\ByteBuffer`/`Reader`/`Writer` underneath.
 - **`serialize` / `unserialize` + magic methods** — `__serialize`/`__unserialize`,
   `allowed_classes`, `__PHP_Incomplete_Class`, `__debugInfo`, `var_export` of objects, and
   `__get`/`__set`/`__isset`/`__unset`/`__call` firing on an **erased** receiver.

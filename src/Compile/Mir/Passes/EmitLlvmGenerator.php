@@ -491,7 +491,7 @@ trait EmitLlvmGenerator
             $s = $this->ssa->allocReg();
             $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
             $out .= $this->jmpBufExpr($s);
-            $out .= '  call void @longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
+            $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
             $out .= "  unreachable\n";
             $out .= $contL . ":\n";
         }

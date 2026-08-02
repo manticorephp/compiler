@@ -127,7 +127,7 @@ trait EmitLlvmExceptions
             $out .= '  ' . $nd . ' = add i64 ' . $d . ", 1\n";
             $out .= '  store i64 ' . $nd . ", ptr @__mir_jmp_depth\n";
             $sj = $this->ssa->allocReg();
-            $out .= '  ' . $sj . ' = call i32 @setjmp(ptr ' . $buf . ")\n";
+            $out .= '  ' . $sj . ' = call i32 @_setjmp(ptr ' . $buf . ")\n";
             $ok = $this->ssa->allocReg();
             $cont = $this->ssa->allocLabel('gen.rearm');
             $out .= '  ' . $ok . ' = icmp eq i32 ' . $sj . ", 0\n";
@@ -172,7 +172,7 @@ trait EmitLlvmExceptions
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . ' = sub i64 ' . $depth . ", 1\n";
         $out .= $this->jmpBufExpr($slot);
-        $out .= '  call void @longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
+        $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
         $out .= "  unreachable\n";
         $out .= $this->emitDeadLabel();
         $this->lastValue = '0';
@@ -247,7 +247,7 @@ trait EmitLlvmExceptions
             $out .= '  ' . $nd . ' = add i64 ' . $od . ", 1\n";
             $out .= '  store i64 ' . $nd . ", ptr @__mir_jmp_depth\n";
             $osj = $this->ssa->allocReg();
-            $out .= '  ' . $osj . ' = call i32 @setjmp(ptr ' . $outerBuf . ")\n";
+            $out .= '  ' . $osj . ' = call i32 @_setjmp(ptr ' . $outerBuf . ")\n";
             $oc = $this->ssa->allocReg();
             $out .= '  ' . $oc . ' = icmp eq i32 ' . $osj . ", 0\n";
             $out .= '  br i1 ' . $oc . ', label %' . $bodyLbl . ', label %' . $outerCatchLbl . "\n";
@@ -265,7 +265,7 @@ trait EmitLlvmExceptions
         $out .= '  ' . $ind . ' = add i64 ' . $idb . ", 1\n";
         $out .= '  store i64 ' . $ind . ", ptr @__mir_jmp_depth\n";
         $sj = $this->ssa->allocReg();
-        $out .= '  ' . $sj . ' = call i32 @setjmp(ptr ' . $innerBuf . ")\n";
+        $out .= '  ' . $sj . ' = call i32 @_setjmp(ptr ' . $innerBuf . ")\n";
         $tryLbl = $this->ssa->allocLabel('try_body');
         $hasCatch = \count($n->catches) > 0;
         // No catch but finally present: an inner throw must still record
@@ -419,7 +419,7 @@ trait EmitLlvmExceptions
         $s = $this->ssa->allocReg();
         $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
         $out .= $this->jmpBufExpr($s);
-        $out .= '  call void @longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
+        $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
         $out .= "  unreachable\n";
         // No dead label: a basic-block label always follows this in
         // emitTryCatch, which starts the next block on its own.

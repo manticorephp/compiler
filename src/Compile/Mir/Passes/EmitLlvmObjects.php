@@ -765,6 +765,18 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** Whether any NON-enum class declares (or inherits) `$method`. Gates the
+     *  cell-receiver ordinal unbox: an enum method's `$this` is an ordinal, and
+     *  that repr is only safe when no object candidate shares the name. */
+    private function nonEnumDeclares(string $method): bool
+    {
+        foreach ($this->classes as $cd) {
+            if (isset($this->enums[$cd->name])) { continue; }
+            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
+        }
+        return false;
+    }
+
     /** Whether ANY class in the table declares (or inherits) `$method`. */
     private function anyClassDeclares(string $method): bool
     {
@@ -3465,6 +3477,30 @@ trait EmitLlvmObjects
                 $r = $this->resolveMethodClass($cd->name, $mc->method);
                 if ($r !== '') { $fallback = $r; break; }
             }
+        }
+        // An ENUM method takes its case ORDINAL as `$this`, not a pointer. A
+        // cell receiver (`?Enum` is a cell — an ordinal cannot carry null, see
+        // LowerTypes::classHintType) holds box_object(singleton), and the mask
+        // above left the SINGLETON POINTER in $thisArg: `$this === Enum::Case`
+        // then compared a pointer against an ordinal and answered false for
+        // every case. Load the ordinal the singleton records, the same +16 slot
+        // unboxCellToType's enum arm reads.
+        //
+        // Only when the enum is the SOLE declarer of the name: with a non-enum
+        // candidate in play the class_id switch below dispatches on $thisArg as
+        // an object, and an ordinal has no header to read.
+        if ($fallback !== '' && isset($this->enums[$fallback])
+            && ($mc->object->type->kind === Type::KIND_CELL
+                || $mc->object->type->kind === Type::KIND_UNKNOWN)
+            && !$this->nonEnumDeclares($mc->method)) {
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
+            $g = $this->ssa->allocReg();
+            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
+            $ord = $this->ssa->allocReg();
+            $out .= '  ' . $ord . ' = load i64, ptr ' . $g . "\n";
+            $thisArg = $ord;
+            $argList = 'i64 ' . $thisArg;
         }
         // By-ref mask of the resolved callee. A method's param 0 is the
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —
