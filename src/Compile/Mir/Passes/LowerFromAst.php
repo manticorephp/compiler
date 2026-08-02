@@ -2543,6 +2543,14 @@ final class LowerFromAst implements Pass
         if ($dc === '') { return null; }
         $global = '@' . $this->sanitizeSym($dc . '__sp_' . $pn);
         $pt = $this->staticPropTypes[$dc . '::' . $pn] ?? Type::int_();
+        // ⚠ An UNHINTED static's slot has NO single static type, and typing the
+        // read CELL here (to match what emitStoreStaticProp boxes for a declared
+        // kind of CELL *or* UNKNOWN) was tried and REVERTED: it is right for the
+        // scalars and WRONG for an array, which rides RAW through the same slot
+        // — `static_array_prop_append` went red immediately. The encoding
+        // depends on the KIND STORED, which is the unknown/cell erasure root,
+        // and no single type on the read expresses it.
+        // {@see docs/audit/GAPS.md unhinted-static-prop-erased-slot}
         return new StaticProp_($global, $pt);
     }
 

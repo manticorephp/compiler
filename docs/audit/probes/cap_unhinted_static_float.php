@@ -38,3 +38,38 @@ var_dump(M::$mixed);     // float(2.5)
 echo M::$hinted + 1.0, "\n";    // 3.5
 echo M::$unhinted + 1.0, "\n";  // php: 3.5   manticore: 4.6128119183342E+18
 echo M::$mixed + 1.0, "\n";     // 3.5
+
+// The same disagreement with a STRING does not misread — it SEGFAULTS. The
+// store boxes (declared UNKNOWN is inside the boxing condition) and the read is
+// typed `unknown`, so the tagged word is inttoptr'd and dereferenced. This is
+// the memoise idiom symfony/cache uses to hold its closures, which is why the
+// row is S1 rather than the S0 the float alone suggested.
+class S
+{
+    private static $shared;
+
+    public static function get(): string
+    {
+        self::$shared ??= 'built';
+        return self::$shared;
+    }
+}
+
+echo S::get(), "\n";   // php: built    manticore: SIGSEGV
+echo S::get(), "\n";   // php: built
+
+// ⚠ Typing the unhinted slot CELL to match the store was tried and REVERTED:
+// an ARRAY rides RAW through the very same slot, so it is right for scalars and
+// wrong for arrays. The encoding depends on the KIND STORED.
+class R
+{
+    private static $list = [];
+
+    public static function push(int $n): int
+    {
+        self::$list[] = $n;
+        return count(self::$list);
+    }
+}
+
+echo R::push(1), R::push(2), "\n";   // 12 — correct today, and must stay correct

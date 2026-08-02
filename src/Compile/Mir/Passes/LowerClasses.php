@@ -333,12 +333,39 @@ trait LowerClasses
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
         }
+        // STATIC trait properties, mixed in the same way. php gives every using
+        // class its OWN slot for a trait's static — the trait is a compile-time
+        // copy, not shared storage — so registering under this class's name is
+        // exactly right, and two classes using one trait get two counters as
+        // they should. Without it `self::$traitStatic` had no registration at
+        // all and lowering refused the whole expression ("unsupported
+        // expression kind StaticAccess"), which hard-blocked tier 2:
+        // symfony/cache's AbstractAdapter keeps its `$createCacheItem` and
+        // `$mergeByLifetime` closures in statics inherited from
+        // AbstractAdapterTrait. The class's own property still wins on conflict.
+        foreach ($decl->uses as $traitName) {
+            $tn = \ltrim($traitName, '\\');
+            $td = $this->traitTable[$tn] ?? null;
+            if ($td === null) { continue; }
+            if ($this->isReifiedDecl($decl)) { continue; }
+            foreach ($td->properties as $tprop) {
+                if (!$tprop->isStatic) { continue; }
+                if (isset($this->staticProps[$decl->name . '::' . $tprop->name])) { continue; }
+                $tvdoc = $this->docTagType($tprop->docComment, '@var', '');
+                $tveff = $this->effectiveHint($tprop->typeHint, $tvdoc);
+                $tpt = $this->lowerTypeHint($tveff)->eraseTypeVars();
+                $spNames[] = $tprop->name;
+                $spTypes[] = $tpt;
+                $this->staticProps[$decl->name . '::' . $tprop->name] = true;
+                $this->staticPropTypes[$decl->name . '::' . $tprop->name] = $tpt;
+            }
+        }
         // Mixed-in trait properties extend the class's layout (PHP appends
         // them after the class's own fields). Without this they get no slot,
         // so `$this->traitProp` inside a trait method reads a wrong offset →
         // heap corruption (e.g. a string slot that lands on an obj/vec tag →
         // strcmp-on-RC_TAG_MAGIC abort). The class's own property wins on
-        // conflict. Static trait props are not yet mixed in (rare).
+        // conflict.
         foreach ($decl->uses as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
@@ -492,6 +519,39 @@ trait LowerClasses
                 $def,
                 $this->inPreludeClass,
             );
+        }
+        // The cells for STATIC TRAIT properties, which the loop above cannot see
+        // — it walks the class's OWN declarations. Registering the slot without
+        // emitting its cell left `load i64, ptr @C__sp_x` against a global
+        // nothing defined, so the two have to move together. addGlobalCell is
+        // idempotent by name and the class's own pass ran first, which is what
+        // keeps "the class's own property wins" true here as well.
+        if (!$this->isReifiedDecl($decl)) {
+            foreach ($decl->uses as $traitName) {
+                $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+                if ($td === null) { continue; }
+                foreach ($td->properties as $tprop) {
+                    if (!$tprop->isStatic) { continue; }
+                    $tspt = $this->staticPropTypes[$decl->name . '::' . $tprop->name] ?? null;
+                    $tIsCell = $tspt !== null
+                        && ($tspt->kind === Type::KIND_CELL || $tspt->kind === Type::KIND_UNKNOWN);
+                    if ($tprop->default === null) {
+                        $tdef = $tIsCell
+                            ? new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_())
+                            : new IntConst(0, Type::int_());
+                    } else {
+                        $tdef = $this->lowerExpr($tprop->default);
+                        if ($tIsCell && $tdef->kind === Node::KIND_NULL_CONST) {
+                            $tdef = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
+                        }
+                    }
+                    $this->module->addGlobalCell(
+                        '@' . $this->sanitizeSym($decl->name . '__sp_' . $tprop->name),
+                        $tdef,
+                        $this->inPreludeClass,
+                    );
+                }
+            }
         }
         $this->currentLowerClass = $prevLowerClass;
         $isStruct = $this->hasStructAttr($decl->attributes);
