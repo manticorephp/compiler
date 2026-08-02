@@ -1971,6 +1971,16 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // ob_start() handler is a CALLABLE; the buffered BYTES live in the codegen
     // runtime instead, which is the only thing both objects can see.
     $obSrc = prelude_src_or_empty("ob.php");
+    // ext/simplexml + ext/libxml + ext/dom — DEMAND-GATED, global namespace.
+    // In the prelude and not the stdlib .o for the usual reason: the .sig
+    // carries functions only, so a SimpleXMLElement declared there would be
+    // invisible to the program holding one. The three files are one module —
+    // xml_xpath rides xml unconditionally (SimpleXMLElement::xpath calls it),
+    // and xml_dom is gated on its own so a SimpleXML-only program pays nothing
+    // for the DOM class tree.
+    $xmlSrc = prelude_src_or_empty("xml.php");
+    $xmlXpathSrc = prelude_src_or_empty("xml_xpath.php");
+    $xmlDomSrc = prelude_src_or_empty("xml_dom.php");
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -2145,6 +2155,32 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                               'timezone_open', 'timezone_name_get', 'timezone_offset_get',
                               'timezone_transitions_get', 'timezone_location_get',
                               'date_parse', 'date_parse_from_format']);
+    // ext/simplexml gates on a MENTION of its classes / its LIBXML_* constants,
+    // plus a CALL of the procedural entry points (a program may call
+    // simplexml_load_string without ever naming the class). Constants need the
+    // mention arm of their own: `$x | LIBXML_NOCDATA` names no class at all.
+    $useXml = $demand->mentionsAny(['SimpleXMLElement', 'SimpleXMLIterator', 'LibXMLError',
+                                    'LIBXML_NOCDATA', 'LIBXML_NOBLANKS', 'LIBXML_NOENT',
+                                    'LIBXML_NOERROR', 'LIBXML_NOWARNING', 'LIBXML_COMPACT',
+                                    'LIBXML_PARSEHUGE', 'LIBXML_DTDVALID', 'LIBXML_DTDLOAD',
+                                    'LIBXML_NONET', 'LIBXML_NOXMLDECL', 'LIBXML_NOEMPTYTAG',
+                                    'LIBXML_SCHEMA_CREATE', 'LIBXML_VERSION',
+                                    'LIBXML_ERR_WARNING', 'LIBXML_ERR_ERROR', 'LIBXML_ERR_FATAL'])
+        || $demand->callsAny(['simplexml_load_string', 'simplexml_load_file',
+                              'simplexml_import_dom', 'dom_import_simplexml',
+                              'libxml_use_internal_errors', 'libxml_get_errors',
+                              'libxml_clear_errors', 'libxml_get_last_error',
+                              'libxml_disable_entity_loader', 'libxml_set_streams_context']);
+    // ext/dom rides the SAME node table, so it forces xml on. Gated apart
+    // because the DOM class tree is the larger half and most SimpleXML programs
+    // never touch it.
+    $useXmlDom = $demand->mentionsAny(['DOMDocument', 'DOMNode', 'DOMElement', 'DOMAttr',
+                                       'DOMText', 'DOMComment', 'DOMCdataSection',
+                                       'DOMNodeList', 'DOMNamedNodeMap', 'DOMXPath',
+                                       'DOMDocumentFragment', 'DOMException',
+                                       'DOMCharacterData', 'DOMProcessingInstruction'])
+        || $demand->callsAny(['dom_import_simplexml', 'simplexml_import_dom']);
+    if ($useXmlDom) { $useXml = true; }
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
@@ -2222,6 +2258,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read http.php");
         return null;
     }
+    if ($useXml && ($xmlSrc === "" || $xmlXpathSrc === "")) {
+        dprint("compile failed: prelude: cannot read xml.php / xml_xpath.php");
+        return null;
+    }
+    if ($useXmlDom && $xmlDomSrc === "") {
+        dprint("compile failed: prelude: cannot read xml_dom.php");
+        return null;
+    }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
@@ -2275,6 +2319,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->bufferSrc = $useBuffer ? $bufferSrc : "";
         $lower->httpSrc = $useHttp ? $httpSrc : "";
+        $lower->xmlSrc = $useXml ? $xmlSrc : "";
+        $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
+        $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;

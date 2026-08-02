@@ -1551,6 +1551,16 @@ trait EmitLlvmBuiltins
             $mc = new \Compile\Mir\MethodCall_($args[0], 'count', [], Type::int_());
             return $this->emitMethodCall($mc);
         }
+        // The same dispatch with the receiver ERASED. `count($sxe->book)` and
+        // every count() over a `X|false` loader result arrive here as a cell, and
+        // the array path below loaded the OBJECT HEADER as a vec length.
+        if (($args[0]->type->kind === Type::KIND_CELL
+                || $args[0]->type->kind === Type::KIND_UNKNOWN)
+            && $this->ifaceMethodHolders('Countable', 'count') !== []) {
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            return $this->emitCountableOrArray($out, $this->lastValue, $args[0]);
+        }
         $out = $this->emitNode($args[0]);
         if ($args[0]->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
@@ -1570,10 +1580,24 @@ trait EmitLlvmBuiltins
         } else {
             $out .= $this->coerceToPtr();
         }
+        $out .= $this->arrayCountFromPtrIr($this->lastValue);
+        return $this->finishI64($out, $this->lastValue);
+    }
+
+    /**
+     * The live element count of the array at `$ptr` — physical length minus the
+     * tombstone counter. lastValue ← the i64 count.
+     *
+     * Split out of {@see biCount} so the erased Countable path
+     * ({@see emitCountableOrArray}) can reuse the identical arithmetic in its
+     * non-object arm instead of restating it.
+     */
+    private function arrayCountFromPtrIr(string $ptr): string
+    {
+        $out = '';
         // An empty `[]` vec/assoc literal lowers to a null ptr; redirect a
         // null base to the zero-word so the length load reads 0 rather than
         // dereferencing address 0.
-        $ptr = $this->lastValue;
         $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $ptr . ", null\n";
         $safe = $this->ssa->allocReg();
@@ -1603,7 +1627,54 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $tomb . ' = select i1 ' . $isNull . ', i64 0, i64 ' . $tomb0 . "\n";
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sub i64 ' . $physlen . ', ' . $tomb . "\n";
-        return $this->finishI64($out, $reg);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `count($erased)` where some class in the table is Countable: branch on the
+     * runtime tag. An object cell (nibble 8) dispatches count() on its class_id;
+     * anything else keeps the ordinary array count.
+     */
+    private function emitCountableOrArray(string $out, string $cv, Node $arg): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
+        $ts = $this->ssa->allocReg();
+        $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+        $isObjNib = $this->ssa->allocReg();
+        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+        $objL = $this->ssa->allocLabel('cnt.obj');
+        $arrL = $this->ssa->allocLabel('cnt.arr');
+        $endL = $this->ssa->allocLabel('cnt.end');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
+
+        $out .= $objL . ":\n";
+        $pm = $this->ssa->allocReg();
+        $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+        $out .= $this->emitErasedIfaceCall($pp, 'Countable', 'count', []);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $arrL . ":\n";
+        $out .= $this->arrayPtrOrEmptyIr($cv);
+        $out .= $this->arrayCountFromPtrIr($this->arrayPtrReg);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        return $this->finishI64($out, $r);
     }
 
     /**

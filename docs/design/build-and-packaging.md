@@ -152,8 +152,24 @@ across a library's `.sig` so a dependent that never names the library still
 links it. `extensions[].link` is the escape hatch for a library no attribute
 names, or one whose flags are not a bare `-l`; both sources dedupe by `-l<name>`.
 See `docs/ffi.md` and `docs/modules.md`. Remaining: static-archive linking
-(dynamic `-l` today), and richer real extensions (curl/xml/pdo) on the same
+(dynamic `-l` today), and richer real extensions (curl/pdo) on the same
 mechanism.
+
+**xml landed a different way.** ext/simplexml + ext/dom did NOT go through
+`extensions[]`: their API surface is classes, and an extension's glue is compiled
+into the user module the same way the stdlib `.sig` is — which carries functions
+only. They are a DEMAND-GATED PRELUDE instead (`prelude/xml.php`,
+`xml_xpath.php`, `xml_dom.php`), so a program that never names `SimpleXMLElement`
+/ `DOM*` / a `libxml_*` function carries none of it and never links `-lxml2`.
+
+The libxml2 binding is `xmlTextReader` — the PULL parser — and nothing else.
+Every entry point in that API returns `int` or `const char *`, so no C struct is
+ever dereferenced: `\Ffi\Ptr` has no `read*` family (see `docs/ffi.md`), and
+binding the `xmlDoc` tree would mean hard-coding the 64-bit offsets of
+`_xmlNode` / `_xmlAttr` / `_xmlNs` plus a `__destruct`-driven `xmlFreeDoc` behind
+every wrapper object. libxml2 parses and validates; the node table, the
+serializer and XPath are ours, and the reader is freed before the parse call
+returns, so no live C pointer ever reaches PHP.
 
 An extension = thin PHP glue + FFI bindings + a native library. The native lib
 (libcurl/libxml2/libpq) is an ordinary C archive linked by `cc`; it never

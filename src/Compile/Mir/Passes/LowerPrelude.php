@@ -177,6 +177,18 @@ trait LowerPrelude
             // the Throwable hierarchy, and Main forces every one of those on.
             $src = $src . $this->sessionSrc;
         }
+        if ($this->xmlSrc !== '') {
+            // ext/simplexml — global namespace, so it belongs to this blob and
+            // not to the braced tier below. After exceptions.php: the
+            // SimpleXMLElement constructor throws on malformed input.
+            //
+            // ⚠ ORDER IS LOAD-BEARING. Classes are built in SOURCE order, so a
+            // subclass parsed ahead of its parent inherits ZERO slots and its
+            // objects walk off their own layout: xml.php defines
+            // SimpleXMLElement before SimpleXMLIterator extends it, and
+            // xml_dom.php defines DOMNode before every DOM subclass.
+            $src = $src . $this->xmlSrc . $this->xmlXpathSrc . $this->xmlDomSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
@@ -213,6 +225,41 @@ trait LowerPrelude
             foreach ($ht->statements as $s) { $stmts[] = $s; }
         }
         return $stmts;
+    }
+
+    /** Whether any class in the finished table resolves a `__toString` — the
+     *  gate for generating {@see objToStrSrc}. */
+    private function anyToStringClass(): bool
+    {
+        foreach ($this->walkableClassesDerivedFirst() as $cname) {
+            if ($this->declaresMethod($cname, '__toString')) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * PHP source for `__mir_obj_to_str` — `(string)` on a value whose STATIC
+     * type is a cell but whose runtime tag says object.
+     *
+     * Why this exists at all: `@__manticore_tagged_to_str` is a single external
+     * body in the central core (it is `T` in `lib/manticore_stdlib.o`), so it
+     * can never be told what classes a user module holds — and it consequently
+     * had no object arm, rendering the tagged word itself. `(string)$sxe['id']`
+     * printed `38503727592` where php prints the attribute's text.
+     *
+     * Generated from the finished class table exactly like {@see dumpObjectSrc}:
+     * most-derived first, so a subclass is matched before its base. A class with
+     * no `__toString` falls through to '' — php fatals there, and the sentinel
+     * → exception conversion is its own owed epic.
+     */
+    private function objToStrSrc(): string
+    {
+        $body = "function __mir_obj_to_str(mixed \$v): string {\n";
+        foreach ($this->walkableClassesDerivedFirst() as $cname) {
+            if (!$this->declaresMethod($cname, '__toString')) { continue; }
+            $body = $body . "  if (\$v instanceof \\" . $cname . ") { return \$v->__toString(); }\n";
+        }
+        return $body . "  return '';\n}\n";
     }
 
     /**
