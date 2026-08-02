@@ -367,6 +367,14 @@ final class LowerFromAst implements Pass
     /** ext/pcntl + posix process control — DEMAND-GATED. Braced-namespace tree;
      *  Async\ implies it (the scheduler dispatches signals every tick). */
     public string $pcntlSrc = '';
+    /** Buffer\ (ByteBuffer + reader/writer) — DEMAND-GATED. Braced-namespace
+     *  tree with no dependencies of its own; Http\ implies it. */
+    public string $bufferSrc = '';
+    /** Http\ (server / request / response / the wire codec) — DEMAND-GATED.
+     *  Braced-namespace tree, parsed LAST of that tier: its Server names
+     *  Async\ types and its parser names Buffer\ByteBuffer. Implies
+     *  bufferSrc + asyncSrc + sapiSrc + obSrc. */
+    public string $httpSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external

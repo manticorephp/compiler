@@ -1614,4 +1614,104 @@ trait InferScans
         }
         foreach (Walk::children($n) as $c) { $this->scanArithUsedLocals($c); }
     }
+
+    /**
+     * Mark arrays this function builds from `[]` and nothing else
+     * ({@see InferTypes::$localBuiltArrays}).
+     *
+     * The gate on {@see InferTypes::$elemLoopLocals}, and the reason that
+     * promotion is sound: such an array holds only what element stores right here
+     * put in it, so pinning it to the element type those stores prove cannot
+     * contradict a value that is already inside. An array that arrived from
+     * anywhere else — a bare-`array` callee return, a by-ref fill, a captured
+     * closure variable — may hold NaN-boxed cells, and re-typing it `vec[string]`
+     * would read a tag as a pointer.
+     *
+     * Disqualifiers are deliberately blunt: any non-`[]` whole-value store, any
+     * appearance ANYWHERE inside a call's argument list, any reference binding,
+     * and any mention inside a closure. Missing a candidate costs precision;
+     * admitting a wrong one costs memory safety.
+     *
+     * ⚠ The argument test walks the whole argument SUBTREE and is not a test for
+     * a bare `LoadLocal`. A by-ref argument is a `ref_addr` node wrapping the
+     * local, so a shape test on the argument itself misses precisely the case
+     * that matters — the callee filling the array. The compiler's own
+     * `scanLocalElemFromStores` is that shape (`$found = []` handed to
+     * `scanLocalElemNode($body, $found)` which fills it with STRING keys), and it
+     * mis-compiled itself one generation later: the array was pinned `vec[bool]`
+     * and the key repr check caught it. Two generations, not one — a fix to
+     * inference is only proven by the build that USES it.
+     */
+    private function scanLocalBuiltArrays(Node $body): void
+    {
+        $seed = [];
+        $bad = [];
+        $read = [];
+        $this->walkLocalBuiltArrays($body, $seed, $bad, $read, false);
+        $out = [];
+        foreach ($seed as $name => $unused) {
+            if (isset($bad[$name])) { continue; }
+            // Must be READ as an element somewhere. An accumulator that is only
+            // ever written (`$out[] = $v`, `$out[$k] = $v` — nearly every array
+            // in this compiler) can never observe the erased element channel, so
+            // pinning it buys nothing and costs everything: without this test the
+            // promotion fired 1104 times in ONE source file, committing an element
+            // repr on arrays that had deliberately stayed uncommitted, and one of
+            // those commits contradicted a by-ref callee's refined parameter.
+            // The defect is a READ that precedes the store proving the element;
+            // no read, no defect.
+            if (!isset($read[$name])) { continue; }
+            $out[$name] = true;
+        }
+        $this->localBuiltArrays = $out;
+    }
+
+    /**
+     * @param array<string,bool> $seed
+     * @param array<string,bool> $bad
+     * @param array<string,bool> $read
+     */
+    private function walkLocalBuiltArrays(Node $n, array &$seed, array &$bad, array &$read, bool $inClosure): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_ARRAY_ACCESS && $n->array->kind === Node::KIND_LOAD_LOCAL) {
+            // An element READ of a local. A plain `$out[$k] = v` does NOT reach
+            // here — a StoreElement holds its base directly, not wrapped in an
+            // ArrayAccess — so this marks exactly the locals whose elements are
+            // observed.
+            $read[$n->array->name] = true;
+        }
+        if ($k === Node::KIND_CLOSURE) {
+            $inClosure = true;
+        } elseif ($inClosure && $k === Node::KIND_LOAD_LOCAL) {
+            $bad[$n->name] = true;
+        } elseif ($k === Node::KIND_STORE_LOCAL) {
+            $v = $n->value;
+            if ($v->kind === Node::KIND_ARRAY_LIT && \count($v->elements) === 0) {
+                $seed[$n->name] = true;
+            } else {
+                $bad[$n->name] = true;
+            }
+        } elseif ($k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_ALIAS
+                  || $k === Node::KIND_REF_BIND) {
+            $this->markLocalNamesIn($n, $bad);
+        } elseif ($k === Node::KIND_CALL || $k === Node::KIND_STATIC_CALL
+                  || $k === Node::KIND_METHOD_CALL) {
+            foreach ($n->args as $a) { $this->markLocalNamesIn($a, $bad); }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->walkLocalBuiltArrays($c, $seed, $bad, $read, $inClosure);
+        }
+    }
+
+    /**
+     * Mark every local NAME read anywhere under `$n`.
+     *
+     * @param array<string,bool> $out
+     */
+    private function markLocalNamesIn(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL) { $out[$n->name] = true; }
+        foreach (Walk::children($n) as $c) { $this->markLocalNamesIn($c, $out); }
+    }
 }

@@ -2045,6 +2045,16 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $asyncSrc = prelude_src_or_empty("async.php");
     // ext/pcntl + posix process control — DEMAND-GATED, braced-namespace tree.
     $pcntlSrc = prelude_src_or_empty("pcntl.php");
+    // Buffer\ (ByteBuffer + reader/writer) — DEMAND-GATED, braced-namespace tree.
+    // Holds a mutable string + cursor as OBJECT fields, so no stdlib signature
+    // could name it even if the parsing lived there.
+    $bufferSrc = prelude_src_or_empty("buffer.php");
+    // Http\ (server / request / response / the wire codec) — DEMAND-GATED,
+    // braced-namespace tree. Wholly in the prelude, including the parts that
+    // would fit the stdlib .o, because the .sig re-erases every array element
+    // type that crosses it and cannot name a prelude class at all; one
+    // compilation unit is what lets the parser hand real objects around.
+    $httpSrc = prelude_src_or_empty("http.php");
     // serialize / unserialize — DEMAND-GATED, and gated SEPARATELY (two files):
     // each one generates a per-class arm set from the class table, so a program
     // that only serializes must not pay for unserialize's rebuild arms.
@@ -2137,6 +2147,33 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         || $demand->mentionsAny(['SessionHandler', 'SessionHandlerInterface',
                                 'SessionIdInterface', 'SessionUpdateTimestampHandlerInterface'])
         || $demand->usesVar('_SESSION'));
+    // Http\ gates on the QUALIFIER, exactly as Async\ and Process\ do one gate
+    // up: Server, Request and Response are three of the most-owned class names
+    // in PHP, and nobody reaches this namespace without writing `Http\`.
+    // Buffer\ gates on the QUALIFIER, exactly as Async\, Process\ and Http\ do:
+    // `ByteBuffer`, `Reader` and `Writer` are names a program may very well own,
+    // and nobody reaches this namespace without writing `Buffer\`.
+    $useBuffer = $demand->mentions('Buffer');
+    $useHttp = $demand->mentions('Http');
+    if ($useHttp && $sapiClash) {
+        // The server runs every handler with the request seam live, so it cannot
+        // bow out of sapi.php the way a plain program does — and injecting on top
+        // of the program's own header() emits two definitions of one symbol.
+        dprint("compile failed: Http\\ needs the request seam (header/setcookie/"
+             . "http_response_code), but this program defines those names itself");
+        return null;
+    }
+    if ($useHttp) {
+        // The Server IS an Async\ accept loop, and every handler runs inside the
+        // request seam: header()/setcookie()/http_response_code() are absorbed
+        // into the Response it returns, and echo is funnelled through ob_start().
+        // Forced HERE, before the $useAsync fan-out below and long before
+        // $useCli, which reads $useSapi.
+        $useBuffer = true;
+        $useAsync = true;
+        $useSapi = true;
+        $useOb = true;
+    }
     if ($useAsync) {
         // The engine IS a fiber loop over an Io\Poll reactor — it cannot compile
         // without either, whatever the program itself mentions. It also dispatches
@@ -2278,6 +2315,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read session.php");
         return null;
     }
+    if ($useBuffer && $bufferSrc === "") {
+        dprint("compile failed: prelude: cannot read buffer.php");
+        return null;
+    }
+    if ($useHttp && $httpSrc === "") {
+        dprint("compile failed: prelude: cannot read http.php");
+        return null;
+    }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
@@ -2330,6 +2375,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->sessionSrc = $useSession ? $sessionSrc : "";
         $lower->asyncSrc = $useAsync ? $asyncSrc : "";
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
+        $lower->bufferSrc = $useBuffer ? $bufferSrc : "";
+        $lower->httpSrc = $useHttp ? $httpSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;

@@ -1482,6 +1482,17 @@ trait EmitLlvmObjects
                 return $out;
             }
         }
+        // Amortized `$this->s .= …` — the property analogue of the local
+        // self-append in {@see EmitLlvmLocals::emitStoreLocal}, and worth as much:
+        // without it a string accumulated into a property is a fresh O(n) concat
+        // per append, i.e. QUADRATIC. Measured on 40k×64B appends: 9215 ms here
+        // against php's 2380 ms, while the same loop over a LOCAL was 0 ms. Every
+        // class that builds a string — serializer, template, response body,
+        // ByteBuffer — sits on this shape.
+        $self = $this->selfAppendProperty($n);
+        if ($self !== null) {
+            return $self;
+        }
         $out = $this->emitNode($n->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
@@ -1560,6 +1571,97 @@ trait EmitLlvmObjects
             $val,
         );
         $this->lastValue = $val;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * IR for `$o->s = $o->s . rhs` as an in-place amortized append, or null when
+     * the store is not that shape.
+     *
+     * The property twin of {@see EmitLlvmLocals::emitSelfAppend}, sharing its
+     * helper and its ownership contract: `__mir_str_append` mutates in place when
+     * the slot is sole owner with spare capacity, else grows and RELEASES the old
+     * buffer — so this path deliberately emits no release-before-overwrite and no
+     * retain. The slot holds the object's single reference, which is exactly the
+     * rc==1 the in-place path needs.
+     *
+     * The gates are narrow on purpose:
+     *   - the receiver must be the SAME plain local on both sides, so the object
+     *     is evaluated once and the read and the write cannot address different
+     *     objects (`$a->s = $b->s . x` is not an append);
+     *   - the slot must be a plain full-width string, never a boxed cell property
+     *     (a tagged word is not a string pointer) and never a narrowed slot;
+     *   - the property must have a real offset — a dynamic/bag property has
+     *     already been routed above, and the offset fallback would blind-write
+     *     slot 16.
+     * Anything else falls through to the general store, which is merely slower.
+     */
+    private function selfAppendProperty(\Compile\Mir\StoreProperty $n): ?string
+    {
+        $sv = $n->value;
+        if ($sv->kind !== Node::KIND_CONCAT || $sv->type->kind !== Type::KIND_STRING) {
+            return null;
+        }
+        if ($n->object->kind !== Node::KIND_LOAD_LOCAL) {
+            return null;
+        }
+        $cls = $n->object->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return null; }
+        $cd = $this->classes[$cls];
+        if ($cd->propertyOffset($n->property) < 0) { return null; }
+        if ($cd->propertyWidth($n->property) !== 8) { return null; }
+        $propType = $cd->propertyTypes[$n->property] ?? null;
+        if ($propType === null || $propType->kind !== Type::KIND_STRING) { return null; }
+        if ($this->cellPropBoxed($propType, $cls, $n->property)) { return null; }
+
+        $ops = [];
+        $this->flattenConcat($sv, $ops);
+        $ops = $this->mergeAdjacentStrConsts($ops);
+        if (\count($ops) < 2) { return null; }
+        $op0 = $ops[0];
+        if ($op0->kind !== Node::KIND_PROPERTY_ACCESS
+            || $op0->property !== $n->property
+            || $op0->type->kind !== Type::KIND_STRING
+            || $op0->object->kind !== Node::KIND_LOAD_LOCAL
+            || $op0->object->name !== $n->object->name) {
+            return null;
+        }
+        // Rebuild `a . b . …` as ONE right-hand operand, exactly as the local
+        // path does, so a multi-way self-append still takes the fast route.
+        $rest = $ops[1];
+        $k = \count($ops);
+        for ($j = 2; $j < $k; $j = $j + 1) {
+            $rest = new \Compile\Mir\Concat($rest, $ops[$j]);
+        }
+
+        $this->rt->needsStrAppend = true;
+        $this->rt->needsStrRc = true;
+        $this->rt->needsConcat = true;
+        $out = $this->emitNode($n->object);
+        $out .= $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+        // The rhs is evaluated BEFORE the slot is loaded: it may itself touch the
+        // property (`$this->s = $this->s . $this->flush()`), and the append must
+        // see the slot as that left behind it.
+        $out .= $this->emitNode($rest);
+        $out .= $this->coerceToStr($rest, false);
+        $rp = $this->lastValue;
+        $gep = $this->ssa->allocReg();
+        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+              . ', i64 ' . (string)$cd->propertyOffset($n->property) . "\n";
+        $curI = $this->ssa->allocReg();
+        $out .= '  ' . $curI . ' = load i64, ptr ' . $gep . "\n";
+        $curP = $this->ssa->allocReg();
+        $out .= '  ' . $curP . ' = inttoptr i64 ' . $curI . " to ptr\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_str_append(ptr ' . $curP
+              . ', ptr ' . $rp . ")\n";
+        $out .= $this->concatTempRelease($rest, $rp);
+        $ri = $this->ssa->allocReg();
+        $out .= '  ' . $ri . ' = ptrtoint ptr ' . $reg . " to i64\n";
+        $out .= '  store i64 ' . $ri . ', ptr ' . $gep . "\n";
+        $this->lastValue = $ri;
         $this->lastValueType = 'i64';
         return $out;
     }
