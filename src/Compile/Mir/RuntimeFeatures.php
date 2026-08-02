@@ -152,6 +152,14 @@ final class RuntimeFeatures
         // __mir_realloc_tagged is always emitted (tagged vec grow), so the
         // realloc decl must always be present.
         $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
+        // The small-object pool reserves its region with mmap and is emitted
+        // with the allocators, i.e. always. Declared here rather than from
+        // `poolRuntime()` because libcExtra is already rendered by then — the
+        // fiber block, which runs earlier, may also key 'mmap' and this map
+        // de-duplicates by symbol.
+        if (\Compile\Debug::$pool) {
+            $decls['mmap'] = "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)";
+        }
         // A2 verify mode (MANTICORE_DEBUG_VERIFY): rc helpers abort on an
         // over-release (rc<1 before decrement = double-free / UAF). Gated so
         // production IR is byte-identical.

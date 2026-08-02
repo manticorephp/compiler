@@ -1177,7 +1177,11 @@ final class EmitLlvm implements EmitVisitor
     /**
      * B5 PGO metrics. Counter indices into the @__prof array:
      * 0 str_alloc, 1 str_retain, 2 str_release, 3 rc_retain (obj/vec),
-     * 4 rc_release (obj/vec), 5 assoc_retain, 6 assoc_release.
+     * 4 rc_release (obj/vec), 5 assoc_retain, 6 assoc_release,
+     * 7-13 retain by source category, 14-15 array-alloc traffic,
+     * 16-23 pool traffic (alloc/hit/miss/free/bypass + obj/bucket/cell).
+     * The names — and the array's length — live in one place:
+     * {@see EmitLlvmModule::profileRuntime}.
      * Emitted only under `MANTICORE_PROFILE=1`; a no-op string otherwise so
      * production IR is byte-identical.
      */
