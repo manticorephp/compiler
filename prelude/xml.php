@@ -146,28 +146,43 @@ function __mc_xml_is_valid(\Ffi\Ptr $reader): int {}
 //
 // XML_PARSE_NOERROR|NOWARNING covers the PARSER, but SCHEMA validity errors are
 // raised through the global error handler and print to stderr regardless. php
-// suppresses them by installing an xmlStructuredErrorFunc — a C FUNCTION
-// POINTER, which this FFI has no way to hand over (no PHP-function-as-C-callback
-// support; that is its own piece of work). fd 2 is therefore parked on
-// /dev/null for the duration of the validation drain and restored immediately —
-// a synchronous, non-suspending window, so nothing else can write into it.
+// suppresses them by installing an xmlStructuredErrorFunc, and so do we, now
+// that a C library can call back into PHP ({@see fn_to_ptr}, docs/ffi.md).
+//
+// __xmlRaiseError consults the STRUCTURED channel first and returns without its
+// default print the moment one is set, so an empty sink is the whole mechanism —
+// the handler does not have to read the xmlError it is handed, which is what
+// keeps this module free of C struct offsets.
+//
+// The GENERIC handler (xmlGenericErrorFunc) is `void(*)(void*, const char*, ...)`
+// — a C VARARGS callback, which a PHP function cannot be. The structured half is
+// the usable one, and it is the half that matters.
 
-#[\Ffi\Library('c'), \Ffi\Symbol('dup'), \Ffi\CType('int')]
-function __mc_xml_dup(#[\Ffi\CType('int')] int $fd): int {}
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSetStructuredErrorFunc'), \Ffi\Weak]
+function __mc_xml_set_structured_error(\Ffi\Ptr $ctx, \Ffi\Ptr $handler): void {}
 
-#[\Ffi\Library('c'), \Ffi\Symbol('dup2'), \Ffi\CType('int')]
-function __mc_xml_dup2(#[\Ffi\CType('int')] int $oldfd, #[\Ffi\CType('int')] int $newfd): int {}
+/**
+ * The sink. Deliberately empty: its ONLY job is to exist, so libxml2 stops
+ * writing to stderr.
+ *
+ * ⚠ It must never throw. A throw here would longjmp to the nearest enclosing PHP
+ * `try`, which sits ABOVE libxml2's frames — abandoning whatever the parser or
+ * the schema validator was in the middle of.
+ */
+function __mc_xml_err_sink(\Ffi\Ptr $ctx, \Ffi\Ptr $err): void
+{
+}
 
-#[\Ffi\Library('c'), \Ffi\Symbol('open'), \Ffi\CType('int'), \Ffi\Variadic(2)]
-function __mc_xml_open(string $path, #[\Ffi\CType('int')] int $flags,
-                       #[\Ffi\CType('int')] int $mode): int {}
-
-#[\Ffi\Library('c'), \Ffi\Symbol('close'), \Ffi\CType('int')]
-function __mc_xml_close(#[\Ffi\CType('int')] int $fd): int {}
-
-/** O_WRONLY — the only flag /dev/null needs, and the same value on Linux and
- *  Darwin (unlike O_CREAT and friends, which are not). */
-const __MC_XML_O_WRONLY = 1;
+/** Install the sink once per process. */
+function __mc_xml_silence(): void
+{
+    static $done = 0;
+    if ($done === 1) {
+        return;
+    }
+    $done = 1;
+    \__mc_xml_set_structured_error(\int_to_ptr(0), \fn_to_ptr('__mc_xml_err_sink'));
+}
 
 // ── LIBXML_* — libxml2's own option bits, which is why php's constants and
 //    xmlParserOption share values and the option word passes straight through.
@@ -626,6 +641,7 @@ function __mc_xml_parse(string $src, int $options, bool $isFile, string $uri): ?
     // is not what php's users see (Zend intercepts them into the same registry
     // this module keeps).
     $opts = $options | LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET;
+    \__mc_xml_silence();
 
     $nul = \int_to_ptr(0);
     if ($isFile) {

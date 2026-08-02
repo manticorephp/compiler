@@ -1189,6 +1189,7 @@ function __mc_dom_path(__McXmlDoc $d, int $n): string
  */
 function __mc_xml_validate(string $xml, string $schema, int $kind, bool $isFile): bool
 {
+    \__mc_xml_silence();
     $nul = \int_to_ptr(0);
     $reader = \__mc_xml_reader_for_memory($xml, \strlen($xml), $nul, $nul,
         LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
@@ -1232,25 +1233,11 @@ function __mc_xml_validate(string $xml, string $schema, int $kind, bool $isFile)
         }
     }
 
-    // Park stderr for the drain: libxml2 prints schema validity errors through
-    // its global handler, which XML_PARSE_NOERROR does not reach. See the
-    // comment on __mc_xml_dup in xml.php.
-    $devnull = \__mc_xml_open('/dev/null', __MC_XML_O_WRONLY, 0);
-    $saved = -1;
-    if ($devnull >= 0) {
-        $saved = \__mc_xml_dup(2);
-        \__mc_xml_dup2($devnull, 2);
-    }
+    // No fd juggling around the drain: the structured error sink installed by
+    // __mc_xml_silence() is what keeps libxml2's schema diagnostics off stderr.
     while (\__mc_xml_read($reader) === 1) {
     }
     $ok = \__mc_xml_is_valid($reader) === 1;
-    if ($saved >= 0) {
-        \__mc_xml_dup2($saved, 2);
-        \__mc_xml_close($saved);
-    }
-    if ($devnull >= 0) {
-        \__mc_xml_close($devnull);
-    }
     \__mc_xml_reader_free($reader);
     if (\ptr_to_int($sch) !== 0) {
         if ($kind === 1) {
