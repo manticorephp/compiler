@@ -131,7 +131,10 @@ trait InferCalls
         if ($n === '__mir_stdin' || $n === '__mir_stdout'
             || $n === '__mir_stderr' || $n === '__mir_argv_at'
             || $n === '__mir_env_at' || $n === 'ptr_offset'
-            || $n === 'int_to_ptr') {
+            || $n === 'int_to_ptr'
+            // fn_to_ptr: the address of a compiled PHP function, handed to a C
+            // library as a callback ({@see EmitLlvmBuiltins::biFnToPtr}).
+            || $n === 'fn_to_ptr') {
             return Type::obj('Ffi\\Ptr');
         }
         if ($n === '__mir_argc' || $n === '__mir_env_count'
