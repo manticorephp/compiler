@@ -3496,6 +3496,22 @@ final class LowerFromAst implements Pass
     {
         $elems = [];
         foreach ($expr->elements as $el) {
+            // `[&$a[$k], $v]` PARSES now, but an element cannot alias. A
+            // reference here is a property of the SLOT, and the array runtime has
+            // nowhere to record one: ARRAY_REPR_* and ARRAY_ELEM_HINT_* are
+            // whole-array flags, and RefAddr_ binds a LOCAL to a slot address,
+            // not a slot to a source. Building the literal by value would compile
+            // and run and be silently wrong — symfony/polyfill-deepclone's
+            // `$refsPool[] = [&$refs[$k], $value, &$value]` is an alias pool that
+            // is written back through, so a copy loses every write. A loud stop
+            // beats a wrong answer, exactly as for `fn &()`.
+            if ($el->byRef) {
+                throw new \RuntimeException(
+                    'unsupported: an array literal cannot bind an element by reference '
+                    . '(`[&$a[$k], …]`). The element would receive a copy, not an alias, '
+                    . 'so every write through it would be lost.'
+                );
+            }
             $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
             if ($el->value->kind === 'Spread') {
                 $inner = $this->lowerExpr($el->value->value);

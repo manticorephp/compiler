@@ -1512,12 +1512,21 @@ trait EmitLlvmObjects
         // rc-managed payload (string/object) is retained on the RAW pointer
         // BEFORE boxing — a tagged cell would mis-locate the rc header. A cell
         // -array backing slot keeps the raw store + rc co-own.
+        // An assignment is an EXPRESSION, and its value is the value ASSIGNED —
+        // not the slot's storage encoding. `$res` therefore tracks the value in
+        // the repr `$n->type` promises (the RHS type), while `$val` is what the
+        // slot receives. They diverge exactly when the slot boxes: returning the
+        // boxed word left `$v = ($o->mixedProp = 'x')` handing a NaN-tagged
+        // pointer to a consumer typed `string`, which inttoptr'd and dereferenced
+        // it. Same invariant emitStoreLocal keeps.
         if ($this->cellPropBoxed($propType, $pcls, $n->property)) {
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_CELL) {
-                // Already a boxed cell — store as-is.
+                // Already a boxed cell — store as-is (repr already agrees).
                 $out .= $this->coerceToI64();
                 $val = $this->lastValue;
+                $res = $val;
+                $resTy = 'i64';
             } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ) {
                 // rc-managed payload (string/object) — retain the RAW ptr before
                 // boxing (a tagged cell would mis-locate the rc header).
@@ -1528,8 +1537,15 @@ trait EmitLlvmObjects
                 $this->lastValueType = 'i64';
                 $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
+                $res = $raw;
+                $resTy = 'i64';
             } else {
-                // Non-rc scalar (int/float/bool/null) — box, no retain.
+                // Non-rc scalar (int/float/bool/null) — box, no retain. The
+                // pre-box register is captured in its NATURAL repr (a float is
+                // still a double here; coercing first would hand box_float an
+                // integer bit pattern).
+                $res = $this->lastValue;
+                $resTy = $this->lastValueType;
                 $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
             }
@@ -1559,6 +1575,8 @@ trait EmitLlvmObjects
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
             $out .= $this->rcRetainByType($n->value, $val, $propType, 4);
+            $res = $val;
+            $resTy = 'i64';
         }
         $offset = $this->propertyOffset($n->object, $n->property);
         $gep = $this->ssa->allocReg();
@@ -1570,8 +1588,8 @@ trait EmitLlvmObjects
             $n->property,
             $val,
         );
-        $this->lastValue = $val;
-        $this->lastValueType = 'i64';
+        $this->lastValue = $res;
+        $this->lastValueType = $resTy;
         return $out;
     }
 
@@ -2638,16 +2656,27 @@ trait EmitLlvmObjects
         // A float is boxed from the DOUBLE register: coercing to i64 first would
         // hand box_float the bit pattern as an integer (1.5 stored as 4.6e18).
         // Floats are not rc-managed, so nothing is owed to the retain below.
+        //
+        // An assignment is an EXPRESSION, and its value is the value ASSIGNED,
+        // not the slot's storage encoding — so what escapes in `lastValue` must
+        // match `$n->type` (the RHS type), which is what every consumer trusts.
+        // Returning the BOXED word made `$v = (M::$d = 'x')` hand a NaN-tagged
+        // pointer to a consumer typed `string`: it inttoptr'd and dereferenced
+        // it (SIGSEGV), and `$v = (M::$i = 42)` silently read -4222124650659798.
+        // emitStoreLocal keeps this invariant; this is the same rule.
         if ($box && $n->value->type->kind === Type::KIND_FLOAT) {
+            $res = $this->lastValue;
+            $resTy = $this->lastValueType;
             $out .= $this->boxToCell($n->value->type, $n->value);
             $val = $this->lastValue;
             $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
-            $this->lastValue = $val;
-            $this->lastValueType = 'i64';
+            $this->lastValue = $res;
+            $this->lastValueType = $resTy;
             return $out;
         }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
+        $res = $val;
         // A static prop is a program-lifetime owner of an obj value. The retain
         // happens on the RAW pointer, BEFORE any boxing — a tagged cell would
         // mis-locate the rc header (same rule as the instance-property store).
@@ -2657,7 +2686,7 @@ trait EmitLlvmObjects
             $val = $this->lastValue;
         }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
-        $this->lastValue = $val;
+        $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
     }

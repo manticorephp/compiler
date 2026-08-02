@@ -2689,9 +2689,20 @@ final class Parser
             $value = $this->parseExpression();
             return new ArrayElement(null, Expr::spread($value, $span));
         }
+        // `[&$a[$k], $v]` and `['k' => &$v]`. Accepting the `&` here replaces a
+        // bare "unexpected token: Ampersand" — which points at the character and
+        // explains nothing — with a diagnostic from lowering that names the
+        // construct and says why it cannot be honoured. The flag is carried, not
+        // obeyed: see LowerFromAst::lowerArrayLit.
+        if ($this->match(TokenKind::Ampersand)) {
+            return new ArrayElement(null, $this->parseExpression(), true);
+        }
         $first = $this->parseExpression();
         if ($this->check(TokenKind::DoubleArrow)) {
             $this->advance();
+            if ($this->match(TokenKind::Ampersand)) {
+                return new ArrayElement($first, $this->parseExpression(), true);
+            }
             $value = $this->parseExpression();
             return new ArrayElement($first, $value);
         }

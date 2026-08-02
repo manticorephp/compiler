@@ -415,12 +415,19 @@ final class ArrayLit extends Expr
     }
 }
 
-/** One element of an array literal. `key` is null for positional. */
+/**
+ * One element of an array literal. `key` is null for positional.
+ *
+ * `byRef` records a `&` before the value (`[&$a[$k], $v]`). It is carried, not
+ * honoured: lowering refuses it, because an element that aliases needs a
+ * per-slot reference fact the array runtime has nowhere to put.
+ */
 final class ArrayElement
 {
     public function __construct(
         public readonly ?Expr $key,
         public readonly Expr $value,
+        public readonly bool $byRef = false,
     ) {}
 }
 
