@@ -300,7 +300,24 @@ trait EmitLlvmLocals
             foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
-        return '';
+        // Every kind NOT special-cased above recurses over its children
+        // generically, so the walk is exhaustive by construction. It was a
+        // hand-written list of kinds, and a kind missing from it is not a missed
+        // optimisation — it is INVALID IR: the local's StoreLocal emits
+        // `store …, ptr ` with an empty operand and clang rejects the module
+        // with `expected instruction opcode`, pointing at the NEXT line. The
+        // static-call arm right above was one such patch; `isset($v[$param =
+        // trim($t[0])])` in symfony/polyfill-intl-messageformatter was the next,
+        // and enumerating kinds one bug at a time has no end.
+        //
+        // Safe against the one case that would be wrong: Walk::children of a
+        // CLOSURE yields its CAPTURES, never its body, so a StoreLocal belonging
+        // to a nested frame can never take a slot in this one.
+        $out = '';
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $out .= $this->preallocateLocals($c);
+        }
+        return $out;
     }
 
     private function emitLoadLocal(LoadLocal $n): string

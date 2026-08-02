@@ -1386,6 +1386,78 @@ function composer_source_dirs(string $projRoot, bool $withVendor): array
 }
 
 /**
+ * The paths composer's own `autoload.exclude-from-classmap` takes OUT of each
+ * package — the package author's statement that this code is not part of what
+ * the package ships. 51 of the 99 packages in the symfony-demo corpus declare
+ * it, almost always `/Test/` or `/Tests/`.
+ *
+ * Honouring it is not tidiness. A shipped-but-excluded `Test/` directory holds
+ * PHPUnit test-case base classes, and PHPUnit is a DEV dependency that
+ * `--no-dev` does not install — so whole-program AOT compiled
+ * `ServiceLocatorTestCase extends TestCase` and the module failed on an
+ * undefined `assertFalse`. Composer never loads those files; neither should we.
+ *
+ * Each pattern is scoped to the package that declared it (prefixed with its
+ * root) rather than applied globally — one package saying `/Test/` says nothing
+ * about another's, and over-EXCLUSION is a regression exactly as
+ * over-inclusion is.
+ *
+ * @return string[]
+ */
+function composer_classmap_excludes(string $projRoot, bool $withVendor): array
+{
+    /** @var string[] $out */
+    $out = [];
+    $cjPath = $projRoot . "/composer.json";
+    $cjSrc = file_exists($cjPath) ? read_file($cjPath) : null;
+    if ($cjSrc !== null) {
+        $cj = json_decode($cjSrc, true);
+        if (\is_array($cj) && isset($cj["autoload"]) && \is_array($cj["autoload"])) {
+            foreach (classmap_exclude_paths($cj["autoload"], $projRoot) as $p) { $out[] = $p; }
+        }
+    }
+    if ($withVendor) {
+        $lockPath = $projRoot . "/composer.lock";
+        $lockSrc = file_exists($lockPath) ? read_file($lockPath) : null;
+        if ($lockSrc !== null) {
+            $lock = json_decode($lockSrc, true);
+            $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
+            foreach ($pkgs as $pkg) {
+                if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                $pkgRoot = $projRoot . "/vendor/" . (string)$pkg["name"];
+                if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
+                    foreach (classmap_exclude_paths($pkg["autoload"], $pkgRoot) as $p) { $out[] = $p; }
+                }
+            }
+        }
+    }
+    return $out;
+}
+
+/**
+ * One autoload block's `exclude-from-classmap` entries, each joined to the
+ * package root. Composer writes them with surrounding slashes (`"/Test/"`), so
+ * the separators are normalised to exactly one on each side.
+ *
+ * @param array<string,mixed> $autoload
+ * @return string[]
+ */
+function classmap_exclude_paths(array $autoload, string $base): array
+{
+    /** @var string[] $out */
+    $out = [];
+    if (!isset($autoload["exclude-from-classmap"])) { return $out; }
+    $ents = $autoload["exclude-from-classmap"];
+    if (!\is_array($ents)) { return $out; }
+    foreach ($ents as $ent) {
+        $rel = \trim((string)$ent, "/");
+        if ($rel === "") { continue; }
+        $out[] = composer_path_join($base, $rel);
+    }
+    return $out;
+}
+
+/**
  * Parse every global-namespace function declaration under `$dir` (minus
  * `$excludes`) — the exported API of a library target, offered to dependent
  * applications as declare-only externs. Mirrors collect_stdlib_extern_decls
@@ -1654,7 +1726,21 @@ function cmd_build(array $args): int
         $sources = [];
         /** @var string[] $paths */
         $paths = [];
+        // A FILE is compiled once, however many autoload roots name it. Keyed by
+        // path rather than by directory because composer roots OVERLAP: symfony
+        // polyfills map psr-4 to the PACKAGE ROOT and then classmap a
+        // subdirectory of it (`"Symfony\\Polyfill\\Intl\\Icu\\": ""` plus
+        // `classmap: ["Resources/stubs"]`). The $covered set below compares
+        // directory STRINGS, so the nested entry is not equal to its parent and
+        // both were scanned — the stub's class was lowered twice and clang
+        // rejected the module with `invalid redefinition of function
+        // manticore_IntlDateFormatter____construct`. Not audit-only: any project
+        // whose autoload roots nest hits it.
+        /** @var array<string,bool> $seenPath */
+        $seenPath = [];
         foreach (collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
+            if (isset($seenPath[$sf->path])) { continue; }
+            $seenPath[$sf->path] = true;
             $sources[] = $sf->contents;
             $paths[] = $sf->path;
         }
@@ -1670,6 +1756,13 @@ function cmd_build(array $args): int
         $composerOn = ($composer === true) || \is_array($composer);
         if ($composerOn) {
             $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
+            // Composer's own exclusions join the manifest's. Applied to the
+            // composer-discovered roots only: the manifest's `src` is the
+            // project's own code, where the author's `exclude` is the authority.
+            $moduleExcludes = \array_merge(
+                $moduleExcludes,
+                composer_classmap_excludes(".", $withVendor),
+            );
             /** @var array<string,bool> $covered */
             $covered = [];
             $covered[\rtrim($srcDir, "/")] = true;
@@ -1679,6 +1772,8 @@ function cmd_build(array $args): int
                 $covered[$nd] = true;
                 dprint("build: + composer autoload '" . $nd . "'");
                 foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
+                    if (isset($seenPath[$sf->path])) { continue; }
+                    $seenPath[$sf->path] = true;
                     $sources[] = $sf->contents;
                     $paths[] = $sf->path;
                 }
@@ -2671,6 +2766,10 @@ function analyze_prelude_files(): array {
         // `tools/audit/calibrate.sh` gates this list against `prelude/*.php`.
         "array_fns_ext.php", "attributes.php", "backtrace_stub.php", "var_export.php",
         "ob.php", "autoload.php", "sapi.php", "session.php",
+        // The Buffer\ and Http\ class trees, same reasoning as the demand-gated
+        // trees above: closed-world analysis must know every prelude class a
+        // user program can name.
+        "buffer.php", "http.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

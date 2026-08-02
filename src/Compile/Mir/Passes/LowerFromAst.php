@@ -837,8 +837,8 @@ final class LowerFromAst implements Pass
 
         // Pre-pass: register every top-level `define("NAME", <const-expr>)` so a
         // later bareword reference / `constant()` / `defined()` resolves at
-        // compile time, regardless of source order. Conditional / non-top-level
-        // / non-literal-name defines are not registered (no runtime registry).
+        // compile time, regardless of source order. Non-literal-name defines are
+        // not registered (no runtime registry).
         foreach ($stmts as $stmt) {
             if ($stmt->kind !== 'Expression') { continue; }
             $de = $stmt->expr;
@@ -848,6 +848,24 @@ final class LowerFromAst implements Pass
             if (\count($dargs) < 2) { continue; }
             if ($dargs[0]->kind !== 'StringLiteral') { continue; }
             $this->userConstants[$this->constBareName($this->stringLitValue($dargs[0]))] = $dargs[1];
+        }
+        // Second pass, AFTER the unconditional one so a plain define always wins:
+        // the guarded form `if (!defined('N')) { define('N', <const-expr>); }`.
+        // This is THE polyfill idiom — every one of the 45 guarded defines across
+        // the tier-1 packages has exactly this shape, with no version conditional
+        // among them — and without it the whole polyfill layer is unreachable
+        // (`unknown constant IDNA_DEFAULT`, reached through a DEFAULT PARAMETER
+        // VALUE, which must be a compile-time constant).
+        //
+        // Only this shape is admitted, and only for the SAME name the guard
+        // tests. That is what makes it sound without evaluating anything: the
+        // constant world is closed at compile time, so "nobody else defined N"
+        // is decidable, and the guard says the author's intent is exactly
+        // "define it if nobody did". A define under any OTHER condition stays
+        // unregistered — registering one from a branch that would not run is
+        // the shape of bug this compiler has paid for before.
+        foreach ($stmts as $stmt) {
+            $this->registerGuardedDefines($stmt);
         }
 
         // Inject bundled-stdlib signatures as declare-only externs. Skipped
@@ -2450,6 +2468,72 @@ final class LowerFromAst implements Pass
         return $bs === false ? $raw : \substr($raw, $bs + 1);
     }
 
+    /**
+     * Register `define('N', <const-expr>)` bodies guarded by `if (!defined('N'))`.
+     *
+     * Recurses so a bootstrap that wraps its whole block in another `if` still
+     * registers, and walks `else` / `elseif` arms for the same reason. Only the
+     * guard's OWN name is registered from its arm — a `!defined('A')` arm that
+     * also defines `B` says nothing about whether B should exist, so B is left
+     * alone. An already-registered name is never overwritten, which is both
+     * php's first-define-wins and what keeps the unconditional pass above
+     * authoritative. It also makes the duplicate harmless in the case that
+     * actually occurs: a polyfill ships bootstrap.php AND bootstrap80.php,
+     * composer picks one at runtime, and whole-program AOT compiles both.
+     */
+    private function registerGuardedDefines(\Parser\Ast\Stmt $stmt): void
+    {
+        if ($stmt->kind !== 'If') { return; }
+        $guarded = $this->negatedDefinedName($stmt->condition);
+        if ($guarded !== null) {
+            foreach ($stmt->then->statements as $inner) {
+                $this->registerDefineFor($inner, $guarded);
+            }
+        }
+        foreach ($stmt->then->statements as $inner) {
+            $this->registerGuardedDefines($inner);
+        }
+        foreach ($stmt->elseifs as $arm) {
+            $armGuard = $this->negatedDefinedName($arm->condition);
+            foreach ($arm->body->statements as $inner) {
+                if ($armGuard !== null) { $this->registerDefineFor($inner, $armGuard); }
+                $this->registerGuardedDefines($inner);
+            }
+        }
+        if ($stmt->else !== null) {
+            foreach ($stmt->else->statements as $inner) {
+                $this->registerGuardedDefines($inner);
+            }
+        }
+    }
+
+    /** `!defined('N')` — the bare constant name N, or null for any other shape. */
+    private function negatedDefinedName(\Parser\Ast\Expr $cond): ?string
+    {
+        if ($cond->kind !== 'UnaryOp' || $cond->op !== '!') { return null; }
+        $call = $cond->operand;
+        if ($call->kind !== 'Call') { return null; }
+        if (\strtolower($call->function) !== 'defined') { return null; }
+        if (\count($call->args) !== 1) { return null; }
+        if ($call->args[0]->kind !== 'StringLiteral') { return null; }
+        return $this->constBareName($this->stringLitValue($call->args[0]));
+    }
+
+    /** Register `$stmt` if it is exactly `define('<$guarded>', <const-expr>);`. */
+    private function registerDefineFor(\Parser\Ast\Stmt $stmt, string $guarded): void
+    {
+        if ($stmt->kind !== 'Expression') { return; }
+        $de = $stmt->expr;
+        if ($de->kind !== 'Call') { return; }
+        if (\strtolower($de->function) !== 'define') { return; }
+        if (\count($de->args) < 2) { return; }
+        if ($de->args[0]->kind !== 'StringLiteral') { return; }
+        $name = $this->constBareName($this->stringLitValue($de->args[0]));
+        if ($name !== $guarded) { return; }
+        if (isset($this->userConstants[$name])) { return; }
+        $this->userConstants[$name] = $de->args[1];
+    }
+
     private function staticPropRef(string $rawClass, string $rawName): ?StaticProp_
     {
         $cls = $this->resolveStaticClass($rawClass);
@@ -2859,6 +2943,33 @@ final class LowerFromAst implements Pass
             if ($lk === null || $rk === null) { return self::GUARD_UNKNOWN; }
             $eq = $lk === $rk;
             return $this->guardOf($op === '===' ? $eq : !$eq);
+        }
+        // ORDERED comparison of two compile-time INTEGERS — `PHP_VERSION_ID <
+        // 80500`, the guard every version-shim stub is wrapped in. Without it a
+        // shim body is lowered on a branch that can never run, and those bodies
+        // DECLARE CLASSES, which is not a statement lowering supports: the tier-1
+        // build died on `unsupported statement kind Class` inside
+        // polyfill-php85's `NoDiscard` stub. Folding is also the only correct
+        // answer — this compiler targets 8.5, so the shim must NOT exist, and
+        // declaring it anyway would shadow the real thing.
+        //
+        // Deliberately NOT routed through a `?int` helper: a nullable scalar's
+        // null does not read back as null under the self-host (the same trap the
+        // tri-state above exists for), so the operands stay as the `i:`-tagged
+        // string keys `constScalarKey` already produces and the null test happens
+        // on a string.
+        if ($op === '<' || $op === '<=' || $op === '>' || $op === '>=') {
+            $lk = $this->constScalarKey($e->left);
+            $rk = $this->constScalarKey($e->right);
+            if ($lk === null || $rk === null) { return self::GUARD_UNKNOWN; }
+            if (\strncmp($lk, 'i:', 2) !== 0) { return self::GUARD_UNKNOWN; }
+            if (\strncmp($rk, 'i:', 2) !== 0) { return self::GUARD_UNKNOWN; }
+            $lv = (int)\substr($lk, 2);
+            $rv = (int)\substr($rk, 2);
+            if ($op === '<')  { return $this->guardOf($lv < $rv); }
+            if ($op === '<=') { return $this->guardOf($lv <= $rv); }
+            if ($op === '>')  { return $this->guardOf($lv > $rv); }
+            return $this->guardOf($lv >= $rv);
         }
         return self::GUARD_UNKNOWN;
     }

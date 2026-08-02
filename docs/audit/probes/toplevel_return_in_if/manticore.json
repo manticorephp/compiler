@@ -1,0 +1,12 @@
+{
+    "applications": [
+        {
+            "name": "smoke",
+            "src": "tiers",
+            "output": "smoke_bin",
+            "entry": "tiers/entry.php",
+            "composer": false,
+            "extensions": []
+        }
+    ]
+}
