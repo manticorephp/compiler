@@ -1,0 +1,17 @@
+localhost
+interp: 5432
+concat: localhost:5432
+top:db=2
+top:tags=2
+<tags><t>a</t><t>b</t></tags>
+<host>localhost</host>
+bool(true)
+bool(false)
+t1=a
+t2=b
+--- dom build ---
+<?xml version="1.0" encoding="UTF-8"?>
+<books>
+  <book year="2006">Dragon</book>
+</books>
+1

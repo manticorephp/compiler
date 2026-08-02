@@ -331,6 +331,47 @@ trait EmitLlvmControl
     }
 
     /**
+     * A word that is a RAW object pointer → the equivalent object cell; anything
+     * else (already NaN-boxed, an array, a string, a small int) passes through.
+     * lastValue ← the normalised word.
+     *
+     * Used where a value has to be self-describing because a sibling code path
+     * produces cells there ({@see iterProtoStep}). Only RC_TAG_MAGIC counts as
+     * an object — an array carries ARRAY_TAG_MAGIC / ARRAY_TAG_ARENA / ASSOC,
+     * so the probe cannot mistake one for the other.
+     */
+    private function rawObjToCellIr(string $w): string
+    {
+        $this->rt->needsTagged = true;
+        $slot = $this->ssa->allocReg();
+        $out  = '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $w . ', ptr ' . $slot . "\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $w . ", -4503599627370496\n";
+        $rawL = $this->ssa->allocLabel('r2c.raw');
+        $endL = $this->ssa->allocLabel('r2c.end');
+        $out .= '  br i1 ' . $isBox . ', label %' . $endL . ', label %' . $rawL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->objectProbeIr($w);
+        $boxL = $this->ssa->allocLabel('r2c.box');
+        $out .= '  br i1 ' . $this->objectProbeReg . ', label %' . $boxL
+              . ', label %' . $endL . "\n";
+        $out .= $boxL . ":\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $b = $this->ssa->allocReg();
+        $out .= '  ' . $b . ' = call i64 @__manticore_box_object(ptr ' . $p . ")\n";
+        $out .= '  store i64 ' . $b . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
      * Drive the Iterator protocol over an erased word already known to be an
      * OBJECT. Which protocol it speaks is a runtime question — an
      * IteratorAggregate hands over its `getIterator()` result (often a
@@ -434,6 +475,21 @@ trait EmitLlvmControl
         if (!$dyn) {
             return $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, $m, [], $rt));
         }
+        // ⚠ The two arms below must AGREE on representation: the generator arm
+        // reads current@16 / key@24, which are already tagged CELLS. Asking the
+        // virtual dispatch for `unknown` left the object arm returning its
+        // callee's raw word — an object pointer, or a raw string pointer for a
+        // `key(): string` — and the merged value was then read on the tag that
+        // was never applied. `foreach ($sxe as $name => $node)` printed the tag
+        // name as 2.16E-314 and `$b['id']` inside the loop reached the array
+        // subscript instead of offsetGet.
+        //
+        // Asking for a CELL turns on emitVirtualDispatch's per-arm boxing, which
+        // boxes each candidate by its OWN declared return type — the general fix,
+        // and the only one that covers a string key as well as an object value.
+        if ($m === 'current' || $m === 'key') {
+            $rt = \Compile\Mir\Type::cell();
+        }
         // The classify is recomputed HERE, per step, rather than hoisted before
         // the loop. A `yield` in the body makes the generator resume switch
         // re-enter mid-loop, so a value defined before the loop does not
@@ -479,6 +535,12 @@ trait EmitLlvmControl
         $out .= $this->emitNode(new \Compile\Mir\MethodCall_($iterNode, $m, [], $rt));
         if ($m !== 'rewind' && $m !== 'next') {
             $out .= $this->coerceToI64();
+            // A candidate the dispatch could not resolve statically still hands
+            // back a raw word; normalise an object pointer so it agrees with the
+            // per-arm boxing the cell-typed call above asks for.
+            if ($m === 'current' || $m === 'key') {
+                $out .= $this->rawObjToCellIr($this->lastValue);
+            }
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         }
         $out .= '  br label %' . $endL . "\n";

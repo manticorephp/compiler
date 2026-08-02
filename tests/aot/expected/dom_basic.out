@@ -1,0 +1,10 @@
+bool(true)
+cat|2
+n=2
+b1:Compilers
+b2:SSA
+xp:Compilers
+xp:SSA
+cnt=2
+sx:cat 2 SSA
+back:book b1

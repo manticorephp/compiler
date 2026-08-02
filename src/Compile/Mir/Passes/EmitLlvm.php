@@ -224,6 +224,9 @@ final class EmitLlvm implements EmitVisitor
     private bool $needsErrorHandlers = false;
     /** prelude/ob.php is compiled in: main() gets the atexit drain. */
     private bool $needsOb = false;
+    /** This module generated `__mir_obj_to_str`, so a cell→string coercion may
+     *  branch on the object tag and call it. {@see coerceCellToStr} */
+    private bool $hasObjToStr = false;
 
     /** True while emitting a `$r = &fn()` bind (suppress call-result deref). */
     private bool $rawRefCall = false;
@@ -384,6 +387,7 @@ final class EmitLlvm implements EmitVisitor
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;
+        $this->hasObjToStr = $module->hasObjToStr;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {

@@ -94,6 +94,19 @@ final class Module
      *  that flushes any buffer still open at exit (php's own behaviour). */
     public bool $needsOb = false;
 
+    /** This module generated `__mir_obj_to_str` — a dispatcher with one
+     *  `instanceof` arm per class declaring `__toString`, written from the
+     *  finished class table.
+     *
+     *  Needed because `@__manticore_tagged_to_str` is ONE external body living
+     *  in the central core (stdlib.o), so it cannot know a user module's
+     *  classes and has no object arm at all: `(string)$cell` on an object cell
+     *  used to render the tagged word itself. The tag-8 branch is therefore
+     *  emitted at the CALL SITE, where the module knows whether the dispatcher
+     *  exists — never inside the shared body, which would specialize a symbol
+     *  the whole program links once. */
+    public bool $hasObjToStr = false;
+
     /** Source file path, for exception file() / trace frames. */
     public string $sourceFile = '';
 

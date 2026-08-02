@@ -1,0 +1,23 @@
+<?php
+$sx = new SimpleXMLElement('<root/>');
+$a = $sx->addChild('item', 'first');
+$a->addAttribute('id', '1');
+$b = $sx->addChild('other', 'ampersand &amp; entity &#65;');
+$b->addAttribute('note', 'a &lt; b');
+$sx->addAttribute('kind', 'demo');
+echo $sx->asXML();
+echo "---\n";
+$sx->item = 'replaced &amp; done';
+echo $sx->asXML();
+echo "---\n";
+unset($sx->other);
+echo $sx->asXML();
+echo "---\n";
+$doc = simplexml_load_string('<a>x<b>y</b>z<![CDATA[raw&stuff]]></a>');
+echo "cast=[", (string) $doc, "]\n";
+echo "b=[", (string) $doc->b, "]\n";
+echo $doc->asXML();
+echo "---\n";
+$e = simplexml_load_string('<a>&amp;&lt;&gt; &#65;</a>');
+echo "ent=[", (string) $e, "]\n";
+echo $e->asXML();

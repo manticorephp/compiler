@@ -1,0 +1,7 @@
+units=2
+1 => Bonjour
+2 => Au revoir
+ns[]=urn:oasis:names:tc:xliff:document:1.2
+--- dom xpath ---
+q=1 v=bye
+cnt=2

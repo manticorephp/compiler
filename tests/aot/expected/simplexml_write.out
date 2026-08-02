@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<root kind="demo"><item id="1">first</item><other note="a &amp;lt; b">ampersand &amp; entity A</other></root>
+---
+<?xml version="1.0"?>
+<root kind="demo"><item id="1">replaced &amp;amp; done</item><other note="a &amp;lt; b">ampersand &amp; entity A</other></root>
+---
+<?xml version="1.0"?>
+<root kind="demo"><item id="1">replaced &amp;amp; done</item></root>
+---
+cast=[xzraw&stuff]
+b=[y]
+<?xml version="1.0"?>
+<a>x<b>y</b>z<![CDATA[raw&stuff]]></a>
+---
+ent=[&<> A]
+<?xml version="1.0"?>
+<a>&amp;&lt;&gt; A</a>
