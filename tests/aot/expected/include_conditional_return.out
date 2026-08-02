@@ -1,0 +1,14 @@
+array(2) {
+  ["from"]=>
+  string(5) "guard"
+  ["n"]=>
+  int(7)
+}
+string(12) "stopped-at-2"
+NULL
+boot: start
+boot: taking the guarded return
+nested: start
+nested: iter 1
+nested: returning at v=2
+novalue: start

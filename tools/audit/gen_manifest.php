@@ -85,6 +85,39 @@ if ($tierKey !== 'T8') {
     }
 }
 
+/**
+ * The first UNCONDITIONALLY declared class/interface/trait/enum in a package,
+ * fully qualified, or '' when the package declares none.
+ *
+ * Column-0 only, so a stub declared inside `if (PHP_VERSION_ID < …)` is never
+ * picked — on a current target that guard folds false and the class does not
+ * exist. Test and stub directories are skipped for the same reason composer
+ * excludes them from its classmap.
+ */
+function audit_first_class_of(string $pkgDir): string
+{
+    if (!is_dir($pkgDir)) { return ''; }
+    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($pkgDir));
+    $files = [];
+    foreach ($it as $f) {
+        if (!$f->isFile() || $f->getExtension() !== 'php') { continue; }
+        $path = $f->getPathname();
+        if (preg_match('#/(Test|Tests|Resources/stubs)/#', $path)) { continue; }
+        $files[] = $path;
+    }
+    sort($files);
+    foreach ($files as $path) {
+        $src = file_get_contents($path);
+        if ($src === false) { continue; }
+        if (!preg_match('/^(?:final\s+|abstract\s+|readonly\s+)*(?:class|interface|trait|enum)\s+(\w+)/m', $src, $m)) {
+            continue;
+        }
+        $ns = preg_match('/^namespace\s+([^;{\s]+)/m', $src, $nm) ? $nm[1] . '\\' : '';
+        return $ns . $m[1];
+    }
+    return '';
+}
+
 // A smoke entry that merely NAMES the tier is not enough: with nothing
 // reachable the whole tier is dead-code-eliminated, the stub list comes back
 // empty, and the tier reads as complete. Touching each package's classes
@@ -101,16 +134,21 @@ $lines = [
     '',
     '$live = 0;',
 ];
+$named = 0;
 foreach ($below as $p) {
-    // vendor/<vendor>/<pkg> -> a plausible root namespace. Wrong guesses are
-    // harmless: class_exists on an unknown name is simply false, and the point
-    // is to keep the compiler from discarding the compiled sources.
-    $parts = explode('/', $p);
-    $ns = str_replace(['-', '_'], '', ucwords($parts[0], '-_'))
-        . '\\' . str_replace(['-', '_'], '', ucwords($parts[1] ?? '', '-_'));
-    $lines[] = '$live += (int)class_exists(' . var_export($ns, true) . ');';
+    // A REAL declared class per package, read out of its sources. This used to
+    // guess `Vendor\Package` from the directory name, and every guess was
+    // wrong — the entry printed "0 root classes live", which is not a harmless
+    // cosmetic zero: a class_exists on a name that exists nowhere folds to
+    // false at compile time, so the entry referenced nothing and could not do
+    // the one job it has. The count IS the evidence that the tier is reachable,
+    // so it has to be able to be non-zero.
+    $fqcn = audit_first_class_of(rtrim($app, '/') . '/vendor/' . $p);
+    if ($fqcn === '') { continue; }
+    $lines[] = '$live += (int)class_exists(' . var_export($fqcn, true) . ');';
+    $named++;
 }
-$lines[] = 'echo "tier ' . $tierKey . ': ", $live, " root classes live\n";';
+$lines[] = 'echo "tier ' . $tierKey . ': ", $live, "/' . $named . ' root classes live\n";';
 file_put_contents($app . '/' . $entryRel, implode("\n", $lines) . "\n");
 
 $manifest = [

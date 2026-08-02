@@ -2001,6 +2001,262 @@ function __mc_include_slot(string $path, int $index): string {
     return '__mc_incl_' . (string)$index . '_' . $tail;
 }
 
+/**
+ * What a non-entry file's top-level `return`s look like, as an int so no
+ * nullable scalar is involved: 0 none, 1 only valueless, 2 at least one with a
+ * value. Control flow is descended; a FUNCTION or CLASS declaration is NOT —
+ * a `return` in there belongs to its own frame, not to the file.
+ *
+ * @param \Parser\Ast\Stmt[] $stmts
+ */
+function __mc_file_return_kind(array $stmts): int
+{
+    $kind = 0;
+    foreach ($stmts as $s) {
+        if ($s->kind === 'Return') {
+            $here = __mc_as_return($s)->value === null ? 1 : 2;
+            if ($here > $kind) { $kind = $here; }
+            continue;
+        }
+        $sub = __mc_stmt_return_kind($s);
+        if ($sub > $kind) { $kind = $sub; }
+    }
+    return $kind;
+}
+
+/**
+ * {@see __mc_file_return_kind} for one statement's nested bodies.
+ *
+ * Recursion is direct rather than through a helper returning the child lists.
+ * An `array` OF `Stmt[]` is a nested-element channel, and handing one back
+ * across a call boundary erases the inner element type — the arrays came back
+ * as values whose bits were read as a `Stmt`, which SIGBUS'd the Zend-seeded
+ * compiler while the self-hosted build stayed green. Nothing here builds a
+ * container it does not need.
+ */
+function __mc_stmt_return_kind(\Parser\Ast\Stmt $s): int
+{
+    $k = $s->kind;
+    $kind = 0;
+    if ($k === 'If') {
+        $n = __mc_as_if($s);
+        $kind = __mc_file_return_kind($n->then->statements);
+        foreach ($n->elseifs as $arm) {
+            $x = __mc_file_return_kind($arm->body->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        if ($n->else !== null) {
+            $x = __mc_file_return_kind($n->else->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        return $kind;
+    }
+    if ($k === 'While')   { return __mc_file_return_kind(__mc_as_while($s)->body->statements); }
+    if ($k === 'DoWhile') { return __mc_file_return_kind(__mc_as_dowhile($s)->body->statements); }
+    if ($k === 'For')     { return __mc_file_return_kind(__mc_as_for($s)->body->statements); }
+    if ($k === 'Foreach') { return __mc_file_return_kind(__mc_as_foreach($s)->body->statements); }
+    if ($k === 'TryCatch') {
+        $n = __mc_as_trycatch($s);
+        $kind = __mc_file_return_kind($n->try->statements);
+        foreach ($n->catches as $c) {
+            $x = __mc_file_return_kind($c->body->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        if ($n->finally !== null) {
+            $x = __mc_file_return_kind($n->finally->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        return $kind;
+    }
+    if ($k === 'Switch') {
+        foreach (__mc_as_switch($s)->cases as $arm) {
+            $x = __mc_file_return_kind($arm->body);
+            if ($x > $kind) { $kind = $x; }
+        }
+        return $kind;
+    }
+    if ($k === 'Namespace') {
+        $n = __mc_as_namespace($s);
+        if ($n->body !== null) { return __mc_file_return_kind($n->body->statements); }
+        return 0;
+    }
+    return 0;
+}
+
+function __mc_as_if(\Parser\Ast\IfStmt $s): \Parser\Ast\IfStmt { return $s; }
+function __mc_as_while(\Parser\Ast\WhileStmt $s): \Parser\Ast\WhileStmt { return $s; }
+function __mc_as_dowhile(\Parser\Ast\DoWhileStmt $s): \Parser\Ast\DoWhileStmt { return $s; }
+function __mc_as_for(\Parser\Ast\ForStmt $s): \Parser\Ast\ForStmt { return $s; }
+function __mc_as_foreach(\Parser\Ast\ForeachStmt $s): \Parser\Ast\ForeachStmt { return $s; }
+function __mc_as_trycatch(\Parser\Ast\TryCatchStmt $s): \Parser\Ast\TryCatchStmt { return $s; }
+function __mc_as_switch(\Parser\Ast\SwitchStmt $s): \Parser\Ast\SwitchStmt { return $s; }
+function __mc_as_namespace(\Parser\Ast\NamespaceStmt $s): \Parser\Ast\NamespaceStmt { return $s; }
+function __mc_as_return(\Parser\Ast\ReturnStmt $s): \Parser\Ast\ReturnStmt { return $s; }
+
+/**
+ * Rewrite every top-level `return` of a NON-ENTRY file into "store the value,
+ * then jump past the rest of this file".
+ *
+ * php's `return` in an included file ends THAT FILE and hands a value back; the
+ * including script carries on. Whole-program AOT flattens every file's
+ * top-level statements into one `__main` with the entry last, so a surviving
+ * `return` ends the PROGRAM instead — and the entry, which is last, never runs.
+ * Dropping the statement (what this used to do for a bare top-level `return`)
+ * is wrong in the other direction: the rest of the file then runs when php
+ * would have skipped it.
+ *
+ * A jump to a label at the file's end is both. The statements stay in `__main`,
+ * so top-level variables keep sharing one scope exactly as php's include does —
+ * which is why this is a jump and not a synthetic per-file function.
+ *
+ * @param \Parser\Ast\Stmt[] $stmts
+ * @return \Parser\Ast\Stmt[]
+ */
+function __mc_rewrite_file_returns(array $stmts, string $slot, string $label): array
+{
+    /** @var \Parser\Ast\Stmt[] $out */
+    $out = [];
+    foreach ($stmts as $s) {
+        if ($s->kind === 'Return') {
+            $ret = __mc_as_return($s);
+            // A `return;` with NO value is not the same as never returning:
+            // php's `require` of a file that RAN a bare `return` evaluates to
+            // NULL, while a file that fell off its end gives int(1). Storing
+            // NULL at the return site keeps both, because the store only
+            // executes on the path that actually returned.
+            $retVal = $ret->value === null
+                ? \Parser\Ast\Expr::null($s->span)
+                : $ret->value;
+            if ($slot !== '') {
+                $out[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign(
+                        \Parser\Ast\Expr::arrayAccess(
+                            \Parser\Ast\Expr::variable('GLOBALS', $s->span),
+                            \Parser\Ast\Expr::string($slot, $s->span),
+                            $s->span,
+                        ),
+                        // Boxed on the way in for the same reason the reader is
+                        // typed cell: the slot holds an array, a closure or a
+                        // scalar interchangeably.
+                        \Parser\Ast\Expr::call('__mir_to_cell', [$retVal], $s->span),
+                        $s->span,
+                    ),
+                    $s->span,
+                );
+            }
+            $out[] = new \Parser\Ast\GotoStmt($label, $s->span);
+            continue;
+        }
+        $out[] = __mc_rewrite_stmt_returns($s, $slot, $label);
+    }
+    return $out;
+}
+
+/** One statement rebuilt with its nested statement lists rewritten. */
+function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $label): \Parser\Ast\Stmt
+{
+    // As in __mc_stmt_return_kind: every subclass field is read behind a
+    // concrete parameter type, never off the base `Stmt`. Read off the base
+    // (which declares only kind/span) a field resolves by the wrong offset
+    // under the self-host and SEGFAULTS THE COMPILER, while Zend — where the
+    // same access is dynamic — compiles the identical program without
+    // complaint. Same rule, and the same reason, as foldGuard's typed dispatch.
+    $k = $s->kind;
+    if ($k === 'If') {
+        $n = __mc_as_if($s);
+        $elseifs = [];
+        foreach ($n->elseifs as $arm) {
+            $elseifs[] = new \Parser\Ast\ElseIfArm(
+                $arm->condition,
+                new \Parser\Ast\Block(__mc_rewrite_file_returns($arm->body->statements, $slot, $label)),
+            );
+        }
+        $else = $n->else === null ? null
+            : new \Parser\Ast\Block(__mc_rewrite_file_returns($n->else->statements, $slot, $label));
+        return \Parser\Ast\Stmt::if_(
+            $n->condition,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->then->statements, $slot, $label)),
+            $elseifs,
+            $else,
+            $s->span,
+        );
+    }
+    if ($k === 'While') {
+        $n = __mc_as_while($s);
+        return \Parser\Ast\Stmt::while_(
+            $n->condition,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $s->span,
+        );
+    }
+    if ($k === 'DoWhile') {
+        $n = __mc_as_dowhile($s);
+        return \Parser\Ast\Stmt::doWhile(
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $n->condition,
+            $s->span,
+        );
+    }
+    if ($k === 'For') {
+        $n = __mc_as_for($s);
+        return \Parser\Ast\Stmt::for_(
+            $n->init,
+            $n->condition,
+            $n->update,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $s->span,
+        );
+    }
+    if ($k === 'Foreach') {
+        $n = __mc_as_foreach($s);
+        return \Parser\Ast\Stmt::foreach_(
+            $n->expr,
+            $n->key,
+            $n->value,
+            $n->valueByRef,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $s->span,
+        );
+    }
+    if ($k === 'TryCatch') {
+        $n = __mc_as_trycatch($s);
+        $catches = [];
+        foreach ($n->catches as $c) {
+            $catches[] = new \Parser\Ast\CatchClause(
+                $c->types,
+                $c->name,
+                new \Parser\Ast\Block(__mc_rewrite_file_returns($c->body->statements, $slot, $label)),
+            );
+        }
+        // The `finally` body is left ALONE: php forbids jumping out of one, so
+        // a `return` there is not this transform's to move.
+        return \Parser\Ast\Stmt::tryCatch(
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->try->statements, $slot, $label)),
+            $catches,
+            $n->finally,
+            $s->span,
+        );
+    }
+    if ($k === 'Switch') {
+        $n = __mc_as_switch($s);
+        $cases = [];
+        foreach ($n->cases as $arm) {
+            $cases[] = new \Parser\Ast\SwitchArm(
+                $arm->value,
+                __mc_rewrite_file_returns($arm->body, $slot, $label),
+            );
+        }
+        return \Parser\Ast\Stmt::switch_($n->expr, $cases, $s->span);
+    }
+    if ($k === 'Namespace') {
+        $n = __mc_as_namespace($s);
+        $body = $n->body === null ? null
+            : new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label));
+        return \Parser\Ast\Stmt::namespace_($n->name, $body, $s->span);
+    }
+    return $s;
+}
+
 function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
@@ -2051,6 +2307,60 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // missing file gives. Without the full path set the last two collapse.
         if ($incAbs !== '' && !$isEntry && !isset($includeSlots[$incAbs])) {
             $includeSlots[$incAbs] = '';
+        }
+        // A non-entry file's top-level `return` — at ANY depth, not just as a
+        // top-level statement — ends THAT FILE in php and hands its value back.
+        // Flattened into one `__main` it would end the PROGRAM, and since the
+        // entry is last, the entry would never run. Rewrite each one to "store
+        // the value, jump past this file"; the label goes after its statements.
+        //
+        // This is not a corner: `vendor/autoload.php` returns the loader, and
+        // every symfony polyfill bootstrap is a version-guarded `return
+        // require …`. Nested in an `if`, those used to silently kill the whole
+        // program — a composer application compiled and then did nothing.
+        $retKind = $isEntry ? 0 : __mc_file_return_kind($program->statements);
+        if ($retKind > 0) {
+            // Any return claims the slot, valued or not — a bare `return`
+            // stores NULL, which is what php's `require` of it evaluates to.
+            $slotFor = $incSlot;
+            $span0 = $program->statements[0]->span;
+            if ($slotFor !== '') {
+                $includeSlots[$incAbs] = $slotFor;
+                // Seed the slot UNCONDITIONALLY, before the file's own
+                // statements, with php's answer for a file that reaches its end
+                // without returning: int(1). Two things depend on it.
+                //
+                // It is what the value must be when a CONDITIONAL return is not
+                // taken — the store at the return site only runs on the path
+                // that returned. And it is the only thing that guarantees the
+                // `@g_<slot>` cell EXISTS: the cell is created by a write, and
+                // every write inside a version-guarded `if` now folds away with
+                // its branch, which left `require` loading an undefined global.
+                $stmts[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign(
+                        \Parser\Ast\Expr::arrayAccess(
+                            \Parser\Ast\Expr::variable('GLOBALS', $span0),
+                            \Parser\Ast\Expr::string($slotFor, $span0),
+                            $span0,
+                        ),
+                        \Parser\Ast\Expr::call(
+                            '__mir_to_cell',
+                            [\Parser\Ast\Expr::int(1, $span0)],
+                            $span0,
+                        ),
+                        $span0,
+                    ),
+                    $span0,
+                );
+            }
+            $eofLabel = '__mc_eof_' . (string)$i;
+            foreach (__mc_rewrite_file_returns($program->statements, $slotFor, $eofLabel) as $s) {
+                $stmts[] = $s;
+            }
+            $stmts[] = new \Parser\Ast\LabelStmt($eofLabel, $span0);
+            foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
+            foreach ($program->docComments as $d) { $docs[] = $d; }
+            continue;
         }
         foreach ($program->statements as $s) {
             if (!$isEntry && $s->kind === 'Return') {
