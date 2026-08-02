@@ -5,7 +5,10 @@
 // string work out of the loop stops the string free list — which has existed
 // for a long time — from masking the difference.
 //
-// Deterministic output, so the harness can still check parity against php.
+// Deterministic output, so the harness can still check parity against php —
+// and the timing goes to STDERR, which parity does not read. The Debian
+// toolchain image has no `/usr/bin/time` (nor `pkill`), so a bench that cannot
+// time itself simply produces no number there.
 class Node
 {
     public function __construct(
@@ -17,6 +20,7 @@ class Node
 }
 
 $sum = 0;
+$t0 = microtime(true);
 for ($i = 0; $i < 300000; $i++) {
     $a = new Node($i, $i * 3);
     $b = new Node($i + 1, $i * 5, $a);
@@ -39,4 +43,6 @@ for ($i = 0; $i < 300000; $i++) {
     ];
     $sum += $map['depth'] + $map['gen'] + $map['slot'];
 }
+$ms = (microtime(true) - $t0) * 1000.0;
 echo $sum, "\n";
+fprintf(STDERR, "alloc_churn %.1f ms\n", $ms);
