@@ -52,9 +52,17 @@ function cb_sorted(array $vals, \Ffi\Ptr $cmp): string
     return $out;
 }
 
+// ⚠ Every fn_to_ptr() call is hoisted ABOVE the first echo on purpose. This is
+// a manticore-only feature, so php dies here with "Call to undefined function"
+// — and tools/difftest.sh only classifies a case as PHP-SKIP when php produced
+// NO stdout (it runs the reference with error_reporting=0, so the fatal reaches
+// neither stream). An `echo "asc: ", fn_to_ptr(...)` printed its prefix before
+// dying, which made the parity gate report this case as a real DIFF.
 $vals = [42, 7, 1000, -3, 0, 7, 99];
-echo "asc:  ", \cb_sorted($vals, \fn_to_ptr('cb_cmp_asc')), "\n";
-echo "desc: ", \cb_sorted($vals, \fn_to_ptr('cb_cmp_desc')), "\n";
+$asc = \cb_sorted($vals, \fn_to_ptr('cb_cmp_asc'));
+$desc = \cb_sorted($vals, \fn_to_ptr('cb_cmp_desc'));
+echo "asc:  ", $asc, "\n";
+echo "desc: ", $desc, "\n";
 
 // A callback invoked many times: the C frame is re-entered per comparison, so a
 // leak or a clobbered arena would show up as a wrong order or a crash.
