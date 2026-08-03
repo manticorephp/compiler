@@ -23,7 +23,8 @@
 #   * `@rss-scales` marks a case whose WORKING SET legitimately grows with the
 #     iteration count (`strcat`) — it reads `grows(exp)`, never LEAK;
 #   * a constant working set whose RSS tracks the iteration count IS the leak,
-#     and the ratio lands near SCALE.
+#     and the ratio lands near SCALE — confirmed against a THIRD point at 2x
+#     SCALE, since a pool high-water grows once and then plateaus.
 #   LEAKPROF=1 additionally recompiles each LEAK case with MANTICORE_PROFILE=1
 #   and prints the alloc-vs-release counter imbalance, which attributes the leak
 #   to a call-site class (capture / element / prop / …).
@@ -131,8 +132,20 @@ if [ "$leak" = "1" ]; then
         if grep -q '@rss-scales' "$f"; then
             verdict="grows(exp)"
         elif awk "BEGIN{exit !(($bn-$b1) > 524288 && $bn > 1.2*$b1)}"; then
-            verdict="LEAK"
-            leaks=$((leaks + 1))
+            # Two points cannot tell a leak from a bounded high-water: a
+            # size-classed pool that never returns memory, or a free list warming
+            # up, grows once and then stops. Confirm with a THIRD point at twice
+            # the scale — a leak keeps paying, a high-water plateaus.
+            # (`assoc_small` is exactly this: 7.8 → 9.7 MB and then 9.7 for ever.)
+            wide_args=()
+            for _ in $(seq 2 $((scale * 2))); do wide_args+=("x"); done
+            bw="$(max_rss_bytes "$bin" "${wide_args[@]}")"
+            if [ -n "$bw" ] && awk "BEGIN{exit !(($bw-$bn) > 0.5*($bn-$b1))}"; then
+                verdict="LEAK"
+                leaks=$((leaks + 1))
+            else
+                verdict="plateau"
+            fi
         else
             verdict="ok"
         fi
