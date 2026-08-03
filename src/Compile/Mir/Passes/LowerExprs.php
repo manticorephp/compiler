@@ -589,6 +589,30 @@ trait LowerExprs
             $value = $yv !== null ? $this->lowerExpr($yv) : null;
             return new Yield_($key, $value, false, Type::cell());
         }
+        // An unresolvable CLASS CONSTANT is php's runtime Error, not a compile
+        // error — same rule as a bare undefined constant, and it reaches here
+        // for the same real reason: symfony/cache names `PDO::CASE_LOWER` in a
+        // PdoAdapter that only runs when ext-pdo is there. php reports the two
+        // cases differently, so the message is chosen by whether the CLASS is
+        // known at all.
+        //
+        // Deliberately narrow: only a StaticAccess whose class or constant
+        // genuinely is not there converts. Anything else still hits the throw
+        // below, because this fallthrough is what catches a construct the
+        // compiler simply failed to route, and turning that into a runtime
+        // error would hide compiler gaps instead of reporting them.
+        if ($expr->kind === 'StaticAccess') {
+            $saCls = $this->resolveStaticClass($this->staticAccessClass($expr));
+            $saName = $this->staticAccessName($expr);
+            $classKnown = isset($this->classTable[$saCls])
+                || isset($this->enumTable[$saCls])
+                || isset($this->classDecls[$saCls]);
+            if ($saName !== '' && \strtolower($saName) !== 'class') {
+                return $this->throwErrorExpr($classKnown
+                    ? 'Undefined constant ' . $saCls . '::' . $saName
+                    : 'Class "' . $saCls . '" not found');
+            }
+        }
         $extra = '';
         if ($expr->kind === 'StaticAccess') { $extra = ' (' . $this->staticAccessClass($expr) . '::' . $this->staticAccessName($expr) . ')'; }
         if ($expr->kind === 'Identifier') { $extra = ' (' . ($expr->name ?? '?') . ')'; }

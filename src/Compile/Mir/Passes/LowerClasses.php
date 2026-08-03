@@ -651,7 +651,25 @@ trait LowerClasses
      */
     private function lowerClassMethods(\Parser\Ast\ClassDecl $decl, Module $module): void
     {
-        $cd = $this->classTable[$decl->name];
+        // A plain CLASS with no ClassDef must stop HERE, with its name. Read
+        // blind, the null went on to a ClassDef-typed parameter — a TypeError
+        // under Zend but a SIGSEGV once self-built, several frames from the
+        // cause, which is how a conditionally-declared class (registered
+        // nowhere, see LowerFromAst::registerHoistedDecl) presented itself: a
+        // bare rc=139 out of a whole-program build.
+        //
+        // An ENUM is exempt, and legitimately so: it only gets a ClassDef when
+        // it declares methods, and a method-less one reaches here with none.
+        // Every $cd read below is inside a loop over properties or methods, so
+        // for that enum there is nothing to read — which is the invariant the
+        // note just under this already relies on.
+        if (($decl->kind ?? 'class') === 'class' && !isset($this->classTable[$decl->name])) {
+            throw new \RuntimeException(
+                'MIR.lower: no class definition for ' . $decl->name
+                . ' — it was declared but never registered'
+            );
+        }
+        $cd = $this->classTable[$decl->name] ?? null;
         $this->currentLowerClass = $decl->name;
         // An ENUM reaches this path but has no ClassDef in the class table, so
         // guard on the table itself — reading `$cd->typeParams` unconditionally

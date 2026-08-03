@@ -72,6 +72,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
         if ($name === '__mir_clock_ns')               { return $this->biClockNs($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
+        if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
         if ($name === '__mir_obj_bag')                { return $this->biObjBag($args); }
         if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
@@ -5036,6 +5037,44 @@ trait EmitLlvmBuiltins
             return \ltrim($arg->value, '\\');
         }
         return \ltrim($arg->type->class ?? '', '\\');
+    }
+
+    /**
+     * `__mir_throw_error('<message>')` — throw `\Error(<message>)` AT USE.
+     *
+     * A reference to a constant this build cannot resolve used to be a hard
+     * compile error, which is stricter than php: php resolves a constant when
+     * the expression is EVALUATED, so a reference sitting behind a guard that
+     * is false costs nothing. symfony/cache reads `\APC_ITER_KEY` inside a
+     * method guarded by `class_exists(\APCUIterator::class, false)` — without
+     * ext-apcu php never looks at it, while whole-program AOT refused to build
+     * at all, and that single reference stopped an entire tier.
+     *
+     * Emitted inline rather than as a prelude call on purpose: prelude demand
+     * is computed from the SOURCE TEXT, and a call the compiler synthesises is
+     * not in the source, so it could never gate itself in.
+     *
+     * Static detection is not lost — the analyzer reports `undefined.constant`
+     * for exactly this, and it runs closed-world over the whole source set.
+     */
+    private function biThrowError(array $args): string
+    {
+        $message = \count($args) > 0 ? $this->reflLitStr($args[0]) : '';
+        $throw = new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\StringConst($message, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        );
+        $out = $this->emitNode($throw);
+        // The throw longjmps and never returns, so nothing consumes this — but
+        // the expression still has to leave a well-typed value behind for the
+        // consumer the type system thinks exists.
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** A string-literal arg's value, or '' when not a literal. */

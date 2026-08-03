@@ -137,6 +137,10 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        // Never actually returns — it throws php's `Undefined constant` Error.
+        // Typed CELL so whatever position the constant stood in accepts it: the
+        // value is unreachable, but the type has to be one every consumer takes.
+        if ($n === '__mir_throw_error') { return Type::cell(); }
         // `print` always yields int 1 in PHP — that is what makes it usable in
         // `$c and print "x"` and `$ok = print "y"`.
         if ($n === 'print') { return Type::int_(); }

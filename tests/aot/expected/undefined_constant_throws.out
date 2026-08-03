@@ -1,0 +1,10 @@
+guard held
+Error: Undefined constant "SOME_UNDEFINED_CONST"
+Undefined constant "Acme\MISSING_ONE"
+throwable: Undefined constant "ANOTHER_MISSING"
+Class "NoSuchClassAtAll" not found
+Undefined constant Known::ABSENT
+class with unresolvable const: declared fine
+on access: Undefined constant "AMQP_ABSENT_ONE"
+42
+done

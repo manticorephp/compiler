@@ -66,13 +66,6 @@ $parseBlocked = [
     // `[&$refs[$k], $value, &$value]` — a reference inside an array literal.
     // finding: parser-ref-in-array-literal
     './vendor/symfony/polyfill-deepclone' => 'parser-ref-in-array-literal',
-    // A class-constant array keyed by ext-amqp's constants (`\AMQP_DURABLE`).
-    // php never evaluates a class constant until it is first read, so the file
-    // is harmless without the extension; whole-program AOT bakes it at compile
-    // time and hard-fails. The casters are only reachable through the extension
-    // they cast, so excluding them costs the tier nothing.
-    // finding: class-const-needs-absent-extension-constant
-    './vendor/symfony/var-dumper/Caster' => 'class-const-needs-absent-extension-constant',
 ];
 foreach ($parseBlocked as $d => $finding) { $exclude[$d] = true; }
 fwrite(STDERR, "gen_manifest: parse-blocked skips: "

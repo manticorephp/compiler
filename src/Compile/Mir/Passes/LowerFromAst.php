@@ -312,6 +312,9 @@ final class LowerFromAst implements Pass
     /** @var array<string, \Parser\Ast\ClassDecl> class name → decl (for constants) */
     private array $classDecls = [];
 
+    /** @var \Parser\Ast\ClassDecl[] classes hoisted out of a folded `if`, awaiting a ClassDef */
+    private array $hoistedClassDecls = [];
+
     /** User constants from top-level `define("NAME", <const-expr>)`.
      *  @var array<string, \Parser\Ast\Expr> bare name → value expression */
     private array $userConstants = [];
@@ -903,6 +906,9 @@ final class LowerFromAst implements Pass
             $head = \array_slice($stmts, 0, $preludeCount);
             $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
             $stmts = \array_merge($head, $tail);
+            // Every hoisted class's DECL is registered by now; give them their
+            // ClassDefs before anything lowers a method body against one.
+            $this->buildHoistedClassDefs($module);
         }
 
         $mainStmts = [];
@@ -2458,7 +2464,41 @@ final class LowerFromAst implements Pass
         if ($low === 'true')  { return new BoolConst(true, Type::bool_()); }
         if ($low === 'false') { return new BoolConst(false, Type::bool_()); }
         if ($low === 'null')  { return new NullConst(Type::null_()); }
-        throw new \RuntimeException('MIR.lower: unknown constant ' . $name);
+        // An unresolvable constant is NOT a compile error — php resolves a
+        // constant when the expression is EVALUATED, and throws
+        // `Error: Undefined constant "X"` there. A reference behind a guard that
+        // is false therefore costs php nothing, while refusing to build was
+        // strictly stricter: symfony/cache reads `\APC_ITER_KEY` inside a method
+        // guarded by `class_exists(\APCUIterator::class, false)`, and that one
+        // reference stopped an entire tier from compiling.
+        //
+        // The FULLY-QUALIFIED spelling goes in the message, because that is what
+        // php reports (`Undefined constant "Ns\X"`), not the bare tail this
+        // resolution walked back to.
+        //
+        // Static detection is unaffected: the analyzer reports
+        // `undefined.constant` closed-world over the whole source set, which is
+        // where a typo should be caught — at build time, by the thing whose job
+        // that is, rather than by the code generator refusing to emit.
+        return $this->throwErrorExpr(
+            'Undefined constant "' . \ltrim($rawName, '\\') . '"');
+    }
+
+    /**
+     * An expression that throws `\Error($message)` when EVALUATED, for a
+     * reference this build cannot resolve but php would only fault on use.
+     *
+     * Emitted inline (a codegen builtin) rather than as a prelude call: prelude
+     * demand is computed from the SOURCE TEXT, and a call the compiler
+     * synthesises appears in no source, so it could never gate itself in.
+     */
+    private function throwErrorExpr(string $message): Node
+    {
+        return new Call(
+            '__mir_throw_error',
+            [new StringConst($message, Type::string_())],
+            Type::cell(),
+        );
     }
 
     /** The trailing segment of a possibly-namespaced constant name. */
@@ -2860,17 +2900,85 @@ final class LowerFromAst implements Pass
         return $s->else !== null ? $s->else->statements : [];
     }
 
-    /** Register a hoisted top-level function declaration so calls to it resolve. */
+    /**
+     * Register a declaration hoisted out of a folded `if`, so later code
+     * resolves it exactly as it would a top-level one.
+     *
+     * FUNCTIONS were the only kind handled, and a hoisted CLASS therefore
+     * reached lowering having been registered NOWHERE — `lowerClassMethods`
+     * then read `$this->classTable[$decl->name]` for a key that was never
+     * added and handed the null to a ClassDef-typed parameter: a warning plus
+     * a TypeError under Zend, a SIGSEGV once self-built. The shape is
+     * symfony/cache's, and it is the ordinary way a package ships one class
+     * two ways:
+     *
+     *     if (interface_exists(SimpleCacheInterface::class)) {
+     *         class BadMethodCallException extends … implements A, B {}
+     *     } else {
+     *         class BadMethodCallException extends … implements A {}
+     *     }
+     *
+     * The ClassDef itself is NOT built here — the whole class-table pass has
+     * already run by the time flattening happens, and a hoisted class may
+     * extend or reference another hoisted one. Only the DECL is registered
+     * now; {@see buildHoistedClassDefs} builds the defs once flattening is
+     * complete, which keeps "every decl known before any def is built" true
+     * for the hoisted set exactly as it is for the top-level one.
+     */
     private function registerHoistedDecl(\Parser\Ast\Stmt $s): void
     {
-        if ($s->kind !== 'Function') { return; }
-        $fqn = $s->decl->name;
-        $this->fnDecls[$fqn] = $s->decl;
-        $pos = \strrpos($fqn, '\\');
-        if ($pos !== false) {
-            $bare = \substr($fqn, $pos + 1);
-            $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
+        if ($s->kind === 'Function') {
+            $fqn = $s->decl->name;
+            $this->fnDecls[$fqn] = $s->decl;
+            $pos = \strrpos($fqn, '\\');
+            if ($pos !== false) {
+                $bare = \substr($fqn, $pos + 1);
+                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
+            }
+            return;
         }
+        if ($s->kind !== 'Class') { return; }
+        $cdecl = $s->decl;
+        $dkind = $cdecl->kind ?? 'class';
+        if ($dkind === 'trait') {
+            $this->traitTable[$this->declName($cdecl)] = $cdecl;
+            return;
+        }
+        $cname = $this->classDeclName($cdecl);
+        if ($cname === '') { return; }
+        $this->classDecls[$cname] = $cdecl;
+        $this->knownClassNames[$cname] = true;
+        $bs = \strrpos($cname, '\\');
+        if ($bs !== false && $bs >= 0) {
+            $short = \substr($cname, $bs + 1, \strlen($cname) - $bs - 1);
+            if (isset($this->shortClassFqn[$short])) {
+                $this->shortClassAmbiguous[$short] = true;
+            } else {
+                $this->shortClassFqn[$short] = $cname;
+            }
+        }
+        // Only a plain class gets a ClassDef; an interface has none by design
+        // and an enum builds its own table entry from its cases.
+        if ($dkind === 'class') { $this->hoistedClassDecls[] = $cdecl; }
+    }
+
+    /**
+     * Build a ClassDef for every class hoisted out of a folded `if`, after
+     * flattening has registered all of their decls. Registered late but
+     * identically to the top-level pass, so a hoisted class is a first-class
+     * one from here on.
+     */
+    private function buildHoistedClassDefs(Module $module): void
+    {
+        foreach ($this->hoistedClassDecls as $cdecl) {
+            $name = $this->declName($cdecl);
+            if ($name === '' || isset($this->classTable[$name])) { continue; }
+            $cd = $this->buildClassDef($cdecl, $this->stableClassId(\ltrim($name, '\\')));
+            $cd->isPreludeClass = false;
+            $this->classTable[$cd->name] = $cd;
+            $module->addClass($cd);
+        }
+        $this->hoistedClassDecls = [];
     }
 
     /** foldGuard: not statically foldable — the guard stays for runtime. */
