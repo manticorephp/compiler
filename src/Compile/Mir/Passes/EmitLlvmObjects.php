@@ -1675,7 +1675,7 @@ trait EmitLlvmObjects
             }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
-            $out .= $this->rcRetainByType($n->value, $val, $propType, 4);
+            $out .= $this->rcRetainByType($n->value, $val, $this->propStoreRetainType($n), 4);
             $res = $val;
             $resTy = 'i64';
         }
@@ -4068,6 +4068,38 @@ trait EmitLlvmObjects
      * ({@see slotHolder}), and `emitObjClone` uses the identical predicate to
      * decide that an array property is copied rather than co-owned.
      */
+    /**
+     * The destination type a property store's OWNERSHIP is decided by — the
+     * declared property type, except that an array-hinted slot whose hint erased
+     * to KIND_UNKNOWN answers `vec[unknown]` so it still reads as rc-managed.
+     *
+     * ⚠ The ONE owner of that question, for the same reason
+     * {@see EmitLlvmArrays::storeElemBoxesValue} is: {@see emitStoreProperty}
+     * reads it to emit the retain and {@see EmitLlvmMemory::collectTransferredLocals}
+     * reads it to decide the source local's scope-exit release. Two copies drift,
+     * and a drift here is a leak (pass says borrowed, emitter retains) or a
+     * double free.
+     *
+     * Why the array hint has to be recovered at all: a bare `array` / `?array`
+     * hint lowers to KIND_UNKNOWN, and a CONSTRUCTOR's parameter is erased too —
+     * a `new C(…)` site never feeds the call-site element refinement that a
+     * method call does. Both sides then looked non-rc, the store took NO
+     * reference, and the object held a BORROWED buffer that the caller's
+     * scope-exit release freed. The same store written as a method retains.
+     */
+    private function propStoreRetainType(\Compile\Mir\StoreProperty $n): ?Type
+    {
+        $pcls = $n->object->type->class ?? '';
+        $propType = ($pcls !== '' && isset($this->classes[$pcls]))
+            ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
+            : null;
+        if (($propType === null || !$propType->isArray())
+            && $this->slotIsArrayHinted($n->object, $n->property, $propType)) {
+            return Type::vec(Type::unknown());
+        }
+        return $propType;
+    }
+
     private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool
     {
         if ($propType !== null && $propType->isArray()) { return true; }

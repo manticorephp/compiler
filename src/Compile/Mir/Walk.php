@@ -124,7 +124,10 @@ final class Walk
         if ($k === Node::KIND_MATCH) {
             $m = self::asMatch($n);
             $out = [$m->subject];
-            foreach ($m->arms as $arm) {
+            /** @var MatchArm_[] $marms */
+            $marms = $m->arms;
+            foreach ($marms as $arm) {
+                /** @var Node[]|null $conds */
                 $conds = $arm->conds;
                 if ($conds !== null) {
                     foreach ($conds as $c) { $out[] = $c; }

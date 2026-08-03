@@ -19,9 +19,46 @@ namespace Compile\Mir;
  */
 final class NodeClone
 {
+    /**
+     * Parameter → argument map applied while cloning: a `LoadLocal` whose name
+     * is a key becomes a fresh clone of that argument instead. Live only for
+     * the duration of {@see nodeSubst}.
+     *
+     * @var array<string, Node>
+     */
+    private static array $subst = [];
+    private static bool $substOn = false;
+
     public static function block(Block $b): Block
     {
         return self::node($b);
+    }
+
+    /**
+     * Clone `$n`, replacing every `LoadLocal` named in `$subst` with a clone of
+     * the mapped node — the inliner's parameter substitution.
+     *
+     * It lives HERE, and not in a walker of its own, because this dispatch is
+     * the only COMPLETE one: an unrecognised kind THROWS, so a node shape
+     * nobody taught it cannot survive un-substituted. InlineClosures used to
+     * keep its own hand-written kind list, which had no `match` arm — the
+     * inlined body kept the closure's parameter load, and the caller then read
+     * a local that was never defined there (`MIR.verify: dangling local $p read
+     * in __main`, and a SIGSEGV in the self-built compiler, which reaches
+     * InferTypes long before Verify).
+     *
+     * @param array<string, Node> $subst
+     */
+    public static function nodeSubst(Node $n, array $subst): Node
+    {
+        $savedMap = self::$subst;
+        $savedOn = self::$substOn;
+        self::$subst = $subst;
+        self::$substOn = true;
+        $out = self::node($n);
+        self::$subst = $savedMap;
+        self::$substOn = $savedOn;
+        return $out;
     }
 
     public static function node(Node $n): Node
@@ -34,7 +71,20 @@ final class NodeClone
         if ($k === Node::KIND_STRING_CONST) { $x = self::asStr($n);    return new StringConst($x->value, $n->type); }
         if ($k === Node::KIND_BOOL_CONST)   { $x = self::asBool($n);   return new BoolConst($x->value, $n->type); }
         if ($k === Node::KIND_NULL_CONST)   { return new NullConst($n->type); }
-        if ($k === Node::KIND_LOAD_LOCAL)   { $x = self::asLoadLocal($n); return new LoadLocal($x->name, $n->type); }
+        if ($k === Node::KIND_LOAD_LOCAL) {
+            $x = self::asLoadLocal($n);
+            if (self::$substOn && isset(self::$subst[$x->name])) {
+                // The argument belongs to the CALLER's scope, so it is cloned
+                // with substitution OFF: a caller local sharing the parameter's
+                // name would otherwise substitute into itself.
+                $arg = self::$subst[$x->name];
+                self::$substOn = false;
+                $out = self::node($arg);
+                self::$substOn = true;
+                return $out;
+            }
+            return new LoadLocal($x->name, $n->type);
+        }
         if ($k === Node::KIND_STATIC_PROP)  { $x = self::asStaticProp($n); return new StaticProp_($x->global, $n->type); }
         if ($k === Node::KIND_BREAK)        { $x = self::asBreak($n);    return new Break_($x->level); }
         if ($k === Node::KIND_CONTINUE)     { $x = self::asContinue($n); return new Continue_($x->level); }

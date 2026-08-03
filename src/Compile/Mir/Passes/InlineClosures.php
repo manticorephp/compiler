@@ -375,9 +375,10 @@ final class InlineClosures implements Pass
             if (!$this->argSafe($arg, $useCounts[$p->name] ?? 0)) { return null; }
             $subst[$p->name] = $arg;
         }
-        // Clone the body expr and substitute each param load with its arg.
-        $body = NodeClone::node($retX->value);
-        return $this->substitute($body, $subst);
+        // Clone the body expr, substituting each param load with its arg as the
+        // clone is built ({@see NodeClone::nodeSubst} — one complete dispatch,
+        // so no node shape can slip through un-substituted).
+        return NodeClone::nodeSubst($retX->value, $subst);
     }
 
     /**
@@ -466,98 +467,6 @@ final class InlineClosures implements Pass
             return;
         }
         foreach (Walk::children($n) as $c) { $this->countLoads($c, $names, $counts); }
-    }
-
-    /**
-     * Replace every `LoadLocal($name)` in the (already-cloned) tree with a
-     * fresh clone of the substituted arg. Returns the (possibly replaced) node.
-     *
-     * @param array<string,Node> $subst
-     */
-    private function substitute(Node $n, array $subst): Node
-    {
-        if ($n->kind === Node::KIND_LOAD_LOCAL) {
-            $name = $n->name;
-            if (isset($subst[$name])) { return NodeClone::node($subst[$name]); }
-            return $n;
-        }
-        $this->substituteChildren($n, $subst);
-        return $n;
-    }
-
-    /** Rewrite each child field of $n in place via {@see substitute}. */
-    private function substituteChildren(Node $n, array $subst): void
-    {
-        if ($n->kind === Node::KIND_ADD) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_SUB) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_MUL) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_DIV) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_MOD) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_SPACESHIP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_CMP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_CONCAT) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_BITOP) { $n->left = $this->substitute($n->left, $subst); $n->right = $this->substitute($n->right, $subst); return; }
-        if ($n->kind === Node::KIND_NEG)    { $n->operand = $this->substitute($n->operand, $subst); return; }
-        if ($n->kind === Node::KIND_NOT)    { $n->operand = $this->substitute($n->operand, $subst); return; }
-        if ($n->kind === Node::KIND_BITNOT) { $n->operand = $this->substitute($n->operand, $subst); return; }
-        if ($n->kind === Node::KIND_CAST) { $n->operand = $this->substitute($n->operand, $subst); return; }
-        if ($n->kind === Node::KIND_INSTANCEOF) { $n->operand = $this->substitute($n->operand, $subst); return; }
-        if ($n->kind === Node::KIND_NULLCOALESCE) {
-            $n->left = $this->substitute($n->left, $subst);
-            $n->right = $this->substitute($n->right, $subst);
-            return;
-        }
-        if ($n->kind === Node::KIND_TERNARY) {
-            $n->cond = $this->substitute($n->cond, $subst);
-            if ($n->then !== null) { $n->then = $this->substitute($n->then, $subst); }
-            $n->else_ = $this->substitute($n->else_, $subst);
-            return;
-        }
-        if ($n->kind === Node::KIND_CALL) {
-            $args = [];
-            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $n->args = $args;
-            return;
-        }
-        if ($n->kind === Node::KIND_INVOKE) {
-            $n->callee = $this->substitute($n->callee, $subst);
-            $args = [];
-            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $n->args = $args;
-            return;
-        }
-        if ($n->kind === Node::KIND_ARRAY_LIT) {
-            foreach ($n->elements as $el) {
-                if ($el->key !== null) { $el->key = $this->substitute($el->key, $subst); }
-                $el->value = $this->substitute($el->value, $subst);
-            }
-            return;
-        }
-        if ($n->kind === Node::KIND_ARRAY_ACCESS) {
-            $n->array = $this->substitute($n->array, $subst);
-            $n->index = $this->substitute($n->index, $subst);
-            return;
-        }
-        if ($n->kind === Node::KIND_PROPERTY_ACCESS) {
-            $n->object = $this->substitute($n->object, $subst);
-            return;
-        }
-        if ($n->kind === Node::KIND_METHOD_CALL) {
-            $n->object = $this->substitute($n->object, $subst);
-            $args = [];
-            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $n->args = $args;
-            return;
-        }
-        if ($n->kind === Node::KIND_STATIC_CALL) {
-            $args = [];
-            foreach ($n->args as $a) { $args[] = $this->substitute($a, $subst); }
-            $n->args = $args;
-            return;
-        }
-        // Leaves and any unexpected shape: nothing to substitute. (The
-        // eligible bodies are pure single expressions; this never recurses
-        // into statement nodes.)
     }
 
     // ── array_map / array_filter / array_reduce fusion ──────────────────

@@ -169,11 +169,10 @@ trait EmitLlvmMemory
             $fallback = $this->storeRetainFallback($n);
             $this->maybeTransfer($n->value, $fallback, $this->storeElemBoxesValue($n));
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
-            $pcls = $n->object->type->class ?? '';
-            $propType = ($pcls !== '' && isset($this->classes[$pcls]))
-                ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
-                : null;
-            $this->maybeTransfer($n->value, $propType);
+            // Same destination type the emitter's retain uses — one owner, or
+            // the two drift into a leak / double free ({@see
+            // EmitLlvmObjects::propStoreRetainType}).
+            $this->maybeTransfer($n->value, $this->propStoreRetainType($n));
         } elseif ($k === Node::KIND_ARRAY_LIT) {
             $fallback = $n->type->element ?? null;
             $boxed = $this->litBoxesValues($n);
