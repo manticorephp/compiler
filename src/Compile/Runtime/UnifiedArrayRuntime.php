@@ -703,7 +703,7 @@ final class UnifiedArrayRuntime
             $zero = $fn->block('idrop_zero');
             $tag = $doFree->load(Type::i64(), $this->hdr($doFree, $arr, MemoryAbi::RC_TAG_OFFSET));
             $doFree->brIf($doFree->icmp('eq', $tag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $zero, $doFreeH);
-            $doFreeH->call('free', Type::void(), [$b]);
+            $this->poolFree($doFreeH, $b);
             $doFreeH->br($zero);
             $zero->store(Value::int(Type::i64(), 0), $this->hdr($zero, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
             $zero->store(Value::null(), $this->hdr($zero, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
@@ -711,7 +711,7 @@ final class UnifiedArrayRuntime
             $ret->retVoid();
             return;
         }
-        $doFree->call('free', Type::void(), [$b]);
+        $this->poolFree($doFree, $b);
         $doFree->store(Value::int(Type::i64(), 0), $nbAddr);
         $doFree->store(Value::null(), $bAddr);
         $doFree->br($ret);
@@ -763,10 +763,10 @@ final class UnifiedArrayRuntime
         if (Debug::$arenaArrays) {
             $hfree = $fn->block('build_freeold');
             $hasOld->brIf($isA, $sizeIt, $hfree);
-            $hfree->call('free', Type::void(), [$oldb]);
+            $this->poolFree($hfree, $oldb);
             $hfree->br($sizeIt);
         } else {
-            $hasOld->call('free', Type::void(), [$oldb]);
+            $this->poolFree($hasOld, $oldb);
             $hasOld->br($sizeIt);
         }
 
@@ -788,12 +788,14 @@ final class UnifiedArrayRuntime
             $capdone->brIf($isA, $bAr, $bHp);
             $bAr->store($bAr->call('__mir_arena_alloc', Type::ptr(), [$bytes]), $bkSlot);
             $bAr->br($bMg);
-            $bHp->store($bHp->call('malloc', Type::ptr(), [$bytes]), $bkSlot);
+            $this->profBucket($bHp);
+            $bHp->store($this->poolAlloc($bHp, $bytes), $bkSlot);
             $bHp->br($bMg);
             $buckets = $bMg->load(Type::ptr(), $bkSlot);
             $capdone = $bMg;
         } else {
-            $buckets = $capdone->call('malloc', Type::ptr(), [$bytes]);
+            $this->profBucket($capdone);
+            $buckets = $this->poolAlloc($capdone, $bytes);
         }
         $capdone->call('memset', Type::ptr(), [$buckets, Value::int(Type::i32(), 0), $bytes]);
         $capdone->store($nb, $this->hdr($capdone, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
@@ -1341,7 +1343,34 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_alloc_array_tagged(size) -> ptr` — malloc `size + 8`, write
+     * Small-object pool front end (see {@see MemoryAbi::POOL_GRAIN}). Array
+     * buffers and bucket side-arrays are exactly the churn it exists for.
+     * `Debug::$pool` off ⇒ the plain libc pair, so the A/B is one env var.
+     *
+     * ⚠ Alloc and free must be swapped TOGETHER: a pooled block handed to libc
+     * `free()` aborts (it is mmap memory, not a malloc chunk).
+     */
+    private function poolAlloc(Block $b, Value $bytes): Value
+    {
+        if (!Debug::$pool) { return $b->call('malloc', Type::ptr(), [$bytes]); }
+        return $b->call('__mir_pool_alloc', Type::ptr(), [$bytes]);
+    }
+
+    private function poolFree(Block $b, Value $ptr): void
+    {
+        $b->call(Debug::$pool ? '__mir_pool_free' : 'free', Type::void(), [$ptr]);
+    }
+
+    /** `bucket_alloc` (@__prof slot 22): hash index side-arrays, the one
+     *  allocation an array pays that `arr_alloc_total` does not count. */
+    private function profBucket(Block $b): void
+    {
+        if (!Debug::$profile) { return; }
+        $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 22)]);
+    }
+
+    /**
+     * `__mir_alloc_array_tagged(size) -> ptr` — allocate `size + 8`, write
      * {@see MemoryAbi::ARRAY_TAG_MAGIC} at the base, return `base + 8`
      * (the data ptr). Mirror of `__mir_alloc_assoc_tagged` with the
      * array sentinel, so the rc helpers self-route on `ptr-8`.
@@ -1352,7 +1381,7 @@ final class UnifiedArrayRuntime
         $size = $fn->param(Type::i64(), 'size');
         $b = $fn->block('entry');
         $total = $b->add($size, Value::int(Type::i64(), 8));
-        $base = $b->call('malloc', Type::ptr(), [$total]);
+        $base = $this->poolAlloc($b, $total);
         $b->store(Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_MAGIC), $base);
         if (Debug::$profile) {
             $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 14)]);
@@ -1970,11 +1999,11 @@ final class UnifiedArrayRuntime
         $hasBuckets = $fn->block('has_buckets');
         $doFree = $fn->block('do_free');
         $freeb->brIf($freeb->icmp('ne', $bptr, Value::null()), $hasBuckets, $doFree);
-        $hasBuckets->call('free', Type::void(), [$bptr]);
+        $this->poolFree($hasBuckets, $bptr);
         $hasBuckets->br($doFree);
         // Free the tagged base (ptr-8), not the data ptr.
         $base = $doFree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
-        $doFree->call('free', Type::void(), [$base]);
+        $this->poolFree($doFree, $base);
         $doFree->retVoid();
     }
 
@@ -2235,13 +2264,13 @@ final class UnifiedArrayRuntime
             $dtag = $done->load(Type::i64(), $this->hdr($done, $arr, MemoryAbi::RC_TAG_OFFSET));
             $done->brIf($done->icmp('eq', $dtag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $skip, $dofree);
             $base = $dofree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
-            $dofree->call('free', Type::void(), [$base]);
+            $this->poolFree($dofree, $base);
             $dofree->br($skip);
             $skip->ret($nu);
             return;
         }
         $base = $done->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
-        $done->call('free', Type::void(), [$base]);
+        $this->poolFree($done, $base);
         $done->ret($nu);
     }
 

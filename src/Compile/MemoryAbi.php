@@ -177,6 +177,42 @@ final class MemoryAbi
     public const STRING_POOL0_CAP = self::STRING_POOL0_ALLOC - self::STRING_HEADER_SIZE;
     public const STRING_POOL1_CAP = self::STRING_POOL1_ALLOC - self::STRING_HEADER_SIZE;
 
+    /**
+     * Small-OBJECT pool (objects, vec/unified-array buffers, hash bucket
+     * side-arrays). Strings keep their own two-class list above; everything
+     * else used to go straight to libc, and malloc/free was ~24% of a loaded
+     * server's leaf profile.
+     *
+     * The shape, and why it is this shape: one address range is reserved up
+     * front and carved into SPAN-sized, SPAN-ALIGNED spans. A span's first word
+     * holds its size-class index, so **free needs no size from its caller** —
+     * mask the pointer down to its span and read the class. That is what keeps
+     * the pool out of the ABI: no block header, no descriptor field, no offset
+     * moves, nothing for a stale `.o` to disagree about.
+     *
+     * ⚠ A pooled block is mmap memory, NOT a malloc chunk: handing one to libc
+     * `free()` aborts. Every free site for a pooled block kind must route
+     * through `@__mir_pool_free`, which passes non-region pointers straight to
+     * `free`. A missed site is loud (abort), never silent corruption.
+     *
+     * Classes are exact multiples of GRAIN — `idx = (n + GRAIN-1) / GRAIN`,
+     * size = `idx * GRAIN` — so there are no rounding-waste tables and every
+     * block is 16-byte aligned (doubles / object slots rely on it).
+     */
+    public const POOL_GRAIN = 16;
+    public const POOL_MAX_SMALL = 512;
+    /** Class indices 1..32; slot 0 exists so `idx` needs no bias. */
+    public const POOL_CLASSES = self::POOL_MAX_SMALL / self::POOL_GRAIN + 1;
+    public const POOL_SPAN_SIZE = 65536;
+    /** Span word 0 = class index; the rest of the header keeps blocks aligned. */
+    public const POOL_SPAN_HEADER = 64;
+    /** Address space only — untouched pages are never committed. */
+    public const POOL_REGION_BYTES = 1073741824;
+    /** Written at block+8 while a block sits on a free list, under
+     *  `MANTICORE_DEBUG_VERIFY` only: libc no longer sees the free, so this is
+     *  what makes a double free loud again instead of a free-list cycle. */
+    public const POOL_FREE_POISON = 0x7E66DEADF2EEF2EE;
+
     // ─── Object header (16 bytes) ─────────────────────────────────
 
     /** Non-`#[Struct]` instances reserve this much before properties. */
