@@ -577,6 +577,7 @@ trait EmitLlvmRuntime
             // ptr-8 ⇒ obj/vec (rc@+8, drop_dispatch + free base=ptr-8). Else
             // the ptr is a string ⇒ its rc@ptr-8, free base=ptr-24 at zero
             // (the string header is [cap@-24, len@-16, rc@-8]; obj/vec base -8).
+            $out .= $this->rcVerifyAliveFormat();
             $out .= "define void @__mir_rc_release(ptr %p) {\n";
             $out .= "entry:\n";
             $out .= "  %z = icmp eq ptr %p, null\n";
