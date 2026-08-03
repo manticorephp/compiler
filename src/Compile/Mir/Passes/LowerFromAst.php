@@ -531,6 +531,20 @@ final class LowerFromAst implements Pass
                 $stmts[] = $us;
             }
         }
+        // Declarations hidden inside a FOLDABLE `if` are registered HERE, not
+        // only when flattenConstantIfs rewrites the statement list much later.
+        // A class that `use`s a hoisted TRAIT is built by the pass just below,
+        // and a trait it cannot see merges nothing: the trait method's return
+        // type falls back to int and a string result renders as a raw pointer
+        // (symfony/cache's Redis62ProxyTrait, declared in both arms of a
+        // version guard, printed `4372747872` for `legacy`).
+        //
+        // Registration only — the statement list is still rewritten later by
+        // the real flatten. This can only ADD registrations earlier, never
+        // remove one: a guard that needs `fnDecls` (not populated yet) simply
+        // folds to UNKNOWN here and is picked up at the later pass, exactly as
+        // before.
+        $this->preregisterFoldableDecls(\array_slice($stmts, $preludeCount));
         // Pre-pass: register every class layout first so method
         // bodies and `new` sites can resolve property offsets and
         // sibling classes regardless of source order.
@@ -2901,6 +2915,33 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * Walk foldable `if`s and register the declarations in their live branch,
+     * ahead of the class-table pass. {@see registerHoistedDecl} does the
+     * registering; this only finds the declarations early enough to matter.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     */
+    private function preregisterFoldableDecls(array $stmts): void
+    {
+        foreach ($stmts as $s) {
+            if ($s->kind !== 'If') { continue; }
+            $branch = $this->constIfBranch($s);
+            if ($branch === null) { continue; }
+            foreach ($branch as $b) {
+                // CLASSES and TRAITS only. Registering a hoisted FUNCTION here
+                // would make the later, real flatten see it already declared
+                // and fold `!function_exists('f')` the OTHER way — dropping the
+                // very declaration it guards, leaving calls against a symbol
+                // nothing defines. Functions have no reason to be early:
+                // nothing between here and the real flatten builds against
+                // them, while a class that `use`s a trait is built in between.
+                if ($b->kind === 'Class') { $this->registerHoistedDecl($b); }
+            }
+            $this->preregisterFoldableDecls($branch);
+        }
+    }
+
+    /**
      * Register a declaration hoisted out of a folded `if`, so later code
      * resolves it exactly as it would a top-level one.
      *
@@ -3092,6 +3133,34 @@ final class LowerFromAst implements Pass
 
     private function foldGuardCall(\Parser\Ast\CallExpr $e): int
     {
+        // `version_compare(phpversion('<ext>'), '<v>', '<op>')` — the shape every
+        // optional-extension shim is guarded by, and the last thing standing
+        // between a build and a package that ships one trait two ways
+        // (symfony/cache's Redis62ProxyTrait declares the SAME trait in both
+        // arms). It folds for the same reason `extension_loaded` does: a
+        // compiled binary carries a FIXED set of extensions, so an absent one's
+        // `phpversion()` is definitively `false`, and php compares that as the
+        // empty string — which is strictly LOWER than any real version.
+        // Measured against the interpreter rather than reasoned about.
+        //
+        // Only the ABSENT side folds. A built-in extension has a version this
+        // compiler does not model, so that stays UNKNOWN rather than inventing
+        // a number and deciding a branch on it.
+        if (\count($e->args) === 3) {
+            $vqual = \ltrim($e->function, '\\');
+            $vpos = \strrpos($vqual, '\\');
+            $vfn = $vpos === false ? $vqual : \substr($vqual, $vpos + 1);
+            if (\strtolower($vfn) === 'version_compare'
+                && $this->isAbsentExtVersion($e->args[0])
+                && $e->args[1]->kind === 'StringLiteral'
+                && $e->args[2]->kind === 'StringLiteral'
+                && $this->stringLitValue($e->args[1]) !== '') {
+                $op = \strtolower($this->stringLitValue($e->args[2]));
+                $lower = $op === '<' || $op === 'lt' || $op === '<=' || $op === 'le'
+                    || $op === '!=' || $op === 'ne' || $op === '<>';
+                return $this->guardOf($lower);
+            }
+        }
         if (\count($e->args) !== 1) { return self::GUARD_UNKNOWN; }
         if (true) {
             // An unqualified builtin call inside a namespace resolves to
@@ -3144,6 +3213,36 @@ final class LowerFromAst implements Pass
             }
         }
         return self::GUARD_UNKNOWN;
+    }
+
+    /**
+     * Whether `$e` is `phpversion('<ext>')` for an extension this build does
+     * NOT carry — i.e. an expression php evaluates to `false`, which
+     * version_compare then reads as the empty version.
+     *
+     * Deliberately narrow: a bare `phpversion()` (the php version itself) and a
+     * BUILT-IN extension both answer a real version string this compiler does
+     * not model, so neither is claimed here.
+     */
+    private function isAbsentExtVersion(\Parser\Ast\Expr $e): bool
+    {
+        // Dispatched into a CallExpr-TYPED helper: a subclass field read off a
+        // base `Expr` (which declares only kind/span) resolves by the wrong
+        // offset under the self-host, exactly as foldGuard's own note says.
+        if ($e->kind !== 'Call') { return false; }
+        return $this->isAbsentExtVersionCall($e);
+    }
+
+    private function isAbsentExtVersionCall(\Parser\Ast\CallExpr $call): bool
+    {
+        $qual = \ltrim($call->function, '\\');
+        $pos = \strrpos($qual, '\\');
+        $fn = $pos === false ? $qual : \substr($qual, $pos + 1);
+        if (\strtolower($fn) !== 'phpversion') { return false; }
+        if (\count($call->args) !== 1) { return false; }
+        if ($call->args[0]->kind !== 'StringLiteral') { return false; }
+        return !$this->extensionIsBuiltIn(
+            \strtolower($this->stringLitValue($call->args[0])));
     }
 
     /**
