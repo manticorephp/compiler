@@ -13,6 +13,15 @@ final class Param
      *  at the caller. Serialized into the interface `.sig`. */
     public bool $refOut = false;
 
+    /** The param's array type came from an ELEMENT-ONLY doc form (`T[]` or
+     *  `array<V>`), which in php commits the element and says NOTHING about the
+     *  keys — `array<K, V>` is the spelling that commits a key type. It lowers
+     *  to a packed vec because that is what such an array almost always is, but
+     *  the commitment is OURS: a call site handing it a string-keyed array is
+     *  correct php, and {@see Passes\InferTypes::scanDocListKeyPromote} moves
+     *  the param to the tagged key channel rather than refusing the program. */
+    public bool $docList = false;
+
     /** An `array` param marked `#[CellArg]`: the callee consumes element VALUES,
      *  so a concrete-element array arg must be cellified (each element boxed) at
      *  the call site. Serialized into the interface `.sig`. */

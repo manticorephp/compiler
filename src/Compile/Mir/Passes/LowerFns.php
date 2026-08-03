@@ -106,12 +106,13 @@ trait LowerFns
             // `T ...$xs` collects trailing args into a vec[T] the callee
             // sees as a single vec param (caller packs at the call site).
             $outType = $this->docTagType($decl->docComment, '@param-out', $p->name);
+            $effHint = $this->effectiveHint(
+                $p->typeHint,
+                $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
+            );
             $pt = $isVariadic
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
-                : $this->lowerParamType($this->effectiveHint(
-                    $p->typeHint,
-                    $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
-                ));
+                : $this->lowerParamType($effHint);
             $fp = new Param(
                 name: $p->name,
                 type: $pt,
@@ -120,6 +121,9 @@ trait LowerFns
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            // A VARIADIC pack is genuinely 0..n — its vec is the compiler's own
+            // and its keys are not in question.
+            $fp->docList = !$isVariadic && $this->isElemOnlyArrayDoc($effHint);
             $fp->refOut = $outType !== null || isset($refOutNames[$p->name])
                 || $this->paramHasRefOutAttr($p);
             $fp->cellArg = isset($cellArgNames[$p->name]) || $this->paramHasCellArgAttr($p);

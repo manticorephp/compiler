@@ -250,6 +250,7 @@ trait LowerClasses
         $names = [];
         $types = [];
         $arrHinted = [];
+        $docList = [];
         $roProps = [];
         // Single inheritance: prepend the parent's properties so the
         // subclass instance shares the parent's field offsets, then
@@ -265,6 +266,7 @@ trait LowerClasses
                 $names[] = $pn;
                 $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
                 $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
+            $docList[$pn] = $pcd->propertyDocList[$pn] ?? false;
                 // readonly is NOT propagated: `readonlyDeclClass` walks the parent
                 // chain so the ORIGINAL declaring class drives the scope check
                 // (only it may write the slot).
@@ -281,6 +283,7 @@ trait LowerClasses
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
                         $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
+                        $docList[$p->name] = $this->isElemOnlyArrayDoc($peff);
                         if (($p->promotedReadonly ?? false) || $decl->isReadonly) { $roProps[$p->name] = true; }
                     }
                 }
@@ -331,6 +334,7 @@ trait LowerClasses
             if (!isset($types[$prop->name])) { $names[] = $prop->name; }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
+            $docList[$prop->name] = $this->isElemOnlyArrayDoc($veff);
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
         }
         // STATIC trait properties, mixed in the same way. php gives every using
@@ -567,6 +571,7 @@ trait LowerClasses
         $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
+        $cd->propertyDocList = $docList;
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;
         $cd->methodMeta = $methodMeta;

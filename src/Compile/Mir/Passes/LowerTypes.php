@@ -483,6 +483,33 @@ trait LowerTypes
     }
 
     /**
+     * Whether `$hint` is an ELEMENT-ONLY array doc form — `T[]` or `array<V>`
+     * with a single type argument.
+     *
+     * Both spell "an array of V" and say NOTHING about the keys: php has no
+     * packed-vs-hashed distinction in a type expression at all, and `array<K, V>`
+     * is the spelling that does commit a key type (which {@see lowerTypeHint}
+     * honours). We lower the element-only forms to a packed vec anyway, because
+     * that is what they nearly always describe and the packed path is the fast
+     * one — but the key commitment is the compiler's, not the program's, so it
+     * must be revisable when a call site proves otherwise ({@see Param::$docList}).
+     */
+    private function isElemOnlyArrayDoc(?string $hint): bool
+    {
+        if ($hint === null) { return false; }
+        $base = \ltrim($hint, '?\\');
+        $low = \strtolower($base);
+        if (\strlen($base) > 2 && \substr($base, \strlen($base) - 2) === '[]') { return true; }
+        if (\strncmp($low, 'array<', 6) !== 0) { return false; }
+        $lt = \strpos($base, '<');
+        $inner = \substr($base, $lt + 1, \strlen($base) - $lt - 2);
+        // self-host strpos returns -1 (not false) on a miss; guard both, as the
+        // `array<…>` lowering above does.
+        $comma = \strpos($inner, ',');
+        return $comma === false || $comma < 0;
+    }
+
+    /**
      * Recover a bare-`array` property's element type from how the class's own
      * methods STORE into it — the usage-inference fallback when neither a `@var`
      * docblock nor a list-literal default carried the element. A property has no

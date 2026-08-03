@@ -391,6 +391,22 @@ final class InferTypes implements Pass
                 $this->inferFunction($fn);
             }
         }
+        // A doc-declared `T[]` / `array<V>` param handed a STRING-KEYED array by
+        // some call site: move it to the tagged key channel instead of refusing
+        // the program. Runs after the call-site element scan so an argument
+        // sourced from a now-typed callee is seen at its real shape.
+        // Bounded, because the promotion travels one HOP per round: the
+        // argument proves the parameter, the parameter's store proves the
+        // property, and a getter over that property proves the next parameter.
+        // Monotone (a slot only ever moves packed → tagged, never back), so the
+        // guard is a backstop, not the termination argument.
+        $docGuard = 0;
+        while ($docGuard < 4 && $this->scanDocListKeyPromote($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $docGuard = $docGuard + 1;
+        }
         // Property-type inference from a whole-array assignment: `$this->p =
         // [1,"x"]` (a heterogeneous literal → vec[cell]) lifts that shape onto
         // the DECLARED property type so a later `$this->p[$i]` / foreach reads a

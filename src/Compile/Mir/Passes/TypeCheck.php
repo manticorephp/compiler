@@ -256,8 +256,16 @@ final class TypeCheck
         if (!$t->isArray()) { return null; }
         $e = $t->element;
         if ($e === null || !$this->reprConcrete($e)) { return null; }
-        if (!$t->isAssoc()) { return Type::KIND_INT; }
+        // A CELL key is the tag-dispatched channel and must be tested BEFORE
+        // isAssoc(), which is string-key-only and answers FALSE for it — a
+        // cell-keyed assoc reports isVec(), so it would otherwise read as a
+        // commitment to packed int keys, which is the opposite of what it is.
+        // `emitForeach` picks `__mir_array_key_cell_at` off exactly this, so a
+        // cell-keyed param accepts either key kind at runtime. This is what
+        // {@see InferScans::scanDocListKeyPromote} promotes a `T[]` param to.
         $k = $t->key;
+        if ($k !== null && $k->kind === Type::KIND_CELL) { return null; }
+        if (!$t->isAssoc()) { return Type::KIND_INT; }
         if ($k === null || !$this->reprConcrete($k)) { return null; }
         return $k->kind;
     }

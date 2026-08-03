@@ -699,6 +699,183 @@ trait InferScans
     }
 
     /**
+     * Move a doc-declared `T[]` / `array<V>` param to the TAGGED KEY CHANNEL
+     * when a call site hands it a string-keyed (or already cell-keyed) array.
+     * Returns true when any param changed (callers re-run inference).
+     *
+     * `T[]` commits the ELEMENT and says nothing about the keys — php has no
+     * packed-vs-hashed distinction in a type expression, and `array<K, V>` is
+     * the spelling that commits a key type. Lowering it to a packed vec is a
+     * good default and a bad certainty: symfony/var-dumper's ServerDumper
+     * declares `@param ContextProviderInterface[] $contextProviders Context
+     * providers INDEXED BY CONTEXT NAME` and is handed exactly that, which used
+     * to be a hard compile error (the key-repr check in {@see TypeCheck} was
+     * right that the two disagreed — the assumption it checked against was the
+     * defect).
+     *
+     * The promotion is `assoc[cell, T]`: only the KEY moves to the tagged
+     * channel — `emitForeach` already picks `__mir_array_key_cell_at` for a cell
+     * key, and an index store dispatches through `set_cell` — while the ELEMENT
+     * type survives untouched, so nothing about the value channel changes. Over
+     * a genuinely packed argument the same reader returns `box_int(i)`, which is
+     * the right answer there too.
+     *
+     * Deliberately narrow:
+     *  - only a param the DOC form marked ({@see Param::$docList}) — an inferred
+     *    vec is the compiler's own conclusion from real stores and stays packed;
+     *  - never a variadic (its 0..n keys are the compiler's own construction);
+     *  - never a by-ref param, whose caller slot keeps the original repr;
+     *  - never an EXTERN (its type is fixed by the `.sig`) and never a PRELUDE
+     *    function, which is emitted linkonce_odr into every module: this
+     *    module's call sites are not all of them, and two modules promoting
+     *    differently would coalesce to one symbol with two key channels — the
+     *    same ODR premise that keeps {@see scanCallSiteArrayElems} off them.
+     */
+    private function scanDocListKeyPromote(Module $module): bool
+    {
+        $cand = [];                      // "fn#idx" → true
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern || $fn->isPrelude) { continue; }
+            $idx = 0;
+            foreach ($fn->params as $p) {
+                $i = $idx;
+                $idx = $idx + 1;
+                if (!$p->docList || $p->byRef || $p->variadic) { continue; }
+                if (!$p->type->isArray()) { continue; }
+                // Idempotent: a param already on the tagged key channel (this
+                // scan's own output, or a cell-keyed refinement from elsewhere)
+                // is done.
+                $k = $p->type->key;
+                if ($k !== null && $k->kind === Type::KIND_CELL) { continue; }
+                $cand[$fn->name . '#' . (string)$i] = true;
+            }
+        }
+        // The same question for a PROPERTY declared `@var T[]`: the slot the
+        // parameter is handed on to. Without it the promotion stops at the
+        // parameter and trades a clean compile error for a WRONG ANSWER — the
+        // witness prints its key as a raw pointer — which is the worse of the
+        // two by a distance.
+        $propCand = [];                  // "Class::prop" → true
+        foreach ($this->classes as $cname => $cd) {
+            foreach ($cd->propertyDocList as $prop => $isDoc) {
+                if (!$isDoc) { continue; }
+                $pt = $cd->propertyTypes[$prop] ?? null;
+                if ($pt === null || !$pt->isArray()) { continue; }
+                $pk = $pt->key;
+                if ($pk !== null && $pk->kind === Type::KIND_CELL) { continue; }
+                $propCand[$cname . '::' . $prop] = true;
+            }
+        }
+        if (\count($cand) === 0 && \count($propCand) === 0) { return false; }
+        $promote = [];                   // "fn#idx" / "Class::prop" → true
+        foreach ($module->functions as $fn) {
+            $this->collectDocListKeyArgs($fn->body, $cand, $propCand, $promote);
+        }
+        if (\count($promote) === 0) { return false; }
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern || $fn->isPrelude) { continue; }
+            $idx = 0;
+            foreach ($fn->params as $p) {
+                $key = $fn->name . '#' . (string)$idx;
+                $idx = $idx + 1;
+                if (!isset($promote[$key])) { continue; }
+                $param = $fn->params[$idx - 1];
+                $elem = $param->type->element;
+                $param->type = Type::assoc(Type::cell(), $elem === null ? Type::unknown() : $elem);
+                $changed = true;
+            }
+        }
+        foreach ($this->classes as $cname => $cd) {
+            foreach ($cd->propertyDocList as $prop => $isDoc) {
+                if (!isset($promote[$cname . '::' . $prop])) { continue; }
+                $pt = $cd->propertyTypes[$prop] ?? null;
+                if ($pt === null) { continue; }
+                $elem = $pt->element;
+                $cd->propertyTypes[$prop] = Type::assoc(
+                    Type::cell(),
+                    $elem === null ? Type::unknown() : $elem,
+                );
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * Record every candidate param a call site hands a non-int-keyed array.
+     *
+     * The call flavors are the ones {@see collectCallArgElems} resolves, plus
+     * `new C(...)` — a constructor is a call site like any other, and leaving it
+     * out is how a ctor parameter stayed erased long enough to lose its
+     * ownership (see ctor-array-param-store-borrows).
+     *
+     * @param array<string,bool> $cand
+     * @param array<string,bool> $propCand
+     * @param array<string,bool> $promote
+     */
+    private function collectDocListKeyArgs(Node $n, array $cand, array $propCand, array &$promote): void
+    {
+        // `$this->prop = <string-keyed array>` — the property analogue of an
+        // argument, and the step that carries the promotion past the parameter.
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $sp = $n;
+            $cls = $sp->object->type->class ?? '';
+            if ($cls !== '' && isset($propCand[$cls . '::' . $sp->property])
+                && $this->keyIsNonPacked($sp->value->type)) {
+                $promote[$cls . '::' . $sp->property] = true;
+            }
+        }
+        $fnName = '';
+        $args = null;
+        $base = 0;
+        if ($n->kind === Node::KIND_CALL) {
+            $fnName = $n->function;
+            $args = $n->args;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $mc = $n;
+            $cls = $mc->object->type->class ?? '';
+            if ($cls !== '') { $fnName = $cls . '__' . $mc->method; $args = $mc->args; $base = 1; }
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $sc = $n;
+            if ($sc->class !== '') { $fnName = $sc->class . '__' . $sc->method; $args = $sc->args; }
+        } elseif ($n->kind === Node::KIND_NEW_OBJ) {
+            $no = $n;
+            if ($no->class !== '') { $fnName = $no->class . '____construct'; $args = $no->args; $base = 1; }
+        }
+        if ($args !== null) {
+            /** @var \Compile\Mir\Node[] $argl */
+            $argl = $args;
+            $i = 0;
+            foreach ($argl as $a) {
+                $key = $fnName . '#' . (string)($base + $i);
+                $i = $i + 1;
+                if (!isset($cand[$key])) { continue; }
+                if ($this->keyIsNonPacked($a->type)) { $promote[$key] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectDocListKeyArgs($c, $cand, $propCand, $promote);
+        }
+    }
+
+    /**
+     * Does this array type prove the packed int-key reader is the wrong one?
+     *
+     * A STRING key is the witness; a CELL key is one already — both say the raw
+     * i64 key channel cannot read it. Anything else (int-keyed, or an erased
+     * array whose keys this site does not know) leaves the slot packed: the
+     * promotion only ever fires on positive evidence.
+     */
+    private function keyIsNonPacked(Type $t): bool
+    {
+        if (!$t->isArray()) { return false; }
+        $k = $t->key;
+        if ($k === null) { return false; }
+        return $k->kind === Type::KIND_STRING || $k->kind === Type::KIND_CELL;
+    }
+
+    /**
      * Refine an UNTYPED by-ref param (`&$p` with no type hint → cell) to the
      * concrete type every call site passes. Only pointer-carrying types
      * (string / array / object) are refined — those misread as a NaN-boxed

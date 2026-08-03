@@ -1567,12 +1567,13 @@ final class LowerFromAst implements Pass
             // function path. Without the Type::vec wrapper the callee reads the
             // param as a single T, so `$xs` is garbage (a raw arg, not the vec).
             $outType = $this->docTagType($m->docComment, '@param-out', $p->name);
+            $effHint = $this->effectiveHint(
+                $p->typeHint,
+                $outType ?? $this->docTagType($m->docComment, '@param', $p->name),
+            );
             $pt = $isVar
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
-                : $this->lowerParamType($this->effectiveHint(
-                    $p->typeHint,
-                    $outType ?? $this->docTagType($m->docComment, '@param', $p->name),
-                ));
+                : $this->lowerParamType($effHint);
             if ($magicName && $pi === 0) { $pt = Type::string_(); }
             if ($magicArgs && $pi === 1) { $pt = Type::vec(Type::cell()); }
             $mp = new Param(
@@ -1583,6 +1584,9 @@ final class LowerFromAst implements Pass
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            // Variadic excluded for the same reason as the free-function path:
+            // the pack's keys are the compiler's own 0..n.
+            $mp->docList = !$isVar && $this->isElemOnlyArrayDoc($effHint);
             $mp->refOut = $outType !== null || isset($refOutNames[$p->name])
                 || $this->paramHasRefOutAttr($p);
             $params[] = $mp;

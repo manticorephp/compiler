@@ -508,6 +508,7 @@ final class Monomorphize implements Pass
             $np->refOut = $p->refOut;
             $np->cellArg = $p->cellArg;
             $np->arrayHinted = $p->arrayHinted;
+            $np->docList = $p->docList;
             $newParams[] = $np;
         }
         try {
@@ -797,6 +798,7 @@ final class Monomorphize implements Pass
             // untagged at the call site, since the whole array-hint mask is keyed
             // off this flag.
             $np->arrayHinted = $p->arrayHinted;
+            $np->docList = $p->docList;
             $newParams[] = $np;
         }
         $clFn = new FunctionDef($newName, $newParams, $orig->returnType, $clBody, $orig->returnsByRef, $orig->isPrelude);
