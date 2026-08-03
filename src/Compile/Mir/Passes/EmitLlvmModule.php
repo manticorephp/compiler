@@ -1005,7 +1005,6 @@ trait EmitLlvmModule
     private function profileRuntime(): string
     {
         if (!\Compile\Debug::$profile) { return ''; }
-        $out  = "@__prof = linkonce_odr global [16 x i64] zeroinitializer\n";
         // atexit/dprintf are declared once via libcExtra (see the preamble) so
         // they don't collide with the uncaught handler's dprintf.
         // 0-6: per-flavor alloc/retain/release. 7-13: retain by SOURCE category
@@ -1013,11 +1012,27 @@ trait EmitLlvmModule
         // 14-15: array-alloc traffic — total (all __mir_alloc_array_tagged, incl.
         // cow clones / unshift reallocs) and the empty-`[]` share (cap==0), the
         // ceiling for the immortal-empty-array singleton.
+        // 16-23: small-object POOL traffic. `pool_alloc` is every request the
+        // pool sees; of those `pool_hit` popped a freelist, `pool_miss` carved a
+        // fresh block out of a span, and `pool_bypass` was too big and went to
+        // libc. `pool_free` counts blocks pushed back. The last two attribute
+        // the CALLER — object/vec headers and hash bucket side-arrays — so a
+        // change can be shown to have removed allocations of a named kind and
+        // not merely moved them. Counts are deterministic; rps is not.
+        // (Array buffers need no counter of their own: `arr_alloc_total` at 14
+        // already is one.)
         $names = ['str_alloc', 'str_retain', 'str_release', 'rc_retain',
                   'rc_release', 'assoc_retain', 'assoc_release',
                   'retain_alias', 'retain_capture', 'retain_element',
                   'retain_assoc', 'retain_prop', 'retain_static', 'retain_return',
-                  'arr_alloc_total', 'arr_alloc_empty'];
+                  'arr_alloc_total', 'arr_alloc_empty',
+                  'pool_alloc', 'pool_hit', 'pool_miss', 'pool_free',
+                  'pool_bypass', 'obj_alloc', 'bucket_alloc'];
+        // ONE spelling of the array length: the global, the bump GEP and the
+        // dump loop all read it from the name list. They disagreed before — the
+        // global was [16 x i64] while the dump indexed it as [14 x i64].
+        $slots = (string)\count($names);
+        $out  = "@__prof = linkonce_odr global [" . $slots . " x i64] zeroinitializer\n";
         $i = 0;
         foreach ($names as $nm) {
             // Each escape (`\0A` newline, `\00` NUL) is one byte in the
@@ -1030,7 +1045,7 @@ trait EmitLlvmModule
             $i = $i + 1;
         }
         $out .= "define void @__prof_bump(i64 %i) {\nentry:\n";
-        $out .= "  %p = getelementptr inbounds [16 x i64], ptr @__prof, i64 0, i64 %i\n";
+        $out .= "  %p = getelementptr inbounds [" . $slots . " x i64], ptr @__prof, i64 0, i64 %i\n";
         $out .= "  %v = load i64, ptr %p\n";
         $out .= "  %v1 = add i64 %v, 1\n";
         $out .= "  store i64 %v1, ptr %p\n";
@@ -1038,8 +1053,9 @@ trait EmitLlvmModule
         $out .= "define void @__manticore_profile_dump() {\nentry:\n";
         // Ordered after the program's own output, not spliced into it.
         if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
-        for ($j = 0; $j < 16; $j = $j + 1) {
-            $out .= '  %p' . (string)$j . ' = getelementptr inbounds [14 x i64], ptr @__prof, i64 0, i64 '
+        $n = \count($names);
+        for ($j = 0; $j < $n; $j = $j + 1) {
+            $out .= '  %p' . (string)$j . ' = getelementptr inbounds [' . $slots . ' x i64], ptr @__prof, i64 0, i64 '
                   . (string)$j . "\n";
             $out .= '  %v' . (string)$j . ' = load i64, ptr %p' . (string)$j . "\n";
             $out .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.fmt.'
@@ -1174,7 +1190,7 @@ trait EmitLlvmModule
             // them all unwinds here instead of computing an OOB slot -1.
             $header .= "  store i64 1, ptr @__mir_jmp_depth\n";
             $header .= "  %__basebuf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
-            $header .= "  %__basesj = call i32 @setjmp(ptr %__basebuf)\n";
+            $header .= "  %__basesj = call i32 @_setjmp(ptr %__basebuf)\n";
             $header .= "  %__caught = icmp ne i32 %__basesj, 0\n";
             $header .= "  br i1 %__caught, label %__uncaught, label %__run\n";
             $header .= "__uncaught:\n";

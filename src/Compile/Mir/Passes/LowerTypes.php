@@ -416,7 +416,7 @@ trait LowerTypes
         // which owns the address and can carry a destructor — a Ptr is excluded
         // from rc, so it can own nothing.
         if (isset($this->classTable[$cls]) || isset($this->knownClassNames[$cls])) {
-            return Type::obj($cls);
+            return $this->classHintType($cls, $nullable);
         }
         // Unqualified short name: PHP resolves it in the current namespace
         // first. Prefer the same-namespace class — this disambiguates a
@@ -436,7 +436,7 @@ trait LowerTypes
             while ($ns !== '') {
                 $qualified = $ns . '\\' . $cls;
                 if (isset($this->classTable[$qualified]) || isset($this->knownClassNames[$qualified])) {
-                    return Type::obj($qualified);
+                    return $this->classHintType($qualified, $nullable);
                 }
                 $p = \strrpos($ns, '\\');
                 if ($p === false || $p < 0) { break; }
@@ -448,9 +448,30 @@ trait LowerTypes
         if (\strpos($cls, '\\') === false
             && isset($this->shortClassFqn[$cls])
             && !isset($this->shortClassAmbiguous[$cls])) {
-            return Type::obj($this->shortClassFqn[$cls]);
+            return $this->classHintType($this->shortClassFqn[$cls], $nullable);
         }
         return Type::unknown();
+    }
+
+    /**
+     * The type a resolved class NAME lowers to — `obj<Cls>`, except that a
+     * NULLABLE enum is a cell.
+     *
+     * `?Enum` is not a nullable pointer. An enum case is an ORDINAL, and the
+     * first case's ordinal is 0 — exactly the carrier a null object uses — so
+     * `$m === null` answered TRUE for the first case, and an actual null
+     * reaching the cell→ordinal unbox dereferenced the NULL tag's bits and
+     * SIGSEGV'd (`Method::tryFrom($unknown)` handed to a `?Method` parameter).
+     * The union spelling `Enum|null` already lowers to a cell and is correct on
+     * every one of those; `?Enum` now means the same thing, which is what php
+     * says it means.
+     */
+    private function classHintType(string $cls, bool $nullable): Type
+    {
+        if ($nullable && isset($this->enumNames[\ltrim($cls, '\\')])) {
+            return Type::cell();
+        }
+        return Type::obj($cls);
     }
 
     /** Whether `$hint` denotes a bare `array` with no element type. */

@@ -122,7 +122,10 @@ trait EmitLlvmFiber
         $out .= $this->fiberGuardHandler();
         $out .= "declare i64 @mc_fiber_make(i64, i64, i64)\n";
         $out .= "declare i64 @mc_fiber_jump(i64)\n";
-        $out .= "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n";
+        // `mmap` goes through libcExtra for the same reason `write` does: the
+        // small-object pool reserves its region with it, and a program using
+        // both fibers and the pool would otherwise declare the name twice.
+        $this->libcExtra['mmap'] = 'declare ptr @mmap(ptr, i64, i32, i32, i32, i64)';
         $out .= "declare i32 @munmap(ptr, i64)\n";
         $out .= "declare i32 @mprotect(ptr, i64, i32)\n";
         // Only the stdlib build carries the fcontext DEFINITIONS; app builds

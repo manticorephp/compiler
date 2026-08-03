@@ -1,0 +1,44 @@
+GET |/| q= v=1.1 host=a.example ct= len=0 body=
+GET |/a/c| q=x=1&y=%20z v=1.1 host=a.example ct= len=0 body=
+GET |/etc/passwd| q= v=1.1 host=a.example ct= len=0 body=
+HEAD |/x/| q= v=1.0 host= ct= len=0 body=
+POST |/p| q= v=1.1 host=a.example ct=text/plain len=5 body=hello
+OPTIONS |*| q= v=1.1 host=a.example ct= len=0 body=
+GET |/abs| q=k=v v=1.1 host=origin.example ct= len=0 body=
+GET |/| q= v=1.1 host=a.example ct= len=0 body=
+x-tag=a, b count=2 keepalive=y method=Get safe=y
+  line: Host: a.example
+  line: X-Tag: a
+  line: X-Tag: b
+a=1 b=hello world c=[] miss=DEF n=3
+sid=abc d theme=dark keepalive=n target=/s?a=1&b=hello+world&c
+POST |/c| q= v=1.1 host=a.example ct= len=11 body=hello world
+POST |/c| q= v=1.1 host=a.example ct= len=3 body=abc
+code=400
+code=400
+code=505
+code=400
+code=411
+code=400
+code=400
+code=400
+code=413
+code=413
+code=501
+code=431
+code=431
+feed1=0
+feed2=0
+feed3=0
+feed4=200
+split body=abcd path=/split
+first=/one
+second-code=200 path=/two left=0
+Not Found||y|n|y
+x-a=3 n=2 int=3 missint=-1
+X-A: 3|Set-Cookie: a=1|Set-Cookie: b=2||
+after remove: X-A: 3||
+status=201 set=y close=y streaming=n body=hi
+Content-Type: text/plain; charset=utf-8|X-One: a|X-One: b|Set-Cookie: sid=v%20a%20l; path=/; HttpOnly; SameSite=Strict||
+body2=hi! Content-Type: text/plain; charset=utf-8|Set-Cookie: sid=v%20a%20l; path=/; HttpOnly; SameSite=Strict||
+done

@@ -1643,6 +1643,28 @@ trait EmitLlvmExpr
         return true;
     }
 
+    /**
+     * Whether a cell-typed operand reads a property slot that is NOT
+     * self-describing — i.e. one {@see cellPropBoxed} keeps raw.
+     *
+     * The read side has to agree with the store side about a slot's shape. A
+     * raw slot holds a bare pointer (or a bare 0 for its `null` default), so a
+     * NaN-tag decode over it answers whatever the pointer bits happen to look
+     * like: `null` reads as tag 6 (a double), which is never tag 3, so
+     * `=== null` was permanently false and `!== null` permanently true. Only
+     * property reads can be raw this way; every other cell operand is boxed by
+     * construction.
+     */
+    private function cellOperandIsRawSlot(Node $n): bool
+    {
+        if ($n->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        $cls = $n->object->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return false; }
+        $pt = $this->classes[$cls]->propertyTypes[$n->property] ?? null;
+        if ($pt === null || $pt->kind !== Type::KIND_CELL) { return false; }
+        return !$this->cellPropBoxed($pt, $cls, $n->property);
+    }
+
     private function emitStringConst(StringConst $n): string
     {
         $sc = $n;
@@ -2460,11 +2482,8 @@ trait EmitLlvmExpr
         if ($c->target === 'string') {
             if ($ok === Type::KIND_STRING) { $out .= $this->coerceToPtr(); return $out; }
             if ($ok === Type::KIND_CELL) {
-                $this->rt->needsTaggedToStr = true;
                 $out .= $this->coerceToI64();
-                $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
-                $this->lastValue = $r; $this->lastValueType = 'ptr';
+                $out .= $this->coerceCellToStr($this->lastValue);
                 return $out;
             }
             $out .= $this->coerceToStr($c->operand);
@@ -2986,6 +3005,68 @@ trait EmitLlvmExpr
      * isn't precise yet — it degrades to the integer formatter,
      * which is wrong for fractional values (tracked for a follow-up).
      */
+    /**
+     * A NaN-boxed cell (already in `$this->lastValue` as i64) → a string ptr,
+     * dispatching on its tag.
+     *
+     * `@__manticore_tagged_to_str` handles every SCALAR tag but has no object
+     * arm and cannot grow one: it is a single external body in the central core
+     * (`T __manticore_tagged_to_str` in lib/manticore_stdlib.o), linked once for
+     * the whole program, so specializing it from one module's class table is the
+     * `__mir_rc_release`-with-two-bodies mistake. An object cell therefore fell
+     * through to the int arm and rendered the tagged word — `(string)$sxe['id']`
+     * printed 38503727592 where php prints the attribute text.
+     *
+     * The object tag (nibble 8) is branched HERE instead, where the module knows
+     * whether it generated `__mir_obj_to_str` ({@see LowerPrelude::objToStrSrc}).
+     * A module with no `__toString` class emits the plain call exactly as before.
+     */
+    private function coerceCellToStr(string $v): string
+    {
+        $this->rt->needsTaggedToStr = true;
+        if (!$this->hasObjToStr) {
+            $r = $this->ssa->allocReg();
+            $out = '  ' . $r . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $slot = $this->ssa->allocReg();
+        $out = '  ' . $slot . " = alloca ptr\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $ts = $this->ssa->allocReg();
+        $out .= '  ' . $ts . ' = lshr i64 ' . $v . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+        $isObjNib = $this->ssa->allocReg();
+        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+        $objL = $this->ssa->allocLabel('o2s.obj');
+        $scaL = $this->ssa->allocLabel('o2s.scalar');
+        $endL = $this->ssa->allocLabel('o2s.end');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $scaL . "\n";
+        $out .= $objL . ":\n";
+        $os = $this->ssa->allocReg();
+        // The dispatcher takes the CELL itself: its arms are `instanceof`, which
+        // unboxes on the tag the same way every other cell consumer does.
+        $out .= '  ' . $os . ' = call ptr @manticore___mir_obj_to_str(i64 ' . $v . ")\n";
+        $out .= '  store ptr ' . $os . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $scaL . ":\n";
+        $ss = $this->ssa->allocReg();
+        $out .= '  ' . $ss . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
+        $out .= '  store ptr ' . $ss . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function coerceToStr(Node $operand, bool $arena = false): string
     {
         if ($operand->type->kind === Type::KIND_STRING) {
@@ -2999,12 +3080,8 @@ trait EmitLlvmExpr
         }
         // A tagged cell (mixed) → dispatch on its tag at runtime.
         if ($operand->type->kind === Type::KIND_CELL) {
-            $this->rt->needsTaggedToStr = true;
             $out = $this->coerceToI64();
-            $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
-            $this->lastValue = $reg;
-            $this->lastValueType = 'ptr';
+            $out .= $this->coerceCellToStr($this->lastValue);
             return $out;
         }
         // An ERASED operand may carry either a boxed cell or a raw i64, and
@@ -3040,9 +3117,10 @@ trait EmitLlvmExpr
             $endL = $this->ssa->allocLabel('cs.end');
             $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
             $out .= $boxL . ":\n";
-            $bs = $this->ssa->allocReg();
-            $out .= '  ' . $bs . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
-            $out .= '  store ptr ' . $bs . ', ptr ' . $slot . "\n";
+            // Same tag dispatch as the CELL branch above — a boxed word reaching
+            // an erased operand may just as well be an object cell.
+            $out .= $this->coerceCellToStr($v);
+            $out .= '  store ptr ' . $this->lastValue . ', ptr ' . $slot . "\n";
             $out .= '  br label %' . $endL . "\n";
             // Raw: only a container stamps an allocator magic at ptr-8, so an
             // array is the one non-scalar a raw word can be identified as. The
@@ -3325,7 +3403,18 @@ trait EmitLlvmExpr
             // A `mixed`/cell operand carries its type in a NaN tag — a boxed
             // null (tag NULL=3) is NOT i64 0, so compare the tag at runtime.
             // (`$o === null` in an SPL offsetSet is the canonical case.)
-            if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL) {
+            //
+            // …UNLESS the operand is a cell PROPERTY whose slot is not
+            // self-describing. A `mixed` property with even one store the
+            // NaN-boxing cannot take — a `\Closure`, which is a header-less
+            // struct and never rc-managed — keeps the WHOLE slot raw
+            // ({@see cellPropBoxed}), so its `null` default is a bare 0 and the
+            // tag decode reads that as a double: kind 6, never 3, and
+            // `$this->fn !== null` answered TRUE on a freshly-constructed
+            // object. Such a slot carries either shape, so it takes the same
+            // dual test as an erased operand below.
+            if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL
+                && !$this->cellOperandIsRawSlot($other)) {
                 $out = $this->emitNode($other);
                 $out .= $this->coerceToI64();
                 $out .= $this->cellTagIr($this->lastValue);
@@ -3345,7 +3434,9 @@ trait EmitLlvmExpr
             // empty array answers one, and symfony's
             // `while (null !== $token = array_shift($this->parsed))` therefore
             // ran forever past the end of its token list.
-            if (!($leftNull && $rightNull) && $ok === Type::KIND_UNKNOWN) {
+            if (!($leftNull && $rightNull)
+                && ($ok === Type::KIND_UNKNOWN
+                    || ($ok === Type::KIND_CELL && $this->cellOperandIsRawSlot($other)))) {
                 $out = $this->emitNode($other);
                 $out .= $this->coerceToI64();
                 $cv = $this->lastValue;
@@ -4273,6 +4364,48 @@ trait EmitLlvmExpr
     }
 
     /**
+     * `echo` of a NaN-boxed cell: an object cell goes through its `__toString`,
+     * everything else through the tag dispatch.
+     *
+     * `@__manticore_echo_tagged` is a single external body in the central core
+     * and knows no user class, exactly like `@__manticore_tagged_to_str` — so an
+     * object cell rendered its tagged word (`echo $sxe->db->host` printed
+     * 4383413368). The object arm is branched HERE, where the module knows
+     * whether it generated `__mir_obj_to_str`. {@see coerceCellToStr}
+     */
+    private function emitEchoCellIr(string $v): string
+    {
+        $this->rt->needsTaggedEcho = true;
+        if (!$this->hasObjToStr) {
+            return '  call void @__manticore_echo_tagged(i64 ' . $v . ")\n";
+        }
+        $isBox = $this->ssa->allocReg();
+        $out = '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $ts = $this->ssa->allocReg();
+        $out .= '  ' . $ts . ' = lshr i64 ' . $v . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+        $isObjNib = $this->ssa->allocReg();
+        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+        $objL = $this->ssa->allocLabel('eco.obj');
+        $scaL = $this->ssa->allocLabel('eco.scalar');
+        $endL = $this->ssa->allocLabel('eco.end');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $scaL . "\n";
+        $out .= $objL . ":\n";
+        $os = $this->ssa->allocReg();
+        $out .= '  ' . $os . ' = call ptr @manticore___mir_obj_to_str(i64 ' . $v . ")\n";
+        $out .= $this->emitOutStr($os);
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $scaL . ":\n";
+        $out .= '  call void @__manticore_echo_tagged(i64 ' . $v . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        return $out;
+    }
+
+    /**
      * One `echo` operand. Split out of {@see emitEcho} because `print` is the
      * same thing with a value — {@see EmitLlvmBuiltins::biPrint} emits this and
      * then yields int 1.
@@ -4292,10 +4425,7 @@ trait EmitLlvmExpr
         // print nothing, matching PHP echo.
         if ($kind === Type::KIND_CELL) {
             $out .= $this->coerceToI64();
-            $this->rt->needsTaggedEcho = true;
-            $out .= '  call void @__manticore_echo_tagged(i64 '
-                  . $this->lastValue . ")\n";
-            return $out;
+            return $out . $this->emitEchoCellIr($this->lastValue);
         }
         // An ERASED operand may carry a boxed cell or a raw i64, and the
         // integer render at the bottom printed the tagged word itself —
@@ -4314,7 +4444,7 @@ trait EmitLlvmExpr
             $endL = $this->ssa->allocLabel('ec.end');
             $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
             $out .= $boxL . ":\n";
-            $out .= '  call void @__manticore_echo_tagged(i64 ' . $v . ")\n";
+            $out .= $this->emitEchoCellIr($v);
             $out .= '  br label %' . $endL . "\n";
             $out .= $rawL . ":\n";
             $out .= $this->emitOutInt($v);

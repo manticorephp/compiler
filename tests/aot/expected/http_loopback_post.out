@@ -1,0 +1,11 @@
+cl: HTTP/1.1 200 OK body=len=11 ct=text/plain body=hello world
+split: HTTP/1.1 200 OK body=len=9 ct= body=abcdefghi
+chunked: HTTP/1.1 200 OK body=len=7 ct= body=chunked
+form: HTTP/1.1 200 OK body=name=ada lovelace city=London
+interim: HTTP/1.1 100 Continue body=
+expect: HTTP/1.1 200 OK body=len=5 ct= body=later
+expect-bad: HTTP/1.1 417 Expectation Failed body=
+too-big: HTTP/1.1 413 Content Too Large body=
+streamed: HTTP/1.1 200 OK body=streamed:100 head=0123456789012345
+served=6 errors=2
+done

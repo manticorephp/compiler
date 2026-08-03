@@ -743,7 +743,7 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('cp.magic');
             $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitMagicCall($declCls, '__get', $objPtr, $prop, null);
+            $bodies .= $this->emitMagicGetCell($declCls, $objPtr, $prop);
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
@@ -766,6 +766,18 @@ trait EmitLlvmObjects
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Whether any NON-enum class declares (or inherits) `$method`. Gates the
+     *  cell-receiver ordinal unbox: an enum method's `$this` is an ordinal, and
+     *  that repr is only safe when no object candidate shares the name. */
+    private function nonEnumDeclares(string $method): bool
+    {
+        foreach ($this->classes as $cd) {
+            if (isset($this->enums[$cd->name])) { continue; }
+            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
+        }
+        return false;
     }
 
     /** Whether ANY class in the table declares (or inherits) `$method`. */
@@ -999,7 +1011,7 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('rp.magic');
             $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitMagicCall($declCls, '__get', $objPtr, $prop, null);
+            $bodies .= $this->emitMagicGetCell($declCls, $objPtr, $prop);
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
@@ -1354,6 +1366,95 @@ trait EmitLlvmObjects
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Classes implementing `$iface` that actually resolve `$method` — the arm
+     *  set for {@see emitErasedIfaceCall}. @return array<string,string> class => declarer */
+    private function ifaceMethodHolders(string $iface, string $method): array
+    {
+        $holders = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct || $this->isClosureClass($cd->name) || $this->isEnumClass($cd->name)) {
+                continue;
+            }
+            if (!$this->classImplements($cd->name, $iface)) { continue; }
+            $decl = $this->resolveMethodClass($cd->name, $method);
+            if ($decl === '') { continue; }
+            $holders[$cd->name] = $decl;
+        }
+        return $holders;
+    }
+
+    /**
+     * Call `$method` on an ERASED receiver — a raw object pointer whose class is
+     * only known at runtime — by dispatching on its class_id across every class
+     * implementing `$iface`. `$argRegs` are already-emitted i64 args (cells for a
+     * `mixed` parameter). lastValue ← the i64 result; an unmatched class_id
+     * yields 0.
+     *
+     * `ArrayAccess` and `Countable` were dispatched ONLY from a statically known
+     * class, so the moment the receiver erased — and `simplexml_load_string`'s
+     * `SimpleXMLElement|false` erases to a cell immediately — `$sxe['id']` fell
+     * through to `__mir_array_get_str` on an OBJECT pointer and `count($sxe->x)`
+     * loaded the object header as a vec length. Same shape as the `__get` arms
+     * in {@see emitRawPropByClassId}: one arm per class, the declarer resolved
+     * per class so an override still wins.
+     */
+    private function emitErasedIfaceCall(string $objPtr, string $iface, string $method,
+                                         array $argRegs): string
+    {
+        $holders = $this->ifaceMethodHolders($iface, $method);
+        $oi = $this->ssa->allocReg();
+        $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->ssa->allocLabel('ei.end');
+        $def = $this->ssa->allocLabel('ei.default');
+        $out .= $this->emitLoadClassId($objPtr);
+        $switch = '  switch i64 ' . $this->classIdReg . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($holders as $cname => $declCls) {
+            $lbl = $this->ssa->allocLabel('ei.case');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $args = 'i64 ' . $oi;
+            foreach ($argRegs as $ar) { $args .= ', i64 ' . $ar; }
+            $r = $this->ssa->allocReg();
+            $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($declCls)
+                     . '__' . $method . '(' . $args . ")\n";
+            $bodies .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        $out .= $def . ":\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $rr = $this->ssa->allocReg();
+        $out .= '  ' . $rr . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $rr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__get` on an ERASED receiver, boxed to a tagged cell by the method's
+     * DECLARED return type. lastValue ← the cell.
+     *
+     * The class_id switches around it hand every other arm through
+     * {@see emitFixedPropLoad}, whose contract is a self-describing cell; the
+     * magic arm used to store `emitMagicCall`'s RAW i64 beside them. A `__get`
+     * returning an object therefore put a bare pointer into a cell channel, and
+     * the consumer read it untagged: `(string)$sxe->title` rendered the pointer
+     * as a denormal double (2.15E-314) because the cell→string dispatch saw no
+     * NaN-box and fell to the float arm.
+     */
+    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop): string
+    {
+        $out = $this->emitMagicCall($declCls, '__get', $objPtrReg, $prop, null);
+        return $out . $this->boxRawValue($this->lastValue,
+            $this->sigs->returnType[$declCls . '____get'] ?? null);
     }
 
     /** The class in `$cls`'s ancestry that DECLARES `$prop` as `readonly`, or ''
@@ -3498,6 +3599,30 @@ trait EmitLlvmObjects
                 $r = $this->resolveMethodClass($cd->name, $mc->method);
                 if ($r !== '') { $fallback = $r; break; }
             }
+        }
+        // An ENUM method takes its case ORDINAL as `$this`, not a pointer. A
+        // cell receiver (`?Enum` is a cell — an ordinal cannot carry null, see
+        // LowerTypes::classHintType) holds box_object(singleton), and the mask
+        // above left the SINGLETON POINTER in $thisArg: `$this === Enum::Case`
+        // then compared a pointer against an ordinal and answered false for
+        // every case. Load the ordinal the singleton records, the same +16 slot
+        // unboxCellToType's enum arm reads.
+        //
+        // Only when the enum is the SOLE declarer of the name: with a non-enum
+        // candidate in play the class_id switch below dispatches on $thisArg as
+        // an object, and an ordinal has no header to read.
+        if ($fallback !== '' && isset($this->enums[$fallback])
+            && ($mc->object->type->kind === Type::KIND_CELL
+                || $mc->object->type->kind === Type::KIND_UNKNOWN)
+            && !$this->nonEnumDeclares($mc->method)) {
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $thisArg . " to ptr\n";
+            $g = $this->ssa->allocReg();
+            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
+            $ord = $this->ssa->allocReg();
+            $out .= '  ' . $ord . ' = load i64, ptr ' . $g . "\n";
+            $thisArg = $ord;
+            $argList = 'i64 ' . $thisArg;
         }
         // By-ref mask of the resolved callee. A method's param 0 is the
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —

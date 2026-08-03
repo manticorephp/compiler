@@ -6,9 +6,266 @@ use Compile\Mir\Type;
 
 trait EmitLlvmRuntime
 {
+    /**
+     * Size-classed small-object pool (see {@see \Compile\MemoryAbi::POOL_GRAIN}
+     * for the shape and the ⚠ that goes with it). Three entry points:
+     *
+     *  - `@__mir_pool_alloc(n)` — a block of `n` bytes, from a class free list
+     *    or carved out of a span; `n > POOL_MAX_SMALL` falls through to malloc.
+     *  - `@__mir_pool_free(p)` — back to its class list, or to libc `free` when
+     *    `p` is not one of ours.
+     *  - `@__mir_pool_size(p)` — the block's class size, or 0 when `p` is not
+     *    pooled. Only `__mir_realloc_tagged` needs it, and only because libc
+     *    `realloc` on a pooled block would corrupt the heap.
+     *
+     * Everything is `linkonce_odr`, pools INCLUDED — the string pool's ODR
+     * lesson (alloc draining one head while reclaim fills another) applies
+     * verbatim, and here the failure would be an abort rather than a leak.
+     */
+    private function poolRuntime(): string
+    {
+        if (!\Compile\Debug::$pool) { return ''; }
+        $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
+        $this->libcExtra['free']   = 'declare void @free(ptr)';
+        $this->libcExtra['mmap']   = 'declare ptr @mmap(ptr, i64, i32, i32, i32, i64)';
+        $grain  = (string)\Compile\MemoryAbi::POOL_GRAIN;
+        $maxSm  = (string)\Compile\MemoryAbi::POOL_MAX_SMALL;
+        $nCls   = (string)\Compile\MemoryAbi::POOL_CLASSES;
+        $span   = (string)\Compile\MemoryAbi::POOL_SPAN_SIZE;
+        $spanHd = (string)\Compile\MemoryAbi::POOL_SPAN_HEADER;
+        $region = (string)\Compile\MemoryAbi::POOL_REGION_BYTES;
+        $mask   = (string)(-\Compile\MemoryAbi::POOL_SPAN_SIZE);   // ~(SPAN-1)
+        $shift  = 4;                                               // log2(GRAIN)
+        // MAP_PRIVATE|MAP_ANON — the constant differs between the hosts, same
+        // pair the fiber stack allocator uses.
+        $mflags = \Manticore\is_darwin() ? 0x1002 : 0x22;
+
+        // base/top bracket the reserved range; both 0 until the first alloc, so
+        // an uninitialised (or failed) pool answers "not mine" for every pointer
+        // and the whole thing degrades to plain malloc/free.
+        $out  = "@__mir_pool_base = linkonce_odr global i64 0\n";
+        $out .= "@__mir_pool_top = linkonce_odr global i64 0\n";
+        $out .= "@__mir_pool_next = linkonce_odr global i64 0\n";
+        $out .= "@__mir_pool_ready = linkonce_odr global i64 0\n";
+        $out .= "@__mir_pool_list = linkonce_odr global [" . $nCls . " x ptr] zeroinitializer\n";
+        $out .= "@__mir_pool_cur = linkonce_odr global [" . $nCls . " x i64] zeroinitializer\n";
+        $out .= "@__mir_pool_lim = linkonce_odr global [" . $nCls . " x i64] zeroinitializer\n";
+        if (\Compile\Debug::$verify) {
+            $raw = '[VERIFY] pool_free: block already on a free list (double free) p=%p';
+            $out .= '@.vfy.pool = private unnamed_addr constant ['
+                  . (string)(\strlen($raw) + 2) . ' x i8] c"' . $raw . '\0A\00", align 1' . "\n";
+        }
+
+        // Reserve the range once. mmap hands back page-aligned memory, not
+        // SPAN-aligned, so round up and reserve one span extra — the mask in
+        // free() only finds a span header if spans are SPAN-ALIGNED.
+        $out .= "define void @__mir_pool_init() {\n";
+        $out .= "entry:\n";
+        $out .= "  %r = load i64, ptr @__mir_pool_ready\n";
+        $out .= "  %done = icmp ne i64 %r, 0\n";
+        $out .= "  br i1 %done, label %ret, label %go\n";
+        $out .= "go:\n";
+        $out .= "  store i64 1, ptr @__mir_pool_ready\n";
+        $out .= "  %m = call ptr @mmap(ptr null, i64 " . (string)(\Compile\MemoryAbi::POOL_REGION_BYTES
+              + \Compile\MemoryAbi::POOL_SPAN_SIZE) . ", i32 3, i32 " . (string)$mflags . ", i32 -1, i64 0)\n";
+        $out .= "  %mi = ptrtoint ptr %m to i64\n";
+        // MAP_FAILED is -1, not null (the fiber allocator learned this the hard
+        // way). A failed reserve leaves base/top at 0 ⇒ permanent bypass.
+        $out .= "  %bad = icmp eq i64 %mi, -1\n";
+        $out .= "  %bad0 = icmp eq i64 %mi, 0\n";
+        $out .= "  %nope = or i1 %bad, %bad0\n";
+        $out .= "  br i1 %nope, label %ret, label %ok\n";
+        $out .= "ok:\n";
+        $out .= "  %up = add i64 %mi, " . (string)(\Compile\MemoryAbi::POOL_SPAN_SIZE - 1) . "\n";
+        $out .= "  %al = and i64 %up, " . $mask . "\n";
+        $out .= "  store i64 %al, ptr @__mir_pool_base\n";
+        $out .= "  store i64 %al, ptr @__mir_pool_next\n";
+        $out .= "  %tp = add i64 %al, " . $region . "\n";
+        $out .= "  store i64 %tp, ptr @__mir_pool_top\n";
+        $out .= "  br label %ret\n";
+        $out .= "ret:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+
+        // One span for class %idx, or 0 when the range is exhausted / absent.
+        $out .= "define i64 @__mir_pool_span(i64 %idx) {\n";
+        $out .= "entry:\n";
+        $out .= "  call void @__mir_pool_init()\n";
+        $out .= "  %next = load i64, ptr @__mir_pool_next\n";
+        $out .= "  %top = load i64, ptr @__mir_pool_top\n";
+        $out .= "  %end = add i64 %next, " . $span . "\n";
+        $out .= "  %full = icmp ugt i64 %end, %top\n";
+        $out .= "  br i1 %full, label %none, label %take\n";
+        $out .= "take:\n";
+        $out .= "  store i64 %end, ptr @__mir_pool_next\n";
+        $out .= "  %sp = inttoptr i64 %next to ptr\n";
+        $out .= "  store i64 %idx, ptr %sp\n";                     // span word 0 = class
+        $out .= "  ret i64 %next\n";
+        $out .= "none:\n";
+        $out .= "  ret i64 0\n";
+        $out .= "}\n";
+
+        $out .= "define ptr @__mir_pool_alloc(i64 %n) {\n";
+        $out .= "entry:\n";
+        $out .= $this->profBump(16);
+        $out .= "  %big = icmp ugt i64 %n, " . $maxSm . "\n";
+        $out .= "  br i1 %big, label %bypass, label %small\n";
+        $out .= "bypass:\n";
+        $out .= $this->profBump(20);
+        $out .= "  %mb = call ptr @malloc(i64 %n)\n";
+        $out .= "  ret ptr %mb\n";
+        $out .= "small:\n";
+        // idx = ceil(n / GRAIN), floored at 1 so a 0-byte request still gets a
+        // real block (callers add headers, but nothing guarantees it).
+        $out .= "  %up = add i64 %n, " . (string)(\Compile\MemoryAbi::POOL_GRAIN - 1) . "\n";
+        $out .= "  %i0 = lshr i64 %up, " . (string)$shift . "\n";
+        $out .= "  %z = icmp eq i64 %i0, 0\n";
+        $out .= "  %idx = select i1 %z, i64 1, i64 %i0\n";
+        $out .= "  %lp = getelementptr inbounds [" . $nCls . " x ptr], ptr @__mir_pool_list, i64 0, i64 %idx\n";
+        $out .= "  %h = load ptr, ptr %lp\n";
+        $out .= "  %hn = icmp eq ptr %h, null\n";
+        $out .= "  br i1 %hn, label %carve, label %pop\n";
+        $out .= "pop:\n";
+        $out .= $this->profBump(17);
+        $out .= "  %nx = load ptr, ptr %h\n";                      // intrusive next @ +0
+        $out .= "  store ptr %nx, ptr %lp\n";
+        if (\Compile\Debug::$verify) {
+            $out .= "  %clr = getelementptr inbounds i8, ptr %h, i64 8\n";
+            $out .= "  store i64 0, ptr %clr\n";                   // clear the free poison
+        }
+        $out .= "  ret ptr %h\n";
+        $out .= "carve:\n";
+        $out .= "  %sz = shl i64 %idx, " . (string)$shift . "\n";
+        $out .= "  %cp = getelementptr inbounds [" . $nCls . " x i64], ptr @__mir_pool_cur, i64 0, i64 %idx\n";
+        $out .= "  %mp = getelementptr inbounds [" . $nCls . " x i64], ptr @__mir_pool_lim, i64 0, i64 %idx\n";
+        $out .= "  %cur = load i64, ptr %cp\n";
+        $out .= "  %lim = load i64, ptr %mp\n";
+        $out .= "  %nend = add i64 %cur, %sz\n";
+        $out .= "  %fits = icmp ule i64 %nend, %lim\n";
+        $out .= "  %live = icmp ne i64 %cur, 0\n";
+        $out .= "  %use = and i1 %fits, %live\n";
+        $out .= "  br i1 %use, label %bump, label %fresh\n";
+        $out .= "bump:\n";
+        $out .= $this->profBump(18);
+        $out .= "  store i64 %nend, ptr %cp\n";
+        $out .= "  %bb = inttoptr i64 %cur to ptr\n";
+        $out .= "  ret ptr %bb\n";
+        $out .= "fresh:\n";
+        $out .= "  %sp = call i64 @__mir_pool_span(i64 %idx)\n";
+        $out .= "  %no = icmp eq i64 %sp, 0\n";
+        $out .= "  br i1 %no, label %bypass2, label %first\n";
+        $out .= "bypass2:\n";
+        $out .= $this->profBump(20);
+        $out .= "  %mb2 = call ptr @malloc(i64 %n)\n";
+        $out .= "  ret ptr %mb2\n";
+        $out .= "first:\n";
+        $out .= $this->profBump(18);
+        $out .= "  %d0 = add i64 %sp, " . $spanHd . "\n";
+        $out .= "  %d1 = add i64 %d0, %sz\n";
+        $out .= "  store i64 %d1, ptr %cp\n";
+        $out .= "  %slim = add i64 %sp, " . $span . "\n";
+        $out .= "  store i64 %slim, ptr %mp\n";
+        $out .= "  %fb = inttoptr i64 %d0 to ptr\n";
+        $out .= "  ret ptr %fb\n";
+        $out .= "}\n";
+
+        // The class size of a pooled block, 0 for anything else. The span
+        // header answers it — which is the whole reason the class lives there
+        // and not in a per-block word.
+        $out .= "define i64 @__mir_pool_size(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %u = ptrtoint ptr %p to i64\n";
+        $out .= "  %b = load i64, ptr @__mir_pool_base\n";
+        $out .= "  %t = load i64, ptr @__mir_pool_top\n";
+        $out .= "  %ge = icmp uge i64 %u, %b\n";
+        $out .= "  %lt = icmp ult i64 %u, %t\n";
+        $out .= "  %in = and i1 %ge, %lt\n";
+        $out .= "  br i1 %in, label %mine, label %not\n";
+        $out .= "mine:\n";
+        $out .= "  %sb = and i64 %u, " . $mask . "\n";
+        $out .= "  %sp = inttoptr i64 %sb to ptr\n";
+        $out .= "  %idx = load i64, ptr %sp\n";
+        $out .= "  %sz = shl i64 %idx, " . (string)$shift . "\n";
+        $out .= "  ret i64 %sz\n";
+        $out .= "not:\n";
+        $out .= "  ret i64 0\n";
+        $out .= "}\n";
+
+        $out .= "define void @__mir_pool_free(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %nul = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %nul, label %ret, label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %u = ptrtoint ptr %p to i64\n";
+        $out .= "  %b = load i64, ptr @__mir_pool_base\n";
+        $out .= "  %t = load i64, ptr @__mir_pool_top\n";
+        $out .= "  %ge = icmp uge i64 %u, %b\n";
+        $out .= "  %lt = icmp ult i64 %u, %t\n";
+        $out .= "  %in = and i1 %ge, %lt\n";
+        $out .= "  br i1 %in, label %mine, label %libc\n";
+        $out .= "libc:\n";
+        $out .= "  call void @free(ptr %p)\n";
+        $out .= "  ret void\n";
+        $out .= "mine:\n";
+        $out .= $this->profBump(19);
+        $out .= "  %sb = and i64 %u, " . $mask . "\n";
+        $out .= "  %sp = inttoptr i64 %sb to ptr\n";
+        $out .= "  %idx = load i64, ptr %sp\n";
+        $out .= "  %lp = getelementptr inbounds [" . $nCls . " x ptr], ptr @__mir_pool_list, i64 0, i64 %idx\n";
+        if (\Compile\Debug::$verify) {
+            // libc used to catch a double free for us and abort with a name.
+            // A pooled block would instead be pushed onto its class list twice,
+            // making a cycle — silent, and fatal much later somewhere else.
+            // Verify mode restores the loud version: word +8 of a free block
+            // carries a poison the allocator clears on the way out, so a second
+            // free sees it. Every class is >= 16 bytes, so +8 is inside.
+            $out .= "  %poisp = getelementptr inbounds i8, ptr %p, i64 8\n";
+            $out .= "  %pois = load i64, ptr %poisp\n";
+            $out .= "  %dbl = icmp eq i64 %pois, " . (string)\Compile\MemoryAbi::POOL_FREE_POISON . "\n";
+            $out .= "  br i1 %dbl, label %vfail, label %push\n";
+            $out .= "vfail:\n";
+            if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
+            $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.vfy.pool, ptr %p)\n";
+            $out .= "  call void @abort()\n";
+            $out .= "  unreachable\n";
+            $out .= "push:\n";
+        }
+        $out .= "  %h = load ptr, ptr %lp\n";
+        $out .= "  store ptr %h, ptr %p\n";
+        $out .= "  store ptr %p, ptr %lp\n";
+        if (\Compile\Debug::$verify) {
+            $out .= "  %poisw = getelementptr inbounds i8, ptr %p, i64 8\n";
+            $out .= "  store i64 " . (string)\Compile\MemoryAbi::POOL_FREE_POISON . ", ptr %poisw\n";
+        }
+        $out .= "  ret void\n";
+        $out .= "ret:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /** `@__mir_pool_alloc` when the pool is on, plain `@malloc` when it is not. */
+    private function poolAllocCall(string $reg, string $size): string
+    {
+        if (!\Compile\Debug::$pool) {
+            return '  ' . $reg . ' = call ptr @malloc(i64 ' . $size . ")\n";
+        }
+        return '  ' . $reg . ' = call ptr @__mir_pool_alloc(i64 ' . $size . ")\n";
+    }
+
+    /** `@__mir_pool_free` when the pool is on, plain `@free` when it is not. */
+    private function poolFreeCall(string $ptr): string
+    {
+        if (!\Compile\Debug::$pool) {
+            return '  call void @free(ptr ' . $ptr . ")\n";
+        }
+        return '  call void @__mir_pool_free(ptr ' . $ptr . ")\n";
+    }
+
     private function allocRuntime(): string
     {
-        $out  = "\ndefine ptr @__mir_alloc(i64 %n) {\n";
+        $out  = $this->poolRuntime();
+        $out .= "\ndefine ptr @__mir_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= "  %p = call ptr @malloc(i64 %n)\n";
         $out .= "  ret ptr %p\n";
@@ -21,8 +278,9 @@ trait EmitLlvmRuntime
         $magic = (string)\Compile\MemoryAbi::RC_TAG_MAGIC;
         $out .= "define ptr @__mir_alloc_tagged(i64 %n) {\n";
         $out .= "entry:\n";
+        $out .= $this->profBump(21);
         $out .= "  %t = add i64 %n, 8\n";
-        $out .= "  %base = call ptr @malloc(i64 %t)\n";
+        $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %base, i64 8\n";
         $out .= "  ret ptr %d\n";
@@ -67,6 +325,27 @@ trait EmitLlvmRuntime
             $out .= "heap:\n";
         }
         $out .= "  %t = add i64 %n, 8\n";
+        if (\Compile\Debug::$pool) {
+            // A POOLED base is mmap memory: libc realloc on it corrupts the
+            // heap exactly as free would. `__mir_pool_size` recovers the old
+            // block's class size (the span header knows it), so the grow is a
+            // plain alloc + copy + release. A base outside the region — a big
+            // block, or one from a pre-pool build — takes the realloc arm and
+            // nothing changes for it.
+            $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+            $out .= "  %posz = call i64 @__mir_pool_size(ptr %base)\n";
+            $out .= "  %pooled = icmp ne i64 %posz, 0\n";
+            $out .= "  br i1 %pooled, label %pmove, label %plain\n";
+            $out .= "pmove:\n";
+            $out .= $this->poolAllocCall('%pnew', '%t');
+            $out .= "  %shrink = icmp ult i64 %posz, %t\n";
+            $out .= "  %cpy = select i1 %shrink, i64 %posz, i64 %t\n";
+            $out .= "  call ptr @memcpy(ptr %pnew, ptr %base, i64 %cpy)\n";
+            $out .= $this->poolFreeCall('%base');
+            $out .= "  %pd = getelementptr inbounds i8, ptr %pnew, i64 8\n";
+            $out .= "  ret ptr %pd\n";
+            $out .= "plain:\n";
+        }
         $out .= "  %nb = call ptr @realloc(ptr %base, i64 %t)\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %nb, i64 8\n";
         $out .= "  ret ptr %d\n";
@@ -298,6 +577,7 @@ trait EmitLlvmRuntime
             // ptr-8 ⇒ obj/vec (rc@+8, drop_dispatch + free base=ptr-8). Else
             // the ptr is a string ⇒ its rc@ptr-8, free base=ptr-24 at zero
             // (the string header is [cap@-24, len@-16, rc@-8]; obj/vec base -8).
+            $out .= $this->rcVerifyAliveFormat();
             $out .= "define void @__mir_rc_release(ptr %p) {\n";
             $out .= "entry:\n";
             $out .= "  %z = icmp eq ptr %p, null\n";
@@ -355,7 +635,7 @@ trait EmitLlvmRuntime
             // before freeing it, so nested objects don't leak.
             $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
             $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
-            $out .= "  call void @free(ptr %obase)\n";
+            $out .= $this->poolFreeCall('%obase');
             $out .= "  br label %done\n";
             $out .= "str:\n";
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
@@ -433,7 +713,7 @@ trait EmitLlvmRuntime
             $out .= "  %ozero = icmp sle i64 %orc1, 0\n";
             $out .= "  br i1 %ozero, label %ovfree, label %done\n";
             $out .= "ovfree:\n";
-            $out .= "  call void @free(ptr %h)\n";
+            $out .= $this->poolFreeCall('%h');
             $out .= "  br label %done\n";
             $out .= "strchk:\n";
             $out .= "  %imm = icmp slt i64 %rc, 0\n";
@@ -1645,7 +1925,7 @@ trait EmitLlvmRuntime
         // above) so collected cycles don't leak their strings.
         $out .= "  call void @__manticore_cc_drop_strings(ptr %s)\n";
         $out .= "  %base = getelementptr i8, ptr %s, i64 -8\n";
-        $out .= "  call void @free(ptr %base)\n";
+        $out .= $this->poolFreeCall('%base');
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
 
@@ -1689,7 +1969,7 @@ trait EmitLlvmRuntime
         $out .= "mrfree:\n";
         $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
-        $out .= "  call void @free(ptr %fbase)\n";
+        $out .= $this->poolFreeCall('%fbase');
         $out .= "  br label %mrn\n";
         $out .= "mrn:\n";
         $out .= "  %inext = add i64 %i, 1\n";

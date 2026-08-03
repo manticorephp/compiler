@@ -1,0 +1,41 @@
+ambient: HTTP/1.1 201 Created
+  X-Ambient: yes
+  X-Two: 2
+  Set-Cookie: sid=abc%20def; path=/; HttpOnly
+  Content-Length: 11
+  body=echoed body
+conflict: HTTP/1.1 202 Accepted
+  X-Only-Ambient: 1
+  Set-Cookie: a=1
+  X-Who: explicit
+  Set-Cookie: b=2; path=/; HttpOnly
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 13
+  body=explicit body
+both: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 8
+  body=returned
+remove: HTTP/1.1 200 OK
+  X-Kept: 1
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 14
+  body=list=X-Kept: 1
+sent: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  X-Sent-Before: n
+  Content-Length: 13
+  body=sent-before=n
+iso1: HTTP/1.1 200 OK
+  X-Round: 1
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 9
+  body=carried=0
+iso2: HTTP/1.1 200 OK
+  X-Round: 1
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 9
+  body=carried=0
+stream: HTTP/1.1 200 OK chunk=8.inside=y.0..
+served=8
+done

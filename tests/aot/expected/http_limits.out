@@ -1,0 +1,14 @@
+ok: HTTP/1.1 200 OK conn=? len=4 after=4
+big-declared: HTTP/1.1 413 Content Too Large conn=close len=0 after=0
+big-chunked: HTTP/1.1 413 Content Too Large conn=close len=0 after=0
+header-count: HTTP/1.1 431 Request Header Fields Too Large conn=close len=0 after=0
+header-bytes: HTTP/1.1 431 Request Header Fields Too Large conn=close len=0 after=0
+bad-line: HTTP/1.1 400 Bad Request conn=close len=0 after=0
+no-length: HTTP/1.1 411 Length Required conn=close len=0 after=0
+version: HTTP/1.1 505 HTTP Version Not Supported conn=close len=0 after=0
+no-host: HTTP/1.1 400 Bad Request conn=close len=0 after=0
+te-and-cl: HTTP/1.1 400 Bad Request conn=close len=0 after=0
+idle: CLOSED-SILENTLY
+half-head: HTTP/1.1 408 Request Timeout conn=close len=0 after=0
+served=1 errors=10
+done

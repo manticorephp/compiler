@@ -1,0 +1,7 @@
+few: HTTP/1.1 200 OK|one-two-three
+empty: HTTP/1.1 200 OK|
+big: HTTP/1.1 200 OK len=40960 head=abababab tail=abababab
+http10: HTTP/1.0 200 OK chunked=no conn=close body=one-two-three
+boom: HTTP/1.1 200 OK|partial
+served=5
+done

@@ -1,0 +1,10 @@
+fresh: null null
+after set: set set
+call: 42
+after clear: null null
+any fresh: null
+any zero: set
+any empty: set
+any false: set
+any null: null
+done

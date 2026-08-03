@@ -8,6 +8,9 @@
 #   REPS=5 bash bench/run.sh     # best-of-5 instead of best-of-3
 #   MEM=0 bash bench/run.sh      # skip the max-RSS columns (wall-clock only)
 #
+# A case carrying `@php-skip` is timed natively only — it uses prelude-only
+# classes (Http\, Buffer\) or prints timings, so there is no parity to check.
+#
 # Not part of any gate — run it by hand to refresh the perf snapshot.
 set -u
 
@@ -62,6 +65,21 @@ for f in "$cases_dir"/*.php; do
 
     if ! "$mant" compile "$f" -o "$bin" >"$out_dir/$name.cerr" 2>&1; then
         printf '%-18s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "COMPILE-FAIL"
+        continue
+    fi
+
+    # `@php-skip` in the case: nothing to compare against (it uses prelude-only
+    # classes, or prints timings). Time the native side alone rather than
+    # reporting a DIFF that means nothing.
+    if grep -q '@php-skip' "$f"; then
+        nt="$(best_time "$bin")"
+        if [ "$mem" = "1" ]; then
+            printf '%-18s %10s %10s %9s %10s %10s   %s\n' \
+                "$name" "$nt" "-" "-" "$(max_rss_mb "$bin")" "-" "php-skip"
+        else
+            printf '%-18s %10s %10s %9s   %s\n' "$name" "$nt" "-" "-" "php-skip"
+        fi
+        total=$((total + 1))
         continue
     fi
 

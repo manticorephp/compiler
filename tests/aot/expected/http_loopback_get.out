@@ -1,0 +1,57 @@
+first: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 18
+  date: present
+  Server: mc-test
+  body[18]=m=GET q=1 ua=probe
+second: HTTP/1.1 201 Created
+  Content-Type: application/json
+  Content-Length: 11
+  date: present
+  Server: mc-test
+  body[11]={"ok":true}
+empty: HTTP/1.1 204 No Content
+  date: present
+  Server: mc-test
+  body[0]=
+head: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 15
+  date: present
+  Server: mc-test
+  body[0]=
+missing: HTTP/1.1 404 Not Found
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 4
+  date: present
+  Server: mc-test
+  body[4]=nope
+bye: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 3
+  date: present
+  Server: mc-test
+  Connection: close
+  body[3]=bye
+after close: []
+closing: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 14
+  date: present
+  Server: mc-test
+  Connection: close
+  body[14]=m=GET q=- ua=-
+pipe1: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 14
+  date: present
+  Server: mc-test
+  body[14]=m=GET q=A ua=-
+pipe2: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 14
+  date: present
+  Server: mc-test
+  body[14]=m=GET q=B ua=-
+served=9 accepted=3 errors=0 stopped=1
+done

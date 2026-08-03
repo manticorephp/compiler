@@ -47,6 +47,7 @@ trait EmitLlvmBuiltins
         if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
         if ($name === 'int_to_ptr')                   { return $this->biIntToPtr($args); }
         if ($name === 'ptr_to_int')                   { return $this->biPtrToInt($args); }
+        if ($name === 'fn_to_ptr')                    { return $this->biFnToPtr($args); }
         if ($name === 'peek_i64')                     { return $this->biPeek($args, 64, true); }
         if ($name === 'peek_i32')                     { return $this->biPeek($args, 32, true); }
         if ($name === 'peek_i16')                     { return $this->biPeek($args, 16, true); }
@@ -1159,6 +1160,106 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * `fn_to_ptr('name'): \Ffi\Ptr` — the ADDRESS of a compiled PHP function, so
+     * a C library can call back into PHP (qsort's comparator, libxml2's
+     * structured error handler, sqlite3's user functions, curl's write callback).
+     *
+     * This works at all because every PHP function is emitted as
+     * `define i64 @manticore_<name>(i64, i64, …)`, and on both arm64 and x86_64
+     * that is EXACTLY the C ABI for integer and pointer arguments — same
+     * registers, same order. A C callee reading `int` truncates our i64 return,
+     * which is what it would do to any `long`-returning function.
+     *
+     * The name must be a STRING LITERAL: the address is a relocation, so it has
+     * to be resolved now, and a typo has to be a compile error rather than a
+     * link error. That reference is also what keeps the function alive — the
+     * only dead-stripping here is the linker's, and `ptrtoint @sym` is a real
+     * reference to it.
+     *
+     * Everything the uniform i64 ABI cannot carry is REFUSED rather than
+     * miscompiled; see {@see checkCallbackSignature}.
+     *
+     * @param Node[] $args
+     */
+    private function biFnToPtr(array $args): string
+    {
+        $a0 = $args[0];
+        if ($a0->kind !== Node::KIND_STRING_CONST) {
+            throw new \RuntimeException(
+                'fn_to_ptr() needs a string LITERAL function name — the address is '
+                . 'a relocation resolved at compile time, not a runtime lookup');
+        }
+        $name = \ltrim($a0->value, '\\');
+        $sym = $this->callbackTarget($name);
+        $this->lastValue = '@manticore_' . $this->mangle($sym);
+        $this->lastValueType = 'ptr';
+        return '';
+    }
+
+    /**
+     * Resolve `$name` to the symbol `fn_to_ptr` should take the address of, or
+     * throw with the reason it cannot be a C callback.
+     */
+    private function callbackTarget(string $name): string
+    {
+        $sig = $this->sigs->paramTypes[$name] ?? null;
+        if ($sig === null) {
+            throw new \RuntimeException(
+                'fn_to_ptr(): no such function `' . $name . '`');
+        }
+        $this->checkCallbackSignature($name, $sig);
+        return $name;
+    }
+
+    /**
+     * A C callback rides the uniform i64 ABI, so its signature has to fit in it.
+     *
+     * REFUSED, each for a reason that would otherwise be a silent miscompile:
+     *  - `float` param or return — floats travel in FP registers under both
+     *    AAPCS and SysV, and this ABI puts every argument in a GP register. The
+     *    callee would read an unrelated register.
+     *  - `string` / `array` param — a C caller passes a bare `char *` or struct
+     *    pointer, and those types mean a HEADERED string / our array layout. Take
+     *    `\Ffi\Ptr` and convert with `cstr_to_str` / `str_from_buffer`.
+     *  - by-reference param — there is no caller variable to write back to.
+     *  - variadic — a C varargs callback cannot be expressed as a PHP function.
+     *
+     * @param array<int,\Compile\Mir\Type|null> $params
+     */
+    private function checkCallbackSignature(string $name, array $params): void
+    {
+        $where = 'fn_to_ptr(): `' . $name . '` cannot be a C callback — ';
+        if ($this->sigs->returnsByRef[$name] ?? false) {
+            throw new \RuntimeException($where . 'it returns by reference');
+        }
+        $rt = $this->sigs->returnType[$name] ?? null;
+        if ($rt !== null && $rt->kind === Type::KIND_FLOAT) {
+            throw new \RuntimeException($where . 'a float return travels in an FP '
+                . 'register, which the uniform i64 ABI does not use');
+        }
+        $refs = $this->sigs->refParams[$name] ?? [];
+        foreach ($params as $i => $pt) {
+            if ($refs[$i] ?? false) {
+                throw new \RuntimeException($where . 'parameter #' . ($i + 1)
+                    . ' is by reference, and a C caller has no variable to bind');
+            }
+            if ($pt === null) {
+                continue;
+            }
+            if ($pt->kind === Type::KIND_FLOAT) {
+                throw new \RuntimeException($where . 'parameter #' . ($i + 1)
+                    . ' is a float, which travels in an FP register');
+            }
+            if ($pt->kind === Type::KIND_STRING || $pt->isArray()) {
+                throw new \RuntimeException($where . 'parameter #' . ($i + 1)
+                    . ' is a ' . ($pt->kind === Type::KIND_STRING ? 'string' : 'array')
+                    . ' — a C caller passes a bare pointer, not our layout. Take '
+                    . '\\Ffi\\Ptr and convert with cstr_to_str / str_from_buffer');
+            }
+        }
+    }
+
     private function biIntToPtr(array $args): string
     {
         $out = $this->emitIntArg($args[0]);
@@ -1587,6 +1688,16 @@ trait EmitLlvmBuiltins
             $mc = new \Compile\Mir\MethodCall_($args[0], 'count', [], Type::int_());
             return $this->emitMethodCall($mc);
         }
+        // The same dispatch with the receiver ERASED. `count($sxe->book)` and
+        // every count() over a `X|false` loader result arrive here as a cell, and
+        // the array path below loaded the OBJECT HEADER as a vec length.
+        if (($args[0]->type->kind === Type::KIND_CELL
+                || $args[0]->type->kind === Type::KIND_UNKNOWN)
+            && $this->ifaceMethodHolders('Countable', 'count') !== []) {
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            return $this->emitCountableOrArray($out, $this->lastValue, $args[0]);
+        }
         $out = $this->emitNode($args[0]);
         if ($args[0]->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
@@ -1606,10 +1717,24 @@ trait EmitLlvmBuiltins
         } else {
             $out .= $this->coerceToPtr();
         }
+        $out .= $this->arrayCountFromPtrIr($this->lastValue);
+        return $this->finishI64($out, $this->lastValue);
+    }
+
+    /**
+     * The live element count of the array at `$ptr` — physical length minus the
+     * tombstone counter. lastValue ← the i64 count.
+     *
+     * Split out of {@see biCount} so the erased Countable path
+     * ({@see emitCountableOrArray}) can reuse the identical arithmetic in its
+     * non-object arm instead of restating it.
+     */
+    private function arrayCountFromPtrIr(string $ptr): string
+    {
+        $out = '';
         // An empty `[]` vec/assoc literal lowers to a null ptr; redirect a
         // null base to the zero-word so the length load reads 0 rather than
         // dereferencing address 0.
-        $ptr = $this->lastValue;
         $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $ptr . ", null\n";
         $safe = $this->ssa->allocReg();
@@ -1639,7 +1764,54 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $tomb . ' = select i1 ' . $isNull . ', i64 0, i64 ' . $tomb0 . "\n";
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sub i64 ' . $physlen . ', ' . $tomb . "\n";
-        return $this->finishI64($out, $reg);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `count($erased)` where some class in the table is Countable: branch on the
+     * runtime tag. An object cell (nibble 8) dispatches count() on its class_id;
+     * anything else keeps the ordinary array count.
+     */
+    private function emitCountableOrArray(string $out, string $cv, Node $arg): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
+        $ts = $this->ssa->allocReg();
+        $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+        $isObjNib = $this->ssa->allocReg();
+        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+        $objL = $this->ssa->allocLabel('cnt.obj');
+        $arrL = $this->ssa->allocLabel('cnt.arr');
+        $endL = $this->ssa->allocLabel('cnt.end');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
+
+        $out .= $objL . ":\n";
+        $pm = $this->ssa->allocReg();
+        $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+        $out .= $this->emitErasedIfaceCall($pp, 'Countable', 'count', []);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $arrL . ":\n";
+        $out .= $this->arrayPtrOrEmptyIr($cv);
+        $out .= $this->arrayCountFromPtrIr($this->arrayPtrReg);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        return $this->finishI64($out, $r);
     }
 
     /**

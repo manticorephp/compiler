@@ -36,11 +36,25 @@ class __McSapi
     /** True while a request is being served, i.e. between begin and end. */
     public static bool $active = false;
 
+    /**
+     * Whether THIS request's head has gone out.
+     *
+     * Per-request, and that is the whole point: `__mc_out_sent()` is a PROCESS
+     * global, so one request flipping it would mute `header()` for every other
+     * request in flight. A server sets this the moment it writes the head,
+     * which is what makes a streaming handler honest — inside the body closure
+     * the headers really ARE gone, so `headers_sent()` must say so.
+     */
+    public static bool $sent = false;
+
     /** Task id owning the live context; 0 is the main flow (no task). */
     public static int $cur = 0;
 
     /** @var array<int,array<int,string>> parked $headers, by task id */
     public static array $savedHeaders = [];
+
+    /** @var array<int,bool> parked $sent, by task id */
+    public static array $savedSent = [];
 
     /** @var array<int,int> parked $status, by task id */
     public static array $savedStatus = [];
@@ -134,6 +148,7 @@ function __mc_sapi_ctx_switch(int $from, int $to): void
     \__McSapi::$savedHeaders[$from] = \__McSapi::$headers;
     \__McSapi::$savedStatus[$from] = \__McSapi::$status;
     \__McSapi::$savedActive[$from] = \__McSapi::$active;
+    \__McSapi::$savedSent[$from] = \__McSapi::$sent;
     \__McSapi::$savedServer[$from] = $_SERVER;
     \__McSapi::$savedGet[$from] = $_GET;
     \__McSapi::$savedPost[$from] = $_POST;
@@ -148,11 +163,23 @@ function __mc_sapi_ctx_switch(int $from, int $to): void
     if (\function_exists('__mc_session_ctx_switch')) {
         \__mc_session_ctx_switch($from, $to);
     }
+    // The output-buffer stack is a PROCESS global too (@__mir_ob_depth /
+    // @__mir_ob_stack are linkonce_odr — they have to be, so that `echo` inside
+    // the prebuilt stdlib.o can reach them), so two concurrent handlers with
+    // open buffers cross-contaminate: fiber A's `echo` lands in fiber B's
+    // buffer. Verified by removing this call: A's body came back holding B's
+    // text while its $_GET was still its own. Same guard as the session hook,
+    // for the same reason — no dependency on ob.php, and a program without one
+    // compiles the branch away.
+    if (\function_exists('__mc_ob_ctx_switch')) {
+        \__mc_ob_ctx_switch($from, $to);
+    }
     if (!isset(\__McSapi::$seen[$to])) {
         // A flow that has never been parked starts clean — a fresh task has no
         // request, and inheriting the previous one's would be the leak above.
         \__McSapi::$headers = \__McSapi::$emptyLines;
         \__McSapi::$status = 200;
+        \__McSapi::$sent = false;
         \__McSapi::$active = false;
         $_GET = \__McSapi::$empty;
         $_POST = \__McSapi::$empty;
@@ -164,6 +191,7 @@ function __mc_sapi_ctx_switch(int $from, int $to): void
     \__McSapi::$headers = \__McSapi::$savedHeaders[$to];
     \__McSapi::$status = \__McSapi::$savedStatus[$to];
     \__McSapi::$active = \__McSapi::$savedActive[$to];
+    \__McSapi::$sent = \__McSapi::$savedSent[$to];
     $_SERVER = \__McSapi::$savedServer[$to];
     $_GET = \__McSapi::$savedGet[$to];
     $_POST = \__McSapi::$savedPost[$to];
@@ -215,8 +243,24 @@ function __mc_request_begin(array<string, string> $server = [], array<string, st
         $_REQUEST[$k] = $v;
     }
     $_SESSION = \__McSapi::$empty;
+    \__mc_response_begin();
+}
+
+/**
+ * Start a RESPONSE on the current flow, without touching the superglobals.
+ *
+ * The cheap half of {@see __mc_request_begin}: an empty header block, status
+ * 200, and the flow marked live — which is all `header()`, `setcookie()` and
+ * `http_response_code()` need to work. Http\Server calls this for every request
+ * so those functions are live in every handler, and only calls the full
+ * begin() when a program asked for `$_GET`/`$_POST` (`compat(true)`): seeding
+ * four superglobals per request for code that never reads them is pure cost.
+ */
+function __mc_response_begin(): void
+{
     \__McSapi::$headers = \__McSapi::$emptyLines;
     \__McSapi::$status = 200;
+    \__McSapi::$sent = false;
     \__McSapi::$active = true;
     \__McSapi::$everActive = true;
     \__McSapi::$seen[\__McSapi::$cur] = true;
@@ -252,10 +296,26 @@ function __mc_response_headers(): array<int, string>
     return \__McSapi::$headers;
 }
 
-/** Whether the header block has already gone out — php's CLI tracks this for real. */
+/**
+ * Whether the header block has already gone out.
+ *
+ * Inside a request the answer is that REQUEST's — a server writing one
+ * response must not tell every other in-flight handler that its headers are
+ * gone. Outside one it is the process-wide CLI answer, which is what a plain
+ * script sees.
+ */
 function headers_sent(): bool
 {
+    if (\__McSapi::$active) {
+        return \__McSapi::$sent;
+    }
     return \__mc_out_sent(0) === 1;
+}
+
+/** Mark this request's head as written. The server's to call, not a user's. */
+function __mc_response_sent(): void
+{
+    \__McSapi::$sent = true;
 }
 
 /**

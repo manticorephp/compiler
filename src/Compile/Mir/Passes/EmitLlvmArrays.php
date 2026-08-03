@@ -237,6 +237,18 @@ trait EmitLlvmArrays
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
             return $this->emitMethodCall($mc);
         }
+        // `$erased[$k]` where some class in the table is ArrayAccess. The typed
+        // branch above needs a static class, so the moment the receiver erases —
+        // and `simplexml_load_string`'s `SimpleXMLElement|false` erases to a cell
+        // at the assignment — `$sxe['id']` went to __mir_array_get_str with an
+        // OBJECT pointer. Branch on the runtime tag instead: an object cell
+        // dispatches offsetGet on its class_id, everything else keeps the array
+        // path. Both operands are emitted ONCE, before the branch.
+        if (($aa->array->type->kind === Type::KIND_CELL
+                || $aa->array->type->kind === Type::KIND_UNKNOWN)
+            && $this->ifaceMethodHolders('ArrayAccess', 'offsetGet') !== []) {
+            return $this->emitErasedOffsetGet($n, $aa);
+        }
         // `$cell[$i]` — a cell subject is string-or-array only at runtime (a
         // `string|false` from getenv/file_get_contents erases to one), so the
         // static type cannot pick a path. Branch on the NaN tag: PTR(4) is a
@@ -592,6 +604,96 @@ trait EmitLlvmArrays
         $el = $t->element;
         if ($el === null) { return false; }
         return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
+    }
+
+    /**
+     * `$erased[$k]` when some class in the table implements ArrayAccess.
+     *
+     * The subject and the key are emitted EXACTLY ONCE and the branch follows,
+     * so neither side's side effects run twice. An object cell (tag nibble 8)
+     * calls offsetGet on its runtime class_id; every other tag keeps the array
+     * lookup this path had before.
+     */
+    private function emitErasedOffsetGet(Node $self, ArrayAccess_ $aa): string
+    {
+        $out = $this->emitNode($aa->array);
+        $out .= $this->coerceToI64();
+        $cv = $this->lastValue;
+
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        $out .= $this->emitNode($aa->index);
+        $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+        $key = $this->lastValue;
+        // offsetGet takes `mixed $offset`, so the object arm needs the key BOXED.
+        // Boxing is pure — doing it up front keeps both arms off a second emit.
+        $keyCell = $key;
+        if (!$keyIsCell) {
+            $this->lastValue = $key;
+            $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
+            $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());
+            $keyCell = $this->lastValue;
+        }
+
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
+        $ts = $this->ssa->allocReg();
+        $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+        $isObjNib = $this->ssa->allocReg();
+        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+        $objL = $this->ssa->allocLabel('oag.obj');
+        $arrL = $this->ssa->allocLabel('oag.arr');
+        $endL = $this->ssa->allocLabel('oag.end');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
+
+        $out .= $objL . ":\n";
+        $pm = $this->ssa->allocReg();
+        $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+        $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetGet', [$keyCell]);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $arrL . ":\n";
+        $am = $this->ssa->allocReg();
+        $out .= '  ' . $am . ' = and i64 ' . $cv . ", 281474976710655\n";
+        $ap = $this->ssa->allocReg();
+        $out .= '  ' . $ap . ' = inttoptr i64 ' . $am . " to ptr\n";
+        $av = $this->ssa->allocReg();
+        if ($keyIsCell) {
+            $this->rt->needsCellKey = true;
+            $out .= '  ' . $av . ' = call i64 @__mir_array_get_cell(ptr ' . $ap
+                  . ', i64 ' . $key . ")\n";
+        } elseif ($keyIsString) {
+            $out .= '  ' . $av . ' = call i64 @__mir_array_get_str(ptr ' . $ap
+                  . ', ptr ' . $key . $this->litKeyHashArgs($aa->index) . ")\n";
+        } else {
+            $out .= '  ' . $av . ' = call i64 @__mir_array_get_int(ptr ' . $ap
+                  . ', i64 ' . $key . ")\n";
+        }
+        $out .= '  store i64 ' . $av . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($self->type->kind === Type::KIND_FLOAT) {
+            $rf = $this->ssa->allocReg();
+            $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
+            $this->lastValue = $rf;
+            $this->lastValueType = 'double';
+        }
+        return $out;
     }
 
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string

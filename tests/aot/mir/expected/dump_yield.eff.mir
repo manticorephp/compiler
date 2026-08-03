@@ -2,7 +2,6 @@
 
 fn gen() -> obj<Generator> {
   ; effects: alloc
-  mem_arena_enter
   %0 = int_const 1 : int
   %1 = yield %0 : cell
   %2 = string_const "k" : string
@@ -10,13 +9,12 @@ fn gen() -> obj<Generator> {
   %4 = yield %2 => %3 : cell
   %5 = int_const 3 : int
   %6 = int_const 4 : int
-  %7 = array_lit [_ => %5, _ => %6] : vec[int]  ; eff: alloc alloc=Arena
+  %7 = array_lit [_ => %5, _ => %6] : vec[int]  ; eff: alloc alloc=RcHeap
   foreach %7 as __yf_k0 => __yf_v0 {
     %8 = load_local __yf_k0 : int
     %9 = load_local __yf_v0 : int
     %10 = yield %8 => %9 : cell
   }
-  mem_arena_leave
 }
 
 fn drain() -> int {

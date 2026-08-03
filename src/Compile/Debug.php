@@ -18,6 +18,9 @@ namespace Compile;
  *                                         non-escaping arrays. ON by default.
  *   MANTICORE_EMPTY_SINGLETON=0         — opt OUT of the shared immortal empty
  *                                         `[]` buffer. ON by default.
+ *   MANTICORE_POOL=0                    — opt OUT of the small-object pool
+ *                                         allocator. ON by default; must be the
+ *                                         same for the whole build (see $pool).
  *   MANTICORE_PROFILE=1                 — emit thread-local rc/alloc counters +
  *                                         an atexit tally (memory-traffic profile).
  *   MANTICORE_DEBUG_VERIFY=1            — slow-path invariant checks at memory ops
@@ -113,6 +116,22 @@ final class Debug
     public static bool $emptyArraySingleton = true;
 
     /**
+     * Size-classed small-object pool in front of libc for objects, unified
+     * array buffers and hash bucket side-arrays (strings already had their own
+     * two-class free list). See {@see \Compile\MemoryAbi::POOL_GRAIN} for the
+     * shape. DEFAULT ON. Disable with `MANTICORE_POOL=0`.
+     *
+     * ⚠ The flag must hold for the WHOLE build. `__mir_pool_alloc` / `_free`
+     * and the allocators calling them are `linkonce_odr`: link a stdlib `.o`
+     * built with the pool against a user `.o` built without it and the linker
+     * keeps one body of each, so a block can be pooled by one and handed to
+     * libc `free()` by the other. `bin/compile` / `bin/build` pass their
+     * environment to both halves, so exporting the variable for the build is
+     * enough — flipping it for a single file is not.
+     */
+    public static bool $pool = true;
+
+    /**
      * Compile-time profile: per-pass wall time, module size after each pass,
      * per-round lines from the fixpoint passes, and a tail of whole-program
      * scan counters. `MANTICORE_STATS=1`. See {@see \Compile\Stats}.
@@ -164,6 +183,12 @@ final class Debug
             self::$emptyArraySingleton = false;
         } elseif ($env !== false && $env !== '') {
             self::$emptyArraySingleton = true;
+        }
+        $env = \getenv('MANTICORE_POOL');
+        if ($env === '0') {
+            self::$pool = false;
+        } elseif ($env !== false && $env !== '') {
+            self::$pool = true;
         }
     }
 }

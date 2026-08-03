@@ -168,6 +168,14 @@ final class RuntimeFeatures
         // __mir_realloc_tagged is always emitted (tagged vec grow), so the
         // realloc decl must always be present.
         $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
+        // The small-object pool reserves its region with mmap and is emitted
+        // with the allocators, i.e. always. Declared here rather than from
+        // `poolRuntime()` because libcExtra is already rendered by then — the
+        // fiber block, which runs earlier, may also key 'mmap' and this map
+        // de-duplicates by symbol.
+        if (\Compile\Debug::$pool) {
+            $decls['mmap'] = "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)";
+        }
         // A2 verify mode (MANTICORE_DEBUG_VERIFY): rc helpers abort on an
         // over-release (rc<1 before decrement = double-free / UAF). Gated so
         // production IR is byte-identical.
@@ -184,8 +192,20 @@ final class RuntimeFeatures
         if ($this->needsStrtol) { $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)"; }
         if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
         if ($this->needsExceptions) {
-            $decls['setjmp'] = "declare i32 @setjmp(ptr) returns_twice";
-            $decls['longjmp'] = "declare void @longjmp(ptr, i32) noreturn";
+            // `_setjmp`/`_longjmp`, NOT `setjmp`/`longjmp`, and it is worth
+            // 20% of a server's CPU. The plain pair saves and restores the
+            // SIGNAL MASK: on glibc `setjmp` is `__sigsetjmp(env, 1)`, and on
+            // Darwin it calls `sigprocmask` AND `sigaltstack` — two syscalls
+            // on every `try` ENTERED, not on every throw. Profiled under load:
+            // 875 of 4374 samples were exactly those two, with `_setjmp` in
+            // the same profile costing one sample and no children.
+            //
+            // Nothing here needs the mask: a longjmp out of a SIGNAL HANDLER
+            // is the only case that does, and the exception runtime never
+            // unwinds from one — the SIGSEGV/SIGBUS handler the fiber guard
+            // installs aborts, it does not resume.
+            $decls['setjmp'] = "declare i32 @_setjmp(ptr) returns_twice";
+            $decls['longjmp'] = "declare void @_longjmp(ptr, i32) noreturn";
         }
         if ($this->needsStrtodDecl()) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
         // Unified PhpArray runtime libc deps (docs/16).

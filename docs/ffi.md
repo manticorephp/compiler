@@ -180,6 +180,61 @@ whatever it points at.
 
 ---
 
+## C calling back into PHP — `fn_to_ptr`
+
+`fn_to_ptr('name')` yields the **address of a compiled PHP function** as a `\Ffi\Ptr`, so a
+C library can call into PHP: qsort's comparator, libxml2's structured error handler,
+sqlite3's user functions, curl's write callback.
+
+```php
+#[Library('c'), Symbol('qsort')]
+function qsort_(\Ffi\Ptr $base, #[CType('size_t')] int $n,
+                #[CType('size_t')] int $sz, \Ffi\Ptr $cmp): void {}
+
+// int (*)(const void *, const void *)
+function cmp_asc(\Ffi\Ptr $a, \Ffi\Ptr $b): int
+{
+    $x = peek_i64($a, 0);
+    $y = peek_i64($b, 0);
+    return $x <=> $y;
+}
+
+qsort_($buf, $n, 8, fn_to_ptr('cmp_asc'));
+```
+
+This works because every PHP function is emitted as
+`define i64 @manticore_<name>(i64, i64, …)`, and on both arm64 and x86_64 that **is** the
+C ABI for integer and pointer arguments — same registers, same order. A C callee declaring
+`int` truncates our `i64` return exactly as it would any `long`-returning function.
+
+**The name must be a string LITERAL.** The address is a relocation resolved at compile
+time, so a typo is a compile error rather than a link error — and that reference is also
+what keeps the function alive, since the only dead-stripping here is the linker's.
+
+### What is refused (rather than miscompiled)
+
+| Refused | Why |
+|---|---|
+| `float` parameter or return | Floats travel in FP registers under AAPCS and SysV; this ABI puts every argument in a GP register, so the callee would read an unrelated one. |
+| `string` / `array` parameter | A C caller passes a bare `char *` or struct pointer. Those PHP types mean a **headered** string / our array layout. Take `\Ffi\Ptr` and convert with `cstr_to_str` / `str_from_buffer`. |
+| by-reference parameter | There is no caller variable to bind. |
+| returns by reference | Same. |
+
+A **C varargs** callback (`void (*)(void *, const char *, ...)`, e.g. libxml2's
+`xmlGenericErrorFunc`) cannot be expressed as a PHP function at all. Where a library offers
+both, bind the non-varargs one — libxml2's *structured* error handler is the usable half.
+
+> ⚠ **An exception must not escape a callback.** A `throw` inside one longjmps to the
+> nearest enclosing PHP `try`, which sits **above** the C frame — so the C library's own
+> frames are skipped and whatever state it was mid-way through updating is left behind.
+> Catch inside the callback and signal failure through its return value, the way the C API
+> expects.
+
+The callback runs on the C library's stack with the caller's arena live. Keep it short, and
+do not let it allocate anything the C side is expected to own.
+
+---
+
 ## Linking the native library
 
 **`#[Library('name')]` is what puts the library on the link line.** Nothing else is required:

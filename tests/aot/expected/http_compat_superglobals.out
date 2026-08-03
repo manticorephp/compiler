@@ -1,0 +1,6 @@
+method=GET uri=/server?a=1 proto=HTTP/1.1 qs=a=1 host=example.test https=off ua=probe/1
+post=v1 cookie=ck1 request=v1
+A: who=alpha get=alpha n=2
+B: who=beta get=beta n=1
+served=4
+done

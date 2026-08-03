@@ -224,6 +224,9 @@ final class EmitLlvm implements EmitVisitor
     private bool $needsErrorHandlers = false;
     /** prelude/ob.php is compiled in: main() gets the atexit drain. */
     private bool $needsOb = false;
+    /** This module generated `__mir_obj_to_str`, so a cell→string coercion may
+     *  branch on the object tag and call it. {@see coerceCellToStr} */
+    private bool $hasObjToStr = false;
 
     /** True while emitting a `$r = &fn()` bind (suppress call-result deref). */
     private bool $rawRefCall = false;
@@ -396,6 +399,7 @@ final class EmitLlvm implements EmitVisitor
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;
+        $this->hasObjToStr = $module->hasObjToStr;
         $this->sourceFile = $module->sourceFile;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
@@ -1202,7 +1206,11 @@ final class EmitLlvm implements EmitVisitor
     /**
      * B5 PGO metrics. Counter indices into the @__prof array:
      * 0 str_alloc, 1 str_retain, 2 str_release, 3 rc_retain (obj/vec),
-     * 4 rc_release (obj/vec), 5 assoc_retain, 6 assoc_release.
+     * 4 rc_release (obj/vec), 5 assoc_retain, 6 assoc_release,
+     * 7-13 retain by source category, 14-15 array-alloc traffic,
+     * 16-23 pool traffic (alloc/hit/miss/free/bypass + obj/bucket/cell).
+     * The names — and the array's length — live in one place:
+     * {@see EmitLlvmModule::profileRuntime}.
      * Emitted only under `MANTICORE_PROFILE=1`; a no-op string otherwise so
      * production IR is byte-identical.
      */

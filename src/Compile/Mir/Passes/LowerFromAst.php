@@ -306,6 +306,12 @@ final class LowerFromAst implements Pass
     /** @var array<string, EnumDef> enum name → case table (pre-pass) */
     private array $enumTable = [];
 
+    /** @var array<string, bool> enum NAMES, registered in the declaration
+     *  pre-pass — before any signature is lowered, which {@see $enumTable} is
+     *  not (it fills during the class BUILD, and a hint can be read first).
+     *  {@see LowerTypes::lowerTypeHint} needs it to make `?Enum` a cell. */
+    private array $enumNames = [];
+
     /** @var array<string, \Parser\Ast\ClassDecl> trait name → decl (pre-pass) */
     private array $traitTable = [];
 
@@ -378,6 +384,19 @@ final class LowerFromAst implements Pass
      *  Async\ types and its parser names Buffer\ByteBuffer. Implies
      *  bufferSrc + asyncSrc + sapiSrc + obSrc. */
     public string $httpSrc = '';
+    /** ext/simplexml + ext/libxml — DEMAND-GATED. Global namespace, so it rides
+     *  the concatenated blob rather than the braced tier. Carries the libxml2
+     *  binds, the __McXmlDoc node table, SimpleXMLElement and the libxml_*
+     *  registry; xmlXpathSrc and xmlDomSrc are built on it and never stand
+     *  alone. */
+    public string $xmlSrc = '';
+    /** The XPath 1.0 subset engine — always injected together with xmlSrc
+     *  (SimpleXMLElement::xpath() calls straight into it). */
+    public string $xmlXpathSrc = '';
+    /** ext/dom over the same node table — DEMAND-GATED separately, so a program
+     *  that only reads SimpleXML does not carry the DOM class tree. Implies
+     *  xmlSrc. */
+    public string $xmlDomSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
@@ -621,6 +640,10 @@ final class LowerFromAst implements Pass
                     $ename = $this->classDeclName($cdecl);
                     $this->classDecls[$ename] = $cdecl;
                     $this->knownClassNames[$ename] = true;
+                    // The NAME, here and not at build time: a `?Enum` hint has
+                    // to know this is an enum to lower to a cell, and a class
+                    // built earlier in the order may already spell one.
+                    $this->enumNames[\ltrim($ename, '\\')] = true;
                 }
             }
         }
@@ -751,6 +774,25 @@ final class LowerFromAst implements Pass
                 $dfn->isPrelude = true;
                 $module->addFunction($dfn);
             }
+        }
+
+        // `(string)` on an object arriving through a CELL — same point and
+        // pattern as __mir_dump_object, and for the same reason: the arms are
+        // written from the now-complete class table.
+        //
+        // The shared @__manticore_tagged_to_str cannot do this itself: it is one
+        // external body in the central core and knows no user class, so the
+        // emitter branches on the object tag at the CALL SITE and lands here.
+        if ($this->anyToStringClass()) {
+            $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
+            foreach ($tsProg->statements as $tstmt) {
+                if ($tstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+                $tfn = $this->lowerFunction($tstmt->decl);
+                $tfn->isPrelude = true;
+                $module->addFunction($tfn);
+            }
+            $module->hasObjToStr = true;
         }
 
         // var_export()'s object arm — same point and pattern as

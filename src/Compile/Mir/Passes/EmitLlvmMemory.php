@@ -299,13 +299,44 @@ trait EmitLlvmMemory
     private function rcVerifyAlive(): string
     {
         if (!\Compile\Debug::$verify) { return ''; }
-        $out  = "  %vbad = icmp slt i64 %rc, 1\n";
+        // It used to `abort()` in silence, which is the one thing an assertion
+        // must not do: the whole cold-seed build died with no output at all and
+        // the site could only be recovered from an lldb backtrace. Say what
+        // was released, with the rc it had and the first header word — slot 0
+        // is the class descriptor for an object (so `hdr0` names the class) and
+        // the length for a vec, which is enough to tell the two apart.
+        // ⚠ Read the rc the way the ABI says, not as a raw word. The live count
+        // is the SIGNED LOW 56 BITS; the top byte carries the collector's color
+        // and buffered bits, so a perfectly alive object registered as a cycle
+        // candidate holds e.g. 0x8100000000000005 — rc 5, and NEGATIVE as an
+        // i64. This check compared the raw word and therefore fired on it: the
+        // whole `MANTICORE_DEBUG_VERIFY=1` cold seed aborted inside the parser
+        // on a live Token. Same field, same spelling as the zero-test below —
+        // that is the lesson `__mir_rc_release` already carries in its comment.
+        $out  = "  %vsh = shl i64 %rc, 8\n";
+        $out .= "  %vsig = ashr i64 %vsh, 8\n";
+        $out .= "  %vbad = icmp slt i64 %vsig, 1\n";
         $out .= "  br i1 %vbad, label %vcorrupt, label %vok\n";
         $out .= "vcorrupt:\n";
+        // Drain our own stdout first: abort() discards the stdio buffer, and
+        // without this the output leading up to the over-release is lost.
+        if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
+        $out .= "  %vh0 = load i64, ptr %p\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.vfy.rcrel, ptr %p, i64 %vsig, i64 %vh0)\n";
         $out .= "  call void @abort()\n";
         $out .= "  unreachable\n";
         $out .= "vok:\n";
         return $out;
+    }
+
+    /** The format string {@see rcVerifyAlive} prints through. Emitted once,
+     *  beside the release helper that carries the check. */
+    private function rcVerifyAliveFormat(): string
+    {
+        if (!\Compile\Debug::$verify) { return ''; }
+        $raw = '[VERIFY] rc_release: rc < 1 (double release / UAF) p=%p rc=%lld hdr0=%lld';
+        return '@.vfy.rcrel = private unnamed_addr constant ['
+            . (string)(\strlen($raw) + 2) . ' x i8] c"' . $raw . '\0A\00", align 1' . "\n";
     }
 
     /**
