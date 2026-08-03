@@ -3861,6 +3861,15 @@ trait EmitLlvmExpr
                 $out .= $jnLbl . ":\n";
                 $phi = $this->ssa->allocReg();
                 $out .= '  ' . $phi . ' = phi i1 [ ' . $scRes . ', %' . $scLbl . ' ], [ ' . $idRes . ', %' . $idLbl . " ]\n";
+                // A comparison CONSUMES its operands and keeps nothing, so a
+                // fresh one dies here — in the join, where both arms have had
+                // their read and the pointer registers still dominate. Emitted
+                // by the same rule as a concat operand ({@see
+                // EmitLlvm::freeStrTemp}); `if (strtolower($x) === 'y')` and
+                // `substr($s, 0, 3) === 'abc'` each leaked 64 B PER COMPARISON
+                // until this existed, in every scanner and every header path.
+                $out .= $this->freeStrTemp($c->left, $lp);
+                $out .= $this->freeStrTemp($c->right, $rp);
                 $extReg = $this->ssa->allocReg();
                 $out .= '  ' . $extReg . ' = zext i1 ' . $phi . " to i64\n";
                 $this->lastValue = $extReg;
@@ -3871,6 +3880,9 @@ trait EmitLlvmExpr
             $out .= '  ' . $call . ' = call i64 @__mir_str_cmp(ptr ' . $lp . ', ptr ' . $rp . ")\n";
             $cmpReg = $this->ssa->allocReg();
             $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $call . ", 0\n";
+            // Ordering consumes its operands exactly as equality does.
+            $out .= $this->freeStrTemp($c->left, $lp);
+            $out .= $this->freeStrTemp($c->right, $rp);
             $extReg = $this->ssa->allocReg();
             $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;

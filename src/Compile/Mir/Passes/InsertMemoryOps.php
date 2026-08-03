@@ -181,7 +181,24 @@ final class InsertMemoryOps implements Pass
         // a SIGBUS in the self-build. Whatever escape that shape relies on is
         // NOT this epic's, so it is left exactly as it was.
         foreach ($this->rcObjNeutral as $name => $ignored) {
-            if (isset($this->rcObjPlainOwner[$name])) { $this->rcObjBlocked[$name] = true; }
+            if (!isset($this->rcObjPlainOwner[$name])) { continue; }
+            // …EXCEPT a STRING, which is what that blanket block costs the most.
+            // `$out = ''; for (…) { $out = $out . $s[$i]; }` — every scanner and
+            // every decoder in the stdlib — leaked the ENTIRE accumulated buffer
+            // at each re-seed, because the literal store blocked the name and
+            // with it the release-before-overwrite (64 B per call in urldecode,
+            // measured). The SIGBUS that motivated the block was an ARRAY
+            // (`$conds = null; … $conds = [];`, whose buffer a live MatchArm_
+            // still held); a string has no by-value container aliasing, and
+            // every borrowing consumer of a string local — an alias store, an
+            // element / property store, a call argument — takes its own +1
+            // through {@see EmitLlvmMemory::rcRetainByType}, so the release has
+            // a matching retain. A borrowed store still lands in the `else`
+            // branch below and blocks the name outright, so only
+            // owned-producer-plus-literal names reach here.
+            $t = $this->rcObjType[$name] ?? null;
+            if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
+            $this->rcObjBlocked[$name] = true;
         }
 
         // Per-local releases for rc-mode confined allocations.

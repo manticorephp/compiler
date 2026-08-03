@@ -2436,6 +2436,12 @@ trait EmitLlvmObjects
                 } else {
                     $out .= '  ' . $val . ' = call i64 @__mir_array_get_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
                 }
+                // Both calls above are done with the key — drop a fresh one
+                // ({@see EmitLlvm::keyTempRelease}); `isset($m["k" . $i])`
+                // leaked exactly as the plain read did.
+                if ($keyIsCell || $keyIsString) {
+                    $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
+                }
                 $nn = $this->ssa->allocReg();
                 $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n"; // != box_null
                 $nnz = $this->ssa->allocReg();
@@ -2632,6 +2638,12 @@ trait EmitLlvmObjects
                         $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
                     } else {
                         $out .= '  call void @__mir_array_unset_int(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
+                    }
+                    // The unset helpers release the STORED key (their own +1);
+                    // this drops the caller's lookup temp
+                    // ({@see EmitLlvm::keyTempRelease}).
+                    if ($keyIsCell || $keyIsString) {
+                        $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
                 }
             }
