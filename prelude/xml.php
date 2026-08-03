@@ -438,6 +438,10 @@ class __McXmlDoc
     /** Formatting knobs DOMDocument exposes; the serializer reads them. */
     public bool $formatOutput = false;
     public bool $preserveWhiteSpace = true;
+    /** `$dom->validateOnParse` — DTD-validate while loading. symfony's
+     *  Config\Util\XmlUtils::parse sets it before every loadXML(), so it is the
+     *  one parse knob that has to be real rather than accepted-and-dropped. */
+    public bool $validateOnParse = false;
 
     public function newNode(int $type, string $name, string $prefix, string $uri, string $value): int
     {

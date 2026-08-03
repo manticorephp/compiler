@@ -74,6 +74,7 @@ class DOMNode
             if ($name === 'standalone' || $name === 'xmlStandalone') { return $d->standalone === 1; }
             if ($name === 'formatOutput') { return $d->formatOutput; }
             if ($name === 'preserveWhiteSpace') { return $d->preserveWhiteSpace; }
+            if ($name === 'validateOnParse') { return $d->validateOnParse; }
             if ($name === 'documentURI' || $name === 'baseURI') {
                 return $d->uriBase === '' ? null : $d->uriBase;
             }
@@ -198,6 +199,10 @@ class DOMNode
         }
         if ($name === 'preserveWhiteSpace') {
             $d->preserveWhiteSpace = (bool) $value;
+            return;
+        }
+        if ($name === 'validateOnParse') {
+            $d->validateOnParse = (bool) $value;
             return;
         }
         if ($name === 'encoding') {
@@ -609,24 +614,49 @@ class DOMDocument extends DOMNode
 
     public function loadXML(string $source, int $options = 0): bool
     {
-        $doc = \__mc_xml_parse($source, $options, false, '');
+        return $this->__mcLoad($source, $options, false, '');
+    }
+
+    public function load(string $filename, int $options = 0): bool
+    {
+        return $this->__mcLoad($filename, $options, true, $filename);
+    }
+
+    /** Shared by loadXML/load so `validateOnParse` — set on the DOCUMENT before
+     *  the call, which is what symfony's XmlUtils::parse does — actually reaches
+     *  the parser as LIBXML_DTDVALID. The flag survives the reload because it
+     *  belongs to the wrapper's intent, not to the table being replaced. */
+    private function __mcLoad(string $src, int $options, bool $isFile, string $uri): bool
+    {
+        $keepValidate = $this->__d !== null && $this->__d->validateOnParse;
+        $keepFormat = $this->__d !== null && $this->__d->formatOutput;
+        $keepWs = $this->__d === null || $this->__d->preserveWhiteSpace;
+        if ($keepValidate) {
+            $options = $options | LIBXML_DTDVALID;
+        }
+        $doc = \__mc_xml_parse($src, $options, $isFile, $uri);
         if ($doc === null) {
             return false;
         }
+        $doc->validateOnParse = $keepValidate;
+        $doc->formatOutput = $keepFormat;
+        $doc->preserveWhiteSpace = $keepWs;
         $this->__d = $doc;
         $this->__n = -1;
         return true;
     }
 
-    public function load(string $filename, int $options = 0): bool
+    /**
+     * Merge adjacent text nodes and drop empty ones, depth first.
+     *
+     * symfony's XmlUtils::parse calls this straight after loadXML, so every DI
+     * config / translation / validator mapping it loads goes through it.
+     */
+    public function normalizeDocument(): void
     {
-        $doc = \__mc_xml_parse($filename, $options, true, $filename);
-        if ($doc === null) {
-            return false;
+        foreach ($this->__d->docKids as $k) {
+            \__mc_dom_normalize($this->__d, $k);
         }
-        $this->__d = $doc;
-        $this->__n = -1;
-        return true;
     }
 
     public function saveXML(?DOMNode $node = null, int $options = 0): string|bool
@@ -1132,6 +1162,44 @@ function __mc_dom_sorted(__McXmlDoc $d, array $in): array
         }
     }
     return $out;
+}
+
+/** Depth-first text normalisation: runs of adjacent TEXT nodes collapse into the
+ *  first, and a text node left empty is removed. CDATA is a distinct node type
+ *  and is never merged into a text run — php does not merge it either. */
+function __mc_dom_normalize(__McXmlDoc $d, int $n): void
+{
+    if ($d->type[$n] !== XML_ELEMENT_NODE) {
+        return;
+    }
+    $out = [];
+    $run = -1;
+    foreach ($d->kids[$n] as $k) {
+        if ($d->type[$k] === XML_TEXT_NODE) {
+            if ($run >= 0) {
+                $d->value[$run] = $d->value[$run] . $d->value[$k];
+                $d->parent[$k] = -1;
+                continue;
+            }
+            $run = $k;
+            $out[] = $k;
+            continue;
+        }
+        $run = -1;
+        $out[] = $k;
+    }
+    $keep = [];
+    foreach ($out as $k) {
+        if ($d->type[$k] === XML_TEXT_NODE && $d->value[$k] === '') {
+            $d->parent[$k] = -1;
+            continue;
+        }
+        $keep[] = $k;
+    }
+    $d->kids[$n] = $keep;
+    foreach ($keep as $k) {
+        \__mc_dom_normalize($d, $k);
+    }
 }
 
 function __mc_dom_sibling(__McXmlDoc $d, int $n, bool $forward): ?DOMNode
