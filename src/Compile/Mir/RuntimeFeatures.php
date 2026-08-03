@@ -30,6 +30,9 @@ final class RuntimeFeatures
     public bool $needsCc = false;
     /** Any string is rc retained/released (sentinel-guarded str rc helpers). */
     public bool $needsStrRc = false;
+
+/** A CAPTURING closure env was built ⇒ emit `__mir_closure_retain/release`. */
+public bool $needsClosureRc = false;
     /** A loop resets the arena per iteration (arena position save/restore). */
     public bool $needsArenaReset = false;
     public bool $needsFloatStr = false;

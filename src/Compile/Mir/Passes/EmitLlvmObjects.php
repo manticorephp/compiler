@@ -2922,8 +2922,38 @@ trait EmitLlvmObjects
         $fnName = $fnNode->type->class ?? '';
         $cnt = $this->closureCaptures[$fnName] ?? 1;
         $slots = 1 + $cnt;
+        // The copy gets its own lifetime header, taken FROM THE SOURCE AT
+        // RUNTIME: the source's magic says whether it owns anything, and its
+        // retain/drop pair describes exactly what. Reading them off the header
+        // instead of naming `__closure_N__mc_retain` here keeps this correct for
+        // a dynamic rebind — and independent of which function the compiler
+        // happens to emit first. A source with no header copies a zero magic,
+        // and every helper then leaves the copy alone: the old
+        // never-freed behaviour, which leaks but cannot dangle.
+        $this->rt->needsClosureRc = true;
+        $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $base = $this->ssa->allocReg();
+        $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 '
+              . (string)($hdr + 8 * $slots) . ")\n";
         $buf = $this->ssa->allocReg();
-        $out .= '  ' . $buf . ' = call ptr @__mir_alloc(i64 ' . (string)(8 * $slots) . ")\n";
+        $out .= '  ' . $buf . ' = getelementptr inbounds i8, ptr ' . $base
+              . ', i64 ' . (string)$hdr . "\n";
+        $srcMagic = $this->closureHdrLoad($src, \Compile\MemoryAbi::STRING_HASH_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $srcRet = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $srcDrop = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $isOurs = $this->ssa->allocReg();
+        $out .= '  ' . $isOurs . ' = icmp eq i64 ' . $srcMagic . ', '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $magicV = $this->ssa->allocReg();
+        $out .= '  ' . $magicV . ' = select i1 ' . $isOurs . ', i64 '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . ", i64 0\n";
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_HASH_OFFSET, $magicV);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET, $srcRet);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET, $srcDrop);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_RC_OFFSET, '1');
         for ($i = 0; $i < $slots; $i = $i + 1) {
             $sg = $this->ssa->allocReg();
             $out .= '  ' . $sg . ' = getelementptr inbounds i64, ptr ' . $src . ', i64 ' . (string)$i . "\n";
@@ -2942,6 +2972,21 @@ trait EmitLlvmObjects
             $out .= '  ' . $tg . ' = getelementptr inbounds i64, ptr ' . $buf . ", i64 1\n";
             $out .= '  store i64 ' . $objV . ', ptr ' . $tg . "\n";
         }
+        // AFTER the `$this` slot is settled, so the retain co-owns the object
+        // this copy actually holds and not the one it replaced — one +1 per
+        // slot the copy's own drop will later release. Indirect through the
+        // header, and skipped entirely when the source had none.
+        $retL = $this->ssa->allocLabel('cbind.ret');
+        $endL = $this->ssa->allocLabel('cbind.end');
+        $hasRet = $this->ssa->allocReg();
+        $out .= '  ' . $hasRet . ' = icmp ne i64 ' . $srcRet . ", 0\n";
+        $out .= '  br i1 ' . $hasRet . ', label %' . $retL . ', label %' . $endL . "\n";
+        $out .= $retL . ":\n";
+        $rf = $this->ssa->allocReg();
+        $out .= '  ' . $rf . ' = inttoptr i64 ' . $srcRet . " to ptr\n";
+        $out .= '  call void ' . $rf . '(ptr ' . $buf . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
         $this->lastValue = $buf;
         $this->lastValueType = 'ptr';
         return $out;

@@ -237,6 +237,10 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, int> closure fn name → capture count */
     private array $closureCaptures = [];
+    /** @var array<string, string[]> closure fn name → per-capture rc flavor,
+     *  registered by the LITERAL and drained into the generated
+     *  `__mc_drop` / `__mc_retain` pair after the function loop. */
+    private array $closureDrops = [];
     /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
     private array $closureHasThis = [];
 
@@ -482,6 +486,10 @@ final class EmitLlvm implements EmitVisitor
             }
             $functionBodies .= $body;
         }
+        // One `__mc_drop` per capturing closure literal seen above — it releases
+        // the captures its env co-owns, and its address is already stamped into
+        // every env {@see EmitLlvmCalls::emitClosure}.
+        $functionBodies .= $this->emitClosureDropFns();
         \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
