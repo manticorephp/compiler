@@ -2485,6 +2485,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $xmlXpathSrc = prelude_src_or_empty("xml_xpath.php");
     $xmlDomSrc = prelude_src_or_empty("xml_dom.php");
 
+    // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
+    // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
+    // can diff our scanner against the C tokenizer with no build in between;
+    // tokenizer_api.php declares PhpToken/token_get_all/token_name and cannot.
+    // Order is load-bearing — token_get_all() constructs __McTok.
+    $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
+    $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
+
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
@@ -2687,6 +2695,12 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                                        'DOMCharacterData', 'DOMProcessingInstruction'])
         || $demand->callsAny(['dom_import_simplexml', 'simplexml_import_dom']);
     if ($useXmlDom) { $useXml = true; }
+
+    // No T_* arm here on purpose: the T_* constants are compile-time folds in
+    // LowerPrelude, so a program can use T_STRING with no prelude at all. Only
+    // the CALLS and the class need the source.
+    $useTokenizer = $demand->callsAny(['token_get_all', 'token_name'])
+        || $demand->mentions('PhpToken');
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
@@ -2772,6 +2786,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read xml_dom.php");
         return null;
     }
+    if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
+        dprint("compile failed: prelude: cannot read tokenizer.php / tokenizer_api.php");
+        return null;
+    }
     if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
@@ -2829,6 +2847,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
+        $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
+        $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -3139,6 +3159,9 @@ function analyze_prelude_files(): array {
         // tree are prelude CLASSES, so closed-world analysis needs them for the
         // same reason as Buffer\/Http\.
         "xml.php", "xml_xpath.php", "xml_dom.php",
+        // Same reason: PhpToken is demand-gated at compile time, but the
+        // analyzer is closed-world and would read it as an unknown class.
+        "tokenizer.php", "tokenizer_api.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];
