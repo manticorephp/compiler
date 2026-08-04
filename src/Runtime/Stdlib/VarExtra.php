@@ -92,8 +92,12 @@ function extension_loaded(string $extension): bool
 {
     $e = \strtolower($extension);
 
+    // ⚠ MUST agree with LowerFromAst::extensionIsBuiltIn(), which folds the
+    // GUARD form `if (extension_loaded('x'))` at compile time. This function
+    // answers the EXPRESSION form. Two lists, one truth — change both.
     return $e === 'pcre' || $e === 'json' || $e === 'ctype'
-        || $e === 'openssl' || $e === 'core' || $e === 'standard';
+        || $e === 'openssl' || $e === 'core' || $e === 'standard'
+        || $e === 'tokenizer';
 }
 
 

@@ -403,7 +403,26 @@ function addcslashes(string $string, string $characters): string
     $n = \strlen($string);
     for ($j = 0; $j < $n; $j = $j + 1) {
         $c = $string[$j];
-        if (isset($set[$c])) { $out .= '\\'; }
+        if (!isset($set[$c])) { $out .= $c; continue; }
+        // php does NOT merely prefix a backslash: a byte outside printable
+        // ASCII is rendered as its C ESCAPE — \n \t \r \a \v \b \f, or a
+        // three-digit octal. Emitting `\` + the raw control byte instead made
+        // the output the same LENGTH but a different string, which is invisible
+        // until something diffs it.
+        $b = \ord($c);
+        if ($b < 32 || $b > 126) {
+            $out .= '\\';
+            if ($b === 10) { $out .= 'n'; continue; }
+            if ($b === 9) { $out .= 't'; continue; }
+            if ($b === 13) { $out .= 'r'; continue; }
+            if ($b === 7) { $out .= 'a'; continue; }
+            if ($b === 11) { $out .= 'v'; continue; }
+            if ($b === 8) { $out .= 'b'; continue; }
+            if ($b === 12) { $out .= 'f'; continue; }
+            $out .= \sprintf('%03o', $b);
+            continue;
+        }
+        $out .= '\\';
         $out .= $c;
     }
     return $out;

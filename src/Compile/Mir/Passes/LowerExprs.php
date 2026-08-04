@@ -200,6 +200,21 @@ trait LowerExprs
                 $this->currentLowerClass = $prevC;
                 return $lowered;
             }
+            // Nothing matched. Falling through to the generic "unsupported
+            // expression kind StaticAccess" throw below names the CONSTRUCT,
+            // which reads as "the compiler cannot do `::`" and sends you to the
+            // wrong file — the actual cause is almost always a class the build
+            // never saw (a prelude module whose demand gate did not fire, a
+            // missing `use`, a typo). Say which it is.
+            $known = isset($this->classDecls[$cname]) || isset($this->traitTable[$cname])
+                || isset($this->enumTable[$cname]);
+            throw new \RuntimeException(
+                $known
+                    ? 'MIR.lower: unknown class constant ' . $cname . '::' . $saName
+                        . ' at line ' . (string)$expr->span->line
+                    : 'MIR.lower: unknown class ' . $cname . ' (in ' . $cname . '::'
+                        . $saName . ') at line ' . (string)$expr->span->line
+            );
         }
         if ($expr->kind === 'DynamicStaticAccess') {
             // `$obj::class` → the operand's class name as a string. Read the

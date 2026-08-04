@@ -189,6 +189,11 @@ trait LowerPrelude
             // xml_dom.php defines DOMNode before every DOM subclass.
             $src = $src . $this->xmlSrc . $this->xmlXpathSrc . $this->xmlDomSrc;
         }
+        if ($this->tokenizerSrc !== '') {
+            // ext/tokenizer. Core BEFORE api — classes are built in source order
+            // and token_get_all() constructs __McTok.
+            $src = $src . $this->tokenizerSrc . $this->tokenizerApiSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
@@ -810,8 +815,27 @@ trait LowerPrelude
         return null;
     }
 
+    /**
+     * ext/tokenizer's 154 `T_*` ids, kept OUT of the `$ints` literal below: that
+     * array is rebuilt on every constant lookup in the program, and a token
+     * table is both large and reachable from a two-byte prefix test. Values are
+     * generated from Zend, never typed — {@see TokenizerConsts}.
+     */
+    private function tokenConstInt(string $name): ?Node
+    {
+        $ints = TokenizerConsts::ints();
+        if (!isset($ints[$name])) { return null; }
+        return new IntConst($ints[$name], Type::int_());
+    }
+
     private function preludeConstInt(string $name): ?Node
     {
+        if ($name === 'TOKEN_PARSE'
+            || (\strlen($name) > 2 && $name[0] === 'T' && $name[1] === '_')) {
+            $tok = $this->tokenConstInt($name);
+            if ($tok !== null) { return $tok; }
+        }
+
         $ints = [
             // string padding
             'STR_PAD_RIGHT' => 1, 'STR_PAD_LEFT' => 0, 'STR_PAD_BOTH' => 2,
@@ -832,8 +856,8 @@ trait LowerPrelude
             'E_USER_NOTICE' => 1024, 'E_STRICT' => 2048, 'E_RECOVERABLE_ERROR' => 4096,
             'E_DEPRECATED' => 8192, 'E_USER_DEPRECATED' => 16384, 'E_ALL' => 30719,
             // php core ints
-            'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80503, 'PHP_MAJOR_VERSION' => 8,
-            'PHP_MINOR_VERSION' => 5, 'PHP_RELEASE_VERSION' => 3, 'PHP_FLOAT_DIG' => 15,
+            'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80508, 'PHP_MAJOR_VERSION' => 8,
+            'PHP_MINOR_VERSION' => 5, 'PHP_RELEASE_VERSION' => 8, 'PHP_FLOAT_DIG' => 15,
             'PHP_ZTS' => 0, 'PHP_DEBUG' => 0, 'PHP_MAXPATHLEN' => 1024,
             // json flags
             'JSON_HEX_TAG' => 1, 'JSON_HEX_AMP' => 2, 'JSON_HEX_APOS' => 4,
@@ -991,7 +1015,7 @@ trait LowerPrelude
 
         $strs = [
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.3', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.8', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references
