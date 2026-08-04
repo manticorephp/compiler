@@ -749,8 +749,12 @@ trait EmitLlvmModule
         // By-ref params: the slot holds the caller's variable address;
         // loads/stores deref it.
         $this->locals->refLocals = [];
+        $this->locals->refParamTypes = [];
         foreach ($fn->params as $p) {
-            if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
+            if ($p->byRef) {
+                $this->locals->refLocals[$p->name] = true;
+                $this->locals->refParamTypes[$p->name] = $p->type;
+            }
         }
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;

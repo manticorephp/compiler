@@ -983,6 +983,37 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * A concrete-element array written through a by-ref param whose DECLARED
+     * type carries a CELL element channel — the caller reads self-describing
+     * cells, so raw elements come back as denormal doubles.
+     *
+     * This is the write-back half of the by-ref array contract. The read half
+     * is {@see Passes\Monomorphize}, which specializes a by-ref param to the
+     * caller's actual slot type: `function f(array &$o)` called with an `$a =
+     * []` (`vec[cell]`) local clones to `f$mono$p1_vec_cell`, and the clone's
+     * `$o = [1, 2]` must then BUILD cells rather than store `vec[int]` raw.
+     * Retyping the parameter without coercing the store was the whole bug: the
+     * caller printed `float(5.0E-324)` for `int(1)`.
+     *
+     * Only the cell direction is handled here; the reverse (a cell-element
+     * value into a concrete-element slot) is `needsDeCellify`, already applied
+     * above.
+     */
+    private function refStoreNeedsCellify(string $name, Type $valueType): bool
+    {
+        if (!$valueType->isArray()) { return false; }
+        $ve = $valueType->element;
+        if ($ve === null) { return false; }
+        $vk = $ve->kind;
+        // Already self-describing — nothing to box.
+        if ($vk === Type::KIND_CELL || $vk === Type::KIND_UNKNOWN) { return false; }
+        $pt = $this->locals->refParamTypes[$name] ?? null;
+        if ($pt === null || !$pt->isArray()) { return false; }
+        $pe = $pt->element;
+        return $pe !== null && ($pe->kind === Type::KIND_CELL || $pe->kind === Type::KIND_UNKNOWN);
+    }
+
+    /**
      * The debug-backtrace builtin — a packed list of the active call frames'
      * NAMES, innermost first (from the runtime call-stack {@see needsBacktrace}).
      * V1 returns vec[string] of names (not PHP's assoc frames); count() and

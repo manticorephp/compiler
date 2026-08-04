@@ -37,4 +37,52 @@ final class FunctionSignatures
      *  call site must push its as-written argument count onto the side channel
      *  ({@see FunctionDef::$usesFuncArgs}). */
     public array $usesFuncArgs = [];
+
+    /**
+     * Bit `i` set ⟺ SOME `__closure_N` in this module declares its call slot
+     * `i` by reference. Computed by {@see closureRefUnion}.
+     *
+     * A closure invoked through a `\Closure`-typed value has no statically
+     * known callee, so no per-callee mask is available at the call site — the
+     * mask has to be recovered at run time. This union is the compile-time
+     * GATE on that machinery: when it is 0 for a call's arity, the invoke can
+     * be emitted exactly as it always was. It is 0 for every program that
+     * never writes a by-ref closure parameter, which is nearly all of them.
+     */
+    public int $closureRefUnion = 0;
+
+    /**
+     * The union above, over every closure in the module.
+     *
+     * A closure's MIR params are prefixed by its captures ({@see
+     * Module::$closureCaptures}) and only the params past that prefix are call
+     * slots, so slot `i` is `params[capCnt + i]`. Refuses an arity the 64-bit
+     * union cannot express rather than silently dropping the high slots.
+     *
+     * @param FunctionDef[] $functions
+     * @param array<string, int> $closureCaptures
+     */
+    public static function closureRefUnion(array $functions, array $closureCaptures): int
+    {
+        $union = 0;
+        foreach ($functions as $fn) {
+            $capCnt = $closureCaptures[$fn->name] ?? -1;
+            if ($capCnt < 0) { continue; }
+            $slot = 0;
+            $np = \count($fn->params);
+            for ($pi = $capCnt; $pi < $np; $pi++) {
+                if ($fn->params[$pi]->byRef) {
+                    if ($slot > 62) {
+                        throw new \RuntimeException(
+                            'closure ' . $fn->name . ' declares a by-reference parameter at call slot '
+                            . (string)$slot . '; the dynamic-invoke by-ref mask carries 63'
+                        );
+                    }
+                    $union = $union | (1 << $slot);
+                }
+                $slot = $slot + 1;
+            }
+        }
+        return $union;
+    }
 }

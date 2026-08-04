@@ -2871,6 +2871,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $infer = new \Compile\Mir\Passes\InferTypes();
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
+        // Define the locals whose only definition is a by-ref ARGUMENT position
+        // (php's out-parameter spelling). Runs here because a MethodCall_
+        // receiver has no class before inference, and because InferTypes #2
+        // below types the inits it plants. Must follow DeadStore — a store
+        // inserted earlier would be a DSE candidate.
+        $statT = \Compile\Stats::now();
+        $module = (new \Compile\Mir\Passes\VivifyRefArgs())->run($module);
+        \Compile\Stats::step('VivifyRefArgs', $statT, \count($module->functions), -1);
         // Narrow CONCRETE, param-independent bare-`array` returns now (a literal
         // `mk(){ return ["x"=>1]; }` → assoc[string,int]) so a call-site
         // `array_filter(mk(), …)` fuses on a concrete element and its result is

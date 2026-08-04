@@ -406,6 +406,10 @@ final class EmitLlvm implements EmitVisitor
         $this->needsOb = $module->needsOb;
         $this->hasObjToStr = $module->hasObjToStr;
         $this->sourceFile = $module->sourceFile;
+        // A dynamic invoke has no per-callee mask; this union is the gate that
+        // decides whether the run-time by-ref machinery is emitted at all.
+        $this->sigs->closureRefUnion = FunctionSignatures::closureRefUnion(
+            $module->functions, $module->closureCaptures);
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
             $mask = [];

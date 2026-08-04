@@ -501,9 +501,40 @@ trait EmitLlvmLocals
         // {@see emitCellifyArrayRaw}. Scalar by-ref arrays (`sort(array &$a)` of
         // ints) are deliberately untouched — their elements round-trip raw and the
         // caller reads them raw.
+        // A by-ref param the USER declared nullable-scalar (`?int &$n`) is a
+        // CELL: the caller's slot is a cell and its address crosses unchanged
+        // (`byRefNeedsCellUnbox` deliberately does not divert a cell param), so
+        // the callee's write has to be self-describing or `var_dump($n)` reads
+        // 42 as `float(2.08E-322)`.
+        //
+        // ⛔ NOT for a CLOSURE. Its parameters are cell-typed by the uniform
+        // closure ABI rather than by any declaration, and a by-ref one points
+        // straight at an array's ELEMENT slot: boxing there made
+        // `array_walk($m, fn (&$v) => $v = $v * 10)` write NaN-boxed words into
+        // the array and print -4222124650659830 for 10.
+        if (!$this->frame->isClosure
+            && isset($this->locals->refLocals[$sl->name])
+            && isset($this->locals->slots[$sl->name])
+            && ($this->locals->refParamTypes[$sl->name] ?? null) !== null
+            && $this->locals->refParamTypes[$sl->name]->kind === Type::KIND_CELL
+            && $sl->value->type->kind !== Type::KIND_CELL
+            && $this->isCellBoxableArg($sl->value->type)) {
+            $out = $this->emitNode($sl->value);
+            $out .= $this->boxToCell($sl->value->type);
+            $dv = $this->lastValue;
+            $addr = $this->ssa->allocReg();
+            $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if (isset($this->locals->refLocals[$sl->name])
             && isset($this->locals->slots[$sl->name])
-            && $this->needsRefOutCellify($sl->value->type)) {
+            && ($this->needsRefOutCellify($sl->value->type)
+                || $this->refStoreNeedsCellify($sl->name, $sl->value->type))) {
             $out = $this->emitNode($sl->value);
             $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
             $out .= $this->coerceToI64();

@@ -248,6 +248,11 @@ trait EmitLlvmObjects
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
+            $cellBoxSlots = [];
+            $boxSlots = [];
+            $boxTmps = [];
+            $boxTypes = [];
+            $cellBoxTmps = [];
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
@@ -263,7 +268,18 @@ trait EmitLlvmObjects
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
             foreach ($n->args as $a) {
-                if ($this->argIsByRef($mask, $ai + 1, $a)) {
+                if ($this->argIsByRef($mask, $ai + 1, $a)
+                    && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)) {
+                    $out .= $this->emitByRefCellUnboxArg($a);
+                    $cellBoxSlots[] = $this->refBoxSlot;
+                    $cellBoxTmps[] = $this->refBoxTmp;
+                } elseif ($this->argIsByRef($mask, $ai + 1, $a)
+                    && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
+                    $out .= $this->emitByRefCellBoxArg($a);
+                    $boxSlots[] = $this->refBoxSlot;
+                    $boxTmps[] = $this->refBoxTmp;
+                    $boxTypes[] = $a->type;
+                } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
@@ -305,6 +321,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
             $out .= $this->btPop();
+            $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
+        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
@@ -3091,6 +3109,11 @@ trait EmitLlvmObjects
         $argList = '';
         $first = true;
         $argTemps = [];
+        $cellBoxSlots = [];
+        $boxSlots = [];
+        $boxTmps = [];
+        $boxTypes = [];
+        $cellBoxTmps = [];
         $cls = $this->resolveMethodClass($n->class, $n->method);
         if ($cls === '') { $cls = $n->class; }
         // Late static binding: route to the per-descendant specialisation
@@ -3126,7 +3149,20 @@ trait EmitLlvmObjects
             }
             if (!$first) { $argList .= ', '; }
             $first = false;
-            if ($this->argIsByRef($mask, $ai, $a)) {
+            if ($this->argIsByRef($mask, $ai, $a)
+                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai)) {
+                $out .= $this->emitByRefCellUnboxArg($a);
+                $argList .= 'i64 ' . $this->lastValue;
+                $cellBoxSlots[] = $this->refBoxSlot;
+                $cellBoxTmps[] = $this->refBoxTmp;
+            } elseif ($this->argIsByRef($mask, $ai, $a)
+                && $this->byRefNeedsCellBox($a, $ptypes, $ai)) {
+                $out .= $this->emitByRefCellBoxArg($a);
+                $argList .= 'i64 ' . $this->lastValue;
+                $boxSlots[] = $this->refBoxSlot;
+                $boxTmps[] = $this->refBoxTmp;
+                $boxTypes[] = $a->type;
+            } elseif ($this->argIsByRef($mask, $ai, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -3158,6 +3194,8 @@ trait EmitLlvmObjects
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
+        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
         $out .= $this->freeStrArgTemps($argTemps);
         // By-ref return (`static function &m()`): the callee yields the slot
         // ADDRESS; deref in value context, keep raw under rawRefCall (RefBind).
@@ -3555,16 +3593,36 @@ trait EmitLlvmObjects
             $argList = 'ptr ' . $bound;
             $argTypes = 'ptr';
             $k = \count($mc->args);
+            // ⚠ `->call()` does NOT bind by reference, and neither do we. Its
+            // own signature is `call(?object $newThis, mixed ...$args)`, so the
+            // arguments are already by-value copies by the time they are
+            // forwarded — php warns "Argument #N must be passed by reference,
+            // value given" and passes the value. Teaching this site the dynamic
+            // by-ref mask would bind where the oracle does not. Verified
+            // against php 8.5 in tests/aot/cases/closure_byref_rebind.php.
+            $fpi = $this->ssa->allocReg();
+            $out .= '  ' . $fpi . ' = load i64, ptr ' . $bound . "\n";
+            $callGate = $this->closureRefGate($k - 1);
+            $callMask = '';
+            if ($callGate !== 0) {
+                $out .= $this->closureRefMaskChain($fpi);
+                $callMask = $this->lastValue;
+            }
             for ($ai = 1; $ai < $k; $ai = $ai + 1) {
                 $a = $mc->args[$ai];
-                $out .= $this->emitNode($a);
-                if ($this->isCellBoxableArg($a->type)) { $out .= $this->boxToCell($a->type); }
-                else { $out .= $this->coerceToI64(); }
+                $slot = $ai - 1;
+                if ($callMask !== '' && ($callGate & (1 << $slot)) !== 0) {
+                    // Still BY VALUE — only the callee's unconditional deref is
+                    // accommodated. See emitDynByRefValueArg.
+                    $out .= $this->emitDynByRefValueArg($a, $callMask, $slot);
+                } else {
+                    $out .= $this->emitNode($a);
+                    if ($this->isCellBoxableArg($a->type)) { $out .= $this->boxToCell($a->type); }
+                    else { $out .= $this->coerceToI64(); }
+                }
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
             }
-            $fpi = $this->ssa->allocReg();
-            $out .= '  ' . $fpi . ' = load i64, ptr ' . $bound . "\n";
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $reg = $this->ssa->allocReg();
@@ -3626,6 +3684,11 @@ trait EmitLlvmObjects
         }
         $argList = 'i64 ' . $thisArg;
         $argTemps = [];
+        $cellBoxSlots = [];
+        $boxSlots = [];
+        $boxTmps = [];
+        $boxTypes = [];
+        $cellBoxTmps = [];
         $static = $mc->object->type->class ?? '';
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
@@ -3712,7 +3775,20 @@ trait EmitLlvmObjects
                 $ai = \count($ptypes) - 1;
                 continue;
             }
-            if ($this->argIsByRef($mask, $ai + 1, $a)) {
+            if ($this->argIsByRef($mask, $ai + 1, $a)
+                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)) {
+                $out .= $this->emitByRefCellUnboxArg($a);
+                $argList .= ', i64 ' . $this->lastValue;
+                $cellBoxSlots[] = $this->refBoxSlot;
+                $cellBoxTmps[] = $this->refBoxTmp;
+            } elseif ($this->argIsByRef($mask, $ai + 1, $a)
+                && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
+                $out .= $this->emitByRefCellBoxArg($a);
+                $argList .= ', i64 ' . $this->lastValue;
+                $boxSlots[] = $this->refBoxSlot;
+                $boxTmps[] = $this->refBoxTmp;
+                $boxTypes[] = $a->type;
+            } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
             } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -3905,6 +3981,8 @@ trait EmitLlvmObjects
             $reg = $this->vdResult;
         }
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
+        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
         $out .= $this->freeStrArgTemps($argTemps);
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
