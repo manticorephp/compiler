@@ -1283,11 +1283,37 @@ trait EmitLlvmCalls
             || ($a->kind === Node::KIND_PROPERTY_ACCESS && $this->isByRefAddressable($a));
         if (!$pure) {
             if ($this->isByRefAddressable($a)) {
-                throw new \RuntimeException(
-                    'argument ' . (string)($pi + 1) . ' of a dynamic closure call may bind a '
-                    . 'by-reference parameter, but its address cannot be taken without side '
-                    . 'effects; assign it to a variable first'
-                );
+                // `$a[$k]` at a slot some closure declares by-ref. Its address
+                // can be taken, but not for free: `__mir_array_ref_slot`
+                // VIVIFIES a missing key, so computing it unconditionally would
+                // add an element php never creates whenever the runtime mask
+                // turns out to be 0. Branch instead of `select` — the address
+                // is then only materialised on the path that actually needs it.
+                //
+                // ⛔ Refusing at COMPILE time was tried and is the third time
+                // that answer proved too broad: it stopped a whole tier-2 build
+                // over a call whose callee takes nothing by reference.
+                $slot = $this->ssa->allocReg();
+                $out .= '  ' . $slot . " = alloca i64\n";
+                $out .= $this->dynByRefBit($maskReg, $pi);
+                $isRef = $this->lastIsRef;
+                $refL = $this->ssa->allocLabel('dynref.take');
+                $valL = $this->ssa->allocLabel('dynref.val');
+                $joinL = $this->ssa->allocLabel('dynref.join');
+                $out .= '  br i1 ' . $isRef . ', label %' . $refL . ', label %' . $valL . "\n";
+                $out .= $refL . ":\n";
+                $out .= $this->byRefAddrOf($a);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $valL . ":\n";
+                $out .= '  store i64 ' . $val . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $joinL . ":\n";
+                $op = $this->ssa->allocReg();
+                $out .= '  ' . $op . ' = load i64, ptr ' . $slot . "\n";
+                $this->lastValue = $op;
+                $this->lastValueType = 'i64';
+                return $out;
             }
             // Not an lvalue at all — php refuses to bind one to a by-ref param,
             // and the known-closure path already backs it with a throwaway slot.
@@ -1431,8 +1457,8 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    /** `select (mask >> $pi) & 1, $addr, $val` — leaves the operand in lastValue. */
-    private function dynByRefSelect(string $maskReg, int $pi, string $addr, string $val): string
+    /** `(mask >> $pi) & 1 != 0` — leaves the predicate in {@see $lastIsRef}. */
+    private function dynByRefBit(string $maskReg, int $pi): string
     {
         $sh = $this->ssa->allocReg();
         $out = '  ' . $sh . ' = lshr i64 ' . $maskReg . ', ' . (string)$pi . "\n";
@@ -1440,6 +1466,15 @@ trait EmitLlvmCalls
         $out .= '  ' . $bit . ' = and i64 ' . $sh . ", 1\n";
         $isRef = $this->ssa->allocReg();
         $out .= '  ' . $isRef . ' = icmp ne i64 ' . $bit . ", 0\n";
+        $this->lastIsRef = $isRef;
+        return $out;
+    }
+
+    /** `select (mask >> $pi) & 1, $addr, $val` — leaves the operand in lastValue. */
+    private function dynByRefSelect(string $maskReg, int $pi, string $addr, string $val): string
+    {
+        $out = $this->dynByRefBit($maskReg, $pi);
+        $isRef = $this->lastIsRef;
         $op = $this->ssa->allocReg();
         $out .= '  ' . $op . ' = select i1 ' . $isRef . ', i64 ' . $addr . ', i64 ' . $val . "\n";
         $this->lastIsRef = $isRef;

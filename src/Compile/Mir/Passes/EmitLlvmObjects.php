@@ -3327,9 +3327,19 @@ trait EmitLlvmObjects
         $defLabel = $this->ssa->allocLabel('vd.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $defLabel . " [\n";
         $bodies = '';
+        // Dedupe on the CLASS ID, not the name. The candidate list is built from
+        // names, and two of them can denote one runtime type — a reified
+        // specialization counts as a descendant of the class it specializes
+        // ({@see selfAndDescendants} follows the ORIGIN edge), so the same
+        // class_id reached the switch twice and clang rejected the whole module
+        // with `duplicate case value`. The first name wins, matching the
+        // first-declarer rule the union path already applies by name.
+        $seenCid = [];
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
+            if (isset($seenCid[$cd->classId])) { continue; }
+            $seenCid[$cd->classId] = true;
             $caseLabel = $this->ssa->allocLabel('vd.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseLabel . "\n";
             $r = $this->ssa->allocReg();

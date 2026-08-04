@@ -299,12 +299,26 @@ final class VivifyRefArgs implements Pass
             foreach ($cl->captures as $c) {
                 $byRef = $cl->captureByRef[$ci] ?? false;
                 $ci = $ci + 1;
-                if (!$byRef || $c->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+                if ($c->kind !== Node::KIND_LOAD_LOCAL) { continue; }
                 $ll = $this->asLoadLocal($c);
                 if (isset($this->defined[$ll->name]) || isset($this->candidates[$ll->name])) { continue; }
-                // UNKNOWN, not cell: the closure writes through the captured
-                // ADDRESS raw (its by-ref param is cell-typed only by the
-                // uniform closure ABI), so the caller must read it raw too.
+                // A BY-VALUE capture of a name the enclosing scope does not
+                // have: php captures nothing and the closure's own assignment
+                // creates its local. Capturing a NULL is the SAME THING — the
+                // capture is by value, so the closure writes its own copy — and
+                // it is what lets an arrow fn both assign and read a name the
+                // outer frame never had:
+                //   fn ($m) => ($parent = $c->getParentClass()) ? $parent->name : 'parent'
+                // (symfony/var-exporter ProxyHelper::exportDefault). Deciding it
+                // the other way round — asking whether the OUTER scope has the
+                // variable — needs a local set lowering does not have, and
+                // subtracting every assigned name instead was measured and is
+                // too strong: the prelude's own sort() lost a real capture.
+                //
+                // UNKNOWN, not cell, for both directions: a by-ref capture packs
+                // the ADDRESS and the closure writes through it raw (its param
+                // is cell-typed only by the uniform closure ABI), and a
+                // by-value one must not commit a repr the closure will replace.
                 $this->candidates[$ll->name] = Type::unknown();
             }
         } elseif ($k === Node::KIND_INVOKE) {
