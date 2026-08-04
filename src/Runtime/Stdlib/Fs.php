@@ -260,14 +260,28 @@ function ftruncate(\Resource $stream, int $size): bool
  * LOCK_UN is 3 in PHP but 8 to the OS, where 3 means LOCK_SH|LOCK_EX and is
  * rejected with EINVAL. LOCK_SH/LOCK_EX/LOCK_NB coincide numerically on both
  * Darwin and Linux. Zend performs the same translation.
+ *
+ * `$would_block` is php's out-parameter: 1 when a NON-BLOCKING request failed
+ * only because someone else holds the lock, 0 otherwise. symfony/cache's
+ * LockRegistry::compute reads it back to tell "busy" from "broken" —
+ * `flock($lock, LOCK_EX | LOCK_NB, $wouldBlock)`.
  * @param \Resource $stream
  */
-function flock(\Resource $stream, int $operation): bool
+function flock(\Resource $stream, int $operation, ?int &$would_block = null): bool
 {
     $op = $operation & 3;
     if ($op === 3) { $op = 8; }
     if (($operation & 4) !== 0) { $op = $op | 4; }
-    return \Runtime\Libc\sys_flock(\__mc_fileno($stream), $op) === 0;
+    $rc = \Runtime\Libc\sys_flock(\__mc_fileno($stream), $op);
+    if ($rc === 0) {
+        $would_block = 0;
+        return true;
+    }
+    // EWOULDBLOCK == EAGAIN on both hosts, but the VALUE differs (Darwin 35,
+    // Linux 11); only a NON-BLOCKING request can report it.
+    $eagain = \PHP_OS_FAMILY === 'Darwin' ? 35 : 11;
+    $would_block = (($operation & 4) !== 0 && \__mc_errno() === $eagain) ? 1 : 0;
+    return false;
 }
 
 /**

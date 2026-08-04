@@ -75,6 +75,9 @@ final class VivifyRefArgs implements Pass
      *  ({@see \Compile\Mir\FunctionSignatures::closureRefUnion}). */
     private int $closureRefUnion = 0;
 
+    /** @var array<string, string> method name → some declaring fn (interface receivers) */
+    private array $anyDeclarer = [];
+
     /** @var array<string, string> class name → parent class name */
     private array $classParent = [];
 
@@ -113,6 +116,17 @@ final class VivifyRefArgs implements Pass
             }
             $this->refMasks[$fn->name] = $mask;
             $this->paramTypes[$fn->name] = $ptypes;
+        }
+        // method name → SOME declaring function, for an interface-typed
+        // receiver. Keyed off the FIRST `__` so `C____construct` reads back as
+        // `__construct` rather than `construct`.
+        $this->anyDeclarer = [];
+        foreach ($this->refMasks as $fname => $unused) {
+            $i = \strpos($fname, '__');
+            if ($i === false) { continue; }
+            $m = \substr($fname, $i + 2);
+            if ($m === '' || isset($this->anyDeclarer[$m])) { continue; }
+            $this->anyDeclarer[$m] = $fname;
         }
         $this->closureCaptures = $module->closureCaptures;
         $this->closureRefUnion = \Compile\Mir\FunctionSignatures::closureRefUnion(
@@ -232,8 +246,18 @@ final class VivifyRefArgs implements Pass
         } elseif ($k === Node::KIND_METHOD_CALL) {
             $mc = $this->asMethodCall($n);
             $recv = $mc->object->type->class ?? '';
-            if ($recv !== '') {
-                $this->scanArgs($this->resolveMethodFn($recv, $mc->method), $mc->args, 1);
+            $target = $recv === '' ? '' : $this->resolveMethodFn($recv, $mc->method);
+            if ($target !== '') {
+                $this->scanArgs($target, $mc->args, 1);
+            } elseif ($recv !== '') {
+                // Nothing in this closed world declares the method — the class
+                // lives in a package a lower tier does not include, or the
+                // extension is absent. Same reasoning as an unknown free
+                // function: the call cannot succeed, so its arguments'
+                // definedness is not a property worth refusing the file over.
+                // `$container->resolveEnvPlaceholders($n, null, $usedEnvs)` in
+                // symfony/cache is a T3 collaborator seen from T2.
+                $this->vivifyBareLocals($mc->args);
             }
         } elseif ($k === Node::KIND_INVOKE) {
             $iv = $this->asInvoke($n);
@@ -256,7 +280,20 @@ final class VivifyRefArgs implements Pass
      */
     private function scanArgs(string $fnName, array $args, int $base): void
     {
-        if ($fnName === '' || !isset($this->refMasks[$fnName])) { return; }
+        if ($fnName === '') { return; }
+        if (!isset($this->refMasks[$fnName])) {
+            // A callee the program neither defines nor gets intrinsically — an
+            // absent extension, `apcu_fetch($ids, $ok)` behind
+            // `ApcuAdapter::isSupported()`. Its by-ref mask is unknowable, but
+            // so is everything else about it: the call cannot succeed, and php
+            // fails AT it rather than refusing the file. Vivify its bare locals
+            // so a guarded, never-taken branch does not cost the whole program.
+            // A typo'd argument to a real builtin still fails Verify — that is
+            // what the isKnownFunction check preserves.
+            if (\Analyze\Builtins::isKnownFunction($fnName)) { return; }
+            $this->vivifyBareLocals($args);
+            return;
+        }
         $mask = $this->refMasks[$fnName];
         $ptypes = $this->paramTypes[$fnName];
         $ai = 0;
@@ -318,6 +355,23 @@ final class VivifyRefArgs implements Pass
     }
 
     /**
+     * Treat every bare local argument as possibly an out-parameter. Only for a
+     * callee NOTHING in the program declares — the call is already an error, so
+     * this trades a refusal we cannot justify for the failure php actually has.
+     *
+     * @param Node[] $args
+     */
+    private function vivifyBareLocals(array $args): void
+    {
+        foreach ($args as $a) {
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $ll = $this->asLoadLocal($a);
+            if (isset($this->candidates[$ll->name])) { continue; }
+            $this->candidates[$ll->name] = Type::cell();
+        }
+    }
+
+    /**
      * The module function name implementing `$class::$method`, walking the
      * parent chain — methods live in the function list as `Class__method` and
      * an inherited one is only present under its DECLARING class. '' when no
@@ -333,7 +387,15 @@ final class VivifyRefArgs implements Pass
             $cur = $this->classParent[$cur] ?? '';
             $guard = $guard + 1;
         }
-        return '';
+        // No ancestor declares it — an INTERFACE receiver, which is how a real
+        // application spells a collaborator (`?MarshallerInterface $marshaller`
+        // then `$this->marshaller->marshall($values, $failed)`). The
+        // implementation lives on some class that implements it, and php
+        // requires an override's by-ref-ness to match the declaration, so ANY
+        // declarer answers the question. This mirrors the widening
+        // {@see EmitLlvmObjects::emitMethodCall} already does when it scans
+        // every class for a declarer.
+        return $this->anyDeclarer[$method] ?? '';
     }
 
     // Typed reads — a base-typed `$n` resolves fields by OFFSET under
