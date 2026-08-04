@@ -200,21 +200,20 @@ trait LowerExprs
                 $this->currentLowerClass = $prevC;
                 return $lowered;
             }
-            // Nothing matched. Falling through to the generic "unsupported
-            // expression kind StaticAccess" throw below names the CONSTRUCT,
-            // which reads as "the compiler cannot do `::`" and sends you to the
-            // wrong file — the actual cause is almost always a class the build
-            // never saw (a prelude module whose demand gate did not fire, a
-            // missing `use`, a typo). Say which it is.
-            $known = isset($this->classDecls[$cname]) || isset($this->traitTable[$cname])
-                || isset($this->enumTable[$cname]);
-            throw new \RuntimeException(
-                $known
-                    ? 'MIR.lower: unknown class constant ' . $cname . '::' . $saName
-                        . ' at line ' . (string)$expr->span->line
-                    : 'MIR.lower: unknown class ' . $cname . ' (in ' . $cname . '::'
-                        . $saName . ') at line ' . (string)$expr->span->line
-            );
+            // Nothing matched — fall through. It does NOT reach the generic
+            // "unsupported expression kind" throw: the StaticAccess arm at that
+            // fallthrough converts an unresolvable class constant into php's own
+            // runtime Error (`Class "C" not found` / `Undefined constant C::K`),
+            // which is where php raises it and why symfony/cache can name
+            // `PDO::CASE_LOWER` in an adapter that never runs.
+            //
+            // ⚠ A build-time throw HERE was reintroduced by a merge from main,
+            // which had added it independently as a better diagnostic than
+            // "unsupported expression kind StaticAccess". Git saw "deleted on one
+            // side, added on the other" and kept the addition — no conflict, and
+            // undefined_constant_throws went red. The runtime rule wins; main's
+            // intent (say whether the CLASS or the CONSTANT is missing) is
+            // already served below, in php's own wording.
         }
         if ($expr->kind === 'DynamicStaticAccess') {
             // `$obj::class` → the operand's class name as a string. Read the
