@@ -1,0 +1,20 @@
+-- share --
+dns:      true
+connect:  true
+cookie:   true
+unshare:  true
+errno:    0
+strerror: 'No error'
+body a:   2048
+body b:   4096
+errno a:  0 b: 0
+-- progress --
+len:      4096
+called:   yes
+dlnow:    full
+errno:    0
+abort:    false errno=42
+-- pause/upkeep --
+pause:    43
+upkeep:   true
+upkeep a: true

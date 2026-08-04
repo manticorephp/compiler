@@ -1,0 +1,34 @@
+keys: 17
+  age                 integer
+  ares                string
+  ares_num            integer
+  brotli_ver_num      integer
+  brotli_version      string
+  feature_list        array
+  features            integer
+  host                string
+  iconv_ver_num       integer
+  libidn              string
+  libssh_version      string
+  libz_version        string
+  protocols           array
+  ssl_version         string
+  ssl_version_number  integer
+  version             string
+  version_number      integer
+-- invariants --
+age >= 4:        yes
+version_number:  positive
+version dots:    yes
+host non-empty:  yes
+features > 0:    yes
+protocols > 4:   yes
+has file:        yes
+has http:        yes
+has https:       yes
+feature_list:    29
+  IPv6 is bool:  yes
+  SSL is bool:   yes
+  SSL agrees:    yes
+  IPv6 agrees:   yes
+  libz agrees:   yes

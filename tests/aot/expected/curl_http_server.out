@@ -1,0 +1,6 @@
+hello:   200 hello from Http\Server
+echo:    200 round=trip
+head:    with header
+header:  X-Answer: 42
+status:  HTTP/1.1 200
+404:     404 not found

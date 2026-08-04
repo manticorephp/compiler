@@ -34,6 +34,18 @@ generation does not know the symbol, so the stdlib `.o` build dies on an undefin
 
 ### Recently completed (2026-07)
 
+- **`ext/curl` — an HTTP client** (`docs/curl.md`). The easy API, `curl_multi_*` and
+  `curl_share_*`, bound to libcurl through FFI and demand-gated, so a binary links
+  `-lcurl` only if it calls one of them. `CURLOPT_WRITEFUNCTION` and its three siblings
+  take real Closures: `fn_to_ptr` needs a string literal, so libcurl holds one of four
+  fixed trampolines and carries the handle **id** in the `void*` it hands back. One
+  `#[Variadic(2)]` binding serves every `curl_setopt` option class, because libcurl
+  encodes the C type in the option NUMBER.
+  Not implemented, each with a named throw: `CURLFile`/`CURLOPT_MIMEPOST` multipart,
+  the `*_BLOB` options, `CURLMOPT_PUSHFUNCTION`, and a real `CURLINFO_CERTINFO`.
+  Every float `CURLINFO` is read through its `_T` sibling — this build cannot read a
+  C `double` out of memory (no `peek_f64`, no bitcast builtin, no `unpack('d')`), which
+  is the one gap worth closing if a caller ever needs a genuine double from C.
 - **`Http\` — an HTTP/1.1 server** (`docs/http.md`). A handler is
   `callable(Request): Response`; one process serves many requests at once, and php's
   `header()`/`setcookie()`/`http_response_code()`/`headers_sent()`/`echo` work inside it
@@ -182,6 +194,7 @@ Living reference:
 - [`modules.md`](modules.md) — the manifest, `.sig` interfaces, Composer projects.
 - [`generics.md`](generics.md) — docblock `@template`, bounds, reified `@var C<T>`.
 - [`ffi.md`](ffi.md), [`attributes.md`](attributes.md) — native binding and the attribute set.
+- [`http.md`](http.md), [`curl.md`](curl.md) — the HTTP server and the HTTP client.
 
 Design notes:
 

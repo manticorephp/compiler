@@ -1,0 +1,12 @@
+errno:    0
+error:    ''
+is_string:yes
+body:     hello curl
+second line
+hello curl
+second line
+direct:   true
+reuse:    same length
+reset:    same body
+escape:   a%20b%26c%3Dd%2Fe
+unescape: a b&c=d/e

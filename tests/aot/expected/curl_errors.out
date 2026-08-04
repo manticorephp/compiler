@@ -1,0 +1,10 @@
+no url:   false
+errno:    3
+error:    No URL set
+strerr 0: 'No error'
+strerr 3: 'URL using bad/illegal format or missing URL'
+strerr 23:'Failed writing received data to disk/application'
+strerr 42:'Operation was aborted by an application callback'
+bad opt:  ValueError: curl_setopt(): Argument #2 ($option) is not a valid cURL option
+missing:  false errno=37
+scheme:   false errno=1

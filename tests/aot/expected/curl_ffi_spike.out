@@ -1,0 +1,11 @@
+init:      ok
+setopt rc: fn=0 data=0 url=0
+perform:   0
+getinfo:   rc=0 size_download=match
+body:      len=match
+callbacks: many
+head:      abcdefghijklmnop
+tail:      uvwxyz0123456789
+long arg:  timeout=0 timeout(-1)=43 postfieldsize(-1)=0
+strerror:  23=Failed writing received data to disk/application | 0=No error
+version:   age>=4=yes vnum>0=yes protocols=many file=yes

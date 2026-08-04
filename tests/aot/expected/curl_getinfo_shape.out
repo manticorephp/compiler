@@ -1,0 +1,61 @@
+keys: 46
+  appconnect_time_us        integer
+  cainfo                    string
+  capath                    string
+  certinfo                  array
+  conn_id                   integer
+  connect_time              double
+  connect_time_us           integer
+  content_type              NULL
+  download_content_length   double
+  effective_method          string
+  filetime                  integer
+  header_size               integer
+  http_code                 integer
+  http_version              integer
+  httpauth_used             integer
+  local_ip                  string
+  local_port                integer
+  namelookup_time           double
+  namelookup_time_us        integer
+  posttransfer_time_us      integer
+  pretransfer_time          double
+  pretransfer_time_us       integer
+  primary_ip                string
+  primary_port              integer
+  protocol                  integer
+  proxyauth_used            integer
+  queue_time_us             integer
+  redirect_count            integer
+  redirect_time             double
+  redirect_time_us          integer
+  redirect_url              string
+  request_size              integer
+  scheme                    string
+  size_download             double
+  size_upload               double
+  speed_download            double
+  speed_upload              double
+  ssl_verify_result         integer
+  ssl_verifyresult          integer
+  starttransfer_time        double
+  starttransfer_time_us     integer
+  total_time                double
+  total_time_us             integer
+  upload_content_length     double
+  url                       string
+  used_proxy                integer
+-- determined values --
+size_download:   4096
+http_code:       0
+certinfo:        0
+url suffix:      yes
+-- single-option reads --
+SIZE_DOWNLOAD_T: 4096
+EFFECTIVE_URL:   file://
+HEADER_SIZE:     0
+CONTENT_TYPE:    false
+COOKIELIST:      array
+TOTAL_TIME:      double >=0 yes
+SIZE_DOWNLOAD:   double 4096
+body: match

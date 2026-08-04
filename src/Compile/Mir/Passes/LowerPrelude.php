@@ -189,6 +189,16 @@ trait LowerPrelude
             // xml_dom.php defines DOMNode before every DOM subclass.
             $src = $src . $this->xmlSrc . $this->xmlXpathSrc . $this->xmlDomSrc;
         }
+        if ($this->curlSrc !== '') {
+            // ext/curl — global namespace, so it rides this blob too. After
+            // exceptions.php (curl_setopt throws ValueError/TypeError and
+            // curl_exec rethrows a callback's Throwable) and after resource.php
+            // (CURLOPT_FILE / INFILE / STDERR take a \Resource).
+            //
+            // ⚠ ORDER IS LOAD-BEARING, same rule as xml above: curl_multi.php
+            // names __McCurl and CurlHandle, both defined in curl.php.
+            $src = $src . $this->curlSrc . $this->curlMultiSrc;
+        }
         $program = \Parser\Parser::parseSource($src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).

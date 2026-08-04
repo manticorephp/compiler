@@ -1,0 +1,9 @@
+exec:     true
+errno:    0
+length:   match
+ordered:  yes
+chunked:  yes
+tail:     0123456789abcdef
+short:    false errno=23
+throw:    callback said no
+both:     true cb_len=match
