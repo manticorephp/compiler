@@ -508,6 +508,10 @@ trait EmitLlvmMemory
         $fn = '@__mir_array_release';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_release'; }
+        // A capturing closure env: rc@-8 behind its own magic, and its generated
+        // drop releases the captures ({@see EmitLlvmRuntime::closureRcRuntime}).
+        // Self-guarded, so a `Closure` slot holding anything else is untouched.
+        elseif ($flavor === 'closure') { $this->rt->needsClosureRc = true; $fn = '@__mir_closure_release'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_release_buf'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
@@ -582,11 +586,30 @@ trait EmitLlvmMemory
                 $cls = $fallback->class ?? '';
             }
         }
+        // A CAPTURING closure env now has a lifetime header of its own, so an
+        // alias / element / property store must co-own it — otherwise the
+        // producing local's scope-exit release frees an env the new owner still
+        // points at. Self-guarded on the magic, so a `Closure` value from any
+        // other producer is left alone exactly as before. An owned producer
+        // (the literal itself) is filtered by the borrow gate further down.
+        if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && $this->isClosureClass($cls))) {
+            // An OWNED producer transfers its +1 — the literal itself, and a
+            // call/invoke returning a closure under the +1 return convention.
+            // Only a borrow (an alias, an element / property read, a param)
+            // needs a co-owner.
+            $k0 = $valueNode->kind;
+            if ($k0 === Node::KIND_CLOSURE || $k0 === Node::KIND_CALL
+                || $k0 === Node::KIND_METHOD_CALL || $k0 === Node::KIND_STATIC_CALL
+                || $k0 === Node::KIND_INVOKE) { return ''; }
+            $this->rt->needsClosureRc = true;
+            $cp = $this->ssa->allocReg();
+            $co  = '  ' . $cp . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
+            $co .= '  call void @__mir_closure_retain(ptr ' . $cp . ")\n";
+            return $co;
+        }
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY
             && $tk !== Type::KIND_STRING) { return ''; }
-        // #[Struct] classes and closures have no rc header (a closure
-        // struct is [fn_ptr, captures...] — offset 8 is a capture, not an
-        // rc word) — never rc-manage them.
+        // #[Struct] classes have no rc header — never rc-manage them.
         if ($tk === Type::KIND_OBJ) {
             $scls = $cls;
             // A raw foreign address has no rc header — retaining one writes into

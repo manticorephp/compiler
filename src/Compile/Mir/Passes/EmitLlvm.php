@@ -246,6 +246,11 @@ final class EmitLlvm implements EmitVisitor
     /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
      *  @var string[] */
     private array $knownFnNames = [];
+
+    /** @var array<string, string[]> closure fn name → per-capture rc flavor,
+     *  registered by the LITERAL and drained into the generated
+     *  `__mc_drop` / `__mc_retain` pair after the function loop. */
+    private array $closureDrops = [];
     /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
     private array $closureHasThis = [];
 
@@ -499,6 +504,10 @@ final class EmitLlvm implements EmitVisitor
             }
             $functionBodies .= $body;
         }
+        // One `__mc_drop` per capturing closure literal seen above — it releases
+        // the captures its env co-owns, and its address is already stamped into
+        // every env {@see EmitLlvmCalls::emitClosure}.
+        $functionBodies .= $this->emitClosureDropFns();
         \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
@@ -1674,9 +1683,44 @@ final class EmitLlvm implements EmitVisitor
         // fresh temp exactly like a concat. Only the shapes CondOwn declares
         // owned qualify — one with an erased arm stays borrowed.
         if ($this->condOwnsResult($node)) { return true; }
+        // `$s[$i]` on a STRING base is an ALLOCATION, not a borrow:
+        // `__mir_str_char_at` mints a fresh 1-char headered buffer for every
+        // read ({@see DemoteCharLocals}, which exists because that allocation is
+        // expensive). Only the reads DemoteCharLocals could not prove dead reach
+        // here, and a consumer that frees its other fresh operands has to free
+        // this one too — `$out = $out . $s[$i]` leaked one buffer per character,
+        // which is the whole of urldecode's 305 B/call. An ARRAY element read
+        // stays a borrow: it hands back the container's own reference.
+        if ($k === Node::KIND_ARRAY_ACCESS
+            && $node->array->type->kind === Type::KIND_STRING) { return true; }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;
+    }
+
+    /**
+     * Drop the KEY temp of an array read / isset / unset, the exact mirror of
+     * what the STORE paths already do ({@see EmitLlvmArrays::emitStoreElem} —
+     * `concatTempRelease` on the string arm, `__mir_cell_drop` on the cell
+     * arm). A store retains the key it keeps and drops its own +1; a READ keeps
+     * nothing, so its +1 must die at the call — `$m["key" . $i]` and
+     * `isset($m["key" . $i])` each leaked one string per lookup, which is 61 B
+     * an iteration and the single largest number in the bench leak table.
+     *
+     * `$key` is the register already coerced for the call; `$keyIsCell` selects
+     * the tag-dispatched drop. Borrowed producers (a local, a literal, an
+     * element read) answer '' and stay untouched — their owner releases them.
+     */
+    private function keyTempRelease(Node $index, string $key, bool $keyIsCell): string
+    {
+        if (!$keyIsCell) { return $this->concatTempRelease($index, $key); }
+        $k = $index->kind;
+        if ($k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
+            && $k !== Node::KIND_STATIC_CALL && $k !== Node::KIND_INVOKE
+            && $k !== Node::KIND_CONCAT) { return ''; }
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        return '  call void @__mir_cell_drop(i64 ' . $key . ")\n";
     }
 
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */

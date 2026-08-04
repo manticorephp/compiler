@@ -516,6 +516,36 @@ trait EmitLlvmBuiltins
      * because a handful of sites box a synthesized value with no node; every
      * site that has one should pass it, or that source leaks.
      */
+    /**
+     * Drop the array {@see boxToCell} REBUILT for a read-only consumer.
+     *
+     * Boxing a concrete-element vec/assoc is not a tag change: it walks the
+     * source into a FRESH cell-array that co-owns every element it took
+     * ({@see emitAssocToCellArrayUnified}). A consumer that only reads the cell
+     * — json_encode, print_r, var_export, implode — keeps nothing, so that
+     * whole rebuilt tree is dead the moment the call returns, and dropping it
+     * is what the +1 was for. `json_encode` of a 2000-row list leaked **337 KB
+     * per call** without this; a flat `vec[int]` of the same length, 16 KB.
+     *
+     * Anything else answers '': an already-CELL argument boxes to itself (a
+     * borrow of the caller's value), a bare `array` (unknown element) is the
+     * same pointer re-tagged, and a scalar box allocates nothing — dropping any
+     * of those frees a value the caller still owns. `__mir_cell_drop` is
+     * tag-dispatched, so it stays correct for whichever of the two array
+     * flavors the rebuild produced.
+     */
+    private function cellBoxTempDrop(Type $t, string $cellReg): string
+    {
+        if ($t->kind === Type::KIND_CELL) { return ''; }
+        if (!$t->isVec() && !$t->isAssoc()) { return ''; }
+        $el = $t->element;
+        if ($el === null || $el->kind === Type::KIND_CELL
+            || $el->kind === Type::KIND_UNKNOWN) { return ''; }
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
+    }
+
     private function boxToCell(Type $t, ?Node $src = null): string
     {
         $this->rt->needsTagged = true;
@@ -3498,6 +3528,7 @@ trait EmitLlvmBuiltins
         $out .= $this->boxToCell($args[0]->type);
         $bv = $this->lastValue;
         $out .= '  call i64 @manticore___mir_print_r(i64 ' . $bv . ', i64 0)' . "\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $bv);
         $this->lastValue = '1';
         $this->lastValueType = 'i64';
         return $out;
@@ -3596,11 +3627,13 @@ trait EmitLlvmBuiltins
             // answered "". The word is already either a tagged cell or a raw
             // pointer, and the 48-bit mask is the identity on the raw one;
             // implode_cell decodes each element by the array's own repr.
+            $boxed = '';
             if ($arr->type->kind === Type::KIND_UNKNOWN) {
                 $out .= $this->coerceToI64();
                 $out .= $this->cellToPtr();
             } else {
                 $out .= $this->boxToCell($arr->type);
+                $boxed = $this->lastValue;
                 $out .= $this->cellToPtr();
             }
             $vec = $this->lastValue;
@@ -3608,6 +3641,9 @@ trait EmitLlvmBuiltins
             $this->rt->needsImplodeCell = true;
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            // implode joins into a fresh string and keeps nothing of the walk —
+            // so a REBUILT cell-array is dead here ({@see cellBoxTempDrop}).
+            if ($boxed !== '') { $out .= $this->cellBoxTempDrop($arr->type, $boxed); }
             $this->lastValue = $reg; $this->lastValueType = 'ptr';
             return $out;
         }
@@ -5942,6 +5978,7 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_var_export(i64 '
               . $cv . ", i64 0)\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cv);
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
         $this->lastValue = $p;
@@ -6123,6 +6160,8 @@ trait EmitLlvmBuiltins
         $cell = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_enc(i64 ' . $cell . ")\n";
+        // The encoder READ the cell into its own buffer and kept nothing.
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell);
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;

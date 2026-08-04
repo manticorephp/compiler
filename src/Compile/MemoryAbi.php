@@ -109,6 +109,31 @@ final class MemoryAbi
      */
     public const GENERATOR_TAG_MAGIC = 0x7E66000000000006;
 
+    /**
+     * Sentinel in a CAPTURING CLOSURE ENV's `hash@-32`, the exact analogue of
+     * {@see GENERATOR_TAG_MAGIC}. The env is `[fn_ptr, cap0, cap1, …]` and its
+     * VALUE POINTER must keep pointing at `fn_ptr`: every capture offset, the
+     * indirect dispatch through slot 0 and the capture-prefixed closure ABI all
+     * index from there. So its lifetime header can only live at NEGATIVE
+     * offsets, and it borrows the STRING header's shape (base = `ptr - 32`,
+     * rc@-8) so even a misrouted generic release frees the right base.
+     *
+     * The two spare words carry what a string has no use for and a closure
+     * cannot do without: the per-closure RETAIN and DROP functions, which
+     * co-own / release exactly the captures this env holds. A closure with NO
+     * captures owns nothing and keeps the old bare allocation — it has no
+     * magic here, and every helper below then leaves it alone.
+     *
+     * `rc = -1` marks an immortal env, the same convention string literals use.
+     */
+    public const CLOSURE_TAG_MAGIC = 0x7E66000000000007;
+
+    /** Per-closure retain fn, at `env - 24` (the string's unused `cap`). */
+    public const CLOSURE_RETAIN_OFFSET = -24;
+
+    /** Per-closure drop fn, at `env - 16` (the string's unused `len`). */
+    public const CLOSURE_DROP_OFFSET = -16;
+
     // ─── String header (32 bytes) ─────────────────────────────────
 
     /**
