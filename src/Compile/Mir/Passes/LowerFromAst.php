@@ -375,6 +375,11 @@ final class LowerFromAst implements Pass
      *  that only reads SimpleXML does not carry the DOM class tree. Implies
      *  xmlSrc. */
     public string $xmlDomSrc = '';
+    /** ext/tokenizer's scanner core — DEMAND-GATED. Names nothing Zend owns so
+     *  it stays loadable under `php` for tools/tokenizer_diff.php. */
+    public string $tokenizerSrc = '';
+    /** PhpToken / token_get_all / token_name. Must follow tokenizerSrc. */
+    public string $tokenizerApiSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
@@ -2808,7 +2813,8 @@ final class LowerFromAst implements Pass
     private function extensionIsBuiltIn(string $ext): bool
     {
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
-            || $ext === 'openssl' || $ext === 'core' || $ext === 'standard';
+            || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
+            || $ext === 'tokenizer';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),
