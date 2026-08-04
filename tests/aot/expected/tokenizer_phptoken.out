@@ -1,0 +1,20 @@
+394|T_OPEN_TAG|1|0|ign|<?php 
+336|T_CLASS|1|6|sig|class
+397|T_WHITESPACE|1|11|ign| 
+262|T_STRING|1|12|sig|Foo
+397|T_WHITESPACE|1|15|ign| 
+123|{|1|16|sig|{
+397|T_WHITESPACE|1|17|ign| 
+125|}|1|18|sig|}
+397|T_WHITESPACE|1|19|ign| 
+396|T_CLOSE_TAG|1|20|sig|?>\n
+267|T_INLINE_HTML|2|23|sig|tail
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+int(-1)
+int(-1)
+string(7) "UNKNOWN"
+string(1) ";"
