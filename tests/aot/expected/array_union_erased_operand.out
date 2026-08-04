@@ -1,0 +1,30 @@
+int(3)
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(6) "expiry"
+  [2]=>
+  string(1) "z"
+}
+int(1)
+int(7)
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(30)
+}
+array(1) {
+  ["k"]=>
+  string(1) "v"
+}
+array(2) {
+  ["k"]=>
+  int(1)
+  ["j"]=>
+  int(6)
+}
+int(2)

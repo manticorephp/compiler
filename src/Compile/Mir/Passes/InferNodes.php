@@ -572,6 +572,21 @@ trait InferNodes
         if ($kind === Node::KIND_ARRAY_ACCESS)    { return $this->inferArrayAccess($node); }
         if ($kind === Node::KIND_STORE_ELEMENT)   { return $this->inferStoreElement($node); }
         if ($kind === Node::KIND_NEW_OBJ)         { return $this->inferNewObj($node); }
+        // `new $cls(...)`. The RESULT stays whatever lowering gave it — the
+        // class is a runtime value — but the ARGUMENTS still have to be
+        // inferred, and this arm was simply absent: every node under a dynamic
+        // `new` kept its default `unknown`, including `$this` and an array
+        // literal. symfony/cache CacheItem::pack is
+        //   new $valueWrapper($this->value->value, $m + ['expiry' => …] + …)
+        // and with both `+` operands erased, `inferAdd` saw no array, fell
+        // through to arithmetic, and emitted `add i64` on two array POINTERS —
+        // which clang rejects outright. The union operator was never the bug.
+        if ($kind === Node::KIND_NEW_DYN_OBJ) {
+            $nd = $node;
+            $this->inferNode($nd->classExpr);
+            foreach ($nd->args as $a) { $this->inferNode($a); }
+            return $node->type;
+        }
         if ($kind === Node::KIND_CLONE) {
             $cl = $node;
             $ot = $this->inferNode($cl->object);
