@@ -18,6 +18,16 @@ use Http\Request;
 use Http\Response;
 use Http\Server;
 
+// ⚠ THE MANTICORE-ONLY REFERENCE HAS TO BE HERE, before the port scan and the
+// fork — not merely before the first echo.
+//
+// It used to sit in the forked CHILD, at Server::onListener. Under php the child
+// died there and the PARENT sailed on, curling a port nobody was listening on
+// and printing the results — so php produced stdout, and difftest graded the
+// case as a real DIFF instead of PHP-SKIP. A `use` statement is not enough
+// either: it binds a name and touches no class.
+$probe = \Http\Method::Get;
+
 $port = 0;
 $listener = false;
 for ($p = 49900; $p < 49980; $p = $p + 1) {

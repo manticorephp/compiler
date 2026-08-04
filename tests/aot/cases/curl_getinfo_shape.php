@@ -20,11 +20,26 @@ $ch = \curl_init('file://' . $tmp);
 $body = \curl_exec($ch);
 
 $info = \curl_getinfo($ch);
-$keys = \array_keys($info);
-\sort($keys);
-echo "keys: ", \count($keys), "\n";
-foreach ($keys as $k) {
-    echo "  ", \str_pad($k, 26), \gettype($info[$k]), "\n";
+
+// ⚠ A CORE key list, not `array_keys($info)`. php builds its array from a list
+// fixed when PHP ITSELF was compiled, guarded by the libcurl it was built
+// against — so its key set legitimately differs from ours on a host whose
+// libcurl is older or newer (Debian 12's 7.88 has no CURLINFO_HTTPAUTH_USED,
+// which landed in 8.12). Dumping every key made this case a real difftest DIFF
+// on Linux and a MATCH on macOS, which says nothing about ext/curl. These are
+// the keys every libcurl in our supported range reports.
+/** @var string[] $core */
+$core = ['url', 'content_type', 'http_code', 'header_size', 'request_size',
+         'filetime', 'ssl_verify_result', 'redirect_count', 'total_time',
+         'namelookup_time', 'connect_time', 'pretransfer_time', 'size_upload',
+         'size_download', 'speed_download', 'speed_upload',
+         'download_content_length', 'upload_content_length',
+         'starttransfer_time', 'redirect_time', 'redirect_url', 'primary_ip',
+         'certinfo', 'primary_port', 'local_ip', 'local_port', 'http_version',
+         'protocol', 'scheme'];
+echo "core keys: ", \count($core), "\n";
+foreach ($core as $k) {
+    echo "  ", \str_pad($k, 26), \array_key_exists($k, $info) ? \gettype($info[$k]) : 'MISSING', "\n";
 }
 
 echo "-- determined values --\n";
