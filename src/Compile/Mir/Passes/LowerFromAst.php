@@ -185,6 +185,12 @@ final class LowerFromAst implements Pass
     /** Enclosing class while lowering a method body (self/static resolution). */
     private string $currentLowerClass = '';
 
+    /** Whether the body being lowered actually HAS a `$this` parameter. A
+     *  static method and a `#[TypeDef]` `__invoke` do not, and neither does a
+     *  free function — so a `self::`/`static::`/`parent::` call inside one has
+     *  no receiver to forward, however the callee is declared. */
+    private bool $currentLowerFnHasThis = false;
+
     /** `@template` names declared by the class being lowered, in order.
      *  @var string[] */
     private array $currentTypeParams = [];
@@ -1016,6 +1022,7 @@ final class LowerFromAst implements Pass
             // top-level closure reading `$this` capture a non-existent local
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
+            $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
             $mainStmts[] = $this->lowerStmt($stmt);
         }
@@ -1545,6 +1552,7 @@ final class LowerFromAst implements Pass
         $tdInvoke = $isTypeDef && $m->name === '__invoke';
         $params = [];
         // Static methods have no implicit `$this`.
+        $this->currentLowerFnHasThis = !$m->isStatic && !$tdInvoke;
         if (!$m->isStatic && !$tdInvoke) {
             $params[] = new Param(
                 name: 'this',
@@ -4312,6 +4320,14 @@ final class LowerFromAst implements Pass
         // `parent::__construct(...)`) is dispatched against the current
         // object — the callee has `$this` as param 0, so pass it. A genuine
         // static method has no `$this` param and must not get one.
+        // A method NOTHING declares is php's runtime Error, raised where the
+        // call is reached — not a link failure. symfony/clock reads
+        // `static::getLastErrors()`, which php's DateTimeImmutable has and ours
+        // does not, inside a throw expression that only runs on a parse failure.
+        if ($this->staticCallUnresolvable($class, $expr->method)) {
+            return $this->throwErrorExpr(
+                'Call to undefined method ' . $class . '::' . $expr->method . '()');
+        }
         $args = [];
         $isSelfish = $low === 'self' || $low === 'parent' || $low === 'static';
         // A forwarding call (`self::`/`parent::`/`static::`) propagates the
@@ -4319,7 +4335,16 @@ final class LowerFromAst implements Pass
         // specialised per descendant too — else `parent::m()` reaching an LSB
         // ancestor binds `static` to the lexical class, not the called one.
         if ($isSelfish) { $this->sawStaticUse = true; }
-        if ($isSelfish && !$this->methodIsStatic($class, $expr->method)) {
+        // ⚠ `methodIsStatic` answers FALSE for a method it cannot resolve, on
+        // purpose — an unresolved `parent::m()` should still receive `$this`.
+        // That default is only sound where a `$this` EXISTS. Inside a static
+        // method it forwarded a local the frame never had, and MIR.verify
+        // rejected the program: `static::getLastErrors()` in symfony/clock's
+        // DatePoint (php declares it; our DateTimeImmutable does not) stopped
+        // tier 2 with `dangling local $this`. Three lines reproduce it —
+        // `class B { static function f() { return static::nope(); } }`.
+        if ($isSelfish && $this->currentLowerFnHasThis
+            && !$this->methodIsStatic($class, $expr->method)) {
             $args[] = new LoadLocal('this', Type::obj($this->currentLowerClass));
         }
         $params = $this->resolveMethodParams($class, $expr->method);
@@ -4345,6 +4370,48 @@ final class LowerFromAst implements Pass
         $sc = new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
         $sc->srcArgc = \count($expr->args);
         return $sc;
+    }
+
+    /**
+     * Whether NOTHING in `$class`'s chain declares `$method` — and we can prove
+     * it, which is the harder half. php raises `Error: Call to undefined method`
+     * when the call is REACHED, so a reference behind a guard that never fires
+     * costs it nothing; refusing to build (or emitting a call to a symbol that
+     * does not exist, which is what a static call did) is strictly stricter.
+     * Same rule the constant fallthrough already follows.
+     *
+     * Deliberately conservative — every one of these makes it answer FALSE:
+     *  - an ancestor, interface or trait this build has not parsed, so absence
+     *    is unprovable rather than established;
+     *  - a `__callStatic` anywhere in the chain, which is exactly php's hook for
+     *    a method that is not declared;
+     *  - an ENUM or interface receiver, whose members arrive by other routes.
+     */
+    private function staticCallUnresolvable(string $class, string $method): bool
+    {
+        if ($class === '' || $method === '') { return false; }
+        $c = $class;
+        $guard = 0;
+        while ($c !== '' && $guard < 64) {
+            $decl = $this->classDecls[$c] ?? null;
+            // Unknown link in the chain — cannot prove the method is absent.
+            if ($decl === null) { return false; }
+            if ($decl->kind !== 'class') { return false; }
+            foreach ($decl->methods as $m) {
+                if ($m->name === $method || $m->name === '__callStatic') { return false; }
+            }
+            foreach ($decl->uses as $traitName) {
+                $t = $this->classDecls[$traitName] ?? null;
+                if ($t === null) { return false; }
+                foreach ($t->methods as $tm) {
+                    if ($tm->name === $method || $tm->name === '__callStatic') { return false; }
+                }
+            }
+            $cd = $this->classTable[$c] ?? null;
+            $c = $cd !== null ? $cd->parent : '';
+            $guard = $guard + 1;
+        }
+        return $guard < 64;
     }
 
     /** Whether `$method` resolved from `$class` (walking ancestors) is a

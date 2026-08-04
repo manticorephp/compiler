@@ -87,6 +87,9 @@ final class VivifyRefArgs implements Pass
     /** @var array<string, Type> candidate local → the callee's declared param type */
     private array $candidates = [];
 
+    /** @var array<string, true> locals php auto-vivifies as an ARRAY (`$x[] = v`) */
+    private array $autoviv = [];
+
     public function run(Module $module): Module
     {
         $this->refMasks = [];
@@ -147,8 +150,9 @@ final class VivifyRefArgs implements Pass
     {
         $this->defined = DefinedLocals::collect($fn);
         $this->candidates = [];
+        $this->autoviv = [];
         $this->walk($fn->body);
-        if (\count($this->candidates) === 0) { return; }
+        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0) { return; }
 
         // A `global $x` name in __main writes through `@g_x`, not a stack slot
         // ({@see EmitLlvmModule}), so an init here would neither create the
@@ -175,6 +179,14 @@ final class VivifyRefArgs implements Pass
             $init = new StoreLocal($name, new NullConst(Type::null_()), $declared);
             $init->declaredType = $declared;
             $inits[] = $init;
+        }
+        // php creates an ARRAY here, not NULL, and the element type is whatever
+        // the appends put in it — so this is the ordinary `$x = [];` a
+        // programmer would have written, left for InferTypes to shape.
+        foreach ($this->autoviv as $name => $unusedAv) {
+            if (isset($skip[$name]) || isset($this->defined[$name])
+                || isset($this->candidates[$name])) { continue; }
+            $inits[] = new StoreLocal($name, new \Compile\Mir\ArrayLit([], Type::unknown()), Type::unknown());
         }
         if (\count($inits) === 0) { return; }
         $fn->body->stmts = \array_merge($inits, $fn->body->stmts);
@@ -258,6 +270,42 @@ final class VivifyRefArgs implements Pass
                 // `$container->resolveEnvPlaceholders($n, null, $usedEnvs)` in
                 // symfony/cache is a T3 collaborator seen from T2.
                 $this->vivifyBareLocals($mc->args);
+            }
+        } elseif ($k === Node::KIND_STORE_ELEMENT) {
+            // `$keys[] = $v` / `$keys['k'] = $v` on an UNDEFINED variable is
+            // php's array auto-vivification: the append CREATES the array. Only
+            // a bare local base counts — a property or nested chain has its own
+            // rules. var-dumper's StubCaster::castEnum builds `$keys` this way
+            // and then hands it to array_combine.
+            $se = $this->asStoreElement($n);
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
+                $ll = $this->asLoadLocal($se->array);
+                if (!isset($this->defined[$ll->name]) && !isset($this->autoviv[$ll->name])) {
+                    $this->autoviv[$ll->name] = true;
+                }
+            }
+        } elseif ($k === Node::KIND_CLOSURE) {
+            // `use (&$x)` is the other by-ref position, and php treats it the
+            // same way: the capture CREATES the variable, so an undefined one
+            // costs nothing. symfony/finder's SplFileInfo::getContents installs
+            // `static function ($type, $msg) use (&$error) {...}` and reads
+            // `$error` back only when the read actually failed.
+            //
+            // Only the UNDEFINED case is claimed. A capture of a local that
+            // already has stores keeps whatever type they give it — the working
+            // `$e = null; … use (&$e)` shape must not shift underneath itself.
+            $cl = $this->asClosure($n);
+            $ci = 0;
+            foreach ($cl->captures as $c) {
+                $byRef = $cl->captureByRef[$ci] ?? false;
+                $ci = $ci + 1;
+                if (!$byRef || $c->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+                $ll = $this->asLoadLocal($c);
+                if (isset($this->defined[$ll->name]) || isset($this->candidates[$ll->name])) { continue; }
+                // UNKNOWN, not cell: the closure writes through the captured
+                // ADDRESS raw (its by-ref param is cell-typed only by the
+                // uniform closure ABI), so the caller must read it raw too.
+                $this->candidates[$ll->name] = Type::unknown();
             }
         } elseif ($k === Node::KIND_INVOKE) {
             $iv = $this->asInvoke($n);
@@ -407,5 +455,7 @@ final class VivifyRefArgs implements Pass
     private function asInvoke(Node $n): \Compile\Mir\Invoke_ { return $n; }
     private function asLoadLocal(Node $n): \Compile\Mir\LoadLocal { return $n; }
     private function asStoreLocal(Node $n): StoreLocal { return $n; }
+    private function asClosure(Node $n): \Compile\Mir\Closure_ { return $n; }
+    private function asStoreElement(Node $n): \Compile\Mir\StoreElement { return $n; }
     private function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 }

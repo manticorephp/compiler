@@ -730,6 +730,12 @@ trait LowerFns
             }
             return $out;
         }
+        // `...$xs` in an argument list. Without this arm the spread OPERAND is
+        // invisible to the free-variable scan, so `fn ($t) => $t->m(...$xs)`
+        // captured nothing and `$xs` dangled inside the closure — symfony's
+        // type-info spreads a VARIADIC parameter into exactly that shape
+        // (`static fn (Type $t) => $t->isIdentifiedBy(...$identifiers)`).
+        if ($k === 'Spread') { return $this->collectVars($e->value); }
         // A nested `function () use ($x) {}` makes each explicitly-captured var
         // free in the enclosing scope (its body runs in an isolated scope).
         if ($k === 'Closure') {
@@ -737,7 +743,90 @@ trait LowerFns
             foreach ($e->uses as $u) { $out[] = $u->name; }
             return $out;
         }
-        return [];
+        if ($k === 'NullCoalesce') {
+            return \array_merge($this->collectVars($e->left), $this->collectVars($e->right));
+        }
+        if ($k === 'Instanceof') { return $this->collectVars($e->operand); }
+        // ⚠ A plain `$x = …` target is a WRITE, and php captures nothing for it:
+        // an arrow fn assigning to a name the enclosing scope does not have
+        // simply creates its own local. Collecting the target made
+        // `fn ($m) => ($parent = $c->getParentClass()) ? … : …` capture a
+        // variable that never existed. A COMPLEX target still reads its base
+        // (`$a[$k] = v` needs `$a`), and a COMPOUND assign reads the variable
+        // itself, so those keep the target.
+        if ($k === 'Assign') {
+            $out = [];
+            if ($e->target->kind !== 'Variable') { $out = $this->collectVars($e->target); }
+            return \array_merge($out, $this->collectVars($e->value));
+        }
+        if ($k === 'CompoundAssign') {
+            return \array_merge($this->collectVars($e->target), $this->collectVars($e->value));
+        }
+        if ($k === 'RefAssign') {
+            $out = [];
+            if ($e->target->kind !== 'Variable') { $out = $this->collectVars($e->target); }
+            return \array_merge($out, $this->collectVars($e->source));
+        }
+        if ($k === 'IncDec') { return $this->collectVars($e->operand); }
+        // `fn () => [$a, $b]` had NO arm at all and silently captured nothing.
+        if ($k === 'ArrayLit') {
+            $out = [];
+            foreach ($e->elements as $el) {
+                if ($el->key !== null) { $out = \array_merge($out, $this->collectVars($el->key)); }
+                $out = \array_merge($out, $this->collectVars($el->value));
+            }
+            return $out;
+        }
+        if ($k === 'DynProp') {
+            return \array_merge($this->collectVars($e->object), $this->collectVars($e->name));
+        }
+        if ($k === 'NewDyn') {
+            $out = $this->collectVars($e->classExpr);
+            foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
+        if ($k === 'Clone') {
+            $out = $this->collectVars($e->object);
+            if ($e->withProps !== null) { $out = \array_merge($out, $this->collectVars($e->withProps)); }
+            return $out;
+        }
+        if ($k === 'Match') {
+            $out = $this->collectVars($e->subject);
+            foreach ($e->arms as $arm) {
+                foreach ($arm->conds ?? [] as $c) { $out = \array_merge($out, $this->collectVars($c)); }
+                $out = \array_merge($out, $this->collectVars($arm->body));
+            }
+            return $out;
+        }
+        if ($k === 'NamedArg') { return $this->collectVars($e->value); }
+        if ($k === 'Yield') {
+            $out = [];
+            if ($e->key !== null) { $out = \array_merge($out, $this->collectVars($e->key)); }
+            if ($e->value !== null) { $out = \array_merge($out, $this->collectVars($e->value)); }
+            return $out;
+        }
+        if ($k === 'DynamicStaticAccess') { return $this->collectVars($e->receiver); }
+        if ($k === 'DynamicStaticCall') {
+            $out = $this->collectVars($e->receiver);
+            foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
+        // Leaves — nothing to collect, named so the dispatch below can be
+        // exhaustive.
+        if ($k === 'IntLiteral' || $k === 'FloatLiteral' || $k === 'StringLiteral'
+            || $k === 'BoolLiteral' || $k === 'NullLiteral' || $k === 'Identifier'
+            || $k === 'MagicConstant' || $k === 'StaticAccess' || $k === 'Ellipsis') {
+            return [];
+        }
+        // ⚠ EXHAUSTIVE ON PURPOSE. This used to `return []` for anything it did
+        // not recognise, which is silent capture LOSS: an arrow fn whose body
+        // held an unlisted shape compiled to a closure missing a capture, and
+        // the failure surfaced far away as `MIR.verify: dangling local`. An
+        // array literal — `fn () => [$a, $b]` — was one such shape for as long
+        // as the list existed. Same lesson as NodeClone: a dispatch nobody can
+        // forget to extend is the only kind worth having.
+        throw new \RuntimeException(
+            'MIR.lower: free-variable scan has no rule for expression kind ' . $k);
     }
 
     /**
