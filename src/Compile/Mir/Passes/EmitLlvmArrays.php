@@ -685,6 +685,12 @@ trait EmitLlvmArrays
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        // Both arms are done with the key here (the register dominates the
+        // join), so a fresh temp dies once ({@see EmitLlvm::keyTempRelease}).
+        // The BOXED copy is the same pointer re-tagged, never a second buffer.
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
+        }
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         if ($self->type->kind === Type::KIND_FLOAT) {
@@ -719,6 +725,10 @@ trait EmitLlvmArrays
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($aa->index) . ")\n";
         } else {
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
+        }
+        // A read keeps no key — drop a fresh one ({@see EmitLlvm::keyTempRelease}).
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -783,7 +793,7 @@ trait EmitLlvmArrays
      */
     private function erasedReprCode(StoreElement $se): ?int
     {
-        $at = $se->array->type;
+        $at = $this->storeBaseReleaseType($se);
         // Only the erased path (element unknown) releases via the repr helper;
         // a concrete element uses vecstr/vecobj/veccell and must not be stamped.
         $erased = $at->kind === Type::KIND_UNKNOWN
@@ -810,6 +820,36 @@ trait EmitLlvmArrays
             return \Compile\MemoryAbi::ARRAY_REPR_OBJ;
         }
         return null;
+    }
+
+    /**
+     * The type the RELEASE of this store's base will be chosen from — the type
+     * pinned on the rc local at its FIRST owned store ({@see
+     * InsertMemoryOps}), not the possibly-narrowed type at this site.
+     *
+     * The two must be read from ONE place or the array is left half-described.
+     * `$out = []; …; if (…) { $out[$k] = ''; continue; } $out[$k2] = substr(…);`
+     * is the shape that proved it: the first store still saw `assoc[string,
+     * unknown]` and stamped STR, the second saw the NARROWED `assoc[string,
+     * string]` and stamped nothing — and since only the second one ever runs,
+     * the buffer reached its release with repr bits of zero while the release
+     * itself was chosen from the erased type, i.e. the plain repr walk. It
+     * dropped nothing: two leaked strings per call, the whole of `parseQuery`.
+     *
+     * Reading the local's recorded type here also keeps the ⚠ above intact — a
+     * local whose recorded type is CONCRETE stays unstamped even where a store
+     * site sees it erased, which is exactly the `uasort`/`natsort` write-back
+     * the flavored release owns.
+     */
+    private function storeBaseReleaseType(StoreElement $se): Type
+    {
+        $base = $se->array;
+        if ($base->kind !== Node::KIND_LOAD_LOCAL) { return $base->type; }
+        $mo = $this->frame->rcObjLocals[$base->name] ?? null;
+        if ($mo === null) { return $base->type; }
+        $t = $mo->target;
+        if ($t === null) { return $base->type; }
+        return $t->type;
     }
 
     /**

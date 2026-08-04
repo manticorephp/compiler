@@ -655,6 +655,7 @@ trait EmitLlvmRuntime
             $out .= $this->dropRuntime();
             if ($this->rt->needsCc) { $out .= $this->ccRuntime(); }
         }
+        if ($this->rt->needsClosureRc) { $out .= $this->closureRcRuntime(); }
         if ($this->rt->needsStrRc) {
             // String rc: the rc word (ptr-8) holds the count; cap@-16
             // precedes it. Immortal strings (literals, arena) carry -1 and
@@ -1023,6 +1024,95 @@ trait EmitLlvmRuntime
             $out .= "  ret void\n";
             $out .= "}\n";
         }
+        return $out;
+    }
+
+    /**
+     * `__mir_closure_retain` / `__mir_closure_release` — the lifetime of a
+     * CAPTURING closure env `[MAGIC@-32, retain@-24, drop@-16, rc@-8][fn, caps…]`
+     * ({@see \Compile\MemoryAbi::CLOSURE_TAG_MAGIC}).
+     *
+     * Both self-guard on the magic, so a `Closure`-typed value that is NOT one
+     * of our capturing envs — a first-class callable, a rebound copy, anything
+     * a future producer invents — is left completely alone: the old
+     * never-freed behaviour, which leaks but cannot corrupt. The per-closure
+     * `drop` releases exactly the captures the literal retained (it is
+     * generated beside the closure body, from the same type switch), so the
+     * two halves cannot drift.
+     *
+     * ⚠ The magic lives 32 bytes BEFORE the value pointer, so both helpers
+     * read `p-32` on a pointer that might not have a header. That is the same
+     * probe the Generator frame does at `-24`: the read stays inside the heap
+     * (never a fresh page boundary in practice) and a false positive needs an
+     * exact 64-bit magic to appear there by chance.
+     */
+    private function closureRcRuntime(): string
+    {
+        $magic = (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC;
+        $hdr   = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $mOff  = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
+        $dOff  = (string)\Compile\MemoryAbi::CLOSURE_DROP_OFFSET;
+        $out  = "define void @__mir_closure_retain(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %z = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %z, label %done, label %hdr\n";
+        $out .= "hdr:\n";
+        $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
+        $out .= "  %m = load i64, ptr %mp\n";
+        $out .= "  %ism = icmp eq i64 %m, " . $magic . "\n";
+        $out .= "  br i1 %ism, label %rcb, label %done\n";
+        $out .= "rcb:\n";
+        $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        $out .= "  %c = load i64, ptr %rp\n";
+        $out .= "  %imm = icmp slt i64 %c, 0\n";
+        $out .= "  br i1 %imm, label %done, label %inc\n";
+        $out .= "inc:\n";
+        $out .= "  %c1 = add i64 %c, 1\n";
+        $out .= "  store i64 %c1, ptr %rp\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_closure_release(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %z = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %z, label %done, label %hdr\n";
+        $out .= "hdr:\n";
+        $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
+        $out .= "  %m = load i64, ptr %mp\n";
+        $out .= "  %ism = icmp eq i64 %m, " . $magic . "\n";
+        $out .= "  br i1 %ism, label %rcb, label %done\n";
+        $out .= "rcb:\n";
+        $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        $out .= "  %c = load i64, ptr %rp\n";
+        $out .= "  %imm = icmp slt i64 %c, 0\n";
+        $out .= "  br i1 %imm, label %done, label %dec\n";
+        $out .= "dec:\n";
+        $out .= "  %c1 = sub i64 %c, 1\n";
+        $out .= "  store i64 %c1, ptr %rp\n";
+        $out .= "  %zero = icmp sle i64 %c1, 0\n";
+        $out .= "  br i1 %zero, label %free, label %done\n";
+        $out .= "free:\n";
+        // The captures die with the env: one generated fn per closure, its
+        // address stamped by the literal. A no-capture env stores null here.
+        $out .= "  %dp = getelementptr inbounds i8, ptr %p, i64 " . $dOff . "\n";
+        $out .= "  %dv = load i64, ptr %dp\n";
+        $out .= "  %hasd = icmp ne i64 %dv, 0\n";
+        $out .= "  br i1 %hasd, label %dropit, label %dofree\n";
+        $out .= "dropit:\n";
+        $out .= "  %df = inttoptr i64 %dv to ptr\n";
+        $out .= "  call void %df(ptr %p)\n";
+        $out .= "  br label %dofree\n";
+        $out .= "dofree:\n";
+        // Clear the magic first: a stale pointer released twice then bails at
+        // the guard instead of pushing a freed block onto a free list.
+        $out .= "  store i64 0, ptr %mp\n";
+        $out .= "  %base = getelementptr inbounds i8, ptr %p, i64 -" . $hdr . "\n";
+        $out .= "  call void @free(ptr %base)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
         return $out;
     }
 

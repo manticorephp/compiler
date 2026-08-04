@@ -15,8 +15,10 @@ use Buffer\ByteBuffer;
 use Http\Headers;
 use Http\Parser;
 
-$n = 200000;
-if ($argc > 1) {
+// An explicit numeric arg is an absolute iteration count; any other arg (the
+// dummy the LEAK harness passes) scales the default instead.
+$n = 200000 * $argc;
+if ($argc > 1 && (int)$argv[1] > 0) {
     $n = (int)$argv[1];
 }
 

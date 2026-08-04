@@ -9,8 +9,10 @@
 use Buffer\ByteBuffer;
 use Http\Parser;
 
-$n = 50000;
-if ($argc > 1) {
+// Numeric arg = absolute count; a non-numeric one (the LEAK harness's dummy)
+// scales the default.
+$n = 50000 * $argc;
+if ($argc > 1 && (int)$argv[1] > 0) {
     $n = (int)$argv[1];
 }
 

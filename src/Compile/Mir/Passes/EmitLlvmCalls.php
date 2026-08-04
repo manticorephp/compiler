@@ -291,10 +291,45 @@ trait EmitLlvmCalls
         // Layout: [fn_ptr, cap0, cap1, ...]. The fn ptr at slot 0 lets a
         // closure invoked through a `Closure`-typed value (returned /
         // passed) dispatch indirectly; captures follow at slot 1+.
-        $sz = 8 * (1 + $cnt);
-        $buf = $this->ssa->allocReg();
-        $out = '  ' . $buf . ' = call ptr @__mir_alloc(i64 ' . (string)$sz . ")\n";
+        //
+        // The env carries a LIFETIME HEADER at negative offsets — the string
+        // header's shape, exactly as a Generator frame does, so no capture
+        // offset moves and a misrouted generic release still frees the right
+        // base: `[MAGIC@-32, retain@-24, drop@-16, rc@-8]`. Without it neither
+        // the env nor the +1 this function takes on every captured
+        // string/array/object was EVER freed — 16 B per closure plus the whole
+        // captured value, at every evaluation of the literal (measured: 80 B an
+        // iteration for a captured string, 112 for an array).
         $fnName = '__closure_' . (string)$cl->id;
+        $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $sz = $hdr + 8 * (1 + $cnt);
+        $base = $this->ssa->allocReg();
+        $out = '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . (string)$sz . ")\n";
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . ' = getelementptr inbounds i8, ptr ' . $base
+              . ', i64 ' . (string)$hdr . "\n";
+        $this->rt->needsClosureRc = true;
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_HASH_OFFSET,
+            (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC);
+        // The per-closure retain/drop pair; both null when the closure owns
+        // nothing through its env, which keeps release a plain free.
+        $dropV = '0';
+        $retV = '0';
+        $flavors = $this->closureCaptureFlavors($cl);
+        if ($this->closureOwnsCaptures($flavors)) {
+            $this->closureDrops[$fnName] = $flavors;
+            $dropReg = $this->ssa->allocReg();
+            $out .= '  ' . $dropReg . ' = ptrtoint ptr @manticore_'
+                  . $this->mangle($fnName . '__mc_drop') . " to i64\n";
+            $dropV = $dropReg;
+            $retReg = $this->ssa->allocReg();
+            $out .= '  ' . $retReg . ' = ptrtoint ptr @manticore_'
+                  . $this->mangle($fnName . '__mc_retain') . " to i64\n";
+            $retV = $retReg;
+        }
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET, $retV);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET, $dropV);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_RC_OFFSET, '1');
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = ptrtoint ptr @manticore_' . $this->mangle($fnName) . " to i64\n";
         $out .= '  store i64 ' . $fp . ', ptr ' . $buf . "\n";
@@ -348,6 +383,152 @@ trait EmitLlvmCalls
         }
         $this->lastValue = $buf;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** Register set by {@see closureHdrLoad} alongside its returned value. */
+    private string $closureHdrLoadOut = '';
+
+    /** One header word of a closure env, read through its VALUE pointer; the
+     *  IR lands in {@see $closureHdrLoadOut}. */
+    private function closureHdrLoad(string $env, int $offset): string
+    {
+        $p = $this->ssa->allocReg();
+        $out  = '  ' . $p . ' = getelementptr inbounds i8, ptr ' . $env
+              . ', i64 ' . (string)$offset . "\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = load i64, ptr ' . $p . "\n";
+        $this->closureHdrLoadOut = $out;
+        return $v;
+    }
+
+    /** One header word of a closure env, written through its VALUE pointer. */
+    private function closureHdrStore(string $env, int $offset, string $value): string
+    {
+        $p = $this->ssa->allocReg();
+        $out  = '  ' . $p . ' = getelementptr inbounds i8, ptr ' . $env
+              . ', i64 ' . (string)$offset . "\n";
+        $out .= '  store i64 ' . $value . ', ptr ' . $p . "\n";
+        return $out;
+    }
+
+    /**
+     * The rc flavor of each capture, in slot order, read from the LITERAL's
+     * capture expressions — the only faithful description of what the env
+     * holds. ⚠ NOT the closure body's capture params: the uniform closure ABI
+     * types a scalar param as a CELL and the body unboxes it, so reading the
+     * flavors there had the drop call `__mir_cell_drop` on a raw string pointer
+     * — a silent no-op, and the captured value went on leaking while the env
+     * itself was correctly freed.
+     *
+     * It is the exact mirror of the retain {@see emitClosure} emits, which is
+     * what makes the generated pair balanced by construction:
+     *   - a BY-REF capture packs the ADDRESS of the enclosing slot, never a
+     *     value ⇒ skipped;
+     *   - CELL / UNKNOWN was co-owned by `__mir_cell_retain` ⇒ `__mir_cell_drop`
+     *     (the `rawContainerRetainIr` half has no mirror — that stays a leak,
+     *     never an over-release);
+     *   - everything else goes through `rcRetainByType`, which co-owns exactly
+     *     string / array / obj / closure, so those and only those are dropped.
+     * An owned producer transfers its +1 instead of being retained; either way
+     * the env holds exactly ONE reference, so one drop is right.
+     *
+     * @return string[] per-capture flavor, '' = nothing to own
+     */
+    private function closureCaptureFlavors(Closure_ $cl): array
+    {
+        $flavors = [];
+        $i = 0;
+        foreach ($cl->captures as $c) {
+            $ref = ($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL;
+            $i = $i + 1;
+            if ($ref) { $flavors[] = ''; continue; }
+            $t = $c->type;
+            $k = $t->kind;
+            if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { $flavors[] = 'cell'; continue; }
+            if ($k === Type::KIND_STRING) { $flavors[] = 'str'; continue; }
+            if ($t->isArray()) { $flavors[] = 'arr'; continue; }
+            if ($k === Type::KIND_CLOSURE) { $flavors[] = 'closure'; continue; }
+            if ($k === Type::KIND_OBJ) {
+                $cls = $t->class ?? '';
+                if ($cls === 'Ffi\\Ptr' || $cls === 'Generator') { $flavors[] = ''; continue; }
+                if ($this->isClosureClass($cls)) { $flavors[] = 'closure'; continue; }
+                if ($this->isEnumClass($cls)) { $flavors[] = ''; continue; }
+                if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) {
+                    $flavors[] = '';
+                    continue;
+                }
+                $flavors[] = 'obj';
+                continue;
+            }
+            $flavors[] = '';
+        }
+        return $flavors;
+    }
+
+    /** @param string[] $flavors  Does this env own anything? */
+    private function closureOwnsCaptures(array $flavors): bool
+    {
+        foreach ($flavors as $f) {
+            if ($f !== '') { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * `@manticore___closure_N__mc_drop` / `__mc_retain` for every capturing
+     * closure in this module, emitted after the function bodies. `internal`,
+     * like the closure bodies: the name is a per-module counter and the address
+     * travels inside the env, never through the linker.
+     *
+     * The RETAIN twin exists for `Closure::bind`/`bindTo`/`call`, which copy an
+     * env slot-for-slot: without it the copy would alias captures it does not
+     * own and the original's release would free them underneath it.
+     */
+    private function emitClosureDropFns(): string
+    {
+        $out = '';
+        foreach ($this->closureDrops as $fnName => $flavors) {
+            $out .= $this->closureRcFn($fnName, $flavors, false);
+            $out .= $this->closureRcFn($fnName, $flavors, true);
+        }
+        return $out;
+    }
+
+    /** @param string[] $flavors */
+    private function closureRcFn(string $fnName, array $flavors, bool $retain): string
+    {
+        $suffix = $retain ? '__mc_retain' : '__mc_drop';
+        $out = 'define internal void @manticore_' . $this->mangle($fnName . $suffix)
+             . "(ptr %env) {\nentry:\n";
+        $i = 0;
+        foreach ($flavors as $flavor) {
+            $i = $i + 1;
+            if ($flavor === '') { continue; }
+            $gep = $this->ssa->allocReg();
+            $out .= '  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 '
+                  . (string)$i . "\n";
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = load i64, ptr ' . $gep . "\n";
+            if ($flavor === 'cell') {
+                $out .= '  call void @' . ($retain ? '__mir_cell_retain' : '__mir_cell_drop')
+                      . '(i64 ' . $v . ")\n";
+                continue;
+            }
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $v . " to ptr\n";
+            if ($flavor === 'str') {
+                $fn = $retain ? '__mir_rc_retain_str' : '__mir_rc_release_str';
+            } elseif ($flavor === 'arr') {
+                $fn = $retain ? '__mir_array_retain' : '__mir_array_release';
+            } elseif ($flavor === 'closure') {
+                $fn = $retain ? '__mir_closure_retain' : '__mir_closure_release';
+            } else {
+                $fn = $retain ? '__mir_rc_retain' : '__mir_rc_release';
+            }
+            $out .= '  call void @' . $fn . '(ptr ' . $p . ")\n";
+        }
+        $out .= "  ret void\n}\n";
         return $out;
     }
 
