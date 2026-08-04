@@ -3754,8 +3754,33 @@ final class UnifiedArrayRuntime
         // holes are removed lazily by {@see emitCompact} on the next full
         // iteration; lookups skip a dead entry via its KIND. This turns an
         // interleaved unset/lookup churn from ~O(n) per op into O(1).
+        //
+        // The KEY's reference dies HERE, and it must: the free walk SKIPS
+        // tombstones on purpose ({@see emitReleaseVariant} — dropping there
+        // would double-free an entry a compaction already moved), so an unset
+        // that drops nothing leaks one key string per call, forever. The drop
+        // mirrors a live path exactly — it balances the retain in {@see
+        // emitSetStr} — and the word is cleared afterwards so a later
+        // compaction / index rebuild cannot see a pointer that is no longer
+        // ours.
+        //
+        // ⛔ The VALUE is deliberately NOT dropped here, and this is not an
+        // oversight: an element READ IS A BORROW in this compiler (`$keep =
+        // $m["b"];` takes no reference of its own), so dropping at unset frees
+        // a value a live local still points at. It is observable — php prints
+        // `__destruct` at SHUTDOWN for `$keep = $m[$k]; unset($m[$k]);` and we
+        // printed it at the unset. The value half only becomes sound once an
+        // element read co-owns what it hands out; until then this is the
+        // remaining tombstone leak (one value per unset), and it is the smaller
+        // half — the key was leaked by EVERY unset, the value only by an unset
+        // of an rc-managed element.
         $fi = $found->load(Type::i64(), $iSlot);
         $found->call('__mir_array_index_remove', Type::void(), [$arr, $fi]);
+        if ($isStr) {
+            $kp = $found->load(Type::ptr(), $this->entryAddr($found, $arr, $fi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+            $found->call('__mir_rc_release_str', Type::void(), [$kp]);
+            $found->store(Value::null(), $this->entryAddr($found, $arr, $fi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        }
         $found->store(Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED),
             $this->entryAddr($found, $arr, $fi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $fl = $found->load(Type::i64(), $this->hdr($found, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));

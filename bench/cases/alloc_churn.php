@@ -20,8 +20,9 @@ class Node
 }
 
 $sum = 0;
+$n = 300000 * $argc;
 $t0 = microtime(true);
-for ($i = 0; $i < 300000; $i++) {
+for ($i = 0; $i < $n; $i++) {
     $a = new Node($i, $i * 3);
     $b = new Node($i + 1, $i * 5, $a);
     $sum += $b->weight + $b->next->id;

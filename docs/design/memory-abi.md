@@ -265,15 +265,60 @@ Global state: `@__manticore_cc_roots`, `@__manticore_cc_count`, `@__manticore_cc
 threshold heartbeat and no safe-point trigger, and the collector does not scan static or
 global roots. Both are open work — see `docs/ROADMAP.md`.
 
+## 7a. Small-object pool
+
+Objects, unified-array buffers and hash bucket side-arrays are served by a
+size-classed pool in front of `malloc`, emitted by
+`EmitLlvmRuntime::poolRuntime()` and gated on `Compile\Debug::$pool`
+(`MANTICORE_POOL=0` disables). Strings keep their own older two-class free list;
+`__mir_alloc` (closure envs, generator frames, boxed args) is still plain
+`malloc`.
+
+Shape (`MemoryAbi`): one `mmap` region of `POOL_REGION_BYTES` (1 GiB of ADDRESS
+SPACE — untouched pages are never committed), carved into `POOL_SPAN_SIZE`
+(64 KiB) **span-aligned** spans. **A span's first word holds its size class**, so
+`__mir_pool_free` derives the class by masking the pointer to its span and needs
+no size from its caller — that is what keeps the pool out of the ABI: no block
+header, no descriptor field, no offset moves, nothing a stale `.o` can disagree
+about. Classes are exact multiples of `POOL_GRAIN` (16 B) up to
+`POOL_MAX_SMALL` (512 B); anything larger, or an exhausted region, falls through
+to `malloc`. A failed `mmap` leaves base/top at 0, which reads as "not mine" for
+every pointer, so the whole thing degrades to plain malloc/free.
+
+Invariants worth stating out loud:
+
+* **A pooled block is mmap memory, not a malloc chunk — libc `free()` on one
+  aborts.** Every free site of a pooled kind routes through `__mir_pool_free`
+  (two of them live in the cycle collector), and `__mir_realloc_tagged` asks
+  `__mir_pool_size` before growing.
+* **`MANTICORE_POOL=0` must hold for the WHOLE build.** These bodies are
+  `linkonce_odr`, so a stdlib `.o` built with the pool linked against a user
+  `.o` built without it keeps ONE body of each: an honest A/B is two cold seeds,
+  not two `compile` invocations with different env.
+* **Freed blocks are never returned to the OS.** `__mir_pool_free` pushes onto a
+  per-class free list; there is no `munmap`, no `madvise`, no span reclaim and no
+  cross-class reuse. **Peak RSS is a per-size-class high-water mark by design** —
+  a burst commits those pages for the life of the process, and a workload that
+  peaks on one class and then shifts to another holds both peaks resident. This
+  is the reason `bench/run.sh`'s `LEAK=1` mode confirms a suspected leak with a
+  third measurement: a high-water grows once and plateaus, a leak keeps paying.
+* The pool is **not thread-safe** (plain loads/stores on the class heads) — fine
+  for the single-threaded fiber runtime; a fork-per-worker model COW-duplicates
+  touched pool pages per child.
+* `MANTICORE_DEBUG_VERIFY=1` poisons word +8 of a freed block (cleared on alloc)
+  and aborts by name on a double free — libc used to catch those for us, and a
+  pooled double free would otherwise just cycle a free list, silently.
+
 ## 8. Debug and verification
 
-`src/Compile/Debug.php` reads six environment variables, once, at startup:
+`src/Compile/Debug.php` reads these environment variables, once, at startup:
 
 | Env var | Default | Effect |
 |---|---|---|
 | `MANTICORE_MEMORY` | `hybrid` | allocation strategy; also `--memory=<rc\|arena\|hybrid>` |
 | `MANTICORE_ARENA_ARRAYS` | on | arena-allocate non-escaping eligible arrays |
 | `MANTICORE_EMPTY_SINGLETON` | on | share one immortal empty-array buffer |
+| `MANTICORE_POOL` | on | size-classed small-object pool (§7a); `0` opts out |
 | `MANTICORE_DEBUG_VERIFY` | off | slow-path invariant checks at memory ops |
 | `MANTICORE_PROFILE` | off | thread-local rc / alloc counters |
 | `MANTICORE_REFLECT_REPORT` | off | report what reflection kept alive |

@@ -181,7 +181,24 @@ final class InsertMemoryOps implements Pass
         // a SIGBUS in the self-build. Whatever escape that shape relies on is
         // NOT this epic's, so it is left exactly as it was.
         foreach ($this->rcObjNeutral as $name => $ignored) {
-            if (isset($this->rcObjPlainOwner[$name])) { $this->rcObjBlocked[$name] = true; }
+            if (!isset($this->rcObjPlainOwner[$name])) { continue; }
+            // …EXCEPT a STRING, which is what that blanket block costs the most.
+            // `$out = ''; for (…) { $out = $out . $s[$i]; }` — every scanner and
+            // every decoder in the stdlib — leaked the ENTIRE accumulated buffer
+            // at each re-seed, because the literal store blocked the name and
+            // with it the release-before-overwrite (64 B per call in urldecode,
+            // measured). The SIGBUS that motivated the block was an ARRAY
+            // (`$conds = null; … $conds = [];`, whose buffer a live MatchArm_
+            // still held); a string has no by-value container aliasing, and
+            // every borrowing consumer of a string local — an alias store, an
+            // element / property store, a call argument — takes its own +1
+            // through {@see EmitLlvmMemory::rcRetainByType}, so the release has
+            // a matching retain. A borrowed store still lands in the `else`
+            // branch below and blocks the name outright, so only
+            // owned-producer-plus-literal names reach here.
+            $t = $this->rcObjType[$name] ?? null;
+            if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
+            $this->rcObjBlocked[$name] = true;
         }
 
         // Per-local releases for rc-mode confined allocations.
@@ -209,7 +226,8 @@ final class InsertMemoryOps implements Pass
             $flavor = $type->kind === Type::KIND_STRING ? 'str'
                 : ($type->kind === Type::KIND_CELL ? 'cell'
                 : ($type->isVec() ? 'vec'
-                : ($type->isAssoc() ? 'assoc' : 'obj')));
+                : ($type->isAssoc() ? 'assoc'
+                : ($this->isClosureType($type) ? 'closure' : 'obj'))));
             $target = new LoadLocal($name, $type);
             $rcReleases[] = new MemoryOp_('rc_release', $flavor, $target, Type::void());
         }
@@ -286,6 +304,14 @@ final class InsertMemoryOps implements Pass
         // only the emitter says owned, the value leaks; if only this pass does,
         // the release has no matching retain and the value is double-freed.
         if ($this->isOwnedCond($value)) { return true; }
+        // A CLOSURE LITERAL builds a fresh capturing env with rc=1 and a drop fn
+        // ({@see EmitLlvmCalls::emitClosure}); the local owns it and releases it
+        // at scope exit / before an overwrite, which is what frees both the env
+        // and the +1 it took on every captured value. Only the literal counts:
+        // a closure ARRIVING from anywhere else (a param, an element read, a
+        // call return through an erased channel) stays borrowed, so nothing
+        // over-releases a `Closure` this frame did not build.
+        if ($value->kind === Node::KIND_CLOSURE) { return true; }
         $tk = $value->type->kind;
         // A CELL counts: `f(): Foo|false` boxes a FRESH object into a cell, and
         // the +1 return convention transfers it to us exactly as for a plain
@@ -497,9 +523,20 @@ final class InsertMemoryOps implements Pass
         if ($k === Type::KIND_STRING)  { return 'string'; }
         if ($t->isVec())               { return 'vec'; }
         if ($t->isAssoc())             { return 'assoc'; }
+        if ($this->isClosureType($t))  { return 'closure'; }
         if ($k === Type::KIND_OBJ)     { return 'obj'; }
-        if ($k === Type::KIND_CLOSURE) { return 'obj'; }
+        if ($k === Type::KIND_CLOSURE) { return 'closure'; }
         if ($k === Type::KIND_CELL)    { return 'cell'; }
         return null;
+    }
+
+    /** KIND_CLOSURE, or the `obj<__closure_N>` / `obj<Closure>` handle — one
+     *  question, asked identically by the release flavor and the emitter. */
+    private function isClosureType(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
     }
 }
