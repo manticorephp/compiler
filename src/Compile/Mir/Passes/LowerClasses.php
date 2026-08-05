@@ -329,6 +329,21 @@ trait LowerClasses
             // constructor wrote past that point landed on the wrong offset
             // (an inherited promoted ctor param read back as 0).
             if (!isset($types[$prop->name])) { $names[] = $prop->name; }
+            // An UNTYPED property IS `mixed` — php's own rule, not an
+            // approximation of one. Lowering it to UNKNOWN left the slot holding a
+            // RAW word that only a STATICALLY-typed reader could interpret, and
+            // the two writers already disagreed about it: the static store wrote
+            // raw while emitCellStoreProperty (the erased receiver's path) boxed.
+            // So an erased read — a `: mixed` return, a mixed property, an array
+            // element — reached emitFixedPropLoad, whose contract is a TAGGED
+            // CELL, and got the bare word instead: `public $id = 5` read back as
+            // float(2.5E-323) and a string slot as a denormal double.
+            //
+            // A cell slot is exactly what a declared `public mixed $x` already
+            // uses, and that one round-trips through every path. Statics are left
+            // alone deliberately: they are external-linkage globals here, so their
+            // repr is a linking contract and not this pass's to change.
+            if ($veff === null || $veff === '') { $pt = Type::cell(); }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
@@ -349,7 +364,12 @@ trait LowerClasses
                 $tvdoc = $this->docTagType($tprop->docComment, '@var', '');
                 $tveff = $this->effectiveHint($tprop->typeHint, $tvdoc);
                 $names[] = $tprop->name;
-                $types[$tprop->name] = $this->lowerTypeHint($tveff);
+                // Untyped is `mixed` here too — a mixed-in property reaches the
+                // same erased read path as a declared one, and answered the same
+                // denormal double for `public $id = 5`. The rule lives in both
+                // places because the layouts are built by two separate walks.
+                $types[$tprop->name] = ($tveff === null || $tveff === '')
+                    ? Type::cell() : $this->lowerTypeHint($tveff);
             }
         }
         // PHP 8.4 property hooks: inherit the parent's map, then record each

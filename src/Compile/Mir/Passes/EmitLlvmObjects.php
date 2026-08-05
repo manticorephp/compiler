@@ -204,7 +204,26 @@ trait EmitLlvmObjects
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
                       . '(' . $argList . ")\n";
             }
-            $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            // The MIR node is typed CELL (`new_dyn %n() : cell`), so the value
+            // has to BE one — this stored the bare `ptrtoint` instead, and every
+            // consumer that checks the tag rather than masking it saw a
+            // non-object: `get_class(new $cls())` answered '' because its tag!=8
+            // arm is the default. Property reads hid it, because cellToPtr's
+            // 48-bit mask leaves a raw pointer unchanged.
+            //
+            // Boxed HERE and not at the join: the miss path below stores 0 for a
+            // name no class matched, and a 0 payload under an object tag would
+            // send get_class's class_id load to address 0. Left raw, that 0 still
+            // fails the tag check and falls to the '' arm, which is the behaviour
+            // php's "Class not found" case degrades to here.
+            if ($n->type->kind === Type::KIND_CELL) {
+                $this->rt->needsTagged = true;
+                $bx = $this->ssa->allocReg();
+                $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $objPtr . ")\n";
+                $out .= '  store i64 ' . $bx . ', ptr ' . $slot . "\n";
+            } else {
+                $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            }
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
