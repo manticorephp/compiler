@@ -646,7 +646,15 @@ function find_prelude_src(string $file): string
         // bindings are empty stubs), and the stdlib implementation in the native
         // binary. Using the libc path here left the seed without any prelude fn
         // the compiler itself calls (explode) → `@manticore_explode` undefined.
-        $src = \file_get_contents($path);
+        // ⚠ `@`, and it is load-bearing under the ZEND COLD SEED. A prelude file
+        // that does not exist is normal — this loop probes four candidate
+        // directories and `prelude_src_or_empty` treats "absent" as "not
+        // demanded" — but php's file_get_contents WARNS on a missing path, and
+        // php CLI warnings go to STDOUT, which here is the generated seed .ll.
+        // clang then died on `2:1: error: expected top-level entity` pointing at
+        // the warning text. The native build never saw it: its own
+        // file_get_contents returns false silently.
+        $src = @\file_get_contents($path);
         if ($src === false) { continue; }
         // Drop everything up to and including the opening `<?php` tag so the
         // remaining class source appends cleanly after the prelude's own header.
@@ -2484,6 +2492,12 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $xmlSrc = prelude_src_or_empty("xml.php");
     $xmlXpathSrc = prelude_src_or_empty("xml_xpath.php");
     $xmlDomSrc = prelude_src_or_empty("xml_dom.php");
+    // ext/curl — DEMAND-GATED, global namespace, prelude and not the stdlib for
+    // the same reason as xml: curl_init() returns a CurlHandle. curl_multi.php
+    // is gated apart so a program making one request at a time does not carry
+    // the multi/share half.
+    $curlSrc = prelude_src_or_empty("curl.php");
+    $curlMultiSrc = prelude_src_or_empty("curl_multi.php");
 
     // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
     // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
@@ -2695,6 +2709,38 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                                        'DOMCharacterData', 'DOMProcessingInstruction'])
         || $demand->callsAny(['dom_import_simplexml', 'simplexml_import_dom']);
     if ($useXmlDom) { $useXml = true; }
+    // ext/curl gates on the `curl_*` names the FILE defines — a prefixed family,
+    // so no program owns them. Same shape as the pcntl_/posix_ gate below.
+    //
+    // The MENTION arm is not optional: a program that only writes
+    // `$opts[CURLOPT_URL] = $u` and hands the array to a helper in another file
+    // CALLS nothing, and a constant reference names no function at all. The
+    // class mention covers `function f(CurlHandle $ch)` in a file whose
+    // curl_init() lives elsewhere in the same compile.
+    $curlFns = [];
+    foreach (\Compile\Mir\PreludeDemand::definedFunctions($curlSrc) as $fn) {
+        if (\str_starts_with($fn, 'curl_')) { $curlFns[] = $fn; }
+    }
+    $useCurl = $demand->callsAny($curlFns)
+        || $demand->mentionsAny(['CurlHandle', 'CURLOPT_URL', 'CURLOPT_RETURNTRANSFER',
+                                 'CURLOPT_POST', 'CURLOPT_POSTFIELDS', 'CURLOPT_HTTPHEADER',
+                                 'CURLOPT_HEADER', 'CURLOPT_NOBODY', 'CURLOPT_FOLLOWLOCATION',
+                                 'CURLOPT_TIMEOUT', 'CURLOPT_CUSTOMREQUEST', 'CURLOPT_USERAGENT',
+                                 'CURLOPT_WRITEFUNCTION', 'CURLOPT_HEADERFUNCTION',
+                                 'CURLOPT_SSL_VERIFYPEER', 'CURLINFO_HTTP_CODE',
+                                 'CURLINFO_RESPONSE_CODE', 'CURLE_OK']);
+    // curl_multi_* / curl_share_* — same prefixed family, own gate, and it
+    // forces curl.php on because it names __McCurl and CurlHandle.
+    $curlMultiFns = [];
+    foreach (\Compile\Mir\PreludeDemand::definedFunctions($curlMultiSrc) as $fn) {
+        if (\str_starts_with($fn, 'curl_')) { $curlMultiFns[] = $fn; }
+    }
+    $useCurlMulti = $demand->callsAny($curlMultiFns)
+        || $demand->mentionsAny(['CurlMultiHandle', 'CurlShareHandle', 'CURLM_OK',
+                                 'CURLMSG_DONE', 'CURLMOPT_MAXCONNECTS',
+                                 'CURLSHOPT_SHARE', 'CURL_LOCK_DATA_COOKIE',
+                                 'CURL_LOCK_DATA_DNS']);
+    if ($useCurlMulti) { $useCurl = true; }
 
     // No T_* arm here on purpose: the T_* constants are compile-time folds in
     // LowerPrelude, so a program can use T_STRING with no prelude at all. Only
@@ -2786,6 +2832,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read xml_dom.php");
         return null;
     }
+    if ($useCurl && $curlSrc === "") {
+        dprint("compile failed: prelude: cannot read curl.php");
+        return null;
+    }
+    if ($useCurlMulti && $curlMultiSrc === "") {
+        dprint("compile failed: prelude: cannot read curl_multi.php");
+        return null;
+    }
     if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
         dprint("compile failed: prelude: cannot read tokenizer.php / tokenizer_api.php");
         return null;
@@ -2847,6 +2901,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
+        $lower->curlSrc = $useCurl ? $curlSrc : "";
+        $lower->curlMultiSrc = $useCurlMulti ? $curlMultiSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
@@ -3162,6 +3218,10 @@ function analyze_prelude_files(): array {
         // Same reason: PhpToken is demand-gated at compile time, but the
         // analyzer is closed-world and would read it as an unknown class.
         "tokenizer.php", "tokenizer_api.php",
+        // And again for CurlHandle / CurlMultiHandle / CurlShareHandle — a
+        // `function fetch(CurlHandle $ch)` hint is the ordinary way to write
+        // ext/curl code, and closed-world it would read as an unknown class.
+        "curl.php", "curl_multi.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

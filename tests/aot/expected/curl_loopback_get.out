@@ -1,0 +1,20 @@
+-- get --
+method=GET
+path=/one
+ua=manticore-curl/1.0
+x-test=alpha
+ctype=
+body=
+errno:  0
+-- header --
+status:  HTTP/1.1 200 OK
+hasfix:  yes
+hasbody: yes
+-- headerfunction --
+count>3: yes
+first:   HTTP/1.1 200 OK
+blank:   yes
+inbody:  no
+-- nobody --
+empty:   yes
+errno:   0

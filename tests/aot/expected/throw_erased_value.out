@@ -1,0 +1,4 @@
+via local:  boom (RuntimeException)
+direct:     boom (RuntimeException)
+subclass:   logic
+interface:  iface (InvalidArgumentException)

@@ -28,9 +28,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 # netbase       -> /etc/services + /etc/protocols, the databases getservby*() /
 #                  getprotoby*() read; a bare debian:12 ships without them, so the
 #                  network stdlib would find nothing (getservbyname("http") → false).
+# libcurl4-openssl-dev -> ext/curl (prelude/curl.php binds `curl` by name). The
+#                  DEV package, not the `curl` CLI above: it is what ships
+#                  `curl-config` and the `libcurl.so` symlink, and Main.php's
+#                  generic_link_flags() needs one of them — `pkg-config --libs
+#                  curl` fails everywhere, since the module is called libcurl.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release software-properties-common \
-        gcc libc6-dev libpcre2-dev libssl-dev pkg-config binutils bash file make \
+        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev pkg-config \
+        binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*
 
@@ -40,7 +46,7 @@ RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.or
         > /etc/apt/sources.list.d/php.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        php8.5-cli php8.5-mbstring \
+        php8.5-cli php8.5-mbstring php8.5-curl \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --set php /usr/bin/php8.5
 
@@ -69,7 +75,8 @@ RUN CLANG_BIN="$(ls -1 /usr/bin/clang-[0-9]* | grep -E 'clang-[0-9]+$' | sort -V
     && ln -sf "$CLANG_BIN" /usr/local/bin/cc
 
 RUN php --version && clang --version | head -1 && cc --version | head -1 \
-    && pcre2-config --libs8 && pkg-config --libs openssl
+    && pcre2-config --libs8 && pkg-config --libs openssl \
+    && curl-config --libs && php -r 'exit(function_exists("curl_init") ? 0 : 1);'
 
 # Run as a normal, unprivileged user. Under root every file is writable/executable
 # regardless of mode, so a suite that checks permissions diverges from a real

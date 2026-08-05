@@ -1016,6 +1016,23 @@ trait EmitLlvmArrays
         $at = $se->array->type;
         if ($at->kind === Type::KIND_CELL) { return true; }
         $et = $at->element;
+        // ⚠ KNOWN GAP, deliberately NOT widened to KIND_UNKNOWN here.
+        //
+        // The READ side decodes an `unknown` element as a TAGGED cell
+        // ({@see arrayBaseToPtr}, {@see storeElemDeCellifyType} both pair
+        // UNKNOWN with CELL), while this predicate stores raw — so a container
+        // whose two ends are inferred apart disagrees about the repr. The shape
+        // that shows it: `$a = []; $f = function () use (&$a) { $a[] = 'lit'; };`
+        // leaves the outer local vec[unknown] while the closure body still sees
+        // a `string`, and `echo $a[0]` then prints the ADDRESS (var_dump says
+        // float(2.1E-314)). See tests/aot/cases/array_erased_elem_repr_gap.php.
+        //
+        // Making this arm return true for UNKNOWN was tried and does NOT work:
+        // the container's repr nibble is fixed at ALLOCATION, so boxed values in
+        // a raw-repr vec make the release path free tagged words — the self-host
+        // gen-2 compiler segfaults on its own smoke test. Closing it needs the
+        // erased element channel RETYPED to cell end-to-end, which is the parked
+        // element-repr epic, not a change to this predicate.
         return $et !== null && $et->kind === Type::KIND_CELL;
     }
 

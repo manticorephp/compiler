@@ -1,0 +1,20 @@
+-- post --
+method=POST
+ctype=application/x-www-form-urlencoded
+len=9
+body=a=1&b=x+y
+-- json --
+method=POST
+ctype=application/json
+len=21
+body={"k":"v","n":[1,2,3]}
+-- patch --
+method=PATCH
+ctype=application/x-www-form-urlencoded
+len=9
+body=patched=1
+-- upload --
+method=PUT
+ctype=
+len=31
+body=chunk-one|chunk-two|chunk-three

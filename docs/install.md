@@ -62,12 +62,21 @@ $MANTICORE_HOME/lib/prelude/*.php
 | **PHP 8.5** (Zend) | *cold bootstrap only* — seeds the first native compiler | `bin/compile:41` |
 | **libpcre2** (8-bit) + `pcre2-config` | `preg_*` | `Main.php::pcre2_link_flags()`, `src/Runtime/Pcre.php` |
 | **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php::openssl_link_flags()`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
+| **libcurl ≥ 7.68** + `curl-config` — *only* to compile a program that calls `curl_*` | `ext/curl` | `Main.php::generic_link_flags()`, `prelude/curl.php` |
 | `bash`, `find`, `sort`, `xargs`, `sed`, `awk`, `grep`, `mktemp` | build scripts | `bin/compile`, `tools/*.sh` |
 
 `pcre2-config --libs8` and `pkg-config --libs openssl` are how the link flags
 are discovered; if either tool is missing, Manticore falls back to literal
 `-lpcre2-8` and `-lssl -lcrypto`, which works only if the libraries sit on the
 default search path.
+
+libcurl is different from the other two: it is **demand-gated**. A program that
+never calls a `curl_*` function emits no libcurl wrapper, so `-lcurl` never
+reaches its link line and the library need not be installed at all. When it is
+needed, discovery goes `pkg-config --libs curl` → `curl-config --libs` →
+`-lcurl`; the first always fails (the pkg-config module is called `libcurl`), so
+in practice `curl-config` is the one that answers — and it ships in the
+**development** package, not with the `curl` command-line tool.
 
 PHP itself is needed **once**. `bin/compile` runs the compiler's own source
 under Zend to produce a throwaway seed binary; that seed then builds the real
@@ -94,7 +103,7 @@ Nothing the compiler emits ever calls into a PHP runtime.
 
 ```bash
 xcode-select --install                  # clang + cc + ld
-brew install php pcre2 openssl@3 pkg-config
+brew install php pcre2 openssl@3 pkg-config curl   # curl: only for ext/curl
 ```
 
 Homebrew's `php` tracks the current release; check `php -v` reports 8.5.
@@ -108,6 +117,7 @@ sury.org and clang from apt.llvm.org:
 sudo apt-get install -y \
     gcc libc6-dev binutils make \
     libpcre2-dev libssl-dev pkg-config \
+    libcurl4-openssl-dev \
     netbase
 
 # clang / LLVM (pick the newest that publishes packages for your release)
@@ -132,7 +142,7 @@ a specific toolchain; otherwise follow the Dockerfile's approach.
 ### Alpine (musl)
 
 ```bash
-apk add clang lld musl-dev pcre2-dev openssl-dev pkgconf bash php85-cli
+apk add clang lld musl-dev pcre2-dev openssl-dev curl-dev pkgconf bash php85-cli
 ```
 
 musl exports plain `stat`/`lstat`/`fstat` and has `glob`/`globfree`, but lacks

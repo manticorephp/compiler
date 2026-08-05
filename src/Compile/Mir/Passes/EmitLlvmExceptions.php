@@ -4,6 +4,7 @@ namespace Compile\Mir\Passes;
 
 use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
+use Compile\Mir\Type;
 
 /**
  * Exception emitters extracted from {@see EmitLlvm}: throw / try-catch /
@@ -165,7 +166,18 @@ trait EmitLlvmExceptions
     {
         $this->rt->needsExceptions = true;
         $out = $this->emitNode($n->value);
-        $out .= $this->coerceToPtr();
+        // `throw $e` where $e came off an ERASED channel — a `mixed` array
+        // element, an untyped property, a `\Throwable` handed through a cell —
+        // holds a NaN-BOXED word, not an object address. A bare inttoptr stored
+        // the tag bits as the pointer, and the catch arm dereferenced
+        // 0xfff8_0000_xxxx_xxxx on the first ->getMessage(). The 48-bit payload
+        // mask is the identity on an already-raw pointer, so this costs nothing
+        // for every other carrier. Same fix, same reason, as
+        // {@see EmitLlvmArrays::arrayBaseToPtr}.
+        $tk = $n->value->type->kind;
+        $out .= ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN)
+            ? $this->cellToPtr()
+            : $this->coerceToPtr();
         $out .= '  store ptr ' . $this->lastValue . ", ptr @__mir_thrown\n";
         $depth = $this->ssa->allocReg();
         $out .= '  ' . $depth . " = load i64, ptr @__mir_jmp_depth\n";

@@ -54,10 +54,16 @@ fi
 #     null/"" (a typed-slot i64 can't carry null without boxing).
 #   superglobals_env.php — $_ENV is populated; php's default variables_order
 #     ("GPCS") leaves it empty. A native binary has no php.ini to flip.
+#   array_erased_elem_repr_gap.php — the case EXISTS to print the divergence.
+#     An `unknown` array element (and an aliased local) is decoded as a tagged
+#     cell on read and stored raw on write, so `echo $a[0]` prints the address.
+#     It also has no expected/ file, so the AOT suite SKIPs it rather than
+#     blessing the wrong answer; here it would otherwise be permanent red.
 is_known_divergence() {
     case "$1" in
         assoc_missing.php) return 0;;
         superglobals_env.php) return 0;;
+        array_erased_elem_repr_gap.php) return 0;;
     esac
     return 1
 }

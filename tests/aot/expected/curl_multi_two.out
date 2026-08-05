@@ -1,0 +1,10 @@
+add: 0 0
+exec rc: 0 running: 0
+info: msg=1 result=0 len=11
+info: msg=1 result=0 len=17
+content a: alpha-body
+content b: beta-body-longer
+errno:     0
+strerror:  'No error'
+CURLM_OK:  0 CURLMSG_DONE: 1
+remove:    0 0

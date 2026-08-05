@@ -1,0 +1,44 @@
+core keys: 29
+  url                       string
+  content_type              NULL
+  http_code                 integer
+  header_size               integer
+  request_size              integer
+  filetime                  integer
+  ssl_verify_result         integer
+  redirect_count            integer
+  total_time                double
+  namelookup_time           double
+  connect_time              double
+  pretransfer_time          double
+  size_upload               double
+  size_download             double
+  speed_download            double
+  speed_upload              double
+  download_content_length   double
+  upload_content_length     double
+  starttransfer_time        double
+  redirect_time             double
+  redirect_url              string
+  primary_ip                string
+  certinfo                  array
+  primary_port              integer
+  local_ip                  string
+  local_port                integer
+  http_version              integer
+  protocol                  integer
+  scheme                    string
+-- determined values --
+size_download:   4096
+http_code:       0
+certinfo:        0
+url suffix:      yes
+-- single-option reads --
+SIZE_DOWNLOAD_T: 4096
+EFFECTIVE_URL:   file://
+HEADER_SIZE:     0
+CONTENT_TYPE:    false
+COOKIELIST:      array
+TOTAL_TIME:      double >=0 yes
+SIZE_DOWNLOAD:   double 4096
+body: match

@@ -403,6 +403,15 @@ final class LowerFromAst implements Pass
      *  that only reads SimpleXML does not carry the DOM class tree. Implies
      *  xmlSrc. */
     public string $xmlDomSrc = '';
+    /** ext/curl, the easy API — DEMAND-GATED. Global namespace, so it rides the
+     *  concatenated blob. Carries the libcurl binds, the CURLOPT_ and CURLINFO_
+     *  constants, the __McCurl side table, CurlHandle and the four callback
+     *  trampolines a C write/header/read/progress hook lands in. */
+    public string $curlSrc = '';
+    /** curl_multi_* + curl_share_* — DEMAND-GATED separately, so a program that
+     *  only makes one request at a time does not carry them. Names __McCurl and
+     *  CurlHandle, so it implies curlSrc and must be concatenated AFTER it. */
+    public string $curlMultiSrc = '';
     /** ext/tokenizer's scanner core — DEMAND-GATED. Names nothing Zend owns so
      *  it stays loadable under `php` for tools/tokenizer_diff.php. */
     public string $tokenizerSrc = '';
