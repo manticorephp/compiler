@@ -199,6 +199,18 @@ trait LowerPrelude
             // names __McCurl and CurlHandle, both defined in curl.php.
             $src = $src . $this->curlSrc . $this->curlMultiSrc;
         }
+        if ($this->pdoSrc !== '') {
+            // ext/pdo — global namespace, so it rides this blob. After
+            // exceptions.php (PDOException extends RuntimeException) and after
+            // spl_arrays.php, whose IteratorAggregate/Iterator PDOStatement and
+            // its row iterator implement.
+            //
+            // ⚠ ORDER IS LOAD-BEARING, same rule as xml and curl above:
+            // pdo_sqlite.php implements the __McPdoDrv / __McPdoDrvStmt
+            // interfaces pdo.php declares, and a class built before the
+            // interface it implements inherits nothing.
+            $src = $src . $this->pdoSrc . $this->pdoSqliteSrc;
+        }
         if ($this->tokenizerSrc !== '') {
             // ext/tokenizer. Core BEFORE api — classes are built in source order
             // and token_get_all() constructs __McTok.

@@ -1184,15 +1184,26 @@ trait EmitLlvmCalls
      * same boundary rule the inline call-site spread arms use). Returns the IR
      * plus the SSA i64 regs for the produced args (caller appends them to its
      * own arg list with the right separators / `$this` offset).
+     * A spread supplies exactly `count($arr)` arguments, so every DEFAULTED
+     * param the array does not reach takes its default — `$fnKey` names the
+     * callee whose defaults those are. The length is a run-time property, so
+     * each defaulted param selects between its element and its default;
+     * reading element `k` unconditionally handed `__construct(string $t = '-')`
+     * a word from past the end and the callee dereferenced it (SIGSEGV on
+     * `$stmt->fetchAll(PDO::FETCH_CLASS, 'Row', [])`).
+     *
      * @param Type[] $ptypes
      * @param array<int,bool> $tmask
      * @return array{0:string,1:string[]}
      */
-    private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes, array $tmask, ?Type $elemType): array
+    private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes,
+                                    array $tmask, ?Type $elemType, string $fnKey = ''): array
     {
         $out = '';
         $regs = [];
         $n = \count($ptypes);
+        $pdefs = $fnKey !== '' ? ($this->sigs->paramDefaults[$fnKey] ?? []) : [];
+        $cnt = '';
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
@@ -1207,6 +1218,37 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'i64';
                 $out .= $this->boxToCell($elemType);
                 $ev = $this->lastValue;
+            } elseif (!$needBox && $pt !== null
+                && ($elemType === null
+                    || $elemType->kind === Type::KIND_CELL
+                    || $elemType->kind === Type::KIND_UNKNOWN)) {
+                // The pack's element repr is not statically known — a mixed
+                // literal (`[...['C', 5]]`) stores CELLS — and a tagged word
+                // reaching a `string` param is dereferenced as a char*.
+                // Unbox by the param's declared type; the helper is tag-aware,
+                // so an already-raw element passes through unchanged.
+                $this->lastValue = $ev;
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType($pt);
+                $out .= $this->coerceToI64();
+                $ev = $this->lastValue;
+            }
+            $def = $pdefs[$k] ?? null;
+            if ($def !== null) {
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $out .= $this->emitNode($def);
+                $out .= $this->coerceToI64();
+                $dv = $this->lastValue;
+                $has = $this->ssa->allocReg();
+                $out .= '  ' . $has . ' = icmp ugt i64 ' . $cnt . ', '
+                      . (string)($k - $firstParam) . "\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
+                      . ', i64 ' . $dv . "\n";
+                $ev = $sel;
             }
             $regs[] = $ev;
         }
@@ -1326,32 +1368,15 @@ trait EmitLlvmCalls
                 $out .= $this->coerceToPtr();
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
-                $nparams = \count($ptypes);
-                $k = $ai;
-                while ($k < $nparams) {
+                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,
+                                                       $elemType, $c->function);
+                $out .= $sir;
+                foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
                     $first = false;
-                    $ev = $this->ssa->allocReg();
-                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
-                          . ', i64 ' . (string)($k - $ai) . ")\n";
-                    // A cell/tagged param needs the raw element boxed by its
-                    // source type (a homogeneous int/string vec stores values
-                    // raw); a cell-valued source is already boxed → no rebox.
-                    $pt = $ptypes[$k] ?? null;
-                    $needBox = ($tmask[$k] ?? false)
-                        || ($pt !== null && $pt->kind === Type::KIND_CELL);
-                    if ($needBox && $elemType !== null
-                        && $elemType->kind !== Type::KIND_CELL
-                        && $elemType->kind !== Type::KIND_UNKNOWN) {
-                        $this->lastValue = $ev;
-                        $this->lastValueType = 'i64';
-                        $out .= $this->boxToCell($elemType);
-                        $ev = $this->lastValue;
-                    }
-                    $argList .= 'i64 ' . $ev;
-                    $k = $k + 1;
+                    $argList .= 'i64 ' . $rg;
                 }
-                $ai = $nparams;
+                $ai = \count($ptypes);
                 continue;
             }
             if (!$first) { $argList .= ', '; }

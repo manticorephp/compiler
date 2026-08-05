@@ -301,6 +301,16 @@ final class EmitLlvm implements EmitVisitor
     /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
     private string $vdArmList = '';
     /**
+     * Scratch: a `...$arr` spread the current method call has NOT expanded into
+     * its shared argument list, as `[arrPtrReg, firstParam, elementType]`. A
+     * spread's length and the DEFAULTS behind it belong to the callee, and an
+     * erased receiver's arms need not share a signature — so each arm expands
+     * it against its OWN params ({@see EmitLlvmObjects::vdArmArgs}). Null when
+     * the call site has no spread.
+     * @var array{0:string,1:int,2:?Type}|null
+     */
+    private ?array $spreadTail = null;
+    /**
      * @var array<string,bool> params of the function being emitted whose
      * DECLARED hint was a bare `array`. The lowered type erased to unknown
      * (LowerTypes has no branch for a bare `array`), so the hint is the only

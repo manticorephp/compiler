@@ -1996,6 +1996,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $curlSrc = prelude_src_or_empty("curl.php");
     $curlMultiSrc = prelude_src_or_empty("curl_multi.php");
 
+    // ext/pdo — DEMAND-GATED, global namespace, prelude and not the stdlib for
+    // the same reason as curl: `new PDO(...)` hands back an object and
+    // PDO::FETCH_ASSOC is a class constant, neither of which a `.sig` carries.
+    // pdo.php is the driver-agnostic facade; pdo_sqlite.php implements its
+    // driver seam over libsqlite3 and is what puts -lsqlite3 on the link line.
+    $pdoSrc = prelude_src_or_empty("pdo.php");
+    $pdoSqliteSrc = prelude_src_or_empty("pdo_sqlite.php");
+
     // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
     // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
     // can diff our scanner against the C tokenizer with no build in between;
@@ -2236,6 +2244,22 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                                  'CURL_LOCK_DATA_DNS']);
     if ($useCurlMulti) { $useCurl = true; }
 
+    // ext/pdo gates on a MENTION and nothing else. PDO is a class family, not a
+    // `pdo_*` function prefix, so there is no defined-function list to key on
+    // the way curl and pcntl do — and a program that only writes
+    // `function repo(PDO $db)` calls nothing at all.
+    $usePdo = $demand->mentionsAny(['PDO', 'PDOStatement', 'PDOException', 'PDORow']);
+    // ⚠ The sqlite driver rides the facade unconditionally, because a DSN scheme
+    // is a runtime STRING and PreludeDemand is token-based: nothing at compile
+    // time can tell which driver `new PDO($dsn)` will open. One driver exists,
+    // so loading it with the facade is honest. When a second driver lands, this
+    // splits the same way curl_multi does — on the driver's own class names.
+    $usePdoSqlite = $usePdo;
+    // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
+    // errors.php — and the demand gate cannot see a call made from the prelude
+    // itself, only one made from user code.
+    if ($usePdo) { $useErrors = true; }
+
     // No T_* arm here on purpose: the T_* constants are compile-time folds in
     // LowerPrelude, so a program can use T_STRING with no prelude at all. Only
     // the CALLS and the class need the source.
@@ -2334,6 +2358,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read curl_multi.php");
         return null;
     }
+    if ($usePdo && ($pdoSrc === "" || $pdoSqliteSrc === "")) {
+        dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php");
+        return null;
+    }
     if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
         dprint("compile failed: prelude: cannot read tokenizer.php / tokenizer_api.php");
         return null;
@@ -2396,6 +2424,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
         $lower->curlSrc = $useCurl ? $curlSrc : "";
         $lower->curlMultiSrc = $useCurlMulti ? $curlMultiSrc : "";
+        $lower->pdoSrc = $usePdo ? $pdoSrc : "";
+        $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
@@ -2685,6 +2715,11 @@ function analyze_prelude_files(): array {
         // `function fetch(CurlHandle $ch)` hint is the ordinary way to write
         // ext/curl code, and closed-world it would read as an unknown class.
         "curl.php", "curl_multi.php",
+        // And again for PDO / PDOStatement / PDOException — `function
+        // repo(PDO $db)` is the ordinary way to write PDO code, and closed-world
+        // it would read as an unknown class. pdo_sqlite.php comes along because
+        // it declares the driver classes pdo.php's seam is satisfied by.
+        "pdo.php", "pdo_sqlite.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

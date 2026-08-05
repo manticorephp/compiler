@@ -136,12 +136,28 @@ trait EmitLlvmObjects
 
         $argRegs = [];
         $argKinds = [];
+        $fixedArgs = [];
+        // `new $cls(...$arr)`: the pack's length is a run-time property, so each
+        // candidate ctor arm expands it against its OWN params. Emitting the
+        // Spread_ node as an ordinary argument produced no value at all, so the
+        // ctor was handed the stale lastValue — the CLASS NAME — as its first
+        // parameter (`new $cls(...['C'])` constructed with 'R').
+        $spreadArr = '';
+        $spreadElem = null;
         foreach ($n->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) {
+                $out .= $this->emitNode($a->operand);
+                $out .= $this->coerceToPtr();
+                $spreadArr = $this->lastValue;
+                $spreadElem = $a->operand->type->element ?? null;
+                continue;
+            }
             $out .= $this->emitNode($a);
             $argRegs[] = $this->lastValue;
             $argKinds[] = $this->lastValueType;
+            $fixedArgs[] = $a;
         }
-        $argc = \count($n->args);
+        $argc = \count($fixedArgs);
 
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -183,7 +199,7 @@ trait EmitLlvmObjects
             if ($ctorClass !== '') {
                 $argList = 'i64 ' . $objInt;
                 $ai = 0;
-                foreach ($n->args as $a) {
+                foreach ($fixedArgs as $a) {
                     $this->lastValue = $argRegs[$ai];
                     $this->lastValueType = $argKinds[$ai];
                     if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -195,16 +211,45 @@ trait EmitLlvmObjects
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
                 }
-                // Default-fill the trailing optional ctor params (param 0 is
-                // `$this`, provided args cover [1 .. argc]).
-                $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
-                $argList .= $this->lastPadArgs;
+                if ($spreadArr !== '') {
+                    // The pack covers every param past the fixed prefix; each
+                    // defaulted one it does not reach falls back to its default.
+                    [$sir, $sregs] = $this->emitSpreadFill(
+                        $spreadArr, $argc + 1, $ptypes, $tmask, $spreadElem,
+                        $ctorClass . '____construct');
+                    $out .= $sir;
+                    foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                } else {
+                    // Default-fill the trailing optional ctor params (param 0 is
+                    // `$this`, provided args cover [1 .. argc]).
+                    $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
+                    $argList .= $this->lastPadArgs;
+                }
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
                       . '(' . $argList . ")\n";
             }
-            $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            // The MIR node is typed CELL (`new_dyn %n() : cell`), so the value
+            // has to BE one — this stored the bare `ptrtoint` instead, and every
+            // consumer that checks the tag rather than masking it saw a
+            // non-object: `get_class(new $cls())` answered '' because its tag!=8
+            // arm is the default. Property reads hid it, because cellToPtr's
+            // 48-bit mask leaves a raw pointer unchanged.
+            //
+            // Boxed HERE and not at the join: the miss path below stores 0 for a
+            // name no class matched, and a 0 payload under an object tag would
+            // send get_class's class_id load to address 0. Left raw, that 0 still
+            // fails the tag check and falls to the '' arm, which is the behaviour
+            // php's "Class not found" case degrades to here.
+            if ($n->type->kind === Type::KIND_CELL) {
+                $this->rt->needsTagged = true;
+                $bx = $this->ssa->allocReg();
+                $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $objPtr . ")\n";
+                $out .= '  store i64 ' . $bx . ', ptr ' . $slot . "\n";
+            } else {
+                $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            }
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
@@ -261,6 +306,21 @@ trait EmitLlvmObjects
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
             foreach ($n->args as $a) {
+                // `new C(...$arr)`: expand the pack across the ctor's remaining
+                // params (param 0 is `$this`). Without an arm here the Spread_
+                // node emitted no value and the ctor read whatever lastValue
+                // still held, so `new R(...['C'])` constructed from garbage.
+                if ($a->kind === Node::KIND_SPREAD) {
+                    $out .= $this->emitNode($a->operand);
+                    $out .= $this->coerceToPtr();
+                    [$sir, $sregs] = $this->emitSpreadFill(
+                        $this->lastValue, $ai + 1, $ptypes, $tmask,
+                        $a->operand->type->element ?? null, $ctorClass . '____construct');
+                    $out .= $sir;
+                    foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                    $ai = \count($ptypes) - 1;
+                    continue;
+                }
                 if ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -3082,7 +3142,8 @@ trait EmitLlvmObjects
                 $out .= $this->coerceToPtr();
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
-                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType);
+                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
+                                                       $cls . '__' . $n->method);
                 $out .= $sir;
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
@@ -3202,10 +3263,12 @@ trait EmitLlvmObjects
      * @param array<int, Type> $srcTypes the repr each arg was emitted in
      * @param array<int, Type> $cTypes   this arm's own signature
      */
-    private function vdArmArgs(string $argList, array $srcTypes, array $cTypes): string
+    private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
-        if (\count($cTypes) === 0 || \count($srcTypes) === 0) { return ''; }
+        if (\count($cTypes) === 0 || \count($srcTypes) === 0) {
+            return $this->vdArmSpread($sym, $cTypes);
+        }
         $parts = \explode(', ', $argList);
         $out = '';
         $changed = false;
@@ -3231,6 +3294,27 @@ trait EmitLlvmObjects
             $i = $i + 1;
         }
         if ($changed) { $this->vdArmList = \implode(', ', $parts); }
+        return $out . $this->vdArmSpread($sym, $cTypes);
+    }
+
+    /**
+     * Append the pending `...$arr` tail to {@see $vdArmList}, expanded against
+     * `$sym`'s OWN parameters — its arity, its tagged mask, its defaults. A
+     * no-op when the call site had no spread.
+     * @param array<int, Type> $cTypes
+     */
+    private function vdArmSpread(string $sym, array $cTypes): string
+    {
+        if ($this->spreadTail === null || $sym === '') { return ''; }
+        $tail = $this->spreadTail;
+        $ptypes = \count($cTypes) > 0 ? $cTypes : ($this->sigs->paramTypes[$sym] ?? []);
+        $tmask = $this->sigs->taggedParams[$sym] ?? [];
+        // Cleared across the fill: a default expression is lowered here too, and
+        // a nested call must not inherit this site's pending tail.
+        $this->spreadTail = null;
+        [$out, $regs] = $this->emitSpreadFill($tail[0], $tail[1], $ptypes, $tmask, $tail[2], $sym);
+        $this->spreadTail = $tail;
+        foreach ($regs as $rg) { $this->vdArmList .= ', i64 ' . $rg; }
         return $out;
     }
 
@@ -3270,7 +3354,8 @@ trait EmitLlvmObjects
             // one CELL arm — so the single `cell_to_strptr` the call site emitted
             // handed the InputDefinition arm a raw pointer in a cell parameter.
             // Re-coerce per arm where the repr disagrees.
-            $bodies .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$targets[$c]] ?? []);
+            $bodies .= $this->vdArmArgs($argList, $argOutTypes,
+                                        $this->sigs->paramTypes[$targets[$c]] ?? [], $targets[$c]);
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
                      . '(' . $this->vdArmList . ")\n";
             // Cell-typed result over candidates whose declared returns DISAGREE:
@@ -3293,7 +3378,8 @@ trait EmitLlvmObjects
         $out .= $defLabel . ":\n";
         // The default arm is a candidate like any other — it too can declare a
         // repr the site did not emit.
-        $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$fallback] ?? []);
+        $out .= $this->vdArmArgs($argList, $argOutTypes,
+                                 $this->sigs->paramTypes[$fallback] ?? [], $fallback);
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $this->vdArmList . ")\n";
         if ($boxCell) {
@@ -3669,13 +3755,14 @@ trait EmitLlvmObjects
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
+                // NOT expanded here: the pack's tail is filled from the CALLEE's
+                // defaults, and an erased receiver's arms need not share the
+                // fallback's signature — `$o->__construct(...['C'])` took some
+                // unrelated class's `= 0` for its second param. Each arm (and
+                // the single-target path) expands it against its own params.
                 $out .= $this->emitNode($a->operand);
                 $out .= $this->coerceToPtr();
-                $arr = $this->lastValue;
-                $elemType = $a->operand->type->element ?? null;
-                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai + 1, $ptypes, $tmask, $elemType);
-                $out .= $sir;
-                foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                $this->spreadTail = [$this->lastValue, $ai + 1, $a->operand->type->element ?? null];
                 $ai = \count($ptypes) - 1;
                 continue;
             }
@@ -3848,6 +3935,7 @@ trait EmitLlvmObjects
             if ($distinct === [] && !isset($this->sigs->paramTypes[$sym])
                 && ($static === '' || !isset($this->classes[$static]))) {
                 if ($btName !== '') { $out .= $this->btPop(); }
+                $this->spreadTail = null;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
                 return $out;
@@ -3855,7 +3943,7 @@ trait EmitLlvmObjects
             // The single resolved target need not be the one the arguments were
             // coerced for either (an erased receiver picks the fallback by
             // method name, then resolves exactly one live candidate).
-            $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? []);
+            $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? [], $sym);
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
                   . '(' . $this->vdArmList . ")\n";
@@ -3868,6 +3956,7 @@ trait EmitLlvmObjects
             $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms, $argOutTypes);
             $reg = $this->vdResult;
         }
+        $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
         // By-ref return (`function &m()`): the callee yields the field/slot

@@ -28,6 +28,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # netbase       -> /etc/services + /etc/protocols, the databases getservby*() /
 #                  getprotoby*() read; a bare debian:12 ships without them, so the
 #                  network stdlib would find nothing (getservbyname("http") → false).
+# libsqlite3-dev   -> pdo_sqlite (prelude/pdo_sqlite.php binds `sqlite3` by name).
+#                     Unlike curl this one DOES have a pkg-config module, so
+#                     Main.php's first probe answers and no *-config shim is needed.
 # libcurl4-openssl-dev -> ext/curl (prelude/curl.php binds `curl` by name). The
 #                  DEV package, not the `curl` CLI above: it is what ships
 #                  `curl-config` and the `libcurl.so` symlink, and Main.php's
@@ -35,7 +38,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  curl` fails everywhere, since the module is called libcurl.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release software-properties-common \
-        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev pkg-config \
+        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config \
         binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*
@@ -76,7 +79,8 @@ RUN CLANG_BIN="$(ls -1 /usr/bin/clang-[0-9]* | grep -E 'clang-[0-9]+$' | sort -V
 
 RUN php --version && clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
-    && curl-config --libs && php -r 'exit(function_exists("curl_init") ? 0 : 1);'
+    && curl-config --libs && php -r 'exit(function_exists("curl_init") ? 0 : 1);' \
+    && pkg-config --libs sqlite3 && php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);'
 
 # Run as a normal, unprivileged user. Under root every file is writable/executable
 # regardless of mode, so a suite that checks permissions diverges from a real

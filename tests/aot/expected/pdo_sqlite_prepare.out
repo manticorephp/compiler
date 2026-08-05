@@ -1,0 +1,13 @@
+string(1) "b"
+string(1) "c"
+string(1) "a"
+string(1) "b"
+bool(true)
+array(2) {
+  ["lit"]=>
+  string(3) ":id"
+  ["id"]=>
+  int(1)
+}
+bool(true)
+queryString=SELECT 1 AS one

@@ -34,6 +34,22 @@ generation does not know the symbol, so the stdlib `.o` build dies on an undefin
 
 ### Recently completed (2026-07)
 
+- **`ext/pdo` + `pdo_sqlite` — a database layer** (`docs/pdo.md`). `PDO` / `PDOStatement`
+  are a thin facade over an internal driver seam, so a future mysql/pgsql driver (a socket
+  with pack/unpack, no FFI) drops in without touching them — SQLite is not a server, which
+  is why this one is FFI. Demand-gated on a `PDO` mention, so a binary links `-lsqlite3`
+  only if it uses it. No trampolines: driving prepare/step directly avoids `sqlite3_exec`'s
+  callback entirely. No SQL scanner either — `sqlite3_bind_parameter_index()` already
+  resolves `:name` with sqlite's own quoting and comment rules.
+  SQLITE_BUSY is waited out through `\Runtime\AsyncHook` (never `sqlite3_busy_timeout`,
+  which sleeps in a C frame and stalls the netpoller).
+  Divergences, each documented: `getCode()` is the driver's int because
+  `Throwable::getCode(): int` is a contract here; `bindParam()` binds by value at bind time;
+  `bindColumn()` / `FETCH_BOUND` throw — all three for the same missing zval reference.
+  ⛔ `FETCH_OBJ` / `FETCH_CLASS` / `FETCH_INTO` / `FETCH_LAZY`, and `fetch()` with no
+  argument under the default `FETCH_BOTH`, are blocked on the ERASED-VALUE work, not on the
+  driver: a value returned through a `mixed` channel whose arms have different shapes is not
+  self-describing. `docs/pdo.md` carries three minimal repros that never mention PDO.
 - **`ext/curl` — an HTTP client** (`docs/curl.md`). The easy API, `curl_multi_*` and
   `curl_share_*`, bound to libcurl through FFI and demand-gated, so a binary links
   `-lcurl` only if it calls one of them. `CURLOPT_WRITEFUNCTION` and its three siblings
