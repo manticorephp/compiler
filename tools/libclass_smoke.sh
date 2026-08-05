@@ -30,9 +30,10 @@ fail() { printf 'FAIL %s\n' "$*"; fails=$((fails + 1)); }
 # ── the positive fixture ──────────────────────────────────────────────────────
 
 rm -rf "$WORK"
-if ! "$MC" build "$FIX/manticore.json" > "$WORK.build.log" 2>&1; then
+mkdir -p "$WORK"   # every artefact goes INSIDE the one gitignored directory
+if ! "$MC" build "$FIX/manticore.json" > "$WORK/build.log" 2>&1; then
     fail "build"
-    cat "$WORK.build.log"
+    cat "$WORK/build.log"
     exit 1
 fi
 

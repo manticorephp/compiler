@@ -1,2 +1,0 @@
-build: library 'acmeclasses' (tests/libs/classes/lib -> tests/libs/classes/.work/acme.o)
-build: application 'acmeapp' (tests/libs/classes/app -> tests/libs/classes/.work/acmeapp)

@@ -1,1 +1,3 @@
 .work/
+.work.build.log
+!expected.out

@@ -1,0 +1,32 @@
+5
+point!:5
+point point!
+00
+30 2 2
+circle 48
+bool(true)
+-1
+5 box/5
+bool(true)
+red GREEN
+Red
+1.0 7
+Acme\Point Acme\Circle
+object(Acme\Point)#1 (2) {
+  ["x"]=>
+  int(2)
+  ["y"]=>
+  int(3)
+}
+object(Acme\Boxed)#4 (2) {
+  ["size"]=>
+  int(5)
+  ["tag"]=>
+  string(3) "box"
+}
+Array
+(
+    [x] => 2
+    [y] => 3
+)
+
