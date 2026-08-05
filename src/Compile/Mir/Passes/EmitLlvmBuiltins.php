@@ -5853,9 +5853,96 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsTagged = true;
         $obj = $args[0];
+        $cls = $obj->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls])) {
+            $out = $this->emitNode($obj);
+            $out .= $this->coerceToPtr();
+            return $out . $this->emitDeclaredPropsArray($this->lastValue, $cls);
+        }
+        return $this->emitObjectVarsByClassId($obj);
+    }
+
+    /**
+     * `get_object_vars($o)` on a receiver whose STATIC type names no class — a
+     * `: mixed` return, a mixed property, an array element.
+     *
+     * {@see emitDeclaredPropsArray} keys off the static class name, so an erased
+     * receiver walked NO properties and the call answered an EMPTY array. That is
+     * what made `get_object_vars()`, `(array)$o` and `json_encode()` of such a
+     * value render `{}` while `var_dump` of the very same value was correct —
+     * var_dump dispatches on the RUNTIME class (`__mir_dump_object`'s instanceof
+     * chain) and this did not.
+     *
+     * Same class_id switch {@see EmitLlvmObjects::emitCellPropertyRead} uses: one
+     * arm per class that has a declared layout, and the dynamic BAG as the
+     * default, which is what a stdClass — every `json_decode` result and every
+     * `(object)` cast — actually carries.
+     */
+    private function emitObjectVarsByClassId(Node $obj): string
+    {
+        $this->rt->needsTagged = true;
+        $k = $obj->type->kind;
         $out = $this->emitNode($obj);
-        $out .= $this->coerceToPtr();
-        return $out . $this->emitDeclaredPropsArray($this->lastValue, $obj->type->class ?? '');
+        $out .= ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN)
+            ? $this->cellToPtr() : $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+
+        /** @var array<string,mixed> */
+        $holders = [];
+        foreach ($this->classes as $cname => $cd) {
+            if ($cd->propertyNames === []) { continue; }
+            $holders[$cname] = $cd;
+        }
+        if ($holders === []) { return $out . $this->emitBagCoOwned($objPtr); }
+
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->ssa->allocLabel('gov.end');
+        $def = $this->ssa->allocLabel('gov.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($holders as $cname => $cd) {
+            $lbl = $this->ssa->allocLabel('gov.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname);
+            $pi = $this->ssa->allocReg();
+            $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $bodies .= '  store i64 ' . $pi . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $bodies .= $def . ":\n";
+        $bodies .= $this->emitBagCoOwned($objPtr);
+        $bi = $this->ssa->allocReg();
+        $bodies .= '  ' . $bi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        $bodies .= '  store i64 ' . $bi . ', ptr ' . $res . "\n";
+        $bodies .= '  br label %' . $end . "\n";
+
+        $out .= $switch . $bodies . $end . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** The object's dynamic bag, co-owned — the bag belongs to the object, and a
+     *  call result is released by the caller by convention, so without the retain
+     *  the first use would free the object's own properties ({@see biObjBag}). */
+    private function emitBagCoOwned(string $objPtr): string
+    {
+        $out = $this->emitBagOfUnknownClass($objPtr);
+        $bagP = $this->lastValue;
+        $this->rt->needsRc = true;
+        $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+        $this->lastValue = $bagP;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /**
@@ -5882,10 +5969,14 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
-                // Box the raw i64 carrier to a tagged cell per its static type.
-                $this->lastValue = $v;
-                $this->lastValueType = 'i64';
-                $out .= $this->boxToCell($pt);
+                // boxRawValue and NOT boxToCell: the slot holds a RAW carrier, and
+                // a float slot's carrier is a double's BIT PATTERN. boxToCell
+                // treats its input as a value of `$pt` already in cell shape, so a
+                // `public float $f = 2.5` came back as float(4.6128119E+18) — the
+                // bits of 2.5 boxed as an integer. boxRawValue is the raw-slot →
+                // cell converter the property READ path already uses
+                // ({@see EmitLlvmObjects::emitFixedPropLoad}).
+                $out .= $this->boxRawValue($v, $pt);
                 $boxed = $this->lastValue;
                 $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '

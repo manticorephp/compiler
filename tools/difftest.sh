@@ -48,33 +48,35 @@ else
     FILES=(tests/aot/cases/*.php)
 fi
 
-# Known, understood divergences from PHP — excluded so the gate flags only
-# NEW findings. Keep each with a one-line reason.
+# Known, understood divergences from PHP — kept out of the DIFF count so the
+# gate flags only NEW findings, but COUNTED AND NAMED in the summary. They used
+# to be scored as MATCH, which is how a divergence stops being a fact: the line
+# read 818 MATCH while three of those cases did not match anything.
+# Keep each with a one-line reason.
 #   assoc_missing.php — typed-int assoc read of a missing key yields 0, not
 #     null/"" (a typed-slot i64 can't carry null without boxing).
 #   superglobals_env.php — $_ENV is populated; php's default variables_order
 #     ("GPCS") leaves it empty. A native binary has no php.ini to flip.
-#   array_erased_elem_repr_gap.php — the case EXISTS to print the divergence.
-#     An `unknown` array element (and an aliased local) is decoded as a tagged
-#     cell on read and stored raw on write, so `echo $a[0]` prints the address.
-#     It also has no expected/ file, so the AOT suite SKIPs it rather than
-#     blessing the wrong answer; here it would otherwise be permanent red.
+# ⚠ A COMPILER GAP DOES NOT BELONG HERE. array_erased_elem_repr_gap.php was on
+# this list AND had no expected/ file, so the AOT suite skipped it and difftest
+# scored it a match — muted in both gates at once. Its expected/ now holds the
+# ORACLE's answer and the case is red until the element-repr epic earns it.
 is_known_divergence() {
     case "$1" in
         assoc_missing.php) return 0;;
         superglobals_env.php) return 0;;
-        array_erased_elem_repr_gap.php) return 0;;
     esac
     return 1
 }
 
-match=0 diff=0 compile=0 phpskip=0
+match=0 diff=0 compile=0 phpskip=0 known=0
 # Assigned EMPTY, not just declared: under `set -u` some bashes treat a declared-but-
 # never-assigned array as unbound, so the summary below died with
 # "COMPILES: unbound variable" on a run that had no compile failures — i.e. exactly
 # when everything passed.
 DIFFS=()
 COMPILES=()
+KNOWN=()
 
 for f in "${FILES[@]}"; do
     [[ -f "$f" ]] || continue
@@ -126,7 +128,7 @@ for f in "${FILES[@]}"; do
     if [[ "$got" == "$ref" ]]; then
         match=$((match + 1))
     elif is_known_divergence "$name"; then
-        match=$((match + 1))   # documented limitation, not a regression
+        known=$((known + 1)); KNOWN+=("$name")   # documented limitation, not a regression
     else
         diff=$((diff + 1)); DIFFS+=("$name")
     fi
@@ -138,7 +140,12 @@ echo "  DIFF:      $diff"
 echo "  COMPILE:   $compile   (manticore failed to compile a php-runnable file)"
 echo "  TIMEOUT:   $timedout   (>${CASE_TIMEOUT}s ours / >${REF_TIMEOUT}s php — a hang, on either side)"
 echo "  PHP-SKIP:  $phpskip   (not plain-runnable under php — manticore-only)"
+echo "  KNOWN:     $known   (documented divergence, named below — NOT a match)"
 
+if [[ ${#KNOWN[@]} -gt 0 ]]; then
+    echo "── known divergences (excluded from DIFF on purpose) ──"
+    printf '  %s\n' "${KNOWN[@]}"
+fi
 if [[ ${#TIMEDOUT[@]} -gt 0 ]]; then
     echo "── timeouts ──"
     printf '  %s\n' "${TIMEDOUT[@]}"

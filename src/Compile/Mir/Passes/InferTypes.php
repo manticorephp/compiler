@@ -149,6 +149,11 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
+    /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
+     *  frames disagreed about the kind in that shared word. Both the outer local
+     *  and the closure's capture param are recorded, and both become a CELL — the
+     *  word is one slot, so it has one representation. {@see scanByRefCaptureWiden} */
+    private array $byRefCaptureCellLocals = [];
     /** @var array<string,bool> array locals whose element is an inner array built
      *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
      *  vec[unknown] (raw). Paired with {@see $nestedScalarStoreLocals}. */
@@ -208,6 +213,10 @@ final class InferTypes implements Pass
      *  Discovered during inference (a call's kind isn't knowable to a pre-scan),
      *  so a promotion re-runs the function — see inferFunction. */
     private array $cellLoopLocals = [];
+    /** The CURRENT function's slice of {@see $byRefCaptureCellLocals} — the same
+     *  role {@see $cellLoopLocals} plays for a loop-rekinded slot: every store
+     *  boxes, every read dispatches by tag. */
+    private array $cellCaptureLocals = [];
     /** @var array<string,bool> locals a loop widens int→float (`$f = 1;` then
      *  `$f = 2.5` in the body). Same story, cheaper answer: the slot is a FLOAT,
      *  not a cell, so the pre-loop int store rides a sitofp ({@see floatLocals},
@@ -530,6 +539,17 @@ final class InferTypes implements Pass
             }
             $guard = $guard + 1;
         }
+        // A BY-REF captured local is ONE word shared by two frames, so it has one
+        // representation and both frames have to agree on it. Runs after the
+        // element scans because the disagreement is only visible once both the
+        // capture site and the closure body have been typed once.
+        $guard = 0;
+        while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
         // promoted param is a bare `array` (lowered to unknown). Retype the
@@ -579,6 +599,21 @@ final class InferTypes implements Pass
                 }
                 if ($before === $after) { break; }
             }
+        }
+        // {@see scanPropElemFromStores} once more, and it has to be HERE — after
+        // the capture convergence above, which is the first point where a
+        // closure's captured RECEIVER is typed at all. The scan ran once far
+        // earlier, saw `$bag` as `unknown`, could not attribute
+        // `$bag->rows[] = $s` to any class, and never looked again — one miss was
+        // permanent. The property kept vec[unknown], the closure stored the
+        // string pointer raw, the outer read decoded a tagged cell, and `echo`
+        // printed the address.
+        $guard = 0;
+        while ($guard < 4 && $this->scanPropElemFromStores($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
         }
         $module->markPassApplied(self::NAME);
         return $module;

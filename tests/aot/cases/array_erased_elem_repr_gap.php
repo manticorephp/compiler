@@ -1,9 +1,11 @@
 <?php
 
-// ⚠ KNOWN GAP — this case has NO expected/ file on purpose, so the suite reports
-// it as a SKIP rather than a green PASS over a wrong answer. It is checked in as
-// the minimal reproduction; give it an expected/ file the day the erased element
-// channel is retyped, and it becomes the regression test for free.
+// ⚠ KNOWN GAP — and its expected/ file is the ORACLE's answer, not ours, so this
+// case is RED until the compiler earns it. It was checked in without an expected/
+// file at first, which made the suite report a SKIP: a gap nothing gates, sitting
+// inside the gate, reading as 897/898 green. The audit's own rule already said so
+// — a muted case is how a known gap turns into an unknown one — so the file now
+// holds what `php` prints and the red line is the standing order.
 //
 // THE DISAGREEMENT. A bare `array` gets element type `unknown` by design. The
 // READ side decodes an `unknown` element as a NaN-TAGGED cell

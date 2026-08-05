@@ -206,7 +206,26 @@ trait EmitLlvmObjects
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
                       . '(' . $argList . ")\n";
             }
-            $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            // The MIR node is typed CELL (`new_dyn %n() : cell`), so the value
+            // has to BE one — this stored the bare `ptrtoint` instead, and every
+            // consumer that checks the tag rather than masking it saw a
+            // non-object: `get_class(new $cls())` answered '' because its tag!=8
+            // arm is the default. Property reads hid it, because cellToPtr's
+            // 48-bit mask leaves a raw pointer unchanged.
+            //
+            // Boxed HERE and not at the join: the miss path below stores 0 for a
+            // name no class matched, and a 0 payload under an object tag would
+            // send get_class's class_id load to address 0. Left raw, that 0 still
+            // fails the tag check and falls to the '' arm, which is the behaviour
+            // php's "Class not found" case degrades to here.
+            if ($n->type->kind === Type::KIND_CELL) {
+                $this->rt->needsTagged = true;
+                $bx = $this->ssa->allocReg();
+                $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $objPtr . ")\n";
+                $out .= '  store i64 ' . $bx . ', ptr ' . $slot . "\n";
+            } else {
+                $out .= '  store i64 ' . $objInt . ', ptr ' . $slot . "\n";
+            }
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
@@ -2805,13 +2824,35 @@ trait EmitLlvmObjects
             $this->lastValueType = $resTy;
             return $out;
         }
+        // The mirror image of the box above, and it was missing: a CELL value
+        // stored into a CONCRETELY-typed slot must be UNBOXED, or the tagged bits
+        // land in a slot every reader treats as that raw type. `public static int
+        // $m` written through an erased closure parameter read back as
+        // -4222124650655744, and `public static string $s` SIGSEGV'd — the reader
+        // inttoptr'd the tag. The INSTANCE property store has done this for a
+        // while ({@see emitStoreProperty}); only the static path never learned it,
+        // which is why a typed instance slot was right and a typed static slot was
+        // not through the very same channel.
+        //
+        // Concrete only. A CELL or UNKNOWN declaration is the box arm's business
+        // above, and UNKNOWN is also the unhinted-static slot whose encoding
+        // depends on the kind STORED — that one is the element-repr epic, not a
+        // store this predicate can settle.
+        $dcT = null;
+        if ($n->value->type->kind === Type::KIND_CELL && $n->declared !== null
+            && $dk !== Type::KIND_CELL && $dk !== Type::KIND_UNKNOWN) {
+            $dcT = $n->declared;
+            $out .= $this->unboxCellToType($dcT);
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $res = $val;
         // A static prop is a program-lifetime owner of an obj value. The retain
         // happens on the RAW pointer, BEFORE any boxing — a tagged cell would
         // mis-locate the rc header (same rule as the instance-property store).
-        $out .= $this->rcRetainByType($n->value, $val, null, 5);
+        // Once unboxed the payload IS raw, so the retain is chosen from the
+        // declared type instead of the cell's null (which retains nothing).
+        $out .= $this->rcRetainByType($n->value, $val, $dcT, 5);
         if ($box) {
             $out .= $this->boxToCell($n->value->type, $n->value);
             $val = $this->lastValue;

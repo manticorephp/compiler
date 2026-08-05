@@ -186,6 +186,15 @@ trait InferNodes
                 $ci = $ci + 1;
             }
         }
+        // …and undo that seeding where the two frames were PROVEN to disagree.
+        // A by-ref capture is one shared word, so the capture-site type is only a
+        // hypothesis about it; when the body stores another kind the slot is a
+        // CELL on both sides. Applied AFTER the loop above on purpose — it is the
+        // correction to it. {@see InferScans::scanByRefCaptureWiden}
+        $this->cellCaptureLocals = $this->byRefCaptureCellLocals[$fn->name] ?? [];
+        foreach ($this->cellCaptureLocals as $name => $unused) {
+            $this->localTypes[$name] = Type::cell();
+        }
         // Pre-scan: refine a bare `array $p` param to vec[string] when the
         // body uses its elements as strings (`$x=$p[$i]; $x==="..."` / `$x[0]`
         // / substr($x)). Without an element type `$p[$i]` is i64 and a string
@@ -671,6 +680,16 @@ trait InferNodes
         // is polymorphic across the back-edge, so every store boxes and every read
         // dispatches by tag.
         if (isset($this->cellLoopLocals[$node->name])) {
+            $this->localTypes[$node->name] = Type::cell();
+            $node->type = Type::cell();
+            return $node->type;
+        }
+        // The same discipline one frame over: a BY-REF CAPTURED local whose two
+        // frames disagreed is polymorphic across the CAPTURE, not across a back
+        // edge. Without this arm the seed above is undone by the very first
+        // store — `$max = 0` retypes the slot to int, and the closure's cell then
+        // lands in it raw. {@see InferScans::scanByRefCaptureWiden}
+        if (isset($this->cellCaptureLocals[$node->name])) {
             $this->localTypes[$node->name] = Type::cell();
             $node->type = Type::cell();
             return $node->type;

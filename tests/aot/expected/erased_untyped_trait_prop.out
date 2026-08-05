@@ -1,0 +1,15 @@
+int(5)
+string(1) "n"
+float(1.5)
+array(3) {
+  ["id"]=>
+  int(5)
+  ["name"]=>
+  string(1) "n"
+  ["f"]=>
+  float(1.5)
+}
+int(42)
+int(5)
+string(1) "n"
+int(7)

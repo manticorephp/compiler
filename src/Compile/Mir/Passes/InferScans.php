@@ -1087,6 +1087,181 @@ trait InferScans
      * local so the next inferFunction seeds it vec[cell]. True when it found
      * something new — the driver re-infers.
      */
+    /**
+     * A BY-REF capture is ONE heap word shared by two frames, and nothing pins
+     * its representation — so when the two frames disagree about what kind lives
+     * there, the word is written as one thing and read as another.
+     *
+     * `$max = 0; $f = function ($v) use (&$max) { if ($v > $max) { $max = $v; } };`
+     * is the shape. The closure body's capture local is seeded with the type
+     * OBSERVED AT THE CAPTURE SITE ({@see InferNodes::inferFunction}), which is
+     * right for a by-VALUE capture and wrong here: `$max` is int at the site, the
+     * body stores the cell it got through a `mixed` parameter, and ONE function
+     * then carries `load_local max : int` next to `store_local max <- … : cell`.
+     * The outer `echo $max` printed -4222124650655744, the tagged word read raw.
+     *
+     * The answer is not to unbox at the store — php lets that slot become a
+     * string on the next call and an unbox to int would corrupt it. Both sides
+     * become a CELL instead, which is the only type that describes what the slot
+     * can hold.
+     *
+     * ⚠ Narrow ON PURPOSE, and the narrowness is the whole design. Retyping every
+     * erased by-ref parameter to cell was tried in an earlier round and SIGSEGV'd
+     * the self-host, and a closure's `&$v` must otherwise stay RAW. This fires
+     * only where the two frames DEMONSTRABLY disagree, so the overwhelmingly
+     * common `use (&$sum)` with an int store is untouched.
+     *
+     * Records into `byRefCaptureCellLocals`; true when it found something new —
+     * the driver re-infers, and a seed only widens, so it converges.
+     */
+    private function scanByRefCaptureWiden(Module $module): bool
+    {
+        $byName = [];
+        foreach ($module->functions as $f) { $byName[$f->name] = $f; }
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            // A prelude body is linkonce_odr and shared across modules — never
+            // specialize one from this module's capture sites.
+            if ($fn->isPrelude) { continue; }
+            $sites = [];
+            $this->scanByRefCaptureNode($fn->body, $sites);
+            foreach ($sites as $site => $unused) {
+                // Flat "closureFn#idx#local#kind" — a nested array here is the
+                // known self-host miscompile hazard the other scans avoid too.
+                $parts = \explode('#', $site);
+                if (\count($parts) !== 5) { continue; }
+                $clName = $parts[0];
+                $idx = (int)$parts[1];
+                $local = $parts[2];
+                // A Type KIND is a STRING ('int', 'cell', 'unknown'), so it rides
+                // the key as one — casting it to int silently made every kind 0
+                // and the predicate compared nothing to nothing.
+                $siteKind = $parts[3];
+                $siteElem = $parts[4];
+                $cl = $byName[$clName] ?? null;
+                if ($cl === null) { continue; }
+                $pn = $this->paramNameAt($cl, $idx);
+                if ($pn === '') { continue; }
+                // The captured word itself holds two different kinds.
+                if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)) {
+                    if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
+                        $this->byRefCaptureCellLocals[$fn->name][$local] = true;
+                        $changed = true;
+                    }
+                    if (!isset($this->byRefCaptureCellLocals[$clName][$pn])) {
+                        $this->byRefCaptureCellLocals[$clName][$pn] = true;
+                        $changed = true;
+                    }
+                    continue;
+                }
+                // The word agrees, but the ARRAY it points at does not: the outer
+                // frame reads elements through an erased channel (decoded as a
+                // tagged cell) while the closure writes them RAW. Same slot, same
+                // cure — the element channel becomes a cell on both sides, which
+                // also makes the buffer allocate with a cell repr instead of being
+                // stamped raw and read tagged.
+                if (!$this->byRefCaptureElemDisagrees($cl, $pn, $siteKind, $siteElem)) { continue; }
+                if (!isset($this->forcedCellElemLocals[$fn->name][$local])) {
+                    $this->forcedCellElemLocals[$fn->name][$local] = true;
+                    $changed = true;
+                }
+                if (!isset($this->forcedCellElemLocals[$clName][$pn])) {
+                    $this->forcedCellElemLocals[$clName][$pn] = true;
+                    $changed = true;
+                }
+            }
+        }
+        return $changed;
+    }
+
+    /** Does the closure body store a kind into its capture param that the capture
+     *  SITE does not have? UNKNOWN on either end is not a disagreement — it is an
+     *  absence of information, and widening on it would fire everywhere. */
+    private function byRefCaptureDisagrees(FunctionDef $cl, string $param, string $siteKind): bool
+    {
+        if ($siteKind === Type::KIND_UNKNOWN || $siteKind === '') { return false; }
+        $kinds = [];
+        $this->scanStoreLocalKinds($cl->body, $param, $kinds);
+        foreach ($kinds as $k => $unused) {
+            $kk = (string)$k;
+            if ($kk === Type::KIND_UNKNOWN || $kk === $siteKind) { continue; }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * The ELEMENT half of the same question: the captured word is an ARRAY both
+     * frames agree on, but the closure writes elements the outer frame cannot
+     * read back.
+     *
+     * `$a = []; $f = function () use (&$a) { $a[] = 'lit'; }; $f(); echo $a[0];`
+     * — the outer local stays vec[unknown] because nothing in ITS body says
+     * otherwise, so its reads decode a tagged cell, while the closure body still
+     * sees a plain `string` and stores the pointer raw. `echo` printed the
+     * ADDRESS. An erased element channel written from another frame is the one
+     * case where neither side can narrow the other, so it becomes a cell.
+     */
+    private function byRefCaptureElemDisagrees(
+        FunctionDef $cl,
+        string $param,
+        string $siteKind,
+        string $siteElem,
+    ): bool {
+        if ($siteKind !== Type::KIND_ARRAY) { return false; }
+        // A CONCRETE element on the outer side is already a shared agreement —
+        // the closure body is narrowed to it through the capture seeding.
+        if ($siteElem !== '' && $siteElem !== Type::KIND_UNKNOWN) { return false; }
+        $kinds = [];
+        $this->scanStoreElemKinds($cl->body, $param, $kinds);
+        foreach ($kinds as $k => $unused) {
+            $kk = (string)$k;
+            if ($kk === Type::KIND_UNKNOWN || $kk === Type::KIND_CELL) { continue; }
+            return true;
+        }
+        return false;
+    }
+
+    /** Every value KIND stored into one local's ELEMENTS, as a set. */
+    private function scanStoreElemKinds(Node $n, string $name, array &$kinds): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT
+            && $n->array->kind === Node::KIND_LOAD_LOCAL
+            && $n->array->name === $name) {
+            $kinds[$n->value->type->kind] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->scanStoreElemKinds($c, $name, $kinds); }
+    }
+
+    /** Every value KIND stored into one local, as a set. */
+    private function scanStoreLocalKinds(Node $n, string $name, array &$kinds): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
+            $kinds[$n->value->type->kind] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->scanStoreLocalKinds($c, $name, $kinds); }
+    }
+
+    /** Every BY-REF capture site in a body, flat: "closureFn#idx#local#kind". */
+    private function scanByRefCaptureNode(Node $n, array &$sites): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $clsName = $n->type->class;
+            if ($clsName === null) { $clsName = ''; }
+            $i = -1;
+            foreach ($n->captures as $c) {
+                $i = $i + 1;
+                if ($clsName === '') { continue; }
+                if (!($n->captureByRef[$i] ?? false)) { continue; }
+                if ($c->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+                $ek = $c->type->element === null ? '' : (string)$c->type->element->kind;
+                $sites[$clsName . '#' . (string)$i . '#' . $c->name
+                       . '#' . (string)$c->type->kind . '#' . $ek] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanByRefCaptureNode($c, $sites); }
+    }
+
     private function scanLocalElemFromStores(Module $module): bool
     {
         $changed = false;
