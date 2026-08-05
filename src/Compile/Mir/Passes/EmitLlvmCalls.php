@@ -1116,13 +1116,10 @@ trait EmitLlvmCalls
         $pt = $ptypes[$ai] ?? null;
         if ($pt === null || $pt->kind !== Type::KIND_CELL) { return false; }
         $ak = $a->type->kind;
-        // SCALARS only. An array would have to cross as a cell-ELEMENT array
-        // for the callee to read its values, and the write-back would then put
-        // that array back in a slot whose static type says raw elements — a
-        // repr the caller would mis-read. Arrays keep the plain address path.
         return $ak === Type::KIND_INT || $ak === Type::KIND_BOOL
             || $ak === Type::KIND_FLOAT || $ak === Type::KIND_STRING
-            || $ak === Type::KIND_NULL || $ak === Type::KIND_OBJ;
+            || $ak === Type::KIND_NULL || $ak === Type::KIND_OBJ
+            || $a->type->isArray();
     }
 
     /**
@@ -1131,9 +1128,12 @@ trait EmitLlvmCalls
      * `$refBoxSlot` / `$refBoxTmp` for the caller to push onto its write-back
      * list; leaves the scratch address in lastValue.
      *
-     * Boxed SHALLOW: a concrete-element array must not be rebuilt here, or the
-     * by-ref aliasing the caller expects is silently broken (the same rule the
-     * unbox arm states).
+     * An ARRAY goes through the full `boxToCell`, which rebuilds it with boxed
+     * elements ONLY when they are concrete — a cell/unknown-element array is
+     * already self-describing and takes the flat `box_array`, so the buffer (and
+     * with it the caller's aliasing) is untouched. A concrete-element array
+     * cannot be handed over flat: the callee reads every element as a cell and
+     * a raw int reads back as a denormal. Its write-back de-cellifies.
      */
     private function emitByRefCellBox(Node $a): string
     {
@@ -1154,7 +1154,9 @@ trait EmitLlvmCalls
             $this->lastValue = $fb;
             $this->lastValueType = 'double';
         }
-        $out .= $this->boxToCellShallow($a->type);
+        $out .= $a->type->isArray()
+            ? $this->boxToCell($a->type)
+            : $this->boxToCellShallow($a->type);
         $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . " = alloca i64\n";
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
@@ -1179,7 +1181,15 @@ trait EmitLlvmCalls
         $out = '  ' . $cv . ' = load i64, ptr ' . $tmp . "\n";
         $this->lastValue = $cv;
         $this->lastValueType = 'i64';
+        // Strip the CONTAINER's tag first: `vec[cell]` is a RAW pointer whose
+        // ELEMENTS are cells, and emitCellArrayToTyped inttoptr's what it is
+        // given — handed the boxed array it dereferenced the tag bits.
         $out .= $this->unboxCellToType($t);
+        // A CONCRETE-element array slot then takes the de-cellify rebuild, the
+        // same boundary `uasort`'s writeback uses.
+        if ($this->needsDeCellify($t, Type::vec(Type::cell()))) {
+            $out .= $this->emitCellArrayToTyped($t);
+        }
         $out .= $this->coerceToI64();
         $sp = $this->ssa->allocReg();
         $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";

@@ -1,12 +1,26 @@
 integer:3
-string:'q'
+string:"q"
 double:1.5
 boolean:true
-NULL:NULL
+NULL:null
 string
 integer:5
 integer:7
 integer:8
 integer:9
 integer:100
-string:'a!'
+string:"a!"
+array:[1,2,3]
+array:["a","b"]
+array:[1.5,2.5]
+array:[1,"a",2.5]
+array:{"k":1,"j":2}
+array:[[1,2],[3]]
+array:[]
+array:[4,5]
+array:[6,7]
+array:[1,2,99] 1
+array:{"a":1,"n":"added"}
+array:[7,8] 7
+102 3 99
+6

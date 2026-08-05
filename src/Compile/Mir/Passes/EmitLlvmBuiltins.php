@@ -903,9 +903,13 @@ trait EmitLlvmBuiltins
         // Unbox the boxed cell value to the element's raw representation.
         $raw = $this->ssa->allocReg();
         if ($elem->kind === Type::KIND_ARRAY && ($elem->element->kind ?? '') !== Type::KIND_CELL) {
-            // Nested concrete array: recursively de-cellify.
+            // Nested concrete array: recursively de-cellify. The element read
+            // out of a cell-element array is a BOXED array cell, and this
+            // function inttoptr's what it is handed — strip the container tag
+            // first or the recursion dereferences the tag bits.
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
+            $out .= $this->unboxCellToType($elem);
             $out .= $this->emitCellArrayToTyped($elem);
             $raw = $this->lastValue;
         } else {
