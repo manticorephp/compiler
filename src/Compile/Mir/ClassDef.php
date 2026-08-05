@@ -232,6 +232,13 @@ final class ClassDef
      *  @var array<string, PropertyMeta> */
     public array $propertyMeta = [];
 
+    /** True when this class was IMPORTED from a library `.sig` rather than
+     *  declared here: its methods, its class descriptor, its reflection
+     *  metadata and its static-property cells are all defined in that library's
+     *  `.o`, so this module must declare them and emit none of them. Appended
+     *  LAST for the same offset-stability reason as {@see $isPreludeClass}. */
+    public bool $isExternClass = false;
+
     /**
      * Width in bytes of `$prop`'s slot: 8 unless the property is declared as a
      * `#[TypeDef]` whose `repr` is narrower.

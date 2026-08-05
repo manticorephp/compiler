@@ -71,6 +71,20 @@ final class Module
     public array $globalIsPrelude = [];
 
     /**
+     * Whether each cell is DEFINED ELSEWHERE — a static property of a class
+     * imported from a library `.sig` — parallel to $globalNames.
+     *
+     * Deliberately NOT the prelude's `linkonce_odr` treatment. PHP gives a
+     * class ONE static slot, and two coalescable definitions carrying different
+     * initialisers leave which one survives to the linker; on a slot the
+     * library's own constructor writes, that is a counter that silently forgets
+     * increments. The library `.o` owns the definition, so this module emits a
+     * declaration and links to it.
+     * @var bool[]
+     */
+    public array $globalIsExtern = [];
+
+    /**
      * Names declared `global $x` anywhere — top-level (`__main`) reads
      * of these route to the shared `@g_<name>` cell too.
      * @var string[]
@@ -163,8 +177,10 @@ final class Module
      *  @var array<string, string> */
     public array $attrSiteErrors = [];
 
-    /** Register a global cell once (idempotent by name). $isPrelude → linkonce_odr. */
-    public function addGlobalCell(string $name, Node $default, bool $isPrelude = false): void
+    /** Register a global cell once (idempotent by name). $isPrelude →
+     *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
+    public function addGlobalCell(string $name, Node $default,
+                                  bool $isPrelude = false, bool $isExtern = false): void
     {
         foreach ($this->globalNames as $existing) {
             if ($existing === $name) { return; }
@@ -172,6 +188,7 @@ final class Module
         $this->globalNames[] = $name;
         $this->globalDefaults[] = $default;
         $this->globalIsPrelude[] = $isPrelude;
+        $this->globalIsExtern[] = $isExtern;
     }
 
     /** Record a `global $name` declaration (idempotent). */
@@ -193,12 +210,75 @@ final class Module
 
     public function addClass(ClassDef $class): void
     {
+        $this->claimClassId($class->classId, $class->name);
         $this->classes[$class->name] = $class;
     }
 
     public function addEnum(EnumDef $enum): void
     {
+        $this->claimClassId($enum->classId, $enum->name);
         $this->enums[$enum->name] = $enum;
+    }
+
+    /** class_id → the FQN that owns it, for the collision check below.
+     *  @var array<int, string> */
+    private array $classIdOwner = [];
+
+    /**
+     * FQN → the AST declaration of a type this module may EXPORT, populated
+     * only when building a library ({@see \Manticore\Sig::emitModule} reads it).
+     *
+     * Lowering keeps a {@see ClassDef} for the layout and an {@see EnumDef} for
+     * the cases, but an INTERFACE gets neither — it lives on as a name in
+     * {@see $interfaceNames} and nothing else — and no MIR structure anywhere
+     * records a type's CONSTANTS, which are inlined at each use site. The
+     * declaration is the only thing that still knows both.
+     *
+     * Prelude types are never recorded: they are compiled into every module
+     * already, so exporting one would hand a dependent a second definition of
+     * a class it also holds.
+     *
+     * @var array<string, \Parser\Ast\ClassDecl>
+     */
+    public array $typeDecls = [];
+
+    /**
+     * `"<FQN>::<CONST>"` → the const-folded MIR value of a class constant, and
+     * plain `"<NAME>"` → that of a global one, for library export.
+     *
+     * FLAT and separate rather than one nested map per class: an assoc of
+     * assocs erases to KIND_UNKNOWN under the self-host, so every read would
+     * come back raw. Populated at lowering, where `self::OTHER` still resolves.
+     *
+     * @var array<string, Node>
+     */
+    public array $classConstValues = [];
+
+    /** @var array<string, Node> */
+    public array $globalConstValues = [];
+
+    /**
+     * A class id is a content hash of the fully-qualified name
+     * ({@see Passes\LowerFromAst::stableClassId}) — which is what makes it the
+     * same in every compiled object, and therefore what makes a `.o` boundary
+     * safe. Two DIFFERENT names hashing alike is the one way that guarantee
+     * fails, and every consequence of it is silent: the wrong `drop` body, an
+     * `instanceof` that answers yes, a virtual-dispatch arm entered with the
+     * wrong layout.
+     *
+     * Classes and enums share one id space — `instanceof` matches across both —
+     * so one map covers them.
+     */
+    private function claimClassId(int $id, string $name): void
+    {
+        $owner = $this->classIdOwner[$id] ?? '';
+        if ($owner !== '' && $owner !== $name) {
+            throw new \RuntimeException(
+                'manticore: class-id collision — ' . $owner . ' and ' . $name
+                . ' both hash to ' . (string)$id
+                . "\n  rename one of them (the id is a hash of the fully-qualified name).");
+        }
+        $this->classIdOwner[$id] = $name;
     }
 
     public function markPassApplied(string $name): void

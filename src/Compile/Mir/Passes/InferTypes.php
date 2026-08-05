@@ -330,7 +330,12 @@ final class InferTypes implements Pass
         foreach ($module->functions as $fn) {
             $this->sigs[$fn->name] = $fn->returnType;
             $this->fnByName[$fn->name] = $fn;
-            if ($fn->returnType->kind === Type::KIND_UNKNOWN) {
+            // An extern's UNKNOWN return is the library's answer, not a gap to
+            // fill: the `.sig` writes "" precisely when the library erased it,
+            // and the compiled body returns a raw word. Letting it into the
+            // undeclared set would have this module infer a type for a body it
+            // does not have — and there is no body to re-check it against.
+            if ($fn->returnType->kind === Type::KIND_UNKNOWN && !$fn->isExtern) {
                 $this->undeclaredReturnFns[$fn->name] = true;
             }
         }

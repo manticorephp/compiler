@@ -491,6 +491,7 @@ trait LowerClasses
                 '@' . $this->sanitizeSym($decl->name . '__sp_' . $prop->name),
                 $def,
                 $this->inPreludeClass,
+                $this->isExternClassName($decl->name),
             );
         }
         $this->currentLowerClass = $prevLowerClass;
@@ -581,6 +582,134 @@ trait LowerClasses
             $this->lowerExpr($tp->default),
             $pt,
         );
+    }
+
+    /**
+     * Stamp on the parts of an imported class the declaration cannot rebuild,
+     * then assert the layout the library published is the layout this build
+     * just computed.
+     *
+     * The assert is the point. Every other way the two can disagree — a missing
+     * constant, a wrong visibility, a lost interface — degrades to a wrong
+     * answer. Disagreeing about a property OFFSET does not: the library's
+     * compiled constructor writes past the end of an instance this module
+     * allocated, and the corruption surfaces in malloc, arbitrarily far from
+     * the cause. {@see \Compile\Mir\ExternClassMeta}
+     */
+    private function applyExternMeta(ClassDef $cd, \Compile\Mir\ExternClassMeta $m): void
+    {
+        $cd->isExternClass = true;
+        if ($cd->classId !== $m->classId) {
+            throw new \RuntimeException(
+                'manticore: class-id mismatch importing ' . $cd->name
+                . ' — the library recorded ' . (string)$m->classId
+                . ', this compiler derives ' . (string)$cd->classId
+                . "\n  the two compilers disagree about stableClassId; rebuild the library.");
+        }
+        $cd->interfaces = $m->interfaces;
+        $cd->propHooks = $m->propHooks;
+        $cd->methodNames = $m->methodNames;
+        $cd->methodMeta = $m->methodMeta;
+        $cd->propertyMeta = $m->propertyMeta;
+        $cd->propertyArrayHinted = $m->propertyArrayHinted;
+        $cd->propertyReadonly = $m->propertyReadonly;
+        $cd->propertyWidths = $m->propertyWidths;
+        $cd->propertySigned = $m->propertySigned;
+        $cd->propertyFloat32 = $m->propertyFloat32;
+        $cd->attributes = $m->attributes;
+        $cd->isFinal = $m->isFinal;
+        $cd->isAbstract = $m->isAbstract;
+        // Widths land BEFORE the offsets are recomputed below — propertyOffset
+        // walks them, so checking first would measure the pre-stamp layout.
+        $here = '';
+        $sum = 0;
+        foreach ($cd->propertyNames as $pn) {
+            if ($here !== '') { $here = $here . ' '; }
+            $off = $cd->propertyOffset($pn);
+            $here = $here . $pn . '@' . (string)$off;
+            $n = \strlen($pn);
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                $sum = ($sum * 131 + \ord(\substr($pn, $i, 1))) % 1000000000000037;
+            }
+            $sum = ($sum * 131 + $off) % 1000000000000037;
+            $sum = ($sum * 131 + $cd->propertyWidth($pn)) % 1000000000000037;
+        }
+        if ($sum !== $m->sum || $cd->instanceSize() !== $m->size
+                || $cd->headerSize() !== $m->hdr || $cd->bagOffset() !== $m->bag) {
+            throw new \RuntimeException(
+                'manticore: ABI drift importing class ' . $cd->name
+                . "\n  library layout: size=" . (string)$m->size . ' [' . $m->offsets . ']'
+                . "\n  this build:     size=" . (string)$cd->instanceSize() . ' [' . $here . ']'
+                . "\n  the library and this program disagree on the class layout"
+                . ' — rebuild the library.');
+        }
+    }
+
+    /**
+     * Lower an IMPORTED class's methods to signatures only: one `declare`-shaped
+     * {@see FunctionDef} per symbol the library's `.o` really defines, with the
+     * body left empty.
+     *
+     * A separate path rather than a flag on {@see lowerClassMethods}, because
+     * that one DROPS every method whose body is null — so a synthetic
+     * declaration would produce no FunctionDef at all, and with it no
+     * `declare`, no entry in the call-ABI tables, and silently uncoerced
+     * arguments at every call site.
+     */
+    private function lowerExternClassMethods(\Parser\Ast\ClassDecl $decl, Module $module,
+                                             \Compile\Mir\ExternClassMeta $meta): void
+    {
+        $this->currentLowerClass = $decl->name;
+        $this->currentDeclNamespace = $this->nsOf($decl->name);
+        $this->currentTypeParams = [];
+        $this->currentTypeBounds = [];
+        $this->currentTypeSubst = [];
+        foreach ($decl->methods as $m) {
+            if (!isset($meta->symbolIsStatic[$m->name])) { continue; }
+            $fnName = $decl->name . '__' . $m->name;
+            $this->currentLowerFn = $m->name;
+            $params = [];
+            if (!$m->isStatic) {
+                $params[] = new Param(
+                    name: 'this',
+                    type: Type::obj($decl->name),
+                    byRef: false,
+                    variadic: false,
+                );
+            }
+            foreach ($m->params as $p) {
+                $isVariadic = (bool)($p->variadic ?? false);
+                // The hint here is the `.sig`'s POST-PIPELINE type, not the one
+                // the library's source spelled, so it goes through
+                // lowerTypeHint unchanged — an empty string means the library
+                // erased it to unknown and the dependent must erase it too.
+                $pt = $isVariadic
+                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    : $this->lowerTypeHint($p->typeHint);
+                $fnp = new Param(
+                    name: $p->name,
+                    type: $pt,
+                    byRef: (bool)($p->byRef ?? false),
+                    variadic: $isVariadic,
+                    default: $p->default !== null ? $this->lowerExpr($p->default) : null,
+                );
+                $fnp->refOut = (bool)($p->refOut ?? false);
+                $fnp->cellArg = (bool)($p->cellArg ?? false);
+                $params[] = $fnp;
+            }
+            $fn = new FunctionDef(
+                name: $fnName,
+                params: $params,
+                returnType: $this->lowerTypeHint($m->returnType),
+                body: new Block([], Type::void()),
+            );
+            $fn->isExtern = true;
+            $module->addFunction($fn);
+            $this->methodOwner[$fnName] = $decl->name;
+            $sep = $m->isStatic ? '::' : '->';
+            $module->methodDisplay[$fnName] = $decl->name . $sep . $m->name;
+        }
+        $this->currentLowerClass = '';
     }
 
     /**

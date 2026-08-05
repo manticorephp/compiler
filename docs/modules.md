@@ -111,11 +111,45 @@ against the bundled stdlib. You can inspect a `.sig` with:
 manticore dump-sig src/Util/*.php
 ```
 
-⚠ **A `.sig` carries FUNCTIONS ONLY** — the emitted JSON is
-`{"schema":1,"functions":[…]}`. Classes, interfaces, traits, enums and constants
-do **not** cross a compiled-library boundary today. A library whose public API is
-a class has to be compiled into the application as source (`src` / `exclude`)
-rather than linked as a `.o`. Tracked in `docs/ROADMAP.md`.
+A `.sig` carries the library's **classes, interfaces, enums and constants**
+alongside its functions:
+
+```json
+{"schema":2,"abi":7,
+ "functions":[…],
+ "classes":[{"name":"Acme\\Point","kind":"class","id":651526131271716,
+             "props":[…],"sprops":[…],"methods":[…],"consts":[…],
+             "layout":{"size":32,"hdr":16,"bag":-1,"offs":[["x",16],["y",24]],
+                       "sum":4634270821217}}],
+ "constants":[{"n":"ACME_VERSION","v":{"k":"str","v":"1.0"}}],
+ "libs":[…],"weak":[…]}
+```
+
+The dependent hydrates each entry into a declaration with no method bodies and
+compiles it through the ordinary class pipeline, so its slot order, its bag
+inheritance and its constant table are computed by the same code that built the
+library's. The method symbols and the static-property cells stay in the
+library's `.o`; the application declares them.
+
+`layout` is a **check**, not information: the importer recomputes the offsets and
+refuses on any disagreement. Every other way the two sides can drift produces a
+wrong answer; drifting here writes past the end of an instance.
+
+Class constants are const-folded at export (`const B = self::A . '!'` ships as
+the finished string), so a dependent never has to evaluate anything. An
+initializer that does not reduce to a literal, array or enum case is refused
+when the **library** is built — where its author can fix it.
+
+⚠ **Still not exportable:** `trait`s (compile-time copy-paste — there is no
+compiled form to link against, so a library's internal trait works but `use`ing
+one across the boundary does not), generic (`@template`) classes and
+`#[TypeDef]`s. A generic or TypeDef is recorded in the `.sig` as
+`"unsupported"` so the diagnostic can name the reason.
+
+⚠ The bundled stdlib (`runtime: true`) exports functions only, by design: its
+classes are internal or compiler-owned, and its `.o` is linked into every
+program rather than selected as a dependency. The class-shaped stdlib surface
+stays in `prelude/`.
 
 ---
 

@@ -483,6 +483,55 @@ final class LowerFromAst implements Pass
     /** True once at least one stdlib extern was injected → driver links stdlib.o. */
     public bool $externInjected = false;
 
+    /**
+     * Building a `--emit-library` target, so the module must carry the extra
+     * bookkeeping a `.sig` exports: the type declarations and the const-folded
+     * constant values ({@see Module::$typeDecls}, {@see Module::$classConstValues}).
+     * Gated because both hold AST alive past lowering, which an ordinary
+     * program build has no use for.
+     */
+    public bool $emitLibrary = false;
+
+    /**
+     * Class / interface / enum declarations hydrated from a dependency's
+     * `.sig` ({@see \Manticore\Sig::classDeclsFromJson}). Spliced into the
+     * statement list just after the prelude window, so they register, sort and
+     * build through exactly the path a source declaration takes — only their
+     * METHOD BODIES are absent, and the symbols come from the linked `.o`.
+     * @var \Parser\Ast\ClassDecl[]
+     */
+    public array $externClassDecls = [];
+
+    /** @var array<string, \Compile\Mir\ExternClassMeta> FQN → what the
+     *  declaration alone cannot rebuild. */
+    public array $externClassMeta = [];
+
+    /** Global constants a dependency exports, merged into `$userConstants`
+     *  where a local definition does not already win.
+     *  @var array<string, \Parser\Ast\Expr> */
+    public array $externConstants = [];
+
+    /** @var array<string, true> FQNs that came from a `.sig`, not from source. */
+    private array $externClassNames = [];
+
+    /**
+     * MIR names (`Acme\Point__sum`) of the methods an imported class owns.
+     *
+     * A method IS a module function, so a library's `.sig` lists every one of
+     * them in its `functions` block as well — and the function-import path
+     * would then inject a second signature-only FunctionDef under the same
+     * name, which reaches clang as two `declare`s and fails the module. The
+     * class import owns these names; the function import skips them.
+     * @var array<string, true>
+     */
+    private array $externMethodSyms = [];
+
+    /** Whether this FQN was imported from a dependency's `.sig`. */
+    private function isExternClassName(string $name): bool
+    {
+        return isset($this->externClassNames[$name]);
+    }
+
     /** Name prefix of a hoisted foreach subject — the one owner of the
      *  convention. {@see LowerStmts::hoistForeachSubject} makes them;
      *  {@see EmitLlvmMemory::collectElementSharedLocals} reads them. */
@@ -535,6 +584,26 @@ final class LowerFromAst implements Pass
         // Count AFTER flattening — $preludeCount indexes into $stmts to mark a
         // class's static-prop linkage as prelude (linkonce_odr).
         $preludeCount = \count($stmts);
+        // Imported types go AFTER the prelude window and BEFORE the user's own
+        // statements: after, so they are never marked `isPreludeClass` (their
+        // static-property cells and method symbols belong to one library `.o`,
+        // not to every module); before, only so a diagnostic can tell which
+        // side of the boundary a name came from. Build ORDER does not depend on
+        // this — `classBuildOrder` sorts by inheritance depth.
+        $xspan = new \Parser\Ast\Span(0, 0);
+        foreach ($this->externClassDecls as $xdecl) {
+            $this->externClassNames[$this->classDeclName($xdecl)] = true;
+            $stmts[] = \Parser\Ast\Stmt::class_($xdecl, $xspan);
+        }
+        foreach ($this->externClassMeta as $xcls => $xmeta) {
+            foreach ($xmeta->symbolIsStatic as $xm => $_) {
+                $this->externMethodSyms[$xcls . '__' . (string)$xm] = true;
+            }
+        }
+        // First index that belongs to the user's own program. Taken HERE, not
+        // derived from `count($this->program->statements)` — a braced namespace
+        // flattens to many statements, so the counts do not line up.
+        $userStart = \count($stmts);
         foreach ($this->program->statements as $us) {
             if ($us->kind === 'Namespace' && $us->body !== null) {
                 foreach ($us->body->statements as $inner) { $stmts[] = $inner; }
@@ -548,9 +617,39 @@ final class LowerFromAst implements Pass
         // Register every class name first so a class can reference
         // itself / a later-declared sibling in a property type hint
         // (e.g. `?Node $next`) before its full def exists.
+        $sIdx = -1;
         foreach ($stmts as $stmt) {
+            $sIdx = $sIdx + 1;
             if ($stmt->kind === 'Class') {
                 $cdecl = $stmt->decl;
+                // A program cannot redeclare a class its libraries export. The
+                // FUNCTION path lets a local definition shadow an imported one
+                // silently — the compiler's own sources ship the stdlib and must
+                // win — but a class is not shadowable: the library's `.o` still
+                // holds its constructor and its class descriptor, and the local
+                // declaration hashes to the SAME class id with a DIFFERENT
+                // layout. That is a wrong-layout free, not a wrong answer.
+                if ($sIdx >= $userStart
+                        && isset($this->externClassNames[$this->classDeclName($cdecl)])) {
+                    throw new \RuntimeException(
+                        'manticore: ' . $this->classDeclName($cdecl)
+                        . ' is declared here and also exported by a linked library'
+                        . "\n  a program cannot redefine a class its libraries export —"
+                        . ' rename one, or drop the library from `libraries` in the manifest.');
+                }
+                // Library export: keep the declaration of every non-prelude
+                // type, the one place a type's CONSTANTS survive lowering (they
+                // are inlined at each use site) and the only record an interface
+                // leaves at all. Traits are deliberately absent — they are
+                // compile-time copy-paste with no compiled form to link against,
+                // so a library's internal trait keeps working and only an
+                // attempt to `use` one across the boundary fails, with the
+                // ordinary unknown-trait error. {@see Module::$typeDecls}
+                if ($this->emitLibrary && $sIdx >= $preludeCount
+                        && ($cdecl->kind ?? 'class') !== 'trait'
+                        && !isset($this->externClassNames[$this->classDeclName($cdecl)])) {
+                    $module->typeDecls[$this->classDeclName($cdecl)] = $cdecl;
+                }
                 if (($cdecl->kind ?? 'class') === 'class') {
                     // `$stmt->decl` is statically unknown here, so reading
                     // `$cdecl->name` directly resolves to the wrong field
@@ -700,6 +799,9 @@ final class LowerFromAst implements Pass
                 if ($dkind !== 'class') { continue; }
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $cd->isPreludeClass = $this->inPreludeClass;
+                if (isset($this->externClassMeta[$cd->name])) {
+                    $this->applyExternMeta($cd, $this->externClassMeta[$cd->name]);
+                }
                 $this->classTable[$cd->name] = $cd;
                 // A `#[TypeDef]` is a VALUE, not an object: it keeps a ClassDef so
                 // its methods and its one property still resolve, but it goes to
@@ -886,6 +988,14 @@ final class LowerFromAst implements Pass
             if ($dargs[0]->kind !== 'StringLiteral') { continue; }
             $this->userConstants[$this->constBareName($this->stringLitValue($dargs[0]))] = $dargs[1];
         }
+        // Constants a dependency exports. AFTER the local scan and guarded, so a
+        // program that defines the name itself keeps its own value — the same
+        // precedence the imported-FUNCTION path uses, and the one that lets a
+        // program shadow a library's default without renaming it.
+        foreach ($this->externConstants as $xn => $xv) {
+            if (isset($this->userConstants[$xn])) { continue; }
+            $this->userConstants[$xn] = $xv;
+        }
 
         // Inject bundled-stdlib signatures as declare-only externs. Skipped
         // when the program defines the name itself (the compiler's own source
@@ -893,6 +1003,10 @@ final class LowerFromAst implements Pass
         // cases the user object is self-contained and stdlib.o is not linked.
         foreach ($this->externDecls as $extDecl) {
             $name = $extDecl->name;
+            // A method of an imported class: the class import already declares
+            // it, with the implicit `$this` in slot 0 that a plain function
+            // signature has no way to reconstruct.
+            if (isset($this->externMethodSyms[$name])) { continue; }
             if (isset($this->fnDecls[$name])) { continue; }
             if ($this->isCodegenBuiltin($name)) { continue; }
             $this->fnDecls[$name] = $extDecl;
@@ -944,6 +1058,15 @@ final class LowerFromAst implements Pass
             }
             if ($stmt->kind === 'Class') {
                 $dk = $stmt->decl->kind ?? 'class';
+                $xname = $this->classDeclName($stmt->decl);
+                if (isset($this->externClassMeta[$xname])) {
+                    // Imported: declare the symbols, emit no body.
+                    if ($dk === 'class' || $dk === 'enum') {
+                        $this->lowerExternClassMethods($stmt->decl, $module,
+                            $this->externClassMeta[$xname]);
+                    }
+                    continue;
+                }
                 if ($dk === 'class' || $dk === 'enum') {
                     $before = \count($module->functions);
                     $this->lowerClassMethods($stmt->decl, $module);
@@ -1021,8 +1144,46 @@ final class LowerFromAst implements Pass
                 }
             }
         }
+        if ($this->emitLibrary) { $this->recordExportConstants($module); }
         $module->markPassApplied(self::NAME);
         return $module;
+    }
+
+    /**
+     * Const-fold every exportable constant into {@see Module::$classConstValues}
+     * / {@see Module::$globalConstValues} for the `.sig` writer.
+     *
+     * Runs LAST, and that placement is the whole point: a class constant may
+     * name another class's (`self::A`, `Other::B`) or a `define()`d one, and
+     * only here are the declaration table and `$userConstants` both complete.
+     * Lowering is what inlines those references, so `const B = self::A . 'x'`
+     * arrives as a Concat of two literals that {@see ConstFold::foldOne}
+     * reduces to the single string a dependent needs — no cross-class
+     * reference has to survive into the file.
+     */
+    private function recordExportConstants(Module $module): void
+    {
+        $saved = $this->currentLowerClass;
+        foreach ($module->typeDecls as $tname => $tdecl) {
+            $this->currentLowerClass = $tname;
+            foreach ($this->declConsts($tdecl) as $const) {
+                $module->classConstValues[$tname . '::' . $const->name] =
+                    \Compile\Mir\Passes\ConstFold::foldOne($this->lowerExpr($const->value));
+            }
+        }
+        $this->currentLowerClass = $saved;
+        foreach ($this->userConstants as $cname => $cexpr) {
+            $module->globalConstValues[$cname] =
+                \Compile\Mir\Passes\ConstFold::foldOne($this->lowerExpr($cexpr));
+        }
+    }
+
+    /** A declaration's constants, read through a typed param so `->consts`
+     *  resolves the right field offset under the self-host.
+     *  @return \Parser\Ast\ConstDecl[] */
+    private function declConsts(\Parser\Ast\ClassDecl $decl): array
+    {
+        return $decl->consts;
     }
 
     /** Depth of a class in its inheritance chain (0 = no parent). */
