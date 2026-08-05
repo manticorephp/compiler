@@ -1,0 +1,14 @@
+int(5)
+string(1) "n"
+float(1.5)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+5|n|1.5|y
+int(5)
+string(1) "n"
+int(42)
+string(2) "zz"
+int(7)

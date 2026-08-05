@@ -1,0 +1,17 @@
+closure store, bare array:
+  echo:      lit
+  gettype:   string
+  is_string: yes
+  strlen:    3
+  ===:       yes
+closure store, bare property:
+  echo:      prop
+annotated:
+  echo:      lit
+  gettype:   string
+  property:  prop
+aliased local:
+  sum:       1
+  max:       4096
+  static:    4096
+  plain loc: 4096

@@ -1,0 +1,46 @@
+array(2) {
+  ["n"]=>
+  int(1)
+  ["s"]=>
+  string(1) "a"
+}
+array(2) {
+  ["n"]=>
+  int(2)
+  ["s"]=>
+  string(1) "b"
+}
+array(3) {
+  ["n"]=>
+  int(1)
+  ["s"]=>
+  string(1) "a"
+  ["f"]=>
+  float(2.5)
+}
+array(2) {
+  ["n"]=>
+  int(1)
+  ["s"]=>
+  string(1) "a"
+}
+array(2) {
+  ["x"]=>
+  int(1)
+  ["y"]=>
+  string(3) "two"
+}
+array(2) {
+  ["x"]=>
+  int(1)
+  ["y"]=>
+  string(3) "two"
+}
+array(2) {
+  ["x"]=>
+  int(1)
+  ["y"]=>
+  string(3) "two"
+}
+int(1)
+string(3) "two"
