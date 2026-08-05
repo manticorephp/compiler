@@ -300,6 +300,10 @@ final class EmitLlvm implements EmitVisitor
     private string $vdResult = '';
     /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
     private string $vdArmList = '';
+    /** Scratch: caller slot address / scratch cell slot of the by-ref argument
+     *  {@see EmitLlvmCalls::emitByRefCellBox} just boxed. */
+    private string $refBoxSlot = '';
+    private string $refBoxTmp = '';
     /**
      * Scratch: a `...$arr` spread the current method call has NOT expanded into
      * its shared argument list, as `[arrPtrReg, firstParam, elementType]`. A

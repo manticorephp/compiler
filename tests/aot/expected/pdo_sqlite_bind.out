@@ -1,0 +1,30 @@
+string(1) "c"
+string(1) "b"
+string(1) "a"
+string(1) "b"
+string(1) "b"
+string(1) "c"
+float(2.5)
+int(42)
+Array
+(
+    [0] => Array
+        (
+            [id] => 1
+            [0] => 1
+        )
+
+    [1] => Array
+        (
+            [id] => 2
+            [0] => 2
+        )
+
+    [2] => Array
+        (
+            [id] => 3
+            [0] => 3
+        )
+
+)
+3

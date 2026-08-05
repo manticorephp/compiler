@@ -3133,6 +3133,9 @@ trait EmitLlvmObjects
         $ptypes = $this->sigs->paramTypes[$cls . '__' . $n->method] ?? [];
         $ahmask = $this->sigs->arrayHintedParams[$cls . '__' . $n->method] ?? [];
         $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
+        $cellBoxSlots = [];
+        $cellBoxTmps = [];
+        $cellBoxTypes = [];
         $ai = 0;
         foreach ($n->args as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
@@ -3155,7 +3158,16 @@ trait EmitLlvmObjects
             }
             if (!$first) { $argList .= ', '; }
             $first = false;
-            if ($this->argIsByRef($mask, $ai, $a)) {
+            if ($this->argIsByRef($mask, $ai, $a) && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellBox($a, $ptypes, $ai)
+            ) {
+                // Raw lvalue → `mixed &$var` param; see emitByRefCellBox.
+                $out .= $this->emitByRefCellBox($a);
+                $argList .= 'i64 ' . $this->lastValue;
+                $cellBoxSlots[] = $this->refBoxSlot;
+                $cellBoxTmps[] = $this->refBoxTmp;
+                $cellBoxTypes[] = $a->type;
+            } elseif ($this->argIsByRef($mask, $ai, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -3187,6 +3199,11 @@ trait EmitLlvmObjects
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
+        $ci = 0;
+        foreach ($cellBoxTmps as $ctmp) {
+            $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
+            $ci = $ci + 1;
+        }
         // By-ref return (`static function &m()`): the callee yields the slot
         // ADDRESS; deref in value context, keep raw under rawRefCall (RefBind).
         if (($this->sigs->returnsByRef[$target] ?? false) && !$this->rawRefCall) {
@@ -3750,6 +3767,11 @@ trait EmitLlvmObjects
         // fallback declares is how an int -1 became a pointer. An index left
         // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
         $argOutTypes = [];
+        // Raw caller lvalue → cell by-ref param: scratch slots to write back
+        // after the call, parallel with the caller's own types.
+        $cellBoxSlots = [];
+        $cellBoxTmps = [];
+        $cellBoxTypes = [];
         $ai = 0;
         foreach ($mc->args as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
@@ -3766,7 +3788,20 @@ trait EmitLlvmObjects
                 $ai = \count($ptypes) - 1;
                 continue;
             }
-            if ($this->argIsByRef($mask, $ai + 1, $a)) {
+            if ($this->argIsByRef($mask, $ai + 1, $a)
+                && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)
+            ) {
+                // A raw lvalue handed to a `mixed &$var` param: box into a
+                // scratch cell and put back what the callee left. Without it
+                // `PDOStatement::bindParam(mixed &$var)` read an `int 3` as
+                // float(1.5E-323) and bound that.
+                $out .= $this->emitByRefCellBox($a);
+                $argList .= ', i64 ' . $this->lastValue;
+                $cellBoxSlots[] = $this->refBoxSlot;
+                $cellBoxTmps[] = $this->refBoxTmp;
+                $cellBoxTypes[] = $a->type;
+            } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
             } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -3959,6 +3994,11 @@ trait EmitLlvmObjects
         $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->freeStrArgTemps($argTemps);
+        $ci = 0;
+        foreach ($cellBoxTmps as $ctmp) {
+            $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
+            $ci = $ci + 1;
+        }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
         // (rawRefCall) keeps the raw address so RefBind can alias through it.

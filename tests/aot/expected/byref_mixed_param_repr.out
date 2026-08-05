@@ -1,0 +1,12 @@
+integer:3
+string:'q'
+double:1.5
+boolean:true
+NULL:NULL
+string
+integer:5
+integer:7
+integer:8
+integer:9
+integer:100
+string:'a!'

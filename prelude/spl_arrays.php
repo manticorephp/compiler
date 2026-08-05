@@ -179,13 +179,12 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
  * typed parameter re-types it at the callee, the same trick the guard folder
  * needed for its AST nodes.
  *
- * ⚠ LIMITATION: every non-array argument takes that generator path, because
- * nothing can tell a Generator from another Traversable at run time — a
- * Generator is compiler-synthesised state with NO class descriptor, so
- * `instanceof \Generator` and `get_class($gen)` both answer as if it were not
- * one (false and ''), even for a concrete generator. A user Iterator /
- * IteratorAggregate is therefore not supported here yet; giving Generator a
- * real descriptor is the fix, and it is its own piece of work.
+ * A Generator cannot be recognised directly: it is compiler-synthesised state
+ * with NO class descriptor, so `instanceof \Generator` and `get_class($gen)`
+ * answer false / '' even for a concrete one. The test is therefore INVERTED —
+ * a user Iterator / IteratorAggregate does have a descriptor and answers its
+ * own interfaces, and a Generator answers false to both — so everything with a
+ * real class is handled here and the generator arm keeps the fallthrough.
  */
 function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
 {
@@ -195,7 +194,50 @@ function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
         foreach ($iterator as $v) { $out[] = $v; }
         return $out;
     }
+    $it = __mc_iter_resolve($iterator);
+    if ($it !== null) { return __mc_iter_drive_to_array($it, $preserve_keys); }
     return __mc_iter_gen_to_array($iterator, $preserve_keys);
+}
+
+/**
+ * The concrete \Iterator behind a Traversable, or null when the value is a
+ * Generator (no descriptor) and belongs on the generator path. php resolves an
+ * IteratorAggregate through as many hops as it takes.
+ */
+function __mc_iter_resolve(mixed $iterator): ?\Iterator
+{
+    $hops = 0;
+    while ($iterator instanceof \IteratorAggregate && $hops < 16) {
+        $iterator = $iterator->getIterator();
+        $hops = $hops + 1;
+    }
+    if ($iterator instanceof \Iterator) { return $iterator; }
+    return null;
+}
+
+/**
+ * The Iterator protocol driven BY HAND rather than with `foreach`: a foreach
+ * over an erased base classifies its subject at run time and has its own open
+ * holes, and the five methods have none.
+ */
+function __mc_iter_drive_to_array(\Iterator $it, bool $preserve_keys): array
+{
+    /** @var array<int|string,mixed> $out */
+    $out = [];
+    $it->rewind();
+    while ($it->valid()) {
+        $v = $it->current();
+        if ($preserve_keys) {
+            // Same reason as the generator arm: a bare cell key gives the index
+            // store no concrete layout to pick.
+            $k = $it->key();
+            if (\is_int($k)) { $out[(int)$k] = $v; } else { $out[(string)$k] = $v; }
+        } else {
+            $out[] = $v;
+        }
+        $it->next();
+    }
+    return $out;
 }
 
 /** The generator arm of iterator_to_array, behind a TYPED parameter. */
@@ -226,7 +268,18 @@ function __mc_iter_gen_to_array(\Generator $g, bool $preserve_keys): array
 function iterator_count(mixed $iterator): int
 {
     if (\is_array($iterator)) { return \count($iterator); }
+    $it = __mc_iter_resolve($iterator);
+    if ($it !== null) { return __mc_iter_drive_count($it); }
     return __mc_iter_gen_count($iterator);
+}
+
+/** iterator_count's object arm — counted without materialising the values. */
+function __mc_iter_drive_count(\Iterator $it): int
+{
+    $n = 0;
+    $it->rewind();
+    while ($it->valid()) { $n = $n + 1; $it->next(); }
+    return $n;
 }
 
 /** The generator arm of iterator_count, behind a TYPED parameter. */
