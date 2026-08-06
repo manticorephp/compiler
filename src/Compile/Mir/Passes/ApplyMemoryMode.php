@@ -86,6 +86,124 @@ final class ApplyMemoryMode implements Pass
             return;
         }
         $this->demote($fn->body, $loops, true);
+        $this->unarenaMutatedAcrossReset($fn, $loops);
+    }
+
+    /**
+     * Take an allocation OUT of the arena when a resetting loop mutates the
+     * container it binds IN PLACE.
+     *
+     * The reset's precondition is that nothing allocated since the mark is
+     * still reachable at the back edge. {@see \Compile\Mir\ArenaContext::
+     * canResetPerIteration} checks that for the VALUE a store binds — but an
+     * in-place container mutation allocates for the CONTAINER, and nothing in
+     * MIR says so. `$seen[$k] = true` on a packed arena array runs
+     * `__mir_array_promote`, which re-homes the whole buffer, and the runtime
+     * routes that allocation to the arena because the SOURCE buffer carries
+     * ARRAY_TAG_ARENA. So the new buffer sits ABOVE the mark while the slot
+     * holding it is live at the back edge: the next iteration's restore hands
+     * those bytes to the next temporary, the tag word at `arr-8` is overwritten,
+     * and the promote after that takes the heap branch and hands libc a pointer
+     * into the arena — "pointer being freed was not allocated". That is the
+     * abort the cold seed (`bin/compile`) died on, in `emitVirtualDispatch`'s
+     * own `$seenCid[$cd->classId] = true`; `bin/build` never saw it, because
+     * whether a function is arena-scoped at all depends on the closed world,
+     * and the seed compiles src/ as ONE module while the manifest build does not.
+     *
+     * The reset is worth far more than one container's arena slot ({@see
+     * unconfineUnresettableLoops}: 2.7 GB against 1 MB), so this demotes the
+     * ALLOCATION and leaves the reset alone. Only a binding OUTSIDE the loop is
+     * demoted — one made inside is re-created every iteration, so its re-homes
+     * die with it, which is the arena working as intended.
+     *
+     * @param array<int, array{0:Node,1:bool}> $loops
+     */
+    private function unarenaMutatedAcrossReset(\Compile\Mir\FunctionDef $fn, array $loops): void
+    {
+        foreach ($loops as $pair) {
+            if ($pair[1] !== true) { continue; }
+            $names = [];
+            $this->collectInPlaceMutations($pair[0], $names);
+            if (\count($names) === 0) { continue; }
+            $this->unarenaOutside($fn->body, $pair[0], $names, false);
+        }
+    }
+
+    /**
+     * Locals a subtree mutates through their own storage — an element store, an
+     * `unset` of an element, an alias bound to the local, or a by-ref argument
+     * position. Each one can reach a runtime helper that reallocates the buffer.
+     *
+     * @param array<string,bool> $out
+     */
+    private function collectInPlaceMutations(Node $n, array &$out): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STORE_ELEMENT) {
+            $r = $this->rootLocalName($n->array);
+            if ($r !== null) { $out[$r] = true; }
+        } elseif ($k === Node::KIND_UNSET) {
+            foreach ($n->targets as $t) {
+                // Only an ELEMENT unset reallocates. `unset($a)` drops the slot.
+                if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
+                $r = $this->rootLocalName($t);
+                if ($r !== null) { $out[$r] = true; }
+            }
+        } elseif ($k === Node::KIND_REF_ADDR) {
+            $r = $this->rootLocalName($n->lvalue);
+            if ($r !== null) { $out[$r] = true; }
+        } elseif ($k === Node::KIND_REF_ALIAS) {
+            $out[$n->source] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->collectInPlaceMutations($c, $out); }
+    }
+
+    /** The local a chain of element accesses is rooted at, or null. */
+    private function rootLocalName(Node $n): ?string
+    {
+        while ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $n = $n->array;
+        }
+        if ($n->kind === Node::KIND_LOAD_LOCAL) {
+            return $n->name;
+        }
+        return null;
+    }
+
+    /**
+     * Demote every arena binding of one of `$names` that lies outside `$loop`.
+     *
+     * @param array<string,bool> $names
+     */
+    private function unarenaOutside(Node $n, Node $loop, array $names, bool $inside): void
+    {
+        if ($n === $loop) { $inside = true; }
+        if (!$inside && $n->kind === Node::KIND_STORE_LOCAL && isset($names[$n->name])) {
+            $this->unarena($n->value);
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->unarenaOutside($c, $loop, $names, $inside);
+        }
+    }
+
+    /**
+     * The demotion itself, over the same shapes {@see \Compile\Mir\ArenaContext::
+     * bindsArenaValue} recognises as binding an arena value.
+     */
+    private function unarena(Node $v): void
+    {
+        if ($v->allocKind === AllocationKind::ARENA) {
+            $v->allocKind = AllocationKind::RC_HEAP;
+        }
+        if ($v->kind === Node::KIND_TERNARY) {
+            if ($v->then !== null) { $this->unarena($v->then); }
+            $this->unarena($v->else_);
+            return;
+        }
+        if ($v->kind === Node::KIND_NULLCOALESCE) {
+            $this->unarena($v->left);
+            $this->unarena($v->right);
+        }
     }
 
     /**
