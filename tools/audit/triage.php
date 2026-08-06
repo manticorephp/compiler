@@ -35,8 +35,22 @@ $tierKey = str_starts_with($tier, 'T') ? $tier : 'T' . $tier;
 $num = (int)substr($tierKey, 1);
 
 $diagPath = "docs/audit/data/analyze-t$num.json";
-$d = json_decode((string)@file_get_contents($diagPath), true);
-if (!is_array($d)) { fwrite(STDERR, "triage: no analyze output at $diagPath\n"); exit(2); }
+// Absent and UNPARSEABLE are different failures, and saying "no analyze output"
+// for a 741 KB file that simply does not decode is the audit lying about its own
+// instrument. `manticore analyze --json` currently emits malformed UTF-8 for
+// this corpus (our json_encode neither validates nor rejects it, where php's
+// json_encode returns false), so the whole static lane degrades SILENTLY.
+$raw = @file_get_contents($diagPath);
+if ($raw === false) {
+    fwrite(STDERR, "triage: no analyze output at $diagPath — run run_tier.sh $num\n");
+    exit(2);
+}
+$d = json_decode((string)$raw, true);
+if (!is_array($d)) {
+    fwrite(STDERR, "triage: analyze output at $diagPath is UNPARSEABLE ("
+        . strlen((string)$raw) . " bytes): " . json_last_error_msg() . "\n");
+    exit(2);
+}
 
 $ladder = json_decode((string)file_get_contents('docs/audit/tiers.json'), true);
 
