@@ -607,6 +607,13 @@ final class TryCatch_ extends Node
      *  -1 when not a generator finally. Allocas would sit past the resume
      *  switch and not dominate; the frame cell survives + dominates. */
     public int $genPendSlot = -1;
+    /** Frame slot for the BACKTRACE depth saved at try entry; -1 outside a
+     *  generator. Same reason as the three above, and it was the one left on an
+     *  inline alloca: the slot is written where the `try` sits and read in the
+     *  catch landing pad, so a resume switch entering past that block leaves the
+     *  alloca dominating neither. Declared LAST — a field added mid-struct
+     *  shifts every later offset. */
+    public int $genBtSlot = -1;
 
     public function __construct(
         public array $tryBody,

@@ -1,0 +1,8 @@
+step0
+step1
+recovered2
+step3
+log=ok0;fin0;ok1;fin1;caught(boom at 2);fin2;ok3;fin3;
+off
+log=
+depth=1
