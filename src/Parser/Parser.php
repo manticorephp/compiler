@@ -663,9 +663,18 @@ final class Parser
         $this->expect(TokenKind::OpenBrace, "expected '{' for trait adaptations");
         $out = [];
         while (!$this->check(TokenKind::CloseBrace)) {
+            // The leading name is a TRAIT only when `::` follows it. Bare, it is
+            // a METHOD name — and parseClassName resolves what it reads against
+            // the current namespace and `use` aliases, which for a method name
+            // is wrong: inside `namespace Symfony\Component\Cache\Adapter`,
+            // `doClear as private doClearCache;` recorded its method as
+            // `Symfony\Component\Cache\Adapter\doClear`, so no trait ever matched
+            // it and the alias got no body — an undefined symbol at link time.
+            // Invisible from a global-namespace test, which is why it survived.
+            $rawFirst = $this->peek()->lexeme;
             $first = $this->parseClassName();
             $trait = '';
-            $method = $first;
+            $method = $rawFirst;
             if ($this->match(TokenKind::DoubleColon)) {
                 $trait = $first;
                 $method = $this->advance()->lexeme;
