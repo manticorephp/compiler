@@ -44,12 +44,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- PHP 8.5 (sury.org) ----
+# The `php8.5-*` extension packages are here for the ORACLE, not for linking:
+# difftest grades our output against this php, so a case that calls curl_* or
+# PDO can only be graded where the interpreter has that extension too. They are
+# a different axis from the `lib*-dev` packages above, which are what our own
+# FFI bindings link against — `libsqlite3-dev` without `php8.5-sqlite3` links
+# fine and leaves the oracle unable to run a single pdo_* case.
 RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ bookworm main" \
         > /etc/apt/sources.list.d/php.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        php8.5-cli php8.5-mbstring php8.5-curl \
+        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --set php /usr/bin/php8.5
 
