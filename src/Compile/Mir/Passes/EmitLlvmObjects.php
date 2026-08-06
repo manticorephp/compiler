@@ -780,13 +780,22 @@ trait EmitLlvmObjects
         $def = $this->ssa->allocLabel('cp.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
+        // Classes sharing a slot share an arm {@see canonArm}.
+        /** @var array<string, string> */
+        $armSeen = [];
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('cp.case');
+            $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $arm .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $arm .= '  br label %' . $end . "\n";
+            $key = $this->canonArm($arm);
+            if (isset($armSeen[$key])) {
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
+                continue;
+            }
+            $armSeen[$key] = $lbl;
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
+            $bodies .= $lbl . ":\n" . $arm;
         }
         foreach ($enumArms as $ename => $ed) {
             $lbl = $this->ssa->allocLabel('cp.enum');
@@ -1056,13 +1065,21 @@ trait EmitLlvmObjects
         $def = $this->ssa->allocLabel('rp.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
+        /** @var array<string, string> {@see canonArm} */
+        $armSeen = [];
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('rp.case');
+            $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $arm .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $arm .= '  br label %' . $end . "\n";
+            $key = $this->canonArm($arm);
+            if (isset($armSeen[$key])) {
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
+                continue;
+            }
+            $armSeen[$key] = $lbl;
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
+            $bodies .= $lbl . ":\n" . $arm;
         }
         foreach ($magic as $cname => $declCls) {
             $lbl = $this->ssa->allocLabel('rp.magic');
@@ -1148,14 +1165,22 @@ trait EmitLlvmObjects
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
         $seen = [];
+        /** @var array<string, string> {@see canonArm} */
+        $armSeen = [];
         foreach ($fixed as $cd) {
             if (isset($seen[$cd->name])) { continue; }
             $seen[$cd->name] = true;
             $lbl = $this->ssa->allocLabel('cs.case');
+            $arm = $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
+            $arm .= '  br label %' . $end . "\n";
+            $key = $this->canonArm($arm);
+            if (isset($armSeen[$key])) {
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
+                continue;
+            }
+            $armSeen[$key] = $lbl;
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
-            $bodies .= '  br label %' . $end . "\n";
+            $bodies .= $lbl . ":\n" . $arm;
         }
         foreach ($magic as $cname => $declCls) {
             if (isset($seen[$cname])) { continue; }
@@ -3670,6 +3695,67 @@ trait EmitLlvmObjects
         $out .= '  ' . $v . ' = load i64, ptr ' . $p . "\n";
         $this->lastValue = $v;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * A class_id-switch arm's body reduced to a form that ignores which SSA
+     * registers it happened to be given — two arms with the same canonical form
+     * compute the same thing and can share one block.
+     *
+     * A property dispatch emits one arm per CLASS, but the arm is a function of
+     * the SLOT (offset, width, signedness, declared type, array-hint), not of the
+     * class: every class inheriting a property at the same offset emits a
+     * byte-identical block down to the register numbering. On an erased receiver
+     * with a deep hierarchy that is the bulk of the site.
+     *
+     * Only registers DEFINED inside the arm are renamed — an outer register
+     * (the receiver pointer, the result slot, the merge label) keeps its name and
+     * must therefore match exactly for two arms to be judged equal. That is what
+     * makes this sound rather than a heuristic: identical remaining text plus a
+     * consistent renaming of purely local names is the same straight-line block.
+     */
+    private function canonArm(string $body): string
+    {
+        // Pass 1: the names this block defines, in definition order.
+        /** @var array<string, string> */
+        $ren = [];
+        $n = 0;
+        $lines = \explode("\n", $body);
+        foreach ($lines as $l) {
+            $t = \ltrim($l);
+            if ($t === '' || $t[0] !== '%') { continue; }
+            $eq = \strpos($t, ' = ');
+            if ($eq === false) { continue; }
+            $name = \substr($t, 0, $eq);
+            if (isset($ren[$name])) { continue; }
+            $ren[$name] = '%#' . (string)$n;
+            $n = $n + 1;
+        }
+        if ($ren === []) { return $body; }
+        // Pass 2: rewrite every occurrence of those names. Hand-rolled rather
+        // than a regex: `%r1` must not match inside `%r12`, and this runs per
+        // dispatch arm on every polymorphic site in the module.
+        $out = '';
+        $len = \strlen($body);
+        $i = 0;
+        while ($i < $len) {
+            $c = $body[$i];
+            if ($c !== '%') { $out = $out . $c; $i = $i + 1; continue; }
+            $j = $i + 1;
+            while ($j < $len) {
+                $d = $body[$j];
+                if (($d >= 'a' && $d <= 'z') || ($d >= 'A' && $d <= 'Z')
+                    || ($d >= '0' && $d <= '9') || $d === '_' || $d === '.') {
+                    $j = $j + 1;
+                    continue;
+                }
+                break;
+            }
+            $tok = \substr($body, $i, $j - $i);
+            $out = $out . ($ren[$tok] ?? $tok);
+            $i = $j;
+        }
         return $out;
     }
 

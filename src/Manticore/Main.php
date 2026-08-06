@@ -1074,7 +1074,10 @@ function cmd_compile(array $args): int {
     // bindings resolve to real syscalls). compile_via_mir consumes them via
     // the static. Skipped when building stdlib.o itself.
     if (!CompileArgs::$emitLibrary) {
+        $sigT = \Compile\Stats::now();
         CompileArgs::$externDecls = collect_stdlib_extern_decls();
+        \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
+            \count(CompileArgs::$externDecls), -1);
         if (CompileArgs::$sigError !== '') {
             dprint(CompileArgs::$sigError);
             return 65;
@@ -2021,6 +2024,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // binding (a throwing stub under the Zend cold-seed), so guard: an
     // unreadable file provides nothing, and LowerFromAst falls back to its
     // embedded copy for the classes the bootstrap cannot live without.
+    $statT = \Compile\Stats::now();
     $arrayFnsSrc = prelude_src_or_empty("array_fns.php");
     $arrayFnsExtSrc = prelude_src_or_empty("array_fns_ext.php");
     $cliSrc = prelude_src_or_empty("cli.php");
@@ -2114,6 +2118,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // Order is load-bearing — token_get_all() constructs __McTok.
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
+    \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
