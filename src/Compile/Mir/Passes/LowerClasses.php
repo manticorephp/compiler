@@ -203,11 +203,17 @@ trait LowerClasses
                 $prop->default !== null, $decl->name,
                 $this->attrNames($prop->attributes));
         }
+        $seenTraitProp = [];
         foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
             if ($td === null) { continue; }
             foreach ($td->properties as $tprop) {
                 if (isset($out[$tprop->name]) && $out[$tprop->name]->declaringClass === $decl->name) { continue; }
+                // A name an EARLIER trait already gave stands: the set spans
+                // nested traits now, and php's first-provider-wins applies to
+                // the metadata exactly as it does to the slot.
+                if (isset($seenTraitProp[$tprop->name])) { continue; }
+                $seenTraitProp[$tprop->name] = true;
                 $vis = $tprop->visibility === '' ? 'public' : $tprop->visibility;
                 $out[$tprop->name] = new \Compile\Mir\PropertyMeta(
                     $tprop->name, $vis, $tprop->isStatic, $tprop->isReadonly,
@@ -890,7 +896,10 @@ trait LowerClasses
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
             foreach ($td->properties as $tprop) {
+                // Accumulates, so a name an earlier trait already defaulted is
+                // not stored twice — one slot must not get two initialisers.
                 if (isset($ownPropNames[$tprop->name])) { continue; }
+                $ownPropNames[$tprop->name] = true;
                 if (!$this->traitPropHasDefault($tprop)) { continue; }
                 $tptype = $cd->propertyTypes[$tprop->name] ?? Type::unknown();
                 $defaultStores[] = $this->traitPropDefaultStore($tprop, $decl->name, $tptype);
@@ -952,7 +961,17 @@ trait LowerClasses
             if ($td === null) { continue; }
             foreach ($td->methods as $tm) {
                 if (isset($excluded[$tn . '::' . $tm->name])) { continue; }
-                if (!isset($ownNames[$tm->name])) { $methods[] = $tm; }
+                // FIRST provider wins, and the set now spans nested traits, so
+                // this has to remember what earlier ones already gave. php's own
+                // rule: a trait's own member overrides the one it mixes in.
+                // symfony/cache's ContractsTrait declares `doGet` AND
+                // `use CacheTrait`, which declares `doGet` too — emitting both
+                // put two definitions of one symbol in the module. The class
+                // TABLE never had this bug because `$methodNames` accumulates;
+                // here `$ownNames` never grew.
+                if (isset($ownNames[$tm->name])) { continue; }
+                $ownNames[$tm->name] = true;
+                $methods[] = $tm;
             }
         }
         // `m as alias` / `A::m as alias`: emit a renamed copy of the source

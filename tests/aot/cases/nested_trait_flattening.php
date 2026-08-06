@@ -19,6 +19,8 @@ trait InnerTrait
     protected function doClear(string $ns): string { return 'cleared:' . $ns; }
 
     public function readInner(): string { return $this->innerProp; }
+
+    public function shared(): string { return 'inner-loses'; }
 }
 
 trait MiddleTrait
@@ -28,6 +30,12 @@ trait MiddleTrait
     public int $middleProp = 42;
 
     protected function doSave(string $k): string { return 'saved:' . $k; }
+
+    // A trait's OWN member overrides the one it mixes in, so this wins over
+    // InnerTrait::shared and only ONE definition may reach the class.
+    // symfony/cache's ContractsTrait does exactly this to CacheTrait's `doGet`;
+    // emitting both put two definitions of one symbol in the module.
+    public function shared(): string { return 'middle-wins'; }
 }
 
 final class Adapter
@@ -43,7 +51,8 @@ final class Adapter
     {
         // The alias of a NESTED trait's method, and the original name too.
         return $this->doClearCache('ns') . '|' . $this->doSaveCache('k')
-             . '|' . $this->doClear('direct') . '|' . $this->doSave('d2');
+             . '|' . $this->doClear('direct') . '|' . $this->doSave('d2')
+             . '|' . $this->shared();
     }
 }
 
