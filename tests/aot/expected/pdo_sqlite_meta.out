@@ -1,0 +1,54 @@
+-- meta keys and table
+native_type,pdo_type,sqlite:decl_type,table,flags,name,len,precision | table='t'
+native_type,pdo_type,sqlite:decl_type,table,flags,name,len,precision | table='t'
+native_type,pdo_type,flags,name,len,precision | table=NULL
+native_type,pdo_type,flags,name,len,precision | table=NULL
+native_type,pdo_type,sqlite:decl_type,table,flags,name,len,precision | table='t'
+native_type,pdo_type,sqlite:decl_type,table,flags,name,len,precision | table='u'
+-- a plain column's full meta
+array (
+  'native_type' => 'integer',
+  'pdo_type' => 1,
+  'sqlite:decl_type' => 'INTEGER',
+  'table' => 't',
+  'flags' => 
+  array (
+  ),
+  'name' => 'id',
+  'len' => -1,
+  'precision' => 0,
+)
+-- every orientation behaves as ORI_NEXT
+array (
+  0 => 'a',
+)
+array (
+  0 => 'a',
+)
+array (
+  0 => 'a',
+)
+array (
+  0 => 'a',
+)
+array (
+  0 => 'a',
+)
+array (
+  0 => 'a',
+)
+-- the cursor still advances
+array (
+  0 => 'a',
+)
+array (
+  0 => 'b',
+)
+array (
+  0 => 'c',
+)
+false
+-- an offset is ignored too
+array (
+  0 => 'a',
+)

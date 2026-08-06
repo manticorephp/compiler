@@ -776,11 +776,14 @@ class PDOStatement implements IteratorAggregate
 
     public function fetch(int $mode = 0, int $cursorOrientation = 0, int $cursorOffset = 0): mixed
     {
+        /*
+         * $cursorOrientation and $cursorOffset are accepted and IGNORED, which
+         * is what php does here: a sqlite statement is a forward-only cursor,
+         * and pdo_sqlite hands back the next row whatever orientation is asked
+         * for (measured: ORI_PRIOR / FIRST / LAST / ABS / REL all behave as
+         * ORI_NEXT). Throwing was stricter than the oracle.
+         */
         $eff = $mode === PDO::FETCH_DEFAULT ? $this->fetchMode : $mode;
-        if ($cursorOrientation !== PDO::FETCH_ORI_NEXT) {
-            throw new PDOException(
-                'PDO::FETCH_ORI_NEXT is the only cursor orientation implemented', 0);
-        }
         if (!$this->advance()) { return false; }
         // The base mode is the low nibble; PDO's flag bits all start at 32.
         $base = $eff & 15;

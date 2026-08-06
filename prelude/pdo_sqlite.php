@@ -127,6 +127,17 @@ function __mc_pdosq_column_name(\Ffi\Ptr $st, #[\Ffi\CType('int')] int $i): \Ffi
 #[\Ffi\Library('sqlite3'), \Ffi\Symbol('sqlite3_column_decltype')]
 function __mc_pdosq_column_decltype(\Ffi\Ptr $st, #[\Ffi\CType('int')] int $i): \Ffi\Ptr {}
 
+/**
+ * ⚠ WEAK: only a libsqlite3 built with SQLITE_ENABLE_COLUMN_METADATA defines it.
+ * The guard is sqlite's OWN answer — {@see __mc_pdosq_compileopt} — so there is no
+ * dlsym and no OS branch, and the reference stays link-tolerable either way.
+ */
+#[\Ffi\Library('sqlite3'), \Ffi\Symbol('sqlite3_column_table_name'), \Ffi\Weak]
+function __mc_pdosq_column_table(\Ffi\Ptr $st, #[\Ffi\CType('int')] int $i): \Ffi\Ptr {}
+
+#[\Ffi\Library('sqlite3'), \Ffi\Symbol('sqlite3_compileoption_used'), \Ffi\CType('int')]
+function __mc_pdosq_compileopt(string $opt): int {}
+
 #[\Ffi\Library('sqlite3'), \Ffi\Symbol('sqlite3_column_int64'), \Ffi\CType('longlong')]
 function __mc_pdosq_column_int64(\Ffi\Ptr $st, #[\Ffi\CType('int')] int $i): int {}
 
@@ -218,6 +229,22 @@ final class __McPdoSq
 
     /** Never 0: 0 is the id an uninitialised handle would carry. */
     public static int $nextId = 1;
+
+    /** -1 until asked; SQLITE_ENABLE_COLUMN_METADATA is a BUILD option. */
+    public static int $colMetaState = -1;
+
+    /**
+     * Whether this libsqlite3 carries the column-metadata API. Asked ONCE, of
+     * sqlite itself: the same option that defines `sqlite3_column_table_name`
+     * is the one `sqlite3_compileoption_used()` reports.
+     */
+    public static function hasColumnMeta(): bool
+    {
+        if (self::$colMetaState < 0) {
+            self::$colMetaState = \__mc_pdosq_compileopt('ENABLE_COLUMN_METADATA') !== 0 ? 1 : 0;
+        }
+        return self::$colMetaState === 1;
+    }
 
     /** sqlite's result code → php's SQLSTATE, matching pdo_sqlite's own table. */
     public static function sqlstate(int $rc): string
@@ -582,10 +609,10 @@ final class __McPdoSqliteStmt implements __McPdoDrvStmt
      * column type — the two differ in sqlite, which is dynamically typed per
      * value.
      *
-     * ⚠ `table` is absent. php fills it from `sqlite3_column_table_name()`,
-     * which only exists when libsqlite3 was built with
-     * SQLITE_ENABLE_COLUMN_METADATA; binding a symbol that may not be there
-     * would trade a missing key for a link failure.
+     * `table` needs `sqlite3_column_table_name()`, which exists only in a build
+     * with SQLITE_ENABLE_COLUMN_METADATA — bound WEAK and called only when
+     * sqlite says it has the option, so a build without it simply omits the key
+     * (as php does for an expression column, which has no table either).
      *
      * @return array<string,mixed>
      */
@@ -605,6 +632,12 @@ final class __McPdoSqliteStmt implements __McPdoDrvStmt
         $meta = ['native_type' => $native, 'pdo_type' => $pdoType];
         $d = \__mc_pdosq_column_decltype($st, $i);
         if (\ptr_to_int($d) !== 0) { $meta['sqlite:decl_type'] = \cstr_to_str($d); }
+        if (__McPdoSq::hasColumnMeta()) {
+            // NULL for anything that is not a plain table column — an
+            // expression or an aggregate — which is exactly when php omits it.
+            $tn = \__mc_pdosq_column_table($st, $i);
+            if (\ptr_to_int($tn) !== 0) { $meta['table'] = \cstr_to_str($tn); }
+        }
         $meta['flags'] = [];
         $meta['name'] = $this->columnName($i);
         $meta['len'] = -1;

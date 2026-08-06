@@ -100,16 +100,24 @@ throw would longjmp past sqlite's own half-updated frames, which `docs/ffi.md` f
 - **`bindColumn()` / `PDO::FETCH_BOUND` throw**, for the same missing primitive — but there the
   write-back *is* the whole feature, so there is no half of it worth approximating.
 - **`ATTR_PERSISTENT` is accepted and ignored.** One process, no pool.
-- **`getColumnMeta()` omits `table`.** php fills it from `sqlite3_column_table_name()`, which
-  exists only when libsqlite3 was built with `SQLITE_ENABLE_COLUMN_METADATA`; binding a symbol
-  that may not be there would trade a missing key for a link failure.
 - **`getAvailableDrivers()` returns what this binary linked** — `['sqlite']` — where php lists
   every driver its build has.
 
+`getColumnMeta()['table']` is **not** a divergence: `sqlite3_column_table_name()` is bound
+`#[\Ffi\Weak]` and called only when `sqlite3_compileoption_used('ENABLE_COLUMN_METADATA')` says
+this libsqlite3 has it — sqlite's own answer, so no dlsym and no OS branch. A build without the
+option omits the key, which is also what php does for an expression column.
+
+Cursor orientation is not one either: `$cursorOrientation` and `$cursorOffset` are accepted and
+ignored, exactly as pdo_sqlite does — a sqlite statement is forward-only and php returns the
+next row whatever is asked for (measured: `ORI_PRIOR` / `FIRST` / `LAST` / `ABS` / `REL` all
+behave as `ORI_NEXT`). Throwing was stricter than the oracle.
+
 ## Not implemented, each with a named throw
 
-`PDO::FETCH_BOUND`, `bindColumn()`, and any cursor orientation other than `FETCH_ORI_NEXT`.
-`nextRowset()` reports IM001, as php's sqlite driver does.
+`PDO::FETCH_BOUND` and `bindColumn()` — both need a stored by-reference binding, the same
+missing primitive `bindParam()` documents above. `nextRowset()` reports IM001, as php's sqlite
+driver does.
 
 ## The default-fetch bug, and what it turned out to be
 
