@@ -1886,6 +1886,9 @@ trait EmitLlvmObjects
     private function emitRefAlias(RefAlias_ $n): string
     {
         if (isset($this->locals->slots[$n->source])) {
+            // Remember what the target owned, so `unset($target)` can hand it
+            // back instead of zeroing the slot both names now share.
+            $this->locals->aliasLocals[$n->target] = $this->locals->slots[$n->target] ?? '';
             $this->locals->slots[$n->target] = $this->locals->slots[$n->source];
         }
         $this->lastValue = '0';
@@ -2648,6 +2651,23 @@ trait EmitLlvmObjects
                 // conditional contract's +1 — until a compile-time condition
                 // folded the ternary away ({@see LowerFromAst::lowerTernary}) and
                 // left the release with nothing to balance it.
+                // `unset($ref)` where `$ref = &$x` breaks THAT BINDING and
+                // nothing else — php leaves `$x` untouched. Here the alias
+                // shares `$x`'s slot ({@see emitRefAlias}), so zeroing it wiped
+                // the source: `$ref = &$bag; $ref[$k] = $v; unset($ref);` in a
+                // loop stored 0 into `$bag` every iteration and the array read
+                // back empty. Hand the name its own slot back (or none), release
+                // nothing — an alias never owned the value.
+                if (isset($this->locals->aliasLocals[$name])) {
+                    $prev = $this->locals->aliasLocals[$name];
+                    unset($this->locals->aliasLocals[$name]);
+                    if ($prev !== '') {
+                        $this->locals->slots[$name] = $prev;
+                    } else {
+                        unset($this->locals->slots[$name]);
+                    }
+                    continue;
+                }
                 $flavor = $this->discardReleaseFlavor($t->type);
                 if (isset($this->locals->globalBacked[$name])) {
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->globalBacked[$name], $flavor); }

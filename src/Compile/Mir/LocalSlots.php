@@ -32,6 +32,15 @@ final class LocalSlots
     public array $globalBacked = [];
     /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
     public array $byRefCaptured = [];
+    /** @var array<string, string> name → the slot it owned BEFORE `$name = &$src`
+     *  rebound it to `$src`'s slot ('' when it owned none). Presence means the
+     *  name is currently an ALIAS, which `unset($name)` has to know: php's
+     *  `unset` on a reference breaks that one binding and leaves the aliased
+     *  storage alone, while zeroing the shared slot wipes the source. Restoring
+     *  the saved slot (rather than allocating a new one) keeps the unbind free
+     *  of an alloca inside a loop.
+     *  Declared LAST — a field added mid-struct shifts every later offset. */
+    public array $aliasLocals = [];
 
     public function collectByRefCaptured(Node $n): void
     {

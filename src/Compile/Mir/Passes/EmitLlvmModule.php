@@ -750,6 +750,7 @@ trait EmitLlvmModule
         // loads/stores deref it.
         $this->locals->refLocals = [];
         $this->locals->refParamTypes = [];
+        $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) {
                 $this->locals->refLocals[$p->name] = true;

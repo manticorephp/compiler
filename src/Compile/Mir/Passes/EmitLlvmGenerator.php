@@ -228,6 +228,7 @@ trait EmitLlvmGenerator
         // ── resume ──
         $this->locals->slots = [];
         $this->locals->refLocals = [];
+        $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
