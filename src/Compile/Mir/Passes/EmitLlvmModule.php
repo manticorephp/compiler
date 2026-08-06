@@ -178,6 +178,15 @@ trait EmitLlvmModule
             // it did link, two copies would be two independent counters. Same
             // treatment as every other shared mutable global here
             // ({@see Module::$globalIsPrelude}).
+            // An IMPORTED class's static prop is defined by the library's own
+            // `.o` — declare it. Not `linkonce_odr`: a class has ONE static
+            // slot, and coalescing two definitions with different initialisers
+            // silently picks one.
+            if ($this->globalIsExtern[$gi] ?? false) {
+                $gi = $gi + 1;
+                $globalCells .= $gname . " = external global i64\n";
+                continue;
+            }
             $linkage = ($this->globalIsPrelude[$gi] ?? false) ? 'linkonce_odr ' : '';
             $gi = $gi + 1;
             $globalCells .= $gname . ' = ' . $linkage . 'global i64 ' . $this->globalInit($def) . "\n";

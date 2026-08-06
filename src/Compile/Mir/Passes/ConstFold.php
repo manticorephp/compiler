@@ -94,6 +94,17 @@ final class ConstFold implements Pass
         return $module;
     }
 
+    /**
+     * Fold one standalone expression — a constant's initializer, which lives
+     * outside any function body and so is never reached by {@see run}. The
+     * `.sig` writer needs the reduced form: a dependent evaluates nothing, so
+     * whatever survives folding is what it has to be able to reproduce.
+     */
+    public static function foldOne(Node $n): Node
+    {
+        return (new self())->foldNode($n);
+    }
+
     private function foldNode(Node $n): Node
     {
         $kind = $n->kind;

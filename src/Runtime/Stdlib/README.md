@@ -39,8 +39,13 @@ function.
   `-1` sentinel; `preg_match` returns `int|false`. Do not "simplify" a return
   type to dodge a union. (They once returned `-1`; code written against that
   reads `false` as 0 through a `< 0` test and silently takes the found path.)
-- **Nor can a CLASS.** The `.sig` carries functions only, so anything whose API is
-  an object lives in `prelude/` instead: ext/simplexml, ext/dom and the `libxml_*`
+- **Nor can a CLASS — from HERE.** A `.sig` does carry classes now (schema 2), but
+  the bundled stdlib deliberately opts out: it is a `runtime: true` library,
+  linked into every program rather than selected as a dependency, and its classes
+  are either internal (`Runtime\Json\Parser`) or compiler-owned (`stdClass`, which
+  every module registers for itself). Exporting them would hand each program a
+  second definition of a class it already holds. So anything whose API is an
+  object still lives in `prelude/`: ext/simplexml, ext/dom and the `libxml_*`
   registry are `prelude/xml.php` + `xml_xpath.php` + `xml_dom.php` for exactly
   that reason (a `SimpleXMLElement` declared here would be invisible to the
   program holding one — `instanceof` false, properties read as raw bits).

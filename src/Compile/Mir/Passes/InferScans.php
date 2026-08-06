@@ -1293,6 +1293,9 @@ trait InferScans
             // compiler's own `array_merge(Type[], Type[])` sites then read boxed
             // cells as raw object pointers.
             if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
+            // An IMPORTED body is compiled and linked, not ours to retype — the
+            // same reason the prelude is excluded, one boundary further out.
+            if ($fn->isExtern) { continue; }
             // A PARAM is the CALLER's array — its elements keep whatever
             // representation the caller built, and storing a cell into it can't
             // retroactively make them cells. Forcing vec[cell] on one made the
@@ -1408,6 +1411,8 @@ trait InferScans
             // A prelude body is linkonce_odr and shared across modules — never
             // specialize one from this module's call sites ({@see scanCallSiteRefParams}).
             if ($fn->isPrelude) { continue; }
+            // Nor an imported one, whose body lives in a dependency's `.o`.
+            if ($fn->isExtern) { continue; }
             // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
             // caller's array and its elements already have a representation.
             $skip = [];

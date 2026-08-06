@@ -328,6 +328,11 @@ final class EmitLlvm implements EmitVisitor
      *  linkage would make stdlib.o and user.o define the same cell twice
      *  ({@see \Compile\Mir\Module::$globalIsPrelude}). */
     private array $globalIsPrelude = [];
+    /** @var bool[] parallel extern flags for $globalNames — a static property of
+     *  an IMPORTED class, defined in the dependency's `.o`, so this module emits
+     *  `external global` and links to it
+     *  ({@see \Compile\Mir\Module::$globalIsExtern}). */
+    private array $globalIsExtern = [];
     /** @var string[] names declared `global $x` — __main shares the cell */
     private array $globalVarNames = [];
 
@@ -397,6 +402,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
         $this->globalIsPrelude = $module->globalIsPrelude;
+        $this->globalIsExtern = $module->globalIsExtern;
         $this->globalVarNames = $module->globalVarNames;
         $this->includeSlots = $module->includeSlots;
         $this->knownFnNames = $module->knownFnNames;
