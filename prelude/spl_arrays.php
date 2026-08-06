@@ -18,9 +18,10 @@
  * `mixed` so the call sites NaN-box them, then the cell array
  * store/get/isset/unset/foreach paths handle them.
  *
- * NOTE: LowerFromAst::arrayClassesPreludeSrc() keeps a byte-identical
- * embedded copy as the bootstrap/distribution fallback (when this file
- * can't be read). Keep the two in sync.
+ * Injection is demand-gated: Main only lowers this file when the program
+ * mentions ArrayIterator / ArrayObject or calls one of the iterator_* helpers
+ * below ({@see LowerFromAst}, line 452). There is no second embedded copy —
+ * this file is the only definition.
  */
 
 class ArrayIterator implements Iterator, ArrayAccess, Countable
@@ -28,6 +29,8 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     private mixed $__s;
     private mixed $__k;
     private int $__i = 0;
+    // Declared LAST: a property added mid-class shifts every later offset.
+    private int $__f = 0;
 
     public function __construct(mixed $array = [])
     {
@@ -108,11 +111,43 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     {
         return $this->__s;
     }
+
+    public function getFlags(): int
+    {
+        return $this->__f;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__f = $flags;
+    }
+
+    /**
+     * php's own shape: [flags, storage, extraProps, iteratorClass]. The 4th is
+     * NULL for an ArrayIterator, and the 3rd is the dynamic properties the
+     * instance carries — always empty here, because this class declares no
+     * public slots and php 8.5 deprecates adding one.
+     */
+    public function __serialize(): array
+    {
+        return [$this->__f, $this->__s, [], null];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->__f = (int)($data[0] ?? 0);
+        $this->__s = $data[1] ?? [];
+        $this->__rebuildKeys();
+        $this->__i = 0;
+    }
 }
 
 class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
 {
     private mixed $__s;
+    // Declared LAST, same reason as ArrayIterator's.
+    private int $__f = 0;
+    private mixed $__ic = null;
 
     public function __construct(mixed $array = [])
     {
@@ -161,6 +196,43 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
     public function getIterator(): ArrayIterator
     {
         return new ArrayIterator($this->__s);
+    }
+
+    public function getFlags(): int
+    {
+        return $this->__f;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__f = $flags;
+    }
+
+    public function getIteratorClass(): string
+    {
+        // php answers the default name, not null, when none was ever set.
+        $c = $this->__ic;
+        return $c === null ? 'ArrayIterator' : (string)$c;
+    }
+
+    public function setIteratorClass(string $class): void
+    {
+        $this->__ic = $class;
+    }
+
+    /** [flags, storage, extraProps, iteratorClass] — {@see ArrayIterator::__serialize}. */
+    public function __serialize(): array
+    {
+        return [$this->__f, $this->__s, [], $this->__ic];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->__f = (int)($data[0] ?? 0);
+        $this->__s = $data[1] ?? [];
+        // symfony/var-exporter's Hydrator passes only three elements for an
+        // ArrayIterator and four for an ArrayObject, so the tail is optional.
+        $this->__ic = $data[3] ?? null;
     }
 }
 
