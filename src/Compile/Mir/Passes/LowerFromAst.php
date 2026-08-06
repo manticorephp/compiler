@@ -4494,6 +4494,21 @@ final class LowerFromAst implements Pass
         // call is reached — not a link failure. symfony/clock reads
         // `static::getLastErrors()`, which php's DateTimeImmutable has and ours
         // does not, inside a throw expression that only runs on a parse failure.
+        // …and a call whose RECEIVER CLASS is declared nowhere is php's other
+        // runtime Error, one step earlier: `Class "X" not found`. Same rule the
+        // class-CONSTANT fallthrough already applies, and the same message split
+        // {@see LowerExprs} makes — a known class with an unknown member reads
+        // differently from a class that is not there at all.
+        //
+        // This is what ext-only code looks like from inside a closed world:
+        // symfony/var-dumper's FFICaster calls `\FFI::cdef(...)` in a branch that
+        // can only run when an FFI\CData exists, which without ext-ffi it never
+        // does. Emitting the call anyway put an undefined symbol in the module
+        // and clang refused the whole build — strictly stricter than php, which
+        // runs the file happily and only raises if the branch is REACHED.
+        if ($this->staticClassAbsent($class, $expr->method)) {
+            return $this->throwErrorExpr('Class "' . $class . '" not found');
+        }
         if ($this->staticCallUnresolvable($class, $expr->method)) {
             return $this->throwErrorExpr(
                 'Call to undefined method ' . $class . '::' . $expr->method . '()');
@@ -4557,6 +4572,42 @@ final class LowerFromAst implements Pass
      *    a method that is not declared;
      *  - an ENUM or interface receiver, whose members arrive by other routes.
      */
+    /**
+     * Whether the receiver of a static call is declared NOWHERE this build can
+     * see AND its symbol will not arrive from a linked object.
+     *
+     * The three class tables are the ones the class-constant path consults, so
+     * the two answers cannot disagree about the same name. They are not enough
+     * on their own: a library may ship a class WITHOUT exporting the type, and
+     * the bundled stdlib deliberately does — `Runtime\AsyncHook` is internal
+     * ({@see \Manticore\CompileArgs::$exportTypes}), so no class table here ever
+     * holds it, while `lib/manticore_stdlib.o.sig` lists every one of its methods
+     * as a function under the `Class__method` symbol convention. Asking only the
+     * class tables turned all eleven async netpoller hooks into
+     * `Class "Runtime\AsyncHook" not found` and took 43 cases down with them.
+     *
+     * So the question is the LINKER's, not the class table's: the call is
+     * unresolvable only when nothing will define the symbol either.
+     */
+    private function staticClassAbsent(string $class, string $method): bool
+    {
+        $c = \ltrim($class, '\\');
+        if ($c === '') { return false; }
+        if (isset($this->classTable[$c])) { return false; }
+        if (isset($this->enumTable[$c])) { return false; }
+        if (isset($this->classDecls[$c])) { return false; }
+        // `Closure` has no declaration anywhere BY DESIGN — the emitter
+        // implements its statics itself ({@see EmitLlvmObjects::
+        // emitStaticCallInner} rebinds `Closure::bind`, and `fromCallable` /
+        // `C::m(...)` are folded further up this function). A name the compiler
+        // owns is not a name the program is missing.
+        if ($c === 'Closure') { return false; }
+        $sym = $c . '__' . $method;
+        if (isset($this->fnDecls[$sym])) { return false; }
+        if (isset($this->externMethodSyms[$sym])) { return false; }
+        return true;
+    }
+
     private function staticCallUnresolvable(string $class, string $method): bool
     {
         if ($class === '' || $method === '') { return false; }
