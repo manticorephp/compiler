@@ -3490,6 +3490,39 @@ trait EmitLlvmObjects
      * Walk a class's parent chain to find the one that actually
      * declares `$method`. Returns '' when no ancestor declares it.
      */
+    /**
+     * Whether NOTHING in the compiled world can serve `$method` on a receiver
+     * whose static type is `$class` — the question the DEFAULT dispatch arm was
+     * answering on faith.
+     *
+     * Mirrors how the candidate set below is built, deliberately and in the same
+     * order, so the predicate and the arms cannot disagree: a KNOWN class walks
+     * its own chain, and an unknown or absent one (an interface, a `new $cls()`
+     * union, a fully erased receiver) is served by any class that resolves the
+     * name, which is exactly the scan the dispatch runs.
+     *
+     * Conservative on purpose — anything that might resolve makes it answer
+     * FALSE. `__call` is not consulted here because both of its reroutes have
+     * already run by the time this is asked.
+     */
+    private function methodHasNoImpl(string $class, string $method): bool
+    {
+        if ($method === '') { return false; }
+        if ($class !== '' && isset($this->classes[$class])) {
+            if ($this->resolveMethodClass($class, $method) !== '') { return false; }
+            // A DESCENDANT may declare it even when the base does not — the
+            // switch arms are built from exactly this set.
+            foreach ($this->selfAndDescendants($class) as $d) {
+                if ($this->resolveMethodClass($d, $method) !== '') { return false; }
+            }
+            return true;
+        }
+        foreach ($this->classes as $cd) {
+            if ($this->resolveMethodClass($cd->name, $method) !== '') { return false; }
+        }
+        return true;
+    }
+
     private function resolveMethodClass(string $class, string $method): string
     {
         $c = $class;
@@ -3814,6 +3847,35 @@ trait EmitLlvmObjects
             $out .= '  ' . $ord . ' = load i64, ptr ' . $g . "\n";
             $thisArg = $ord;
             $argList = 'i64 ' . $thisArg;
+        }
+        // Nothing implements this method — anywhere. Every switch ARM below is
+        // already dropped when its candidate cannot resolve the method (see the
+        // `$t === ''` skip), but the DEFAULT arm still named a callee on faith,
+        // so the module got a symbol nothing defines and clang failed the build.
+        // php answers that at RUNTIME, when the call is reached, so this does
+        // too — a build must not die over a branch that never runs.
+        //
+        // symfony/cache reaches it through an OPTIONAL dependency: a
+        // `MessageBusInterface` property with symfony/messenger absent leaves
+        // the hint pointing at a type no compiled class implements, and asking
+        // its result for `->last(...)` put an undefined `Http\Response::last`
+        // in the module and failed the whole tier-2 link.
+        //
+        // Placed HERE, before the arguments are emitted, because php does not
+        // evaluate them: `$e->alsoMissing(mark('one'))` raises without ever
+        // running `mark`. The RECEIVER is already emitted above, which php also
+        // does — it has to, to know the class it is complaining about. Both
+        // `__call` reroutes ran far above, so their absence is settled.
+        if ($this->methodHasNoImpl($static, $mc->method)) {
+            $name = $static !== '' ? $static : 'object';
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst(
+                    'Call to undefined method ' . $name . '::' . $mc->method . '()',
+                    Type::string_())],
+                Type::cell(),
+            );
+            return $out . $this->emitNode($thr);
         }
         // By-ref mask of the resolved callee. A method's param 0 is the
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —
