@@ -139,7 +139,7 @@ trait LowerClasses
      */
     private function traitAliasSource(\Parser\Ast\ClassDecl $decl, \Parser\Ast\TraitAdaptation $a): ?\Parser\Ast\MethodDecl
     {
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             if ($a->trait !== '' && $tn !== \ltrim($a->trait, '\\')) { continue; }
             $td = $this->traitTable[$tn] ?? null;
@@ -203,7 +203,7 @@ trait LowerClasses
                 $prop->default !== null, $decl->name,
                 $this->attrNames($prop->attributes));
         }
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
             if ($td === null) { continue; }
             foreach ($td->properties as $tprop) {
@@ -362,7 +362,7 @@ trait LowerClasses
         // symfony/cache's AbstractAdapter keeps its `$createCacheItem` and
         // `$mergeByLifetime` closures in statics inherited from
         // AbstractAdapterTrait. The class's own property still wins on conflict.
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
@@ -385,7 +385,7 @@ trait LowerClasses
         // heap corruption (e.g. a string slot that lands on an obj/vec tag →
         // strcmp-on-RC_TAG_MAGIC abort). The class's own property wins on
         // conflict.
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
@@ -437,7 +437,7 @@ trait LowerClasses
         // + ctor resolution); the class's own method wins on conflict.
         // `use … { A::m insteadof B; }` excludes the loser; `m as x;` adds an alias.
         $excluded = $this->traitExclusions($decl);
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
@@ -485,7 +485,7 @@ trait LowerClasses
         }
         // A defaulted trait property also needs the synthesised ctor to run.
         if (!isset($methodNames['__construct'])) {
-            foreach ($decl->uses as $traitName) {
+            foreach ($this->usedTraitsFlat($decl) as $traitName) {
                 $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
                 if ($td === null) { continue; }
                 foreach ($td->properties as $tprop) {
@@ -552,7 +552,7 @@ trait LowerClasses
         // idempotent by name and the class's own pass ran first, which is what
         // keeps "the class's own property wins" true here as well.
         if (!$this->isReifiedDecl($decl)) {
-            foreach ($decl->uses as $traitName) {
+            foreach ($this->usedTraitsFlat($decl) as $traitName) {
                 $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
                 if ($td === null) { continue; }
                 foreach ($td->properties as $tprop) {
@@ -885,7 +885,7 @@ trait LowerClasses
         // helpers (T5). Class's own property wins.
         $ownPropNames = [];
         foreach ($decl->properties as $prop) { $ownPropNames[$prop->name] = true; }
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
@@ -946,7 +946,7 @@ trait LowerClasses
         $ownNames = [];
         foreach ($decl->methods as $m) { $ownNames[$m->name] = true; }
         $excluded = $this->traitExclusions($decl);
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }

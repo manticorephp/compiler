@@ -1,0 +1,14 @@
+cleared:ns|saved:k|cleared:direct|saved:d2
+inner-default|42|own-value
+written|43|own-value
+written
+7
+9
+object(Adapter)#1 (3) {
+  ["own"]=>
+  string(9) "own-value"
+  ["middleProp"]=>
+  int(43)
+  ["innerProp"]=>
+  string(7) "written"
+}

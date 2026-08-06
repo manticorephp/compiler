@@ -1632,12 +1632,60 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * Every trait a declaration mixes in, TRANSITIVELY.
+     *
+     * A trait may `use` another, and php flattens the whole chain into the
+     * using class: `class C { use Outer; }` where `trait Outer { use Inner; }`
+     * gets Inner's methods, properties and static properties as if C had listed
+     * them. Walking only `$decl->uses` dropped the nested level everywhere —
+     * symfony/cache's FilesystemTagAwareAdapter uses FilesystemTrait, which uses
+     * FilesystemCommonTrait, and `doClear` lives in the inner one. That is the
+     * whole of the bug in the methods case (an undefined symbol, which is loud);
+     * in the PROPERTY case it is the quiet one the layout walk already warns
+     * about — a nested trait's field got no slot, so `$this->traitProp` inside a
+     * trait method read a wrong offset.
+     *
+     * Depth-first pre-order, so a directly-used trait precedes the ones it
+     * pulls in, and deduplicated by name — the same trait reached twice is one
+     * mix-in, as php has it. Every caller keeps its own "the class's own member
+     * wins" guard; this only widens the set they scan. Cycle-guarded: a trait
+     * chain that loops would otherwise never terminate.
+     *
+     * @return string[]
+     */
+    private function usedTraitsFlat(\Parser\Ast\ClassDecl $decl): array
+    {
+        $out = [];
+        $seen = [];
+        $this->collectUsedTraits($decl, $out, $seen, 0);
+        return $out;
+    }
+
+    /**
+     * @param string[] $out
+     * @param array<string,bool> $seen
+     */
+    private function collectUsedTraits(\Parser\Ast\ClassDecl $decl, array &$out, array &$seen, int $depth): void
+    {
+        if ($depth > 32) { return; }
+        foreach ($decl->uses as $traitName) {
+            $tn = \ltrim($traitName, '\\');
+            if (isset($seen[$tn])) { continue; }
+            $seen[$tn] = true;
+            $out[] = $tn;
+            $td = $this->traitTable[$tn] ?? null;
+            if ($td === null) { continue; }
+            $this->collectUsedTraits($td, $out, $seen, $depth + 1);
+        }
+    }
+
+    /**
      * Find a trait method for an `as` alias: `$trait` names the source trait
      * (or '' to search every used trait). Returns the MethodDecl or null.
      */
     private function findTraitMethod(\Parser\Ast\ClassDecl $decl, string $trait, string $method): ?\Parser\Ast\MethodDecl
     {
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             if ($trait !== '' && $tn !== $trait) { continue; }
             $td = $this->traitTable[$tn] ?? null;
