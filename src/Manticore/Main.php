@@ -804,6 +804,21 @@ final class CompileArgs
     /** @var array<string, \Compile\Mir\ExternClassMeta> */
     public static array $externClassMeta = [];
 
+    /**
+     * Paths composer autoloads ON DEMAND (psr-4 / psr-0 / classmap) rather than
+     * `require`ing at bootstrap. php reads such a file only when a class lookup
+     * resolves to it, so its top-level SIDE EFFECTS run then — or, for a class
+     * nothing ever names, never at all.
+     *
+     * The eager whole-program model has no "then": {@see lower_module} flattens
+     * every file's top level into one `__main`, which runs the lot at startup.
+     * Only DECLARATIONS are hoisted from a path in this set ({@see
+     * __mc_stmt_declares}); pure side effects are dropped.
+     *
+     * @var array<string,bool>
+     */
+    public static array $demandLoadedPaths = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -1390,6 +1405,162 @@ function composer_autoload_dirs(array $autoload, string $base): array
 }
 
 /**
+ * The `autoload.files` entries of a composer project, as a path set. These are
+ * composer's BOOTSTRAP files: it `require`s each one on every request, so their
+ * top-level statements genuinely run at program start.
+ *
+ * Every other autoload mechanism is DEMAND-driven — psr-4/psr-0 map a class
+ * NAME to a file and classmap maps a declared symbol to one, so such a file is
+ * read only when a class lookup resolves to it, and never otherwise.
+ *
+ * @return array<string,bool>
+ */
+function composer_autoload_file_entries(string $projRoot, bool $withVendor): array
+{
+    /** @var array<string,bool> $out */
+    $out = [];
+    $add = function (array $autoload, string $base) use (&$out): void {
+        $fl = isset($autoload["files"]) ? $autoload["files"] : [];
+        if (!\is_array($fl)) { return; }
+        foreach ($fl as $p) {
+            $out[\rtrim(composer_path_join($base, (string)$p), "/")] = true;
+        }
+    };
+    $cjPath = $projRoot . "/composer.json";
+    $cjSrc = file_exists($cjPath) ? read_file($cjPath) : null;
+    if ($cjSrc !== null) {
+        $cj = json_decode($cjSrc, true);
+        if (\is_array($cj) && isset($cj["autoload"]) && \is_array($cj["autoload"])) {
+            $add($cj["autoload"], $projRoot);
+        }
+    }
+    if ($withVendor) {
+        $lockPath = $projRoot . "/composer.lock";
+        $lockSrc = file_exists($lockPath) ? read_file($lockPath) : null;
+        if ($lockSrc !== null) {
+            $lock = json_decode($lockSrc, true);
+            $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
+            foreach ($pkgs as $pkg) {
+                if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
+                    $add($pkg["autoload"], $projRoot . "/vendor/" . (string)$pkg["name"]);
+                }
+            }
+        }
+    }
+    return $out;
+}
+
+/**
+ * Could `$src` ever be reached by a DEMAND-driven autoload rule? Only if it
+ * declares something a lookup can name. A file under a psr-4 root that declares
+ * nothing at all is dead weight under php — composer resolves a class name to a
+ * path, finds no such class, and nothing else ever reads the file.
+ *
+ * Compiling one is not merely wasteful, it is WRONG: `lower_module` flattens
+ * every file's top level into `__main`, so a standalone script shipped inside a
+ * package root RUNS AT STARTUP. symfony/expression-language ships
+ * `Resources/bin/generate_operator_regex.php` under a psr-4 root mapped to `""`
+ * — a CLI script ending in `echo '/'.implode('|', $regex).'/A';`. It executed
+ * before the program's own entry, and its `$operator[$len - 1]` was the SIGSEGV
+ * that stopped tier 2.
+ *
+ * Deliberately CONSERVATIVE: any occurrence of a declaration keyword anywhere in
+ * the file — even in a comment or a closure — keeps the file. A false "keeps it"
+ * costs a little compile time; a false "drops it" would lose a declaration, and
+ * a version-guarded `if (…) { class X {} }` must never be mistaken for a script.
+ */
+function __mc_source_may_declare(string $src): bool
+{
+    return \preg_match('/\b(class|interface|trait|enum|function)\b/i', $src) === 1;
+}
+
+/**
+ * Does this top-level statement DECLARE something, at any depth?
+ *
+ * The keep/drop test for a demand-loaded file ({@see CompileArgs::$demandLoadedPaths}).
+ * Declarations must survive — the whole point of compiling the file — while a
+ * pure side effect must not, because php would only ever run it at the moment
+ * a class lookup pulled the file in.
+ *
+ * ★ The recursion is what makes this safe. A version guard wrapping a class
+ * (`if (\PHP_VERSION_ID < 80000) { class Foo {} }`) is an `if`, and dropping
+ * `if`s wholesale would silently delete the class — so the test is "contains a
+ * declaration", never "is a declaration". The shape this DOES drop is the
+ * dependency guard symfony writes at the top of a class file:
+ *
+ *     if (!interface_exists(LocaleAwareInterface::class)) { throw new \LogicException(…); }
+ *
+ * Seven files in the pinned corpus carry one. Compiled eagerly they threw
+ * before the program's own entry ran — symfony/string's AsciiSlugger is what
+ * stopped tier 2 once the SIGSEGV ahead of it was fixed.
+ *
+ * ⚠ A top-level `class_alias()` in a psr-4 file is a side effect and IS
+ * dropped. Recorded rather than special-cased: the alias would have to become a
+ * compile-time class synonym, which is its own piece of work.
+ */
+function __mc_stmt_declares(\Parser\Ast\Stmt $s): bool
+{
+    $k = $s->kind;
+    if ($k === 'Class' || $k === 'Function' || $k === 'UseDecl'
+        || $k === 'Namespace' || $k === 'StaticLocal' || $k === 'Label') {
+        return true;
+    }
+    // A `const X = …;` at file scope is a declaration too. The parser models it
+    // as an ExpressionStmt only for `define()`, which is a CALL — and a call is
+    // exactly the side effect this drops, matching php: an unloaded file's
+    // define() never runs either.
+    foreach (__mc_stmt_children($s) as $c) {
+        if (__mc_stmt_declares($c)) { return true; }
+    }
+    return false;
+}
+
+/**
+ * Nested STATEMENTS of `$s` (not expressions) — enough for {@see
+ * __mc_stmt_declares} to find a declaration wrapped in any control flow.
+ *
+ * @return \Parser\Ast\Stmt[]
+ */
+function __mc_stmt_children(\Parser\Ast\Stmt $s): array
+{
+    /** @var \Parser\Ast\Stmt[] $out */
+    $out = [];
+    $k = $s->kind;
+    // ⚠ Every arm goes through the `__mc_as_*` accessors and never reads a
+    // subclass field off the base `Stmt`: doing that SEGFAULTS the native
+    // self-build while Zend compiles the same program fine (the trap the
+    // top-level-return work already paid for). Bodies are `Block`s — their
+    // statements live under `->statements` — except a SwitchArm's, which is a
+    // plain array.
+    if ($k === 'If') {
+        $n = __mc_as_if($s);
+        foreach ($n->then->statements as $x) { $out[] = $x; }
+        foreach ($n->elseifs as $ei) { foreach ($ei->body->statements as $x) { $out[] = $x; } }
+        if ($n->else !== null) { foreach ($n->else->statements as $x) { $out[] = $x; } }
+    } elseif ($k === 'While') {
+        foreach (__mc_as_while($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'DoWhile') {
+        foreach (__mc_as_dowhile($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'For') {
+        foreach (__mc_as_for($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'Foreach') {
+        foreach (__mc_as_foreach($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'TryCatch') {
+        $n = __mc_as_trycatch($s);
+        foreach ($n->try->statements as $x) { $out[] = $x; }
+        foreach ($n->catches as $c) { foreach ($c->body->statements as $x) { $out[] = $x; } }
+        if ($n->finally !== null) { foreach ($n->finally->statements as $x) { $out[] = $x; } }
+    } elseif ($k === 'Switch') {
+        foreach (__mc_as_switch($s)->cases as $a) { foreach ($a->body as $x) { $out[] = $x; } }
+    } elseif ($k === 'Namespace') {
+        $n = __mc_as_namespace($s);
+        if ($n->body !== null) { foreach ($n->body->statements as $x) { $out[] = $x; } }
+    }
+    return $out;
+}
+
+/**
  * Source directories of a composer project rooted at `$projRoot`: its own
  * `autoload` (composer.json) and — when `$withVendor` — every installed
  * package's `autoload` (composer.lock, rooted at `vendor/<name>/`). Whole-program
@@ -1827,6 +1998,11 @@ function cmd_build(array $args): int
             /** @var array<string,bool> $covered */
             $covered = [];
             $covered[\rtrim($srcDir, "/")] = true;
+            // composer's BOOTSTRAP set. Everything else it autoloads is
+            // demand-driven, so a file there that declares nothing is not a
+            // compile unit at all ({@see __mc_source_may_declare}).
+            $bootFiles = composer_autoload_file_entries(".", $withVendor);
+            $skippedScripts = 0;
             foreach (composer_source_dirs(".", $withVendor) as $cdir) {
                 $nd = \rtrim($cdir, "/");
                 if (isset($covered[$nd])) { continue; }
@@ -1835,9 +2011,23 @@ function cmd_build(array $args): int
                 foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
                     if (isset($seenPath[$sf->path])) { continue; }
                     $seenPath[$sf->path] = true;
+                    $sfNorm = \rtrim($sf->path, "/");
+                    $isBoot = isset($bootFiles[$sfNorm]) || isset($bootFiles[$nd]);
+                    if (!$isBoot && !__mc_source_may_declare($sf->contents)) {
+                        $skippedScripts = $skippedScripts + 1;
+                        dprint("build:   - script (declares nothing, never autoloaded): " . $sf->path);
+                        continue;
+                    }
+                    // Demand-loaded: keep its DECLARATIONS, drop its top-level
+                    // side effects ({@see CompileArgs::$demandLoadedPaths}).
+                    if (!$isBoot) { CompileArgs::$demandLoadedPaths[$sfNorm] = true; }
                     $sources[] = $sf->contents;
                     $paths[] = $sf->path;
                 }
+            }
+            if ($skippedScripts > 0) {
+                dprint("build: skipped " . (string)$skippedScripts
+                    . " non-declaring script(s) under demand-loaded autoload roots");
             }
         }
         // Extensions: opt-in native bindings. Each named extension adds its thin
@@ -2391,6 +2581,28 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $isEntry = $i === $lastIdx;
         $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '', $i);
         $incAbs = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
+        // A DEMAND-LOADED file (psr-4 / classmap) contributes its DECLARATIONS
+        // only. php reads such a file when a class lookup resolves to it and
+        // runs its top level THEN — for a class nothing names, never. The eager
+        // model has no "then", so hoisting the side effects into `__main` runs
+        // them at startup, ahead of the program's own entry.
+        //
+        // symfony/string's AsciiSlugger is the witness: a file-scope
+        // `if (!interface_exists(LocaleAwareInterface::class)) { throw … }`
+        // guarding a package that tier 2 deliberately excludes. Seven files in
+        // the pinned corpus carry that shape. {@see __mc_stmt_declares} keeps a
+        // version-guarded `if (…) { class Foo {} }`, which is why the test is
+        // "contains a declaration" and not "is one".
+        $srcPath = isset($paths[$i]) ? \rtrim($paths[$i], "/") : '';
+        /** @var \Parser\Ast\Stmt[] $topStmts */
+        $topStmts = $program->statements;
+        if (!$isEntry && $srcPath !== '' && isset(CompileArgs::$demandLoadedPaths[$srcPath])) {
+            $kept = [];
+            foreach ($topStmts as $s) {
+                if (__mc_stmt_declares($s)) { $kept[] = $s; }
+            }
+            $topStmts = $kept;
+        }
         // Every compiled file is registered, with an EMPTY slot until one of its
         // top-level `return`s claims it. That distinction is the difference
         // between php's three answers: a file that returned a value gives it, a
@@ -2410,12 +2622,12 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // every symfony polyfill bootstrap is a version-guarded `return
         // require …`. Nested in an `if`, those used to silently kill the whole
         // program — a composer application compiled and then did nothing.
-        $retKind = $isEntry ? 0 : __mc_file_return_kind($program->statements);
+        $retKind = $isEntry ? 0 : __mc_file_return_kind($topStmts);
         if ($retKind > 0) {
             // Any return claims the slot, valued or not — a bare `return`
             // stores NULL, which is what php's `require` of it evaluates to.
             $slotFor = $incSlot;
-            $span0 = $program->statements[0]->span;
+            $span0 = $topStmts[0]->span;
             if ($slotFor !== '') {
                 $includeSlots[$incAbs] = $slotFor;
                 // Seed the slot UNCONDITIONALLY, before the file's own
@@ -2446,7 +2658,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                 );
             }
             $eofLabel = '__mc_eof_' . (string)$i;
-            foreach (__mc_rewrite_file_returns($program->statements, $slotFor, $eofLabel) as $s) {
+            foreach (__mc_rewrite_file_returns($topStmts, $slotFor, $eofLabel) as $s) {
                 $stmts[] = $s;
             }
             $stmts[] = new \Parser\Ast\LabelStmt($eofLabel, $span0);
@@ -2454,7 +2666,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             foreach ($program->docComments as $d) { $docs[] = $d; }
             continue;
         }
-        foreach ($program->statements as $s) {
+        foreach ($topStmts as $s) {
             if (!$isEntry && $s->kind === 'Return') {
                 // Its VALUE is what `require`/`include` of this file evaluates
                 // to, and it used to be thrown away with the statement. Keep the
