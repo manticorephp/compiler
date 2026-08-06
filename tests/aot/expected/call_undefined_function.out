@@ -1,0 +1,5 @@
+unreached branch cost nothing
+Error: Call to undefined function totally_missing_function()
+bool(false)
+bool(true)
+12|4|1,2,3

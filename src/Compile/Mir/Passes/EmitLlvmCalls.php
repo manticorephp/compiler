@@ -1863,6 +1863,39 @@ trait EmitLlvmCalls
         $c = $n;
         $b = $this->emitBuiltin($c);
         if ($b !== null) { return $b; }
+        // Nothing will define this symbol, so php's runtime
+        // `Error: Call to undefined function f()` is the answer — raised when
+        // the call is reached, which for symfony/cache's `apcu_add` behind an
+        // `extension_loaded('apcu')` guard is never. Emitting the call anyway
+        // put an undefined symbol in the module and clang killed the build,
+        // strictly stricter than php.
+        //
+        // Asked HERE, and asked of {@see definedFns}, because that is the
+        // linker's own question answered by the linker's own table: every
+        // function the module defines PLUS every declare-only extern a linked
+        // library's `.sig` brought in, filled by the pre-pass above before any
+        // body is emitted. Everything the emitter inlines has already returned
+        // from emitBuiltin one line up, so the runtime plumbing never reaches
+        // this test.
+        //
+        // The first attempt asked `functionIsKnown` at LOWERING instead, and it
+        // was wrong four different ways: that predicate answers what
+        // `function_exists` must report, which by design differs from what
+        // links (HIDDEN_FNS links while reporting absent; `__mir_*`/`__mc_*` are
+        // hidden but called from the prelude; `fn_to_ptr` is an emitter builtin
+        // in none of the name tables; and a stdlib name lowered inside GENERATED
+        // prelude source has no fnDecl yet). It also poisoned lib/*.o with throw
+        // stubs that outlived the source fix by a generation.
+        if (!isset($this->definedFns[$this->mangle($c->function)])) {
+            $thr = new Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst(
+                    'Call to undefined function ' . \ltrim($c->function, '\\') . '()',
+                    Type::string_())],
+                Type::cell(),
+            );
+            return $this->emitBuiltin($thr) ?? '';
+        }
         $out = $this->deprecatedFnDiag($c);
         $argList = '';
         $first = true;
