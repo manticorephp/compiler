@@ -1,0 +1,3 @@
+# ceiling for tests/aot/cases/array_access.php — regenerate with tests/ir_budget/run.sh --bless
+max_bytes=196156
+max_defs=103

@@ -2118,7 +2118,7 @@ trait EmitLlvmObjects
      *  ancestors) or a union (across the atoms) — as name => return Type.
      *  Atoms disagreeing on a method's return kind collapse it to a cell.
      *  Null when the receiver has no static class set (cell / unknown). */
-    private function dynMethodCandidates(Type $t): ?array
+    private function dynMethodCandidates(Type $t, int $argc): ?array
     {
         $roots = [];
         $single = $t->class ?? '';
@@ -2130,7 +2130,7 @@ trait EmitLlvmObjects
                 if ($cn !== '' && isset($this->classes[$cn])) { $roots[] = $cn; }
             }
         }
-        if ($roots === []) { return $this->classlessMethodCandidates(); }
+        if ($roots === []) { return $this->classlessMethodCandidates($argc); }
         $out = [];
         foreach ($roots as $root) {
             $c = $root;
@@ -2139,6 +2139,7 @@ trait EmitLlvmObjects
                     if ($m === '__construct' || $m === '__call') { continue; }
                     $holder = $this->resolveMethodClass($root, $m);
                     if ($holder === '') { continue; }
+                    if (!$this->methodTakesArgc($holder, $m, $argc)) { continue; }
                     $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
                     if (!isset($out[$m])) { $out[$m] = $rt; }
                     elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
@@ -2154,7 +2155,7 @@ trait EmitLlvmObjects
      *  disagree on the return kind collapse to a cell — the emit-side dispatch
      *  boxes each arm's return by its own type (emitMethodCall's per-arm boxing
      *  when the result is cell), so the merged value is a uniform cell. */
-    private function classlessMethodCandidates(): array
+    private function classlessMethodCandidates(int $argc): array
     {
         $out = [];
         foreach ($this->classes as $cd) {
@@ -2162,12 +2163,61 @@ trait EmitLlvmObjects
                 if ($m === '__construct' || $m === '__call') { continue; }
                 $holder = $this->resolveMethodClass($cd->name, $m);
                 if ($holder === '') { continue; }
+                if (!$this->methodTakesArgc($holder, $m, $argc)) { continue; }
                 $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
                 if (!isset($out[$m])) { $out[$m] = $rt; }
                 elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
             }
         }
         return $out;
+    }
+
+    /**
+     * Can `$holder::$m` be called with exactly `$argc` arguments?
+     *
+     * A dynamic name is dispatched by an inline `strcmp` chain, one arm per
+     * candidate NAME, and on an erased receiver the candidate set is every
+     * method of every class — 312 arms and 272 KB of IR for `prelude/ob.php`'s
+     * 15-line `__mc_ob_call`, in a module with 99 classes. Arity is the one
+     * thing the call site knows for certain about the target, and it cuts that
+     * set hard: an ob handler is invoked with two arguments, so no zero-arg
+     * accessor can ever be what `$o->$m($buf, $phase)` reaches.
+     *
+     * ⚠ This is a real semantic edge, not only a size fix. php throws
+     * ArgumentCountError when a method is called with too few arguments; the
+     * dispatch's default arm answers null. Dropping the arm moves the wrong
+     * answer from one shape to the other and neither matches Zend — the fix for
+     * that is a throw in the default arm, which is a separate change.
+     *
+     * Fails OPEN: a method with no recorded meta (an interface method, an
+     * imported class) keeps its arm.
+     */
+    private function methodTakesArgc(string $holder, string $m, int $argc): bool
+    {
+        $hd = $this->classes[$holder] ?? null;
+        if ($hd === null) { return true; }
+        if (!isset($hd->methodMeta[$m])) { return true; }
+        $mm = $this->asMethodMeta($hd->methodMeta[$m]);
+        $total = 0;
+        foreach ($mm->params as $pm) {
+            $p = $this->asParamMeta($pm);
+            if ($p->variadic) { return $argc >= $mm->requiredParams(); }
+            $total = $total + 1;
+        }
+        return $argc >= $mm->requiredParams() && $argc <= $total;
+    }
+
+    /** Read a MethodMeta through a TYPED local: a field read off an untyped
+     *  slot resolves the wrong offset under the self-host. */
+    private function asMethodMeta(\Compile\Mir\MethodMeta $mm): \Compile\Mir\MethodMeta
+    {
+        return $mm;
+    }
+
+    /** {@see asMethodMeta} — same reason. */
+    private function asParamMeta(\Compile\Mir\ParamMeta $p): \Compile\Mir\ParamMeta
+    {
+        return $p;
     }
 
     /**
@@ -2193,7 +2243,7 @@ trait EmitLlvmObjects
     {
         $recv = $dp->object;
         $nameNode = $dp->name;
-        $methods = $this->dynMethodCandidates($recv->type);
+        $methods = $this->dynMethodCandidates($recv->type, \count($iv->args));
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
             // Evaluate the name for side effects and yield null (open case).
@@ -3379,11 +3429,45 @@ trait EmitLlvmObjects
         $defLabel = $this->ssa->allocLabel('vd.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $defLabel . " [\n";
         $bodies = '';
+        // Group the candidates that produce the SAME arm before emitting any.
+        //
+        // An inherited method is the common case, not the exception: 27 classes
+        // deriving from Exception/Error all resolve `getMessage` to one of two
+        // symbols, and emitting one block each duplicated the call, the boxing
+        // and the branch 27 times. LLVM lets many `i64 X, label %L` entries share
+        // a destination, so the switch TABLE still names every class id while the
+        // bodies collapse to one per distinct callee. This is the single biggest
+        // IR-volume term at a megamorphic site — `__mc_ob_call`'s 312 dynamic-name
+        // arms each carried a full copy of one of these switches.
+        //
+        // The key is everything the body depends on: the callee symbol, and — for
+        // a cell-typed merge — the class whose DECLARED return type decides the
+        // boxing. Two candidates agreeing on both emit byte-identical arms.
+        /** @var array<string, string> arm key → block label */
+        $armLabel = [];
+        /** @var array<string, string> arm key → the candidate class to emit it from */
+        $armCand = [];
+        /** @var string[] arm keys, in first-seen order */
+        $armOrder = [];
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
-            $caseLabel = $this->ssa->allocLabel('vd.case');
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseLabel . "\n";
+            $tgt = $targets[$c];
+            $rtKey = '';
+            if ($boxCell && !isset($erasedSyms[$tgt])) {
+                $rtKey = $this->resolveMethodClass($c, $method);
+            }
+            $key = $tgt . '|' . $rtKey;
+            if (!isset($armLabel[$key])) {
+                $armLabel[$key] = $this->ssa->allocLabel('vd.case');
+                $armCand[$key] = $c;
+                $armOrder[] = $key;
+            }
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armLabel[$key] . "\n";
+        }
+        foreach ($armOrder as $key) {
+            $c = $armCand[$key];
+            $caseLabel = $armLabel[$key];
             $r = $this->ssa->allocReg();
             $bodies .= $caseLabel . ":\n";
             // The shared $argList was coerced ONCE, to the FALLBACK's signature.

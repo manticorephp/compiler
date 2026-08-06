@@ -831,7 +831,7 @@ final class CompileArgs
 /**
  * The compile/dump option spec, shared by every command that takes them:
  *   -o <out> · --memory=<rc|arena|hybrid> · --backend=<mir|ast> · -O<level>
- *   --prelude · --effects · --emit-library
+ *   --prelude · --effects · --emit-library · --keep-ir
  * All value forms (`-o out`, `-O2`, `--memory=rc`, `--memory rc`) are accepted;
  * positionals (files) may appear in any position.
  *
@@ -846,6 +846,7 @@ function compile_arg_spec(): array {
         "prelude" => \Cli\ArgParse::FLAG,
         "effects" => \Cli\ArgParse::FLAG,
         "emit-library" => \Cli\ArgParse::FLAG,
+        "keep-ir" => \Cli\ArgParse::FLAG,
     ];
 }
 
@@ -866,6 +867,7 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool {
     CompileArgs::$dumpPrelude = $p->flag("prelude");
     CompileArgs::$dumpEffects = $p->flag("effects");
     if ($p->flag("emit-library")) { CompileArgs::$emitLibrary = true; }
+    if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
     if (\strlen($memory) > 0) {
         if (!\Compile\Debug::applyMemoryMode($memory)) {
             dprint("unknown --memory value: " . $memory . " (expected rc|arena|hybrid)");
@@ -1093,8 +1095,20 @@ function cmd_compile(array $args): int {
         return 65;
     }
 
-    $pid = getpid();
-    $base = "/tmp/manticore_" . (string)$pid;
+    // Staging path for the IR and the intermediate object — the same contract
+    // {@see build_target} uses: under --keep-ir they sit next to the target
+    // (stable, one per target, never swept from /tmp), otherwise a pid-derived
+    // /tmp base that is removed once the target links. Staged files are
+    // deliberately LEFT BEHIND on failure: they are the only record of what the
+    // compiler emitted for a build that did not finish, and every failure path
+    // below names the path it kept.
+    //
+    // ⚠ These used to leak unconditionally — `compile` wrote /tmp/manticore_<pid>.ll
+    // and never removed it, so every compile since the tool existed left its
+    // whole module behind. One dev machine had accumulated 56 970 files / 43 GB.
+    // `build_target` always cleaned up; only this path did not.
+    $keep = CompileArgs::$keepIr;
+    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_" . (string)getpid());
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
 
@@ -1102,6 +1116,7 @@ function cmd_compile(array $args): int {
         dprint("compile: cannot write " . $llPath . " (rc=73)");
         return 73;
     }
+    if ($keep) { dprint("compile: kept IR " . $llPath); }
 
     // Library build: assemble straight to the output .o, no link. The
     // runtime preamble helpers are emitted linkonce_odr so this object
@@ -1112,6 +1127,7 @@ function cmd_compile(array $args): int {
             dprint("compile: clang -c (library) failed (rc=" . (string)$rcLib . "); IR at " . $llPath);
             return 75;
         }
+        if (!$keep) { system("rm -f " . $llPath); }
         return 0;
     }
 
@@ -1192,6 +1208,9 @@ function cmd_compile(array $args): int {
         dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objPath);
         return 76;
     }
+    // Linked: the staging pair has no further use. Kept under --keep-ir, which
+    // is the escape hatch for reading what was emitted.
+    if (!$keep) { system("rm -f " . $llPath . " " . $objPath); }
     return 0;
 }
 

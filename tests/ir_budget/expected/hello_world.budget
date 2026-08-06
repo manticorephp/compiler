@@ -1,0 +1,3 @@
+# ceiling for tests/aot/cases/hello_world.php — regenerate with tests/ir_budget/run.sh --bless
+max_bytes=105005
+max_defs=41
