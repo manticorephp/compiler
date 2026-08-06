@@ -501,21 +501,12 @@ trait LowerFns
             $elem = $retType->isGenerator() ? $retType->element : null;
             $retType = Type::generator($elem);
         }
-        // `fn &()` / `function &()` PARSES now, but the closure invoke path does
-        // not honour a by-reference return the way the named-function one does:
-        // the alias came back a copy, so `$r = &$f(); $r[] = x;` left the
-        // original untouched. Silently. A loud stop is strictly better than a
-        // wrong answer — and better than the old parse error, which pointed at
-        // the `&` with no explanation.
-        //
-        // What is missing is the closure ABI half, not the parser: named
-        // functions and methods already return by reference correctly.
-        if ($returnsByRef) {
-            throw new \RuntimeException(
-                'unsupported: a closure or arrow function cannot return by reference yet '
-                . '(the named-function form does). Its caller would receive a copy, not an alias.'
-            );
-        }
+        // `fn &()` / `function &()` returns by reference like the named form.
+        // The callee half was always in place — {@see EmitLlvmModule::emitReturn}
+        // yields `byRefAddrOf($v)` BEFORE the uniform-closure-ABI boxing — and
+        // `$this->sigs->returnsByRef['__closure_N']` is recorded for every
+        // FunctionDef, so what was missing sat at the CALL site: the invoke
+        // return unboxed unconditionally ({@see EmitLlvmCalls::emitClosureStructInvoke}).
         $clFn = new FunctionDef(
             name: $fnName,
             params: $params,

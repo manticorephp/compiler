@@ -2971,10 +2971,17 @@ final class LowerFromAst implements Pass
         // `$r = &fn(...)` / `$r = &$obj->m()` / `$r = &Cls::m()` — bind $r as a
         // reference to the by-ref return (the callee yields the raw address;
         // emitRefBind sets rawRefCall so the value-context deref is suppressed).
+        //
+        // `Invoke` is the fourth call shape and belongs here for the same
+        // reason: `$c()`, and in particular an IMMEDIATELY-invoked closure like
+        // symfony's `&\Closure::bind(fn &() => $this->p, $o, $o)()`. Without it
+        // the whole expression fell through to storeToTarget and became a
+        // silent VALUE COPY — every write through the "alias" was lost.
         if ($expr->target->kind === 'Variable'
             && ($expr->source->kind === 'Call'
                 || $expr->source->kind === 'MethodCall'
-                || $expr->source->kind === 'StaticCall')) {
+                || $expr->source->kind === 'StaticCall'
+                || $expr->source->kind === 'Invoke')) {
             return new RefBind_($expr->target->name, $this->lowerExpr($expr->source), Type::void());
         }
         // `$r = &$obj->prop` / `$r = &$a[$k]` — bind $r to the container slot's
@@ -4580,10 +4587,49 @@ final class LowerFromAst implements Pass
             && !$this->methodIsStatic($class, $expr->method)) {
             $args[] = new LoadLocal('this', Type::obj($this->currentLowerClass));
         }
+        // `Closure::bind($fn, $obj, Scope::class)` — the third argument is what
+        // `self::` and `$this->` MEAN inside `$fn`. php resolves both against
+        // the BOUND SCOPE, not against the class the closure was written in,
+        // and that is the entire reason the idiom exists: it reaches another
+        // class's private members. symfony/http-foundation's RequestStack:
+        //
+        //     \Closure::bind(static fn () => self::$formats = null, null, Request::class)
+        //
+        // `self::$formats` is Request's. Lowering read `self` from the LEXICAL
+        // class (RequestStack, which has no such static), staticPropRef came
+        // back null, and the whole program was refused with "unsupported assign
+        // target kind StaticAccess" — the tier-3 build stopped there.
+        //
+        // Sibling of the `$this->prop` half in {@see
+        // EmitLlvmObjects::emitPropertyAccess}: one root, two spellings.
+        $bindScope = '';
+        if (\strtolower(\ltrim($class, '\\')) === 'closure' && $expr->method === 'bind'
+            && \count($expr->args) >= 3) {
+            $sc = $this->guardClassArgName($expr->args[2]);
+            if ($sc !== null && isset($this->classTable[\ltrim($sc, '\\')])) {
+                $bindScope = \ltrim($sc, '\\');
+            }
+        }
         $params = $this->resolveMethodParams($class, $expr->method);
         if ($params !== null) {
             $selfCls = $this->resolveMethodDeclClass($class, $expr->method);
             foreach ($this->defaultFillArgs($params, $expr->args, $selfCls) as $f) { $args[] = $f; }
+        } elseif ($bindScope !== '') {
+            $ai = 0;
+            foreach ($expr->args as $a) {
+                if ($ai === 0) {
+                    $prevL = $this->currentLowerClass;
+                    $prevS = $this->currentStaticClass;
+                    $this->currentLowerClass = $bindScope;
+                    $this->currentStaticClass = $bindScope;
+                    $args[] = $this->lowerExpr($a);
+                    $this->currentLowerClass = $prevL;
+                    $this->currentStaticClass = $prevS;
+                } else {
+                    $args[] = $this->lowerExpr($a);
+                }
+                $ai = $ai + 1;
+            }
         } else {
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
         }

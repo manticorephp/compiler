@@ -732,8 +732,15 @@ trait EmitLlvmLocals
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $a;
-            $cls = $pa->object->type->class ?? '';
-            if ($cls === '' || !isset($this->classes[$cls])) { return null; }
+            // No statically knowable slot — a classless receiver, or a class
+            // that declares `$prop` nowhere. Returning null here degraded the
+            // bind to a silent VALUE COPY ({@see EmitLlvmObjects::emitRefAddr})
+            // and a by-ref RETURN to a by-value one; recover the real slot from
+            // the object's class_id instead. Asks the same predicate the offset
+            // itself comes from, so the two cannot drift.
+            if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
+                return $this->emitPropAddrByClassId($pa->object, $pa->property);
+            }
             $out = $this->emitNode($pa->object);
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;

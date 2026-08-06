@@ -1007,6 +1007,7 @@ trait EmitLlvmCalls
             : ($this->rt->needsFuncArgs
                 ? '  store i64 ' . (string)$faN . ", ptr @__mir_fa_argc\n" : '');
         $reg = $this->ssa->allocReg();
+        $fpReg = '';
         if ($known) {
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList . ")\n";
         } else {
@@ -1018,6 +1019,7 @@ trait EmitLlvmCalls
                 $fpi = $this->ssa->allocReg();
                 $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
             }
+            $fpReg = $fpi;
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
@@ -1026,6 +1028,94 @@ trait EmitLlvmCalls
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // A by-REFERENCE closure returns the ADDRESS of an lvalue rather than a
+        // value ({@see EmitLlvmModule::emitReturn} takes byRefAddrOf BEFORE the
+        // uniform-ABI boxing). Under `rawRefCall` — a `$r = &$c()` binding —
+        // that address IS the result; in value context it has to be deref'd
+        // once. A KNOWN callee answers from its sig; a dynamic one is decided at
+        // run time from its fn pointer, exactly as the by-ref PARAM mask is
+        // ({@see closureRefMaskChain}, and sharing its module-local limit).
+        $refRet = $known ? (bool)($this->sigs->returnsByRef[$fn] ?? false) : false;
+        $dynRef = !$known && $fpReg !== '' && $this->anyClosureReturnsByRef();
+        if ($refRet) {
+            if ($this->rawRefCall) { return $out; }
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($d);
+            $this->lastValue = $d;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($dynRef) {
+            $out .= $this->closureReturnsByRefChain($fpReg);
+            $isRef = $this->lastValue;
+            if ($this->rawRefCall) {
+                // The binding needs an address either way. A callee that does
+                // NOT return by reference yields a value, and php's answer there
+                // is a COPY — spill it so the alias points at a private slot
+                // instead of at whatever the value's bits would address.
+                $sp = $this->ssa->allocReg();
+                $out .= '  ' . $sp . " = alloca i64\n";
+                $out .= '  store i64 ' . $reg . ', ptr ' . $sp . "\n";
+                $spI = $this->ssa->allocReg();
+                $out .= '  ' . $spI . ' = ptrtoint ptr ' . $sp . " to i64\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $isRef . ', i64 ' . $reg
+                      . ', i64 ' . $spI . "\n";
+                $this->lastValue = $sel;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            // Value context: only the by-ref arm may dereference — the other
+            // arm's word is a plain value and inttoptr'ing it would fault.
+            $dL = $this->ssa->allocLabel('rr.deref');
+            $vL = $this->ssa->allocLabel('rr.val');
+            $eL = $this->ssa->allocLabel('rr.end');
+            // Joined through a SLOT, not a phi: the retain below opens basic
+            // blocks of its own, so `%rr.deref` is not the predecessor that
+            // reaches the join and a phi naming it would be invalid IR.
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  br i1 ' . $isRef . ', label %' . $dL . ', label %' . $vL . "\n";
+            $out .= $dL . ":\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($d);
+            $out .= '  store i64 ' . $d . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $eL . "\n";
+            $out .= $vL . ":\n";
+            // The uniform-ABI unbox belongs to THIS arm only: a by-ref return
+            // never went through boxToCell, so unboxing the joined value would
+            // corrupt the other one.
+            $vv = $reg;
+            if ($unboxResult && $this->isCellScalarParam($n->type)) {
+                $this->lastValue = $reg;
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType($n->type);
+                $out .= $this->coerceToI64();
+                $vv = $this->lastValue;
+            }
+            $out .= '  store i64 ' . $vv . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $eL . "\n";
+            $out .= $eL . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            if ($n->type->kind === Type::KIND_FLOAT) {
+                $rf = $this->ssa->allocReg();
+                $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
+                $this->lastValue = $rf;
+                $this->lastValueType = 'double';
+            }
+            return $out;
+        }
         // The closure returned a scalar as a tagged cell (uniform ABI). Unbox
         // to the invoke's static type — a known closure types it from the sig
         // (string/int/float/…); a dynamic one is cell ({@see inferInvoke}) and
@@ -1033,6 +1123,44 @@ trait EmitLlvmCalls
         if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
+        return $out;
+    }
+
+    /**
+     * Does ANY closure in this module return by reference? The compile-time
+     * gate on the runtime chain below — 0 means every invoke is emitted exactly
+     * as it always was, so a program without `fn &()` pays nothing.
+     */
+    private function anyClosureReturnsByRef(): bool
+    {
+        foreach ($this->closureCaptures as $cname => $unused) {
+            if ($this->sigs->returnsByRef[$cname] ?? false) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * i1 in `lastValue`: does the closure at `$fpReg` return by reference?
+     * The exact analogue of {@see closureRefMaskChain}, and it shares that
+     * method's documented limit — the chain sees only THIS module's closures,
+     * so a by-ref closure built inside `manticore_stdlib.o` answers false and
+     * keeps today's by-value behaviour rather than being papered over.
+     */
+    private function closureReturnsByRefChain(string $fpReg): string
+    {
+        $out = '';
+        $cur = 'false';
+        foreach ($this->closureCaptures as $cname => $unused) {
+            if (!($this->sigs->returnsByRef[$cname] ?? false)) { continue; }
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpReg
+                  . ', ptrtoint (ptr @manticore_' . $this->mangle($cname) . " to i64)\n";
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $eq . ', ' . $cur . "\n";
+            $cur = $or;
+        }
+        $this->lastValue = $cur;
+        $this->lastValueType = 'i1';
         return $out;
     }
 
@@ -2139,6 +2267,8 @@ trait EmitLlvmCalls
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($dv);
             $this->lastValue = $dv;
             $reg = $dv;
         }

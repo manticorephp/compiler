@@ -666,6 +666,22 @@ trait EmitLlvmObjects
         if ($pa->object->type->kind === Type::KIND_UNKNOWN) {
             return $this->emitRawPropByClassId($pa);
         }
+        // The class is KNOWN but does not put `$prop` anywhere — neither on
+        // itself nor on any subclass. A static offset here is not a fact, it is
+        // the slot-16 default, and 16 is the first field of whatever object
+        // actually arrives. That is a silent WRONG READ, which is strictly
+        // worse than the runtime dispatch that already exists for the erased
+        // receiver, so take that instead.
+        //
+        // A closure is the shape that makes this reachable in correct code:
+        // `Closure::bind($fn, $obj, $scope)` rebinds `$this` to a class the
+        // body was not written in, and lowering types `$this` from the LEXICAL
+        // class ({@see LowerFns::finishClosure}). symfony's MicroKernelTrait
+        // does exactly that — `fn &() => $this->instanceof` sits in the app
+        // Kernel and is bound to a PhpFileLoader.
+        if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
+            return $this->emitRawPropByClassId($pa);
+        }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
@@ -1060,6 +1076,76 @@ trait EmitLlvmObjects
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
         $out .= '  store i64 ' . $ld . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The ADDRESS of `$prop` as i64 in lastValue, for a receiver whose layout
+     * is not statically knowable; null when NO class in the module declares
+     * `$prop`, since then there is no slot to point at and the caller must fall
+     * back to a value copy.
+     *
+     * The address twin of {@see emitRawPropByClassId}. A by-ref RETURN of
+     * `$this->prop` out of a closure that `Closure::bind` rebinds to a foreign
+     * scope needs a real slot address — the static offset there is the slot-16
+     * guess, and handing THAT out as an alias corrupts an unrelated field.
+     */
+    private function emitPropAddrByClassId(Node $objExpr, string $prop): ?string
+    {
+        $fixed = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+        }
+        if ($fixed === []) { return null; }
+        $out = $this->emitNode($objExpr);
+        $out .= $this->cellToPtr();
+        $objPtr = $this->lastValue;
+        // One holder → its real offset, no dispatch.
+        if (\count($fixed) === 1) {
+            $g = $this->ssa->allocReg();
+            $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                  . ', i64 ' . (string)$fixed[0]->propertyOffset($prop) . "\n";
+            $addr = $this->ssa->allocReg();
+            $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->ssa->allocLabel('pad.end');
+        $def = $this->ssa->allocLabel('pad.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($fixed as $cd) {
+            $lbl = $this->ssa->allocLabel('pad.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $g = $this->ssa->allocReg();
+            $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                     . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+            $gi = $this->ssa->allocReg();
+            $bodies .= '  ' . $gi . ' = ptrtoint ptr ' . $g . " to i64\n";
+            $bodies .= '  store i64 ' . $gi . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        // A class_id no holder matches keeps the historical slot-16 address.
+        $out .= $def . ":\n";
+        $dg = $this->ssa->allocReg();
+        $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
+        $dgi = $this->ssa->allocReg();
+        $out .= '  ' . $dgi . ' = ptrtoint ptr ' . $dg . " to i64\n";
+        $out .= '  store i64 ' . $dgi . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $r = $this->ssa->allocReg();
@@ -1619,6 +1705,15 @@ trait EmitLlvmObjects
                 $this->lastValueType = 'i64';
                 return $out;
             }
+        }
+        // The class is KNOWN but puts `$prop` nowhere: a static offset would be
+        // the slot-16 default, i.e. a blind write into the first field of
+        // whatever object actually arrives. The class_id dispatch above is the
+        // honest answer, and it is the same one the classless receiver takes.
+        // Mirrors the READ side in {@see emitPropertyAccess}; a closure rebound
+        // by `Closure::bind` to a foreign scope is what makes this reachable.
+        if ($this->propertyOffsetOrNull($n->object, $n->property) === null) {
+            return $this->emitCellStoreProperty($n);
         }
         // Amortized `$this->s .= …` — the property analogue of the local
         // self-append in {@see EmitLlvmLocals::emitStoreLocal}, and worth as much:
@@ -3265,6 +3360,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($dv);
             $reg = $dv;
         }
         $this->lastValue = $reg;
@@ -4125,6 +4222,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($dv);
             $reg = $dv;
         }
         $this->lastValue = $reg;
@@ -4445,7 +4544,17 @@ trait EmitLlvmObjects
              . '  store i' . $bits . ' ' . $t . ', ptr ' . $gep . "\n";
     }
 
-    private function propertyOffset(Node $objExpr, string $prop): int
+    /**
+     * The STATIC offset of `$prop` on `$objExpr`'s class, or null when no class
+     * in the module puts it anywhere — i.e. when a static offset is a GUESS.
+     *
+     * The nullable form is the single source of truth; {@see propertyOffset}
+     * is it plus the legacy slot-16 default. Callers that can do better on a
+     * miss ask THIS one, so the "is a static offset knowable?" question and the
+     * offset itself can never drift apart — the failure shape this audit has
+     * paid for repeatedly (a guard and the thing it guards computed twice).
+     */
+    private function propertyOffsetOrNull(Node $objExpr, string $prop): ?int
     {
         $cls = $objExpr->type->class ?? '';
         if ($cls !== '' && isset($this->classes[$cls])) {
@@ -4461,7 +4570,13 @@ trait EmitLlvmObjects
             $sub = $this->subclassPropOffset($cls, $prop);
             if ($sub >= 0) { return $sub; }
         }
-        return 16;
+        return null;
+    }
+
+    private function propertyOffset(Node $objExpr, string $prop): int
+    {
+        $off = $this->propertyOffsetOrNull($objExpr, $prop);
+        return $off !== null ? $off : 16;
     }
 
     /**

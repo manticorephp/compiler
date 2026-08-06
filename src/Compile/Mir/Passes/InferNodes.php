@@ -862,6 +862,20 @@ trait InferNodes
     private function inferRefBind(RefBind_ $node): Type
     {
         $t = $this->inferNode($node->call);
+        // `$r = &f()` aliases the SLOT `f` returned the address of, and a by-ref
+        // return never went through the uniform closure ABI's boxToCell — the
+        // address is taken BEFORE it ({@see EmitLlvmModule::emitReturn}). So a
+        // CELL claim here is not merely imprecise, it is wrong in the one way
+        // that corrupts the aliased storage: the local's repr drives the
+        // element write-back, and `$r[] = x` would `__mir_array_cow_cell` +
+        // `box_array` and store a TAGGED word into a slot its owner reads raw.
+        // `implode($h->items)` then dereferenced the tag bits.
+        //
+        // The cell comes from the callee being a bare `\Closure`, whose invoke
+        // is typed cell because the ABI usually boxes ({@see
+        // InferCalls::inferInvoke}) — true for a normal closure, never for this
+        // one. Erased is the honest answer: it is the repr the slot already has.
+        if ($t->kind === Type::KIND_CELL) { $t = Type::unknown(); }
         $this->localTypes[$node->target] = $t;
         return Type::void();
     }
