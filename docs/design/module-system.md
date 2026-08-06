@@ -7,10 +7,12 @@ absent from `src/` entirely: transitive dependency resolution, the global build
 cache (`MANTICORE_HOME`, `~/.manticore/cache`), the `compiler_abi` field, and
 the composer packaging bootstrap.
 
-⚠ The `.sig` example below is aspirational. The emitter (`Manticore\Sig`) writes
-exactly `{"schema":1,"functions":[…]}` — no `package`, `version`, `compiler_abi`,
-`target`, `classes` or `constants`. That functions-only limit is a tracked epic
-in `docs/ROADMAP.md`.
+⚠ The `.sig` example below is still partly aspirational. The emitter
+(`Manticore\Sig`) writes `{"schema":2,"abi":N,"functions":[…],"classes":[…],
+"constants":[…],"libs":[…],"weak":[…]}` — so `classes` and `constants` are real
+now (see `docs/modules.md`), but `package`, `version` and `target` are not, and
+the ABI is pinned by a bare `abi` integer rather than a `compiler_abi` string.
+Traits and generic classes are still not exportable.
 
 Goal: cargo/go/swift-class module system. Seamless, config-level deps
 (composer.json-style). Easy to distribute the compiler, libraries, and

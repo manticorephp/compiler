@@ -119,6 +119,15 @@ final class NarrowReturns implements Pass
         // reads a raw int as a cell (`invoke(sum())` → 3.45e-323 not 7). Its
         // return type is a hard contract, not an inferred convenience.
         if (\Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name)) { return false; }
+        // An IMPORTED signature is a contract with an already-compiled body: the
+        // library narrowed (or did not) when IT was built, and the value it
+        // returns has that representation. Re-deciding here from this module's
+        // call sites would change what the caller unpacks, not what the callee
+        // packs. It is only safe today by accident — an extern has no return
+        // statements, so the scan below finds nothing — and that accident would
+        // stop protecting anything the moment the pass grew a signature-level
+        // rule.
+        if ($fn->isExtern) { return false; }
         // Only un-resolved returns (bare `array` / no hint) are candidates —
         // EXCEPT the full pass may WIDEN an already-narrowed concrete scalar-element
         // array to a CELL element. The early (concreteOnly) pass can lock a

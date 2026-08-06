@@ -62,6 +62,8 @@ final class InferAllocKind implements Pass
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
+            // No body here to place allocations in: the library already decided.
+            if ($fn->isExtern) { continue; }
             $this->analyzeFunction($fn);
         }
         $module->markPassApplied(self::NAME);

@@ -494,6 +494,8 @@ function collect_stdlib_extern_decls(): array
     if ($sigPath !== "") {
         $sigJson = read_file($sigPath);
         if ($sigJson !== null) {
+            $bad = Sig::validateImport($sigJson, $sigPath);
+            if ($bad !== "") { CompileArgs::$sigError = $bad; return $decls; }
             return Sig::declsFromJson($sigJson);
         }
     }
@@ -780,6 +782,43 @@ final class CompileArgs
      * @var \Parser\Ast\FunctionDecl[]
      */
     public static array $externDecls = [];
+
+    /**
+     * The refusal from the last `.sig` compatibility check, or "" when every
+     * imported interface was accepted. {@see Sig::validateImport} has no error
+     * channel of its own because its callers ({@see collect_stdlib_extern_decls},
+     * the `build` library loop) return decl LISTS — and an empty list from a
+     * rejected stdlib interface would read as "no stdlib", silently producing a
+     * program that cannot resolve `strlen`. The build tail checks this instead.
+     */
+    public static string $sigError = '';
+
+    /**
+     * Type declarations imported from dependency `.sig`s, hydrated into
+     * synthetic AST and handed to the lowering exactly as {@see $externDecls}
+     * is for functions.
+     * @var \Parser\Ast\ClassDecl[]
+     */
+    public static array $externClassDecls = [];
+
+    /** @var array<string, \Compile\Mir\ExternClassMeta> */
+    public static array $externClassMeta = [];
+
+    /** @var array<string, \Parser\Ast\Expr> */
+    public static array $externConstants = [];
+
+    /**
+     * Whether the library being built exports its TYPES, not just its
+     * functions. False for a `runtime: true` library — the bundled stdlib.
+     *
+     * The stdlib's classes are internal (`Runtime\Json\Parser`,
+     * `Runtime\AsyncHook`) or compiler-owned (`stdClass`, which every module
+     * registers for itself), and its `.o` is linked into every program rather
+     * than selected as a dependency. Exporting them would hand each program a
+     * second definition of a class it already holds. The class-shaped stdlib
+     * surface stays where it is — in the prelude.
+     */
+    public static bool $exportTypes = true;
 }
 
 /**
@@ -1034,6 +1073,10 @@ function cmd_compile(array $args): int {
     // the static. Skipped when building stdlib.o itself.
     if (!CompileArgs::$emitLibrary) {
         CompileArgs::$externDecls = collect_stdlib_extern_decls();
+        if (CompileArgs::$sigError !== '') {
+            dprint(CompileArgs::$sigError);
+            return 65;
+        }
     }
     // NOTE: the bundled PHP stdlib is NOT prepended here. Merging the whole
     // stdlib into every user program both bloats output and crashes the
@@ -1429,6 +1472,10 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     // app opted out (the self-contained compiler).
     if ($withStdlib && !$emitLibrary) {
         foreach (collect_stdlib_extern_decls() as $d) { CompileArgs::$externDecls[] = $d; }
+        if (CompileArgs::$sigError !== '') {
+            dprint(CompileArgs::$sigError);
+            return 65;
+        }
     }
     $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
@@ -1615,7 +1662,13 @@ function cmd_build(array $args): int
             return 66;
         }
         CompileArgs::$externDecls = [];
+        CompileArgs::$externClassDecls = [];
+        CompileArgs::$externClassMeta = [];
+        CompileArgs::$externConstants = [];
+        CompileArgs::$exportTypes =
+            !(isset($lib["runtime"]) && (string)$lib["runtime"] === "1");
         $rc = build_compile_module($sources, $output, true, [], '', false, $paths);
+        CompileArgs::$exportTypes = true;
         if ($rc !== 0) { return $rc; }
     }
     if ($libsOnly) { return 0; }
@@ -1732,6 +1785,14 @@ function cmd_build(array $args): int
         }
         /** @var \Parser\Ast\FunctionDecl[] $externDecls */
         $externDecls = [];
+        /** @var \Parser\Ast\ClassDecl[] $externClassDecls */
+        $externClassDecls = [];
+        /** @var array<string, \Compile\Mir\ExternClassMeta> $externClassMeta */
+        $externClassMeta = [];
+        /** @var array<string, \Parser\Ast\Expr> $externConstants */
+        $externConstants = [];
+        /** @var array<string, string> $classOrigin FQN → the library that exports it */
+        $classOrigin = [];
         /** @var string[] $linkObjs */
         $linkObjs = [];
         foreach ($libs as $lib) {
@@ -1746,8 +1807,28 @@ function cmd_build(array $args): int
             $libOut = (string)$lib["output"];
             $sigJson = read_file($libOut . ".sig");
             if ($sigJson !== null) {
+                $bad = Sig::validateImport($sigJson, $libOut . ".sig");
+                if ($bad !== "") { dprint($bad); return 65; }
                 foreach (Sig::declsFromJson($sigJson) as $d) {
                     $externDecls[] = $d;
+                }
+                foreach (Sig::classDeclsFromJson($sigJson) as $cdecl) {
+                    $externClassDecls[] = $cdecl;
+                }
+                foreach (Sig::classMetaFromJson($sigJson) as $mname => $meta) {
+                    // Two libraries exporting one FQN is not a merge — their
+                    // layouts are independent and only one `.o` can win the
+                    // symbol. Refuse rather than pick.
+                    if (isset($classOrigin[$mname])) {
+                        dprint("manticore: class " . $mname . " is exported by both "
+                            . $classOrigin[$mname] . " and " . $libOut);
+                        return 65;
+                    }
+                    $classOrigin[$mname] = $libOut;
+                    $externClassMeta[$mname] = $meta;
+                }
+                foreach (Sig::constantsFromJson($sigJson) as $cn => $cv) {
+                    $externConstants[$cn] = $cv;
                 }
             } else {
                 dprint("build: missing .sig for library output " . $libOut);
@@ -1755,6 +1836,9 @@ function cmd_build(array $args): int
             $linkObjs[] = $libOut;
         }
         CompileArgs::$externDecls = $externDecls;
+        CompileArgs::$externClassDecls = $externClassDecls;
+        CompileArgs::$externClassMeta = $externClassMeta;
+        CompileArgs::$externConstants = $externConstants;
         $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
         if ($rc !== 0) { return $rc; }
     }
@@ -2406,6 +2490,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->includeArrayFns = $useArrayFns;
         $lower->includeArrayFnsExt = $useArrayFnsExt;
         $lower->includeCli = $useCli;
+        // Library targets carry the extra bookkeeping their `.sig` exports.
+        $lower->emitLibrary = CompileArgs::$emitLibrary && CompileArgs::$exportTypes;
+        $lower->externClassDecls = CompileArgs::$externClassDecls;
+        $lower->externClassMeta = CompileArgs::$externClassMeta;
+        $lower->externConstants = CompileArgs::$externConstants;
         $lower->exceptionsSrc = $exceptionsSrc;
         $lower->resourceSrc = $resourceSrc;
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";

@@ -40,6 +40,9 @@ final class ApplyMemoryMode implements Pass
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
+            // An extern carries a signature and no body — the memory mode of the
+            // code behind it was fixed when the library was compiled.
+            if ($fn->isExtern) { continue; }
             $this->remap($fn->body);
             $this->unconfineUnresettableLoops($fn);
         }

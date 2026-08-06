@@ -1,0 +1,18 @@
+{
+  "libraries": [
+    {
+      "name": "acmeclasses",
+      "src": "tests/libs/classes/lib",
+      "output": "tests/libs/classes/.work/acme.o"
+    }
+  ],
+  "applications": [
+    {
+      "name": "acmeapp",
+      "src": "tests/libs/classes/app",
+      "output": "tests/libs/classes/.work/acmeapp",
+      "entry": "tests/libs/classes/app/main.php",
+      "libraries": ["acmeclasses"]
+    }
+  ]
+}

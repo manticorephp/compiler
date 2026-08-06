@@ -301,8 +301,11 @@ The Linux gate is not optional for anything touching `src/Runtime/`, syscalls or
   not model). `compact()` works.
 - **`goto` into a loop body** is unsupported (plain forward/backward `goto` works).
 - **Cycle collector** is manual-trigger only and does not scan static/global roots.
-- **A `.sig` carries functions only** — classes, interfaces, traits, enums and
-  constants do not yet cross a compiled-library boundary.
+- **`trait`s and generic classes do not cross a compiled-library boundary.**
+  Classes, interfaces, enums and constants do (`.sig` schema 2); a trait and a
+  `@template` class both need their method bodies on the far side.
+- **`json_encode` of an object answers `{}`** — the encoder lives in
+  `manticore_stdlib.o`, a separate module with no user classes in its table.
 - **Regular-file I/O blocks the async loop** by design; see
   [`docs/async.md`](docs/async.md#-what-is-not-async) for the measurements and
   `Async\readFile()`.

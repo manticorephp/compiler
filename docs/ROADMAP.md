@@ -152,10 +152,28 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
 
 ## Tier 3 — infrastructure
 
-- **EPIC: a `.sig` carries FUNCTIONS ONLY.** `src/Manticore/Sig.php` emits
-  `{"schema":1,"functions":[…]}` and nothing else, so classes, interfaces, traits, enums and
-  constants do not cross a compiled-library boundary. Consequences: `instanceofMatchIds` and
-  `descendantClassIds` are closed-world, and `catchAcceptsAll` fails open.
+- **`.sig` schema 2 ships classes, interfaces, enums and constants** (`tests/libs/classes` +
+  `tools/libclass_smoke.sh`). What remains:
+  - **`trait`s and generic (`@template`) classes still do not cross.** Both need method
+    BODIES on the far side — a trait because it is copy-paste into the using class, a
+    generic because each binding is reified from source. They are recorded in the `.sig`
+    as `"unsupported"` so the diagnostic can say why.
+  - **`instanceofMatchIds` / `descendantClassIds` remain closed-world and `catchAcceptsAll`
+    still fails open** — now over the UNION of local and imported classes, which is the
+    whole program for a library-first build order, but not for a plugin loaded later.
+  - **A class descriptor is `linkonce_odr` and the two modules can emit different
+    bytes for it** (the library's rmeta field is null unless the library itself reflects).
+    The application object is linked first, so its richer copy wins — deterministic given
+    how the link line is built, but an invariant rather than a guarantee. The fix is the
+    descriptor extension below.
+- **EPIC: per-class function pointers in the class descriptor.** `__mc_json_enc` lives in
+  `manticore_stdlib.o`, whose class table is empty, so `(array)$obj` inside it yields `[]`
+  and `json_encode` of ANY object — imported or local — answers `{}`. Same shape for
+  `__manticore_tagged_to_str`. Extend `{ i64 class_id, ptr drop_fn, ptr rmeta }` with
+  `props_fn` / `tostr_fn` / `debug_fn`, generated once by whichever module OWNS the class,
+  so the definition travels with the class and a generic walker in `stdlib.o` reaches an
+  application class without knowing its name. Bumps `MemoryAbi::VERSION` (⇒ one
+  `bin/build --seed`) and lets four of the five `LowerPrelude::*ObjectSrc()` generators go.
 - **No dependency resolution, no build cache, no packaging bootstrap.** `MANTICORE_HOME`,
   `~/.manticore/cache` and a `compiler_abi` field appear in
   [`design/module-system.md`](design/module-system.md) but nowhere in `src/`. Manifest targets
