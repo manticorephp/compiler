@@ -216,8 +216,20 @@ trait EmitLlvmExceptions
         // the unwound frames and later traces grow). alloca survives setjmp.
         $btSlot = '';
         if ($this->rt->needsBacktrace) {
-            $btSlot = $this->ssa->allocReg();
-            $out .= '  ' . $btSlot . " = alloca i64\n";
+            // In a generator the snapshot lives in a FRAME CELL, for the reason
+            // the pending slots below already spell out: this alloca sits in
+            // whatever block the `try` occupies, the restore reads it from the
+            // catch landing pad, and the resume switch re-enters past the
+            // former — so the alloca dominates neither use.
+            // `Instruction does not dominate all uses` out of symfony/cache's
+            // doDeleteYieldTags, whose try sits inside an `if` inside a loop.
+            if ($this->gen->inGenerator && $n->genBtSlot >= 0
+                && isset($this->locals->slots["@try.bt." . (string)$n->genBtSlot])) {
+                $btSlot = $this->locals->slots["@try.bt." . (string)$n->genBtSlot];
+            } else {
+                $btSlot = $this->ssa->allocReg();
+                $out .= '  ' . $btSlot . " = alloca i64\n";
+            }
             $bd = $this->ssa->allocReg();
             $out .= '  ' . $bd . " = load i64, ptr @__mir_bt_depth\n";
             $out .= '  store i64 ' . $bd . ', ptr ' . $btSlot . "\n";

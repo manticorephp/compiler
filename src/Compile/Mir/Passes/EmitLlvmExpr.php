@@ -1745,16 +1745,37 @@ trait EmitLlvmExpr
     private function emitArrayUnion(Node $left, Node $right): string
     {
         $out = $this->emitNode($left);
-        $out .= $this->coerceToPtr();
+        $out .= $this->unionOperandPtr($left);
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
-        $out .= $this->coerceToPtr();
+        $out .= $this->unionOperandPtr($right);
         $r = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_array_union(ptr ' . $l . ', ptr ' . $r . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * A union operand as a RAW array pointer. `coerceToPtr` only inttoptrs — it
+     * does NOT strip a NaN-box — so an ERASED operand (`$m + $this->v->metadata`,
+     * where the property read types cell) handed `__mir_array_union` the tagged
+     * word and it dereferenced the tag bits. Mask the payload first, for the
+     * same carrier kinds {@see emitInvoke} masks.
+     */
+    private function unionOperandPtr(Node $op): string
+    {
+        $k = $op->type->kind;
+        if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN) {
+            return $this->coerceToPtr();
+        }
+        $out = $this->coerceToI64();
+        $raw = $this->ssa->allocReg();
+        $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+        $this->lastValue = $raw;
+        $this->lastValueType = 'i64';
+        return $out . $this->coerceToPtr();
     }
 
     /** Coerce a just-emitted arithmetic operand: to double for a float op

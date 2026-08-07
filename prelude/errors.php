@@ -82,15 +82,16 @@ function __mc_call_exception_handler(mixed $cb, mixed $e): mixed
     return $cb($e);
 }
 
-/** Invoke any callable shape with no arguments (the shutdown queue). */
-function __mc_call_shutdown(mixed $cb): mixed
+/** Invoke any callable shape with the args it was registered with.
+ *  @param mixed[] $args */
+function __mc_call_shutdown(mixed $cb, array $args): mixed
 {
     if (\is_array($cb)) {
         $o = $cb[0];
         $m = $cb[1];
-        return $o->$m();
+        return $o->$m(...$args);
     }
-    return $cb();
+    return $cb(...$args);
 }
 
 /**
@@ -145,9 +146,15 @@ function restore_exception_handler(): bool
  * driven from an `atexit` trampoline the compiler registers in main(), so all
  * three paths are covered by construction.
  */
-function register_shutdown_function(mixed $callback): bool
+function register_shutdown_function(mixed $callback, mixed ...$args): bool
 {
+    // php's signature is (callable, mixed ...$args) and the extra arguments are
+    // handed to the callback at shutdown. They used to be dropped on the floor,
+    // so a callback that declared a parameter read an unbound slot and printed
+    // whatever was there — `register_shutdown_function($f, 'arg')` produced
+    // "shutdown 2 \x0co\xd8\xf1..." instead of "shutdown 2 arg".
     __McErrors::$shutdown[] = $callback;
+    __McErrors::$shutdownArgs[] = $args;
     return true;
 }
 
@@ -160,7 +167,11 @@ function __mc_run_shutdown(): void
     $i = 0;
     while ($i < $n) {
         $cb = __McErrors::$shutdown[$i];
-        if ($cb !== null) { __mc_call_shutdown($cb); }
+        // Parallel arrays rather than a queue of [cb, args] pairs: a nested
+        // array<int, mixed[]> is a known self-host miscompile hazard, and the
+        // two are only ever appended together.
+        $args = $i < \count(__McErrors::$shutdownArgs) ? __McErrors::$shutdownArgs[$i] : [];
+        if ($cb !== null) { __mc_call_shutdown($cb, $args); }
         $i = $i + 1;
         // A shutdown function may register another; php runs those too.
         $n = \count(__McErrors::$shutdown);

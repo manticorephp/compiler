@@ -909,6 +909,21 @@ final class CompileArgs
     /** @var array<string, \Compile\Mir\ExternClassMeta> */
     public static array $externClassMeta = [];
 
+    /**
+     * Paths composer autoloads ON DEMAND (psr-4 / psr-0 / classmap) rather than
+     * `require`ing at bootstrap. php reads such a file only when a class lookup
+     * resolves to it, so its top-level SIDE EFFECTS run then — or, for a class
+     * nothing ever names, never at all.
+     *
+     * The eager whole-program model has no "then": {@see lower_module} flattens
+     * every file's top level into one `__main`, which runs the lot at startup.
+     * Only DECLARATIONS are hoisted from a path in this set ({@see
+     * __mc_stmt_declares}); pure side effects are dropped.
+     *
+     * @var array<string,bool>
+     */
+    public static array $demandLoadedPaths = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -1398,6 +1413,26 @@ function is_darwin(): bool {
  * @param string[] $excludes
  * @return string[]
  */
+/**
+ * Prefix-match `$path` against a manifest `exclude` entry, with a leading `./`
+ * meaning nothing on either side.
+ *
+ * The normalisation is the whole point. A VENDOR package's autoload root
+ * arrives as `./vendor/name/src` — its base is `./vendor/name` — but the
+ * PROJECT's own root arrives as bare `src`, because {@see composer_path_join}
+ * drops a `.` base entirely. So `"exclude": ["./src"]` silently matched nothing
+ * while the identical spelling worked for every vendor package, and a directory
+ * the manifest plainly excluded was compiled anyway.
+ */
+function exclude_matches(string $path, string $ex): bool
+{
+    if (\strlen($ex) === 0) { return false; }
+    $p = \str_starts_with($path, "./") ? \substr($path, 2) : $path;
+    $e = \str_starts_with($ex, "./") ? \substr($ex, 2) : $ex;
+    if (\strlen($e) === 0) { return false; }
+    return \str_starts_with($p, $e);
+}
+
 function collect_php_sources(string $dir, array $excludes): array
 {
     /** @var string[] $out */
@@ -1410,7 +1445,7 @@ function collect_php_sources(string $dir, array $excludes): array
         if (\strlen($path) === 0) { continue; }
         $skip = false;
         foreach ($excludes as $ex) {
-            if (\strlen($ex) > 0 && \str_starts_with($path, $ex)) { $skip = true; break; }
+            if (exclude_matches($path, $ex)) { $skip = true; break; }
         }
         if ($skip) { continue; }
         $src = read_file($path);
@@ -1441,7 +1476,7 @@ function collect_php_source_files(string $dir, array $excludes): array
         if (\strlen($path) === 0) { continue; }
         $skip = false;
         foreach ($excludes as $ex) {
-            if (\strlen($ex) > 0 && \str_starts_with($path, $ex)) { $skip = true; break; }
+            if (exclude_matches($path, $ex)) { $skip = true; break; }
         }
         if ($skip) { continue; }
         $src = read_file($path);
@@ -1508,6 +1543,162 @@ function composer_autoload_dirs(array $autoload, string $base): array
 }
 
 /**
+ * The `autoload.files` entries of a composer project, as a path set. These are
+ * composer's BOOTSTRAP files: it `require`s each one on every request, so their
+ * top-level statements genuinely run at program start.
+ *
+ * Every other autoload mechanism is DEMAND-driven — psr-4/psr-0 map a class
+ * NAME to a file and classmap maps a declared symbol to one, so such a file is
+ * read only when a class lookup resolves to it, and never otherwise.
+ *
+ * @return array<string,bool>
+ */
+function composer_autoload_file_entries(string $projRoot, bool $withVendor): array
+{
+    /** @var array<string,bool> $out */
+    $out = [];
+    $add = function (array $autoload, string $base) use (&$out): void {
+        $fl = isset($autoload["files"]) ? $autoload["files"] : [];
+        if (!\is_array($fl)) { return; }
+        foreach ($fl as $p) {
+            $out[\rtrim(composer_path_join($base, (string)$p), "/")] = true;
+        }
+    };
+    $cjPath = $projRoot . "/composer.json";
+    $cjSrc = file_exists($cjPath) ? read_file($cjPath) : null;
+    if ($cjSrc !== null) {
+        $cj = json_decode($cjSrc, true);
+        if (\is_array($cj) && isset($cj["autoload"]) && \is_array($cj["autoload"])) {
+            $add($cj["autoload"], $projRoot);
+        }
+    }
+    if ($withVendor) {
+        $lockPath = $projRoot . "/composer.lock";
+        $lockSrc = file_exists($lockPath) ? read_file($lockPath) : null;
+        if ($lockSrc !== null) {
+            $lock = json_decode($lockSrc, true);
+            $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
+            foreach ($pkgs as $pkg) {
+                if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
+                    $add($pkg["autoload"], $projRoot . "/vendor/" . (string)$pkg["name"]);
+                }
+            }
+        }
+    }
+    return $out;
+}
+
+/**
+ * Could `$src` ever be reached by a DEMAND-driven autoload rule? Only if it
+ * declares something a lookup can name. A file under a psr-4 root that declares
+ * nothing at all is dead weight under php — composer resolves a class name to a
+ * path, finds no such class, and nothing else ever reads the file.
+ *
+ * Compiling one is not merely wasteful, it is WRONG: `lower_module` flattens
+ * every file's top level into `__main`, so a standalone script shipped inside a
+ * package root RUNS AT STARTUP. symfony/expression-language ships
+ * `Resources/bin/generate_operator_regex.php` under a psr-4 root mapped to `""`
+ * — a CLI script ending in `echo '/'.implode('|', $regex).'/A';`. It executed
+ * before the program's own entry, and its `$operator[$len - 1]` was the SIGSEGV
+ * that stopped tier 2.
+ *
+ * Deliberately CONSERVATIVE: any occurrence of a declaration keyword anywhere in
+ * the file — even in a comment or a closure — keeps the file. A false "keeps it"
+ * costs a little compile time; a false "drops it" would lose a declaration, and
+ * a version-guarded `if (…) { class X {} }` must never be mistaken for a script.
+ */
+function __mc_source_may_declare(string $src): bool
+{
+    return \preg_match('/\b(class|interface|trait|enum|function)\b/i', $src) === 1;
+}
+
+/**
+ * Does this top-level statement DECLARE something, at any depth?
+ *
+ * The keep/drop test for a demand-loaded file ({@see CompileArgs::$demandLoadedPaths}).
+ * Declarations must survive — the whole point of compiling the file — while a
+ * pure side effect must not, because php would only ever run it at the moment
+ * a class lookup pulled the file in.
+ *
+ * ★ The recursion is what makes this safe. A version guard wrapping a class
+ * (`if (\PHP_VERSION_ID < 80000) { class Foo {} }`) is an `if`, and dropping
+ * `if`s wholesale would silently delete the class — so the test is "contains a
+ * declaration", never "is a declaration". The shape this DOES drop is the
+ * dependency guard symfony writes at the top of a class file:
+ *
+ *     if (!interface_exists(LocaleAwareInterface::class)) { throw new \LogicException(…); }
+ *
+ * Seven files in the pinned corpus carry one. Compiled eagerly they threw
+ * before the program's own entry ran — symfony/string's AsciiSlugger is what
+ * stopped tier 2 once the SIGSEGV ahead of it was fixed.
+ *
+ * ⚠ A top-level `class_alias()` in a psr-4 file is a side effect and IS
+ * dropped. Recorded rather than special-cased: the alias would have to become a
+ * compile-time class synonym, which is its own piece of work.
+ */
+function __mc_stmt_declares(\Parser\Ast\Stmt $s): bool
+{
+    $k = $s->kind;
+    if ($k === 'Class' || $k === 'Function' || $k === 'UseDecl'
+        || $k === 'Namespace' || $k === 'StaticLocal' || $k === 'Label') {
+        return true;
+    }
+    // A `const X = …;` at file scope is a declaration too. The parser models it
+    // as an ExpressionStmt only for `define()`, which is a CALL — and a call is
+    // exactly the side effect this drops, matching php: an unloaded file's
+    // define() never runs either.
+    foreach (__mc_stmt_children($s) as $c) {
+        if (__mc_stmt_declares($c)) { return true; }
+    }
+    return false;
+}
+
+/**
+ * Nested STATEMENTS of `$s` (not expressions) — enough for {@see
+ * __mc_stmt_declares} to find a declaration wrapped in any control flow.
+ *
+ * @return \Parser\Ast\Stmt[]
+ */
+function __mc_stmt_children(\Parser\Ast\Stmt $s): array
+{
+    /** @var \Parser\Ast\Stmt[] $out */
+    $out = [];
+    $k = $s->kind;
+    // ⚠ Every arm goes through the `__mc_as_*` accessors and never reads a
+    // subclass field off the base `Stmt`: doing that SEGFAULTS the native
+    // self-build while Zend compiles the same program fine (the trap the
+    // top-level-return work already paid for). Bodies are `Block`s — their
+    // statements live under `->statements` — except a SwitchArm's, which is a
+    // plain array.
+    if ($k === 'If') {
+        $n = __mc_as_if($s);
+        foreach ($n->then->statements as $x) { $out[] = $x; }
+        foreach ($n->elseifs as $ei) { foreach ($ei->body->statements as $x) { $out[] = $x; } }
+        if ($n->else !== null) { foreach ($n->else->statements as $x) { $out[] = $x; } }
+    } elseif ($k === 'While') {
+        foreach (__mc_as_while($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'DoWhile') {
+        foreach (__mc_as_dowhile($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'For') {
+        foreach (__mc_as_for($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'Foreach') {
+        foreach (__mc_as_foreach($s)->body->statements as $x) { $out[] = $x; }
+    } elseif ($k === 'TryCatch') {
+        $n = __mc_as_trycatch($s);
+        foreach ($n->try->statements as $x) { $out[] = $x; }
+        foreach ($n->catches as $c) { foreach ($c->body->statements as $x) { $out[] = $x; } }
+        if ($n->finally !== null) { foreach ($n->finally->statements as $x) { $out[] = $x; } }
+    } elseif ($k === 'Switch') {
+        foreach (__mc_as_switch($s)->cases as $a) { foreach ($a->body as $x) { $out[] = $x; } }
+    } elseif ($k === 'Namespace') {
+        $n = __mc_as_namespace($s);
+        if ($n->body !== null) { foreach ($n->body->statements as $x) { $out[] = $x; } }
+    }
+    return $out;
+}
+
+/**
  * Source directories of a composer project rooted at `$projRoot`: its own
  * `autoload` (composer.json) and — when `$withVendor` — every installed
  * package's `autoload` (composer.lock, rooted at `vendor/<name>/`). Whole-program
@@ -1550,6 +1741,78 @@ function composer_source_dirs(string $projRoot, bool $withVendor): array
     $seen = [];
     foreach ($dirs as $d) {
         if (!isset($seen[$d])) { $seen[$d] = true; $out[] = $d; }
+    }
+    return $out;
+}
+
+/**
+ * The paths composer's own `autoload.exclude-from-classmap` takes OUT of each
+ * package — the package author's statement that this code is not part of what
+ * the package ships. 51 of the 99 packages in the symfony-demo corpus declare
+ * it, almost always `/Test/` or `/Tests/`.
+ *
+ * Honouring it is not tidiness. A shipped-but-excluded `Test/` directory holds
+ * PHPUnit test-case base classes, and PHPUnit is a DEV dependency that
+ * `--no-dev` does not install — so whole-program AOT compiled
+ * `ServiceLocatorTestCase extends TestCase` and the module failed on an
+ * undefined `assertFalse`. Composer never loads those files; neither should we.
+ *
+ * Each pattern is scoped to the package that declared it (prefixed with its
+ * root) rather than applied globally — one package saying `/Test/` says nothing
+ * about another's, and over-EXCLUSION is a regression exactly as
+ * over-inclusion is.
+ *
+ * @return string[]
+ */
+function composer_classmap_excludes(string $projRoot, bool $withVendor): array
+{
+    /** @var string[] $out */
+    $out = [];
+    $cjPath = $projRoot . "/composer.json";
+    $cjSrc = file_exists($cjPath) ? read_file($cjPath) : null;
+    if ($cjSrc !== null) {
+        $cj = json_decode($cjSrc, true);
+        if (\is_array($cj) && isset($cj["autoload"]) && \is_array($cj["autoload"])) {
+            foreach (classmap_exclude_paths($cj["autoload"], $projRoot) as $p) { $out[] = $p; }
+        }
+    }
+    if ($withVendor) {
+        $lockPath = $projRoot . "/composer.lock";
+        $lockSrc = file_exists($lockPath) ? read_file($lockPath) : null;
+        if ($lockSrc !== null) {
+            $lock = json_decode($lockSrc, true);
+            $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
+            foreach ($pkgs as $pkg) {
+                if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                $pkgRoot = $projRoot . "/vendor/" . (string)$pkg["name"];
+                if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
+                    foreach (classmap_exclude_paths($pkg["autoload"], $pkgRoot) as $p) { $out[] = $p; }
+                }
+            }
+        }
+    }
+    return $out;
+}
+
+/**
+ * One autoload block's `exclude-from-classmap` entries, each joined to the
+ * package root. Composer writes them with surrounding slashes (`"/Test/"`), so
+ * the separators are normalised to exactly one on each side.
+ *
+ * @param array<string,mixed> $autoload
+ * @return string[]
+ */
+function classmap_exclude_paths(array $autoload, string $base): array
+{
+    /** @var string[] $out */
+    $out = [];
+    if (!isset($autoload["exclude-from-classmap"])) { return $out; }
+    $ents = $autoload["exclude-from-classmap"];
+    if (!\is_array($ents)) { return $out; }
+    foreach ($ents as $ent) {
+        $rel = \trim((string)$ent, "/");
+        if ($rel === "") { continue; }
+        $out[] = composer_path_join($base, $rel);
     }
     return $out;
 }
@@ -1838,7 +2101,21 @@ function cmd_build(array $args): int
         $sources = [];
         /** @var string[] $paths */
         $paths = [];
+        // A FILE is compiled once, however many autoload roots name it. Keyed by
+        // path rather than by directory because composer roots OVERLAP: symfony
+        // polyfills map psr-4 to the PACKAGE ROOT and then classmap a
+        // subdirectory of it (`"Symfony\\Polyfill\\Intl\\Icu\\": ""` plus
+        // `classmap: ["Resources/stubs"]`). The $covered set below compares
+        // directory STRINGS, so the nested entry is not equal to its parent and
+        // both were scanned — the stub's class was lowered twice and clang
+        // rejected the module with `invalid redefinition of function
+        // manticore_IntlDateFormatter____construct`. Not audit-only: any project
+        // whose autoload roots nest hits it.
+        /** @var array<string,bool> $seenPath */
+        $seenPath = [];
         foreach (collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
+            if (isset($seenPath[$sf->path])) { continue; }
+            $seenPath[$sf->path] = true;
             $sources[] = $sf->contents;
             $paths[] = $sf->path;
         }
@@ -1854,18 +2131,46 @@ function cmd_build(array $args): int
         $composerOn = ($composer === true) || \is_array($composer);
         if ($composerOn) {
             $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
+            // Composer's own exclusions join the manifest's. Applied to the
+            // composer-discovered roots only: the manifest's `src` is the
+            // project's own code, where the author's `exclude` is the authority.
+            $moduleExcludes = \array_merge(
+                $moduleExcludes,
+                composer_classmap_excludes(".", $withVendor),
+            );
             /** @var array<string,bool> $covered */
             $covered = [];
             $covered[\rtrim($srcDir, "/")] = true;
+            // composer's BOOTSTRAP set. Everything else it autoloads is
+            // demand-driven, so a file there that declares nothing is not a
+            // compile unit at all ({@see __mc_source_may_declare}).
+            $bootFiles = composer_autoload_file_entries(".", $withVendor);
+            $skippedScripts = 0;
             foreach (composer_source_dirs(".", $withVendor) as $cdir) {
                 $nd = \rtrim($cdir, "/");
                 if (isset($covered[$nd])) { continue; }
                 $covered[$nd] = true;
                 dprint("build: + composer autoload '" . $nd . "'");
                 foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
+                    if (isset($seenPath[$sf->path])) { continue; }
+                    $seenPath[$sf->path] = true;
+                    $sfNorm = \rtrim($sf->path, "/");
+                    $isBoot = isset($bootFiles[$sfNorm]) || isset($bootFiles[$nd]);
+                    if (!$isBoot && !__mc_source_may_declare($sf->contents)) {
+                        $skippedScripts = $skippedScripts + 1;
+                        dprint("build:   - script (declares nothing, never autoloaded): " . $sf->path);
+                        continue;
+                    }
+                    // Demand-loaded: keep its DECLARATIONS, drop its top-level
+                    // side effects ({@see CompileArgs::$demandLoadedPaths}).
+                    if (!$isBoot) { CompileArgs::$demandLoadedPaths[$sfNorm] = true; }
                     $sources[] = $sf->contents;
                     $paths[] = $sf->path;
                 }
+            }
+            if ($skippedScripts > 0) {
+                dprint("build: skipped " . (string)$skippedScripts
+                    . " non-declaring script(s) under demand-loaded autoload roots");
             }
         }
         // Extensions: opt-in native bindings. Each named extension adds its thin
@@ -2086,6 +2391,297 @@ function __mc_abs_source_path(string $path): string {
     return $real === false ? $path : $real;
 }
 
+/**
+ * The global slot name holding what `require`/`include` of `$path` evaluates
+ * to. Keyed on the RESOLVED path so the two spellings a program reaches one
+ * file by (`__DIR__ . '/x.php'` and `./x.php`) name the same slot — the same
+ * normalisation `__FILE__` already gets. '' for a source with no path, which
+ * simply has no slot.
+ */
+function __mc_include_slot(string $path, int $index): string {
+    $abs = __mc_abs_source_path($path);
+    if ($abs === '') { return ''; }
+    // Derived from the source INDEX plus a sanitised tail of the path — no hash.
+    //
+    // This used to be substr(sha1($abs), 0, 16), which is correct everywhere
+    // except the one place that matters: sha1() routes through OpenSSL's EVP,
+    // and tools/link_stubs.sh stubs EVP_sha1 to `return 0` when linking the
+    // SELF-HOSTED compiler. Inside that compiler every path hashed to the same
+    // string, so every file shared one slot and the include case SEGFAULTED —
+    // and only under self-host, which is why the normal suite stayed green and
+    // the fixpoint gate caught it.
+    //
+    // The index makes it unique by construction (one compile, one list), so
+    // there is no collision to reason about; the tail is only there to keep the
+    // emitted IR readable.
+    $tail = '';
+    $n = \strlen($abs);
+    $from = $n > 40 ? $n - 40 : 0;
+    for ($i = $from; $i < $n; $i = $i + 1) {
+        $c = $abs[$i];
+        $ok = ($c >= 'a' && $c <= 'z') || ($c >= 'A' && $c <= 'Z')
+            || ($c >= '0' && $c <= '9');
+        $tail = $tail . ($ok ? $c : '_');
+    }
+    return '__mc_incl_' . (string)$index . '_' . $tail;
+}
+
+/**
+ * What a non-entry file's top-level `return`s look like, as an int so no
+ * nullable scalar is involved: 0 none, 1 only valueless, 2 at least one with a
+ * value. Control flow is descended; a FUNCTION or CLASS declaration is NOT —
+ * a `return` in there belongs to its own frame, not to the file.
+ *
+ * @param \Parser\Ast\Stmt[] $stmts
+ */
+function __mc_file_return_kind(array $stmts): int
+{
+    $kind = 0;
+    foreach ($stmts as $s) {
+        if ($s->kind === 'Return') {
+            $here = __mc_as_return($s)->value === null ? 1 : 2;
+            if ($here > $kind) { $kind = $here; }
+            continue;
+        }
+        $sub = __mc_stmt_return_kind($s);
+        if ($sub > $kind) { $kind = $sub; }
+    }
+    return $kind;
+}
+
+/**
+ * {@see __mc_file_return_kind} for one statement's nested bodies.
+ *
+ * Recursion is direct rather than through a helper returning the child lists.
+ * An `array` OF `Stmt[]` is a nested-element channel, and handing one back
+ * across a call boundary erases the inner element type — the arrays came back
+ * as values whose bits were read as a `Stmt`, which SIGBUS'd the Zend-seeded
+ * compiler while the self-hosted build stayed green. Nothing here builds a
+ * container it does not need.
+ */
+function __mc_stmt_return_kind(\Parser\Ast\Stmt $s): int
+{
+    $k = $s->kind;
+    $kind = 0;
+    if ($k === 'If') {
+        $n = __mc_as_if($s);
+        $kind = __mc_file_return_kind($n->then->statements);
+        foreach ($n->elseifs as $arm) {
+            $x = __mc_file_return_kind($arm->body->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        if ($n->else !== null) {
+            $x = __mc_file_return_kind($n->else->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        return $kind;
+    }
+    if ($k === 'While')   { return __mc_file_return_kind(__mc_as_while($s)->body->statements); }
+    if ($k === 'DoWhile') { return __mc_file_return_kind(__mc_as_dowhile($s)->body->statements); }
+    if ($k === 'For')     { return __mc_file_return_kind(__mc_as_for($s)->body->statements); }
+    if ($k === 'Foreach') { return __mc_file_return_kind(__mc_as_foreach($s)->body->statements); }
+    if ($k === 'TryCatch') {
+        $n = __mc_as_trycatch($s);
+        $kind = __mc_file_return_kind($n->try->statements);
+        foreach ($n->catches as $c) {
+            $x = __mc_file_return_kind($c->body->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        if ($n->finally !== null) {
+            $x = __mc_file_return_kind($n->finally->statements);
+            if ($x > $kind) { $kind = $x; }
+        }
+        return $kind;
+    }
+    if ($k === 'Switch') {
+        foreach (__mc_as_switch($s)->cases as $arm) {
+            $x = __mc_file_return_kind($arm->body);
+            if ($x > $kind) { $kind = $x; }
+        }
+        return $kind;
+    }
+    if ($k === 'Namespace') {
+        $n = __mc_as_namespace($s);
+        if ($n->body !== null) { return __mc_file_return_kind($n->body->statements); }
+        return 0;
+    }
+    return 0;
+}
+
+function __mc_as_if(\Parser\Ast\IfStmt $s): \Parser\Ast\IfStmt { return $s; }
+function __mc_as_while(\Parser\Ast\WhileStmt $s): \Parser\Ast\WhileStmt { return $s; }
+function __mc_as_dowhile(\Parser\Ast\DoWhileStmt $s): \Parser\Ast\DoWhileStmt { return $s; }
+function __mc_as_for(\Parser\Ast\ForStmt $s): \Parser\Ast\ForStmt { return $s; }
+function __mc_as_foreach(\Parser\Ast\ForeachStmt $s): \Parser\Ast\ForeachStmt { return $s; }
+function __mc_as_trycatch(\Parser\Ast\TryCatchStmt $s): \Parser\Ast\TryCatchStmt { return $s; }
+function __mc_as_switch(\Parser\Ast\SwitchStmt $s): \Parser\Ast\SwitchStmt { return $s; }
+function __mc_as_namespace(\Parser\Ast\NamespaceStmt $s): \Parser\Ast\NamespaceStmt { return $s; }
+function __mc_as_return(\Parser\Ast\ReturnStmt $s): \Parser\Ast\ReturnStmt { return $s; }
+
+/**
+ * Rewrite every top-level `return` of a NON-ENTRY file into "store the value,
+ * then jump past the rest of this file".
+ *
+ * php's `return` in an included file ends THAT FILE and hands a value back; the
+ * including script carries on. Whole-program AOT flattens every file's
+ * top-level statements into one `__main` with the entry last, so a surviving
+ * `return` ends the PROGRAM instead — and the entry, which is last, never runs.
+ * Dropping the statement (what this used to do for a bare top-level `return`)
+ * is wrong in the other direction: the rest of the file then runs when php
+ * would have skipped it.
+ *
+ * A jump to a label at the file's end is both. The statements stay in `__main`,
+ * so top-level variables keep sharing one scope exactly as php's include does —
+ * which is why this is a jump and not a synthetic per-file function.
+ *
+ * @param \Parser\Ast\Stmt[] $stmts
+ * @return \Parser\Ast\Stmt[]
+ */
+function __mc_rewrite_file_returns(array $stmts, string $slot, string $label): array
+{
+    /** @var \Parser\Ast\Stmt[] $out */
+    $out = [];
+    foreach ($stmts as $s) {
+        if ($s->kind === 'Return') {
+            $ret = __mc_as_return($s);
+            // A `return;` with NO value is not the same as never returning:
+            // php's `require` of a file that RAN a bare `return` evaluates to
+            // NULL, while a file that fell off its end gives int(1). Storing
+            // NULL at the return site keeps both, because the store only
+            // executes on the path that actually returned.
+            $retVal = $ret->value === null
+                ? \Parser\Ast\Expr::null($s->span)
+                : $ret->value;
+            if ($slot !== '') {
+                $out[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign(
+                        \Parser\Ast\Expr::arrayAccess(
+                            \Parser\Ast\Expr::variable('GLOBALS', $s->span),
+                            \Parser\Ast\Expr::string($slot, $s->span),
+                            $s->span,
+                        ),
+                        // Boxed on the way in for the same reason the reader is
+                        // typed cell: the slot holds an array, a closure or a
+                        // scalar interchangeably.
+                        \Parser\Ast\Expr::call('__mir_to_cell', [$retVal], $s->span),
+                        $s->span,
+                    ),
+                    $s->span,
+                );
+            }
+            $out[] = new \Parser\Ast\GotoStmt($label, $s->span);
+            continue;
+        }
+        $out[] = __mc_rewrite_stmt_returns($s, $slot, $label);
+    }
+    return $out;
+}
+
+/** One statement rebuilt with its nested statement lists rewritten. */
+function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $label): \Parser\Ast\Stmt
+{
+    // As in __mc_stmt_return_kind: every subclass field is read behind a
+    // concrete parameter type, never off the base `Stmt`. Read off the base
+    // (which declares only kind/span) a field resolves by the wrong offset
+    // under the self-host and SEGFAULTS THE COMPILER, while Zend — where the
+    // same access is dynamic — compiles the identical program without
+    // complaint. Same rule, and the same reason, as foldGuard's typed dispatch.
+    $k = $s->kind;
+    if ($k === 'If') {
+        $n = __mc_as_if($s);
+        $elseifs = [];
+        foreach ($n->elseifs as $arm) {
+            $elseifs[] = new \Parser\Ast\ElseIfArm(
+                $arm->condition,
+                new \Parser\Ast\Block(__mc_rewrite_file_returns($arm->body->statements, $slot, $label)),
+            );
+        }
+        $else = $n->else === null ? null
+            : new \Parser\Ast\Block(__mc_rewrite_file_returns($n->else->statements, $slot, $label));
+        return \Parser\Ast\Stmt::if_(
+            $n->condition,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->then->statements, $slot, $label)),
+            $elseifs,
+            $else,
+            $s->span,
+        );
+    }
+    if ($k === 'While') {
+        $n = __mc_as_while($s);
+        return \Parser\Ast\Stmt::while_(
+            $n->condition,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $s->span,
+        );
+    }
+    if ($k === 'DoWhile') {
+        $n = __mc_as_dowhile($s);
+        return \Parser\Ast\Stmt::doWhile(
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $n->condition,
+            $s->span,
+        );
+    }
+    if ($k === 'For') {
+        $n = __mc_as_for($s);
+        return \Parser\Ast\Stmt::for_(
+            $n->init,
+            $n->condition,
+            $n->update,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $s->span,
+        );
+    }
+    if ($k === 'Foreach') {
+        $n = __mc_as_foreach($s);
+        return \Parser\Ast\Stmt::foreach_(
+            $n->expr,
+            $n->key,
+            $n->value,
+            $n->valueByRef,
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label)),
+            $s->span,
+        );
+    }
+    if ($k === 'TryCatch') {
+        $n = __mc_as_trycatch($s);
+        $catches = [];
+        foreach ($n->catches as $c) {
+            $catches[] = new \Parser\Ast\CatchClause(
+                $c->types,
+                $c->name,
+                new \Parser\Ast\Block(__mc_rewrite_file_returns($c->body->statements, $slot, $label)),
+            );
+        }
+        // The `finally` body is left ALONE: php forbids jumping out of one, so
+        // a `return` there is not this transform's to move.
+        return \Parser\Ast\Stmt::tryCatch(
+            new \Parser\Ast\Block(__mc_rewrite_file_returns($n->try->statements, $slot, $label)),
+            $catches,
+            $n->finally,
+            $s->span,
+        );
+    }
+    if ($k === 'Switch') {
+        $n = __mc_as_switch($s);
+        $cases = [];
+        foreach ($n->cases as $arm) {
+            $cases[] = new \Parser\Ast\SwitchArm(
+                $arm->value,
+                __mc_rewrite_file_returns($arm->body, $slot, $label),
+            );
+        }
+        return \Parser\Ast\Stmt::switch_($n->expr, $cases, $s->span);
+    }
+    if ($k === 'Namespace') {
+        $n = __mc_as_namespace($s);
+        $body = $n->body === null ? null
+            : new \Parser\Ast\Block(__mc_rewrite_file_returns($n->body->statements, $slot, $label));
+        return \Parser\Ast\Stmt::namespace_($n->name, $body, $s->span);
+    }
+    return $s;
+}
+
 function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
@@ -2112,6 +2708,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // make a top-level return the exit status. Hence the test is "not the last
     // source": position decides whether the statement survives, not its value.
     $lastIdx = \count($sources) - 1;
+    /** @var array<string, string> resolved path → value-slot global name */
+    $includeSlots = [];
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
@@ -2124,8 +2722,124 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             return null;
         }
         $isEntry = $i === $lastIdx;
-        foreach ($program->statements as $s) {
-            if (!$isEntry && $s->kind === 'Return') { continue; }
+        $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '', $i);
+        $incAbs = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
+        // A DEMAND-LOADED file (psr-4 / classmap) contributes its DECLARATIONS
+        // only. php reads such a file when a class lookup resolves to it and
+        // runs its top level THEN — for a class nothing names, never. The eager
+        // model has no "then", so hoisting the side effects into `__main` runs
+        // them at startup, ahead of the program's own entry.
+        //
+        // symfony/string's AsciiSlugger is the witness: a file-scope
+        // `if (!interface_exists(LocaleAwareInterface::class)) { throw … }`
+        // guarding a package that tier 2 deliberately excludes. Seven files in
+        // the pinned corpus carry that shape. {@see __mc_stmt_declares} keeps a
+        // version-guarded `if (…) { class Foo {} }`, which is why the test is
+        // "contains a declaration" and not "is one".
+        $srcPath = isset($paths[$i]) ? \rtrim($paths[$i], "/") : '';
+        /** @var \Parser\Ast\Stmt[] $topStmts */
+        $topStmts = $program->statements;
+        if (!$isEntry && $srcPath !== '' && isset(CompileArgs::$demandLoadedPaths[$srcPath])) {
+            $kept = [];
+            foreach ($topStmts as $s) {
+                if (__mc_stmt_declares($s)) { $kept[] = $s; }
+            }
+            $topStmts = $kept;
+        }
+        // Every compiled file is registered, with an EMPTY slot until one of its
+        // top-level `return`s claims it. That distinction is the difference
+        // between php's three answers: a file that returned a value gives it, a
+        // file that returned nothing gives int(1), and a path that is not a
+        // compile unit at all gives false — which is what php's `include` of a
+        // missing file gives. Without the full path set the last two collapse.
+        if ($incAbs !== '' && !$isEntry && !isset($includeSlots[$incAbs])) {
+            $includeSlots[$incAbs] = '';
+        }
+        // A non-entry file's top-level `return` — at ANY depth, not just as a
+        // top-level statement — ends THAT FILE in php and hands its value back.
+        // Flattened into one `__main` it would end the PROGRAM, and since the
+        // entry is last, the entry would never run. Rewrite each one to "store
+        // the value, jump past this file"; the label goes after its statements.
+        //
+        // This is not a corner: `vendor/autoload.php` returns the loader, and
+        // every symfony polyfill bootstrap is a version-guarded `return
+        // require …`. Nested in an `if`, those used to silently kill the whole
+        // program — a composer application compiled and then did nothing.
+        $retKind = $isEntry ? 0 : __mc_file_return_kind($topStmts);
+        if ($retKind > 0) {
+            // Any return claims the slot, valued or not — a bare `return`
+            // stores NULL, which is what php's `require` of it evaluates to.
+            $slotFor = $incSlot;
+            $span0 = $topStmts[0]->span;
+            if ($slotFor !== '') {
+                $includeSlots[$incAbs] = $slotFor;
+                // Seed the slot UNCONDITIONALLY, before the file's own
+                // statements, with php's answer for a file that reaches its end
+                // without returning: int(1). Two things depend on it.
+                //
+                // It is what the value must be when a CONDITIONAL return is not
+                // taken — the store at the return site only runs on the path
+                // that returned. And it is the only thing that guarantees the
+                // `@g_<slot>` cell EXISTS: the cell is created by a write, and
+                // every write inside a version-guarded `if` now folds away with
+                // its branch, which left `require` loading an undefined global.
+                $stmts[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign(
+                        \Parser\Ast\Expr::arrayAccess(
+                            \Parser\Ast\Expr::variable('GLOBALS', $span0),
+                            \Parser\Ast\Expr::string($slotFor, $span0),
+                            $span0,
+                        ),
+                        \Parser\Ast\Expr::call(
+                            '__mir_to_cell',
+                            [\Parser\Ast\Expr::int(1, $span0)],
+                            $span0,
+                        ),
+                        $span0,
+                    ),
+                    $span0,
+                );
+            }
+            $eofLabel = '__mc_eof_' . (string)$i;
+            foreach (__mc_rewrite_file_returns($topStmts, $slotFor, $eofLabel) as $s) {
+                $stmts[] = $s;
+            }
+            $stmts[] = new \Parser\Ast\LabelStmt($eofLabel, $span0);
+            foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
+            foreach ($program->docComments as $d) { $docs[] = $d; }
+            continue;
+        }
+        foreach ($topStmts as $s) {
+            if (!$isEntry && $s->kind === 'Return') {
+                // Its VALUE is what `require`/`include` of this file evaluates
+                // to, and it used to be thrown away with the statement. Keep the
+                // value in a per-file global instead: the statements around it
+                // still run inline, in the same order, so nothing about when
+                // this file executes changes — only that its result survives to
+                // be read back. Written through $GLOBALS so a `require` inside
+                // any FUNCTION can reach it, not just __main's own scope.
+                if ($incSlot !== '' && $s->value !== null) {
+                    $includeSlots[$incAbs] = $incSlot;
+                    $stmts[] = \Parser\Ast\Stmt::expression(
+                        \Parser\Ast\Expr::assign(
+                            \Parser\Ast\Expr::arrayAccess(
+                                \Parser\Ast\Expr::variable('GLOBALS', $s->span),
+                                \Parser\Ast\Expr::string($incSlot, $s->span),
+                                $s->span,
+                            ),
+                            // Boxed on the way in: the slot has to hold an
+                            // array, a closure or a scalar interchangeably, and
+                            // the reader (a `require` expression) is typed cell
+                            // because nothing static covers that union. Stored
+                            // raw, an array pointer read back as its own bits.
+                            \Parser\Ast\Expr::call('__mir_to_cell', [$s->value], $s->span),
+                            $s->span,
+                        ),
+                        $s->span,
+                    );
+                }
+                continue;
+            }
             $stmts[] = $s;
         }
         foreach ($program->useAliases as $short => $fqn) { $aliases[$short] = $fqn; }
@@ -2207,6 +2921,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // ob_start() handler is a CALLABLE; the buffered BYTES live in the codegen
     // runtime instead, which is the only thing both objects can see.
     $obSrc = prelude_src_or_empty("ob.php");
+    $autoloadSrc = prelude_src_or_empty("autoload.php");
     // ext/simplexml + ext/libxml + ext/dom — DEMAND-GATED, global namespace.
     // In the prelude and not the stdlib .o for the usual reason: the .sig
     // carries functions only, so a SimpleXMLElement declared there would be
@@ -2253,6 +2968,9 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // Same definedFunctions gate: adding an ob_* function to prelude/ob.php
     // needs no second edit here.
     $useOb = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($obSrc));
+    // Same definedFunctions gate: adding a function to prelude/autoload.php
+    // enrols it automatically, no second list to keep in step.
+    $useAutoload = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($autoloadSrc));
     // `array_multisort` is DESUGARED at the call site (LowerExprs) into
     // __mc_multisort_order + __mc_multisort_apply, so the user's source never
     // names either helper and the definedFunctions gate above cannot see the
@@ -2646,6 +3364,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
         $lower->errorsSrc = $useErrors ? $errorsSrc : "";
         $lower->obSrc = $useOb ? $obSrc : "";
+        $lower->autoloadSrc = $useAutoload ? $autoloadSrc : "";
         $lower->binarySrc = $useBinary ? $binarySrc : "";
         $lower->sapiSrc = $useSapi ? $sapiSrc : "";
         $lower->sessionSrc = $useSession ? $sessionSrc : "";
@@ -2682,6 +3401,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         if ($collect !== null) { $lower->attrCollectMode = true; }
         $statT = \Compile\Stats::now();
         $module = $lower->run($module);
+        // Path → value-slot map for `require`/`include`. Set after lowering
+        // because that is when the Module exists; the map itself was built at
+        // parse-merge time, the only point that still knows which file each
+        // top-level statement came from.
+        $module->includeSlots = $includeSlots;
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         if ($collect !== null) {
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
@@ -2699,6 +3423,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $infer = new \Compile\Mir\Passes\InferTypes();
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
+        // Define the locals whose only definition is a by-ref ARGUMENT position
+        // (php's out-parameter spelling). Runs here because a MethodCall_
+        // receiver has no class before inference, and because InferTypes #2
+        // below types the inits it plants. Must follow DeadStore — a store
+        // inserted earlier would be a DSE candidate.
+        $statT = \Compile\Stats::now();
+        $module = (new \Compile\Mir\Passes\VivifyRefArgs())->run($module);
+        \Compile\Stats::step('VivifyRefArgs', $statT, \count($module->functions), -1);
         // Narrow CONCRETE, param-independent bare-`array` returns now (a literal
         // `mk(){ return ["x"=>1]; }` → assoc[string,int]) so a call-site
         // `array_filter(mk(), …)` fuses on a concrete element and its result is
@@ -2942,6 +3674,23 @@ function analyze_prelude_files(): array {
         // these, `new \Fiber(...)`, an `\Io\Poll\Context` hint, or the
         // `StreamPollHandle` handle read as unknown classes.
         "fiber.php", "io_poll.php", "async.php", "pcntl.php",
+        // Function-only prelude files. Omitting these is invisible in a normal
+        // build (they are injected on demand all the same) but makes the
+        // closed-world undefined-function rule report every one of their
+        // declarations — `array_splice`, `array_replace_recursive`,
+        // `array_walk_recursive`, `array_diff_ukey`, `var_export`, the reserved
+        // attribute classes — against code that runs correctly.
+        // `tools/audit/calibrate.sh` gates this list against `prelude/*.php`.
+        "array_fns_ext.php", "attributes.php", "backtrace_stub.php", "var_export.php",
+        "ob.php", "autoload.php", "sapi.php", "session.php",
+        // The Buffer\ and Http\ class trees, same reasoning as the demand-gated
+        // trees above: closed-world analysis must know every prelude class a
+        // user program can name.
+        "buffer.php", "http.php",
+        // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
+        // tree are prelude CLASSES, so closed-world analysis needs them for the
+        // same reason as Buffer\/Http\.
+        "xml.php", "xml_xpath.php", "xml_dom.php",
         // Same reason: PhpToken is demand-gated at compile time, but the
         // analyzer is closed-world and would read it as an unknown class.
         "tokenizer.php", "tokenizer_api.php",
@@ -2997,9 +3746,23 @@ function mir_line_to_diag(string $line, string $fileLabel): \Analyze\Diagnostic 
 }
 
 /**
- * Global-namespace stdlib function names from the bundled `.o.sig`, lowercased —
- * the analyzer's known-callable set for its undefined-function rule. Namespaced
- * internals (`Runtime\…`, `__mc_…`) are filtered: user code never names them.
+ * Stdlib function names from the bundled `.o.sig`, lowercased — the analyzer's
+ * known-callable set for its undefined-function rule.
+ *
+ * Global declarations are taken as-is. Namespaced ones are NOT simply dropped:
+ * `LowerFromAst::lowerProgram` (LowerFromAst.php:822-841) registers a bare-name
+ * alias for every namespaced extern whose bare name is unique, and
+ * `resolveCallName` (:1826) resolves an unqualified call through it. So an
+ * unqualified `strncmp()` really does bind to `Runtime\Libc\strncmp`, and the
+ * analyzer must model that or it reports a call that compiles and runs.
+ *
+ * The alias set is deliberately the SAME shape the lowering computes, including
+ * the collision rule (two namespaced decls sharing a bare name cancel each
+ * other out and no alias is registered).
+ *
+ * ⚠ Modelling this here makes the analyzer quiet about those names. Whether a
+ * given capture is CORRECT is a separate question — `tools/audit/alias_scan.php`
+ * answers it, and reports the ones that bind a raw C function under a PHP name.
  *
  * @return string[]
  */
@@ -3010,10 +3773,23 @@ function analyze_stdlib_fn_names(): array {
     if ($json === null) { return []; }
     /** @var string[] $out */
     $out = [];
+    /** @var array<string,int> $bareCount  bare name -> namespaced decls seen */
+    $bareCount = [];
+    /** @var string[] $bareNames */
+    $bareNames = [];
     try {
         foreach (Sig::declsFromJson($json) as $decl) {
-            if (\strpos($decl->name, "\\") !== false) { continue; }
-            $out[] = \strtolower($decl->name);
+            $name = $decl->name;
+            $pos = \strrpos($name, "\\");
+            if ($pos === false) { $out[] = \strtolower($name); continue; }
+            $bare = \strtolower(\substr($name, $pos + 1));
+            if (!isset($bareCount[$bare])) { $bareCount[$bare] = 0; $bareNames[] = $bare; }
+            $bareCount[$bare] = $bareCount[$bare] + 1;
+        }
+        // Only a UNIQUE bare name becomes an alias — mirrors the `isset(...) ? ''`
+        // collision guard in the lowering.
+        foreach ($bareNames as $bare) {
+            if ($bareCount[$bare] === 1) { $out[] = $bare; }
         }
     } catch (\Throwable $e) {
         // A malformed sig just yields no stdlib names (rule stays conservative).

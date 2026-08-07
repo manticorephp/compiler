@@ -228,6 +228,7 @@ trait EmitLlvmGenerator
         // ── resume ──
         $this->locals->slots = [];
         $this->locals->refLocals = [];
+        $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
@@ -323,6 +324,12 @@ trait EmitLlvmGenerator
             // slots (reloaded at the depth-restore points).
             $tc->genDepthSlot = \count($locals);
             $locals["@try.d." . (string)$tc->genDepthSlot] = \count($locals);
+            // The backtrace snapshot needs a cell for the same reason, and
+            // unconditionally like the depth one: it is written where the `try`
+            // sits and read in the catch landing pad, so an inline alloca is
+            // bypassed by the resume switch exactly the same way.
+            $tc->genBtSlot = \count($locals);
+            $locals["@try.bt." . (string)$tc->genBtSlot] = \count($locals);
             if ($tc->hasFinally) {
                 $tc->genOuterSlot = \count($locals);
                 $locals["@try.o." . (string)$tc->genOuterSlot] = \count($locals);

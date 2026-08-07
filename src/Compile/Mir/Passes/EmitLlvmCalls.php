@@ -623,6 +623,18 @@ trait EmitLlvmCalls
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
+            if ($hasSpread && $this->anyRefParam($fname)) {
+                // This arm's callee takes a parameter by reference, and a spread
+                // supplies it from array ELEMENTS — there is no caller variable
+                // to bind, so the write would land in a temporary and vanish.
+                // Refuse in the arm rather than module-wide: the refusal then
+                // costs only the program that actually dispatches here.
+                $out .= $this->emitNamedFatal('PHP Fatal error:  cannot pass a spread element by reference to '
+                    . $fname . '()');
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+                continue;
+            }
             if ($hasSpread) {
                 // Build the call directly: fixed prefix from the hoisted regs,
                 // the rest read from the spread array (element k → param
@@ -866,6 +878,32 @@ trait EmitLlvmCalls
         $capCnt = $known ? ($this->closureCaptures[$fn] ?? 0) : 0;
         $calleeParams = $known ? ($this->sigs->paramTypes[$fn] ?? []) : [];
         $calleeRefs = $known ? ($this->sigs->refParams[$fn] ?? []) : [];
+        // ── the DYNAMIC by-ref mask ──
+        // A `\Closure`-typed callee has no static mask, so until now every
+        // argument crossed by value — while the callee, which knows its own
+        // params, unconditionally DEREFERENCES a by-ref one. symfony/cache's
+        // `(self::$mergeByLifetime)(…, $expiredIds, …)` is exactly that shape.
+        // The mask cannot ride in the closure value (its negative header is
+        // fully spoken for by the env lifetime words, and a CAPTURELESS closure
+        // has no header at all), so recover it from what the struct does carry:
+        // the fn ptr in slot 0, compared against the module's own closures.
+        // `closureRefUnion` gates the whole thing — it is 0 for any program
+        // without a by-ref closure param, and then nothing below is emitted.
+        $dynMask = '';
+        $dynFp = '';
+        $refGate = 0;
+        $dynReboxSlots = [];
+        $dynReboxTmps = [];
+        $dynReboxBits = [];
+        if (!$known) {
+            $refGate = $this->closureRefGate(\count($iv->args));
+            if ($refGate !== 0) {
+                $dynFp = $this->ssa->allocReg();
+                $out .= '  ' . $dynFp . ' = load i64, ptr ' . $struct . "\n";
+                $out .= $this->closureRefMaskChain($dynFp);
+                $dynMask = $this->lastValue;
+            }
+        }
         // A `...$arr` spread into a DYNAMIC closure (concrete __closure_N lost ⇒
         // arity unknown, e.g. a `callable`/`\Closure` param): the fixed-arity
         // fill below can't apply. Route to a trampoline that switches on the
@@ -942,6 +980,23 @@ trait EmitLlvmCalls
                 $pi = $pi + 1;
                 continue;
             }
+            // A DYNAMIC callee whose slot $pi some closure declares by-ref: the
+            // operand has to be able to be either. Both are materialized and a
+            // `select` on the runtime mask bit picks one — a branch would buy
+            // nothing, since the value operand must be computed regardless (an
+            // argument is evaluated exactly once, `$f($i++)` included).
+            if ($dynMask !== '' && ($refGate & (1 << $pi)) !== 0) {
+                $out .= $this->emitDynByRefArg($a, $dynMask, $pi);
+                $argList .= ', i64 ' . $this->lastValue;
+                $argTypes .= ', i64';
+                if ($this->dynRefTmp !== '') {
+                    $dynReboxSlots[] = $this->dynRefSlot;
+                    $dynReboxTmps[] = $this->dynRefTmp;
+                    $dynReboxBits[] = $this->dynRefBit;
+                }
+                $pi = $pi + 1;
+                continue;
+            }
             $out .= $this->emitNode($a);
             $pt = $calleeParams[$capCnt + $pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
@@ -964,21 +1019,125 @@ trait EmitLlvmCalls
             $argTypes .= ', i64';
             $pi = $pi + 1;
         }
+        // The closure invoke pushes on ARITY, not on identity: a known callee is
+        // asked directly, and for a dynamic one no target name exists at this
+        // site, so the channel is armed whenever the module has any func-args
+        // callee at all. {@see EmitLlvm::faPop} makes over-arming safe.
+        $faN = \count($iv->args);
+        $out .= $known
+            ? $this->faPush($fn, $faN)
+            : ($this->rt->needsFuncArgs
+                ? '  store i64 ' . (string)$faN . ", ptr @__mir_fa_argc\n" : '');
         $reg = $this->ssa->allocReg();
+        $fpReg = '';
         if ($known) {
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList . ")\n";
         } else {
             // Dynamic dispatch: load the fn ptr from struct slot 0 and call
             // indirectly (the callee is a `Closure`-typed value whose
             // concrete __closure_N isn't known statically).
-            $fpi = $this->ssa->allocReg();
-            $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
+            $fpi = $dynFp;
+            if ($fpi === '') {
+                $fpi = $this->ssa->allocReg();
+                $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
+            }
+            $fpReg = $fpi;
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
         }
+        $out .= $this->faPop();
+        $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // A by-REFERENCE closure returns the ADDRESS of an lvalue rather than a
+        // value ({@see EmitLlvmModule::emitReturn} takes byRefAddrOf BEFORE the
+        // uniform-ABI boxing). Under `rawRefCall` — a `$r = &$c()` binding —
+        // that address IS the result; in value context it has to be deref'd
+        // once. A KNOWN callee answers from its sig; a dynamic one is decided at
+        // run time from its fn pointer, exactly as the by-ref PARAM mask is
+        // ({@see closureRefMaskChain}, and sharing its module-local limit).
+        $refRet = $known ? (bool)($this->sigs->returnsByRef[$fn] ?? false) : false;
+        $dynRef = !$known && $fpReg !== '' && $this->anyClosureReturnsByRef();
+        if ($refRet) {
+            if ($this->rawRefCall) { return $out; }
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($d);
+            $this->lastValue = $d;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($dynRef) {
+            $out .= $this->closureReturnsByRefChain($fpReg);
+            $isRef = $this->lastValue;
+            if ($this->rawRefCall) {
+                // The binding needs an address either way. A callee that does
+                // NOT return by reference yields a value, and php's answer there
+                // is a COPY — spill it so the alias points at a private slot
+                // instead of at whatever the value's bits would address.
+                $sp = $this->ssa->allocReg();
+                $out .= '  ' . $sp . " = alloca i64\n";
+                $out .= '  store i64 ' . $reg . ', ptr ' . $sp . "\n";
+                $spI = $this->ssa->allocReg();
+                $out .= '  ' . $spI . ' = ptrtoint ptr ' . $sp . " to i64\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $isRef . ', i64 ' . $reg
+                      . ', i64 ' . $spI . "\n";
+                $this->lastValue = $sel;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            // Value context: only the by-ref arm may dereference — the other
+            // arm's word is a plain value and inttoptr'ing it would fault.
+            $dL = $this->ssa->allocLabel('rr.deref');
+            $vL = $this->ssa->allocLabel('rr.val');
+            $eL = $this->ssa->allocLabel('rr.end');
+            // Joined through a SLOT, not a phi: the retain below opens basic
+            // blocks of its own, so `%rr.deref` is not the predecessor that
+            // reaches the join and a phi naming it would be invalid IR.
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  br i1 ' . $isRef . ', label %' . $dL . ', label %' . $vL . "\n";
+            $out .= $dL . ":\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($d);
+            $out .= '  store i64 ' . $d . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $eL . "\n";
+            $out .= $vL . ":\n";
+            // The uniform-ABI unbox belongs to THIS arm only: a by-ref return
+            // never went through boxToCell, so unboxing the joined value would
+            // corrupt the other one.
+            $vv = $reg;
+            if ($unboxResult && $this->isCellScalarParam($n->type)) {
+                $this->lastValue = $reg;
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType($n->type);
+                $out .= $this->coerceToI64();
+                $vv = $this->lastValue;
+            }
+            $out .= '  store i64 ' . $vv . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $eL . "\n";
+            $out .= $eL . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            if ($n->type->kind === Type::KIND_FLOAT) {
+                $rf = $this->ssa->allocReg();
+                $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
+                $this->lastValue = $rf;
+                $this->lastValueType = 'double';
+            }
+            return $out;
+        }
         // The closure returned a scalar as a tagged cell (uniform ABI). Unbox
         // to the invoke's static type — a known closure types it from the sig
         // (string/int/float/…); a dynamic one is cell ({@see inferInvoke}) and
@@ -986,6 +1145,472 @@ trait EmitLlvmCalls
         if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
+        return $out;
+    }
+
+    /**
+     * Does ANY closure in this module return by reference? The compile-time
+     * gate on the runtime chain below — 0 means every invoke is emitted exactly
+     * as it always was, so a program without `fn &()` pays nothing.
+     */
+    private function anyClosureReturnsByRef(): bool
+    {
+        foreach ($this->closureCaptures as $cname => $unused) {
+            if ($this->sigs->returnsByRef[$cname] ?? false) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * i1 in `lastValue`: does the closure at `$fpReg` return by reference?
+     * The exact analogue of {@see closureRefMaskChain}, and it shares that
+     * method's documented limit — the chain sees only THIS module's closures,
+     * so a by-ref closure built inside `manticore_stdlib.o` answers false and
+     * keeps today's by-value behaviour rather than being papered over.
+     */
+    private function closureReturnsByRefChain(string $fpReg): string
+    {
+        $out = '';
+        $cur = 'false';
+        foreach ($this->closureCaptures as $cname => $unused) {
+            if (!($this->sigs->returnsByRef[$cname] ?? false)) { continue; }
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpReg
+                  . ', ptrtoint (ptr @manticore_' . $this->mangle($cname) . " to i64)\n";
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $eq . ', ' . $cur . "\n";
+            $cur = $or;
+        }
+        $this->lastValue = $cur;
+        $this->lastValueType = 'i1';
+        return $out;
+    }
+
+    /**
+     * The by-ref union restricted to a call of `$argc` arguments — the
+     * compile-time gate on the dynamic by-ref machinery. 0 means the module
+     * declares no by-ref closure parameter this call could ever reach, and the
+     * invoke is emitted exactly as it always was.
+     */
+    private function closureRefGate(int $argc): int
+    {
+        if ($argc <= 0) { return 0; }
+        if ($argc > 62) { return $this->sigs->closureRefUnion; }
+        return $this->sigs->closureRefUnion & ((1 << $argc) - 1);
+    }
+
+    /**
+     * Recover a dynamic closure's by-ref mask from its fn ptr: a chain of
+     * `select`s over the module's closures that declare one. Leaves the mask in
+     * `lastValue`; an unrecognised pointer yields 0, i.e. today's all-by-value
+     * behaviour.
+     *
+     * ⚠ The chain sees only THIS module's closures. A closure built inside
+     * `manticore_stdlib.o` and invoked from user code answers 0 — prelude
+     * bodies are emitted into the consumer's module (so `array_walk`-shaped
+     * callbacks are covered), but a stdlib function that RETURNS a closure with
+     * a by-ref parameter is not. Recorded as an audit limit, not papered over.
+     */
+    private function closureRefMaskChain(string $fpReg): string
+    {
+        $out = '';
+        $cur = '0';
+        foreach ($this->closureCaptures as $cname => $capCnt) {
+            $mask = $this->closureOwnRefMask($cname, $capCnt);
+            if ($mask === 0) { continue; }
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpReg
+                  . ', ptrtoint (ptr @manticore_' . $this->mangle($cname) . " to i64)\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $eq . ', i64 ' . (string)$mask
+                  . ', i64 ' . $cur . "\n";
+            $cur = $sel;
+        }
+        $this->lastValue = $cur;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Scratch out-params of {@see emitByRefCellUnboxArg} / {@see
+     *  emitByRefCellBoxArg} (self-host has no list-destructure return;
+     *  mirrors {@see EmitLlvm::$classIdReg}). */
+    private string $refBoxSlot = '';
+    private string $refBoxTmp = '';
+
+
+    /**
+     * Box a concrete lvalue into a scratch slot and hand the callee that slot's
+     * address; {@see emitByRefCellUnboxBack} translates it back afterwards.
+     */
+    private function emitByRefCellBoxArg(Node $a): string
+    {
+        $out = $this->byRefAddrOf($a);
+        $slotAddr = $this->lastValue;
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
+        $this->lastValue = $cv;
+        $this->lastValueType = 'i64';
+        $out .= $this->boxToCell($a->type);
+        $tmp = $this->ssa->allocReg();
+        $out .= '  ' . $tmp . " = alloca i64\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+        $taddr = $this->ssa->allocReg();
+        $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        $this->refBoxSlot = $slotAddr;
+        $this->refBoxTmp = $tmp;
+        $this->lastValue = $taddr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Unbox each scratch slot from {@see emitByRefCellBoxArg} back into the
+     * caller's concrete slot. Read back, never assumed unchanged.
+     *
+     * @param string[] $slots
+     * @param string[] $tmps
+     * @param Type[]   $types
+     */
+    private function emitByRefCellUnboxBack(array $slots, array $tmps, array $types): string
+    {
+        $out = '';
+        $bi = 0;
+        foreach ($tmps as $tmp) {
+            $t = $types[$bi];
+            $rv = $this->ssa->allocReg();
+            $out .= '  ' . $rv . ' = load i64, ptr ' . $tmp . "\n";
+            $this->lastValue = $rv;
+            $this->lastValueType = 'i64';
+            if ($t->isArray()) {
+                $out .= $this->emitCellArrayToTyped($t);
+            } else {
+                $out .= $this->unboxCellToType($t);
+            }
+            $out .= $this->coerceToI64();
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sp . "\n";
+            $bi = $bi + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * A CELL lvalue bound to a RAW-payload by-ref parameter, for the METHOD /
+     * STATIC / CTOR call paths — the free-function path has had this since the
+     * `sort()`-through-a-mixed-slot fix, and the object paths never grew it.
+     *
+     * It is what a vivified out-variable needs: the fresh slot is a cell (only
+     * a cell can carry both php's NULL and whatever the callee assigns), while
+     * the callee's `?array &$out` parameter is erased and rides raw. Handing
+     * over the cell slot directly makes the callee dereference the tag bits —
+     * `$obj->fill(1, $undefined)` printed `float(6.36E-314)`.
+     *
+     * Leaves the scratch address in `lastValue` and the caller-slot / scratch
+     * pair in {@see $refBoxSlot} / {@see $refBoxTmp} for the post-call rebox.
+     */
+    private function emitByRefCellUnboxArg(Node $a): string
+    {
+        $out = $this->byRefAddrOf($a);
+        $slotAddr = $this->lastValue;
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
+        $raw = $this->ssa->allocReg();
+        $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+        $tmp = $this->ssa->allocReg();
+        $out .= '  ' . $tmp . " = alloca i64\n";
+        $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
+        $taddr = $this->ssa->allocReg();
+        $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        $this->refBoxSlot = $slotAddr;
+        $this->refBoxTmp = $tmp;
+        $this->lastValue = $taddr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Re-box every scratch slot from {@see emitByRefCellUnboxArg} back into the
+     * caller's cell slot after the call. The value is READ BACK, never assumed
+     * unchanged — that is the whole point of a by-ref parameter. Boxed as
+     * `vec[cell]` for the same reason the free-function path does: a concrete
+     * element type would make `boxToCell` REBUILD the array and break the
+     * aliasing the caller expects.
+     *
+     * @param string[] $slots
+     * @param string[] $tmps
+     */
+    private function emitByRefCellRebox(array $slots, array $tmps): string
+    {
+        $out = '';
+        $bi = 0;
+        foreach ($tmps as $tmp) {
+            $rv = $this->ssa->allocReg();
+            $out .= '  ' . $rv . ' = load i64, ptr ' . $tmp . "\n";
+            $this->lastValue = $rv;
+            $this->lastValueType = 'i64';
+            $out .= $this->boxToCell(Type::vec(Type::cell()));
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sp . "\n";
+            $bi = $bi + 1;
+        }
+        return $out;
+    }
+
+    /** Does `$fname` declare any parameter by reference? */
+    private function anyRefParam(string $fname): bool
+    {
+        foreach ($this->sigs->refParams[$fname] ?? [] as $r) {
+            if ($r) { return true; }
+        }
+        return false;
+    }
+
+    /** Bit `i` ⟺ closure `$cname`'s CALL slot `i` (params past the captures) is by-ref. */
+    private function closureOwnRefMask(string $cname, int $capCnt): int
+    {
+        $refs = $this->sigs->refParams[$cname] ?? [];
+        $mask = 0;
+        $slot = 0;
+        $np = \count($refs);
+        for ($pi = $capCnt; $pi < $np; $pi++) {
+            if ($refs[$pi] && $slot <= 62) { $mask = $mask | (1 << $slot); }
+            $slot = $slot + 1;
+        }
+        return $mask;
+    }
+
+    /**
+     * One argument at a call slot some closure declares by-ref, for a callee
+     * only known at run time: the value operand and the address operand, joined
+     * by a `select` on the mask bit.
+     *
+     * Only a SIDE-EFFECT-FREE address qualifies — a local's slot, or a property
+     * GEP. `$a[$k]` is refused instead: taking an element's address VIVIFIES a
+     * missing key, and doing that unconditionally would add a key php never
+     * creates whenever the mask bit turns out to be 0. A named compile error is
+     * the honest answer; a silently mutated array is not.
+     */
+    private function emitDynByRefArg(Node $a, string $maskReg, int $pi): string
+    {
+        $this->dynRefSlot = '';
+        $this->dynRefTmp = '';
+        $this->dynRefBit = '';
+        $out = $this->emitNode($a);
+        if ($this->isCellBoxableArg($a->type)) {
+            $out .= $this->boxToCell($a->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $val = $this->lastValue;
+
+        $pure = ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->slots[$a->name]))
+            || ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$a->name]))
+            || ($a->kind === Node::KIND_PROPERTY_ACCESS && $this->isByRefAddressable($a));
+        if (!$pure) {
+            if ($this->isByRefAddressable($a)) {
+                // `$a[$k]` at a slot some closure declares by-ref. Its address
+                // can be taken, but not for free: `__mir_array_ref_slot`
+                // VIVIFIES a missing key, so computing it unconditionally would
+                // add an element php never creates whenever the runtime mask
+                // turns out to be 0. Branch instead of `select` — the address
+                // is then only materialised on the path that actually needs it.
+                //
+                // ⛔ Refusing at COMPILE time was tried and is the third time
+                // that answer proved too broad: it stopped a whole tier-2 build
+                // over a call whose callee takes nothing by reference.
+                $slot = $this->ssa->allocReg();
+                $out .= '  ' . $slot . " = alloca i64\n";
+                $out .= $this->dynByRefBit($maskReg, $pi);
+                $isRef = $this->lastIsRef;
+                $refL = $this->ssa->allocLabel('dynref.take');
+                $valL = $this->ssa->allocLabel('dynref.val');
+                $joinL = $this->ssa->allocLabel('dynref.join');
+                $out .= '  br i1 ' . $isRef . ', label %' . $refL . ', label %' . $valL . "\n";
+                $out .= $refL . ":\n";
+                $out .= $this->byRefAddrOf($a);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $valL . ":\n";
+                $out .= '  store i64 ' . $val . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $joinL . ":\n";
+                $op = $this->ssa->allocReg();
+                $out .= '  ' . $op . ' = load i64, ptr ' . $slot . "\n";
+                $this->lastValue = $op;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            // Not an lvalue at all — php refuses to bind one to a by-ref param,
+            // and the known-closure path already backs it with a throwaway slot.
+            $tmp = $this->ssa->allocReg();
+            $out .= '  ' . $tmp . " = alloca i64\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $tmp . "\n";
+            $addrT = $this->ssa->allocReg();
+            $out .= '  ' . $addrT . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+            $out .= $this->dynByRefSelect($maskReg, $pi, $addrT, $val);
+            return $out;
+        }
+        $out .= $this->byRefAddrOf($a);
+        $addr = $this->lastValue;
+        // A CELL lvalue cannot be handed over as-is: the callee stores a RAW
+        // value through the reference and the tag bits would be gone. Same
+        // scratch-and-rebox contract the static paths use — except the decision
+        // is a RUNTIME bit here, so the write-back is a `select` too, leaving
+        // the caller's slot untouched when the callee took the value.
+        if ($a->type->kind === Type::KIND_CELL) {
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $cv = $this->ssa->allocReg();
+            $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
+            $raw = $this->ssa->allocReg();
+            $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $tmp = $this->ssa->allocReg();
+            $out .= '  ' . $tmp . " = alloca i64\n";
+            $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
+            $taddr = $this->ssa->allocReg();
+            $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+            $out .= $this->dynByRefSelect($maskReg, $pi, $taddr, $val);
+            $this->dynRefSlot = $addr;
+            $this->dynRefTmp = $tmp;
+            $this->dynRefBit = $this->lastIsRef;
+            return $out;
+        }
+        // A CONCRETE lvalue cannot receive what a dynamic callee writes: the
+        // callee may replace the array wholesale — `$pre = ['stale']` handed to
+        // `fn (&$out) => $out = [1, 2]` leaves ints in a slot still typed
+        // `vec[string]`, and the next read walks them as pointers.
+        //
+        // Refusing at COMPILE time was tried and is far too broad: the union
+        // only says "some closure declares slot $pi by-ref", so an unrelated
+        // `array_diff_ukey($a, $b, 'strcasecmp')` comparator was rejected. Trap
+        // on the runtime bit instead — it fires only when THIS callee really
+        // does take the argument by reference, and it fires BEFORE the call, so
+        // nothing has happened yet.
+        $out .= $this->dynByRefTypedGuard($maskReg, $pi, $a->type);
+        $this->lastValue = $val;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Named fatal when the runtime mask binds `$pi` by reference but the
+     *  caller's variable is concretely typed. {@see emitDynByRefArg} */
+    private function dynByRefTypedGuard(string $maskReg, int $pi, Type $t): string
+    {
+        $sh = $this->ssa->allocReg();
+        $out = '  ' . $sh . ' = lshr i64 ' . $maskReg . ', ' . (string)$pi . "\n";
+        $bit = $this->ssa->allocReg();
+        $out .= '  ' . $bit . ' = and i64 ' . $sh . ", 1\n";
+        $isRef = $this->ssa->allocReg();
+        $out .= '  ' . $isRef . ' = icmp ne i64 ' . $bit . ", 0\n";
+        $trapL = $this->ssa->allocLabel('dynref.typed');
+        $okL = $this->ssa->allocLabel('dynref.ok');
+        $out .= '  br i1 ' . $isRef . ', label %' . $trapL . ', label %' . $okL . "\n";
+        $out .= $trapL . ":\n";
+        $out .= $this->emitNamedFatal('PHP Fatal error:  cannot bind argument '
+            . (string)($pi + 1) . ' of a dynamic closure call by reference: the variable is typed '
+            . $t->toString() . '; initialise it to null first');
+        $out .= '  br label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        return $out;
+    }
+
+    /**
+     * An argument for a dynamic call that passes BY VALUE but may reach a
+     * by-ref parameter — `Closure::call($obj, …)`, whose own signature is
+     * `mixed ...$args`, so php copies before forwarding and merely warns
+     * "must be passed by reference, value given".
+     *
+     * The callee still DEREFERENCES such a parameter unconditionally, so a
+     * plain value crashes it. Back the value with a throwaway slot and select
+     * its address when the runtime mask says by-ref: the callee's write lands
+     * in the temporary and is discarded, which is exactly php's outcome.
+     */
+    private function emitDynByRefValueArg(Node $a, string $maskReg, int $pi): string
+    {
+        $out = $this->emitNode($a);
+        if ($this->isCellBoxableArg($a->type)) {
+            $out .= $this->boxToCell($a->type);
+        } else {
+            $out .= $this->coerceToI64();
+        }
+        $val = $this->lastValue;
+        $tmp = $this->ssa->allocReg();
+        $out .= '  ' . $tmp . " = alloca i64\n";
+        $out .= '  store i64 ' . $val . ', ptr ' . $tmp . "\n";
+        $addr = $this->ssa->allocReg();
+        $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        return $out . $this->dynByRefSelect($maskReg, $pi, $addr, $val);
+    }
+
+    /** Scratch out-params of {@see emitDynByRefArg} ('' when no rebox is due). */
+    private string $dynRefSlot = '';
+    private string $dynRefTmp = '';
+    private string $dynRefBit = '';
+    /** The `%isref` predicate {@see dynByRefSelect} just produced. */
+    private string $lastIsRef = '';
+
+    /**
+     * Re-box each cell lvalue the dynamic by-ref path spilled, but only where
+     * the runtime mask actually said by-reference — a `select` against the
+     * slot's current value, so a by-VALUE slot is written back unchanged.
+     *
+     * @param string[] $slots
+     * @param string[] $tmps
+     * @param string[] $bits
+     */
+    private function emitDynByRefRebox(array $slots, array $tmps, array $bits): string
+    {
+        $out = '';
+        $bi = 0;
+        foreach ($tmps as $tmp) {
+            $rv = $this->ssa->allocReg();
+            $out .= '  ' . $rv . ' = load i64, ptr ' . $tmp . "\n";
+            $this->lastValue = $rv;
+            $this->lastValueType = 'i64';
+            $out .= $this->boxToCell(Type::vec(Type::cell()));
+            $boxed = $this->lastValue;
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
+            $cur = $this->ssa->allocReg();
+            $out .= '  ' . $cur . ' = load i64, ptr ' . $sp . "\n";
+            $pick = $this->ssa->allocReg();
+            $out .= '  ' . $pick . ' = select i1 ' . $bits[$bi] . ', i64 ' . $boxed
+                  . ', i64 ' . $cur . "\n";
+            $out .= '  store i64 ' . $pick . ', ptr ' . $sp . "\n";
+            $bi = $bi + 1;
+        }
+        return $out;
+    }
+
+    /** `(mask >> $pi) & 1 != 0` — leaves the predicate in {@see $lastIsRef}. */
+    private function dynByRefBit(string $maskReg, int $pi): string
+    {
+        $sh = $this->ssa->allocReg();
+        $out = '  ' . $sh . ' = lshr i64 ' . $maskReg . ', ' . (string)$pi . "\n";
+        $bit = $this->ssa->allocReg();
+        $out .= '  ' . $bit . ' = and i64 ' . $sh . ", 1\n";
+        $isRef = $this->ssa->allocReg();
+        $out .= '  ' . $isRef . ' = icmp ne i64 ' . $bit . ", 0\n";
+        $this->lastIsRef = $isRef;
+        return $out;
+    }
+
+    /** `select (mask >> $pi) & 1, $addr, $val` — leaves the operand in lastValue. */
+    private function dynByRefSelect(string $maskReg, int $pi, string $addr, string $val): string
+    {
+        $out = $this->dynByRefBit($maskReg, $pi);
+        $isRef = $this->lastIsRef;
+        $op = $this->ssa->allocReg();
+        $out .= '  ' . $op . ' = select i1 ' . $isRef . ', i64 ' . $addr . ', i64 ' . $val . "\n";
+        $this->lastIsRef = $isRef;
+        $this->lastValue = $op;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
@@ -1006,6 +1631,60 @@ trait EmitLlvmCalls
         if ($spreadPos !== \count($args) - 1) {
             throw new \RuntimeException('only a single trailing spread into a dynamic closure is supported');
         }
+        // A spread builds each arity arm's argument list directly, so the
+        // by-ref `select` the fixed-arity path uses has nowhere to go — and the
+        // arity a slot lands on is itself a runtime value, so the mask cannot
+        // even be indexed. Refuse AT RUN TIME if the callee turns out to declare
+        // a by-ref parameter; silently passing its value would drop the write.
+        // Gated on the union, so a program without one pays nothing.
+        if ($this->sigs->closureRefUnion !== 0) {
+            $out = $this->emitDynSpreadRefGuard($struct);
+            return $out . $this->emitDynClosureSpreadBody($struct, $args, $spreadPos, $retType);
+        }
+        return $this->emitDynClosureSpreadBody($struct, $args, $spreadPos, $retType);
+    }
+
+    /**
+     * Trap if the dynamic closure about to receive a spread declares any by-ref
+     * parameter. A named fatal beats a lost mutation.
+     */
+    private function emitDynSpreadRefGuard(string $struct): string
+    {
+        $fp = $this->ssa->allocReg();
+        $out = '  ' . $fp . ' = load i64, ptr ' . $struct . "\n";
+        $out .= $this->closureRefMaskChain($fp);
+        $mask = $this->lastValue;
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ne i64 ' . $mask . ", 0\n";
+        $trapL = $this->ssa->allocLabel('dynspread.byref');
+        $okL = $this->ssa->allocLabel('dynspread.ok');
+        $out .= '  br i1 ' . $bad . ', label %' . $trapL . ', label %' . $okL . "\n";
+        $out .= $trapL . ":\n";
+        $out .= $this->emitNamedFatal(
+            'PHP Fatal error:  by-ref parameter through a spread into a dynamic closure is unsupported');
+        $out .= '  br label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        return $out;
+    }
+
+    /**
+     * Write `$msg` to stderr and exit 255. The message goes through the string
+     * pool (its data pointer is NUL-terminated for exactly this kind of libc
+     * interop) and doubles as the `dprintf` format — it carries no `%`.
+     */
+    private function emitNamedFatal(string $msg): string
+    {
+        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        $this->libcExtra['exit'] = 'declare void @exit(i32)';
+        $id = $this->pool->intern($msg . "\n");
+        $out = '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ' . $this->strLitId($id) . ")\n";
+        $out .= "  call void @exit(i32 255)\n";
+        return $out;
+    }
+
+    /** @param Node[] $args */
+    private function emitDynClosureSpreadBody(string $struct, array $args, int $spreadPos, Type $retType): string
+    {
         $maxArity = 10;
         $numFixed = $spreadPos;
         $out = '';
@@ -1454,6 +2133,39 @@ trait EmitLlvmCalls
         $c = $n;
         $b = $this->emitBuiltin($c);
         if ($b !== null) { return $b; }
+        // Nothing will define this symbol, so php's runtime
+        // `Error: Call to undefined function f()` is the answer — raised when
+        // the call is reached, which for symfony/cache's `apcu_add` behind an
+        // `extension_loaded('apcu')` guard is never. Emitting the call anyway
+        // put an undefined symbol in the module and clang killed the build,
+        // strictly stricter than php.
+        //
+        // Asked HERE, and asked of {@see definedFns}, because that is the
+        // linker's own question answered by the linker's own table: every
+        // function the module defines PLUS every declare-only extern a linked
+        // library's `.sig` brought in, filled by the pre-pass above before any
+        // body is emitted. Everything the emitter inlines has already returned
+        // from emitBuiltin one line up, so the runtime plumbing never reaches
+        // this test.
+        //
+        // The first attempt asked `functionIsKnown` at LOWERING instead, and it
+        // was wrong four different ways: that predicate answers what
+        // `function_exists` must report, which by design differs from what
+        // links (HIDDEN_FNS links while reporting absent; `__mir_*`/`__mc_*` are
+        // hidden but called from the prelude; `fn_to_ptr` is an emitter builtin
+        // in none of the name tables; and a stdlib name lowered inside GENERATED
+        // prelude source has no fnDecl yet). It also poisoned lib/*.o with throw
+        // stubs that outlived the source fix by a generation.
+        if (!isset($this->definedFns[$this->mangle($c->function)])) {
+            $thr = new Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst(
+                    'Call to undefined function ' . \ltrim($c->function, '\\') . '()',
+                    Type::string_())],
+                Type::cell(),
+            );
+            return $this->emitBuiltin($thr) ?? '';
+        }
         $out = $this->deprecatedFnDiag($c);
         $argList = '';
         $first = true;
@@ -1482,7 +2194,11 @@ trait EmitLlvmCalls
         // dead once the call returns. Parallel reg/flavor arrays.
         $rcArgRegs = [];
         $rcArgFlavs = [];
-        foreach ($c->args as $a) {
+        // A func-args callee's surplus arguments ride the overflow channel, so
+        // they must not also ride the call — the callee has no parameter for
+        // them and the emitted call would not match its `declare`.
+        $callArgs = $this->faCallArgs($c->function, $c->args);
+        foreach ($callArgs as $a) {
             // Argument unpacking `f(...$arr)`: expand the array into the callee's
             // remaining positional params (arr[0], arr[1], …). Fixed-arity; the
             // element values pass raw (matches int/string/cell params).
@@ -1636,6 +2352,7 @@ trait EmitLlvmCalls
             if ($bs !== false) { $btName = \substr($btName, $bs + 1); }
             $out .= $this->btPush($btName, $n->line);
         }
+        $out .= $this->faPush($c->function, $c->srcArgc, $c->args);
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
@@ -1681,6 +2398,8 @@ trait EmitLlvmCalls
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($dv);
             $this->lastValue = $dv;
             $reg = $dv;
         }

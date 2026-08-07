@@ -105,6 +105,69 @@ trait LowerTypes
         return $this->lowerTypeHint($eff)->eraseTypeVars();
     }
 
+    /**
+     * Split a type hint on its TOP-LEVEL `|` only.
+     *
+     * Depth matters: `array<int, string|null>` and `callable(A|B): C` carry a
+     * `|` that belongs to an inner type, and splitting there would invent arms
+     * that do not exist.
+     *
+     * @return string[]
+     */
+    private function topLevelUnionArms(string $hint): array
+    {
+        $arms = [];
+        $depth = 0;
+        $cur = '';
+        $n = \strlen($hint);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $c = $hint[$i];
+            if ($c === '<' || $c === '(' || $c === '[') { $depth = $depth + 1; }
+            elseif ($c === '>' || $c === ')' || $c === ']') { $depth = $depth - 1; }
+            if ($c === '|' && $depth === 0) { $arms[] = \trim($cur); $cur = ''; continue; }
+            $cur = $cur . $c;
+        }
+        $arms[] = \trim($cur);
+        return $arms;
+    }
+
+    /**
+     * The single non-null arm of a `T|null` / `null|T` union, or null when the
+     * hint is not that shape. `A|B|null` has two live arms and stays a cell —
+     * there is no one class to dispatch on.
+     */
+    private function nullableUnionArm(string $hint): ?string
+    {
+        $arms = $this->topLevelUnionArms($hint);
+        if (\count($arms) !== 2) { return null; }
+        $a0 = \strtolower(\ltrim($arms[0], '\\'));
+        $a1 = \strtolower(\ltrim($arms[1], '\\'));
+        $live = null;
+        if ($a1 === 'null' && $a0 !== 'null' && $arms[0] !== '') { $live = $arms[0]; }
+        elseif ($a0 === 'null' && $a1 !== 'null' && $arms[1] !== '') { $live = $arms[1]; }
+        if ($live === null) { return null; }
+        // A nullable CONTAINER keeps its old cell lowering. `string[]|null` and
+        // `array<string,mixed>|null` never matched isArrayUnion — that wants
+        // EVERY arm to be an array and `null` is not — so they fell through to a
+        // cell, and the tree is built on that. Collapsing them to `?string[]`
+        // hands back a raw array pointer where a null still has to be
+        // representable.
+        //
+        // This is what broke async TLS, and it took a single-variable rebuild to
+        // see: of the fifteen hints the collapse fires on tree-wide, TWELVE are
+        // containers and five of those sit in Runtime/Stdlib/Net.php. The three
+        // that remain — ReflectionNamedType|null, ReflectionMethod|null,
+        // string|null — are exactly the cases the fix exists for.
+        if ($this->looksLikeArrayElemType($live)) { return null; }
+        // A CALLABLE SIGNATURE arm does not survive the round trip either: the
+        // collapse re-lowers as `?<arm>`, and lowerCallableSignature — which runs
+        // BEFORE the union branch — does not recognise its own syntax behind a
+        // leading `?`. src/Cli/Command.php spells its handler field
+        // `\Closure(array<int, string>): int | null`.
+        if (\strpos($live, '(') !== false) { return null; }
+        return $live;
+    }
+
     /** True if `$hint` is a union (`a|b|…`) whose every arm is an ARRAY shape
      *  (`X[]` or `array<…>`) — e.g. `int[]|float[]`, `string[]|int[]`. */
     private function isArrayUnion(string $hint): bool
@@ -163,6 +226,19 @@ trait LowerTypes
         // (InferTypes), so e.g. array_sum's float specialization returns a raw
         // double instead of a mantissa-truncating box_float.
         if (\strpos($hint, '|') > 0) {
+            // `S|null` IS `?S` — php treats the two spellings as one type. Only
+            // the shorthand was modelled, so the union spelling fell through to
+            // a plain cell and the class was gone: `(string)$x` on a value from
+            // a `S|null` method emitted the raw pointer because toStringClassOf
+            // saw no class, `get_debug_type` said `object`, and
+            // `method_exists($x, '__toString')` read false — while the RUNTIME
+            // object was intact all along (get_class and instanceof both right).
+            //
+            // prelude/reflection.php spells every one of its optional returns
+            // this way (`ReflectionNamedType|null`), which is how a
+            // compiler-wide type bug surfaced as "reflection is broken".
+            $arm = $this->nullableUnionArm($hint);
+            if ($arm !== null) { return $this->lowerTypeHint('?' . $arm); }
             // A union whose every arm is an ARRAY shape (`int[]|float[]`,
             // `string[]|int[]`) is still an ARRAY, not a scalar cell — lower it
             // to an erased `vec[unknown]` so call-site element inference /
@@ -404,6 +480,33 @@ trait LowerTypes
         if ($hint === null) { return false; }
         $low = \strtolower(\ltrim($hint, '?\\'));
         return $low === 'array';
+    }
+
+    /**
+     * Whether `$hint` is an ELEMENT-ONLY array doc form — `T[]` or `array<V>`
+     * with a single type argument.
+     *
+     * Both spell "an array of V" and say NOTHING about the keys: php has no
+     * packed-vs-hashed distinction in a type expression at all, and `array<K, V>`
+     * is the spelling that does commit a key type (which {@see lowerTypeHint}
+     * honours). We lower the element-only forms to a packed vec anyway, because
+     * that is what they nearly always describe and the packed path is the fast
+     * one — but the key commitment is the compiler's, not the program's, so it
+     * must be revisable when a call site proves otherwise ({@see Param::$docList}).
+     */
+    private function isElemOnlyArrayDoc(?string $hint): bool
+    {
+        if ($hint === null) { return false; }
+        $base = \ltrim($hint, '?\\');
+        $low = \strtolower($base);
+        if (\strlen($base) > 2 && \substr($base, \strlen($base) - 2) === '[]') { return true; }
+        if (\strncmp($low, 'array<', 6) !== 0) { return false; }
+        $lt = \strpos($base, '<');
+        $inner = \substr($base, $lt + 1, \strlen($base) - $lt - 2);
+        // self-host strpos returns -1 (not false) on a miss; guard both, as the
+        // `array<…>` lowering above does.
+        $comma = \strpos($inner, ',');
+        return $comma === false || $comma < 0;
     }
 
     /**

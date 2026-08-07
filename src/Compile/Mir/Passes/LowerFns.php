@@ -106,12 +106,13 @@ trait LowerFns
             // `T ...$xs` collects trailing args into a vec[T] the callee
             // sees as a single vec param (caller packs at the call site).
             $outType = $this->docTagType($decl->docComment, '@param-out', $p->name);
+            $effHint = $this->effectiveHint(
+                $p->typeHint,
+                $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
+            );
             $pt = $isVariadic
                 ? Type::vec($this->lowerTypeHint($p->typeHint))
-                : $this->lowerParamType($this->effectiveHint(
-                    $p->typeHint,
-                    $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
-                ));
+                : $this->lowerParamType($effHint);
             $fp = new Param(
                 name: $p->name,
                 type: $pt,
@@ -120,6 +121,9 @@ trait LowerFns
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            // A VARIADIC pack is genuinely 0..n — its vec is the compiler's own
+            // and its keys are not in question.
+            $fp->docList = !$isVariadic && $this->isElemOnlyArrayDoc($effHint);
             $fp->refOut = $outType !== null || isset($refOutNames[$p->name])
                 || $this->paramHasRefOutAttr($p);
             $fp->cellArg = isset($cellArgNames[$p->name]) || $this->paramHasCellArgAttr($p);
@@ -184,9 +188,16 @@ trait LowerFns
         }
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
+        $savedSawFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = false;
         $loweredBody = $this->lowerBlockNode($decl->body);
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
+        $usesFuncArgs = $this->sawFuncArgs;
+        $this->sawFuncArgs = $savedSawFuncArgs;
+        if ($usesFuncArgs) {
+            $loweredBody = $this->withFuncArgsPrologue($loweredBody, \count($params));
+        }
         $fn = new FunctionDef(
             name: $decl->name,
             params: $params,
@@ -198,6 +209,7 @@ trait LowerFns
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
         $fn->isGenerator = $isGen;
+        $fn->usesFuncArgs = $usesFuncArgs;
         if ($fn->isGenerator) {
             // A generator CALL returns a Generator (its frame ptr); type it so
             // foreach / InferTypes route through the iterator-protocol path.
@@ -282,6 +294,117 @@ trait LowerFns
      * worse, registering it would change default-arg filling at every call
      * site. Mirrors the emitBuiltin if-chain — keep in sync.
      */
+    /**
+     * A name `emitBuiltin` handles inline that {@see isCodegenBuiltin} does NOT
+     * list — the two sets differ on purpose. isCodegenBuiltin decides whether to
+     * skip injecting a stdlib extern; this one answers the different question
+     * `function_exists` asks: will a call to this name resolve at all?
+     *
+     * Without it `function_exists('floor')`, `('var_dump')`, `('explode')`,
+     * `('json_encode')` and forty others answered FALSE for functions that
+     * plainly work, because a builtin is emitted inline and so is declared
+     * nowhere. That is exactly the predicate the polyfill idiom tests.
+     *
+     * Internal names (`__mir_*`, `__mc_*`, `manticore_*`) are left out: nobody
+     * writes them in a function_exists guard. `tools/audit/calibrate.sh` gates
+     * the union of the two lists against the real dispatch, so adding a builtin
+     * without updating one of them fails there rather than here.
+     */
+    /**
+     * Function names the PRELUDE declares, whether or not this program pulled
+     * the file in.
+     *
+     * The prelude is DEMAND-GATED on a mention that looks like use, and a name
+     * appearing only inside `function_exists('x')` deliberately does not
+     * count — injecting a whole prelude file because someone asked after it
+     * would undo the gating. But then the answer must not be derived from
+     * whether injection happened, or `function_exists('ob_start')` says false
+     * in a program that would run ob_start perfectly well the moment it called
+     * it. It measured its own gate. 23 names answered wrong that way, the whole
+     * header/session/ob/error-handler surface among them.
+     *
+     * Answering true here is safe in the direction that matters: a program that
+     * goes on to CALL the name makes a real mention, which injects the file.
+     *
+     * Hardcoded rather than scanned: listing prelude/ from inside the compiled
+     * binary would add a cold-seed bootstrap dependency. `tools/audit/calibrate.sh`
+     * derives this set from prelude/*.php and fails on drift — hardcode at
+     * runtime, derive at gate time, the same contract {@see isEmitterInlineName}
+     * has.
+     */
+    /** Whether the prelude declares $n (see {@see preludeProvidedNames}). */
+    private function isPreludeProvidedName(string $n): bool
+    {
+        foreach ($this->preludeProvidedNames() as $k) {
+            if ($k === $n) { return true; }
+        }
+        return false;
+    }
+
+    /** @return string[] */
+    private function preludeProvidedNames(): array
+    {
+        return [
+            'array_all', 'array_any', 'array_change_key_case', 'array_chunk', 'array_combine',
+            'array_count_values', 'array_diff', 'array_diff_assoc', 'array_diff_key', 'array_diff_uassoc',
+            'array_diff_ukey', 'array_fill_keys', 'array_filter', 'array_find', 'array_find_key',
+            'array_flip', 'array_intersect', 'array_intersect_assoc', 'array_intersect_key', 'array_intersect_uassoc',
+            'array_intersect_ukey', 'array_map', 'array_merge', 'array_merge_recursive', 'array_pad',
+            'array_product', 'array_push', 'array_rand', 'array_reduce', 'array_replace',
+            'array_replace_recursive', 'array_reverse', 'array_slice', 'array_splice', 'array_sum',
+            'array_udiff', 'array_udiff_assoc', 'array_udiff_uassoc', 'array_uintersect', 'array_uintersect_assoc',
+            'array_uintersect_uassoc', 'array_unique', 'array_walk', 'array_walk_recursive', 'arsort',
+            'asort', 'assert', 'class_implements', 'date_add', 'date_create',
+            'date_create_from_format', 'date_create_immutable', 'date_date_set', 'date_diff', 'date_format',
+            'date_interval_create_from_date_string', 'date_interval_format', 'date_isodate_set', 'date_modify', 'date_offset_get',
+            'date_parse', 'date_parse_from_format', 'date_sub', 'date_time_set', 'date_timestamp_get',
+            'date_timestamp_set', 'date_timezone_get', 'date_timezone_set', 'error_get_last', 'error_reporting',
+            'explode', 'get_declared_classes', 'get_declared_interfaces', 'get_declared_traits', 'get_defined_constants',
+            'getopt', 'header', 'header_remove', 'headers_list', 'headers_sent',
+            'http_response_code', 'iterator_apply', 'iterator_count', 'iterator_to_array', 'krsort',
+            'ksort', 'ob_clean', 'ob_end_clean', 'ob_end_flush', 'ob_flush',
+            'ob_get_clean', 'ob_get_contents', 'ob_get_flush', 'ob_get_length', 'ob_get_level',
+            'ob_get_status', 'ob_implicit_flush', 'ob_list_handlers', 'ob_start', 'pack',
+            'register_shutdown_function', 'restore_error_handler', 'restore_exception_handler', 'rsort', 'serialize',
+            'session_abort', 'session_cache_expire', 'session_cache_limiter', 'session_commit', 'session_create_id',
+            'session_decode', 'session_destroy', 'session_encode', 'session_gc', 'session_get_cookie_params',
+            'session_id', 'session_module_name', 'session_name', 'session_regenerate_id', 'session_register_shutdown',
+            'session_reset', 'session_save_path', 'session_set_cookie_params', 'session_set_save_handler', 'session_start',
+            'session_status', 'session_unset', 'session_write_close', 'set_error_handler', 'set_exception_handler',
+            'setcookie', 'setrawcookie', 'shuffle', 'sort', 'spl_autoload_functions',
+            'spl_autoload_register', 'spl_autoload_unregister', 'str_split', 'timezone_location_get', 'timezone_name_get',
+            'timezone_offset_get', 'timezone_open', 'timezone_transitions_get', 'uasort', 'uksort',
+            'unpack', 'unserialize', 'usort',
+        ];
+    }
+
+    /** Whether $n is emitted inline (see {@see emitterInlineNames}). */
+    private function isEmitterInlineName(string $n): bool
+    {
+        foreach ($this->emitterInlineNames() as $k) {
+            if ($k === $n) { return true; }
+        }
+        return false;
+    }
+
+    /** @return string[] */
+    private function emitterInlineNames(): array
+    {
+        return [
+            'acos', 'array_first', 'array_key_first', 'array_key_last',
+            'array_keys', 'array_last', 'array_values', 'asin', 'atan',
+            'atan2', 'ceil', 'cos', 'cosh', 'debug_backtrace', 'deg2rad',
+            'exp', 'explode', 'floor', 'flush', 'fmod',
+            'func_get_arg', 'func_get_args', 'func_num_args', 'hypot',
+            'int_to_ptr', 'is_numeric', 'json_decode', 'json_encode', 'log',
+            'log10', 'peek_i16', 'peek_i32', 'peek_i64', 'peek_i8',
+            'peek_u16', 'peek_u32', 'peek_u8', 'pi', 'poke_i16', 'poke_i32',
+            'poke_i64', 'poke_i8', 'print_r', 'ptr_offset',
+            'ptr_to_int', 'rad2deg', 'round', 'sin', 'sinh', 'sqrt', 'tan',
+            'tanh', 'var_dump',
+        ];
+    }
+
     private function isCodegenBuiltin(string $name): bool
     {
         $n = \strtolower($name);
@@ -312,6 +435,7 @@ trait LowerFns
             || $n === 'gc_collect_cycles' || $n === 'spl_object_id'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
+            || $n === 'putenv' || $n === '__mir_fn_exists'
             || $n === 'get_object_vars' || $n === 'var_export'
             || $n === 'class_exists' || $n === 'enum_exists'
             || $n === 'interface_exists' || $n === 'trait_exists'
@@ -331,7 +455,7 @@ trait LowerFns
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -377,13 +501,21 @@ trait LowerFns
             $elem = $retType->isGenerator() ? $retType->element : null;
             $retType = Type::generator($elem);
         }
+        // `fn &()` / `function &()` returns by reference like the named form.
+        // The callee half was always in place — {@see EmitLlvmModule::emitReturn}
+        // yields `byRefAddrOf($v)` BEFORE the uniform-closure-ABI boxing — and
+        // `$this->sigs->returnsByRef['__closure_N']` is recorded for every
+        // FunctionDef, so what was missing sat at the CALL site: the invoke
+        // return unboxed unconditionally ({@see EmitLlvmCalls::emitClosureStructInvoke}).
         $clFn = new FunctionDef(
             name: $fnName,
             params: $params,
             returnType: $retType,
             body: $body,
+            returnsByRef: $returnsByRef,
         );
         $clFn->isGenerator = $isGenerator;
+        $clFn->usesFuncArgs = $usesFuncArgs;
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
@@ -589,6 +721,12 @@ trait LowerFns
             }
             return $out;
         }
+        // `...$xs` in an argument list. Without this arm the spread OPERAND is
+        // invisible to the free-variable scan, so `fn ($t) => $t->m(...$xs)`
+        // captured nothing and `$xs` dangled inside the closure — symfony's
+        // type-info spreads a VARIADIC parameter into exactly that shape
+        // (`static fn (Type $t) => $t->isIdentifiedBy(...$identifiers)`).
+        if ($k === 'Spread') { return $this->collectVars($e->value); }
         // A nested `function () use ($x) {}` makes each explicitly-captured var
         // free in the enclosing scope (its body runs in an isolated scope).
         if ($k === 'Closure') {
@@ -596,7 +734,90 @@ trait LowerFns
             foreach ($e->uses as $u) { $out[] = $u->name; }
             return $out;
         }
-        return [];
+        if ($k === 'NullCoalesce') {
+            return \array_merge($this->collectVars($e->left), $this->collectVars($e->right));
+        }
+        if ($k === 'Instanceof') { return $this->collectVars($e->operand); }
+        // ⚠ A plain `$x = …` target is a WRITE, and php captures nothing for it:
+        // an arrow fn assigning to a name the enclosing scope does not have
+        // simply creates its own local. Collecting the target made
+        // `fn ($m) => ($parent = $c->getParentClass()) ? … : …` capture a
+        // variable that never existed. A COMPLEX target still reads its base
+        // (`$a[$k] = v` needs `$a`), and a COMPOUND assign reads the variable
+        // itself, so those keep the target.
+        if ($k === 'Assign') {
+            $out = [];
+            if ($e->target->kind !== 'Variable') { $out = $this->collectVars($e->target); }
+            return \array_merge($out, $this->collectVars($e->value));
+        }
+        if ($k === 'CompoundAssign') {
+            return \array_merge($this->collectVars($e->target), $this->collectVars($e->value));
+        }
+        if ($k === 'RefAssign') {
+            $out = [];
+            if ($e->target->kind !== 'Variable') { $out = $this->collectVars($e->target); }
+            return \array_merge($out, $this->collectVars($e->source));
+        }
+        if ($k === 'IncDec') { return $this->collectVars($e->operand); }
+        // `fn () => [$a, $b]` had NO arm at all and silently captured nothing.
+        if ($k === 'ArrayLit') {
+            $out = [];
+            foreach ($e->elements as $el) {
+                if ($el->key !== null) { $out = \array_merge($out, $this->collectVars($el->key)); }
+                $out = \array_merge($out, $this->collectVars($el->value));
+            }
+            return $out;
+        }
+        if ($k === 'DynProp') {
+            return \array_merge($this->collectVars($e->object), $this->collectVars($e->name));
+        }
+        if ($k === 'NewDyn') {
+            $out = $this->collectVars($e->classExpr);
+            foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
+        if ($k === 'Clone') {
+            $out = $this->collectVars($e->object);
+            if ($e->withProps !== null) { $out = \array_merge($out, $this->collectVars($e->withProps)); }
+            return $out;
+        }
+        if ($k === 'Match') {
+            $out = $this->collectVars($e->subject);
+            foreach ($e->arms as $arm) {
+                foreach ($arm->conds ?? [] as $c) { $out = \array_merge($out, $this->collectVars($c)); }
+                $out = \array_merge($out, $this->collectVars($arm->body));
+            }
+            return $out;
+        }
+        if ($k === 'NamedArg') { return $this->collectVars($e->value); }
+        if ($k === 'Yield') {
+            $out = [];
+            if ($e->key !== null) { $out = \array_merge($out, $this->collectVars($e->key)); }
+            if ($e->value !== null) { $out = \array_merge($out, $this->collectVars($e->value)); }
+            return $out;
+        }
+        if ($k === 'DynamicStaticAccess') { return $this->collectVars($e->receiver); }
+        if ($k === 'DynamicStaticCall') {
+            $out = $this->collectVars($e->receiver);
+            foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
+            return $out;
+        }
+        // Leaves — nothing to collect, named so the dispatch below can be
+        // exhaustive.
+        if ($k === 'IntLiteral' || $k === 'FloatLiteral' || $k === 'StringLiteral'
+            || $k === 'BoolLiteral' || $k === 'NullLiteral' || $k === 'Identifier'
+            || $k === 'MagicConstant' || $k === 'StaticAccess' || $k === 'Ellipsis') {
+            return [];
+        }
+        // ⚠ EXHAUSTIVE ON PURPOSE. This used to `return []` for anything it did
+        // not recognise, which is silent capture LOSS: an arrow fn whose body
+        // held an unlisted shape compiled to a closure missing a capture, and
+        // the failure surfaced far away as `MIR.verify: dangling local`. An
+        // array literal — `fn () => [$a, $b]` — was one such shape for as long
+        // as the list existed. Same lesson as NodeClone: a dispatch nobody can
+        // forget to extend is the only kind worth having.
+        throw new \RuntimeException(
+            'MIR.lower: free-variable scan has no rule for expression kind ' . $k);
     }
 
     /**
@@ -627,6 +848,81 @@ trait LowerFns
             if ($conv !== null) { return $conv; }
         }
         return $this->lowerExpr($a);
+    }
+
+    /**
+     * The synthetic local holding this frame's real argument count, taken off
+     * the side channel by the prologue. A plain local name (not an `@`-prefixed
+     * emitter temp) so InferTypes types it and the usual local machinery
+     * allocates it.
+     */
+    private function argcLocalName(): string { return '__mc_argc'; }
+
+    /** Companion local holding the overflow arguments — those written past this
+     *  frame's declared parameters, which have no local of their own. */
+    private function argxLocalName(): string { return '__mc_argx'; }
+
+    /**
+     * `[$p0, $p1, …]` over the declared parameters of the body being lowered —
+     * the argument vector `func_get_args()` / `func_get_arg($i)` index into.
+     * Boxed to cells: the parameters are heterogeneously typed and a PHP
+     * argument list is a `mixed` array.
+     */
+    private function funcArgsVector(): Node
+    {
+        $elems = [];
+        $i = 0;
+        foreach ($this->currentLowerParams as $pn) {
+            $hint = $this->currentLowerParamHints[$i] ?? '';
+            $pt = $hint !== '' ? $this->lowerParamType($hint) : Type::cell();
+            $elems[] = new ArrayElement_(null, new LoadLocal($pn, $pt));
+            $i = $i + 1;
+        }
+        $declared = new ArrayLit($elems, Type::vec(Type::cell()));
+        // The parameters answer for the arguments that HAVE a local — and they
+        // answer with the parameter's CURRENT value, which is what php >= 7
+        // reports. Anything the caller wrote past them arrives separately.
+        return new Call('__mc_func_args_join',
+            [$declared, new LoadLocal($this->argxLocalName(), Type::vec(Type::cell()))],
+            Type::vec(Type::cell()));
+    }
+
+    /**
+     * The statement that opens any body using the func-args family:
+     * `$__mc_argc = __mir_argc_take(<declared count>)`.
+     *
+     * It must run BEFORE the body's first nested call, which is what makes a
+     * single global slot safe — nothing can execute between a call site's push
+     * and this take, so generators and fibers need no per-frame stack. The
+     * declared count is the fallback the builtin returns when the channel is
+     * empty (-1), i.e. when this frame was entered from a call site that did
+     * not push; that degrades to exactly the old declared-count answer rather
+     * than to garbage.
+     */
+    private function funcArgsPrologue(int $declared): Node
+    {
+        return new StoreLocal(
+            $this->argcLocalName(),
+            new Call('__mir_fa_take', [new IntConst($declared, Type::int_())], Type::int_()),
+            Type::int_(),
+        );
+    }
+
+    /** `$body` with {@see funcArgsPrologue} spliced in as its first statements. */
+    private function withFuncArgsPrologue(Block $body, int $declared): Block
+    {
+        $stmts = [
+            $this->funcArgsPrologue($declared),
+            // Taken in the same breath as the count, and for the same reason:
+            // both slots must be emptied before anything else can run.
+            new StoreLocal(
+                $this->argxLocalName(),
+                new Call('__mir_fa_takex', [], Type::vec(Type::cell())),
+                Type::vec(Type::cell()),
+            ),
+        ];
+        foreach ($body->stmts as $s) { $stmts[] = $s; }
+        return new Block($stmts, $body->type);
     }
 
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
@@ -686,6 +982,8 @@ trait LowerFns
                 $out[] = $this->lowerArgForParam($params[$i] ?? null, $a);
                 $i = $i + 1;
             }
+            // Surplus arguments stay on the call — see lowerCallArgs for why
+            // diverting them here was a regression.
             return $out;
         }
         // Dense parallel slots (sparse int-key isset is unreliable in

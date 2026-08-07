@@ -114,6 +114,33 @@ class TypeError extends Error {}
 class ValueError extends Error {}
 class AssertionError extends Error {}
 
+// The rest of SPL's exception tree, with php's exact parentage — `catch
+// (LogicException)` has to catch a BadMethodCallException, and `catch
+// (RuntimeException)` an OutOfBoundsException, or a handler silently stops
+// handling. Every symfony and doctrine package throws from this set:
+// BadMethodCallException from an unimplemented interface method,
+// OutOfBoundsException from a container miss, UnexpectedValueException from a
+// failed assertion about a value's shape.
+//
+// Declared here rather than in src/Runtime/Stdlib because the stdlib `.sig`
+// carries FUNCTIONS ONLY — a class declared there is never registered by a user
+// program, so `instanceof` and `catch` would read false in user code while the
+// stdlib's own throw sites saw it. Same reason Resource lives in the prelude.
+class BadFunctionCallException extends LogicException {}
+class BadMethodCallException extends BadFunctionCallException {}
+class DomainException extends LogicException {}
+class LengthException extends LogicException {}
+class OutOfBoundsException extends RuntimeException {}
+class OverflowException extends RuntimeException {}
+class RangeException extends RuntimeException {}
+class UnderflowException extends RuntimeException {}
+class UnexpectedValueException extends RuntimeException {}
+
+// json_encode/json_decode with JSON_THROW_ON_ERROR. Extends Exception, not
+// RuntimeException — php's own hierarchy, and code that catches
+// RuntimeException around a json call must NOT swallow it.
+class JsonException extends Exception {}
+
 /**
  * `assert($cond, $description)` — php CLI ships zend.assertions=1, so the
  * assertion is EVALUATED and a falsy result throws AssertionError. (The

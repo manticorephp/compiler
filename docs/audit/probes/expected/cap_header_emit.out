@@ -1,0 +1,22 @@
+bool(false)
+PHP Warning:  Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 10
+
+Warning: Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 10
+PHP Warning:  Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 11
+
+Warning: Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 11
+PHP Warning:  http_response_code(): Cannot set response code - headers already sent (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 12
+
+Warning: http_response_code(): Cannot set response code - headers already sent (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 12
+bool(false)
+array(0) {
+}
+PHP Warning:  Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 15
+
+Warning: Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 15
+array(0) {
+}
+PHP Warning:  Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 17
+
+Warning: Cannot modify header information - headers already sent by (output started at /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php:9) in /Users/taras/var/projects/manticore-audit/docs/audit/probes/cap_header_emit.php on line 17
+bool(true)

@@ -1,0 +1,5 @@
+bare_name	bound_to	c_symbol	manticore_proto	php_proto	risk
+checkdnsrr	Runtime\Stdlib\checkdnsrr	-	(string,string):bool	(string,string):bool	BY-DESIGN-php-impl
+dns_check_record	Runtime\Stdlib\dns_check_record	-	(string,string):bool	(string,string):bool	BY-DESIGN-php-impl
+dns_get_record	Runtime\Stdlib\dns_get_record	-	(string,int,&,&,bool):mixed	(string,int,&mixed,&mixed,bool):array|false	BY-DESIGN-php-impl
+getmxrr	Runtime\Stdlib\getmxrr	-	(string,&string[],&int[]):bool	(string,&mixed,&mixed):bool	BY-DESIGN-php-impl

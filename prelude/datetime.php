@@ -796,6 +796,41 @@ class DatePeriod implements Iterator
         $this->advance();
         $this->idx = $this->idx + 1;
     }
+
+    public function getStartDate(): DateTimeInterface
+    {
+        return new DateTime('@' . $this->startTs, new DateTimeZone($this->zname));
+    }
+
+    /** NULL when the period was built with a recurrence COUNT — php's own rule,
+     *  and the discriminator symfony/var-dumper's DateCaster branches on. */
+    public function getEndDate(): ?DateTimeInterface
+    {
+        if ($this->useEnd !== 1) { return null; }
+        return new DateTime('@' . $this->endTs, new DateTimeZone($this->zname));
+    }
+
+    /** NULL when the period was built with an END DATE — the mirror of
+     *  {@see getEndDate}. */
+    public function getRecurrences(): ?int
+    {
+        if ($this->useEnd === 1) { return null; }
+        return $this->recurrences;
+    }
+
+    /**
+     * The interval, rebuilt from the six fields the constructor unpacked. php
+     * hands back a DateInterval whose `days` is false and `invert` 0, which an
+     * ISO spec round-trip reproduces exactly — the constructor never records a
+     * negative or day-resolved interval.
+     */
+    public function getDateInterval(): DateInterval
+    {
+        $spec = 'P' . (string)$this->ivY . 'Y' . (string)$this->ivM . 'M'
+              . (string)$this->ivD . 'DT' . (string)$this->ivH . 'H'
+              . (string)$this->ivI . 'M' . (string)$this->ivS . 'S';
+        return new DateInterval($spec);
+    }
 }
 
 // ---------------------------------------------------------------------------

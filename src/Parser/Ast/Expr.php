@@ -175,18 +175,18 @@ abstract class Expr
     }
 
     /** @param Param[] $params */
-    public static function arrowFn(bool $isStatic, array $params, ?string $returnType, Expr $body, Span $span): ArrowFn
+    public static function arrowFn(bool $isStatic, array $params, ?string $returnType, Expr $body, Span $span, bool $returnsByRef = false): ArrowFn
     {
-        return new ArrowFn($isStatic, $params, $returnType, $body, $span);
+        return new ArrowFn($isStatic, $params, $returnType, $body, $span, $returnsByRef);
     }
 
     /**
      * @param Param[]      $params
      * @param ClosureUse[] $uses
      */
-    public static function closure(bool $isStatic, array $params, array $uses, ?string $returnType, Block $body, Span $span): Closure
+    public static function closure(bool $isStatic, array $params, array $uses, ?string $returnType, Block $body, Span $span, bool $returnsByRef = false): Closure
     {
-        return new Closure($isStatic, $params, $uses, $returnType, $body, $span);
+        return new Closure($isStatic, $params, $uses, $returnType, $body, $span, $returnsByRef);
     }
 
     /** @param MatchArm[] $arms */
@@ -415,12 +415,19 @@ final class ArrayLit extends Expr
     }
 }
 
-/** One element of an array literal. `key` is null for positional. */
+/**
+ * One element of an array literal. `key` is null for positional.
+ *
+ * `byRef` records a `&` before the value (`[&$a[$k], $v]`). It is carried, not
+ * honoured: lowering refuses it, because an element that aliases needs a
+ * per-slot reference fact the array runtime has nowhere to put.
+ */
 final class ArrayElement
 {
     public function __construct(
         public readonly ?Expr $key,
         public readonly Expr $value,
+        public readonly bool $byRef = false,
     ) {}
 }
 
@@ -574,6 +581,9 @@ final class ArrowFn extends Expr
         public readonly ?string $returnType,
         public readonly Expr $body,
         Span $span,
+        /** `fn &() => …` — returns by reference. Appended LAST: a promoted field
+         *  added mid-class shifts every later property offset under self-host. */
+        public readonly bool $returnsByRef = false,
     ) {
         parent::__construct('ArrowFn', $span);
     }
@@ -592,6 +602,8 @@ final class Closure extends Expr
         public readonly ?string $returnType,
         public readonly Block $body,
         Span $span,
+        /** `function &() {…}` — returns by reference. Appended LAST, same reason. */
+        public readonly bool $returnsByRef = false,
     ) {
         parent::__construct('Closure', $span);
     }

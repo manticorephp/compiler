@@ -1,0 +1,9 @@
+hit:a=1
+{b}
+empty:key
+set:key
+unset:gone:1
+both:ab
+miss:ab
+outer|inner-miss:z
+outer|inner-hit:z

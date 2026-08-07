@@ -450,6 +450,20 @@ function __mc_host_is_darwin(): bool
 }
 
 /**
+ * php_sapi_name() — the interface between the interpreter and the host.
+ *
+ * A compiled manticore binary IS the command-line program, so this is 'cli' by
+ * construction. ⚠ It must keep answering exactly what the `PHP_SAPI` constant
+ * folds to ({@see \Compile\Mir\Passes\LowerPrelude}) — code branches on the two
+ * interchangeably, and a build where they disagreed would take one path while
+ * reporting the other.
+ */
+function php_sapi_name(): string
+{
+    return 'cli';
+}
+
+/**
  * php_uname($mode) — host info via uname(2). $mode: 's' sysname, 'n' nodename,
  * 'r' release, 'v' version, 'm' machine (arch), 'a' (default) all five joined by
  * a space. The utsname field stride is 256 on Darwin / 65 on glibc (mirrors

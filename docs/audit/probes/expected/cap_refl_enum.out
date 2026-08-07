@@ -1,0 +1,12 @@
+bool(true)
+bool(true)
+string(4) "Live"
+array(2) {
+  [0]=>
+  string(5) "draft"
+  [1]=>
+  string(4) "live"
+}
+bool(true)
+string(6) "string"
+int(2)

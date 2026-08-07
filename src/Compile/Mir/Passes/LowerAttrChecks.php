@@ -319,13 +319,18 @@ trait LowerAttrChecks
             $this->bakeAttrSiteErrors($this->methodAttrs($m),
                 \Compile\BuiltinAttributes::TARGET_METHOD, $cls, 'm', $this->methodDeclName($m));
             foreach ($this->methodDeclParams($m) as $p) {
+                // A promoted constructor parameter is BOTH sites at once, so an
+                // attribute there is valid when it targets EITHER — php attaches
+                // it to whichever side accepts it. Checking the two targets in
+                // two STRICT passes demanded that every attribute satisfy both,
+                // so `#[\SensitiveParameter] private string $secret` — parameter-
+                // only, and exactly what symfony/http-foundation's UriSigner
+                // writes — passed the parameter pass and failed the property one.
+                // php's message names the PARAMETER when neither matches.
                 $this->checkAttrSite($this->paramAttrs($p),
-                    \Compile\BuiltinAttributes::TARGET_PARAMETER, $this->paramSpan($p));
-                // A promoted constructor parameter is also a PROPERTY site.
-                if ($this->paramPromoted($p) !== '') {
-                    $this->checkAttrSite($this->paramAttrs($p),
-                        \Compile\BuiltinAttributes::TARGET_PROPERTY, $this->paramSpan($p));
-                }
+                    \Compile\BuiltinAttributes::TARGET_PARAMETER, $this->paramSpan($p),
+                    $this->paramPromoted($p) !== ''
+                        ? \Compile\BuiltinAttributes::TARGET_PROPERTY : 0);
             }
             $this->recordMethodDiagnostics($d, $m);
             if ($this->hasOverride($this->methodAttrs($m))
@@ -372,9 +377,13 @@ trait LowerAttrChecks
      * `#[DelayedTargetValidation]` anywhere at the site suppresses BOTH checks
      * for every attribute there — Zend then re-runs them inside newInstance().
      *
+     * `$alsoAllow` widens what is ACCEPTED without changing what the message
+     * names — a promoted constructor parameter is a parameter and a property at
+     * once, and php takes an attribute that targets either.
+     *
      * @param \Parser\Ast\AttributeNode[] $attrs
      */
-    private function checkAttrSite(array $attrs, int $target, \Parser\Ast\Span $span): void
+    private function checkAttrSite(array $attrs, int $target, \Parser\Ast\Span $span, int $alsoAllow = 0): void
     {
         $delayed = false;
         foreach ($attrs as $a) {
@@ -386,7 +395,7 @@ trait LowerAttrChecks
             $name = $this->reservedAttr($a);
             if ($name === '') { continue; }
             $flags = \Compile\BuiltinAttributes::flagsOf($name);
-            if (($flags & $target) === 0) {
+            if (($flags & ($target | $alsoAllow)) === 0) {
                 $this->attrFail('Attribute "' . $name . '" cannot target '
                     . \Compile\BuiltinAttributes::targetWord($target)
                     . ' (allowed targets: ' . \Compile\BuiltinAttributes::allowedList($flags) . ')',

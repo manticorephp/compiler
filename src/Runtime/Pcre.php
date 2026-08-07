@@ -34,3 +34,21 @@ function matchDataFree(int $matchData): void {}
 
 #[Library('pcre2-8'), Symbol('pcre2_code_free_8')]
 function codeFree(int $code): void {}
+
+/**
+ * `int pcre2_pattern_info(const pcre2_code *, uint32_t what, void *where)`.
+ *
+ * The only route to a pattern's NAME TABLE, which is what `(?P<name>…)` groups
+ * need: PCRE2 reports them nowhere else, so without this every named group was
+ * simply absent from `$matches` — and symfony/routing is named groups all the
+ * way down.
+ *
+ * `$where` is an OUT slot whose width depends on `$what`: a uint32 for
+ * NAMECOUNT / NAMEENTRYSIZE, a pointer for NAMETABLE. One 8-byte calloc covers
+ * both, read back with peek_u32 / peek_i64 respectively.
+ *
+ * The `int` return needs the function-level CType so it sign-extends: an error
+ * comes back negative, and without the sext it reads as ~4 billion.
+ */
+#[Library('pcre2-8'), Symbol('pcre2_pattern_info_8'), \Ffi\CType('int')]
+function patternInfo(int $code, int $what, Ptr $where): int {}

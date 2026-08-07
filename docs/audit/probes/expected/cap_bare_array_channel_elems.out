@@ -1,0 +1,22 @@
+array(2) {
+  ["a"]=>
+  int(1)
+  ["expiry"]=>
+  int(7)
+}
+array(2) {
+  ["a"]=>
+  int(1)
+  ["expiry"]=>
+  int(7)
+}
+array(2) {
+  ["a"]=>
+  int(1)
+  ["expiry"]=>
+  int(7)
+}
+array(1) {
+  ["k"]=>
+  string(1) "v"
+}

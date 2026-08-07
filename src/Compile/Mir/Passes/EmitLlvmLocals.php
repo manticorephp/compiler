@@ -300,7 +300,24 @@ trait EmitLlvmLocals
             foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
         }
-        return '';
+        // Every kind NOT special-cased above recurses over its children
+        // generically, so the walk is exhaustive by construction. It was a
+        // hand-written list of kinds, and a kind missing from it is not a missed
+        // optimisation — it is INVALID IR: the local's StoreLocal emits
+        // `store …, ptr ` with an empty operand and clang rejects the module
+        // with `expected instruction opcode`, pointing at the NEXT line. The
+        // static-call arm right above was one such patch; `isset($v[$param =
+        // trim($t[0])])` in symfony/polyfill-intl-messageformatter was the next,
+        // and enumerating kinds one bug at a time has no end.
+        //
+        // Safe against the one case that would be wrong: Walk::children of a
+        // CLOSURE yields its CAPTURES, never its body, so a StoreLocal belonging
+        // to a nested frame can never take a slot in this one.
+        $out = '';
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $out .= $this->preallocateLocals($c);
+        }
+        return $out;
     }
 
     private function emitLoadLocal(LoadLocal $n): string
@@ -511,9 +528,40 @@ trait EmitLlvmLocals
         // {@see emitCellifyArrayRaw}. Scalar by-ref arrays (`sort(array &$a)` of
         // ints) are deliberately untouched — their elements round-trip raw and the
         // caller reads them raw.
+        // A by-ref param the USER declared nullable-scalar (`?int &$n`) is a
+        // CELL: the caller's slot is a cell and its address crosses unchanged
+        // (`byRefNeedsCellUnbox` deliberately does not divert a cell param), so
+        // the callee's write has to be self-describing or `var_dump($n)` reads
+        // 42 as `float(2.08E-322)`.
+        //
+        // ⛔ NOT for a CLOSURE. Its parameters are cell-typed by the uniform
+        // closure ABI rather than by any declaration, and a by-ref one points
+        // straight at an array's ELEMENT slot: boxing there made
+        // `array_walk($m, fn (&$v) => $v = $v * 10)` write NaN-boxed words into
+        // the array and print -4222124650659830 for 10.
+        if (!$this->frame->isClosure
+            && isset($this->locals->refLocals[$sl->name])
+            && isset($this->locals->slots[$sl->name])
+            && ($this->locals->refParamTypes[$sl->name] ?? null) !== null
+            && $this->locals->refParamTypes[$sl->name]->kind === Type::KIND_CELL
+            && $sl->value->type->kind !== Type::KIND_CELL
+            && $this->isCellBoxableArg($sl->value->type)) {
+            $out = $this->emitNode($sl->value);
+            $out .= $this->boxToCell($sl->value->type);
+            $dv = $this->lastValue;
+            $addr = $this->ssa->allocReg();
+            $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if (isset($this->locals->refLocals[$sl->name])
             && isset($this->locals->slots[$sl->name])
-            && $this->needsRefOutCellify($sl->value->type)) {
+            && ($this->needsRefOutCellify($sl->value->type)
+                || $this->refStoreNeedsCellify($sl->name, $sl->value->type))) {
             $out = $this->emitNode($sl->value);
             $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
             $out .= $this->coerceToI64();
@@ -711,8 +759,15 @@ trait EmitLlvmLocals
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $a;
-            $cls = $pa->object->type->class ?? '';
-            if ($cls === '' || !isset($this->classes[$cls])) { return null; }
+            // No statically knowable slot — a classless receiver, or a class
+            // that declares `$prop` nowhere. Returning null here degraded the
+            // bind to a silent VALUE COPY ({@see EmitLlvmObjects::emitRefAddr})
+            // and a by-ref RETURN to a by-value one; recover the real slot from
+            // the object's class_id instead. Asks the same predicate the offset
+            // itself comes from, so the two cannot drift.
+            if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
+                return $this->emitPropAddrByClassId($pa->object, $pa->property);
+            }
             $out = $this->emitNode($pa->object);
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;

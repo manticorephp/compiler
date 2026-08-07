@@ -1,0 +1,4 @@
+unreached branch cost nothing
+Error: Call to undefined method Envelope::noSuchThing()
+Error: Call to undefined method Envelope::alsoMissing()
+fine

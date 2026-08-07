@@ -89,4 +89,17 @@ final class FunctionDef
      * (libc/libSystem is always linked).
      */
     public string $ffiLibrary = '';
+
+    /**
+     * The body calls `func_num_args` / `func_get_arg` / `func_get_args`, so it
+     * needs the real count of arguments the CALLER wrote — which the callee
+     * cannot otherwise see, because the caller fills every omitted default
+     * ({@see LowerFns::defaultFillArgs}). Set while lowering the body
+     * ({@see LowerExprs}), the same way `$isGenerator` is set from `sawYield`.
+     *
+     * Two things key off it: lowering prepends the prologue that takes the
+     * count off the side channel, and every call site targeting such a callee
+     * pushes its as-written argument count onto that channel.
+     */
+    public bool $usesFuncArgs = false;
 }

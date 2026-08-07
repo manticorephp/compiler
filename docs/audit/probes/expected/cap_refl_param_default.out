@@ -1,0 +1,4 @@
+count avail=true value=7 declaring=CapDefaults
+label avail=true value='none' declaring=CapDefaults
+opts avail=true value=NULL declaring=CapDefaults
+required avail=true value='' declaring=CapDefaults

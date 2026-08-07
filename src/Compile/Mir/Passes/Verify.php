@@ -32,7 +32,8 @@ final class Verify implements Pass
 
     public function requires(): array { return [InferTypes::NAME]; }
 
-    /** @var array<string, true> locals defined in the current function */
+    /** @var array<string, true> locals defined in the current function
+     *  ({@see \Compile\Mir\DefinedLocals}, the one owner of the rules) */
     private array $defined = [];
 
     /** @var array<string, true> locals read in the current function */
@@ -51,12 +52,12 @@ final class Verify implements Pass
 
     private function verifyFunction(FunctionDef $fn): void
     {
-        $this->defined = [];
+        // Definition rules live in ONE place ({@see \Compile\Mir\DefinedLocals})
+        // so this verifier and VivifyRefArgs cannot drift apart; the walk below
+        // collects only the USE side.
+        $this->defined = \Compile\Mir\DefinedLocals::collect($fn);
         $this->used = [];
         $this->fnName = $fn->name;
-        foreach ($fn->params as $p) {
-            $this->defined[$p->name] = true;
-        }
         $this->walk($fn->body);
         foreach ($this->used as $name => $unused) {
             if (!isset($this->defined[$name])) {
@@ -72,47 +73,41 @@ final class Verify implements Pass
     {
         $k = $n->kind;
 
-        // ── definition sites ──
+        // ── definition sites: the DEFS come from DefinedLocals; these arms
+        //    exist for the USE half each kind carries (and for the recursion
+        //    shape, which is part of the rules — a ref-alias source is a read,
+        //    a ref-alias target is not). ──
         if ($k === Node::KIND_STORE_LOCAL) {
             $sl = $n;
-            $this->defined[$sl->name] = true;
             $this->walk($sl->value);
             return;
         }
         if ($k === Node::KIND_INCDEC) {
-            $name = $n->name;
-            $this->defined[$name] = true;
-            $this->used[$name] = true;
+            $this->used[$n->name] = true;
             return;
         }
         if ($k === Node::KIND_REF_ALIAS) {
             $ra = $n;
-            $this->defined[$ra->target] = true;
             $this->used[$ra->source] = true;
             return;
         }
         if ($k === Node::KIND_REF_BIND) {
             $rb = $n;
-            $this->defined[$rb->target] = true;
             $this->walk($rb->call);
             return;
         }
         if ($k === Node::KIND_REF_ADDR) {
             $ra = $n;
-            $this->defined[$ra->target] = true;
             $this->walk($ra->lvalue);
             return;
         }
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
             $sld = $n;
-            $this->defined[$sld->name] = true;
             if ($sld->init !== null) { $this->walk($sld->init); }
             return;
         }
         if ($k === Node::KIND_FOREACH) {
             $fe = $n;
-            $this->defined[$fe->valueVar] = true;
-            if ($fe->keyVar !== null) { $this->defined[$fe->keyVar] = true; }
             $this->walk($fe->array);
             $this->walk($fe->body);
             return;
@@ -121,7 +116,6 @@ final class Verify implements Pass
             $tc = $n;
             foreach ($tc->tryBody as $s) { $this->walk($s); }
             foreach ($tc->catches as $c) {
-                if ($c->var !== null) { $this->defined[$c->var] = true; }
                 foreach ($c->body as $s) { $this->walk($s); }
             }
             foreach ($tc->finallyBody as $s) { $this->walk($s); }

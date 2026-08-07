@@ -84,6 +84,14 @@ final class ClassDef
      *  @var array<string, bool> */
     public array $propertyArrayHinted = [];
 
+    /** Names of properties whose array type came from an ELEMENT-ONLY doc form
+     *  (`T[]` / `array<V>`), which commits the element and says nothing about
+     *  the keys. The property analogue of {@see Param::$docList}: a whole-array
+     *  store of a string-keyed array moves the slot to the tagged key channel
+     *  instead of leaving it reading a string key as a packed index.
+     *  @var array<string, bool> */
+    public array $propertyDocList = [];
+
     /** Names of `readonly` properties — a write from outside the declaring class
      *  scope is a fatal `Error` (Cannot modify readonly property).
      *  @var array<string, bool> */

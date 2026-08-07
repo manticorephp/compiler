@@ -253,6 +253,22 @@ function __mc_count_recursive(mixed $arr): int
 }
 
 /**
+ * `count($x, $mode)` where `$mode` is not an int literal — LowerExprs cannot
+ * fold the choice, so it is made here. Both arms exist already; this is only
+ * the dispatch, and it is deliberately NOT the fast path: a literal mode never
+ * reaches it.
+ *
+ * A Countable receiver never reaches this body either — the emitter intercepts
+ * the call by name and answers `->count()` for both modes, the way php does
+ * ({@see EmitLlvmBuiltins::biCountableModeCall}).
+ */
+function __mc_count_mode(mixed $arr, int $mode): int
+{
+    if ($mode === 0) { return \count($arr); }
+    return __mc_count_recursive($arr);
+}
+
+/**
  * `array_fill(start, count, value)` — `count` copies of `value` keyed from
  * `start` (non-negative start → a positional list).
  *
@@ -385,4 +401,73 @@ function __mir_array_union(array $a, array $b): array
         if (!\array_key_exists($k, $out)) { $out[$k] = $v; }
     }
     return $out;
+}
+
+/**
+ * The enclosing frame's full argument vector: its declared parameters followed
+ * by whatever the caller wrote past them.
+ *
+ * Two sources because they have two different lifetimes — a parameter is a live
+ * local whose CURRENT value php reports, while an overflow argument exists only
+ * as the value the caller pushed.
+ *
+ * @param array<int, mixed> $declared
+ * @param array<int, mixed> $extra
+ * @return array<int, mixed>
+ */
+function __mc_func_args_join(#[\Manticore\Attr\CellArg] array $declared, #[\Manticore\Attr\CellArg] array $extra): array
+{
+    $out = [];
+    foreach ($declared as $v) { $out[] = $v; }
+    foreach ($extra as $v) { $out[] = $v; }
+    return $out;
+}
+
+/**
+ * `func_get_args()` — the first $n of the enclosing frame's argument vector.
+ *
+ * The compiler lowers the call to this, handing over every DECLARED parameter
+ * of the frame plus the count the caller actually wrote
+ * ({@see \Compile\Mir\Passes\LowerExprs}). Slicing here rather than at the call
+ * site keeps the emitted code one call wide.
+ *
+ * @param array<int, mixed> $all
+ * @return array<int, mixed>
+ */
+function __mc_func_get_args(#[\Manticore\Attr\CellArg] array $all, int $n): array
+{
+    $out = [];
+    $i = 0;
+    foreach ($all as $v) {
+        if ($i >= $n) { break; }
+        $out[] = $v;
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+/**
+ * `func_get_arg($i)` — one slot of that same vector.
+ *
+ * php throws a ValueError (NOT an ArgumentCountError — measured against the
+ * interpreter) both for a negative index and for one at or past the number of
+ * arguments the caller actually passed, so a defaulted parameter the caller
+ * omitted is out of range even though its local holds a value.
+ *
+ * @param array<int, mixed> $all
+ */
+function __mc_func_get_arg(#[\Manticore\Attr\CellArg] array $all, int $n, int $i): mixed
+{
+    if ($i < 0 || $i >= $n) {
+        throw new \ValueError(
+            'func_get_arg(): Argument #1 ($position) must be less than the number of'
+            . ' the arguments passed to the currently executed function'
+        );
+    }
+    $idx = 0;
+    foreach ($all as $v) {
+        if ($idx === $i) { return $v; }
+        $idx = $idx + 1;
+    }
+    return null;
 }

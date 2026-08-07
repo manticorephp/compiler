@@ -600,7 +600,7 @@ final class Parser
 
             if ($this->checkKeyword('case') && $kindKw === 'enum') {
                 $this->advance();
-                $caseNameTok = $this->expect(TokenKind::Identifier, 'expected enum case name');
+                $caseNameTok = $this->expectMemberName('expected enum case name');
                 $value = null;
                 if ($this->match(TokenKind::Equals)) {
                     $value = $this->parseExpression();
@@ -663,9 +663,18 @@ final class Parser
         $this->expect(TokenKind::OpenBrace, "expected '{' for trait adaptations");
         $out = [];
         while (!$this->check(TokenKind::CloseBrace)) {
+            // The leading name is a TRAIT only when `::` follows it. Bare, it is
+            // a METHOD name — and parseClassName resolves what it reads against
+            // the current namespace and `use` aliases, which for a method name
+            // is wrong: inside `namespace Symfony\Component\Cache\Adapter`,
+            // `doClear as private doClearCache;` recorded its method as
+            // `Symfony\Component\Cache\Adapter\doClear`, so no trait ever matched
+            // it and the alias got no body — an undefined symbol at link time.
+            // Invisible from a global-namespace test, which is why it survived.
+            $rawFirst = $this->peek()->lexeme;
             $first = $this->parseClassName();
             $trait = '';
-            $method = $first;
+            $method = $rawFirst;
             if ($this->match(TokenKind::DoubleColon)) {
                 $trait = $first;
                 $method = $this->advance()->lexeme;
@@ -834,15 +843,7 @@ final class Parser
                 $typeHint = $this->parseTypeHint();
             }
         }
-        // A class constant may be named with a semi-reserved word — `const
-        // CONTINUE`, `const LIST`, `const PRINT` are all legal php, because a
-        // constant is only ever reached through `Cls::NAME` and there is no
-        // ambiguity to resolve. parseMethod() already takes a Keyword here for
-        // the same reason; this path was the outlier.
-        $nameTok = $this->advance();
-        if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword) {
-            throw $this->error('expected const name');
-        }
+        $nameTok = $this->expectMemberName('expected const name');
         $this->expect(TokenKind::Equals, "expected '=' in const");
         $value = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after const");
@@ -1386,7 +1387,7 @@ final class Parser
     {
         $span = $this->span();
         $this->advance(); // 'const'
-        $nameTok = $this->expect(TokenKind::Identifier, 'expected const name');
+        $nameTok = $this->expectMemberName('expected const name');
         $this->expect(TokenKind::Equals, "expected '=' in const declaration");
         $value = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after const declaration");
@@ -1796,7 +1797,19 @@ final class Parser
         if ($this->check(TokenKind::DoubleQuestion)) {
             $span = $this->span();
             $this->advance();
-            $right = $this->parseNullCoalesce(); // right-associative
+            // Right-associative, and the right operand is a full ASSIGNMENT
+            // expression — php's grammar puts `expr` there, and assignment is an
+            // expression. The memoise idiom depends on it:
+            //     $d = self::$d ?? self::$d = require '…';
+            // parses as `$d = (self::$d ?? (self::$d = require …))`. Recursing
+            // into parseNullCoalesce instead stopped below `=`, so the `=` was
+            // left for the CALLER and the whole coalesce became an assignment
+            // TARGET — "unsupported assign target kind NullCoalesce", which is
+            // what blocked tier 1 of the audit ladder.
+            //
+            // parseAssign, not parseExpression: `and` / `or` / `xor` bind looser
+            // than this, so `$a ?? $b and $c` must stay `($a ?? $b) and $c`.
+            $right = $this->parseAssign();
             return Expr::nullCoalesce($left, $right, $span);
         }
         return $left;
@@ -2387,18 +2400,20 @@ final class Parser
             }
             // require / include (+ _once): in whole-program AOT the target's
             // declarations are already compiled in — composer discovery and the
-            // src scan pull every autoload file, including the one being required
-            // — so the runtime load is redundant. Parse and DISCARD the path
-            // operand, lowering to a no-op that yields null (PHP's include of a
-            // file with no `return` yields int 1; nothing downstream in a compiled
-            // program depends on that). A future step could resolve the path at
-            // compile time and merge a genuinely external file into the build; the
-            // value-returning `$x = require 'data.php'` form is not modelled yet.
+            // src scan pull every autoload file, including the one being
+            // required — so the LOAD is redundant. Its VALUE is not: a file
+            // ending in `return [...]` (symfony's config/bundles.php, every
+            // dumped-container data file) or `return function (…) {…}` is the
+            // whole point of the expression, and this used to yield null.
+            //
+            // The path operand is now EVALUATED (it can have side effects, and
+            // php evaluates it) and handed to `__mc_require_value`, which maps a
+            // path to the slot holding that file's top-level return value
+            // ({@see \Manticore\__mc_include_slot}).
             if ($lower === 'require' || $lower === 'require_once'
                     || $lower === 'include' || $lower === 'include_once') {
                 $this->advance();
-                $this->parseExpression(); // consume + discard the path
-                return Expr::null($span);
+                return Expr::call('__mc_require_value', [$this->parseExpression()], $span);
             }
             // Legacy long-array syntax `array(a, b, k => v)` — identical to
             // `[a, b, k => v]`; still common in generated / data files.
@@ -2474,6 +2489,12 @@ final class Parser
     private function parseArrowFn(bool $isStatic, Span $span): Expr
     {
         $this->advance(); // 'fn'
+        // `fn &() => …` returns by reference, exactly as `function &f()` does —
+        // the machinery already exists for named functions and methods, only
+        // the closure forms never parsed the `&`. symfony/dependency-injection
+        // uses it twice to alias a private property out of a bound closure:
+        // `$x = &\Closure::bind(fn &() => $this->instanceof, $o, $o)();`
+        $returnsByRef = $this->match(TokenKind::Ampersand);
         $params = $this->parseParenParamList();
         $returnType = null;
         if ($this->match(TokenKind::Colon)) {
@@ -2481,12 +2502,14 @@ final class Parser
         }
         $this->expect(TokenKind::DoubleArrow, "expected '=>' in arrow function");
         $body = $this->parseExpression();
-        return Expr::arrowFn($isStatic, $params, $returnType, $body, $span);
+        return Expr::arrowFn($isStatic, $params, $returnType, $body, $span, $returnsByRef);
     }
 
     private function parseClosure(bool $isStatic, Span $span): Expr
     {
         $this->advance(); // 'function'
+        // `function &() {…}` — same by-reference return as the named form.
+        $returnsByRef = $this->match(TokenKind::Ampersand);
         $params = $this->parseParenParamList();
         $uses = [];
         if ($this->checkKeyword('use')) {
@@ -2506,7 +2529,7 @@ final class Parser
             $returnType = $this->parseTypeHint();
         }
         $body = $this->parseBlock();
-        return Expr::closure($isStatic, $params, $uses, $returnType, $body, $span);
+        return Expr::closure($isStatic, $params, $uses, $returnType, $body, $span, $returnsByRef);
     }
 
     private function parseClosureUse(): ClosureUse
@@ -2675,9 +2698,20 @@ final class Parser
             $value = $this->parseExpression();
             return new ArrayElement(null, Expr::spread($value, $span));
         }
+        // `[&$a[$k], $v]` and `['k' => &$v]`. Accepting the `&` here replaces a
+        // bare "unexpected token: Ampersand" — which points at the character and
+        // explains nothing — with a diagnostic from lowering that names the
+        // construct and says why it cannot be honoured. The flag is carried, not
+        // obeyed: see LowerFromAst::lowerArrayLit.
+        if ($this->match(TokenKind::Ampersand)) {
+            return new ArrayElement(null, $this->parseExpression(), true);
+        }
         $first = $this->parseExpression();
         if ($this->check(TokenKind::DoubleArrow)) {
             $this->advance();
+            if ($this->match(TokenKind::Ampersand)) {
+                return new ArrayElement($first, $this->parseExpression(), true);
+            }
             $value = $this->parseExpression();
             return new ArrayElement($first, $value);
         }
@@ -3102,6 +3136,27 @@ final class Parser
             throw $this->error($message);
         }
         return $this->advance();
+    }
+
+    /**
+     * A MEMBER name — a class constant or an enum case.
+     *
+     * php lets a reserved word stand here: `case ARRAY = 'array';` in
+     * doctrine/dbal's ArrayParameterType, `const LIST = …`, `case MATCH`. The
+     * lexer classifies those as Keyword, not Identifier, so requiring an
+     * Identifier rejected code the interpreter accepts — six sites across
+     * doctrine/dbal and nette/utils in symfony-demo alone.
+     *
+     * Deliberately NOT used for a plain identifier position: `class array` is
+     * still a syntax error in php, and accepting it here would only turn a
+     * clean parse error into a confusing one further along.
+     */
+    private function expectMemberName(string $message): Token
+    {
+        if ($this->check(TokenKind::Identifier) || $this->check(TokenKind::Keyword)) {
+            return $this->advance();
+        }
+        throw $this->error($message);
     }
 
     private function span(): Span

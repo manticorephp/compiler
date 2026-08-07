@@ -1,0 +1,7 @@
+int(1)
+string(9) "CapInject"
+array(1) {
+  [0]=>
+  string(6) "logger"
+}
+string(6) "logger"

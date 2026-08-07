@@ -200,21 +200,20 @@ trait LowerExprs
                 $this->currentLowerClass = $prevC;
                 return $lowered;
             }
-            // Nothing matched. Falling through to the generic "unsupported
-            // expression kind StaticAccess" throw below names the CONSTRUCT,
-            // which reads as "the compiler cannot do `::`" and sends you to the
-            // wrong file — the actual cause is almost always a class the build
-            // never saw (a prelude module whose demand gate did not fire, a
-            // missing `use`, a typo). Say which it is.
-            $known = isset($this->classDecls[$cname]) || isset($this->traitTable[$cname])
-                || isset($this->enumTable[$cname]);
-            throw new \RuntimeException(
-                $known
-                    ? 'MIR.lower: unknown class constant ' . $cname . '::' . $saName
-                        . ' at line ' . (string)$expr->span->line
-                    : 'MIR.lower: unknown class ' . $cname . ' (in ' . $cname . '::'
-                        . $saName . ') at line ' . (string)$expr->span->line
-            );
+            // Nothing matched — fall through. It does NOT reach the generic
+            // "unsupported expression kind" throw: the StaticAccess arm at that
+            // fallthrough converts an unresolvable class constant into php's own
+            // runtime Error (`Class "C" not found` / `Undefined constant C::K`),
+            // which is where php raises it and why symfony/cache can name
+            // `PDO::CASE_LOWER` in an adapter that never runs.
+            //
+            // ⚠ A build-time throw HERE was reintroduced by a merge from main,
+            // which had added it independently as a better diagnostic than
+            // "unsupported expression kind StaticAccess". Git saw "deleted on one
+            // side, added on the other" and kept the addition — no conflict, and
+            // undefined_constant_throws went red. The runtime rule wins; main's
+            // intent (say whether the CLASS or the CONSTANT is missing) is
+            // already served below, in php's own wording.
         }
         if ($expr->kind === 'DynamicStaticAccess') {
             // `$obj::class` → the operand's class name as a string. Read the
@@ -235,9 +234,24 @@ trait LowerExprs
         }
         if ($expr->kind === 'Call') {
             $fn = \strtolower($expr->function);
+            // Every desugaring below matches the BARE name. A namespaced file
+            // QUALIFIES an unqualified call ({@see Parser::resolveClassName}),
+            // so `compact(` inside `namespace App;` arrives here as
+            // `App\compact` — and each gate that asked `$fn` instead saw no
+            // match, fell through to an ordinary call, and died at emit with
+            // "Call to undefined function compact()". Every one of these names
+            // is a php builtin with no user definition anywhere, which is why
+            // the fall-through had nowhere to land.
+            //
+            // A user function that shadows one of these names inside its own
+            // namespace loses to the desugaring. php would prefer the
+            // namespaced declaration; nothing in the corpus does that, and the
+            // gates that were already bare (func_get_args, sscanf, …) have
+            // always made the same trade.
+            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
             // `call_user_func($cb, ...$rest)` → invoke $cb with the rest args,
             // reusing the Invoke path (literal / FCC / const-callable dispatch).
-            if ($fn === 'call_user_func' && \count($expr->args) >= 1) {
+            if ($fnBare === 'call_user_func' && \count($expr->args) >= 1) {
                 $rest = [];
                 $ci = 1;
                 while ($ci < \count($expr->args)) { $rest[] = $expr->args[$ci]; $ci = $ci + 1; }
@@ -250,7 +264,7 @@ trait LowerExprs
             // Call that emitCall expands) or the known-closure invoke path.
             // Array/static/method callable + a runtime array remains
             // unsupported (StaticCall_/MethodCall_ don't expand a spread).
-            if ($fn === 'call_user_func_array' && \count($expr->args) === 2) {
+            if ($fnBare === 'call_user_func_array' && \count($expr->args) === 2) {
                 if ($expr->args[1]->kind === 'ArrayLit') {
                     $spread = [];
                     foreach ($this->arrayLitElements($expr->args[1]) as $el) {
@@ -294,7 +308,6 @@ trait LowerExprs
             // Desugar to: tmp = __mc_sscanf($s, $f); $a = tmp[0]; $b = tmp[1]; …;
             // count(tmp). (php returns the number of assigned values; a full match
             // makes that the field count — the partial-match tail is not modelled.)
-            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
             // `getenv()` with NO argument returns the whole environment as an
             // assoc array — the same value as `$_ENV`. Reading the superglobal (not
             // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
@@ -325,7 +338,7 @@ trait LowerExprs
             // array names fall through to the stdlib). An undefined var is not
             // skipped (yields its null slot) — the common "compact vars you just
             // set" usage matches PHP.
-            if ($fn === 'compact' && \count($expr->args) >= 1) {
+            if ($fnBare === 'compact' && \count($expr->args) >= 1) {
                 $names = [];
                 $litOnly = true;
                 foreach ($expr->args as $a) {
@@ -351,7 +364,7 @@ trait LowerExprs
             // desugar it at the call site, where the arguments are still real
             // lvalues: compute the row permutation once, then rebuild each
             // column through a plain assignment. The call itself yields `true`.
-            if ($fn === 'array_multisort' && \count($expr->args) >= 1) {
+            if ($fnBare === 'array_multisort' && \count($expr->args) >= 1) {
                 $ms = $this->lowerMultisort($expr);
                 if ($ms !== null) { return $ms; }
             }
@@ -361,7 +374,7 @@ trait LowerExprs
             // costs the bootstrapping compiler nothing. Desugared to a NewObj so
             // it reuses the whole allocation path (per-slot zero-init by repr,
             // the bag, a reified specialization) instead of a second emitter.
-            if ($fn === '__mc_new_uninit' && \count($expr->args) === 1) {
+            if ($fnBare === '__mc_new_uninit' && \count($expr->args) === 1) {
                 $lit = $this->lowerExpr($expr->args[0]);
                 if ($lit->kind === Node::KIND_STRING_CONST) {
                     $cls = $lit->value;
@@ -374,9 +387,25 @@ trait LowerExprs
             // length out of the array header and has no notion of a mode, so a
             // non-zero mode is rewritten to the stdlib walker instead. A literal
             // COUNT_NORMAL (0) keeps the fast path.
-            if (($fn === 'count' || $fn === 'sizeof') && \count($expr->args) === 2) {
+            //
+            // $fnBare, not $fn: an unqualified name inside `namespace App;` is
+            // resolved to `App\count` ({@see Parser::resolveClassName}), and the
+            // qualified name matched neither arm — a namespaced
+            // `count($x, COUNT_RECURSIVE)` silently answered the SHALLOW count.
+            //
+            // A mode that is not an int literal cannot be folded here, and
+            // assuming recursion was equally wrong the other way (a runtime
+            // COUNT_NORMAL still walked the tree), so it goes to the two-arm
+            // stdlib entry that picks at runtime.
+            if (($fnBare === 'count' || $fnBare === 'sizeof') && \count($expr->args) === 2) {
                 $mode = $this->lowerExpr($expr->args[1]);
-                if ($mode->kind !== Node::KIND_INT_CONST || $mode->value !== 0) {
+                if ($mode->kind !== Node::KIND_INT_CONST) {
+                    return new Call('__mc_count_mode', [
+                        $this->lowerExpr($expr->args[0]),
+                        $mode,
+                    ], Type::int_());
+                }
+                if ($mode->value !== 0) {
                     return new Call('__mc_count_recursive', [
                         $this->lowerExpr($expr->args[0]),
                     ], Type::int_());
@@ -384,12 +413,12 @@ trait LowerExprs
             }
             // `define("NAME", v)` — registered in the run() pre-pass; the call
             // itself is a no-op yielding true (define's bool return).
-            if ($fn === 'define') {
+            if ($fnBare === 'define') {
                 return new BoolConst(true, Type::bool_());
             }
             // `defined("NAME")` → compile-time bool against predefined +
             // user constants. A non-literal name conservatively folds false.
-            if ($fn === 'defined' && \count($expr->args) === 1) {
+            if ($fnBare === 'defined' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 $known = false;
                 if ($a0->kind === 'StringLiteral') {
@@ -401,7 +430,7 @@ trait LowerExprs
             }
             // `constant("NAME")` → the resolved constant value. An unknown /
             // non-literal name folds to null (PHP throws; null degrades safely).
-            if ($fn === 'constant' && \count($expr->args) === 1) {
+            if ($fnBare === 'constant' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 if ($a0->kind === 'StringLiteral') {
                     $nm = $this->constBareName($this->stringLitValue($a0));
@@ -413,35 +442,45 @@ trait LowerExprs
                 }
                 return new NullConst(Type::null_());
             }
-            // `func_num_args()` / `func_get_arg($k)` — resolved against the
-            // enclosing function's DECLARED parameters.
+            // `func_num_args()` / `func_get_arg($k)` / `func_get_args()`.
             //
-            // Zend counts what the caller actually PASSED, which a compiled
-            // binary cannot know: an omitted optional arrives already filled
-            // from its default, indistinguishable from one passed explicitly.
-            // Answering with the declared count reads every call as "all
-            // arguments given". That is the useful direction — symfony's
-            // `if (1 > \func_num_args()) { trigger_deprecation(...) }` guards are
-            // BC shims for callers that omit a new parameter, and this build
-            // always fills it — and it is the only one that keeps
-            // `func_get_arg($k)` a real value rather than a stub.
-            // Matched on the BARE name: a namespaced file qualifies an
-            // unqualified call, so `func_get_arg(` inside
-            // `namespace Symfony\…;` arrives as `Symfony\…\func_get_arg`.
-            $fnBarePos = \strrpos($fn, '\\');
-            $fnBare = $fnBarePos === false ? $fn : \substr($fn, $fnBarePos + 1);
+            // The count Zend reports is what the CALLER wrote, and the callee
+            // cannot see it directly: an omitted optional arrives already
+            // filled from its default ({@see LowerFns::defaultFillArgs}), so by
+            // the time the body runs every argument list is exactly arity-many.
+            // It travels on a side channel instead — the call site pushes its
+            // as-written count and {@see prologueFuncArgs} takes it off into
+            // `__mc_argc` before the body's first nested call can overwrite it.
+            //
+            // The VALUES come from the parameter locals: PHP >= 7 hands back a
+            // parameter's CURRENT value, not the one originally passed, so the
+            // locals are the correct source and no separate argument buffer is
+            // needed. Args past the declared list have no local and ride the
+            // overflow channel `__mc_argx`.
+            //
             if ($fnBare === 'func_num_args' && \count($expr->args) === 0) {
-                return new IntConst(\count($this->currentLowerParams), Type::int_());
+                $this->sawFuncArgs = true;
+                return new LoadLocal($this->argcLocalName(), Type::int_());
             }
-            if ($fnBare === 'func_get_arg' && \count($expr->args) === 1
-                && $expr->args[0]->kind === 'IntLiteral') {
-                $idx = (int)$expr->args[0]->value;
-                if ($idx >= 0 && $idx < \count($this->currentLowerParams)) {
-                    return new LoadLocal($this->currentLowerParams[$idx], Type::unknown());
-                }
-                // Out of range: php throws ArgumentCountError. Nothing here can
-                // hold that value, so hand back null rather than a wild read.
-                return new NullConst(Type::null_());
+            if ($fnBare === 'func_get_args' && \count($expr->args) === 0) {
+                $this->sawFuncArgs = true;
+                return new Call('__mc_func_get_args',
+                    [$this->funcArgsVector(), new LoadLocal($this->argcLocalName(), Type::int_())],
+                    Type::vec(Type::cell()));
+            }
+            if ($fnBare === 'func_get_arg' && \count($expr->args) === 1) {
+                $this->sawFuncArgs = true;
+                // Any index expression, not just a literal: the idiomatic
+                // `for ($i = 0; $i < func_num_args(); $i++) func_get_arg($i)`
+                // passes a loop variable, which used to fall through to an
+                // undefined `@manticore_func_get_arg` and fail the link.
+                return new Call('__mc_func_get_arg',
+                    [
+                        $this->funcArgsVector(),
+                        new LoadLocal($this->argcLocalName(), Type::int_()),
+                        $this->lowerExpr($expr->args[0]),
+                    ],
+                    Type::cell());
             }
             // `trigger_error($msg[, $level])` → `__mc_trigger_error($msg,
             // $level, <file>, <line>, <silenced>)`. A prelude function cannot
@@ -470,20 +509,30 @@ trait LowerExprs
             // Shares functionIsKnown with the statement-position guard fold, so
             // the two can never disagree — and so a HIDDEN function (a
             // link-only Windows stub) reads absent in both.
-            if ($fn === 'function_exists' && \count($expr->args) === 1) {
+            if ($fnBare === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
-                $known = 0;
-                if ($a0->kind === 'StringLiteral'
-                    && $this->functionIsKnown($this->stringLitValue($a0))) {
-                    $known = 1;
+                if ($a0->kind === 'StringLiteral') {
+                    return new IntConst(
+                        $this->functionIsKnown($this->stringLitValue($a0)) ? 1 : 0,
+                        Type::bool_());
                 }
-                return new IntConst($known, Type::bool_());
+                // A NON-literal argument used to fold to false, described as
+                // conservative. Conservative is the wrong word for an answer
+                // that is simply wrong: a loop over a list of names reported
+                // strlen, count and floor all missing, and it is what made this
+                // project's own SAPI presence probe claim trigger_error was
+                // absent. The function set is CLOSED at compile time, so the
+                // honest answer is a lookup — the same name-table-and-scan shape
+                // the dynamic function-name dispatch and the include resolver
+                // already use.
+                $this->sawDynFnExists = true;
+                return new Call('__mir_fn_exists', [$this->lowerExpr($a0)], Type::bool_());
             }
             // `var_dump($a, $b, …)` stays a `var_dump` call — EmitLlvm's biVarDump
             // dumps each arg by its static type (a typed FLOAT goes straight to a
             // shortest-round-trip format instead of through the lossy cell box;
             // everything else recurses through `__mir_var_dump`).
-            if ($fn === 'var_dump' && \count($expr->args) >= 1) {
+            if ($fnBare === 'var_dump' && \count($expr->args) >= 1) {
                 $vdArgs = [];
                 foreach ($expr->args as $a) { $vdArgs[] = $this->lowerExpr($a); }
                 return new Call('var_dump', $vdArgs, Type::void());
@@ -497,7 +546,7 @@ trait LowerExprs
             // LowerPrelude's STDIN/STDOUT/STDERR). Doing it here keeps that
             // invariant and still answers the literal every console app opens
             // with — symfony's ConsoleOutput is fopen('php://stdout', 'w').
-            if ($fn === 'fopen' && \count($expr->args) >= 1
+            if ($fnBare === 'fopen' && \count($expr->args) >= 1
                 && $expr->args[0]->kind === 'StringLiteral') {
                 $stdRes = $this->stdStreamResource($this->stringLitValue($expr->args[0]));
                 if ($stdRes !== null) { return $stdRes; }
@@ -517,7 +566,13 @@ trait LowerExprs
                     return new Call($sited, $withSite, Type::unknown());
                 }
             }
-            return new Call($callee, $args, Type::unknown());
+            $call = new Call($callee, $args, Type::unknown());
+            // Before defaultFillArgs padded it — the callee's func_num_args()
+            // needs what the SOURCE wrote, and this is the last point that
+            // knows it. The overflow is read here and nowhere later: the next
+            // lowering of any call overwrites it.
+            $call->srcArgc = \count($expr->args);
+            return $call;
         }
         if ($expr->kind === 'Spread')         { return new Spread_($this->lowerExpr($expr->value), Type::unknown()); }
         if ($expr->kind === 'ArrayLit')       { return $this->lowerArrayLit($expr); }
@@ -572,6 +627,30 @@ trait LowerExprs
             $key = $yk !== null ? $this->lowerExpr($yk) : null;
             $value = $yv !== null ? $this->lowerExpr($yv) : null;
             return new Yield_($key, $value, false, Type::cell());
+        }
+        // An unresolvable CLASS CONSTANT is php's runtime Error, not a compile
+        // error — same rule as a bare undefined constant, and it reaches here
+        // for the same real reason: symfony/cache names `PDO::CASE_LOWER` in a
+        // PdoAdapter that only runs when ext-pdo is there. php reports the two
+        // cases differently, so the message is chosen by whether the CLASS is
+        // known at all.
+        //
+        // Deliberately narrow: only a StaticAccess whose class or constant
+        // genuinely is not there converts. Anything else still hits the throw
+        // below, because this fallthrough is what catches a construct the
+        // compiler simply failed to route, and turning that into a runtime
+        // error would hide compiler gaps instead of reporting them.
+        if ($expr->kind === 'StaticAccess') {
+            $saCls = $this->resolveStaticClass($this->staticAccessClass($expr));
+            $saName = $this->staticAccessName($expr);
+            $classKnown = isset($this->classTable[$saCls])
+                || isset($this->enumTable[$saCls])
+                || isset($this->classDecls[$saCls]);
+            if ($saName !== '' && \strtolower($saName) !== 'class') {
+                return $this->throwErrorExpr($classKnown
+                    ? 'Undefined constant ' . $saCls . '::' . $saName
+                    : 'Class "' . $saCls . '" not found');
+            }
         }
         $extra = '';
         if ($expr->kind === 'StaticAccess') { $extra = ' (' . $this->staticAccessClass($expr) . '::' . $this->staticAccessName($expr) . ')'; }
@@ -756,9 +835,14 @@ trait LowerExprs
         if ($target->kind === 'ArrayLit') {
             return $this->lowerDestructure($target, $value);
         }
+        // Name the FILE, not just the line. A whole-program build merges
+        // thousands of files into one module, so "at line 25" sent three
+        // separate searches to the wrong file before this was added — the
+        // parse error has always named its file and this had no reason not to.
         throw new \RuntimeException(
             'MIR.lower: unsupported assign target kind ' . $target->kind
-            . ' at line ' . (string)$target->span->line
+            . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : '<source>')
+            . ':' . (string)$target->span->line
         );
     }
 

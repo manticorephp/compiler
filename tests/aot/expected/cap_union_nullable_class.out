@@ -1,0 +1,9 @@
+shorthand  UnS SSS
+union      UnS SSS
+plain      UnS SSS
+null|T     UnS SSS
+function   UnS SSS
+bool(true)
+bool(true)
+string(5) "plain"
+int(3)

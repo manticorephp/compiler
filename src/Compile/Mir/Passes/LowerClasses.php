@@ -139,7 +139,7 @@ trait LowerClasses
      */
     private function traitAliasSource(\Parser\Ast\ClassDecl $decl, \Parser\Ast\TraitAdaptation $a): ?\Parser\Ast\MethodDecl
     {
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             if ($a->trait !== '' && $tn !== \ltrim($a->trait, '\\')) { continue; }
             $td = $this->traitTable[$tn] ?? null;
@@ -203,11 +203,17 @@ trait LowerClasses
                 $prop->default !== null, $decl->name,
                 $this->attrNames($prop->attributes));
         }
-        foreach ($decl->uses as $traitName) {
+        $seenTraitProp = [];
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
             if ($td === null) { continue; }
             foreach ($td->properties as $tprop) {
                 if (isset($out[$tprop->name]) && $out[$tprop->name]->declaringClass === $decl->name) { continue; }
+                // A name an EARLIER trait already gave stands: the set spans
+                // nested traits now, and php's first-provider-wins applies to
+                // the metadata exactly as it does to the slot.
+                if (isset($seenTraitProp[$tprop->name])) { continue; }
+                $seenTraitProp[$tprop->name] = true;
                 $vis = $tprop->visibility === '' ? 'public' : $tprop->visibility;
                 $out[$tprop->name] = new \Compile\Mir\PropertyMeta(
                     $tprop->name, $vis, $tprop->isStatic, $tprop->isReadonly,
@@ -250,6 +256,7 @@ trait LowerClasses
         $names = [];
         $types = [];
         $arrHinted = [];
+        $docList = [];
         $roProps = [];
         // Single inheritance: prepend the parent's properties so the
         // subclass instance shares the parent's field offsets, then
@@ -265,6 +272,7 @@ trait LowerClasses
                 $names[] = $pn;
                 $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
                 $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
+            $docList[$pn] = $pcd->propertyDocList[$pn] ?? false;
                 // readonly is NOT propagated: `readonlyDeclClass` walks the parent
                 // chain so the ORIGINAL declaring class drives the scope check
                 // (only it may write the slot).
@@ -281,6 +289,7 @@ trait LowerClasses
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
                         $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
+                        $docList[$p->name] = $this->isElemOnlyArrayDoc($peff);
                         if (($p->promotedReadonly ?? false) || $decl->isReadonly) { $roProps[$p->name] = true; }
                     }
                 }
@@ -346,15 +355,43 @@ trait LowerClasses
             if ($veff === null || $veff === '') { $pt = Type::cell(); }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
+            $docList[$prop->name] = $this->isElemOnlyArrayDoc($veff);
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
+        }
+        // STATIC trait properties, mixed in the same way. php gives every using
+        // class its OWN slot for a trait's static — the trait is a compile-time
+        // copy, not shared storage — so registering under this class's name is
+        // exactly right, and two classes using one trait get two counters as
+        // they should. Without it `self::$traitStatic` had no registration at
+        // all and lowering refused the whole expression ("unsupported
+        // expression kind StaticAccess"), which hard-blocked tier 2:
+        // symfony/cache's AbstractAdapter keeps its `$createCacheItem` and
+        // `$mergeByLifetime` closures in statics inherited from
+        // AbstractAdapterTrait. The class's own property still wins on conflict.
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $tn = \ltrim($traitName, '\\');
+            $td = $this->traitTable[$tn] ?? null;
+            if ($td === null) { continue; }
+            if ($this->isReifiedDecl($decl)) { continue; }
+            foreach ($td->properties as $tprop) {
+                if (!$tprop->isStatic) { continue; }
+                if (isset($this->staticProps[$decl->name . '::' . $tprop->name])) { continue; }
+                $tvdoc = $this->docTagType($tprop->docComment, '@var', '');
+                $tveff = $this->effectiveHint($tprop->typeHint, $tvdoc);
+                $tpt = $this->lowerTypeHint($tveff)->eraseTypeVars();
+                $spNames[] = $tprop->name;
+                $spTypes[] = $tpt;
+                $this->staticProps[$decl->name . '::' . $tprop->name] = true;
+                $this->staticPropTypes[$decl->name . '::' . $tprop->name] = $tpt;
+            }
         }
         // Mixed-in trait properties extend the class's layout (PHP appends
         // them after the class's own fields). Without this they get no slot,
         // so `$this->traitProp` inside a trait method reads a wrong offset →
         // heap corruption (e.g. a string slot that lands on an obj/vec tag →
         // strcmp-on-RC_TAG_MAGIC abort). The class's own property wins on
-        // conflict. Static trait props are not yet mixed in (rare).
-        foreach ($decl->uses as $traitName) {
+        // conflict.
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
@@ -406,7 +443,7 @@ trait LowerClasses
         // + ctor resolution); the class's own method wins on conflict.
         // `use … { A::m insteadof B; }` excludes the loser; `m as x;` adds an alias.
         $excluded = $this->traitExclusions($decl);
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
@@ -454,7 +491,7 @@ trait LowerClasses
         }
         // A defaulted trait property also needs the synthesised ctor to run.
         if (!isset($methodNames['__construct'])) {
-            foreach ($decl->uses as $traitName) {
+            foreach ($this->usedTraitsFlat($decl) as $traitName) {
                 $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
                 if ($td === null) { continue; }
                 foreach ($td->properties as $tprop) {
@@ -518,6 +555,39 @@ trait LowerClasses
                 $this->isExternClassName($decl->name),
             );
         }
+        // The cells for STATIC TRAIT properties, which the loop above cannot see
+        // — it walks the class's OWN declarations. Registering the slot without
+        // emitting its cell left `load i64, ptr @C__sp_x` against a global
+        // nothing defined, so the two have to move together. addGlobalCell is
+        // idempotent by name and the class's own pass ran first, which is what
+        // keeps "the class's own property wins" true here as well.
+        if (!$this->isReifiedDecl($decl)) {
+            foreach ($this->usedTraitsFlat($decl) as $traitName) {
+                $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+                if ($td === null) { continue; }
+                foreach ($td->properties as $tprop) {
+                    if (!$tprop->isStatic) { continue; }
+                    $tspt = $this->staticPropTypes[$decl->name . '::' . $tprop->name] ?? null;
+                    $tIsCell = $tspt !== null
+                        && ($tspt->kind === Type::KIND_CELL || $tspt->kind === Type::KIND_UNKNOWN);
+                    if ($tprop->default === null) {
+                        $tdef = $tIsCell
+                            ? new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_())
+                            : new IntConst(0, Type::int_());
+                    } else {
+                        $tdef = $this->lowerExpr($tprop->default);
+                        if ($tIsCell && $tdef->kind === Node::KIND_NULL_CONST) {
+                            $tdef = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
+                        }
+                    }
+                    $this->module->addGlobalCell(
+                        '@' . $this->sanitizeSym($decl->name . '__sp_' . $tprop->name),
+                        $tdef,
+                        $this->inPreludeClass,
+                    );
+                }
+            }
+        }
         $this->currentLowerClass = $prevLowerClass;
         $isStruct = $this->hasStructAttr($decl->attributes);
         // #[AllowDynamicProperties] is INHERITED (php 8.2+). Without this a
@@ -532,6 +602,7 @@ trait LowerClasses
         $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
+        $cd->propertyDocList = $docList;
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;
         $cd->methodMeta = $methodMeta;
@@ -770,7 +841,25 @@ trait LowerClasses
      */
     private function lowerClassMethods(\Parser\Ast\ClassDecl $decl, Module $module): void
     {
-        $cd = $this->classTable[$decl->name];
+        // A plain CLASS with no ClassDef must stop HERE, with its name. Read
+        // blind, the null went on to a ClassDef-typed parameter — a TypeError
+        // under Zend but a SIGSEGV once self-built, several frames from the
+        // cause, which is how a conditionally-declared class (registered
+        // nowhere, see LowerFromAst::registerHoistedDecl) presented itself: a
+        // bare rc=139 out of a whole-program build.
+        //
+        // An ENUM is exempt, and legitimately so: it only gets a ClassDef when
+        // it declares methods, and a method-less one reaches here with none.
+        // Every $cd read below is inside a loop over properties or methods, so
+        // for that enum there is nothing to read — which is the invariant the
+        // note just under this already relies on.
+        if (($decl->kind ?? 'class') === 'class' && !isset($this->classTable[$decl->name])) {
+            throw new \RuntimeException(
+                'MIR.lower: no class definition for ' . $decl->name
+                . ' — it was declared but never registered'
+            );
+        }
+        $cd = $this->classTable[$decl->name] ?? null;
         $this->currentLowerClass = $decl->name;
         // An ENUM reaches this path but has no ClassDef in the class table, so
         // guard on the table itself — reading `$cd->typeParams` unconditionally
@@ -832,12 +921,15 @@ trait LowerClasses
         // helpers (T5). Class's own property wins.
         $ownPropNames = [];
         foreach ($decl->properties as $prop) { $ownPropNames[$prop->name] = true; }
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
             foreach ($td->properties as $tprop) {
+                // Accumulates, so a name an earlier trait already defaulted is
+                // not stored twice — one slot must not get two initialisers.
                 if (isset($ownPropNames[$tprop->name])) { continue; }
+                $ownPropNames[$tprop->name] = true;
                 if (!$this->traitPropHasDefault($tprop)) { continue; }
                 $tptype = $cd->propertyTypes[$tprop->name] ?? Type::unknown();
                 $defaultStores[] = $this->traitPropDefaultStore($tprop, $decl->name, $tptype);
@@ -893,13 +985,23 @@ trait LowerClasses
         $ownNames = [];
         foreach ($decl->methods as $m) { $ownNames[$m->name] = true; }
         $excluded = $this->traitExclusions($decl);
-        foreach ($decl->uses as $traitName) {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
             $tn = \ltrim($traitName, '\\');
             $td = $this->traitTable[$tn] ?? null;
             if ($td === null) { continue; }
             foreach ($td->methods as $tm) {
                 if (isset($excluded[$tn . '::' . $tm->name])) { continue; }
-                if (!isset($ownNames[$tm->name])) { $methods[] = $tm; }
+                // FIRST provider wins, and the set now spans nested traits, so
+                // this has to remember what earlier ones already gave. php's own
+                // rule: a trait's own member overrides the one it mixes in.
+                // symfony/cache's ContractsTrait declares `doGet` AND
+                // `use CacheTrait`, which declares `doGet` too — emitting both
+                // put two definitions of one symbol in the module. The class
+                // TABLE never had this bug because `$methodNames` accumulates;
+                // here `$ownNames` never grew.
+                if (isset($ownNames[$tm->name])) { continue; }
+                $ownNames[$tm->name] = true;
+                $methods[] = $tm;
             }
         }
         // `m as alias` / `A::m as alias`: emit a renamed copy of the source

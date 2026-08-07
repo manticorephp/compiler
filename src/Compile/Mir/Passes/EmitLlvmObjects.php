@@ -225,6 +225,12 @@ trait EmitLlvmObjects
                     $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
                     $argList .= $this->lastPadArgs;
                 }
+                // func_get_args() channel: what the SOURCE wrote, before the pad
+                // above widened the list. Kept across the merge with the spread
+                // arm — the two are independent, and dropping this makes a ctor
+                // reading func_get_arg() see the padded arity instead.
+                $out .= $this->faPush($this->lsbTarget($ctorClass, '__construct', $cd->name),
+                    $n->srcArgc, $n->args, 1);
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
@@ -291,6 +297,11 @@ trait EmitLlvmObjects
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
+            $cellBoxSlots = [];
+            $boxSlots = [];
+            $boxTmps = [];
+            $boxTypes = [];
+            $cellBoxTmps = [];
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
@@ -358,10 +369,13 @@ trait EmitLlvmObjects
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
+            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1);
             $cr = $this->ssa->allocReg();
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
             $out .= $this->btPop();
+            $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
+        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
@@ -684,6 +698,22 @@ trait EmitLlvmObjects
         // the real holder lays $prop elsewhere. Recover the class at runtime from
         // the object's class_id and read $prop's REAL per-holder offset.
         if ($pa->object->type->kind === Type::KIND_UNKNOWN) {
+            return $this->emitRawPropByClassId($pa);
+        }
+        // The class is KNOWN but does not put `$prop` anywhere — neither on
+        // itself nor on any subclass. A static offset here is not a fact, it is
+        // the slot-16 default, and 16 is the first field of whatever object
+        // actually arrives. That is a silent WRONG READ, which is strictly
+        // worse than the runtime dispatch that already exists for the erased
+        // receiver, so take that instead.
+        //
+        // A closure is the shape that makes this reachable in correct code:
+        // `Closure::bind($fn, $obj, $scope)` rebinds `$this` to a class the
+        // body was not written in, and lowering types `$this` from the LEXICAL
+        // class ({@see LowerFns::finishClosure}). symfony's MicroKernelTrait
+        // does exactly that — `fn &() => $this->instanceof` sits in the app
+        // Kernel and is bound to a PhpFileLoader.
+        if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
             return $this->emitRawPropByClassId($pa);
         }
         $out = $this->emitNode($pa->object);
@@ -1097,6 +1127,76 @@ trait EmitLlvmObjects
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
         $out .= '  store i64 ' . $ld . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The ADDRESS of `$prop` as i64 in lastValue, for a receiver whose layout
+     * is not statically knowable; null when NO class in the module declares
+     * `$prop`, since then there is no slot to point at and the caller must fall
+     * back to a value copy.
+     *
+     * The address twin of {@see emitRawPropByClassId}. A by-ref RETURN of
+     * `$this->prop` out of a closure that `Closure::bind` rebinds to a foreign
+     * scope needs a real slot address — the static offset there is the slot-16
+     * guess, and handing THAT out as an alias corrupts an unrelated field.
+     */
+    private function emitPropAddrByClassId(Node $objExpr, string $prop): ?string
+    {
+        $fixed = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+        }
+        if ($fixed === []) { return null; }
+        $out = $this->emitNode($objExpr);
+        $out .= $this->cellToPtr();
+        $objPtr = $this->lastValue;
+        // One holder → its real offset, no dispatch.
+        if (\count($fixed) === 1) {
+            $g = $this->ssa->allocReg();
+            $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                  . ', i64 ' . (string)$fixed[0]->propertyOffset($prop) . "\n";
+            $addr = $this->ssa->allocReg();
+            $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->ssa->allocLabel('pad.end');
+        $def = $this->ssa->allocLabel('pad.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($fixed as $cd) {
+            $lbl = $this->ssa->allocLabel('pad.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $g = $this->ssa->allocReg();
+            $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                     . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+            $gi = $this->ssa->allocReg();
+            $bodies .= '  ' . $gi . ' = ptrtoint ptr ' . $g . " to i64\n";
+            $bodies .= '  store i64 ' . $gi . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies;
+        // A class_id no holder matches keeps the historical slot-16 address.
+        $out .= $def . ":\n";
+        $dg = $this->ssa->allocReg();
+        $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
+        $dgi = $this->ssa->allocReg();
+        $out .= '  ' . $dgi . ' = ptrtoint ptr ' . $dg . " to i64\n";
+        $out .= '  store i64 ' . $dgi . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $r = $this->ssa->allocReg();
@@ -1665,6 +1765,15 @@ trait EmitLlvmObjects
                 return $out;
             }
         }
+        // The class is KNOWN but puts `$prop` nowhere: a static offset would be
+        // the slot-16 default, i.e. a blind write into the first field of
+        // whatever object actually arrives. The class_id dispatch above is the
+        // honest answer, and it is the same one the classless receiver takes.
+        // Mirrors the READ side in {@see emitPropertyAccess}; a closure rebound
+        // by `Closure::bind` to a foreign scope is what makes this reachable.
+        if ($this->propertyOffsetOrNull($n->object, $n->property) === null) {
+            return $this->emitCellStoreProperty($n);
+        }
         // Amortized `$this->s .= …` — the property analogue of the local
         // self-append in {@see EmitLlvmLocals::emitStoreLocal}, and worth as much:
         // without it a string accumulated into a property is a fresh O(n) concat
@@ -1695,12 +1804,21 @@ trait EmitLlvmObjects
         // rc-managed payload (string/object) is retained on the RAW pointer
         // BEFORE boxing — a tagged cell would mis-locate the rc header. A cell
         // -array backing slot keeps the raw store + rc co-own.
+        // An assignment is an EXPRESSION, and its value is the value ASSIGNED —
+        // not the slot's storage encoding. `$res` therefore tracks the value in
+        // the repr `$n->type` promises (the RHS type), while `$val` is what the
+        // slot receives. They diverge exactly when the slot boxes: returning the
+        // boxed word left `$v = ($o->mixedProp = 'x')` handing a NaN-tagged
+        // pointer to a consumer typed `string`, which inttoptr'd and dereferenced
+        // it. Same invariant emitStoreLocal keeps.
         if ($this->cellPropBoxed($propType, $pcls, $n->property)) {
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_CELL) {
-                // Already a boxed cell — store as-is.
+                // Already a boxed cell — store as-is (repr already agrees).
                 $out .= $this->coerceToI64();
                 $val = $this->lastValue;
+                $res = $val;
+                $resTy = 'i64';
             } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ) {
                 // rc-managed payload (string/object) — retain the RAW ptr before
                 // boxing (a tagged cell would mis-locate the rc header).
@@ -1711,8 +1829,15 @@ trait EmitLlvmObjects
                 $this->lastValueType = 'i64';
                 $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
+                $res = $raw;
+                $resTy = 'i64';
             } else {
-                // Non-rc scalar (int/float/bool/null) — box, no retain.
+                // Non-rc scalar (int/float/bool/null) — box, no retain. The
+                // pre-box register is captured in its NATURAL repr (a float is
+                // still a double here; coercing first would hand box_float an
+                // integer bit pattern).
+                $res = $this->lastValue;
+                $resTy = $this->lastValueType;
                 $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
             }
@@ -1741,7 +1866,9 @@ trait EmitLlvmObjects
             }
             $out .= $this->coerceToI64();
             $val = $this->lastValue;
-            $out .= $this->rcRetainByType($n->value, $val, $propType, 4);
+            $out .= $this->rcRetainByType($n->value, $val, $this->propStoreRetainType($n), 4);
+            $res = $val;
+            $resTy = 'i64';
         }
         $offset = $this->propertyOffset($n->object, $n->property);
         $gep = $this->ssa->allocReg();
@@ -1753,8 +1880,8 @@ trait EmitLlvmObjects
             $n->property,
             $val,
         );
-        $this->lastValue = $val;
-        $this->lastValueType = 'i64';
+        $this->lastValue = $res;
+        $this->lastValueType = $resTy;
         return $out;
     }
 
@@ -1913,6 +2040,9 @@ trait EmitLlvmObjects
     private function emitRefAlias(RefAlias_ $n): string
     {
         if (isset($this->locals->slots[$n->source])) {
+            // Remember what the target owned, so `unset($target)` can hand it
+            // back instead of zeroing the slot both names now share.
+            $this->locals->aliasLocals[$n->target] = $this->locals->slots[$n->target] ?? '';
             $this->locals->slots[$n->target] = $this->locals->slots[$n->source];
         }
         $this->lastValue = '0';
@@ -2725,6 +2855,23 @@ trait EmitLlvmObjects
                 // conditional contract's +1 — until a compile-time condition
                 // folded the ternary away ({@see LowerFromAst::lowerTernary}) and
                 // left the release with nothing to balance it.
+                // `unset($ref)` where `$ref = &$x` breaks THAT BINDING and
+                // nothing else — php leaves `$x` untouched. Here the alias
+                // shares `$x`'s slot ({@see emitRefAlias}), so zeroing it wiped
+                // the source: `$ref = &$bag; $ref[$k] = $v; unset($ref);` in a
+                // loop stored 0 into `$bag` every iteration and the array read
+                // back empty. Hand the name its own slot back (or none), release
+                // nothing — an alias never owned the value.
+                if (isset($this->locals->aliasLocals[$name])) {
+                    $prev = $this->locals->aliasLocals[$name];
+                    unset($this->locals->aliasLocals[$name]);
+                    if ($prev !== '') {
+                        $this->locals->slots[$name] = $prev;
+                    } else {
+                        unset($this->locals->slots[$name]);
+                    }
+                    continue;
+                }
                 $flavor = $this->discardReleaseFlavor($t->type);
                 if (isset($this->locals->globalBacked[$name])) {
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->globalBacked[$name], $flavor); }
@@ -2883,12 +3030,22 @@ trait EmitLlvmObjects
         // A float is boxed from the DOUBLE register: coercing to i64 first would
         // hand box_float the bit pattern as an integer (1.5 stored as 4.6e18).
         // Floats are not rc-managed, so nothing is owed to the retain below.
+        //
+        // An assignment is an EXPRESSION, and its value is the value ASSIGNED,
+        // not the slot's storage encoding — so what escapes in `lastValue` must
+        // match `$n->type` (the RHS type), which is what every consumer trusts.
+        // Returning the BOXED word made `$v = (M::$d = 'x')` hand a NaN-tagged
+        // pointer to a consumer typed `string`: it inttoptr'd and dereferenced
+        // it (SIGSEGV), and `$v = (M::$i = 42)` silently read -4222124650659798.
+        // emitStoreLocal keeps this invariant; this is the same rule.
         if ($box && $n->value->type->kind === Type::KIND_FLOAT) {
+            $res = $this->lastValue;
+            $resTy = $this->lastValueType;
             $out .= $this->boxToCell($n->value->type, $n->value);
             $val = $this->lastValue;
             $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
-            $this->lastValue = $val;
-            $this->lastValueType = 'i64';
+            $this->lastValue = $res;
+            $this->lastValueType = $resTy;
             return $out;
         }
         // The mirror image of the box above, and it was missing: a CELL value
@@ -2913,6 +3070,7 @@ trait EmitLlvmObjects
         }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
+        $res = $val;
         // A static prop is a program-lifetime owner of an obj value. The retain
         // happens on the RAW pointer, BEFORE any boxing — a tagged cell would
         // mis-locate the rc header (same rule as the instance-property store).
@@ -2924,7 +3082,7 @@ trait EmitLlvmObjects
             $val = $this->lastValue;
         }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
-        $this->lastValue = $val;
+        $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -3216,6 +3374,11 @@ trait EmitLlvmObjects
         $argList = '';
         $first = true;
         $argTemps = [];
+        $cellBoxSlots = [];
+        $boxSlots = [];
+        $boxTmps = [];
+        $boxTypes = [];
+        $cellBoxTmps = [];
         $cls = $this->resolveMethodClass($n->class, $n->method);
         if ($cls === '') { $cls = $n->class; }
         // Late static binding: route to the per-descendant specialisation
@@ -3234,7 +3397,7 @@ trait EmitLlvmObjects
         $cellBoxTmps = [];
         $cellBoxTypes = [];
         $ai = 0;
-        foreach ($n->args as $a) {
+        foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
@@ -3291,10 +3454,13 @@ trait EmitLlvmObjects
             $btName = $n->class . '::' . $n->method;
             $out .= $this->btPush($btName, $n->line);
         }
+        $out .= $this->faPush($target, $n->srcArgc, $n->args);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
+        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
         $out .= $this->freeStrArgTemps($argTemps);
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
@@ -3308,6 +3474,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($dv);
             $reg = $dv;
         }
         $this->lastValue = $reg;
@@ -3474,9 +3642,22 @@ trait EmitLlvmObjects
         $armCand = [];
         /** @var string[] arm keys, in first-seen order */
         $armOrder = [];
+        // Dedupe on the CLASS ID as well as on the arm. The candidate list is
+        // built from NAMES, and two of them can denote one runtime type — a
+        // reified specialization counts as a descendant of the class it
+        // specializes ({@see selfAndDescendants} follows the ORIGIN edge) — so
+        // the same class_id reached the switch twice and clang rejected the
+        // whole module with `duplicate case value`. Grouping by arm does NOT
+        // subsume this: two names sharing a class_id can still resolve to
+        // different arms, and each would emit its own case entry for that id.
+        // The first name wins, matching the first-declarer rule the union path
+        // already applies by name.
+        $seenCid = [];
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
+            if (isset($seenCid[$cd->classId])) { continue; }
+            $seenCid[$cd->classId] = true;
             $tgt = $targets[$c];
             $rtKey = '';
             if ($boxCell && !isset($erasedSyms[$tgt])) {
@@ -3582,6 +3763,39 @@ trait EmitLlvmObjects
      * Walk a class's parent chain to find the one that actually
      * declares `$method`. Returns '' when no ancestor declares it.
      */
+    /**
+     * Whether NOTHING in the compiled world can serve `$method` on a receiver
+     * whose static type is `$class` — the question the DEFAULT dispatch arm was
+     * answering on faith.
+     *
+     * Mirrors how the candidate set below is built, deliberately and in the same
+     * order, so the predicate and the arms cannot disagree: a KNOWN class walks
+     * its own chain, and an unknown or absent one (an interface, a `new $cls()`
+     * union, a fully erased receiver) is served by any class that resolves the
+     * name, which is exactly the scan the dispatch runs.
+     *
+     * Conservative on purpose — anything that might resolve makes it answer
+     * FALSE. `__call` is not consulted here because both of its reroutes have
+     * already run by the time this is asked.
+     */
+    private function methodHasNoImpl(string $class, string $method): bool
+    {
+        if ($method === '') { return false; }
+        if ($class !== '' && isset($this->classes[$class])) {
+            if ($this->resolveMethodClass($class, $method) !== '') { return false; }
+            // A DESCENDANT may declare it even when the base does not — the
+            // switch arms are built from exactly this set.
+            foreach ($this->selfAndDescendants($class) as $d) {
+                if ($this->resolveMethodClass($d, $method) !== '') { return false; }
+            }
+            return true;
+        }
+        foreach ($this->classes as $cd) {
+            if ($this->resolveMethodClass($cd->name, $method) !== '') { return false; }
+        }
+        return true;
+    }
+
     private function resolveMethodClass(string $class, string $method): string
     {
         $c = $class;
@@ -3817,16 +4031,36 @@ trait EmitLlvmObjects
             $argList = 'ptr ' . $bound;
             $argTypes = 'ptr';
             $k = \count($mc->args);
+            // ⚠ `->call()` does NOT bind by reference, and neither do we. Its
+            // own signature is `call(?object $newThis, mixed ...$args)`, so the
+            // arguments are already by-value copies by the time they are
+            // forwarded — php warns "Argument #N must be passed by reference,
+            // value given" and passes the value. Teaching this site the dynamic
+            // by-ref mask would bind where the oracle does not. Verified
+            // against php 8.5 in tests/aot/cases/closure_byref_rebind.php.
+            $fpi = $this->ssa->allocReg();
+            $out .= '  ' . $fpi . ' = load i64, ptr ' . $bound . "\n";
+            $callGate = $this->closureRefGate($k - 1);
+            $callMask = '';
+            if ($callGate !== 0) {
+                $out .= $this->closureRefMaskChain($fpi);
+                $callMask = $this->lastValue;
+            }
             for ($ai = 1; $ai < $k; $ai = $ai + 1) {
                 $a = $mc->args[$ai];
-                $out .= $this->emitNode($a);
-                if ($this->isCellBoxableArg($a->type)) { $out .= $this->boxToCell($a->type); }
-                else { $out .= $this->coerceToI64(); }
+                $slot = $ai - 1;
+                if ($callMask !== '' && ($callGate & (1 << $slot)) !== 0) {
+                    // Still BY VALUE — only the callee's unconditional deref is
+                    // accommodated. See emitDynByRefValueArg.
+                    $out .= $this->emitDynByRefValueArg($a, $callMask, $slot);
+                } else {
+                    $out .= $this->emitNode($a);
+                    if ($this->isCellBoxableArg($a->type)) { $out .= $this->boxToCell($a->type); }
+                    else { $out .= $this->coerceToI64(); }
+                }
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
             }
-            $fpi = $this->ssa->allocReg();
-            $out .= '  ' . $fpi . ' = load i64, ptr ' . $bound . "\n";
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $reg = $this->ssa->allocReg();
@@ -3888,6 +4122,11 @@ trait EmitLlvmObjects
         }
         $argList = 'i64 ' . $thisArg;
         $argTemps = [];
+        $cellBoxSlots = [];
+        $boxSlots = [];
+        $boxTmps = [];
+        $boxTypes = [];
+        $cellBoxTmps = [];
         $static = $mc->object->type->class ?? '';
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
@@ -3943,6 +4182,35 @@ trait EmitLlvmObjects
             $thisArg = $ord;
             $argList = 'i64 ' . $thisArg;
         }
+        // Nothing implements this method — anywhere. Every switch ARM below is
+        // already dropped when its candidate cannot resolve the method (see the
+        // `$t === ''` skip), but the DEFAULT arm still named a callee on faith,
+        // so the module got a symbol nothing defines and clang failed the build.
+        // php answers that at RUNTIME, when the call is reached, so this does
+        // too — a build must not die over a branch that never runs.
+        //
+        // symfony/cache reaches it through an OPTIONAL dependency: a
+        // `MessageBusInterface` property with symfony/messenger absent leaves
+        // the hint pointing at a type no compiled class implements, and asking
+        // its result for `->last(...)` put an undefined `Http\Response::last`
+        // in the module and failed the whole tier-2 link.
+        //
+        // Placed HERE, before the arguments are emitted, because php does not
+        // evaluate them: `$e->alsoMissing(mark('one'))` raises without ever
+        // running `mark`. The RECEIVER is already emitted above, which php also
+        // does — it has to, to know the class it is complaining about. Both
+        // `__call` reroutes ran far above, so their absence is settled.
+        if ($this->methodHasNoImpl($static, $mc->method)) {
+            $name = $static !== '' ? $static : 'object';
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst(
+                    'Call to undefined method ' . $name . '::' . $mc->method . '()',
+                    Type::string_())],
+                Type::cell(),
+            );
+            return $out . $this->emitNode($thr);
+        }
         // By-ref mask of the resolved callee. A method's param 0 is the
         // implicit `$this`, so call arg index `ai` maps to param `ai + 1` —
         // forward the slot address rather than the dereferenced value, or a
@@ -3965,7 +4233,7 @@ trait EmitLlvmObjects
         $cellBoxTmps = [];
         $cellBoxTypes = [];
         $ai = 0;
-        foreach ($mc->args as $a) {
+        foreach ($this->faCallArgsRecv($fallback . '__' . $mc->method, $mc->args) as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
@@ -4144,6 +4412,9 @@ trait EmitLlvmObjects
             $btName = $mc->method;
             $out .= $this->btPush($btName, $n->line);
         }
+        $faCands = $distinct;
+        $faCands[] = $fallbackFull;
+        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->args, 1);
         // A CELL result over candidates whose declared returns disagree: each
         // dispatch arm boxes its raw return by its own type (a mixed-repr raw
         // merge would mis-read). The result is then a uniform self-describing cell.
@@ -4185,6 +4456,8 @@ trait EmitLlvmObjects
         }
         $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
+        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
         $out .= $this->freeStrArgTemps($argTemps);
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
@@ -4199,6 +4472,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $dv = $this->ssa->allocReg();
             $out .= '  ' . $dv . ' = load i64, ptr ' . $p . "\n";
+            // Value context takes a COPY ({@see byRefValueCopyRetainIr}).
+            $out .= $this->byRefValueCopyRetainIr($dv);
             $reg = $dv;
         }
         $this->lastValue = $reg;
@@ -4410,6 +4685,38 @@ trait EmitLlvmObjects
      * ({@see slotHolder}), and `emitObjClone` uses the identical predicate to
      * decide that an array property is copied rather than co-owned.
      */
+    /**
+     * The destination type a property store's OWNERSHIP is decided by — the
+     * declared property type, except that an array-hinted slot whose hint erased
+     * to KIND_UNKNOWN answers `vec[unknown]` so it still reads as rc-managed.
+     *
+     * ⚠ The ONE owner of that question, for the same reason
+     * {@see EmitLlvmArrays::storeElemBoxesValue} is: {@see emitStoreProperty}
+     * reads it to emit the retain and {@see EmitLlvmMemory::collectTransferredLocals}
+     * reads it to decide the source local's scope-exit release. Two copies drift,
+     * and a drift here is a leak (pass says borrowed, emitter retains) or a
+     * double free.
+     *
+     * Why the array hint has to be recovered at all: a bare `array` / `?array`
+     * hint lowers to KIND_UNKNOWN, and a CONSTRUCTOR's parameter is erased too —
+     * a `new C(…)` site never feeds the call-site element refinement that a
+     * method call does. Both sides then looked non-rc, the store took NO
+     * reference, and the object held a BORROWED buffer that the caller's
+     * scope-exit release freed. The same store written as a method retains.
+     */
+    private function propStoreRetainType(\Compile\Mir\StoreProperty $n): ?Type
+    {
+        $pcls = $n->object->type->class ?? '';
+        $propType = ($pcls !== '' && isset($this->classes[$pcls]))
+            ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
+            : null;
+        if (($propType === null || !$propType->isArray())
+            && $this->slotIsArrayHinted($n->object, $n->property, $propType)) {
+            return Type::vec(Type::unknown());
+        }
+        return $propType;
+    }
+
     private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool
     {
         if ($propType !== null && $propType->isArray()) { return true; }
@@ -4487,7 +4794,17 @@ trait EmitLlvmObjects
              . '  store i' . $bits . ' ' . $t . ', ptr ' . $gep . "\n";
     }
 
-    private function propertyOffset(Node $objExpr, string $prop): int
+    /**
+     * The STATIC offset of `$prop` on `$objExpr`'s class, or null when no class
+     * in the module puts it anywhere — i.e. when a static offset is a GUESS.
+     *
+     * The nullable form is the single source of truth; {@see propertyOffset}
+     * is it plus the legacy slot-16 default. Callers that can do better on a
+     * miss ask THIS one, so the "is a static offset knowable?" question and the
+     * offset itself can never drift apart — the failure shape this audit has
+     * paid for repeatedly (a guard and the thing it guards computed twice).
+     */
+    private function propertyOffsetOrNull(Node $objExpr, string $prop): ?int
     {
         $cls = $objExpr->type->class ?? '';
         if ($cls !== '' && isset($this->classes[$cls])) {
@@ -4503,7 +4820,13 @@ trait EmitLlvmObjects
             $sub = $this->subclassPropOffset($cls, $prop);
             if ($sub >= 0) { return $sub; }
         }
-        return 16;
+        return null;
+    }
+
+    private function propertyOffset(Node $objExpr, string $prop): int
+    {
+        $off = $this->propertyOffsetOrNull($objExpr, $prop);
+        return $off !== null ? $off : 16;
     }
 
     /**

@@ -64,11 +64,16 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_stdout')                 { return $this->biStdStream('stdout'); }
         if ($name === '__mir_stderr')                 { return $this->biStdStream('stderr'); }
         if ($name === '__mir_argc')                   { return $this->biCliArgc(); }
+        if ($name === '__mc_require_value')           { return $this->biRequireValue($args); }
+        if ($name === '__mir_fn_exists')              { return $this->biFnExists($args); }
+        if ($name === '__mir_fa_take')                { return $this->biFuncArgsTake($args); }
+        if ($name === '__mir_fa_takex')               { return $this->biFuncArgsTakeExtra(); }
         if ($name === '__mir_argv_at')                { return $this->biCliArgvAt($args); }
         if ($name === '__mir_env_count')              { return $this->biEnvCount(); }
         if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
         if ($name === '__mir_clock_ns')               { return $this->biClockNs($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
+        if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
         if ($name === '__mir_obj_bag')                { return $this->biObjBag($args); }
         if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
@@ -86,6 +91,15 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_fiber_ctx_free')         { return $this->biFiberCtxFree($args); }
         if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
+        // NOT builtins — the two stdlib entries LowerExprs rewrites a moded
+        // `count()` into. They are intercepted here only to answer a COUNTABLE
+        // receiver, which php resolves through `->count()` for EVERY mode and
+        // the walkers would have iterated as a plain object. A non-countable
+        // receiver returns null and the ordinary call is emitted.
+        if ($name === '__mc_count_recursive' || $name === '__mc_count_mode') {
+            $cm = $this->biCountableModeCall($c);
+            if ($cm !== null) { return $cm; }
+        }
         if ($name === 'ord')                          { return $this->biOrd($args); }
         if ($name === 'chr')                          { return $this->biChr($args); }
         if ($name === 'abs')                          { return $this->biAbs($args); }
@@ -248,6 +262,7 @@ trait EmitLlvmBuiltins
         if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
+        if ($name === 'putenv')                       { return $this->biPutenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
         if ($name === 'var_export')                   { return $this->biVarExport($args); }
         // Reflection Tier-1: compile-time class queries folded from the static
@@ -981,6 +996,37 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * A concrete-element array written through a by-ref param whose DECLARED
+     * type carries a CELL element channel — the caller reads self-describing
+     * cells, so raw elements come back as denormal doubles.
+     *
+     * This is the write-back half of the by-ref array contract. The read half
+     * is {@see Passes\Monomorphize}, which specializes a by-ref param to the
+     * caller's actual slot type: `function f(array &$o)` called with an `$a =
+     * []` (`vec[cell]`) local clones to `f$mono$p1_vec_cell`, and the clone's
+     * `$o = [1, 2]` must then BUILD cells rather than store `vec[int]` raw.
+     * Retyping the parameter without coercing the store was the whole bug: the
+     * caller printed `float(5.0E-324)` for `int(1)`.
+     *
+     * Only the cell direction is handled here; the reverse (a cell-element
+     * value into a concrete-element slot) is `needsDeCellify`, already applied
+     * above.
+     */
+    private function refStoreNeedsCellify(string $name, Type $valueType): bool
+    {
+        if (!$valueType->isArray()) { return false; }
+        $ve = $valueType->element;
+        if ($ve === null) { return false; }
+        $vk = $ve->kind;
+        // Already self-describing — nothing to box.
+        if ($vk === Type::KIND_CELL || $vk === Type::KIND_UNKNOWN) { return false; }
+        $pt = $this->locals->refParamTypes[$name] ?? null;
+        if ($pt === null || !$pt->isArray()) { return false; }
+        $pe = $pt->element;
+        return $pe !== null && ($pe->kind === Type::KIND_CELL || $pe->kind === Type::KIND_UNKNOWN);
+    }
+
+    /**
      * The debug-backtrace builtin — a packed list of the active call frames'
      * NAMES, innermost first (from the runtime call-stack {@see needsBacktrace}).
      * V1 returns vec[string] of names (not PHP's assoc frames); count() and
@@ -1469,6 +1515,137 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * `__mir_fa_take($declared)` — the func-args prologue. Takes this frame's
+     * argument count off the side channel and empties it, falling back to the
+     * declared parameter count when no call site pushed one.
+     *
+     * Emitted as a CALL to the shared `@__mir_fa_take` (not inlined here): the
+     * global it clears is `linkonce_odr`, so user.o and stdlib.o must reach the
+     * same slot through the same body.
+     * @param Node[] $args
+     */
+    private function biFuncArgsTake(array $args): string
+    {
+        $this->rt->needsFuncArgs = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_fa_take(i64 ' . $this->lastValue . ")\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `function_exists($var)` with a non-literal name — a scan of the
+     * closed-world table ({@see EmitLlvmModule}). The literal form still folds
+     * at compile time; both are decided by the same predicate, so they agree.
+     * @param Node[] $args
+     */
+    private function biFnExists(array $args): string
+    {
+        $this->rt->needsFnExists = true;
+        $out = $this->emitPtrArg($args[0]);
+        $nm = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_fn_exists(ptr ' . $nm . ")\n";
+        $out .= $this->freeStrTemp($args[0], $nm);
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `require`/`include <path>` — what the expression EVALUATES to.
+     *
+     * Whole-program AOT already compiled the target's declarations in, and its
+     * top-level statements already ran inline; what was missing is the value a
+     * file ending in `return [...]` / `return function (…) {…}` hands back.
+     * Each such file stores that value in a global ({@see
+     * \Manticore\__mc_include_slot}), and this resolves a path to the right one.
+     *
+     * A chain rather than a table because the set is closed and small, and it
+     * is the same shape the dynamic function-name dispatch uses. The path is
+     * compared RESOLVED — a program reaches one file by several spellings
+     * (`__DIR__ . '/x.php'`, `./x.php`), and the slot is keyed on the real path.
+     *
+     * Three answers, matching php's three: a compile unit that returned a value
+     * gives it; one that returned nothing gives `int(1)`; a path that is not a
+     * compile unit at all gives `false`, which is what php's `include` of a
+     * missing file gives. The middle and the last are only distinguishable
+     * because every compiled path is registered, not just the ones that return.
+     * @param Node[] $args
+     */
+    private function biRequireValue(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $pathP = $this->lastValue;
+        $slots = $this->includeSlots;
+        if (\count($slots) === 0) {
+            $this->rt->needsTagged = true;
+            $f = $this->ssa->allocReg();
+            $out .= '  ' . $f . " = call i64 @__manticore_box_bool(i64 0)\n";
+            return $this->finishI64($out, $f);
+        }
+        $this->rt->needsTagged = true;
+        $this->rt->needsStrcmp = true;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $notFound = $this->ssa->allocReg();
+        $out .= '  ' . $notFound . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $out .= '  store i64 ' . $notFound . ', ptr ' . $res . "\n";
+        // Resolve the incoming path the same way the keys were resolved, so a
+        // relative spelling still matches. A NULL result (the file is gone)
+        // leaves the original pointer, which then simply matches nothing.
+        $this->libcExtra['realpath'] = 'declare ptr @realpath(ptr, ptr)';
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = call ptr @realpath(ptr ' . $pathP . ", ptr null)\n";
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rp . ", null\n";
+        $keyP = $this->ssa->allocReg();
+        $out .= '  ' . $keyP . ' = select i1 ' . $isNull . ', ptr ' . $pathP . ', ptr ' . $rp . "\n";
+        $endL = $this->ssa->allocLabel('incl.end');
+        foreach ($slots as $absPath => $slot) {
+            $hitL = $this->ssa->allocLabel('incl.hit');
+            $nextL = $this->ssa->allocLabel('incl.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr '
+                  . $this->litStr($absPath) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            if ($slot === '') {
+                // A compile unit with no top-level return — php's int(1).
+                $one = $this->ssa->allocReg();
+                $out .= '  ' . $one . " = call i64 @__manticore_box_int(i64 1)\n";
+                $out .= '  store i64 ' . $one . ', ptr ' . $res . "\n";
+            } else {
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
+                $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
+            }
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        return $this->finishI64($out, $loaded);
+    }
+
+    /**
+     * `__mir_fa_takex()` — the overflow half of the func-args prologue: the
+     * vec[cell] of arguments written past this frame's parameter list, or a
+     * null vec when the caller wrote none.
+     */
+    private function biFuncArgsTakeExtra(): string
+    {
+        $this->rt->needsFuncArgs = true;
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . " = call i64 @__mir_fa_takex()\n";
+        return $this->finishI64($out, $r);
+    }
+
     /** `$argc` source: the captured process argc (preamble cli_argv block). */
     private function biCliArgc(): string
     {
@@ -1625,6 +1802,51 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `count($x, $mode)` after LowerExprs rewrote it to `__mc_count_recursive`
+     * / `__mc_count_mode`: answer a COUNTABLE receiver here instead of letting
+     * the walker run. php ignores the mode for a Countable and always returns
+     * `->count()`; the walker would have `foreach`ed the object — its public
+     * properties, or a Traversable's yields — and answered a different number.
+     *
+     * Returns null for everything else, which is emitCall's "not a builtin"
+     * answer, so the ordinary stdlib call is emitted unchanged.
+     */
+    private function biCountableModeCall(Call $c): ?string
+    {
+        if ($c->args === []) { return null; }
+        $arg = $c->args[0];
+        // A statically known Countable — identical to {@see biCount}'s first arm.
+        if ($arg->type->kind === Type::KIND_OBJ
+            && $this->classImplements($arg->type->class ?? '', 'Countable')) {
+            // The mode is evaluated for its side effects and discarded: php
+            // evaluates every argument before it looks at the receiver.
+            $pre = '';
+            if (\count($c->args) === 2) {
+                $pre = $this->emitNode($c->args[1]);
+                $pre .= $this->coerceToI64();
+            }
+            $mc = new \Compile\Mir\MethodCall_($arg, 'count', [], Type::int_());
+            return $pre . $this->emitMethodCall($mc);
+        }
+        // The receiver ERASED. Same tag dispatch as `count($erased)`, except the
+        // non-object arm is the walker call rather than a header read.
+        if (($arg->type->kind !== Type::KIND_CELL && $arg->type->kind !== Type::KIND_UNKNOWN)
+            || $this->ifaceMethodHolders('Countable', 'count') === []) {
+            return null;
+        }
+        $out = $this->emitNode($arg);
+        $out .= $this->boxToCell($arg->type, $arg);
+        $cv = $this->lastValue;
+        $modeReg = '';
+        if (\count($c->args) === 2) {
+            $out .= $this->emitNode($c->args[1]);
+            $out .= $this->coerceToI64();
+            $modeReg = $this->lastValue;
+        }
+        return $this->emitCountableOrArray($out, $cv, $arg, $c->function, $modeReg);
+    }
+
+    /**
      * The live element count of the array at `$ptr` — physical length minus the
      * tombstone counter. lastValue ← the i64 count.
      *
@@ -1676,8 +1898,15 @@ trait EmitLlvmBuiltins
      * `count($erased)` where some class in the table is Countable: branch on the
      * runtime tag. An object cell (nibble 8) dispatches count() on its class_id;
      * anything else keeps the ordinary array count.
+     *
+     * `$walkerFn` swaps that non-object arm for a call to the moded stdlib entry
+     * ({@see biCountableModeCall}) — emitted HERE, from the cell already in
+     * `$cv`, rather than by re-entering emitCall, which would evaluate the
+     * receiver expression a second time. `$modeReg` is the walker's second
+     * argument when it takes one.
      */
-    private function emitCountableOrArray(string $out, string $cv, Node $arg): string
+    private function emitCountableOrArray(string $out, string $cv, Node $arg,
+                                          string $walkerFn = '', string $modeReg = ''): string
     {
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -1706,8 +1935,22 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $endL . "\n";
 
         $out .= $arrL . ":\n";
-        $out .= $this->arrayPtrOrEmptyIr($cv);
-        $out .= $this->arrayCountFromPtrIr($this->arrayPtrReg);
+        if ($walkerFn === '') {
+            $out .= $this->arrayPtrOrEmptyIr($cv);
+            $out .= $this->arrayCountFromPtrIr($this->arrayPtrReg);
+        } else {
+            $mangled = $this->mangle($walkerFn);
+            if (!isset($this->definedFns[$mangled])) {
+                $this->libcExtra['manticore_' . $mangled] =
+                    'declare i64 @manticore_' . $mangled
+                    . ($modeReg === '' ? '(i64)' : '(i64, i64)');
+            }
+            $wr = $this->ssa->allocReg();
+            $out .= '  ' . $wr . ' = call i64 @manticore_' . $mangled . '(i64 ' . $cv
+                  . ($modeReg === '' ? '' : ', i64 ' . $modeReg) . ")\n";
+            $this->lastValue = $wr;
+            $this->lastValueType = 'i64';
+        }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
@@ -5003,6 +5246,84 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * `putenv("NAME=value")` sets, `putenv("NAME")` unsets — php's own split on
+     * the first `=`. Returns bool.
+     *
+     * Straight through to libc, with NO shadow table, and that is the whole
+     * reason it round-trips: `getenv` ({@see biGetenv}) reads the real environ
+     * and `$_SERVER`/`$_ENV` are built from it, so one store is visible to all
+     * three. Note php behaves the same way about the arrays — they are a
+     * snapshot taken at startup, so a later putenv does not appear in them.
+     *
+     * `setenv`/`unsetenv` rather than C's `putenv`: C's takes ownership of the
+     * buffer it is handed, and ours is an rc'd MIR string that will be freed.
+     * @param Node[] $args
+     */
+    private function biPutenv(array $args): string
+    {
+        $this->libcExtra['setenv'] = 'declare i32 @setenv(ptr, ptr, i32)';
+        $this->libcExtra['unsetenv'] = 'declare i32 @unsetenv(ptr)';
+        $this->libcExtra['strchr'] = 'declare ptr @strchr(ptr, i32)';
+        $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
+        $this->libcExtra['free'] = 'declare void @free(ptr)';
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $eq = $this->ssa->allocReg();
+        $out .= '  ' . $eq . ' = call ptr @strchr(ptr ' . $s . ", i32 61)\n";
+        $hasEq = $this->ssa->allocReg();
+        $out .= '  ' . $hasEq . ' = icmp ne ptr ' . $eq . ", null\n";
+        $lSet = $this->ssa->allocLabel('penv.set');
+        $lUnset = $this->ssa->allocLabel('penv.unset');
+        $lEnd = $this->ssa->allocLabel('penv.end');
+        $out .= '  br i1 ' . $hasEq . ', label %' . $lSet . ', label %' . $lUnset . "\n";
+        $out .= $lSet . ":\n";
+        // The name has to be its OWN NUL-terminated buffer. Splitting in place
+        // by writing a NUL over the '=' is what a C program would do and it is
+        // wrong here: the argument is usually a STRING LITERAL, which is
+        // immutable, so the store is UB — LLVM keeps the original bytes and
+        // setenv then receives "NAME=value" as the NAME. A name containing '='
+        // is EINVAL, so putenv answered false and nothing was ever set.
+        $nameLen = $this->ssa->allocReg();
+        $eqI = $this->ssa->allocReg();
+        $sI = $this->ssa->allocReg();
+        $out .= '  ' . $eqI . ' = ptrtoint ptr ' . $eq . " to i64\n";
+        $out .= '  ' . $sI . ' = ptrtoint ptr ' . $s . " to i64\n";
+        $out .= '  ' . $nameLen . ' = sub i64 ' . $eqI . ', ' . $sI . "\n";
+        $bufSz = $this->ssa->allocReg();
+        $out .= '  ' . $bufSz . ' = add i64 ' . $nameLen . ", 1\n";
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . ' = call ptr @malloc(i64 ' . $bufSz . ")\n";
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = call ptr @memcpy(ptr ' . $buf . ', ptr ' . $s
+              . ', i64 ' . $nameLen . ")\n";
+        $term = $this->ssa->allocReg();
+        $out .= '  ' . $term . ' = getelementptr inbounds i8, ptr ' . $buf
+              . ', i64 ' . $nameLen . "\n";
+        $out .= '  store i8 0, ptr ' . $term . "\n";
+        $val = $this->ssa->allocReg();
+        $out .= '  ' . $val . ' = getelementptr inbounds i8, ptr ' . $eq . ", i64 1\n";
+        $rc1 = $this->ssa->allocReg();
+        $out .= '  ' . $rc1 . ' = call i32 @setenv(ptr ' . $buf . ', ptr ' . $val . ", i32 1)\n";
+        $out .= '  call void @free(ptr ' . $buf . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lUnset . ":\n";
+        $rc2 = $this->ssa->allocReg();
+        $out .= '  ' . $rc2 . ' = call i32 @unsetenv(ptr ' . $s . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $rc = $this->ssa->allocReg();
+        $out .= '  ' . $rc . ' = phi i32 [' . $rc1 . ', %' . $lSet . '], ['
+              . $rc2 . ', %' . $lUnset . "]\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp eq i32 ' . $rc . ", 0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $ok . " to i64\n";
+        return $this->finishI64($out, $r);
+    }
+
     /** @param Node[] $args  getenv($name) — `string|false` tagged cell:
      * a copy of the C env string, or boxed false when unset. */
     private function biGetenv(array $args): string
@@ -5063,6 +5384,44 @@ trait EmitLlvmBuiltins
             return \ltrim($arg->value, '\\');
         }
         return \ltrim($arg->type->class ?? '', '\\');
+    }
+
+    /**
+     * `__mir_throw_error('<message>')` — throw `\Error(<message>)` AT USE.
+     *
+     * A reference to a constant this build cannot resolve used to be a hard
+     * compile error, which is stricter than php: php resolves a constant when
+     * the expression is EVALUATED, so a reference sitting behind a guard that
+     * is false costs nothing. symfony/cache reads `\APC_ITER_KEY` inside a
+     * method guarded by `class_exists(\APCUIterator::class, false)` — without
+     * ext-apcu php never looks at it, while whole-program AOT refused to build
+     * at all, and that single reference stopped an entire tier.
+     *
+     * Emitted inline rather than as a prelude call on purpose: prelude demand
+     * is computed from the SOURCE TEXT, and a call the compiler synthesises is
+     * not in the source, so it could never gate itself in.
+     *
+     * Static detection is not lost — the analyzer reports `undefined.constant`
+     * for exactly this, and it runs closed-world over the whole source set.
+     */
+    private function biThrowError(array $args): string
+    {
+        $message = \count($args) > 0 ? $this->reflLitStr($args[0]) : '';
+        $throw = new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\StringConst($message, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        );
+        $out = $this->emitNode($throw);
+        // The throw longjmps and never returns, so nothing consumes this — but
+        // the expression still has to leave a well-typed value behind for the
+        // consumer the type system thinks exists.
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** A string-literal arg's value, or '' when not a literal. */

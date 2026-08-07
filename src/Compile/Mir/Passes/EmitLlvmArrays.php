@@ -244,84 +244,23 @@ trait EmitLlvmArrays
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
             return $this->emitMethodCall($mc);
         }
-        // `$erased[$k]` where some class in the table is ArrayAccess. The typed
-        // branch above needs a static class, so the moment the receiver erases —
-        // and `simplexml_load_string`'s `SimpleXMLElement|false` erases to a cell
-        // at the assignment — `$sxe['id']` went to __mir_array_get_str with an
-        // OBJECT pointer. Branch on the runtime tag instead: an object cell
-        // dispatches offsetGet on its class_id, everything else keeps the array
-        // path. Both operands are emitted ONCE, before the branch.
-        if (($aa->array->type->kind === Type::KIND_CELL
-                || $aa->array->type->kind === Type::KIND_UNKNOWN)
-            && $this->ifaceMethodHolders('ArrayAccess', 'offsetGet') !== []) {
-            return $this->emitErasedOffsetGet($n, $aa);
-        }
-        // `$cell[$i]` — a cell subject is string-or-array only at runtime (a
-        // `string|false` from getenv/file_get_contents erases to one), so the
-        // static type cannot pick a path. Branch on the NaN tag: PTR(4) is a
-        // string and indexes a byte; anything else takes the array path.
-        // Without this the cell fell straight through to the array path and
-        // __mir_array_get_int deref'd a string pointer as an array — SIGSEGV.
-        // Only for an int index: a string key on a string subject is a PHP
-        // warning case, and the array path already handles it.
-        $idxIsInt = $aa->index->type->kind === Type::KIND_INT
-            || $aa->index->kind === Node::KIND_INT_CONST;
-        if ($aa->array->type->kind === Type::KIND_CELL && $idxIsInt) {
-            // Both operands are emitted once, before the branch — re-emitting
-            // inside an arm would run their side effects twice.
-            $out = $this->emitNode($aa->array);
-            $out .= $this->coerceToI64();
-            $cv = $this->lastValue;
-            $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceToI64();
-            $idx = $this->lastValue;
-            $out .= $this->cellTagIr($cv);
-            $tag = $this->cellTagReg;
-            $isStr = $this->ssa->allocReg();
-            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
-            $lStr = $this->ssa->allocLabel('cellidx.str');
-            $lArr = $this->ssa->allocLabel('cellidx.arr');
-            $lEnd = $this->ssa->allocLabel('cellidx.end');
-            $out .= '  br i1 ' . $isStr . ', label %' . $lStr . ', label %' . $lArr . "\n";
-
-            $out .= $lStr . ":\n";
-            $sm = $this->ssa->allocReg();
-            $out .= '  ' . $sm . ' = and i64 ' . $cv . ", 281474976710655\n";
-            $sp = $this->ssa->allocReg();
-            $out .= '  ' . $sp . ' = inttoptr i64 ' . $sm . " to ptr\n";
-            $ch = $this->ssa->allocReg();
-            $out .= '  ' . $ch . ' = call ptr @__mir_str_char_at(ptr ' . $sp
-                  . ', i64 ' . $idx . ")\n";
-            $this->lastValue = $ch;
-            $this->lastValueType = 'ptr';
-            // Re-box: the array arm yields a cell, so both arms must agree.
-            $out .= $this->boxToCell(Type::string_());
-            $strCell = $this->lastValue;
-            $out .= '  br label %' . $lEnd . "\n";
-
-            $out .= $lArr . ":\n";
-            $am = $this->ssa->allocReg();
-            $out .= '  ' . $am . ' = and i64 ' . $cv . ", 281474976710655\n";
-            $ap = $this->ssa->allocReg();
-            $out .= '  ' . $ap . ' = inttoptr i64 ' . $am . " to ptr\n";
-            $av = $this->ssa->allocReg();
-            $out .= '  ' . $av . ' = call i64 @__mir_array_get_int(ptr ' . $ap
-                  . ', i64 ' . $idx . ")\n";
-            $out .= '  br label %' . $lEnd . "\n";
-
-            $out .= $lEnd . ":\n";
-            $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = phi i64 [ ' . $strCell . ', %' . $lStr
-                  . ' ], [ ' . $av . ', %' . $lArr . " ]\n";
-            $this->lastValue = $r;
-            $this->lastValueType = 'i64';
-            if ($n->type->kind === Type::KIND_FLOAT) {
-                $rf = $this->ssa->allocReg();
-                $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
-                $this->lastValue = $rf;
-                $this->lastValueType = 'double';
-            }
-            return $out;
+        // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
+        // ARRAY only at run time, so the static type cannot pick a path. One
+        // dispatch on the NaN-box nibble decides all three ({@see
+        // emitErasedIndexGet}).
+        //
+        // ⚠ This used to be TWO guards, and the first SHADOWED the second: the
+        // ArrayAccess arm fired whenever ANY class in the module implements
+        // ArrayAccess — true of every real application — which made the string
+        // arm below it unreachable, and the string arm additionally demanded a
+        // statically INT index, so it was skipped even where it did run.
+        // symfony's generate_operator_regex.php is the witness on both counts:
+        // `foreach ($ops as $op => $len)` over a vec[cell] types BOTH as cells,
+        // and `$op[$len - 1]` handed a string pointer to __mir_array_get_int.
+        // `$op[0]` worked, which is what made this look like a base-type bug.
+        if ($aa->array->type->kind === Type::KIND_CELL
+            || $aa->array->type->kind === Type::KIND_UNKNOWN) {
+            return $this->emitErasedIndexGet($n, $aa);
         }
         return $this->emitArrayAccessUnified($n, $aa);
     }
@@ -614,15 +553,24 @@ trait EmitLlvmArrays
     }
 
     /**
-     * `$erased[$k]` when some class in the table implements ArrayAccess.
+     * `$erased[$k]` where the subject's kind is only known at run time.
      *
      * The subject and the key are emitted EXACTLY ONCE and the branch follows,
-     * so neither side's side effects run twice. An object cell (tag nibble 8)
-     * calls offsetGet on its runtime class_id; every other tag keeps the array
-     * lookup this path had before.
+     * so neither side's side effects run twice. Three arms, decided by the
+     * NaN-box nibble: an OBJECT (8) calls offsetGet on its runtime class_id, a
+     * STRING (4) indexes a byte, everything else keeps the array lookup this
+     * path had before.
+     *
+     * ⚠ A RAW (unboxed) word stays on the array arm deliberately. There an
+     * array and a string are both bare pointers, and only an ARRAY can be
+     * identified POSITIVELY (its magic at ptr-8; a string carries its refcount
+     * there, which no probe can tell from a small integer). "Not provably an
+     * array" must therefore not be read as "string" — that would send real
+     * arrays to __mir_str_char_at.
      */
-    private function emitErasedOffsetGet(Node $self, ArrayAccess_ $aa): string
+    private function emitErasedIndexGet(Node $self, ArrayAccess_ $aa): string
     {
+        $holders = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet');
         $out = $this->emitNode($aa->array);
         $out .= $this->coerceToI64();
         $cv = $this->lastValue;
@@ -635,8 +583,9 @@ trait EmitLlvmArrays
         $key = $this->lastValue;
         // offsetGet takes `mixed $offset`, so the object arm needs the key BOXED.
         // Boxing is pure — doing it up front keeps both arms off a second emit.
+        // Only worth emitting when there IS an object arm.
         $keyCell = $key;
-        if (!$keyIsCell) {
+        if (!$keyIsCell && $holders !== []) {
             $this->lastValue = $key;
             $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
             $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());
@@ -651,23 +600,68 @@ trait EmitLlvmArrays
         $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
         $nib = $this->ssa->allocReg();
         $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
-        $isObjNib = $this->ssa->allocReg();
-        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
-        $isObj = $this->ssa->allocReg();
-        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
-        $objL = $this->ssa->allocLabel('oag.obj');
-        $arrL = $this->ssa->allocLabel('oag.arr');
-        $endL = $this->ssa->allocLabel('oag.end');
-        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
+        $arrL = $this->ssa->allocLabel('eidx.arr');
+        $endL = $this->ssa->allocLabel('eidx.end');
 
-        $out .= $objL . ":\n";
-        $pm = $this->ssa->allocReg();
-        $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
-        $pp = $this->ssa->allocReg();
-        $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
-        $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetGet', [$keyCell]);
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
+        if ($holders !== []) {
+            $objL = $this->ssa->allocLabel('eidx.obj');
+            $notObjL = $this->ssa->allocLabel('eidx.notobj');
+            $isObjNib = $this->ssa->allocReg();
+            $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $notObjL . "\n";
+
+            $out .= $objL . ":\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetGet', [$keyCell]);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+
+            $out .= $notObjL . ":\n";
+        }
+
+        // A STRING subject indexes a byte. A string KEY is excluded: php has no
+        // string offset by string key (`$s['id']` is a TypeError), so the array
+        // path already answers that shape.
+        if (!$keyIsString) {
+            $strL = $this->ssa->allocLabel('eidx.str');
+            $isStrNib = $this->ssa->allocReg();
+            $out .= '  ' . $isStrNib . ' = icmp eq i64 ' . $nib . ", 4\n";
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = and i1 ' . $isBox . ', ' . $isStrNib . "\n";
+            $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $arrL . "\n";
+
+            $out .= $strL . ":\n";
+            $sm = $this->ssa->allocReg();
+            $out .= '  ' . $sm . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $sm . " to ptr\n";
+            // The OFFSET rides the same erased channel as the subject, so unbox
+            // it to a machine int before it can index bytes — this is the half
+            // the old int-only guard silently skipped.
+            $si = $key;
+            if ($keyIsCell) {
+                $this->lastValue = $key;
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType(Type::int_());
+                $si = $this->lastValue;
+            }
+            $ch = $this->ssa->allocReg();
+            $out .= '  ' . $ch . ' = call ptr @__mir_str_char_at(ptr ' . $sp
+                  . ', i64 ' . $si . ")\n";
+            $this->lastValue = $ch;
+            $this->lastValueType = 'ptr';
+            // Re-box: the array arm yields a cell, so every arm must agree.
+            $out .= $this->boxToCell(Type::string_());
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+        } else {
+            $out .= '  br label %' . $arrL . "\n";
+        }
 
         $out .= $arrL . ":\n";
         $am = $this->ssa->allocReg();

@@ -329,6 +329,13 @@ final class Call extends Node
      *  every later offset, a self-host layout hazard. */
     public bool $voidCast = false;
 
+    /** How many arguments the SOURCE wrote at this call site, before
+     *  {@see Passes\LowerFns::defaultFillArgs} padded the list out to the
+     *  parameter count. -1 = not recorded. The only carrier of that fact: by
+     *  emit time `$args` is always exactly arity-many. Declared LAST. */
+    public int $srcArgc = -1;
+
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCall($this);
@@ -600,6 +607,13 @@ final class TryCatch_ extends Node
      *  -1 when not a generator finally. Allocas would sit past the resume
      *  switch and not dominate; the frame cell survives + dominates. */
     public int $genPendSlot = -1;
+    /** Frame slot for the BACKTRACE depth saved at try entry; -1 outside a
+     *  generator. Same reason as the three above, and it was the one left on an
+     *  inline alloca: the slot is written where the `try` sits and read in the
+     *  catch landing pad, so a resume switch entering past that block leaves the
+     *  alloca dominating neither. Declared LAST — a field added mid-struct
+     *  shifts every later offset. */
+    public int $genBtSlot = -1;
 
     public function __construct(
         public array $tryBody,
@@ -1115,6 +1129,10 @@ final class NewObj extends Node
      *  load-bearing) does not shift. */
     public bool $bare = false;
 
+    /** See {@see Call::$srcArgc}. Declared LAST. */
+    public int $srcArgc = -1;
+
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNewObj($this);
@@ -1230,6 +1248,10 @@ final class MethodCall_ extends Node
     /** See {@see Call::$voidCast}. Declared LAST. */
     public bool $voidCast = false;
 
+    /** See {@see Call::$srcArgc}. Declared LAST. */
+    public int $srcArgc = -1;
+
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitMethodCall($this);
@@ -1259,6 +1281,10 @@ final class StaticCall_ extends Node
 
     /** See {@see Call::$voidCast}. Declared LAST. */
     public bool $voidCast = false;
+
+    /** See {@see Call::$srcArgc}. Declared LAST. */
+    public int $srcArgc = -1;
+
 
     public function accept(EmitVisitor $v): string
     {

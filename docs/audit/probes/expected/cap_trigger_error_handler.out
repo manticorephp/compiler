@@ -1,0 +1,8 @@
+bool(true)
+bool(true)
+array(2) {
+  [0]=>
+  string(22) "16384:deprecated thing"
+  [1]=>
+  string(13) "1024:a notice"
+}

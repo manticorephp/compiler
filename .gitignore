@@ -12,6 +12,7 @@ graphify-out/
 !tests/expected/*.out
 !tests/bootstrap/expected/*.out
 !tests/aot/expected/*.out
+!docs/audit/probes/expected/*.out
 
 # Compiled example binaries (rebuilt via examples/*/build.sh)
 examples/async/*_bin

@@ -22,10 +22,25 @@ final class LocalSlots
     public array $slots = [];
     /** @var array<string, true> by-ref param names in the current fn */
     public array $refLocals = [];
+    /** @var array<string, Type> by-ref param name → its DECLARED type.
+     *  A store through the reference must match what the CALLER's slot reads,
+     *  and the declared param type is the only statement of that contract —
+     *  {@see Passes\Monomorphize} specializes a by-ref param to the caller's
+     *  actual slot type precisely so this is knowable here. */
+    public array $refParamTypes = [];
     /** @var array<string, string> static-local / `global $x` name → global cell */
     public array $globalBacked = [];
     /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
     public array $byRefCaptured = [];
+    /** @var array<string, string> name → the slot it owned BEFORE `$name = &$src`
+     *  rebound it to `$src`'s slot ('' when it owned none). Presence means the
+     *  name is currently an ALIAS, which `unset($name)` has to know: php's
+     *  `unset` on a reference breaks that one binding and leaves the aliased
+     *  storage alone, while zeroing the shared slot wipes the source. Restoring
+     *  the saved slot (rather than allocating a new one) keeps the unbind free
+     *  of an alloca inside a loop.
+     *  Declared LAST — a field added mid-struct shifts every later offset. */
+    public array $aliasLocals = [];
 
     public function collectByRefCaptured(Node $n): void
     {

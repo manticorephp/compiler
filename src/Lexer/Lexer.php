@@ -685,7 +685,13 @@ final class Lexer
         $b = \is_int($c) ? $c : \ord($c);
         return ($b >= 0x61 && $b <= 0x7A)   // a..z
             || ($b >= 0x41 && $b <= 0x5A)   // A..Z
-            || $b === 0x5F;                 // _
+            || $b === 0x5F                  // _
+            // php's identifier grammar is [a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*
+            // — every byte at or above 0x80 is an identifier byte, which is how
+            // a UTF-8 name works without the lexer decoding UTF-8 at all.
+            // symfony/cache declares `class \xa9` (a bare ©) for its internal
+            // value wrapper, so this was a parse error on a real vendor tree.
+            || $b >= 0x80;
     }
 
     private function isIdentPart($c): bool

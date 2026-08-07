@@ -324,8 +324,38 @@ trait LowerStmts
     private function lowerForeach(\Parser\Ast\ForeachStmt $stmt): Node
     {
         $array = $this->lowerExpr($stmt->expr);
+        // php lets a foreach bind into ANY assignable target, not just a
+        // variable: `foreach ($item as $stub->class => $stub->position)` is
+        // symfony/var-dumper's Data::__construct. Foreach_ carries its bindings
+        // as local NAMES, so a non-variable target binds a synthetic local and
+        // is re-materialised by a store at the top of the body — the same shape
+        // the list-destructuring pattern below already uses.
+        //
+        // Before this, `$stmt->key->name` simply read a property PropertyAccess
+        // does not have and passed the null on to a string-typed parameter: a
+        // warning plus a TypeError under Zend, a SIGSEGV once self-built.
+        /** @var Node[] $bind */
+        $bind = [];
         $keyVar = null;
-        if ($stmt->key !== null) { $keyVar = $stmt->key->name; }
+        if ($stmt->key !== null) {
+            if ($stmt->key->kind === 'Variable') {
+                $keyVar = $this->varName($stmt->key);
+            } else {
+                $keyVar = '__fe_key_' . (string)$this->destrCounter;
+                $this->destrCounter = $this->destrCounter + 1;
+                $bind[] = $this->storeToTarget(
+                    $stmt->key, new LoadLocal($keyVar, Type::unknown()));
+            }
+        }
+        // A by-REFERENCE binding into a non-variable target would alias the
+        // synthetic local, not the target, so writes through it would be lost —
+        // refuse it rather than compile something silently wrong.
+        if ($stmt->valueByRef && $stmt->value->kind !== 'Variable') {
+            throw new \RuntimeException(
+                'unsupported: foreach cannot bind BY REFERENCE into anything but a '
+                . 'variable — the alias would reach a temporary, not the target.'
+            );
+        }
         // List-destructuring value pattern — `foreach ($x as [$a, $b])` /
         // `foreach ($x as ['k' => $v])`: the value binding can't name the
         // pattern's several targets, so bind each element to a synthetic local
@@ -335,13 +365,26 @@ trait LowerStmts
             $this->destrCounter = $this->destrCounter + 1;
             $destr = $this->lowerDestructure($stmt->value, new LoadLocal($tmp, Type::unknown()));
             $body = $this->lowerBlockNode($stmt->body);
-            $stmts = [$destr];
+            $stmts = $bind;
+            $stmts[] = $destr;
             foreach ($body->stmts as $s) { $stmts[] = $s; }
             return $this->hoistForeachSubject(
                 new Foreach_($array, $keyVar, $tmp, $stmt->valueByRef, new Block($stmts, Type::void())));
         }
-        $valueVar = $stmt->value->name;
+        if ($stmt->value->kind === 'Variable') {
+            $valueVar = $this->varName($stmt->value);
+        } else {
+            $valueVar = '__fe_val_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $bind[] = $this->storeToTarget(
+                $stmt->value, new LoadLocal($valueVar, Type::unknown()));
+        }
         $body = $this->lowerBlockNode($stmt->body);
+        if ($bind !== []) {
+            $stmts = $bind;
+            foreach ($body->stmts as $s) { $stmts[] = $s; }
+            $body = new Block($stmts, Type::void());
+        }
         return $this->hoistForeachSubject(
             new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body));
     }

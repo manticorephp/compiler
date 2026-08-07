@@ -167,6 +167,11 @@ trait LowerPrelude
             // buffering the output of.
             $src = $src . $this->obSrc;
         }
+        if ($this->autoloadSrc !== '') {
+            // Order-independent — the queue holds callables and calls nothing
+            // else in the prelude.
+            $src = $src . $this->autoloadSrc;
+        }
         if ($this->sapiSrc !== '') {
             // After exceptions.php (setcookie throws ValueError) and after
             // cli.php, which Main forces on: the request context seeds $_SERVER.

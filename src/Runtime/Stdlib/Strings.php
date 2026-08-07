@@ -282,6 +282,135 @@ function substr_count(string $haystack, string $needle): int
     return $count;
 }
 
+/**
+ * Byte-difference comparison, php.net `strcmp` semantics.
+ *
+ * ⚠ Same reason to exist as {@see strstr}: without a global declaration a
+ * user's `strcmp()` bound to the C one through the bare-name alias, and C
+ * strings stop at the first NUL — so `strcmp("a\0b", "a\0c")` answered **0**,
+ * "these are equal", for two strings that are not. Any comparison of binary
+ * data, a hash or a token was affected, silently.
+ *
+ * PHP 8 returns the byte DIFFERENCE at the first mismatch (`strcmp('z','a')` is
+ * 25, not 1), bytes taken UNSIGNED (`"\xff"` vs `"\x01"` is 254). When one
+ * string is a prefix of the other it returns -1 / 1 rather than the length
+ * difference. Both pinned by docs/audit/probes/cap_str_capture_family.php.
+ */
+function strcmp(string $string1, string $string2): int
+{
+    return \__mc_str_cmp_bytes($string1, $string2, -1, false);
+}
+
+/** `strcmp` over at most `$length` leading bytes. */
+function strncmp(string $string1, string $string2, int $length): int
+{
+    if ($length < 0) {
+        throw new \ValueError('strncmp(): Argument #3 ($length) must be greater than or equal to 0');
+    }
+    return \__mc_str_cmp_bytes($string1, $string2, $length, false);
+}
+
+/** `strcmp` with ASCII case folding. Bytes >= 0x80 are never folded. */
+function strcasecmp(string $string1, string $string2): int
+{
+    return \__mc_str_cmp_bytes($string1, $string2, -1, true);
+}
+
+/** `strncmp` with ASCII case folding. */
+function strncasecmp(string $string1, string $string2, int $length): int
+{
+    if ($length < 0) {
+        throw new \ValueError('strncasecmp(): Argument #3 ($length) must be greater than or equal to 0');
+    }
+    return \__mc_str_cmp_bytes($string1, $string2, $length, true);
+}
+
+/**
+ * The one comparison body behind strcmp/strncmp/strcasecmp/strncasecmp.
+ *
+ * `$limit` < 0 means "whole string". The prefix rule only applies to what is
+ * actually compared: `strncmp('ab', 'abc', 2)` is 0 because the window ends
+ * before the lengths diverge.
+ *
+ * @param int $limit  max bytes to compare, or -1 for all
+ */
+function __mc_str_cmp_bytes(string $a, string $b, int $limit, bool $fold): int
+{
+    $la = \strlen($a);
+    $lb = \strlen($b);
+    if ($limit >= 0) {
+        if ($la > $limit) { $la = $limit; }
+        if ($lb > $limit) { $lb = $limit; }
+    }
+    $n = $la < $lb ? $la : $lb;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $ca = \ord(\substr($a, $i, 1));
+        $cb = \ord(\substr($b, $i, 1));
+        if ($fold) {
+            if ($ca >= 65 && $ca <= 90) { $ca = $ca + 32; }
+            if ($cb >= 65 && $cb <= 90) { $cb = $cb + 32; }
+        }
+        if ($ca !== $cb) {
+            return $ca - $cb;
+        }
+    }
+    if ($la === $lb) {
+        return 0;
+    }
+    return $la < $lb ? -1 : 1;
+}
+
+/**
+ * First occurrence of `$needle` in `$haystack`, or false — php.net semantics.
+ *
+ * ⚠ This function has to EXIST, not merely be correct. `Runtime\Libc` binds the
+ * C `strstr`, and {@see \Compile\Mir\Passes\LowerFromAst} registers a bare-name
+ * alias for every namespaced extern whose short name is unique, which
+ * `resolveCallName` consults when no global declaration matches. With nothing
+ * declared here, a user's `strstr()` bound straight to C's — returning a raw
+ * `char*` that surfaced in PHP as an integer, and stopping at the first NUL.
+ * It compiled, it linked, it ran. Declaring it globally makes the
+ * `fnDecls[bare]` step win first.
+ *
+ * Built on `strpos`, which is a codegen builtin and length-aware, so an
+ * embedded NUL in either argument behaves.
+ */
+function strstr(string $haystack, string $needle, bool $before_needle = false): string|false
+{
+    $pos = \strpos($haystack, $needle);
+    if ($pos === false) {
+        return false;
+    }
+    return $before_needle ? \substr($haystack, 0, $pos) : \substr($haystack, $pos);
+}
+
+/** `strchr` is an alias of `strstr` in PHP — not a byte search, despite the name. */
+function strchr(string $haystack, string $needle, bool $before_needle = false): string|false
+{
+    return \strstr($haystack, $needle, $before_needle);
+}
+
+/**
+ * From the LAST occurrence of `$needle`'s first byte to the end of the string,
+ * or false.
+ *
+ * Two quirks that are easy to get wrong and are pinned by
+ * docs/audit/probes/cap_str_capture_family.php: only the FIRST BYTE of
+ * `$needle` is searched for (`strrchr('a/b#c', '#/')` is `'#c'`), and an EMPTY
+ * needle returns false rather than the whole string — the opposite of `strstr`.
+ */
+function strrchr(string $haystack, string $needle): string|false
+{
+    if (\strlen($needle) === 0) {
+        return false;
+    }
+    $pos = \strrpos($haystack, \substr($needle, 0, 1));
+    if ($pos === false) {
+        return false;
+    }
+    return \substr($haystack, $pos);
+}
+
 /** Reverse a string byte-wise (1:1 with PHP `strrev`). */
 function strrev(string $s): string
 {

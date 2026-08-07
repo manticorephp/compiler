@@ -1,0 +1,4 @@
+u class=ReflectionUnionType str=string|int nullable=false
+i class=ReflectionIntersectionType str=CapA&CapB nullable=false
+n class=ReflectionNamedType str=?int nullable=true
+m class=ReflectionNamedType str=mixed nullable=true

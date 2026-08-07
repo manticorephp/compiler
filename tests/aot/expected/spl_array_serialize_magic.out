@@ -1,0 +1,55 @@
+array(4) {
+  [0]=>
+  int(0)
+  [1]=>
+  array(2) {
+    ["x"]=>
+    int(1)
+    ["y"]=>
+    int(2)
+  }
+  [2]=>
+  array(0) {
+  }
+  [3]=>
+  NULL
+}
+array(1) {
+  ["k"]=>
+  string(1) "v"
+}
+int(0)
+int(1)
+k=v
+array(4) {
+  [0]=>
+  int(0)
+  [1]=>
+  array(3) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+    [2]=>
+    int(3)
+  }
+  [2]=>
+  array(0) {
+  }
+  [3]=>
+  NULL
+}
+string(13) "ArrayIterator"
+int(0)
+array(1) {
+  ["z"]=>
+  int(9)
+}
+int(2)
+string(13) "ArrayIterator"
+array(1) {
+  ["q"]=>
+  int(8)
+}
+string(13) "ArrayIterator"
+int(1)

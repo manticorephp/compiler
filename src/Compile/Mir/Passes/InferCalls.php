@@ -140,6 +140,10 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
+        // Never actually returns — it throws php's `Undefined constant` Error.
+        // Typed CELL so whatever position the constant stood in accepts it: the
+        // value is unreachable, but the type has to be one every consumer takes.
+        if ($n === '__mir_throw_error') { return Type::cell(); }
         // `print` always yields int 1 in PHP — that is what makes it usable in
         // `$c and print "x"` and `$ok = print "y"`.
         if ($n === 'print') { return Type::int_(); }
@@ -358,6 +362,18 @@ trait InferCalls
         }
         // getenv is `string|false` — a tagged cell.
         if ($n === 'getenv') {
+            return Type::cell();
+        }
+        if ($n === 'putenv') {
+            return Type::bool_();
+        }
+        if ($n === '__mir_fn_exists') {
+            return Type::bool_();
+        }
+        // `require`/`include` evaluates to whatever the target file returned —
+        // an array, a closure, a scalar, or php's int(1) when it returned
+        // nothing. Nothing static covers that, so it stays self-describing.
+        if ($n === '__mc_require_value') {
             return Type::cell();
         }
         // Math: floor/ceil/round/sqrt/fmod all return float in PHP (e.g.

@@ -191,6 +191,18 @@ trait EmitLlvmModule
             $gi = $gi + 1;
             $globalCells .= $gname . ' = ' . $linkage . 'global i64 ' . $this->globalInit($def) . "\n";
         }
+        // Intern the function-name table BEFORE the pool renders, for the same
+        // reason the global initialisers are computed above it: a name interned
+        // after the pool has been written gets no @.str.N definition at all.
+        $fnNamesRows = '';
+        $fnNamesCount = 0;
+        if ($this->rt->needsFnExists) {
+            foreach ($this->knownFnNames as $fname) {
+                if ($fnNamesCount > 0) { $fnNamesRows .= ', '; }
+                $fnNamesRows .= 'ptr ' . $this->litStr($fname);
+                $fnNamesCount = $fnNamesCount + 1;
+            }
+        }
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
         // literal share one layout so retain/release work on either.
@@ -230,6 +242,71 @@ trait EmitLlvmModule
             $out .= "  %d1 = sub i64 %d, 1\n";
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
+        }
+        if ($this->rt->needsFuncArgs) {
+            // The func-args side channel. A call site targeting a callee that
+            // asks stores its as-written argument count here; the callee's
+            // prologue takes it, in its FIRST statement, before any nested call
+            // can overwrite it. That ordering is the whole safety argument —
+            // nothing executes between the store and the take, so generators
+            // and fibers need no per-frame stack and one word is enough.
+            //
+            // Empty is -1, and the take RESETS it to -1. A frame entered from a
+            // call site that did not push (a path the emitter does not
+            // instrument) therefore reads -1 and falls back to its declared
+            // parameter count — the answer this compiler gave before the
+            // channel existed, rather than a stale count from an unrelated call.
+            // linkonce_odr so user.o and stdlib.o share one slot.
+            $out .= "@__mir_fa_argc = linkonce_odr global i64 -1\n";
+            // Companion slot for arguments written past the callee's parameter
+            // list, as a vec[cell] pointer (0 = none). Cleared by the same take
+            // so it can never be read by a later, unrelated frame.
+            $out .= "@__mir_fa_argx = linkonce_odr global i64 0\n";
+            $out .= "define i64 @__mir_fa_take(i64 %declared) {\n";
+            $out .= "entry:\n";
+            $out .= "  %n = load i64, ptr @__mir_fa_argc\n";
+            $out .= "  store i64 -1, ptr @__mir_fa_argc\n";
+            $out .= "  %empty = icmp slt i64 %n, 0\n";
+            $out .= "  %r = select i1 %empty, i64 %declared, i64 %n\n";
+            $out .= "  ret i64 %r\n}\n";
+            $out .= "define i64 @__mir_fa_takex() {\n";
+            $out .= "entry:\n";
+            $out .= "  %x = load i64, ptr @__mir_fa_argx\n";
+            $out .= "  store i64 0, ptr @__mir_fa_argx\n";
+            $out .= "  ret i64 %x\n}\n";
+        }
+        if ($this->rt->needsFnExists && $fnNamesCount > 0) {
+            // The closed-world function-name table, for `function_exists($var)`.
+            // A flat array plus a scan rather than an unrolled strcmp chain:
+            // the set runs to ~a thousand names, and this is never hot — one
+            // presence check is not worth a thousand emitted basic blocks.
+            // The rows were interned above, before the pool was rendered.
+            $n = $fnNamesCount;
+            $out .= '@__mir_fn_names = internal constant [' . (string)$n . ' x ptr] ['
+                  . $fnNamesRows . "]\n";
+            $out .= "define i64 @__mir_fn_exists(ptr %name) {\n";
+            $out .= "entry:\n";
+            $out .= "  %isnull = icmp eq ptr %name, null\n";
+            $out .= "  br i1 %isnull, label %miss, label %loop\n";
+            $out .= "loop:\n";
+            $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
+            $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+            $out .= "  br i1 %done, label %miss, label %body\n";
+            $out .= "body:\n";
+            $out .= '  %p = getelementptr inbounds [' . (string)$n
+                  . " x ptr], ptr @__mir_fn_names, i64 0, i64 %i\n";
+            $out .= "  %cand = load ptr, ptr %p\n";
+            $out .= "  %c = call i32 @strcmp(ptr %name, ptr %cand)\n";
+            $out .= "  %eq = icmp eq i32 %c, 0\n";
+            $out .= "  br i1 %eq, label %hit, label %next\n";
+            $out .= "next:\n";
+            $out .= "  %i1 = add i64 %i, 1\n";
+            $out .= "  br label %loop\n";
+            $out .= "hit:\n";
+            $out .= "  ret i64 1\n";
+            $out .= "miss:\n";
+            $out .= "  ret i64 0\n}\n";
+            $this->rt->needsStrcmp = true;
         }
         if ($this->rt->needsFibers) {
             $out .= $this->fiberRuntime();
@@ -681,8 +758,13 @@ trait EmitLlvmModule
         // By-ref params: the slot holds the caller's variable address;
         // loads/stores deref it.
         $this->locals->refLocals = [];
+        $this->locals->refParamTypes = [];
+        $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
-            if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
+            if ($p->byRef) {
+                $this->locals->refLocals[$p->name] = true;
+                $this->locals->refParamTypes[$p->name] = $p->type;
+            }
         }
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;

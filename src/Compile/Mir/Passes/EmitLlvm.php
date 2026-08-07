@@ -237,6 +237,16 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, int> closure fn name → capture count */
     private array $closureCaptures = [];
+
+    /** Resolved source path → the global slot holding that file's top-level
+     *  `return` value ({@see Module::$includeSlots}). Read by the
+     *  `require`/`include` builtin. @var array<string, string> */
+    private array $includeSlots = [];
+
+    /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
+     *  @var string[] */
+    private array $knownFnNames = [];
+
     /** @var array<string, string[]> closure fn name → per-capture rc flavor,
      *  registered by the LITERAL and drained into the generated
      *  `__mc_drop` / `__mc_retain` pair after the function loop. */
@@ -408,11 +418,18 @@ final class EmitLlvm implements EmitVisitor
         $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalIsExtern = $module->globalIsExtern;
         $this->globalVarNames = $module->globalVarNames;
+        $this->includeSlots = $module->includeSlots;
+        $this->knownFnNames = $module->knownFnNames;
+        if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;
         $this->hasObjToStr = $module->hasObjToStr;
         $this->sourceFile = $module->sourceFile;
+        // A dynamic invoke has no per-callee mask; this union is the gate that
+        // decides whether the run-time by-ref machinery is emitted at all.
+        $this->sigs->closureRefUnion = FunctionSignatures::closureRefUnion(
+            $module->functions, $module->closureCaptures);
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
             $mask = [];
@@ -437,6 +454,11 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->sigs->returnType[$fn->name] = $fn->returnType;
+            $this->sigs->usesFuncArgs[$fn->name] = $fn->usesFuncArgs;
+            // One callee that asks arms the channel for the whole module: the
+            // push is per-call-site, but the global and its take helper are
+            // emitted once, here, before any body is.
+            if ($fn->usesFuncArgs) { $this->rt->needsFuncArgs = true; }
             $this->definedFns[$this->mangle($fn->name)] = true;
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
             // The demand-gated fiber prelude is present iff the program uses
@@ -1003,7 +1025,15 @@ final class EmitLlvm implements EmitVisitor
         $n = \strlen($name);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $c = \substr($name, $i, 1);
-            if ($c === '\\') { $out .= '_'; } else { $out .= $c; }
+            if ($c === '\\') { $out .= '_'; continue; }
+            // php identifiers admit every byte >= 0x80, so a class can be named
+            // in UTF-8 — symfony/cache declares `class \xa9`. An LLVM identifier
+            // cannot carry those bytes raw, so they are hex-escaped into a
+            // still-unique ASCII name. `$u` keeps the escape from colliding with
+            // an ordinary `_XX` in a source name.
+            $b = \ord($c);
+            if ($b >= 0x80) { $out .= '_u' . \strtoupper(\dechex($b)); continue; }
+            $out .= $c;
         }
         return $out;
     }
@@ -1582,6 +1612,17 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($target === 'Stringable') {
             return $this->resolveMethodClass($name, '__toString') !== '';
+        }
+        // `Traversable` is php's implicit base of Iterator and IteratorAggregate.
+        // Neither of those is a declared interface here — they are built-ins, so
+        // they are absent from `$this->classes` and the interface-parent walk
+        // below never reaches Traversable from a class that names one of them on
+        // its `implements`. php forbids implementing Traversable directly, so
+        // those two ARE the whole membership rule.
+        if ($target === 'Traversable') {
+            return $this->classImplements($name, 'Iterator')
+                || $this->classImplements($name, 'IteratorAggregate')
+                || $this->classImplements($name, 'Traversable');
         }
         $c = $name;
         while ($c !== '') {
@@ -2207,6 +2248,115 @@ final class EmitLlvm implements EmitVisitor
     private function btPop(): string
     {
         return $this->rt->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
+    }
+
+    /**
+     * Push this call site's as-written argument count onto the func-args side
+     * channel, for a callee whose body asks for it. Emitted IMMEDIATELY before
+     * the call — the callee takes it in its first statement, so nothing may run
+     * in between.
+     *
+     * Silent (and free) for every other callee: `$srcArgc` is -1 when the
+     * lowering path did not record one, and a callee that never asks leaves the
+     * channel alone.
+     */
+    private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0): string
+    {
+        if ($srcArgc < 0) { return ''; }
+        if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return ''; }
+        $this->rt->needsFuncArgs = true;
+        $out = '';
+        // Arguments past the callee's real arity have no parameter to land in.
+        // Decided HERE and not at lowering: a stdlib entry routinely declares
+        // fewer parameters than php accepts and lets its emitter builtin read
+        // the rest, so "surplus" is only meaningful once the callee is known to
+        // read them back.
+        //
+        // `$recvParams` is how many leading parameters the callee has that the
+        // node's argument list does NOT carry — 1 for an instance method or a
+        // constructor, whose params[0] is `this`, and 0 for a free or static
+        // call. Without it every instance method looked one argument short of
+        // its own arity and its overflow was never built.
+        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if ($arity < 0) { $arity = 0; }
+        $over = [];
+        $ai = 0;
+        foreach ($args as $a) {
+            if ($ai >= $arity) { $over[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $ai = $ai + 1;
+        }
+        if (\count($over) > 0) {
+            // Built first: it is ordinary array construction and may itself
+            // call, which would clobber the count word.
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($over, Type::vec(Type::cell())));
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
+        }
+        return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
+    }
+
+    /** The prefix of `$args` the callee actually has parameters for, when the
+     *  surplus has been diverted to the func-args overflow channel; `$args`
+     *  unchanged otherwise. Keeps the emitted call matching its `declare`.
+     *  @param Node[] $args @return Node[] */
+    private function faCallArgs(string $callee, array $args, int $recvParams = 0): array
+    {
+        if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return $args; }
+        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if ($arity < 0) { $arity = 0; }
+        if (\count($args) <= $arity) { return $args; }
+        $kept = [];
+        $ai = 0;
+        foreach ($args as $a) {
+            if ($ai >= $arity) { break; }
+            $kept[] = $a;
+            $ai = $ai + 1;
+        }
+        return $kept;
+    }
+
+    /** {@see faCallArgs} for a callee whose params[0] is the receiver.
+     *  @param Node[] $args @return Node[] */
+    private function faCallArgsRecv(string $callee, array $args): array
+    {
+        return $this->faCallArgs($callee, $args, 1);
+    }
+
+    /**
+     * Clear the channel after the call returns, pairing {@see faPush} the way
+     * {@see btPop} pairs {@see btPush}.
+     *
+     * The callee's prologue normally empties it on the way in, so this is a
+     * no-op — except when the push reached a callee that does NOT read it
+     * (an indirect closure invoke, where the target is not known at the call
+     * site). Without the pop that count would still be sitting there when some
+     * later frame took it, and a stale count is far worse than no count: the
+     * empty channel has a defined meaning (fall back to the declared arity)
+     * and a stale one does not.
+     */
+    private function faPop(): string
+    {
+        if (!$this->rt->needsFuncArgs) { return ''; }
+        return "  store i64 -1, ptr @__mir_fa_argc\n"
+             . "  store i64 0, ptr @__mir_fa_argx\n";
+    }
+
+    /**
+     * {@see faPush} for a virtual dispatch: the receiver's class is not known
+     * here, so the channel is armed if ANY candidate reads it. Arming it for a
+     * callee that does not is harmless — the value is only ever read by a
+     * prologue that asked for it, and {@see faPop} clears what is left.
+     *
+     * @param string[] $callees
+     */
+    private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0): string
+    {
+        foreach ($callees as $cal) {
+            if ($this->sigs->usesFuncArgs[$cal] ?? false) {
+                return $this->faPush($cal, $srcArgc, $args, $recvParams);
+            }
+        }
+        return '';
     }
 
     /**

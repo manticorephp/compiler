@@ -37,6 +37,20 @@ final class Module
      *  `trait_exists` fold). */
     public array $traitNames = [];
 
+    /** Resolved source path → the global slot holding that file's top-level
+     *  `return` value, i.e. what `require`/`include` of it evaluates to.
+     *  Only files that actually return are listed; everything else answers
+     *  php's `int(1)`.
+     *  @var array<string, string> */
+    public array $includeSlots = [];
+
+    /** Every function name `function_exists()` should answer true for, for a
+     *  program that asks with a NON-literal argument. Filtered through the same
+     *  predicate the literal fold uses, so the two forms cannot disagree.
+     *  Empty unless the program actually asks dynamically.
+     *  @var string[] */
+    public array $knownFnNames = [];
+
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 

@@ -169,11 +169,10 @@ trait EmitLlvmMemory
             $fallback = $this->storeRetainFallback($n);
             $this->maybeTransfer($n->value, $fallback, $this->storeElemBoxesValue($n));
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
-            $pcls = $n->object->type->class ?? '';
-            $propType = ($pcls !== '' && isset($this->classes[$pcls]))
-                ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
-                : null;
-            $this->maybeTransfer($n->value, $propType);
+            // Same destination type the emitter's retain uses — one owner, or
+            // the two drift into a leak / double free ({@see
+            // EmitLlvmObjects::propStoreRetainType}).
+            $this->maybeTransfer($n->value, $this->propStoreRetainType($n));
         } elseif ($k === Node::KIND_ARRAY_LIT) {
             $fallback = $n->type->element ?? null;
             $boxed = $this->litBoxesValues($n);
@@ -455,6 +454,30 @@ trait EmitLlvmMemory
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         return $out;
+    }
+
+    /**
+     * A by-reference return read in VALUE context. `$copy = f()` is an
+     * ASSIGNMENT, so php hands back a COPY — only `$r = &f()` aliases. The
+     * deref yields a BORROWED word naming storage someone else owns, so the
+     * new holder has to take a reference: without it the container's rc stays
+     * 1, the first `$copy[] = …` COWs nothing and appends IN PLACE, and the
+     * reallocation leaves the aliased property pointing at freed memory —
+     * `implode($h->items)` printed nothing where php prints the original.
+     *
+     * The two calls are disjoint by construction ({@see rawContainerRetainIr}):
+     * cell_retain answers on the NaN tag and returns at once for an untagged
+     * word; the raw probe only fires on an untagged pointer carrying a
+     * container magic at `ptr-8`. A scalar matches neither and costs nothing.
+     * A raw STRING matches neither either — nothing stamps a magic for one —
+     * which keeps today's behaviour there rather than guessing.
+     */
+    private function byRefValueCopyRetainIr(string $v): string
+    {
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        return '  call void @__mir_cell_retain(i64 ' . $v . ")\n"
+             . $this->rawContainerRetainIr($v);
     }
 
     /** Emit a retain of the rc value carried in the i64 register `$i64reg` —
