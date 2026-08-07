@@ -1708,16 +1708,70 @@ trait InferScans
     }
 
     /** Mark locals used as an array index/key — a merge-cell key does not
-     *  render through the cell-key dispatch yet, so such names stay raw. */
+     *  render through the cell-key dispatch yet, so such names stay raw.
+     *
+     *  A STRING subscript is NOT that. `$s[$i]` is a byte OFFSET into a string:
+     *  it has no key channel, no vec-vs-assoc question, and the emitter unboxes
+     *  a tagged index there. Counting it as a key pinned the offset local raw,
+     *  which is how an `int $pos` that a loop body reassigns from `strpos()`
+     *  missed the cell promotion — and then held a boxed word while the loop
+     *  guard still compared it with a raw `icmp slt`. */
     private function scanKeyUsedLocals(Node $n): void
     {
         $k = $n->kind;
         if ($k === Node::KIND_ARRAY_ACCESS) {
-            $this->markKeyLocal($n->index);
+            if (!$this->subscriptBaseIsString($n->array)) { $this->markKeyLocal($n->index); }
         } elseif ($k === Node::KIND_STORE_ELEMENT) {
-            $this->markKeyLocal($n->index);
+            if (!$this->subscriptBaseIsString($n->array)) { $this->markKeyLocal($n->index); }
         }
         foreach (Walk::children($n) as $c) { $this->scanKeyUsedLocals($c); }
+    }
+
+    /**
+     * Whether a subscript base is statically a STRING, so its index is a byte
+     * offset rather than a key.
+     *
+     * This scan runs BEFORE the body is inferred on every round, so the node's
+     * own type is only trustworthy from round 2 on. A declared `string` PARAM
+     * is already in {@see InferTypes::$localTypes} when the scan runs, which is
+     * what makes the common case (a parser walking its input) work on round 1 —
+     * and round 1 is the only one that happens when nothing else gets promoted.
+     */
+    private function subscriptBaseIsString(Node $base): bool
+    {
+        if ($base->type->kind === Type::KIND_STRING) { return true; }
+        if ($base->kind === Node::KIND_LOAD_LOCAL) {
+            $t = $this->localTypes[$base->name] ?? null;
+            return $t !== null && $t->kind === Type::KIND_STRING;
+        }
+        return false;
+    }
+
+    /**
+     * Mark locals handed to a BY-REF parameter whose declared type is a concrete
+     * scalar ({@see InferTypes::$refPinnedLocals}).
+     *
+     * Such a slot's representation is not the caller's to choose: the callee
+     * writes it back as a raw `int` because that is what `int &$pos` says, so
+     * promoting the caller's name to a cell leaves the two ends disagreeing —
+     * `__mc_sess_take_value(string $s, int &$pos)` advanced the cursor and the
+     * decode loop then read the raw word as a tagged one, so every value after
+     * the first came back NULL / float(0).
+     */
+    private function scanRefPinnedLocals(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $callee = $this->fnByName[$n->function] ?? null;
+            if ($callee !== null) {
+                foreach ($n->args as $i => $a) {
+                    $p = $callee->params[$i] ?? null;
+                    if ($p === null || !$p->byRef) { continue; }
+                    if (!$this->isScalarReprKind($p->type)) { continue; }
+                    $this->markRefPinnedLocal($a);
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanRefPinnedLocals($c); }
     }
 
     /** Mark locals used as an ARITHMETIC operand ({@see InferTypes::$arithUsedLocals}) —

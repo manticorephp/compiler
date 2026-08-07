@@ -624,10 +624,10 @@ Both halves are inference-side, per §17.4, and both re-converged the self-host.
   no emitted arithmetic and stops every consumer guessing.
 - **A plain mixed cell in numeric arithmetic promotes by tag** — the numeric-cell
   route to `__manticore_tagged_<op>`, which also promotes an int overflow to
-  float. **Built and measured, then PARKED** (see §18.3); the reproducer lives at
-  `docs/bugs/erased_arith_float_cell.php`.
+  float. The comment claiming this "SIGKILLs the self-build" was **stale**: two
+  generations build, and what it really needed was §18.3.
 
-Six latent bugs surfaced, each pre-existing and each with its own root:
+Eight latent bugs surfaced, each pre-existing and each with its own root:
 
 1. A CELL-KEYED array reports `isVec()` (`isAssoc()` is string-key-only), and the
    foreach key rode a cell only when the ELEMENT was cell/unknown — the element
@@ -645,45 +645,75 @@ Six latent bugs surfaced, each pre-existing and each with its own root:
 5. The dynamic-name call's SPREAD arm built its call by hand and passed raw
    scalars to cell params. It survived only because the callee unboxed with
    `unbox_int`, the identity on a raw int.
-6. `$s[$i]` never unboxed a CELL index. The NaN bits read as an i64 are a vast
-   offset, so `__mir_str_char_at`'s out-of-range arm answered `""` for every
-   character — a wrong answer with no crash and no diagnostic.
+6. `$s[$i]` never unboxed a CELL index — in EITHER emitter. The NaN bits read as
+   an i64 are a vast offset, so `__mir_str_char_at`'s out-of-range arm answered
+   `""` for every character. The second emitter is the one that mattered:
+   {@see DemoteCharLocals} rewrites a character read to a raw `__mir_str_byte_at`
+   whenever the character is only compared to one-char literals and never used
+   AS a string — so **adding a `. $c .` to a debug line disables the pass and
+   the bug with it**. A marker that printed nothing but a constant is what
+   finally kept the failure alive.
+7. `scanKeyUsedLocals` counted a STRING byte offset as an array key. See §18.3.
+8. A local handed to a by-ref param typed `int &$pos` had no pin, so the loop
+   promotion could change a slot whose representation the CALLEE owns.
 
 Note the shape of 3, 4 and 5: each is a place where a value crossed into a cell
 channel without being self-describing, and each was invisible while the consumer
 happened to unbox it with an operation that is the identity on a raw int.
 `unbox_int` is a very forgiving reader, and it hid all of them.
 
-### 18.3 Why the tagged-arith half is parked (and what unblocks it)
+### 18.3 What the tagged-arith half really needed
 
-It was built, and the old comment's claim — "broadening to every cell SIGKILLs
-the self-build" — is **not what happens**. Two generations build clean, and it
-fixes what it set out to fix. What it does hit is a DIFFERENT missing piece:
+Not the store plant it first looked like. Once arithmetic over a cell yields a
+cell, a loop-carried slot changes representation across the back edge — and the
+machinery for exactly that already exists and had been running for other kinds
+all along:
 
-> A concrete-scalar slot written with a CELL value has no un-cellify plant.
+> `loopMerge` promotes a re-kinded loop local to a CELL, records it in
+> `cellLoopLocals`, sets `loopPromoGrew`, and `inferFunction` re-infers the
+> whole body — so the pre-loop store, the guard and the body all agree. A
+> promoted PARAM even gets a `$p = box($p)` prepended at entry
+> ({@see InferNodes::coercePromotedParams}).
 
-`emitStoreLocal` already carries three plants of exactly this shape — box-back
-(a cell slot ← a concrete value), float-slot (a float slot ← an int value), and
-de-cellify (a concrete-element array slot ← a cell-element array). The fourth,
-its mirror, is missing. So once arithmetic over a cell yields a cell, a
-loop-carried `int $pos` written by `$pos = $eol + 2` holds a BOXED word while
-`while ($pos < $len)` still compares it with a raw `icmp slt` — one slot, two
-representations. A boxed int is NEGATIVE as an i64, so the condition is
-permanently true and the HTTP parser never leaves its header loop. 15 suite
-cases (the http / session / simplexml cluster) fail that way, and the minimal
-form is 25 lines of ordinary PHP — nothing about it is exotic.
+Three things kept `$pos` out of it, and each was a rule that had quietly
+outgrown its reason:
 
-That plant is the aliasing epic's "one slot = one representation" agreement,
-not a new mechanism. Land it, then delete the `⛔` guard in `arithType` and move
-`docs/bugs/erased_arith_float_cell.php` back into the suite.
+1. **A STRING byte offset counted as an array KEY.** `scanKeyUsedLocals` marks
+   every subscript index, and a marked name is excluded from cell promotion —
+   because a cell ARRAY key has no dispatch. `$s[$i]` has no key channel at all;
+   it is an offset. That single over-broad mark is why `$pos` stayed pinned raw
+   while the body wrote a boxed word into it. **Ask what the base is.**
+2. **`$s[$i]` did not unbox a cell index** — and the emitter that mattered was
+   the DEMOTED one (`__mir_str_byte_at`), which only exists when the character
+   is never used as a string. Instrumenting with `. $c0 .` disabled the
+   demotion and the symptom together; a constant-only marker was needed to keep
+   it alive.
+3. **A by-ref callee owns its slot's representation.** `int &$pos` writes back a
+   raw int, so the caller must NOT promote that name — a new `refPinnedLocals`
+   pin, and for the store into such a pinned slot the fourth plant after all:
+   a concrete-scalar store node with a cell value un-cellifies
+   ({@see EmitLlvmLocals::emitStoreLocal}, mirror of the box-back).
 
-**Do not** reach for the alternative of teaching each consumer to unbox. The
-string-subscript fix above is one such consumer, and finding it cost a full
-bisect; there is no reason to believe the set is small, and every one of them
-is the same bug seen from the far end.
+The lesson is §17.4's, one level up: the cheapest fix was not a new mechanism
+but **finding the predicate that was excluding the value from the mechanism
+already there**. Both exclusions (key-used, ref-pinned) are conservative rules
+whose justification is narrower than their test.
 
 ### 18.2 Still open
 
+- **The `$GLOBALS['x']` view and a `global $x` binding disagree about the repr
+  of the SAME cell.** The view is lowered `cell` unconditionally
+  (`LowerSuperglobals::lowerGlobalsRead`); the binding is typed from the
+  cross-scope join, which deliberately declines to record an INT because that
+  is what a `global` decl is hard-lowered to anyway. Both currently read the
+  slot RAW, so they agree by accident. Tagged arithmetic breaks that accident —
+  `$GLOBALS['n'] = $GLOBALS['n'] + 1` would box into a slot the other scope
+  reads raw — so `arithType` carves the view out and keeps the integer path
+  there. Closing it means picking ONE repr for the cell and making both ends
+  say so, INCLUDING `__main`'s seeding store (`$counter = 7`), which writes the
+  slot before any other scope runs. That is a global-storage change, not an
+  arithmetic one, and it is the last known place where one slot still has two
+  representations.
 - **`plausiblePtrIr` still dereferences an unvalidated word** at ~10 call sites
   (the erased-`foreach` classifier, `is_array` on an erased operand, the memory
   passes). The two fixes above stop FEEDING it raw ints, which is why the

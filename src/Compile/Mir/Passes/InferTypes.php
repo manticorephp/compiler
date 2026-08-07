@@ -293,6 +293,12 @@ final class InferTypes implements Pass
     /** @var array<string, Type> */
     private array $sigs = [];
 
+    /** @var array<string,bool> locals handed to a by-ref param declared as a
+     *  concrete scalar — the callee writes the slot back in ITS representation,
+     *  so the loop-carried cell promotion must leave these names alone
+     *  ({@see InferScans::scanRefPinnedLocals}). */
+    private array $refPinnedLocals = [];
+
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
      *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
@@ -1464,20 +1470,27 @@ final class InferTypes implements Pass
             && $lt->kind === Type::KIND_CELL && $rt->kind === Type::KIND_CELL) {
             return Type::numericCell();
         }
-        // ⛔ A PLAIN mixed cell does NOT go to the promoting tagged path yet,
-        // and the reason is not the one the old comment here gave. Routing it
-        // there is CORRECT — it is what makes `$v + 1` on a cell holding 1.5
-        // answer `float(2.5)`, and the self-build survives it (measured: two
-        // generations, 2026-08-07). What it needs first is a store-side plant
-        // that does not exist: a CONCRETE-SCALAR slot written with a cell value
-        // must un-cellify at the store, the mirror of the three plants
-        // {@see Passes\EmitLlvmLocals::emitStoreLocal} already has (box-back,
-        // float-slot, de-cellify). Without it a loop-carried `int $pos` written
-        // by `$pos = $eol + 2` holds a BOXED word while `while ($pos < $len)`
-        // still compares it RAW — one slot, two representations — and the HTTP
-        // parser loops forever. That plant belongs to the aliasing epic's
-        // agreement scan; this returns the moment it lands.
+        // A PLAIN mixed cell in numeric arithmetic. Which of int-or-float PHP
+        // does is decided by the TAG, at runtime — exactly what the numeric-cell
+        // path above already asks `__manticore_tagged_<op>` to do (and that
+        // helper also promotes an int overflow to float, which the raw path
+        // silently wraps). The integer path below instead unboxes every cell
+        // with unbox_int, so a cell holding 1.5 answered `int(1)` for `$v + 1`.
         //
+        // Both operands must be numeric-ish: a string / array / object / erased
+        // partner has its own arithmetic path (strtol coercion, array union, …)
+        // and must not be dragged into the tagged helpers.
+        //
+        // The old comment here claimed this "SIGKILLs the self-build". It does
+        // not. What it does do is make a loop-carried slot change repr, and the
+        // machinery for that already exists ({@see loopMerge}'s cellLoopLocals
+        // promotion + {@see InferNodes::coercePromotedParams}) — it was being
+        // skipped because a STRING byte-offset counted as an array key.
+        if (($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
+            && $this->cellArithOperand($lt) && $this->cellArithOperand($rt)
+            && !$this->globalsViewOperand($left) && !$this->globalsViewOperand($right)) {
+            return Type::numericCell();
+        }
         // Everything left takes the INTEGER path, and that path is total: it
         // coerces every operand to i64 first (strtol for a string, unbox_int
         // for a cell, the raw word otherwise — {@see EmitLlvmExpr::
@@ -1544,7 +1557,8 @@ final class InferTypes implements Pass
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }
-            if (isset($this->keyUsedLocals[$name])) { continue; }
+            if (isset($this->keyUsedLocals[$name])
+                || isset($this->refPinnedLocals[$name])) { continue; }
             $this->cellMergeLocals[$name] = true;
             $node->then->stmts[] = $this->boxBackStore($name, $tT);
             if ($hasElse) {
@@ -1626,6 +1640,28 @@ final class InferTypes implements Pass
         }
     }
 
+    /** The name behind a by-ref ARGUMENT — a plain lvalue, or the `RefAddr_` the
+     *  lowering wraps one in — pinned to the callee's declared representation. */
+    private function markRefPinnedLocal(Node $arg): void
+    {
+        if ($arg->kind === Node::KIND_LOAD_LOCAL) {
+            $this->refPinnedLocals[$arg->name] = true;
+            return;
+        }
+        if ($arg->kind === Node::KIND_REF_ADDR && $arg->target !== '') {
+            $this->refPinnedLocals[$arg->target] = true;
+        }
+    }
+
+    /** A type whose slot is a RAW scalar, so a by-ref callee writing it back
+     *  fixes the caller's representation too. */
+    private function isScalarReprKind(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_STRING;
+    }
+
     /** The literal `true` (the `||` short-circuit then arm). */
     private function isLiteralTrue(?Node $n): bool
     {
@@ -1681,6 +1717,35 @@ final class InferTypes implements Pass
     {
         return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
             || $t->isNumericCell();
+    }
+
+    /** An operand the TAGGED arithmetic helpers can take: a concrete number, or
+     *  any cell (they dispatch on its tag). Deliberately NOT a string/array/obj
+     *  or an erased word — each of those has its own arithmetic path. */
+    private function cellArithOperand(Type $t): bool
+    {
+        return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
+            || $t->kind === Type::KIND_CELL;
+    }
+
+    /**
+     * A `$GLOBALS['x']` read — the one cell operand the tagged path must NOT
+     * take.
+     *
+     * That view is lowered `cell` unconditionally, while the SAME storage
+     * reached through `global $x` is typed from the cross-scope join (an int,
+     * usually). The two readers already disagree about the slot's
+     * representation today, and what keeps them working is that both currently
+     * treat it RAW. Handing this operand to the tagged helpers boxes the result
+     * into that slot and breaks the accidental agreement — `$GLOBALS['n'] =
+     * $GLOBALS['n'] + 1` then reads back as a denormal double in the other
+     * scope. Keep the integer path here until the view and the binding agree on
+     * a repr, which is a global-storage question, not an arithmetic one.
+     */
+    private function globalsViewOperand(Node $n): bool
+    {
+        return $n->kind === Node::KIND_STATIC_PROP
+            && \str_starts_with($n->global, '@g_');
     }
 
     /** Cell type for a value union of two arms: a NUMERIC cell (int|float) when
@@ -1844,7 +1909,8 @@ final class InferTypes implements Pass
             // `$x = null;` seed via `box_null`. A numeric body types directly, so
             // no entry/body chicken-and-egg — key on the body kind here.
             if ($st->kind === Type::KIND_NULL && ($this->nullBoxesWith($bt) || $arithUnknown)) {
-                if (isset($this->keyUsedLocals[$name])) { continue; }
+                if (isset($this->keyUsedLocals[$name])
+                    || isset($this->refPinnedLocals[$name])) { continue; }
                 $out[$name] = Type::cell();
                 if (!isset($this->cellLoopLocals[$name])) {
                     $this->cellLoopLocals[$name] = true;
@@ -1853,7 +1919,8 @@ final class InferTypes implements Pass
                 continue;
             }
             if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
-            if (isset($this->keyUsedLocals[$name])) { continue; }
+            if (isset($this->keyUsedLocals[$name])
+                || isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
                 $this->cellLoopLocals[$name] = true;

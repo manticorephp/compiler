@@ -358,6 +358,8 @@ trait InferNodes
         $this->scanKeyUsedLocals($fn->body);
         $this->arithUsedLocals = [];
         $this->scanArithUsedLocals($fn->body);
+        $this->refPinnedLocals = [];
+        $this->scanRefPinnedLocals($fn->body);
         // Which arrays this function builds from `[]` — the soundness gate on the
         // elemLoopLocals pin below ({@see scanLocalBuiltArrays}).
         $this->scanLocalBuiltArrays($fn->body);
@@ -688,6 +690,21 @@ trait InferNodes
             $this->localTypes[$node->name] = Type::cell();
             $node->type = Type::cell();
             return $node->type;
+        }
+        // The opposite pin: a slot whose representation a CALLEE owns
+        // ({@see InferScans::scanRefPinnedLocals} — `int &$pos` writes it back
+        // raw), assigned a CELL. The slot cannot follow the value here, so the
+        // value has to leave its box AT THE STORE. Typing the store NODE with
+        // the SLOT type while the value stays a cell is the same (node ≠ value)
+        // signal the box-back plant uses, read in the other direction by
+        // {@see Passes\EmitLlvmLocals::emitStoreLocal}.
+        if (isset($this->refPinnedLocals[$node->name])
+            && $valueType->kind === Type::KIND_CELL) {
+            $slotT = $this->localTypes[$node->name] ?? null;
+            if ($slotT !== null && $this->isScalarReprKind($slotT)) {
+                $node->type = $slotT;
+                return $node->type;
+            }
         }
         // A null-seeded accumulator a loop assigns an object ({@see loopMerge}):
         // the slot IS that object type, so the `$acc = null;` seed store must not
