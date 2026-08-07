@@ -3033,7 +3033,208 @@ final class LowerFromAst implements Pass
         if ($expr->target->kind === 'Variable') {
             $this->trackCallableAssign($this->varName($expr->target), $expr->value);
         }
+        // `self::${$name}[$k] = $v` and its nested spellings. The target is
+        // rebuilt once per candidate static and re-lowered, so an arbitrarily
+        // deep index chain comes along for free — there is no new store node.
+        $dyn = $this->dynStaticPropBase($expr->target);
+        if ($dyn !== null) { return $this->lowerDynStaticStore($dyn, $expr); }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
+    }
+
+    /**
+     * The {@see \Parser\Ast\DynamicStaticProp} an assignment target bottoms out
+     * at, walking down index expressions, or null when it does not.
+     */
+    private function dynStaticPropBase(\Parser\Ast\Expr $t): ?\Parser\Ast\DynamicStaticProp
+    {
+        $cur = $t;
+        while ($cur->kind === 'ArrayAccess') { $cur = $this->arrayAccessBase($cur); }
+        if ($cur->kind === 'DynamicStaticProp') { return $this->asDynStaticProp($cur); }
+        return null;
+    }
+
+    private function arrayAccessBase(\Parser\Ast\ArrayAccess $a): \Parser\Ast\Expr { return $a->array; }
+
+    private function asDynStaticProp(\Parser\Ast\Expr $e): \Parser\Ast\DynamicStaticProp
+    {
+        /** @var \Parser\Ast\DynamicStaticProp $e */
+        return $e;
+    }
+
+    private function dynStaticPropClass(\Parser\Ast\DynamicStaticProp $e): string { return $e->class; }
+    private function dynStaticPropNameExpr(\Parser\Ast\DynamicStaticProp $e): \Parser\Ast\Expr { return $e->nameExpr; }
+
+    /**
+     * Every static property name `$class` can answer to, its own and inherited.
+     * The set is closed at compile time, which is the whole reason a computed
+     * name can be compiled at all.
+     *
+     * @return string[]
+     */
+    private function dynStaticCandidates(string $class): array
+    {
+        /** @var string[] $out */
+        $out = [];
+        $seen = [];
+        $c = $class;
+        while ($c !== '') {
+            $pfx = $c . '::';
+            $n = \strlen($pfx);
+            foreach ($this->staticProps as $key => $_) {
+                if (\substr($key, 0, $n) !== $pfx) { continue; }
+                $nm = \substr($key, $n);
+                if (isset($seen[$nm])) { continue; }
+                $seen[$nm] = true;
+                $out[] = $nm;
+            }
+            if (!isset($this->classTable[$c])) { break; }
+            $c = $this->classTable[$c]->parent;
+        }
+        return $out;
+    }
+
+    /**
+     * `$target` with its {@see \Parser\Ast\DynamicStaticProp} base replaced by
+     * the concrete `Class::$name`, index chain preserved.
+     */
+    private function substDynStaticBase(\Parser\Ast\Expr $target, string $class, string $prop): \Parser\Ast\Expr
+    {
+        if ($target->kind === 'DynamicStaticProp') {
+            return \Parser\Ast\Expr::staticAccess($class, '$' . $prop, $target->span);
+        }
+        $aa = $this->asArrayAccess($target);
+        $base = $this->substDynStaticBase($this->arrayAccessBase($aa), $class, $prop);
+        return \Parser\Ast\Expr::arrayAccess($base, $this->arrayAccessIndex($aa), $target->span);
+    }
+
+    private function asArrayAccess(\Parser\Ast\Expr $e): \Parser\Ast\ArrayAccess
+    {
+        /** @var \Parser\Ast\ArrayAccess $e */
+        return $e;
+    }
+
+    private function arrayAccessIndex(\Parser\Ast\ArrayAccess $a): ?\Parser\Ast\Expr { return $a->index; }
+
+    /**
+     * A read through a computed static-property name, as a ternary chain over
+     * the concrete slots. The name is evaluated once into a temporary — it can
+     * be an arbitrary expression (`self::${$annotation.'Methods'}`), so
+     * re-evaluating it per arm would run its side effects N times.
+     */
+    /**
+     * php's own wording for a computed name that matched nothing, with the name
+     * itself in it — so it is built at RUNTIME, not baked as a constant.
+     */
+    private function dynStaticThrow(string $cls, string $nameTmp): Node
+    {
+        return new Call(
+            '__mir_throw_error',
+            [new Concat(
+                new StringConst('Access to undeclared static property ' . $cls . '::$', Type::string_()),
+                new LoadLocal($nameTmp, Type::string_()),
+            )],
+            Type::cell(),
+        );
+    }
+
+    private function lowerDynStaticPropRead(\Parser\Ast\DynamicStaticProp $dyn): Node
+    {
+        $cls = $this->resolveStaticClass($this->dynStaticPropClass($dyn));
+        $names = $this->dynStaticCandidates($cls);
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameTmp = '__dynsp_r' . $id;
+        // Lower every arm FIRST and unify what the arms actually produce. The
+        // declared slot type is not that: `private static array $a` with a
+        // `@var array<string,string>` docblock reads back through the erased
+        // static channel, so a chain typed from the declaration handed a tagged
+        // word to __mir_array_retain_str and faulted. Typing it `cell`
+        // unconditionally is the other trap — the array then came back EMPTY
+        // while `isset()` still answered correctly, which is the kind of
+        // half-right that hides a bug.
+        /** @var Node[] $arms */
+        $arms = [];
+        foreach ($names as $nm) {
+            $arms[] = $this->lowerExpr(\Parser\Ast\Expr::staticAccess($cls, '$' . $nm, $dyn->span));
+        }
+        $n = \count($names);
+        if ($n === 0) {
+            return new Block([
+                $this->throwErrorExpr('Access to undeclared static property ' . $cls . '::$'),
+                new NullConst(Type::null_()),
+            ], Type::null_());
+        }
+        // The unknown-name throw is a STATEMENT GUARD, not the chain's last
+        // else. Three value-position spellings were tried and all three broke,
+        // each differently: the throw CALL dragged the chain to `cell`
+        // (InferTypes re-derives a call's type from its callee) and a raw vec was
+        // then retained as one, faulting in __mir_array_retain_str; a typed zero
+        // dragged it to `unknown`; and re-reading a real slot still left the
+        // wrapping Block carrying the `unknown` it was CONSTRUCTED with, because
+        // the arms are only refined to their real types later. Nothing decided at
+        // lowering time can be right. Out of value position the question does not
+        // arise: the chain then holds only static-prop reads and InferTypes
+        // unifies them itself.
+        $guard = new Block([
+            $this->dynStaticThrow($cls, $nameTmp),
+        ], Type::void());
+        for ($i = $n - 1; $i >= 0; $i = $i - 1) {
+            $guard = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($names[$i], Type::string_()), '==='),
+                new Block([], Type::void()),
+                $guard,
+            )], Type::void());
+        }
+        $chain = $arms[$n - 1];
+        for ($i = $n - 2; $i >= 0; $i = $i - 1) {
+            $chain = new Ternary(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($names[$i], Type::string_()), '==='),
+                $arms[$i],
+                $chain,
+                $arms[$i]->type,
+            );
+        }
+        return new Block([
+            new StoreLocal($nameTmp, $this->lowerExpr($this->dynStaticPropNameExpr($dyn)), Type::string_()),
+            $guard,
+            $chain,
+        ], $chain->type);
+    }
+
+    /**
+     * A store through a computed static-property name: evaluate the name and the
+     * value ONCE, then dispatch to the concrete slot. An unknown name throws what
+     * php throws, rather than silently writing nowhere — a hand-written dispatch
+     * that quietly takes its default is the costliest bug shape in this compiler.
+     */
+    private function lowerDynStaticStore(\Parser\Ast\DynamicStaticProp $dyn, \Parser\Ast\Assign $expr): Node
+    {
+        $cls = $this->resolveStaticClass($this->dynStaticPropClass($dyn));
+        $names = $this->dynStaticCandidates($cls);
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameTmp = '__dynsp_n' . $id;
+        $valTmp = '__dynsp_v' . $id;
+        $valNode = $this->lowerExpr($expr->value);
+        $stmts = [
+            new StoreLocal($nameTmp, $this->lowerExpr($this->dynStaticPropNameExpr($dyn)), Type::string_()),
+            new StoreLocal($valTmp, $valNode, $valNode->type),
+        ];
+        $chain = new Block([
+            $this->dynStaticThrow($cls, $nameTmp),
+        ], Type::void());
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $nm = $names[$i];
+            $tgt = $this->substDynStaticBase($expr->target, $cls, $nm);
+            $arm = new Block([$this->storeToTarget($tgt, new LoadLocal($valTmp, $valNode->type))], Type::void());
+            $chain = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($nm, Type::string_()), '==='),
+                $arm,
+                $chain,
+            )], Type::void());
+        }
+        $stmts[] = $chain;
+        return new Block($stmts, Type::void());
     }
 
     private function varName(\Parser\Ast\Variable $v): string { return $v->name; }

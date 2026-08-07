@@ -215,6 +215,13 @@ trait LowerExprs
             // intent (say whether the CLASS or the CONSTANT is missing) is
             // already served below, in php's own wording.
         }
+        if ($expr->kind === 'DynamicStaticProp') {
+            // `Class::${expr}` in VALUE position. The candidate set is closed at
+            // compile time, so this is a chain over the concrete slots; an index
+            // chain above it (`self::${$p}[$k]`) lowers on top of the chain's
+            // value and needs nothing of its own, and so does `isset(...)`.
+            return $this->lowerDynStaticPropRead($this->asDynStaticProp($expr));
+        }
         if ($expr->kind === 'DynamicStaticAccess') {
             // `$obj::class` → the operand's class name as a string. Read the
             // subclass `name` / `receiver` through a typed param (T5 offset).

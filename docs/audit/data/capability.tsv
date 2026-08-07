@@ -1,2 +1,2 @@
 probe	location	status	owning_epic	php_out_sha	mc_out_sha
-cap_variadic_byref_pack	audit	DIFF	variadic-byref	fad5b004	e3518e93
+cap_bare_array_return_ternary	audit	DIFF	element-repr	6ea17143	2b43e1a4

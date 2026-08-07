@@ -2729,6 +2729,24 @@ final class Parser
         if ($tok->kind === TokenKind::DoubleColon) {
             $this->advance();
             $member = $this->advance();
+            // `Class::${expr}` / `Class::$$var` — the static property NAME is
+            // computed. The lexer scans `$` on its own when no identifier
+            // follows, so a bare `$` lexeme here is the marker; `{ … }` wraps an
+            // arbitrary expression (symfony/error-handler DebugClassLoader
+            // writes `self::${$annotation.'Methods'}`) and a following Variable
+            // is the `$$name` spelling.
+            if ($member->kind === TokenKind::Variable && $member->lexeme === '$') {
+                if ($this->match(TokenKind::OpenBrace)) {
+                    $nameExpr = $this->parseExpression();
+                    $this->expect(TokenKind::CloseBrace, "expected '}' after a dynamic static property name");
+                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
+                }
+                if ($this->check(TokenKind::Variable)) {
+                    $inner = $this->advance();
+                    $nameExpr = Expr::variable(\substr($inner->lexeme, 1), $span);
+                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
+                }
+            }
             // `Class::method(...)`
             if ($this->check(TokenKind::OpenParen)) {
                 $args = $this->parseArgList();

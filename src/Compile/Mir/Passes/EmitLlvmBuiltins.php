@@ -5325,10 +5325,18 @@ trait EmitLlvmBuiltins
      */
     private function biThrowError(array $args): string
     {
-        $message = \count($args) > 0 ? $this->reflLitStr($args[0]) : '';
+        // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to
+        // go through reflLitStr, which answers '' for anything that is not a
+        // string constant — so a message assembled at runtime (php puts the
+        // offending name in it, as in "Access to undeclared static property
+        // C::$name") threw an Error with an EMPTY message. A literal still
+        // lowers to the same constant it always did.
+        $message = \count($args) > 0
+            ? $args[0]
+            : new \Compile\Mir\StringConst('', Type::string_());
         $throw = new \Compile\Mir\Throw_(
             new \Compile\Mir\NewObj('Error', [
-                new \Compile\Mir\StringConst($message, Type::string_()),
+                $message,
                 new \Compile\Mir\IntConst(0, Type::int_()),
                 new \Compile\Mir\NullConst(Type::obj('Throwable')),
             ], Type::obj('Error')),
