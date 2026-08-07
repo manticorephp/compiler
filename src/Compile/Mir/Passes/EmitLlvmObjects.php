@@ -3840,18 +3840,46 @@ trait EmitLlvmObjects
     {
         if ($method === '') { return false; }
         if ($class !== '' && isset($this->classes[$class])) {
-            if ($this->resolveMethodClass($class, $method) !== '') { return false; }
+            if ($this->methodResolvesToBody($class, $method)) { return false; }
             // A DESCENDANT may declare it even when the base does not — the
             // switch arms are built from exactly this set.
             foreach ($this->selfAndDescendants($class) as $d) {
-                if ($this->resolveMethodClass($d, $method) !== '') { return false; }
+                if ($this->methodResolvesToBody($d, $method)) { return false; }
             }
             return true;
         }
         foreach ($this->classes as $cd) {
-            if ($this->resolveMethodClass($cd->name, $method) !== '') { return false; }
+            if ($this->methodResolvesToBody($cd->name, $method)) { return false; }
         }
         return true;
+    }
+
+    /**
+     * Whether `$class::$method` resolves to a method with an emitted BODY.
+     *
+     * A declaration is not an implementation. `$this->initializeBundles()`
+     * inside symfony/dependency-injection's `abstract class AbstractKernel`
+     * resolves to that class's own ABSTRACT declaration, and asking only
+     * whether something declared the name answered yes — so the call was
+     * emitted direct, to a symbol nothing defines and nothing declares, and
+     * clang rejected the entire module with `use of undefined value`. Every
+     * concrete Kernel lives in framework-bundle, a package the tier excludes;
+     * with none of them compiled, no instance of the class can exist and the
+     * call is unreachable, which is exactly what the undefined-method throw
+     * says. When a concrete subclass IS compiled it answers here and the call
+     * dispatches normally.
+     *
+     * `paramTypes` is the emitter's ground truth for "a body exists" — the
+     * dispatch-arm builder drops candidates on this same test. The LSB target
+     * is accepted too, since a late-static-bound method is emitted under its
+     * specialised symbol.
+     */
+    private function methodResolvesToBody(string $class, string $method): bool
+    {
+        $d = $this->resolveMethodClass($class, $method);
+        if ($d === '') { return false; }
+        if (isset($this->sigs->paramTypes[$d . '__' . $method])) { return true; }
+        return isset($this->sigs->paramTypes[$this->lsbTarget($d, $method, $class)]);
     }
 
     private function resolveMethodClass(string $class, string $method): string
