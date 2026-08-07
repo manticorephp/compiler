@@ -713,6 +713,9 @@ trait EmitLlvmControl
             if ($flavor === 'str') { return true; }
             return isset($this->sigs->paramTypes[$fn]);
         }
+        // `$s[$i]` mints a buffer — the same read {@see EmitLlvm::isFreshStringTemp}
+        // has always released. Missing it here retained an already-owned +1.
+        if ($this->isStrCharRead($arm)) { return true; }
         return $this->condOwnsResult($arm);
     }
 

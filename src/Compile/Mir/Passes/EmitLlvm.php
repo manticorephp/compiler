@@ -1738,19 +1738,34 @@ final class EmitLlvm implements EmitVisitor
         // fresh temp exactly like a concat. Only the shapes CondOwn declares
         // owned qualify — one with an erased arm stays borrowed.
         if ($this->condOwnsResult($node)) { return true; }
-        // `$s[$i]` on a STRING base is an ALLOCATION, not a borrow:
-        // `__mir_str_char_at` mints a fresh 1-char headered buffer for every
-        // read ({@see DemoteCharLocals}, which exists because that allocation is
-        // expensive). Only the reads DemoteCharLocals could not prove dead reach
-        // here, and a consumer that frees its other fresh operands has to free
-        // this one too — `$out = $out . $s[$i]` leaked one buffer per character,
-        // which is the whole of urldecode's 305 B/call. An ARRAY element read
-        // stays a borrow: it hands back the container's own reference.
-        if ($k === Node::KIND_ARRAY_ACCESS
-            && $node->array->type->kind === Type::KIND_STRING) { return true; }
+        if ($this->isStrCharRead($node)) { return true; }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;
+    }
+
+    /**
+     * `$s[$i]` on a STRING base is an ALLOCATION, not a borrow:
+     * `__mir_str_char_at` mints a fresh 1-char headered buffer for every read
+     * ({@see DemoteCharLocals}, which exists because that allocation is
+     * expensive). Only the reads DemoteCharLocals could not prove dead reach the
+     * emitter, and a consumer that frees its other fresh operands has to free
+     * this one too — `$out = $out . $s[$i]` leaked one buffer per character,
+     * which is the whole of urldecode's 305 B/call. An ARRAY element read stays
+     * a borrow: it hands back the container's own reference.
+     *
+     * ONE predicate, asked by BOTH sides of the ownership contract. It lived
+     * inline in {@see isFreshStringTemp} only, so {@see EmitLlvmControl::armIsFresh}
+     * read the same node as BORROWED and a conditional arm normalizing to +1
+     * retained a buffer that was already +1: `$out . ($ok ? $s[$i] : '=')` — the
+     * shape of base64_encode's inner loop — leaked one char buffer per iteration
+     * at rc 1, and only the ternary form of it, which is why the identical
+     * ternary-free loop right above it was clean.
+     */
+    private function isStrCharRead(Node $n): bool
+    {
+        return $n->kind === Node::KIND_ARRAY_ACCESS
+            && $n->array->type->kind === Type::KIND_STRING;
     }
 
     /**
