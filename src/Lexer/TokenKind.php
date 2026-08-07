@@ -98,6 +98,8 @@ final class TokenKind
     public const MagicConstant  = 'MagicConstant';
     public const InlineHtml     = 'InlineHtml';
     public const OpenTag        = 'OpenTag';
+    /** `<?=` — php's short ECHO tag: opens PHP and echoes the expression list. */
+    public const OpenTagEcho    = 'OpenTagEcho';
     public const CloseTag       = 'CloseTag';
     public const AttributeStart = 'AttributeStart';
     public const AtSign         = 'AtSign';

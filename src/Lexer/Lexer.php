@@ -36,6 +36,19 @@ final class Lexer
     private array $tokens = [];
 
     /**
+     * php starts every file in HTML mode and only enters PHP at an open tag.
+     * Everything scanned while this is false is literal output, which is why a
+     * file of plain text is a valid php program that echoes itself.
+     *
+     * ⚠ Declared LAST on purpose: a new property in the middle of the list
+     * shifts every field after it, and this tree reads some fields by offset.
+     */
+    private bool $inPhp = false;
+
+    /** What the NEXT scan() begins in; see startInPhp(). */
+    private bool $startInPhp = false;
+
+    /**
      * Token lexeme - no need for kind narrowing; the keyword text is the
      * lookup. Keywords are recognised by exact lowercase match.
      * @var array<string>
@@ -70,12 +83,75 @@ final class Lexer
         $this->line = 1;
         $this->col = 1;
         $this->tokens = [];
+        $this->inPhp = $this->startInPhp;
 
         while ($this->pos < $this->len) {
+            if (!$this->inPhp) { $this->scanInlineHtml(); continue; }
             $this->scanOne();
         }
         $this->push(TokenKind::Eof, '');
         return $this->tokens;
+    }
+
+    /**
+     * Begin the next {@see scan()} already INSIDE php, for a fragment that has
+     * no open tag of its own — an interpolation body (`{$a->b}`) sub-lexed out
+     * of a double-quoted string, which is code however it looks.
+     *
+     * A setter rather than a `scanInPhp()` wrapper on purpose: a wrapper means
+     * one `array`-returning method returning ANOTHER's result, and a bare
+     * `array` return erases its element type across that hop. The tokens came
+     * back as cells and the seed build died three steps later, complaining that
+     * array_merge was undefined in a file that never mentions it.
+     */
+    public function startInPhp(): void
+    {
+        $this->startInPhp = true;
+    }
+
+    /**
+     * Literal output up to the next open tag, then the tag itself. The text is
+     * emitted verbatim as one InlineHtml token — no escape processing, none of
+     * php's string rules apply to it.
+     *
+     * `<?=` is php's short ECHO tag, not an alias for `<?php`: it opens PHP and
+     * the expression list that follows is echoed. It gets its own token kind so
+     * the parser does not have to look behind itself.
+     */
+    private function scanInlineHtml(): void
+    {
+        $line = $this->line;
+        $col = $this->col;
+        $start = $this->pos;
+        $isEcho = false;
+        $found = false;
+        while ($this->pos < $this->len) {
+            if ($this->src[$this->pos] === '<' && $this->peekAt(1) === '?') {
+                if ($this->starts('<?php')) { $found = true; break; }
+                if ($this->starts('<?=')) { $found = true; $isEcho = true; break; }
+                // Short open tag `<?`. php gates it behind short_open_tag, off
+                // by default since 5.4, so a bare `<?` stays literal text here.
+            }
+            $this->advance();
+        }
+        if ($this->pos > $start) {
+            $this->tokens[] = new Token(
+                TokenKind::InlineHtml, \substr($this->src, $start, $this->pos - $start), $line, $col);
+        }
+        if (!$found) { return; }   // ran to EOF with no tag
+        $tline = $this->line;
+        $tcol = $this->col;
+        // Each branch pushes its own LITERAL kind. Carrying the kind in a local
+        // and pushing once looks tidier and is not worth it here: the token kind
+        // is the one field every later pass switches on.
+        if ($isEcho) {
+            $this->consume(3);
+            $this->tokens[] = new Token(TokenKind::OpenTagEcho, '<?=', $tline, $tcol);
+        } else {
+            $this->consume(5);
+            $this->tokens[] = new Token(TokenKind::OpenTag, '<?php', $tline, $tcol);
+        }
+        $this->inPhp = true;
     }
 
     private function scanOne(): void
@@ -97,12 +173,17 @@ final class Lexer
             return;
         }
 
-        // PHP close tag.
+        // PHP close tag — back to HTML mode. php swallows ONE newline directly
+        // after it, so a close tag on its own line emits no leading blank line
+        // in the markup that follows; a SECOND newline is literal output.
         if ($c === '?' && $this->peekAt(1) === '>') {
             $line = $this->line;
             $col = $this->col;
             $this->consume(2);
             $this->tokens[] = new Token(TokenKind::CloseTag, '?>', $line, $col);
+            if ($this->pos < $this->len && $this->src[$this->pos] === "\r") { $this->advance(); }
+            if ($this->pos < $this->len && $this->src[$this->pos] === "\n") { $this->advance(); }
+            $this->inPhp = false;
             return;
         }
 

@@ -221,7 +221,15 @@ trait LowerPrelude
             // and token_get_all() constructs __McTok.
             $src = $src . $this->tokenizerSrc . $this->tokenizerApiSrc;
         }
-        $program = \Parser\Parser::parseSource($src);
+        // `<?php` — the prelude is FRAGMENTS concatenated, and several of them
+        // (errors, sapi, session, ob, binary, http, buffer) open with a comment
+        // rather than a tag: they were only ever meant to be spliced into a unit
+        // that had already opened one. Invisible while the lexer treated every
+        // byte as php; now that a file starts in HTML mode the leading fragment
+        // would be literal output. Opened HERE, once, rather than by heading each
+        // fragment — that was tried and cost 79 suite failures, because a `<?php`
+        // arriving mid-concatenation lands wherever that fragment was spliced.
+        $program = \Parser\Parser::parseSource("<?php\n" . $src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
         // PHP forbids mixing bracketed + unbracketed namespaces in one unit, so
