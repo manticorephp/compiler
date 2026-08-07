@@ -373,9 +373,25 @@ trait LowerExprs
             // length out of the array header and has no notion of a mode, so a
             // non-zero mode is rewritten to the stdlib walker instead. A literal
             // COUNT_NORMAL (0) keeps the fast path.
-            if (($fn === 'count' || $fn === 'sizeof') && \count($expr->args) === 2) {
+            //
+            // $fnBare, not $fn: an unqualified name inside `namespace App;` is
+            // resolved to `App\count` ({@see Parser::resolveClassName}), and the
+            // qualified name matched neither arm — a namespaced
+            // `count($x, COUNT_RECURSIVE)` silently answered the SHALLOW count.
+            //
+            // A mode that is not an int literal cannot be folded here, and
+            // assuming recursion was equally wrong the other way (a runtime
+            // COUNT_NORMAL still walked the tree), so it goes to the two-arm
+            // stdlib entry that picks at runtime.
+            if (($fnBare === 'count' || $fnBare === 'sizeof') && \count($expr->args) === 2) {
                 $mode = $this->lowerExpr($expr->args[1]);
-                if ($mode->kind !== Node::KIND_INT_CONST || $mode->value !== 0) {
+                if ($mode->kind !== Node::KIND_INT_CONST) {
+                    return new Call('__mc_count_mode', [
+                        $this->lowerExpr($expr->args[0]),
+                        $mode,
+                    ], Type::int_());
+                }
+                if ($mode->value !== 0) {
                     return new Call('__mc_count_recursive', [
                         $this->lowerExpr($expr->args[0]),
                     ], Type::int_());

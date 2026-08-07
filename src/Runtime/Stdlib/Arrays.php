@@ -253,6 +253,22 @@ function __mc_count_recursive(mixed $arr): int
 }
 
 /**
+ * `count($x, $mode)` where `$mode` is not an int literal — LowerExprs cannot
+ * fold the choice, so it is made here. Both arms exist already; this is only
+ * the dispatch, and it is deliberately NOT the fast path: a literal mode never
+ * reaches it.
+ *
+ * A Countable receiver never reaches this body either — the emitter intercepts
+ * the call by name and answers `->count()` for both modes, the way php does
+ * ({@see EmitLlvmBuiltins::biCountableModeCall}).
+ */
+function __mc_count_mode(mixed $arr, int $mode): int
+{
+    if ($mode === 0) { return \count($arr); }
+    return __mc_count_recursive($arr);
+}
+
+/**
  * `array_fill(start, count, value)` — `count` copies of `value` keyed from
  * `start` (non-negative start → a positional list).
  *

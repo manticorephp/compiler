@@ -91,6 +91,15 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_fiber_ctx_free')         { return $this->biFiberCtxFree($args); }
         if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
+        // NOT builtins — the two stdlib entries LowerExprs rewrites a moded
+        // `count()` into. They are intercepted here only to answer a COUNTABLE
+        // receiver, which php resolves through `->count()` for EVERY mode and
+        // the walkers would have iterated as a plain object. A non-countable
+        // receiver returns null and the ordinary call is emitted.
+        if ($name === '__mc_count_recursive' || $name === '__mc_count_mode') {
+            $cm = $this->biCountableModeCall($c);
+            if ($cm !== null) { return $cm; }
+        }
         if ($name === 'ord')                          { return $this->biOrd($args); }
         if ($name === 'chr')                          { return $this->biChr($args); }
         if ($name === 'abs')                          { return $this->biAbs($args); }
@@ -1787,6 +1796,51 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `count($x, $mode)` after LowerExprs rewrote it to `__mc_count_recursive`
+     * / `__mc_count_mode`: answer a COUNTABLE receiver here instead of letting
+     * the walker run. php ignores the mode for a Countable and always returns
+     * `->count()`; the walker would have `foreach`ed the object — its public
+     * properties, or a Traversable's yields — and answered a different number.
+     *
+     * Returns null for everything else, which is emitCall's "not a builtin"
+     * answer, so the ordinary stdlib call is emitted unchanged.
+     */
+    private function biCountableModeCall(Call $c): ?string
+    {
+        if ($c->args === []) { return null; }
+        $arg = $c->args[0];
+        // A statically known Countable — identical to {@see biCount}'s first arm.
+        if ($arg->type->kind === Type::KIND_OBJ
+            && $this->classImplements($arg->type->class ?? '', 'Countable')) {
+            // The mode is evaluated for its side effects and discarded: php
+            // evaluates every argument before it looks at the receiver.
+            $pre = '';
+            if (\count($c->args) === 2) {
+                $pre = $this->emitNode($c->args[1]);
+                $pre .= $this->coerceToI64();
+            }
+            $mc = new \Compile\Mir\MethodCall_($arg, 'count', [], Type::int_());
+            return $pre . $this->emitMethodCall($mc);
+        }
+        // The receiver ERASED. Same tag dispatch as `count($erased)`, except the
+        // non-object arm is the walker call rather than a header read.
+        if (($arg->type->kind !== Type::KIND_CELL && $arg->type->kind !== Type::KIND_UNKNOWN)
+            || $this->ifaceMethodHolders('Countable', 'count') === []) {
+            return null;
+        }
+        $out = $this->emitNode($arg);
+        $out .= $this->boxToCell($arg->type, $arg);
+        $cv = $this->lastValue;
+        $modeReg = '';
+        if (\count($c->args) === 2) {
+            $out .= $this->emitNode($c->args[1]);
+            $out .= $this->coerceToI64();
+            $modeReg = $this->lastValue;
+        }
+        return $this->emitCountableOrArray($out, $cv, $arg, $c->function, $modeReg);
+    }
+
+    /**
      * The live element count of the array at `$ptr` — physical length minus the
      * tombstone counter. lastValue ← the i64 count.
      *
@@ -1838,8 +1892,15 @@ trait EmitLlvmBuiltins
      * `count($erased)` where some class in the table is Countable: branch on the
      * runtime tag. An object cell (nibble 8) dispatches count() on its class_id;
      * anything else keeps the ordinary array count.
+     *
+     * `$walkerFn` swaps that non-object arm for a call to the moded stdlib entry
+     * ({@see biCountableModeCall}) — emitted HERE, from the cell already in
+     * `$cv`, rather than by re-entering emitCall, which would evaluate the
+     * receiver expression a second time. `$modeReg` is the walker's second
+     * argument when it takes one.
      */
-    private function emitCountableOrArray(string $out, string $cv, Node $arg): string
+    private function emitCountableOrArray(string $out, string $cv, Node $arg,
+                                          string $walkerFn = '', string $modeReg = ''): string
     {
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -1868,8 +1929,22 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $endL . "\n";
 
         $out .= $arrL . ":\n";
-        $out .= $this->arrayPtrOrEmptyIr($cv);
-        $out .= $this->arrayCountFromPtrIr($this->arrayPtrReg);
+        if ($walkerFn === '') {
+            $out .= $this->arrayPtrOrEmptyIr($cv);
+            $out .= $this->arrayCountFromPtrIr($this->arrayPtrReg);
+        } else {
+            $mangled = $this->mangle($walkerFn);
+            if (!isset($this->definedFns[$mangled])) {
+                $this->libcExtra['manticore_' . $mangled] =
+                    'declare i64 @manticore_' . $mangled
+                    . ($modeReg === '' ? '(i64)' : '(i64, i64)');
+            }
+            $wr = $this->ssa->allocReg();
+            $out .= '  ' . $wr . ' = call i64 @manticore_' . $mangled . '(i64 ' . $cv
+                  . ($modeReg === '' ? '' : ', i64 ' . $modeReg) . ")\n";
+            $this->lastValue = $wr;
+            $this->lastValueType = 'i64';
+        }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
