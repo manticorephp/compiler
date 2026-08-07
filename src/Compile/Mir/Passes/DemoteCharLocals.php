@@ -107,7 +107,7 @@ final class DemoteCharLocals
     /** `$s[$i] === 'x'` — read the byte, compare it to the literal's byte. */
     private function rewriteCharCmp(Cmp $n): void
     {
-        if (!$this->isEqOp($n->op)) { return; }
+        if (!$this->isByteCmpOp($n->op)) { return; }
         if ($this->isCharRead($n->left) && $this->charLiteralByte($n->right) >= 0) {
             $byte = $this->charLiteralByte($n->right);
             $n->left = $this->byteReadOf($n->left);
@@ -156,8 +156,62 @@ final class DemoteCharLocals
             $this->scanLoad($n);
         } elseif ($n->kind === Node::KIND_CMP) {
             $this->scanCmp($n);
+        } elseif ($n->kind === Node::KIND_CALL) {
+            $this->scanOrdOfLocal($n);
+        } elseif ($n->kind === Node::KIND_SWITCH) {
+            $this->scanCharSwitch($n);
         }
         foreach (Walk::children($n) as $c) { $this->scan($c); }
+    }
+
+    /**
+     * `switch ($c) { case '+': … }` — a fan of equality tests written as one
+     * statement, and the third context that never observes the string. The
+     * Lexer's `scanOperator` dispatches its 26 single-character operators this
+     * way, which alone kept its `$c` a string and cost one malloc per operator
+     * token. Counted as ONE byte use (the subject is loaded once).
+     *
+     * Every arm must carry a one-character literal; a default arm (value null)
+     * is fine — it tests nothing. One arm comparing to a longer string and the
+     * whole switch is a string switch.
+     */
+    private function scanCharSwitch(\Compile\Mir\Switch_ $n): void
+    {
+        $s = $n->subject;
+        if ($s->kind !== Node::KIND_LOAD_LOCAL) { return; }
+        if (!$this->armsAreCharLiterals($n)) { return; }
+        $name = $this->localName($s);
+        $this->byteUseCount[$name] = ($this->byteUseCount[$name] ?? 0) + 1;
+    }
+
+    private function armsAreCharLiterals(\Compile\Mir\Switch_ $n): bool
+    {
+        $seen = false;
+        foreach ($n->arms as $arm) {
+            $v = $arm->value;
+            if ($v === null) { continue; }
+            if ($this->charLiteralByte($v) < 0) { return false; }
+            $seen = true;
+        }
+        return $seen;
+    }
+
+    /**
+     * `ord($c)` — the OTHER context in which the string is never observed, and
+     * the one the tree reaches for when a byte has to cross a call boundary:
+     * every `isIdentStart`/`isDigit`-style predicate here takes `$c` and does
+     * `is_int($c) ? $c : ord($c)`, so the caller writes `ord(...)` and both
+     * worlds agree. Counting it makes those locals demotable — the Lexer's
+     * `scanOne` kept `$c` a STRING for the sake of one `ord($c)` and one
+     * `$c >= '0'`, and paid a malloc per source byte for it.
+     */
+    private function scanOrdOfLocal(Call $n): void
+    {
+        if ($n->function !== 'ord' || \count($n->args) !== 1) { return; }
+        $a = $n->args[0];
+        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return; }
+        $name = $this->localName($a);
+        $this->byteUseCount[$name] = ($this->byteUseCount[$name] ?? 0) + 1;
     }
 
     private function scanStore(StoreLocal $n): void
@@ -177,10 +231,10 @@ final class DemoteCharLocals
         $this->useCount[$n->name] = ($this->useCount[$n->name] ?? 0) + 1;
     }
 
-    /** A `$c === 'x'` use — the one context in which the string is never observed. */
+    /** A `$c === 'x'` / `$c >= '0'` use — the string itself is never observed. */
     private function scanCmp(Cmp $n): void
     {
-        if (!$this->isEqOp($n->op)) { return; }
+        if (!$this->isByteCmpOp($n->op)) { return; }
         $name = '';
         if ($n->left->kind === Node::KIND_LOAD_LOCAL
             && $this->charLiteralByte($n->right) >= 0) {
@@ -201,8 +255,45 @@ final class DemoteCharLocals
             $this->rewriteDemotedLoad($n);
         } elseif ($n->kind === Node::KIND_CMP) {
             $this->rewriteDemotedCmp($n);
+        } elseif ($n->kind === Node::KIND_CALL) {
+            $this->rewriteDemotedOrd($n);
+        } elseif ($n->kind === Node::KIND_SWITCH) {
+            $this->rewriteDemotedSwitch($n);
         }
         foreach (Walk::children($n) as $c) { $this->rewriteDemoted($c); }
+    }
+
+    /** Each `case 'x':` label becomes its byte, matching the demoted subject. */
+    private function rewriteDemotedSwitch(\Compile\Mir\Switch_ $n): void
+    {
+        $s = $n->subject;
+        if ($s->kind !== Node::KIND_LOAD_LOCAL) { return; }
+        if (!isset($this->demoted[$this->localName($s)])) { return; }
+        if (!$this->armsAreCharLiterals($n)) { return; }
+        foreach ($n->arms as $arm) {
+            $v = $arm->value;
+            if ($v === null) { continue; }
+            $arm->value = new IntConst($this->charLiteralByte($v), Type::int_());
+        }
+    }
+
+    /**
+     * `ord($c)` on a demoted local: the byte is already in the slot, so the read
+     * is the identity. Rewritten to `intval`, not deleted — the node stays in
+     * place (Walk::children hands out nodes, not slots, so a pass cannot replace
+     * one), and `intval` of an int is both the identity in codegen and exactly
+     * what php would answer, so nothing diverges if this ever fires elsewhere.
+     * `ord` itself could NOT be left: it takes its argument as a POINTER and
+     * would dereference the byte value as an address.
+     */
+    private function rewriteDemotedOrd(Call $n): void
+    {
+        if ($n->function !== 'ord' || \count($n->args) !== 1) { return; }
+        $a = $n->args[0];
+        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return; }
+        if (!isset($this->demoted[$this->localName($a)])) { return; }
+        $n->function = 'intval';
+        $n->type = Type::int_();
     }
 
     private function rewriteDemotedStore(StoreLocal $n): void
@@ -221,7 +312,7 @@ final class DemoteCharLocals
 
     private function rewriteDemotedCmp(Cmp $n): void
     {
-        if (!$this->isEqOp($n->op)) { return; }
+        if (!$this->isByteCmpOp($n->op)) { return; }
         if ($n->left->kind === Node::KIND_LOAD_LOCAL
             && isset($this->demoted[$this->localName($n->left)])
             && $this->charLiteralByte($n->right) >= 0) {
@@ -298,5 +389,19 @@ final class DemoteCharLocals
     private function isEqOp(string $op): bool
     {
         return $op === '===' || $op === '!==' || $op === '==' || $op === '!=';
+    }
+
+    /**
+     * Equality PLUS the relational operators. Two ONE-BYTE strings compare by
+     * their single byte — `$c >= '0' && $c <= '9'` is the digit test every
+     * scanner writes, and leaving it out kept `scanOne`'s `$c` a string for the
+     * sake of two comparisons. Only ever paired with a one-character literal
+     * ({@see charLiteralByte}), so the multi-byte lexicographic case, where the
+     * byte answer would differ, never reaches here.
+     */
+    private function isByteCmpOp(string $op): bool
+    {
+        return $this->isEqOp($op)
+            || $op === '<' || $op === '<=' || $op === '>' || $op === '>=';
     }
 }

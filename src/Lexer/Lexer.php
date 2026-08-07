@@ -134,9 +134,13 @@ final class Lexer
             }
         }
 
-        // String literals.
+        // String literals. The quote is re-read rather than passed from `$c`:
+        // an argument use is a use that OBSERVES the string, and one of those
+        // keeps `$c` a string for the whole function ({@see DemoteCharLocals}),
+        // which costs a malloc per source byte. Re-reading costs one allocation
+        // per string literal instead.
         if ($c === "'" || $c === '"') {
-            $this->scanString($c);
+            $this->scanString($this->src[$this->pos]);
             return;
         }
 
@@ -147,7 +151,7 @@ final class Lexer
         }
 
         // Identifiers / keywords.
-        if ($this->isIdentStart($c)) {
+        if ($this->isIdentStart(\ord($c))) {
             $this->scanIdentifier();
             return;
         }
@@ -218,7 +222,7 @@ final class Lexer
         if ($q === \ord("'")) { $nowdoc = true; $quoted = true; $this->advance(); }
         elseif ($q === \ord('"')) { $quoted = true; $this->advance(); }
         $lblStart = $this->pos;
-        while ($this->pos < $this->len && $this->isIdentPart($this->src[$this->pos])) {
+        while ($this->pos < $this->len && $this->isIdentPart(\ord($this->src[$this->pos]))) {
             $this->advance();
         }
         $label = \substr($this->src, $lblStart, $this->pos - $lblStart);
@@ -239,7 +243,7 @@ final class Lexer
             }
             if (\substr($this->src, $this->pos, $labelLen) === $label) {
                 $after = $this->pos + $labelLen;
-                $isEnd = ($after >= $this->len) || !$this->isIdentPart($this->src[$after]);
+                $isEnd = ($after >= $this->len) || !$this->isIdentPart(\ord($this->src[$after]));
                 if ($isEnd) {
                     $closeIndent = $indent;
                     $bodyEnd = $lineStart;
@@ -307,7 +311,7 @@ final class Lexer
         $start = $this->pos;
         $line = $this->line;
         $col = $this->col;
-        while ($this->pos < $this->len && $this->isIdentPart($this->src[$this->pos])) {
+        while ($this->pos < $this->len && $this->isIdentPart(\ord($this->src[$this->pos]))) {
             $this->advance();
         }
         $lex = substr($this->src, $start, $this->pos - $start);
@@ -331,7 +335,7 @@ final class Lexer
         $col = $this->col;
         $start = $this->pos;
         $this->advance(); // consume '$'
-        while ($this->pos < $this->len && $this->isIdentPart($this->src[$this->pos])) {
+        while ($this->pos < $this->len && $this->isIdentPart(\ord($this->src[$this->pos]))) {
             $this->advance();
         }
         $lex = substr($this->src, $start, $this->pos - $start);
@@ -399,7 +403,7 @@ final class Lexer
         }
 
         // Integer part.
-        while ($this->pos < $this->len && ($this->isDigit($this->src[$this->pos]) || $this->src[$this->pos] === '_')) {
+        while ($this->pos < $this->len && ($this->isDigit(\ord($this->src[$this->pos])) || $this->src[$this->pos] === '_')) {
             $this->advance();
         }
 
@@ -511,46 +515,48 @@ final class Lexer
         $line = $this->line;
         $col = $this->col;
         $c  = $this->src[$this->pos];
-        $n  = $this->peekAt(1);
-        $n2 = $this->peekAt(2);
+        // Bytes, not 1-char strings: peekAt allocates, and this function is its
+        // heaviest caller — two peeks for every operator token in the file.
+        $n  = $this->peekByte(1);
+        $n2 = $this->peekByte(2);
 
         // Triples first.
-        if ($c === '=' && $n === '=' && $n2 === '=') { $this->emit(TokenKind::TripleEquals, '===', 3, $line, $col); return; }
-        if ($c === '!' && $n === '=' && $n2 === '=') { $this->emit(TokenKind::NotIdentical, '!==', 3, $line, $col); return; }
-        if ($c === '<' && $n === '=' && $n2 === '>') { $this->emit(TokenKind::Spaceship, '<=>', 3, $line, $col); return; }
-        if ($c === '.' && $n === '.' && $n2 === '.') { $this->emit(TokenKind::Ellipsis, '...', 3, $line, $col); return; }
-        if ($c === '*' && $n === '*' && $n2 === '=') { $this->emit(TokenKind::StarStarEquals, '**=', 3, $line, $col); return; }
-        if ($c === '<' && $n === '<' && $n2 === '=') { $this->emit(TokenKind::ShiftLeftEquals, '<<=', 3, $line, $col); return; }
-        if ($c === '>' && $n === '>' && $n2 === '=') { $this->emit(TokenKind::ShiftRightEquals, '>>=', 3, $line, $col); return; }
-        if ($c === '?' && $n === '-' && $n2 === '>') { $this->emit(TokenKind::NullsafeArrow, '?->', 3, $line, $col); return; }
-        if ($c === '?' && $n === '?' && $n2 === '=') { $this->emit(TokenKind::DoubleQuestionEquals, '??=', 3, $line, $col); return; }
+        if ($c === '=' && $n === \ord('=') && $n2 === \ord('=')) { $this->emit(TokenKind::TripleEquals, '===', 3, $line, $col); return; }
+        if ($c === '!' && $n === \ord('=') && $n2 === \ord('=')) { $this->emit(TokenKind::NotIdentical, '!==', 3, $line, $col); return; }
+        if ($c === '<' && $n === \ord('=') && $n2 === \ord('>')) { $this->emit(TokenKind::Spaceship, '<=>', 3, $line, $col); return; }
+        if ($c === '.' && $n === \ord('.') && $n2 === \ord('.')) { $this->emit(TokenKind::Ellipsis, '...', 3, $line, $col); return; }
+        if ($c === '*' && $n === \ord('*') && $n2 === \ord('=')) { $this->emit(TokenKind::StarStarEquals, '**=', 3, $line, $col); return; }
+        if ($c === '<' && $n === \ord('<') && $n2 === \ord('=')) { $this->emit(TokenKind::ShiftLeftEquals, '<<=', 3, $line, $col); return; }
+        if ($c === '>' && $n === \ord('>') && $n2 === \ord('=')) { $this->emit(TokenKind::ShiftRightEquals, '>>=', 3, $line, $col); return; }
+        if ($c === '?' && $n === \ord('-') && $n2 === \ord('>')) { $this->emit(TokenKind::NullsafeArrow, '?->', 3, $line, $col); return; }
+        if ($c === '?' && $n === \ord('?') && $n2 === \ord('=')) { $this->emit(TokenKind::DoubleQuestionEquals, '??=', 3, $line, $col); return; }
 
         // Pairs.
-        if ($c === '=' && $n === '=') { $this->emit(TokenKind::DoubleEquals, '==', 2, $line, $col); return; }
-        if ($c === '!' && $n === '=') { $this->emit(TokenKind::NotEquals, '!=', 2, $line, $col); return; }
-        if ($c === '<' && $n === '=') { $this->emit(TokenKind::LessEquals, '<=', 2, $line, $col); return; }
-        if ($c === '>' && $n === '=') { $this->emit(TokenKind::GreaterEquals, '>=', 2, $line, $col); return; }
-        if ($c === '<' && $n === '<') { $this->emit(TokenKind::ShiftLeft, '<<', 2, $line, $col); return; }
-        if ($c === '>' && $n === '>') { $this->emit(TokenKind::ShiftRight, '>>', 2, $line, $col); return; }
-        if ($c === '&' && $n === '&') { $this->emit(TokenKind::DoubleAmpersand, '&&', 2, $line, $col); return; }
-        if ($c === '|' && $n === '|') { $this->emit(TokenKind::DoublePipe, '||', 2, $line, $col); return; }
-        if ($c === '|' && $n === '>') { $this->emit(TokenKind::PipeArrow, '|>', 2, $line, $col); return; }
-        if ($c === '+' && $n === '+') { $this->emit(TokenKind::PlusPlus, '++', 2, $line, $col); return; }
-        if ($c === '-' && $n === '-') { $this->emit(TokenKind::MinusMinus, '--', 2, $line, $col); return; }
-        if ($c === '*' && $n === '*') { $this->emit(TokenKind::StarStar, '**', 2, $line, $col); return; }
-        if ($c === '+' && $n === '=') { $this->emit(TokenKind::PlusEquals, '+=', 2, $line, $col); return; }
-        if ($c === '-' && $n === '=') { $this->emit(TokenKind::MinusEquals, '-=', 2, $line, $col); return; }
-        if ($c === '*' && $n === '=') { $this->emit(TokenKind::StarEquals, '*=', 2, $line, $col); return; }
-        if ($c === '/' && $n === '=') { $this->emit(TokenKind::SlashEquals, '/=', 2, $line, $col); return; }
-        if ($c === '%' && $n === '=') { $this->emit(TokenKind::PercentEquals, '%=', 2, $line, $col); return; }
-        if ($c === '.' && $n === '=') { $this->emit(TokenKind::DotEquals, '.=', 2, $line, $col); return; }
-        if ($c === '?' && $n === '?') { $this->emit(TokenKind::DoubleQuestion, '??', 2, $line, $col); return; }
-        if ($c === '-' && $n === '>') { $this->emit(TokenKind::Arrow, '->', 2, $line, $col); return; }
-        if ($c === ':' && $n === ':') { $this->emit(TokenKind::DoubleColon, '::', 2, $line, $col); return; }
-        if ($c === '=' && $n === '>') { $this->emit(TokenKind::DoubleArrow, '=>', 2, $line, $col); return; }
-        if ($c === '&' && $n === '=') { $this->emit(TokenKind::AmpersandEquals, '&=', 2, $line, $col); return; }
-        if ($c === '|' && $n === '=') { $this->emit(TokenKind::PipeEquals, '|=', 2, $line, $col); return; }
-        if ($c === '^' && $n === '=') { $this->emit(TokenKind::CaretEquals, '^=', 2, $line, $col); return; }
+        if ($c === '=' && $n === \ord('=')) { $this->emit(TokenKind::DoubleEquals, '==', 2, $line, $col); return; }
+        if ($c === '!' && $n === \ord('=')) { $this->emit(TokenKind::NotEquals, '!=', 2, $line, $col); return; }
+        if ($c === '<' && $n === \ord('=')) { $this->emit(TokenKind::LessEquals, '<=', 2, $line, $col); return; }
+        if ($c === '>' && $n === \ord('=')) { $this->emit(TokenKind::GreaterEquals, '>=', 2, $line, $col); return; }
+        if ($c === '<' && $n === \ord('<')) { $this->emit(TokenKind::ShiftLeft, '<<', 2, $line, $col); return; }
+        if ($c === '>' && $n === \ord('>')) { $this->emit(TokenKind::ShiftRight, '>>', 2, $line, $col); return; }
+        if ($c === '&' && $n === \ord('&')) { $this->emit(TokenKind::DoubleAmpersand, '&&', 2, $line, $col); return; }
+        if ($c === '|' && $n === \ord('|')) { $this->emit(TokenKind::DoublePipe, '||', 2, $line, $col); return; }
+        if ($c === '|' && $n === \ord('>')) { $this->emit(TokenKind::PipeArrow, '|>', 2, $line, $col); return; }
+        if ($c === '+' && $n === \ord('+')) { $this->emit(TokenKind::PlusPlus, '++', 2, $line, $col); return; }
+        if ($c === '-' && $n === \ord('-')) { $this->emit(TokenKind::MinusMinus, '--', 2, $line, $col); return; }
+        if ($c === '*' && $n === \ord('*')) { $this->emit(TokenKind::StarStar, '**', 2, $line, $col); return; }
+        if ($c === '+' && $n === \ord('=')) { $this->emit(TokenKind::PlusEquals, '+=', 2, $line, $col); return; }
+        if ($c === '-' && $n === \ord('=')) { $this->emit(TokenKind::MinusEquals, '-=', 2, $line, $col); return; }
+        if ($c === '*' && $n === \ord('=')) { $this->emit(TokenKind::StarEquals, '*=', 2, $line, $col); return; }
+        if ($c === '/' && $n === \ord('=')) { $this->emit(TokenKind::SlashEquals, '/=', 2, $line, $col); return; }
+        if ($c === '%' && $n === \ord('=')) { $this->emit(TokenKind::PercentEquals, '%=', 2, $line, $col); return; }
+        if ($c === '.' && $n === \ord('=')) { $this->emit(TokenKind::DotEquals, '.=', 2, $line, $col); return; }
+        if ($c === '?' && $n === \ord('?')) { $this->emit(TokenKind::DoubleQuestion, '??', 2, $line, $col); return; }
+        if ($c === '-' && $n === \ord('>')) { $this->emit(TokenKind::Arrow, '->', 2, $line, $col); return; }
+        if ($c === ':' && $n === \ord(':')) { $this->emit(TokenKind::DoubleColon, '::', 2, $line, $col); return; }
+        if ($c === '=' && $n === \ord('>')) { $this->emit(TokenKind::DoubleArrow, '=>', 2, $line, $col); return; }
+        if ($c === '&' && $n === \ord('=')) { $this->emit(TokenKind::AmpersandEquals, '&=', 2, $line, $col); return; }
+        if ($c === '|' && $n === \ord('=')) { $this->emit(TokenKind::PipeEquals, '|=', 2, $line, $col); return; }
+        if ($c === '^' && $n === \ord('=')) { $this->emit(TokenKind::CaretEquals, '^=', 2, $line, $col); return; }
 
         // Singles.
         switch ($c) {
@@ -660,6 +666,22 @@ final class Lexer
         $p = $this->pos + $offset;
         if ($p >= $this->len) { return ''; }
         return $this->src[$p];
+    }
+
+    /**
+     * The BYTE at `$pos + $offset`, or -1 past end-of-source — the allocation-free
+     * peek. {@see peekAt} has to mint a 1-character string for every call, and
+     * `scanOperator` calls it twice per operator token, which made it the single
+     * largest source of the compiler's own memory use after the character locals
+     * ({@see Passes\DemoteCharLocals}). `ord($s[$i])` is rewritten to a bounds-
+     * checked `load i8`, and under Zend it is the same byte, so both worlds agree.
+     * -1 rather than 0: no literal encodes byte 0, and neither does end-of-source.
+     */
+    private function peekByte(int $offset): int
+    {
+        $p = $this->pos + $offset;
+        if ($p >= $this->len) { return -1; }
+        return \ord($this->src[$p]);
     }
 
     private function starts(string $needle): bool
