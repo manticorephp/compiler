@@ -1,0 +1,33 @@
+Array
+(
+    [a] => 1
+    [b] => two
+)
+bool(true)
+bool(false)
+int(42)
+int(42)
+bool(true)
+bool(false)
+bool(true)
+string(3) "HI!"
+string(3) "HO!"
+string(4) "abab"
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)
+Array
+(
+    [0] => a
+    [1] => b
+    [2] => c
+)
+stdout via fopen
+int(5)
+float(1.5)
+string(3) "str"
+bool(true)
+NULL

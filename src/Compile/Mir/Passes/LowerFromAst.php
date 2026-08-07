@@ -1032,7 +1032,10 @@ final class LowerFromAst implements Pass
             if ($stmt->kind !== 'Expression') { continue; }
             $de = $stmt->expr;
             if ($de->kind !== 'Call') { continue; }
-            if (\strtolower($de->function) !== 'define') { continue; }
+            // Bare name: inside `namespace App;` the parser qualifies the call
+            // to `App\define`, and a qualified compare registered nothing — the
+            // constant then resolved through the undefined-constant throw.
+            if (\strtolower($this->constBareName($de->function)) !== 'define') { continue; }
             $dargs = $de->args;
             if (\count($dargs) < 2) { continue; }
             if ($dargs[0]->kind !== 'StringLiteral') { continue; }
@@ -2800,7 +2803,7 @@ final class LowerFromAst implements Pass
         );
     }
 
-    /** The trailing segment of a possibly-namespaced constant name. */
+    /** The trailing segment of a possibly-namespaced constant — or call — name. */
     private function constBareName(string $raw): string
     {
         $bs = \strrpos($raw, '\\');
@@ -2852,7 +2855,7 @@ final class LowerFromAst implements Pass
         if ($cond->kind !== 'UnaryOp' || $cond->op !== '!') { return null; }
         $call = $cond->operand;
         if ($call->kind !== 'Call') { return null; }
-        if (\strtolower($call->function) !== 'defined') { return null; }
+        if (\strtolower($this->constBareName($call->function)) !== 'defined') { return null; }
         if (\count($call->args) !== 1) { return null; }
         if ($call->args[0]->kind !== 'StringLiteral') { return null; }
         return $this->constBareName($this->stringLitValue($call->args[0]));
@@ -2864,7 +2867,7 @@ final class LowerFromAst implements Pass
         if ($stmt->kind !== 'Expression') { return; }
         $de = $stmt->expr;
         if ($de->kind !== 'Call') { return; }
-        if (\strtolower($de->function) !== 'define') { return; }
+        if (\strtolower($this->constBareName($de->function)) !== 'define') { return; }
         if (\count($de->args) < 2) { return; }
         if ($de->args[0]->kind !== 'StringLiteral') { return; }
         $name = $this->constBareName($this->stringLitValue($de->args[0]));
@@ -3756,6 +3759,7 @@ final class LowerFromAst implements Pass
 
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
+        $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
             foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
@@ -3791,6 +3795,42 @@ final class LowerFromAst implements Pass
             return $out;
         }
         return $this->defaultFillArgs($params, $astArgs);
+    }
+
+    /**
+     * `builtin(...$arr)` — refuse it at the call site, with the name and the line.
+     *
+     * A codegen builtin has no signature ANYWHERE: it is excluded from the
+     * extern injection on purpose (it is emitted inline, so stdlib.o is not
+     * linked for it) and `lib/*.o.sig` carries no entry. A `...$arr` pack is
+     * expanded against the callee's declared parameters
+     * ({@see EmitLlvmCalls::emitSpreadFill}), and for a builtin there are none —
+     * so the pack stayed a single Spread_ node and every `bi*` emitter, which
+     * indexes its arguments positionally, read past it:
+     * `call_user_func_array('str_repeat', $args)` reached biStrRepeat with ONE
+     * argument, and `$args[1]` was an undefined index under Zend and a null
+     * dereference — SIGSEGV inside emitNode — self-hosted. A crashing compiler
+     * is the worst possible answer to a legal program; say what is unsupported.
+     *
+     * sprintf/printf are exempt: they are variadic and biFormatRuntime takes the
+     * pack array AS the argument list, which is exactly php's semantics.
+     */
+    private function rejectSpreadIntoBuiltin(string $fnName, array $astArgs): void
+    {
+        // Cheapest test first: this runs at EVERY call site, and a spread is
+        // rare while isCodegenBuiltin is a long name comparison chain.
+        $spread = null;
+        foreach ($astArgs as $a) {
+            if ($a->kind === 'Spread') { $spread = $a; break; }
+        }
+        if ($spread === null) { return; }
+        if (!$this->isCodegenBuiltin($fnName)) { return; }
+        $bare = $this->constBareName(\strtolower($fnName));
+        if ($bare === 'sprintf' || $bare === 'printf') { return; }
+        throw new \RuntimeException(
+            'argument unpacking into ' . $bare . '() is not supported: it is a '
+            . 'codegen builtin with no signature to expand the pack against '
+            . '(line ' . (string)$spread->span->line . ')');
     }
 
     private function paramTypeHint(\Parser\Ast\Param $p): ?string { return $p->typeHint; }
