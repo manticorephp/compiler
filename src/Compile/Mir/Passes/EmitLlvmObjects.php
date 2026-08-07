@@ -2061,7 +2061,17 @@ trait EmitLlvmObjects
     /** `$y = &$x` — point the target's slot at the source's slot. */
     private function emitRefAlias(RefAlias_ $n): string
     {
-        if (isset($this->locals->slots[$n->source])) {
+        if (isset($this->locals->globalBacked[$n->source])) {
+            // The source is not a stack slot at all: a `global $x` name — and a
+            // SUPERGLOBAL is only an implicit one — is backed by a module cell
+            // ({@see LocalSlots::$globalBacked}), which both Load and Store
+            // consult AHEAD of `$slots`. Aliasing therefore means naming the
+            // same cell; matching on `$slots` alone left the target owning its
+            // own alloca, so every write through the alias was invisible to the
+            // global and to every other scope sharing it.
+            // `$session = &$_SESSION;` (symfony NativeSessionStorage) is this.
+            $this->locals->globalBacked[$n->target] = $this->locals->globalBacked[$n->source];
+        } elseif (isset($this->locals->slots[$n->source])) {
             // Remember what the target owned, so `unset($target)` can hand it
             // back instead of zeroing the slot both names now share.
             $this->locals->aliasLocals[$n->target] = $this->locals->slots[$n->target] ?? '';

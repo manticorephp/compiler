@@ -2513,6 +2513,31 @@ final class LowerFromAst implements Pass
         return false;
     }
 
+    /**
+     * Whether the node tree binds the named local BY REFERENCE, on either side.
+     *
+     * A reference node names its participants as plain STRINGS
+     * ({@see \Compile\Mir\RefAlias_}), so neither a LoadLocal nor a StoreLocal
+     * is ever emitted for them and the two scanners above are blind to the
+     * position. `$session = &$_SESSION;` in symfony's NativeSessionStorage is
+     * the whole of that function's use of the superglobal, so the demand scan
+     * saw nothing, no cell was bound, and the program was refused with
+     * `dangling local $_SESSION read`.
+     */
+    private function nodeAliasesLocal(Node $n, string $name): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_REF_ALIAS) {
+            if ($n->target === $name || $n->source === $name) { return true; }
+        } elseif ($k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_BIND) {
+            if ($n->target === $name) { return true; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->nodeAliasesLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
     /** Whether the node tree assigns the named local (StoreLocal). */
     private function nodeWritesLocal(Node $n, string $name): bool
     {
