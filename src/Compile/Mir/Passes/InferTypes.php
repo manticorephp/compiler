@@ -1065,7 +1065,7 @@ final class InferTypes implements Pass
      * @param array<string,Type> $assocKey
      * @param array<string,string> $shape
      */
-    private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell): void
+    private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell, array &$erasedArg): void
     {
         // Resolve the target function name + a param-index base for each call
         // flavor. A free/static call's arg `i` maps to param `i`; an INSTANCE
@@ -1180,7 +1180,13 @@ final class InferTypes implements Pass
                 $refinable = $ek === Type::KIND_STRING || $ek === Type::KIND_INT
                     || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
                     || $ek === Type::KIND_CELL || $ek === Type::KIND_OBJ || $nested;
-                if (!$refinable) { $conflict[$key] = true; continue; }
+                // NOT a disagreement — an argument whose element cannot be
+                // OBSERVED at all (an erased array out of another erased
+                // channel). Recorded apart from $conflict because the two
+                // want opposite treatment: a caller passing an already-erased
+                // array cannot re-encode its elements, so a param one of these
+                // reaches must keep whatever repr its callers already speak.
+                if (!$refinable) { $conflict[$key] = true; $erasedArg[$key] = true; continue; }
                 // A heterogeneous vec[cell] arg (element boxed by nature) records
                 // that this param has a CELL floor — even if a differing concrete
                 // observation later marks $conflict and unsets $observed. cell is
@@ -1194,7 +1200,7 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape, $sawCell);
+            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
         }
     }
 

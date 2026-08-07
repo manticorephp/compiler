@@ -3129,8 +3129,20 @@ final class LowerFromAst implements Pass
     private function assignTarget(\Parser\Ast\Assign $a): \Parser\Ast\Expr { return $a->target; }
     private function assignValue(\Parser\Ast\Assign $a): \Parser\Ast\Expr { return $a->value; }
 
-    /** Lower a tracked callable variable `$var` invoked as `$var(args)` to the
-     *  direct call. */
+    /**
+     * Lower a tracked callable variable `$var` invoked as `$var(args)` to the
+     * direct call.
+     *
+     * $info is the record {@see trackCallableAssign} built: a string-keyed map
+     * of `kind` plus, per kind, `name` / `class` / `method`. Annotated rather
+     * than left a bare `array` because a bare one is a CANDIDATE for the
+     * body-usage element guess ({@see Passes\\InferScans::scanParamElements}),
+     * which reads the `$info['kind'] === 'str'` test as proof of vec[string]
+     * — a claim about a MAP, and wrong about its keys as well as its elements.
+     *
+     * @param array<string,string> $info
+     * @param \\Parser\\Ast\\Expr[] $astArgs
+     */
     private function lowerConstCallable(string $var, array $info, array $astArgs): Node
     {
         if ($info['kind'] === 'str') {

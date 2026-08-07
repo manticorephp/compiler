@@ -509,6 +509,8 @@ final class Monomorphize implements Pass
             $np->cellArg = $p->cellArg;
             $np->arrayHinted = $p->arrayHinted;
             $np->docList = $p->docList;
+            $np->elemGuessed = $p->elemGuessed;
+            $np->elemGuessWithdrawn = $p->elemGuessWithdrawn;
             $newParams[] = $np;
         }
         try {
@@ -799,6 +801,8 @@ final class Monomorphize implements Pass
             // off this flag.
             $np->arrayHinted = $p->arrayHinted;
             $np->docList = $p->docList;
+            $np->elemGuessed = $p->elemGuessed;
+            $np->elemGuessWithdrawn = $p->elemGuessWithdrawn;
             $newParams[] = $np;
         }
         $clFn = new FunctionDef($newName, $newParams, $orig->returnType, $clBody, $orig->returnsByRef, $orig->isPrelude);

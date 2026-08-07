@@ -556,6 +556,9 @@ trait InferScans
             // `array`, so is_resource($stream) folded false and every console
             // app threw "needs a stream as its first argument".
             if (!$p->arrayHinted) { continue; }
+            // A guess call sites already refuted is not made again ({@see
+            // Param::$elemGuessWithdrawn}) — the retraction has to be monotone.
+            if ($p->elemGuessWithdrawn) { continue; }
             if ($this->isUnknownArrayElem($p->type)) { $cand[$p->name] = $idx; }
         }
         if (\count($cand) === 0) { return; }
@@ -573,6 +576,10 @@ trait InferScans
             $param = $fn->params[$idx];
             $vt = Type::vec(Type::string_());
             $param->type = $vt;
+            // Mark it a GUESS: read from BODY USAGE, not from a hint, a doc form
+            // or a call site. Call sites that later disagree with each other
+            // withdraw it ({@see Param::$elemGuessed}, {@see scanCallSiteArrayElems}).
+            $param->elemGuessed = true;
             $this->localTypes[$pname] = $vt;
         }
     }
@@ -647,8 +654,9 @@ trait InferScans
         $assocKey = [];                  // "fn#idx" → key Type (assoc-shaped arg)
         $shape = [];                     // "fn#idx" → 'v' (vec) | 'a' (assoc)
         $sawCell = [];                   // "fn#idx" → true (a vec[cell] arg seen)
+        $erasedArg = [];                 // "fn#idx" → true (an UNOBSERVABLE arg seen)
         foreach ($module->functions as $fn) {
-            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape, $sawCell);
+            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
         }
         $changed = false;
         foreach ($module->functions as $fn) {
@@ -677,7 +685,44 @@ trait InferScans
                     }
                     continue;
                 }
-                if (isset($conflict[$key]) || !isset($observed[$key])) { continue; }
+                // Call sites that disagree WITH EACH OTHER withdraw a body-usage
+                // GUESS. The guess is now known wrong for at least one caller,
+                // and leaving it standing is a hard stop rather than a missed
+                // optimisation: TypeCheck's arrayReprConflict refuses the
+                // program. symfony/dependency-injection's PhpDumper reads its
+                // elements as strings (`(string) $argument`) while two call
+                // sites hand it `[$definition]`, and that single parameter
+                // stopped the whole tier-3 build.
+                //
+                // WITHDRAWN, not replaced. Substituting a different concrete
+                // claim — vec[cell] — was measured and rejected twice: it moves
+                // the element REPR, so every caller must re-encode to match, and
+                // the compiler's own LowerFromAst::lowerConstCallable then read
+                // `$info['method']` as a tagged cell out of a raw slot and threw
+                // `Call to undefined method ::()`. Going back to erased asks
+                // nothing of the callers: it is what the parameter was before the
+                // heuristic guessed, and an erased element is not `concrete()`,
+                // so the conflict check has nothing left to refuse.
+                //
+                // Never a PRELUDE function — its body is emitted linkonce_odr
+                // into every module, so this module's call sites are not all of
+                // them (the premise that already keeps this scan off prelude
+                // by-ref params).
+                if (isset($conflict[$key])) {
+                    if (!$fn->isPrelude && $p->elemGuessed && !isset($erasedArg[$key])) {
+                        $cur = $p->type;
+                        $k = isset($assocKey[$key]) ? $assocKey[$key]
+                            : ($cur->isArray() ? $cur->key : null);
+                        $p->type = $k !== null
+                            ? Type::assoc($k, Type::cell())
+                            : Type::vec(Type::cell());
+                        $p->elemGuessed = false;
+                        $p->elemGuessWithdrawn = true;
+                        $changed = true;
+                    }
+                    continue;
+                }
+                if (!isset($observed[$key])) { continue; }
                 // An already-refined param is only overridden by a NESTED-array
                 // or a CELL observation — never fight a legitimate vec[string]
                 // whose call sites pass scalar-element arrays. A call site that
