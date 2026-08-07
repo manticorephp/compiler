@@ -223,6 +223,13 @@ trait EmitLlvmArrays
             $base = $this->lastValue;
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceToI64();
+            // A byte OFFSET, so a tagged index has to come out of its box: an
+            // `int|false` strpos result carried into arithmetic reaches here as
+            // a cell, and its NaN bits read as an i64 are a vast offset — the
+            // helper's out-of-range arm then answers "" for every character.
+            if ($aa->index->type->kind === Type::KIND_CELL) {
+                $out .= $this->unboxCellInt($this->lastValue);
+            }
             $idx = $this->lastValue;
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '

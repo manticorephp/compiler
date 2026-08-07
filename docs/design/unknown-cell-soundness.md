@@ -585,6 +585,117 @@ scan rather than to a new mechanism. The tell that it is the same class: `mixed
   twice; only a 2-generation self-build catches it, the AOT suite passes.
 - Grepping `KIND_UNKNOWN` to find the work — it is all fall-through.
 
+## 18. What was actually wrong (2026-08-07) — §17 measured, and mostly superseded
+
+§17 was written from a re-audit, not from a run. Measured against its own driver
+on `main` `ac84a52`, two of its three premises do not hold:
+
+| §17 said | measured |
+|---|---|
+| the stdlib `.o.sig` re-erases arrays — meaning #3 is the thing to split out | the `.sig` erases **1 of 900** returns and **17 of 1747** params. `array_fill`'s is `ret:"mixed[]"` — a `vec[cell]`, correct. Splitting the type would have bought almost nothing |
+| §16's "var_dump of an ERASED bare-`array` prints int(ptr)" is still open | fixed at HEAD; matches php |
+| `array_fill` faults because its element re-erased | its element is a **cell**. The fault is in the ARITHMETIC over that cell, and in what boxes the result |
+
+The real chain, off `--keep-ir`:
+
+1. `$a[$i]` reads a cell element → `__manticore_unbox_int` → a raw i64.
+2. `arithType` typed `cell ⊕ int` **`unknown`** — its own comment saying a plain
+   mixed cell "falls through to unknown (the integer path)".
+3. `coerceArithOperand` coerces every non-float operand to i64, so the value IS
+   a raw int. The type said otherwise.
+4. Storing it into the cell array called `boxToCell(unknown)` → the probing
+   boxer, which **dereferences `[v-8]`** for an allocator magic under
+   `plausiblePtrIr` (`65535 < v < 2^48`). Every result above 65535 faulted.
+   Into a `mixed` property the same word was stored raw and read back as a
+   denormal double.
+
+**The two-boxer divergence is the finding that replaces §17.2's type split.**
+The RETURN boundary boxes an erased word with `boxLastByRepr` — a tag test, no
+dereference, `box_int` otherwise — and is correct. The element/property boundary
+uses `boxUnknownShallowIr`, which dereferences. §4 already called the return path
+"the template for the fix"; it is also the SAFE one, and the divergence is what
+turns a wrong value into a SIGSEGV.
+
+### 18.1 What landed
+
+Both halves are inference-side, per §17.4, and both re-converged the self-host.
+
+- **The integer path is total, so its result is an `int`.** Typing it so changes
+  no emitted arithmetic and stops every consumer guessing.
+- **A plain mixed cell in numeric arithmetic promotes by tag** — the numeric-cell
+  route to `__manticore_tagged_<op>`, which also promotes an int overflow to
+  float. **Built and measured, then PARKED** (see §18.3); the reproducer lives at
+  `docs/bugs/erased_arith_float_cell.php`.
+
+Six latent bugs surfaced, each pre-existing and each with its own root:
+
+1. A CELL-KEYED array reports `isVec()` (`isAssoc()` is string-key-only), and the
+   foreach key rode a cell only when the ELEMENT was cell/unknown — the element
+   standing in for the key. A concrete element sent string keys down the vec
+   int-key path, printing pointers.
+2. `NarrowReturns` rebuilt an array return as `isAssoc() ? assoc : vec`, dropping
+   a cell key on the way out of the function that built it.
+3. A monomorphic clone inherited the generic's ADOPTED return type; `array_sum`'s
+   `int|float` had narrowed to `int` for the erased body, so the vec[float]
+   specialization summed doubles behind an `-> int` signature. Fixed by carrying
+   the DECLARED return per function and having the adoption gate read that
+   instead of the type a previous pass wrote in place.
+4. `public static mixed $n = 0;` stored its default RAW into a cell slot — only
+   the `null` default had been boxed. Every tag consumer read it as a double.
+5. The dynamic-name call's SPREAD arm built its call by hand and passed raw
+   scalars to cell params. It survived only because the callee unboxed with
+   `unbox_int`, the identity on a raw int.
+6. `$s[$i]` never unboxed a CELL index. The NaN bits read as an i64 are a vast
+   offset, so `__mir_str_char_at`'s out-of-range arm answered `""` for every
+   character — a wrong answer with no crash and no diagnostic.
+
+Note the shape of 3, 4 and 5: each is a place where a value crossed into a cell
+channel without being self-describing, and each was invisible while the consumer
+happened to unbox it with an operation that is the identity on a raw int.
+`unbox_int` is a very forgiving reader, and it hid all of them.
+
+### 18.3 Why the tagged-arith half is parked (and what unblocks it)
+
+It was built, and the old comment's claim — "broadening to every cell SIGKILLs
+the self-build" — is **not what happens**. Two generations build clean, and it
+fixes what it set out to fix. What it does hit is a DIFFERENT missing piece:
+
+> A concrete-scalar slot written with a CELL value has no un-cellify plant.
+
+`emitStoreLocal` already carries three plants of exactly this shape — box-back
+(a cell slot ← a concrete value), float-slot (a float slot ← an int value), and
+de-cellify (a concrete-element array slot ← a cell-element array). The fourth,
+its mirror, is missing. So once arithmetic over a cell yields a cell, a
+loop-carried `int $pos` written by `$pos = $eol + 2` holds a BOXED word while
+`while ($pos < $len)` still compares it with a raw `icmp slt` — one slot, two
+representations. A boxed int is NEGATIVE as an i64, so the condition is
+permanently true and the HTTP parser never leaves its header loop. 15 suite
+cases (the http / session / simplexml cluster) fail that way, and the minimal
+form is 25 lines of ordinary PHP — nothing about it is exotic.
+
+That plant is the aliasing epic's "one slot = one representation" agreement,
+not a new mechanism. Land it, then delete the `⛔` guard in `arithType` and move
+`docs/bugs/erased_arith_float_cell.php` back into the suite.
+
+**Do not** reach for the alternative of teaching each consumer to unbox. The
+string-subscript fix above is one such consumer, and finding it cost a full
+bisect; there is no reason to believe the set is small, and every one of them
+is the same bug seen from the far end.
+
+### 18.2 Still open
+
+- **`plausiblePtrIr` still dereferences an unvalidated word** at ~10 call sites
+  (the erased-`foreach` classifier, `is_array` on an erased operand, the memory
+  passes). The two fixes above stop FEEDING it raw ints, which is why the
+  crashes are gone, but the predicate itself is unchanged: any erased raw word
+  in `(65535, 2^48)` is still dereferenced. Hardening it means bounding it by a
+  real allocation range — the pool already brackets its region with
+  `@__mir_pool_base`/`@__mir_pool_top`, but large blocks bypass to `malloc` from
+  ~14 sites, so a watermark needs a single allocation choke point first.
+- The type split of §17.2 is NOT done and, on these numbers, is not worth doing
+  for the stdlib boundary alone. Revisit it only if a new producer of
+  "raw array, element unknown" appears.
+
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
   memory `unknown-receiver-propread-offset16-2026-07-08`.

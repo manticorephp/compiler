@@ -1464,6 +1464,20 @@ final class InferTypes implements Pass
             && $lt->kind === Type::KIND_CELL && $rt->kind === Type::KIND_CELL) {
             return Type::numericCell();
         }
+        // ⛔ A PLAIN mixed cell does NOT go to the promoting tagged path yet,
+        // and the reason is not the one the old comment here gave. Routing it
+        // there is CORRECT — it is what makes `$v + 1` on a cell holding 1.5
+        // answer `float(2.5)`, and the self-build survives it (measured: two
+        // generations, 2026-08-07). What it needs first is a store-side plant
+        // that does not exist: a CONCRETE-SCALAR slot written with a cell value
+        // must un-cellify at the store, the mirror of the three plants
+        // {@see Passes\EmitLlvmLocals::emitStoreLocal} already has (box-back,
+        // float-slot, de-cellify). Without it a loop-carried `int $pos` written
+        // by `$pos = $eol + 2` holds a BOXED word while `while ($pos < $len)`
+        // still compares it RAW — one slot, two representations — and the HTTP
+        // parser loops forever. That plant belongs to the aliasing epic's
+        // agreement scan; this returns the moment it lands.
+        //
         // Everything left takes the INTEGER path, and that path is total: it
         // coerces every operand to i64 first (strtol for a string, unbox_int
         // for a cell, the raw word otherwise — {@see EmitLlvmExpr::
@@ -1667,15 +1681,6 @@ final class InferTypes implements Pass
     {
         return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
             || $t->isNumericCell();
-    }
-
-    /** An operand the TAGGED arithmetic helpers can take: a concrete number, or
-     *  any cell (they dispatch on its tag). Deliberately NOT a string/array/obj
-     *  or an erased word — each of those has its own arithmetic path. */
-    private function cellArithOperand(Type $t): bool
-    {
-        return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
-            || $t->kind === Type::KIND_CELL;
     }
 
     /** Cell type for a value union of two arms: a NUMERIC cell (int|float) when

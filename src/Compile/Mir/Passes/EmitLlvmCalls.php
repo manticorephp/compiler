@@ -628,17 +628,39 @@ trait EmitLlvmCalls
                 // the rest read from the spread array (element k → param
                 // numFixed+k). Matches emitCall's fixed-arity spread contract —
                 // the array must supply the callee's remaining params.
+                // The element type behind the spread — what each `value_at`
+                // hands back, and the only thing that says whether it is already
+                // tagged.
+                $spreadElem = $iv->args[$spreadIdx]->operand->type->element;
                 $argList = '';
                 for ($pi = 0; $pi < $tot; $pi = $pi + 1) {
                     if ($pi > 0) { $argList .= ', '; }
                     if ($pi < $numFixed) {
-                        $argList .= 'i64 ' . $fixedRegs[$pi];
-                        continue;
+                        $val = $fixedRegs[$pi];
+                        $argT = $iv->args[$pi]->type;
+                    } else {
+                        $ev = $this->ssa->allocReg();
+                        $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $spreadArr
+                              . ', i64 ' . (string)($pi - $numFixed) . ")\n";
+                        $val = $ev;
+                        $argT = $spreadElem ?? Type::unknown();
                     }
-                    $ev = $this->ssa->allocReg();
-                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $spreadArr
-                          . ', i64 ' . (string)($pi - $numFixed) . ")\n";
-                    $argList .= 'i64 ' . $ev;
+                    // A CELL parameter is NaN-boxed by the CALLER. The non-spread
+                    // arm gets this from emitCall; this one builds the call by
+                    // hand and used to hand a raw scalar to an untyped (=cell)
+                    // param. It survived only because the callee unboxed with
+                    // unbox_int, which is the identity on a raw int — the moment
+                    // the callee did tag arithmetic instead, `$f(1, ...$rest)`
+                    // read all three arguments as denormal doubles.
+                    $pt = $ptypes[$pi] ?? null;
+                    if ($pt !== null && $pt->kind === Type::KIND_CELL
+                        && $this->isCellScalarParam($argT)) {
+                        $this->lastValue = $val;
+                        $this->lastValueType = 'i64';
+                        $out .= $this->boxToCell($argT);
+                        $val = $this->lastValue;
+                    }
+                    $argList .= 'i64 ' . $val;
                 }
                 $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fname) . '(' . $argList . ")\n";
