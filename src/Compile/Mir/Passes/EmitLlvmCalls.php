@@ -2053,11 +2053,35 @@ trait EmitLlvmCalls
         $pcount = \count($ptypes);
         if ($firstMissingIdx >= $pcount) { return ''; }
         $pdefs = $this->sigs->paramDefaults[$fnKey] ?? [];
+        $refs = $this->sigs->refParams[$fnKey] ?? [];
         $out = '';
         $pi = $firstMissingIdx;
         while ($pi < $pcount) {
             $sep = ($haveArgs || $this->lastPadArgs !== '') ? ', ' : '';
             $def = $pdefs[$pi] ?? null;
+            if ($refs[$pi] ?? false) {
+                // A BY-REF param the call omitted still needs an ADDRESS. The
+                // callee writes through it unconditionally — a `#[RefOut]` one
+                // is defined as doing exactly that — so handing it the default
+                // VALUE gives it `0` as a pointer, or worse, whatever the ABI
+                // slot happened to hold. Back it with a throwaway stack slot
+                // seeded with the default, the same treatment an omitted default
+                // gets when the call site does supply the trailing arguments.
+                $tmp = $this->ssa->allocReg();
+                $out .= '  ' . $tmp . " = alloca i64\n";
+                if ($def !== null) {
+                    $out .= $this->emitNode($def);
+                    $out .= $this->coerceToI64();
+                    $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+                } else {
+                    $out .= '  store i64 0, ptr ' . $tmp . "\n";
+                }
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                $this->lastPadArgs .= $sep . 'i64 ' . $addr;
+                $pi = $pi + 1;
+                continue;
+            }
             if ($def !== null) {
                 $out .= $this->emitNode($def);
                 $out .= $this->coerceToI64();
@@ -2303,6 +2327,20 @@ trait EmitLlvmCalls
             }
             $ai = $ai + 1;
         }
+        // Trailing params the call omitted. Lowering normally fills these from
+        // the callee's declaration ({@see LowerFns::defaultFillArgs}), but only
+        // when that declaration is known where the call is lowered — a call in a
+        // GENERATED prelude can be lowered before the stdlib's `.sig` decls are
+        // in scope, and then the call carries fewer arguments than the callee
+        // has parameters. Harmless for a by-value param; for a BY-REF one the
+        // callee writes through an ABI slot the caller never set, which is how
+        // `str_replace('::', ':', $en)` in the enum serializer corrupted the
+        // string it had just built (the `";` terminator became `\x01`) and made
+        // unserialize SIGSEGV. The emitter always knows the signature, so it is
+        // the right place to close the gap; the object paths already padded here
+        // and inherited the same by-ref hazard.
+        $out .= $this->emitDefaultArgPad($c->function, $ai, !$first);
+        $argList .= $this->lastPadArgs;
         $reg = $this->ssa->allocReg();
         $mangled = $this->mangle($c->function);
         // A `manticore_rt_*` callee with no PHP definition is a native
