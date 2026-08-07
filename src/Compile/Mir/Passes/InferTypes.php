@@ -1503,14 +1503,27 @@ final class InferTypes implements Pass
         // partner has its own arithmetic path (strtol coercion, array union, …)
         // and must not be dragged into the tagged helpers.
         //
-        // The old comment here claimed this "SIGKILLs the self-build". It does
-        // not. What it does do is make a loop-carried slot change repr, and the
-        // machinery for that already exists ({@see loopMerge}'s cellLoopLocals
-        // promotion + {@see InferNodes::coercePromotedParams}) — it was being
-        // skipped because a STRING byte-offset counted as an array key.
-        if (($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
-            && $this->cellArithOperand($lt) && $this->cellArithOperand($rt)
-            && !$this->globalsViewOperand($left) && !$this->globalsViewOperand($right)) {
+        // ⛔ HELD BACK, and NOT for the reason the old comment gave ("SIGKILLs
+        // the self-build" — it does not; two generations build). Tagged arith is
+        // the first consumer that TRUSTS `cell` to mean "the word carries a
+        // tag", and that guarantee is not yet true at the producer side. Three
+        // channels say cell and hold a RAW word, each found by turning this on:
+        //   · the `$GLOBALS['x']` view (lowered cell; `global $x` types the same
+        //     storage from the join, and both read it raw — they agree only by
+        //     accident);
+        //   · an UNHINTED static property read (typed `unknown` while the store
+        //     boxes by the DECLARED type — and typing that read cell was already
+        //     tried and reverted, because an ARRAY rides the same slot raw);
+        //   · the elements of an erased array (`array_combine` + `array_map`),
+        //     whose foreach value types cell and arrives raw — `var_dump($len)`
+        //     answers `float(5.4E-323)` on its own, with no arithmetic involved.
+        // Every one is a PRE-EXISTING producer gap that the integer path hides
+        // by being raw at both ends. Turn this on again once §3's "erased ⟹
+        // cell" holds at the producers, not before — the fix belongs there, and
+        // carving out each consumer one at a time only moves the lie around.
+        // {@see docs/design/unknown-cell-soundness.md §18.3}
+        if (false && ($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
+            && $this->cellArithOperand($lt) && $this->cellArithOperand($rt)) {
             return Type::numericCell();
         }
         // Everything left takes the INTEGER path, and that path is total: it
@@ -1527,6 +1540,21 @@ final class InferTypes implements Pass
         // over an array_fill counter). Into a `mixed` PROPERTY the same word
         // was stored raw and read back as a denormal double.
         //
+        // …but only for operands whose representation is actually known. An
+        // ERASED one may be a BOXED word fed raw into `add i64`, and then the
+        // result is that cell arithmetic-ed: `box_int(42) + 1` is `box_int(43)`,
+        // because the payload lives in the low bits. Claiming `int` there tells
+        // echo to print the tagged word (`-4222124650659797`), where `unknown`
+        // leaves it to dispatch on the tag and answer 43.
+        //
+        // Nothing is lost by conceding this: the CELL operands that motivated
+        // the honest typing — an array_fill element, a `mixed` property — now
+        // take the tagged path above, which is right rather than accidentally
+        // right. What is left here is the genuinely erased case, and `unknown`
+        // is what it is. {@see docs/design/unknown-cell-soundness.md §18}
+        if ($lt->kind === Type::KIND_UNKNOWN || $rt->kind === Type::KIND_UNKNOWN) {
+            return Type::unknown();
+        }
         // Typing it `int` changes no emitted arithmetic — only what consumers
         // believe, so they box it with box_int instead of guessing.
         return Type::int_();
@@ -1750,25 +1778,6 @@ final class InferTypes implements Pass
             || $t->kind === Type::KIND_CELL;
     }
 
-    /**
-     * A `$GLOBALS['x']` read — the one cell operand the tagged path must NOT
-     * take.
-     *
-     * That view is lowered `cell` unconditionally, while the SAME storage
-     * reached through `global $x` is typed from the cross-scope join (an int,
-     * usually). The two readers already disagree about the slot's
-     * representation today, and what keeps them working is that both currently
-     * treat it RAW. Handing this operand to the tagged helpers boxes the result
-     * into that slot and breaks the accidental agreement — `$GLOBALS['n'] =
-     * $GLOBALS['n'] + 1` then reads back as a denormal double in the other
-     * scope. Keep the integer path here until the view and the binding agree on
-     * a repr, which is a global-storage question, not an arithmetic one.
-     */
-    private function globalsViewOperand(Node $n): bool
-    {
-        return $n->kind === Node::KIND_STATIC_PROP
-            && \str_starts_with($n->global, '@g_');
-    }
 
     /** Cell type for a value union of two arms: a NUMERIC cell (int|float) when
      *  both arms are numeric so arithmetic can promote at runtime, else a plain

@@ -662,6 +662,37 @@ channel without being self-describing, and each was invisible while the consumer
 happened to unbox it with an operation that is the identity on a raw int.
 `unbox_int` is a very forgiving reader, and it hid all of them.
 
+### 18.3b The real blocker, found by merging main in (2026-08-07)
+
+The three predicates below were real and are fixed. But turning tagged
+arithmetic on and then merging `main` — which brought ~60 new suite cases —
+produced a fourth failure of a different KIND, and it is the one that matters:
+
+> **`cell` is not yet a runtime GUARANTEE.** It is a static claim that several
+> producers do not honour: they type a slot `cell` and store a RAW word into it.
+
+Tagged arithmetic is the first consumer that TRUSTS the claim — every other
+consumer either re-probes the word or treats it raw — so it fails on exactly
+those channels, and only there. Three of them, each pre-existing and each
+independently demonstrable with NO arithmetic in the program:
+
+| channel | witness |
+|---|---|
+| the `$GLOBALS['x']` view | lowered `cell`; `global $x` types the same storage from the join. Both read it RAW, so they agree by accident |
+| an UNHINTED static property READ | typed `unknown` while the STORE boxes by the declared type. Typing the read `cell` was already tried and reverted — an ARRAY rides the same slot raw (`staticPropRef`'s ⚠) |
+| the elements of an erased array | `array_combine($k, array_map('strlen', $k))` then `foreach` — the value types `cell` and arrives raw. `var_dump($len)` alone answers `float(5.4E-323)` |
+
+The integer path hides all three by being raw at BOTH ends. That is the same
+accidental agreement §18 found at the element/property boundary, one level up.
+
+So the routing stays built and stays OFF (a `false &&` in `arithType`, with the
+list above). **Do not carve out the consumers one channel at a time** — the
+first carve-out was written and then deleted for exactly this reason: it moves
+the lie around instead of removing it. The fix is §3's invariant at the
+PRODUCERS: a slot typed `cell` must be written boxed, whoever writes it. When
+that holds, delete the `false &&` and move
+`docs/bugs/erased_arith_float_cell.php` back into the suite.
+
 ### 18.3 What the tagged-arith half really needed
 
 Not the store plant it first looked like. Once arithmetic over a cell yields a
