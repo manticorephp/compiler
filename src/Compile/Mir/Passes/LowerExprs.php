@@ -308,13 +308,25 @@ trait LowerExprs
                 $tmp = '__sscanf_' . (string)$this->destrCounter;
                 $this->destrCounter = $this->destrCounter + 1;
                 $vecT = Type::vec(Type::cell());
-                $stmts = [new StoreLocal($tmp, new Call('__mc_sscanf', [$s, $fmt], $vecT), $vecT)];
+                // __mc_scanf_vals, not __mc_sscanf: the latter answers NULL for a
+                // subject that never matched, and indexing a null handed the
+                // caller's variable a denormal 0.0 where php leaves NULL.
+                $stmts = [new StoreLocal($tmp, new Call('__mc_scanf_vals', [$s, $fmt], $vecT), $vecT)];
                 $n = \count($expr->args);
                 for ($i = 2; $i < $n; $i = $i + 1) {
                     $val = new ArrayAccess_(new LoadLocal($tmp, $vecT), new IntConst($i - 2, Type::int_()), Type::cell());
                     $stmts[] = $this->storeToTarget($expr->args[$i], $val);
                 }
-                $stmts[] = new Call('count', [new LoadLocal($tmp, $vecT)], Type::int_());
+                // php returns the number of values ASSIGNED and -1 when nothing
+                // matched. This used to be `count($tmp)` — the SPECIFIER count —
+                // so `sscanf("5", "%d %d", $y, $z)` answered 2 where php answers
+                // 1, and `sscanf("", "%d", $w)` answered 0 where php answers -1.
+                // A second parse of a short subject is the price of keeping the
+                // count and the values in separately typed results; flattening
+                // them into one array mixes a raw int with cells and every value
+                // comes back a denormal.
+                $stmts[] = new Call('__mc_scanf_ret',
+                    [$this->lowerExpr($expr->args[0]), $this->lowerExpr($expr->args[1])], Type::int_());
                 return new Block($stmts, Type::int_());
             }
             // `compact('a', 'b', ...)` with STRING-LITERAL names → an assoc array
