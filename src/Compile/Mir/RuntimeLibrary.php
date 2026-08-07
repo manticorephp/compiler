@@ -844,8 +844,57 @@ final class RuntimeLibrary
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  ret i1 %eq\n}\n";
 
+        // ── The 256 single-byte strings, interned ───────────────────────────
+        //
+        // A 1-character string has exactly 256 possible values, and both
+        // producers of one — `$s[$i]` and `chr()` — used to malloc a fresh
+        // 34-byte buffer per call. The compiler's own Lexer alone did that
+        // once per source byte; DemoteCharLocals exists to dodge it, but only
+        // where it can PROVE the character is never observed as a string.
+        // Interning removes the allocation unconditionally, including from the
+        // reads no proof covers.
+        //
+        // The table is `zeroinitializer` — .bss, so it costs NOTHING in the
+        // binary (a 10 KB static initializer would have been ~10% of a hello
+        // world) and is faulted in a page at a time as bytes are first used.
+        // rc == 0 is the "not yet built" marker: a live entry carries the
+        // immortal -1, which the rc runtime skips on BOTH retain and release,
+        // so a caller that frees its string temps cannot free the table, and
+        // `.=` on one copies instead of appending in place (that path requires
+        // rc == 1). Both hazards are closed by the convention string literals
+        // already use, not by a new rule.
+        $stride = \Compile\MemoryAbi::STRING_HEADER_SIZE + 8;
+        $out .= "\n@__mir_char_table = linkonce_odr global [" . (string)(256 * $stride)
+              . " x i8] zeroinitializer, align 16\n";
+        $out .= "define ptr @__mir_char_of(i64 %b) {\nentry:\n";
+        $out .= "  %bm = and i64 %b, 255\n";
+        $out .= "  %off = mul i64 %bm, " . (string)$stride . "\n";
+        $out .= "  %ent = getelementptr inbounds i8, ptr @__mir_char_table, i64 %off\n";
+        $out .= "  %datap = getelementptr inbounds i8, ptr %ent, i64 " . $nH . "\n";
+        $out .= "  %rcp = getelementptr inbounds i8, ptr %ent, i64 " . $nRcAt . "\n";
+        $out .= "  %rc = load i64, ptr %rcp\n";
+        $out .= "  %fresh = icmp eq i64 %rc, 0\n";
+        $out .= "  br i1 %fresh, label %fill, label %ret\n";
+        $out .= "fill:\n";
+        $out .= "  %hp = getelementptr inbounds i8, ptr %ent, i64 " . $nHashAt . "\n";
+        $out .= "  store i64 0, ptr %hp\n";
+        $out .= "  %ccp = getelementptr inbounds i8, ptr %ent, i64 " . $nCapAt . "\n";
+        $out .= "  store i64 1, ptr %ccp\n";
+        $out .= "  %llp = getelementptr inbounds i8, ptr %ent, i64 " . $nLenAt . "\n";
+        $out .= "  store i64 1, ptr %llp\n";
+        $out .= "  %b8 = trunc i64 %bm to i8\n";
+        $out .= "  store i8 %b8, ptr %datap\n";
+        $out .= "  %nulp = getelementptr inbounds i8, ptr %datap, i64 1\n";
+        $out .= "  store i8 0, ptr %nulp\n";
+        // rc LAST: it is the published marker, and nothing may observe an entry
+        // as built before its bytes are there.
+        $out .= "  store i64 -1, ptr %rcp\n";
+        $out .= "  br label %ret\n";
+        $out .= "ret:\n";
+        $out .= "  ret ptr %datap\n}\n";
+
         // `$s[$i]` read — negative index counts from the end; out-of-range → "".
-        // Returns a fresh 1-char headered string (binary-safe).
+        // Returns the interned 1-char string (binary-safe, immortal).
         $out .= "\ndefine ptr @__mir_str_char_at(ptr %s, i64 %i) {\nentry:\n";
         $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %neg = icmp slt i64 %i, 0\n";
@@ -860,7 +909,9 @@ final class RuntimeLibrary
         $out .= "  ret ptr %e\n";
         $out .= "one:\n";
         $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %ix\n";
-        $out .= "  %r = call ptr @__mir_str_new(ptr %cp, i64 1)\n";
+        $out .= "  %cb = load i8, ptr %cp\n";
+        $out .= "  %cbz = zext i8 %cb to i64\n";
+        $out .= "  %r = call ptr @__mir_char_of(i64 %cbz)\n";
         $out .= "  ret ptr %r\n}\n";
 
         // `\$s[\$i]` read as a BYTE — the same access as __mir_str_char_at, minus

@@ -2473,16 +2473,14 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args */
     private function biChr(array $args): string
     {
+        // The interned single-byte string ({@see RuntimeLibrary::stringCore}) —
+        // `chr()` used to malloc a 34-byte buffer per call, and there are only
+        // 256 possible answers. The `and 255` inside the helper is php's own
+        // wrap, which the old `trunc i64 to i8` performed here.
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
-        $t = $this->ssa->allocReg();
-        $out .= '  ' . $t . ' = trunc i64 ' . $this->lastValue . " to i8\n";
         $buf = $this->ssa->allocReg();
-        $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 2)\n";
-        $out .= '  store i8 ' . $t . ', ptr ' . $buf . "\n";
-        $nul = $this->ssa->allocReg();
-        $out .= '  ' . $nul . ' = getelementptr inbounds i8, ptr ' . $buf . ", i64 1\n";
-        $out .= '  store i8 0, ptr ' . $nul . "\n";
+        $out .= '  ' . $buf . ' = call ptr @__mir_char_of(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
         return $out;
     }
