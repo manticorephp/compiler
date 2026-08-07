@@ -1370,13 +1370,19 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
  * php.net's stream_socket_accept. $timeout is SECONDS (php's unit); a negative
  * value blocks. Waiting happens in poll(), so a timeout costs no host constants.
  *
- * The peer's address is not requested — accept(2) takes NULL/NULL for that,
- * which keeps this off the sockaddr-parsing path.
+ * accept(2) is still called with NULL/NULL — the peer's address is read back off
+ * the accepted descriptor with getpeername instead, so this stays off the
+ * sockaddr-parsing path on the hot side and only pays for it when it succeeds.
+ * `$peer_name` is php's third parameter: an argument in a by-ref position is a
+ * DEFINITION, so declaring it is what lets a caller write
+ * `stream_socket_accept($srv, -1, $peer)` at all.
  *
  * @return \Resource|false
  */
-function stream_socket_accept(\Resource $server, ?float $timeout = null)
+function stream_socket_accept(\Resource $server, ?float $timeout = null,
+                              #[\Manticore\Attr\RefOut] string &$peer_name = '')
 {
+    $peer_name = '';
     if (\Runtime\AsyncHook::active()) {
         // ⚠ The LISTENER itself must be O_NONBLOCK under a scheduler. accept(2) on
         // an idle BLOCKING listener blocks the whole PROCESS — every timer, every
@@ -1466,13 +1472,20 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null)
     // A TLS listener parks its server ctx in $ssl (see __mc_mark_tls_listener):
     // handshake the accepted fd server-side and hand back a TLS stream.
     if ($server->ssl !== 0) {
-        return \__mc_tls_accept($server->ssl, $fd);
+        $tls = \__mc_tls_accept($server->ssl, $fd);
+        if ($tls !== false) {
+            $tn = \stream_socket_get_name($tls, true);
+            if ($tn !== false) { $peer_name = (string)$tn; }
+        }
+        return $tls;
     }
     // A plain listener that carried a context passes its ssl.* options down, so a
     // server-side stream_socket_enable_crypto() STARTTLS on the accepted socket can
     // find ssl.local_cert. Both are concrete \Resource here — a plain field copy.
     $conn = new \Resource(\Resource::KIND_SOCKET, 'stream', $fd);
     $conn->ctxBlob = $server->ctxBlob;
+    $pn = \stream_socket_get_name($conn, true);
+    if ($pn !== false) { $peer_name = (string)$pn; }
     // Netpoller: an accepted connection is driven non-blocking so recv/send report
     // would-block (→ suspend) instead of stalling the loop.
     if (\Runtime\AsyncHook::active()) {

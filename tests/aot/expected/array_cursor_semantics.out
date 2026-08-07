@@ -1,0 +1,34 @@
+string(1) "b"
+int(2)
+string(1) "a"
+int(10)
+string(1) "z"
+int(7)
+string(1) "x"
+array(2) {
+  ["x"]=>
+  int(7)
+  ["y"]=>
+  int(8)
+}
+string(1) "p"
+int(1)
+int(1)
+array(1) {
+  ["present"]=>
+  array(2) {
+    ["p"]=>
+    int(1)
+    ["q"]=>
+    int(2)
+  }
+}
+int(1)
+int(2)
+int(1)
+int(1)
+int(0)
+int(3)
+int(2)
+bool(false)
+NULL

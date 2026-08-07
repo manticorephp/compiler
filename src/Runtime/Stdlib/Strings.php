@@ -176,11 +176,20 @@ function strpos(string $haystack, string $needle, int $offset = 0): int|false
  * search delegates to the single-pair worker. The union params are NaN-boxed
  * cells; `is_array` dispatches, and a scalar arm coerces the cell to string.
  *
+ * `$count` receives the total number of replacements, summed over every pair and
+ * counted against the subject as it stands when that pair runs — php counts the
+ * same way, so `str_replace(['a','b'], 'b', 'a')` reports 2. It costs one extra
+ * scan per pair: the native worker knows the number (it counts to size the
+ * output) but does not hand it back, and widening that builtin's arity would
+ * also move the FuseSplitJoin rewrite target, so the count is taken here.
+ *
  * @param array|string $search
  * @param array|string $replace
  */
-function str_replace(array|string $search, array|string $replace, string $subject): string
+function str_replace(array|string $search, array|string $replace, string $subject,
+                     #[\Manticore\Attr\RefOut] int &$count = 0): string
 {
+    $count = 0;
     if (is_array($search)) {
         $out = $subject;
         $n = \count($search);
@@ -188,12 +197,16 @@ function str_replace(array|string $search, array|string $replace, string $subjec
         $i = 0;
         while ($i < $n) {
             $rep = $repIsArr ? (string)($replace[$i] ?? '') : (string)$replace;
-            $out = __mir_str_replace_one((string)$search[$i], $rep, $out);
+            $one = (string)$search[$i];
+            $count = $count + \substr_count($out, $one);
+            $out = __mir_str_replace_one($one, $rep, $out);
             $i = $i + 1;
         }
         return $out;
     }
-    return __mir_str_replace_one((string)$search, (string)$replace, $subject);
+    $needle = (string)$search;
+    $count = \substr_count($subject, $needle);
+    return __mir_str_replace_one($needle, (string)$replace, $subject);
 }
 
 /**

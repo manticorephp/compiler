@@ -1,9 +1,3 @@
 # function	file	divergence
-current	Arrays.php	param #0 $arr: ours=byref zend=byval
 fscanf	Scanf.php	missing by-ref param #2 $vars
-key	Arrays.php	param #0 $arr: ours=byref zend=byval
-similar_text	StringsExtra.php	missing by-ref param #2 $percent
 sscanf	Scanf.php	missing by-ref param #2 $vars
-str_ireplace	StringsExtra.php	missing by-ref param #3 $count
-str_replace	Strings.php	missing by-ref param #3 $count
-stream_socket_accept	Net.php	missing by-ref param #2 $peer_name

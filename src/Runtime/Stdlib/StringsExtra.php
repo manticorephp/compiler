@@ -14,11 +14,42 @@ function stripos(string $haystack, string $needle, int $offset = 0): int|false
     return \strpos(\strtolower($haystack), \strtolower($needle), $offset);
 }
 
-/** Case-insensitive {@see str_replace}, scalar search/replace/subject (PHP
- *  `str_ireplace`). Matches are found case-insensitively; the ORIGINAL casing of
- *  the non-matched text is preserved. */
-function str_ireplace(string $search, string $replace, string $subject): string
+/**
+ * Case-insensitive {@see str_replace} (PHP `str_ireplace`). Matches are found
+ * case-insensitively; the ORIGINAL casing of the non-matched text is preserved.
+ * An array search applies each pair in order, exactly as `str_replace` does, and
+ * `$count` accumulates over the pairs.
+ *
+ * @param array|string $search
+ * @param array|string $replace
+ */
+function str_ireplace(array|string $search, array|string $replace, string $subject,
+                      #[\Manticore\Attr\RefOut] int &$count = 0): string
 {
+    $count = 0;
+    if (is_array($search)) {
+        $out = $subject;
+        $n = \count($search);
+        $repIsArr = is_array($replace);
+        $i = 0;
+        while ($i < $n) {
+            $rep = $repIsArr ? (string)($replace[$i] ?? '') : (string)$replace;
+            $hits = 0;
+            $out = __mir_str_ireplace_one((string)$search[$i], $rep, $out, $hits);
+            $count = $count + $hits;
+            $i = $i + 1;
+        }
+        return $out;
+    }
+    return __mir_str_ireplace_one((string)$search, (string)$replace, $subject, $count);
+}
+
+/** Single case-insensitive search/replace pair; `$hits` receives the number of
+ *  replacements it made. */
+function __mir_str_ireplace_one(string $search, string $replace, string $subject,
+                                int &$hits): string
+{
+    $hits = 0;
     if ($search === '') { return $subject; }
     $ls = \strtolower($subject);
     $ln = \strtolower($search);
@@ -31,6 +62,7 @@ function str_ireplace(string $search, string $replace, string $subject): string
         $h = (int)$hit;
         $out = $out . \substr($subject, $pos, $h - $pos) . $replace;
         $pos = $h + $sl;
+        $hits = $hits + 1;
     }
     return $out;
 }
@@ -79,7 +111,21 @@ function wordwrap(string $string, int $width = 75, string $break = "\n", bool $c
  * `similar_text`, 2-arg form): the longest common substring plus, recursively,
  * the same over the segments to its left and right.
  */
-function similar_text(string $string1, string $string2): int
+function similar_text(string $string1, string $string2,
+                      #[\Manticore\Attr\RefOut] float &$percent = 0.0): int
+{
+    // The recursion has to stay in its own worker: php computes `$percent` once,
+    // from the OUTER pair of lengths, and a `&$percent` threaded through the
+    // recursive calls would be overwritten by the last segment to return.
+    $sim = __mir_similar_text($string1, $string2);
+    $total = \strlen($string1) + \strlen($string2);
+    $percent = $total === 0 ? 0.0 : (float)$sim * 200.0 / (float)$total;
+    return $sim;
+}
+
+/** The recursive half of {@see similar_text}: longest common substring plus the
+ *  same over the segments left and right of it. */
+function __mir_similar_text(string $string1, string $string2): int
 {
     $la = \strlen($string1);
     $lb = \strlen($string2);
@@ -98,8 +144,8 @@ function similar_text(string $string1, string $string2): int
     }
     if ($max === 0) { return 0; }
     $sum = $max;
-    $sum = $sum + similar_text(\substr($string1, 0, $pa), \substr($string2, 0, $pb));
-    $sum = $sum + similar_text(\substr($string1, $pa + $max), \substr($string2, $pb + $max));
+    $sum = $sum + __mir_similar_text(\substr($string1, 0, $pa), \substr($string2, 0, $pb));
+    $sum = $sum + __mir_similar_text(\substr($string1, $pa + $max), \substr($string2, $pb + $max));
     return $sum;
 }
 

@@ -104,18 +104,23 @@ function array_values(array $arr): array
 // the old walking `reset`/`end` could not move the cursor at all, so a
 // following `current()` disagreed with them.
 
-// current() / key() answer from the FIRST entry, the same simplification
-// reset() and end() already make: an array here carries no internal pointer, so
-// there is no cursor for next()/prev() to move. That covers the overwhelmingly
-// common `key($arr)` / `current($arr)` on a freshly built array (symfony reads
-// `key(class_implements($x))` exactly so) and is honest about the rest.
-function current(array &$arr): mixed
+// These two bodies are the FALLBACK only — the one reached across a `.o.sig`,
+// for a callable-string dispatch, where there is no header to read a cursor
+// from. They answer from the first entry and are honest about the rest.
+//
+// BY VALUE, as Zend declares them: php stopped taking current/key by reference
+// in 8.1, and only next/prev/reset/end still take one — because only those four
+// move the cursor, and only they COW (biArrayCursor's `$moves`). A by-ref
+// declaration demanded an lvalue the language does not, reached the vivifying
+// element-slot path on `key($a['k'])` (a write php never performs on a pure
+// read), and marked the caller's array as escaping for no reason.
+function current(array $arr): mixed
 {
     foreach ($arr as $v) { return $v; }
     return false;
 }
 
-function key(array &$arr): mixed
+function key(array $arr): mixed
 {
     foreach ($arr as $k => $v) { return $k; }
     return null;
