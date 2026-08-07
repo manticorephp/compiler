@@ -28,6 +28,8 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     private mixed $__s;
     private mixed $__k;
     private int $__i = 0;
+    // Declared LAST: a property added mid-class shifts every later offset.
+    private int $__f = 0;
 
     public function __construct(mixed $array = [])
     {
@@ -108,11 +110,43 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     {
         return $this->__s;
     }
+
+    public function getFlags(): int
+    {
+        return $this->__f;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__f = $flags;
+    }
+
+    /**
+     * php's own shape: [flags, storage, extraProps, iteratorClass]. The 4th is
+     * NULL for an ArrayIterator, and the 3rd is the dynamic properties the
+     * instance carries — always empty here, because this class declares no
+     * public slots and php 8.5 deprecates adding one.
+     */
+    public function __serialize(): array
+    {
+        return [$this->__f, $this->__s, [], null];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->__f = (int)($data[0] ?? 0);
+        $this->__s = $data[1] ?? [];
+        $this->__rebuildKeys();
+        $this->__i = 0;
+    }
 }
 
 class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
 {
     private mixed $__s;
+    // Declared LAST, same reason as ArrayIterator's.
+    private int $__f = 0;
+    private mixed $__ic = null;
 
     public function __construct(mixed $array = [])
     {
@@ -162,6 +196,43 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
     {
         return new ArrayIterator($this->__s);
     }
+
+    public function getFlags(): int
+    {
+        return $this->__f;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__f = $flags;
+    }
+
+    public function getIteratorClass(): string
+    {
+        // php answers the default name, not null, when none was ever set.
+        $c = $this->__ic;
+        return $c === null ? 'ArrayIterator' : (string)$c;
+    }
+
+    public function setIteratorClass(string $class): void
+    {
+        $this->__ic = $class;
+    }
+
+    /** [flags, storage, extraProps, iteratorClass] — {@see ArrayIterator::__serialize}. */
+    public function __serialize(): array
+    {
+        return [$this->__f, $this->__s, [], $this->__ic];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->__f = (int)($data[0] ?? 0);
+        $this->__s = $data[1] ?? [];
+        // symfony/var-exporter's Hydrator passes only three elements for an
+        // ArrayIterator and four for an ArrayObject, so the tail is optional.
+        $this->__ic = $data[3] ?? null;
+    }
 }
 
 /**
@@ -194,6 +265,18 @@ function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
         foreach ($iterator as $v) { $out[] = $v; }
         return $out;
     }
+    // The aggregate hop is taken HERE, not inside a resolver: what
+    // getIterator() hands back is very often a GENERATOR, and a generator has
+    // no descriptor, so a resolver can only answer null for it — and the
+    // caller would then send the ORIGINAL aggregate down the generator arm.
+    // `CapBag implements IteratorAggregate { getIterator(): Generator }` did
+    // exactly that: the object's refcount was read as `state@8`, the resume
+    // step loaded slot 0 (the class descriptor pointer) and jumped into a
+    // read-only page. SIGBUS, several statements away from any foreach.
+    if ($iterator instanceof \IteratorAggregate) {
+        // php unwraps as many aggregate layers as it finds.
+        return iterator_to_array($iterator->getIterator(), $preserve_keys);
+    }
     $it = __mc_iter_resolve($iterator);
     if ($it !== null) { return __mc_iter_drive_to_array($it, $preserve_keys); }
     return __mc_iter_gen_to_array($iterator, $preserve_keys);
@@ -201,16 +284,13 @@ function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
 
 /**
  * The concrete \Iterator behind a Traversable, or null when the value is a
- * Generator (no descriptor) and belongs on the generator path. php resolves an
- * IteratorAggregate through as many hops as it takes.
+ * Generator (no descriptor) and belongs on the generator path.
+ *
+ * ⚠ Callers must take the IteratorAggregate hop THEMSELVES before asking — a
+ * hop taken in here is invisible to the caller's generator fallback.
  */
 function __mc_iter_resolve(mixed $iterator): ?\Iterator
 {
-    $hops = 0;
-    while ($iterator instanceof \IteratorAggregate && $hops < 16) {
-        $iterator = $iterator->getIterator();
-        $hops = $hops + 1;
-    }
     if ($iterator instanceof \Iterator) { return $iterator; }
     return null;
 }
@@ -268,6 +348,10 @@ function __mc_iter_gen_to_array(\Generator $g, bool $preserve_keys): array
 function iterator_count(mixed $iterator): int
 {
     if (\is_array($iterator)) { return \count($iterator); }
+    // Hop the aggregate here, for the reason iterator_to_array gives.
+    if ($iterator instanceof \IteratorAggregate) {
+        return iterator_count($iterator->getIterator());
+    }
     $it = __mc_iter_resolve($iterator);
     if ($it !== null) { return __mc_iter_drive_count($it); }
     return __mc_iter_gen_count($iterator);

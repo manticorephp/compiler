@@ -298,10 +298,10 @@ trait EmitLlvmObjects
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
             $cellBoxSlots = [];
-            $boxSlots = [];
-            $boxTmps = [];
-            $boxTypes = [];
             $cellBoxTmps = [];
+            $cellBoxTypes = [];
+            $reboxSlots = [];
+            $reboxTmps = [];
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
@@ -332,7 +332,25 @@ trait EmitLlvmObjects
                     $ai = \count($ptypes) - 1;
                     continue;
                 }
-                if ($this->argIsByRef($mask, $ai + 1, $a)) {
+                if ($this->argIsByRef($mask, $ai + 1, $a)
+                    && $this->isByRefAddressable($a)
+                    && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)) {
+                    // A CELL lvalue (a vivified out-variable) bound to a
+                    // raw-payload by-ref param: hand over an untagged scratch
+                    // slot and re-box what the ctor left. Passing the cell slot
+                    // makes the ctor dereference the tag bits.
+                    $out .= $this->emitByRefCellUnboxArg($a);
+                    $reboxSlots[] = $this->refBoxSlot;
+                    $reboxTmps[] = $this->refBoxTmp;
+                } elseif ($this->argIsByRef($mask, $ai + 1, $a)
+                    && $this->isByRefAddressable($a)
+                    && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
+                    // The mirror: a concrete lvalue bound to a `mixed &$var`.
+                    $out .= $this->emitByRefCellBox($a);
+                    $cellBoxSlots[] = $this->refBoxSlot;
+                    $cellBoxTmps[] = $this->refBoxTmp;
+                    $cellBoxTypes[] = $a->type;
+                } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
@@ -374,8 +392,12 @@ trait EmitLlvmObjects
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
             $out .= $this->btPop();
-            $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
-        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
+            $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
+            $ci = 0;
+            foreach ($cellBoxTmps as $ctmp) {
+                $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
+                $ci = $ci + 1;
+            }
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
@@ -2345,10 +2367,12 @@ trait EmitLlvmObjects
      * that is a throw in the default arm, which is a separate change.
      *
      * Fails OPEN: a method with no recorded meta (an interface method, an
-     * imported class) keeps its arm.
+     * imported class) keeps its arm — and so does an argc of -1, the call site
+     * saying it does not know ({@see siteArgc}).
      */
     private function methodTakesArgc(string $holder, string $m, int $argc): bool
     {
+        if ($argc < 0) { return true; }
         $hd = $this->classes[$holder] ?? null;
         if ($hd === null) { return true; }
         if (!isset($hd->methodMeta[$m])) { return true; }
@@ -2360,6 +2384,25 @@ trait EmitLlvmObjects
             $total = $total + 1;
         }
         return $argc >= $mm->requiredParams() && $argc <= $total;
+    }
+
+    /**
+     * How many arguments a call site passes, or -1 when it cannot be known
+     * statically. A `...$arr` argument is ONE node carrying a RUN-TIME number of
+     * values, so counting nodes answers a different question than the arity
+     * filter asks — `$o->$m(...$args)` counted as one argument and every 0-arg
+     * and 2+-arg candidate lost its arm, leaving the default to answer null in
+     * silence (`__mc_call_shutdown`, so a `[$obj,'close']` shutdown callback
+     * simply never ran).
+     *
+     * @param Node[] $args
+     */
+    private function siteArgc(array $args): int
+    {
+        foreach ($args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return -1; }
+        }
+        return \count($args);
     }
 
     /** Read a MethodMeta through a TYPED local: a field read off an untyped
@@ -2398,7 +2441,7 @@ trait EmitLlvmObjects
     {
         $recv = $dp->object;
         $nameNode = $dp->name;
-        $methods = $this->dynMethodCandidates($recv->type, \count($iv->args));
+        $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
             // Evaluate the name for side effects and yield null (open case).
@@ -3374,11 +3417,8 @@ trait EmitLlvmObjects
         $argList = '';
         $first = true;
         $argTemps = [];
-        $cellBoxSlots = [];
-        $boxSlots = [];
-        $boxTmps = [];
-        $boxTypes = [];
-        $cellBoxTmps = [];
+        $reboxSlots = [];
+        $reboxTmps = [];
         $cls = $this->resolveMethodClass($n->class, $n->method);
         if ($cls === '') { $cls = $n->class; }
         // Late static binding: route to the per-descendant specialisation
@@ -3419,6 +3459,15 @@ trait EmitLlvmObjects
             if (!$first) { $argList .= ', '; }
             $first = false;
             if ($this->argIsByRef($mask, $ai, $a) && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai)
+            ) {
+                // Cell lvalue → raw-payload by-ref param; see
+                // emitByRefCellUnboxArg. A vivified out-variable is exactly this.
+                $out .= $this->emitByRefCellUnboxArg($a);
+                $argList .= 'i64 ' . $this->lastValue;
+                $reboxSlots[] = $this->refBoxSlot;
+                $reboxTmps[] = $this->refBoxTmp;
+            } elseif ($this->argIsByRef($mask, $ai, $a) && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
                 // Raw lvalue → `mixed &$var` param; see emitByRefCellBox.
@@ -3459,8 +3508,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
-        $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
-        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
+        $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
@@ -4123,9 +4171,8 @@ trait EmitLlvmObjects
         $argList = 'i64 ' . $thisArg;
         $argTemps = [];
         $cellBoxSlots = [];
-        $boxSlots = [];
-        $boxTmps = [];
-        $boxTypes = [];
+        $reboxSlots = [];
+        $reboxTmps = [];
         $cellBoxTmps = [];
         $static = $mc->object->type->class ?? '';
         $fallback = $this->resolveMethodClass($static, $mc->method);
@@ -4249,6 +4296,19 @@ trait EmitLlvmObjects
                 continue;
             }
             if ($this->argIsByRef($mask, $ai + 1, $a)
+                && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)
+            ) {
+                // A CELL lvalue handed to a raw-payload by-ref param — what a
+                // VIVIFIED out-variable always is. Hand over an untagged scratch
+                // slot and re-box afterwards; passing the cell slot itself makes
+                // the callee dereference the tag bits and `$obj->fill(1, $out)`
+                // read back float(6.36E-314).
+                $out .= $this->emitByRefCellUnboxArg($a);
+                $argList .= ', i64 ' . $this->lastValue;
+                $reboxSlots[] = $this->refBoxSlot;
+                $reboxTmps[] = $this->refBoxTmp;
+            } elseif ($this->argIsByRef($mask, $ai + 1, $a)
                 && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)
             ) {
@@ -4456,8 +4516,7 @@ trait EmitLlvmObjects
         }
         $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
-        $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
-        $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
+        $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
