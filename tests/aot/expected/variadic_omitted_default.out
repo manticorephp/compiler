@@ -1,0 +1,14 @@
+f: isnull=1 raw=0 cnt=0
+f: isnull=0 raw=7 cnt=0
+f: isnull=0 raw=7 cnt=1
+g: a=3 b=d cnt=0
+g: a=9 b=d cnt=0
+g: a=9 b=z cnt=0
+g: a=9 b=z cnt=2
+C::m: isnull=1 cnt=0
+C::m: isnull=0 cnt=2
+C::k: a=7 cnt=0
+C::k: a=4 cnt=1
+C::s: isnull=1 cnt=0
+C::s: isnull=0 cnt=1
+f: isnull=0 raw=7 cnt=2

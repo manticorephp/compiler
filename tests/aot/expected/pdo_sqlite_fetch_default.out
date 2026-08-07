@@ -1,0 +1,97 @@
+-- prepare + execute + fetch()
+array(4) {
+  ["id"]=>
+  int(1)
+  [0]=>
+  int(1)
+  ["name"]=>
+  string(1) "a"
+  [1]=>
+  string(1) "a"
+}
+-- query() + fetch()
+array(4) {
+  ["id"]=>
+  int(1)
+  [0]=>
+  int(1)
+  ["name"]=>
+  string(1) "a"
+  [1]=>
+  string(1) "a"
+}
+-- query() with an explicit mode
+array(2) {
+  ["id"]=>
+  int(1)
+  ["name"]=>
+  string(1) "a"
+}
+-- fetch() with the mode in a variable
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "a"
+}
+-- foreach
+array(4) {
+  ["id"]=>
+  int(1)
+  [0]=>
+  int(1)
+  ["name"]=>
+  string(1) "a"
+  [1]=>
+  string(1) "a"
+}
+array(4) {
+  ["id"]=>
+  int(2)
+  [0]=>
+  int(2)
+  ["name"]=>
+  string(1) "b"
+  [1]=>
+  string(1) "b"
+}
+-- setFetchMode + fetch()
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "a"
+}
+-- ATTR_DEFAULT_FETCH_MODE
+array(2) {
+  ["id"]=>
+  int(1)
+  ["name"]=>
+  string(1) "a"
+}
+array(1) {
+  [0]=>
+  array(2) {
+    ["id"]=>
+    int(2)
+    ["name"]=>
+    string(1) "b"
+  }
+}
+-- fetchAll() with the default restored
+array(2) {
+  [0]=>
+  array(2) {
+    ["id"]=>
+    int(1)
+    [0]=>
+    int(1)
+  }
+  [1]=>
+  array(2) {
+    ["id"]=>
+    int(2)
+    [0]=>
+    int(2)
+  }
+}

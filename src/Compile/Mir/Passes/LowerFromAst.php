@@ -412,6 +412,14 @@ final class LowerFromAst implements Pass
      *  only makes one request at a time does not carry them. Names __McCurl and
      *  CurlHandle, so it implies curlSrc and must be concatenated AFTER it. */
     public string $curlMultiSrc = '';
+    /** ext/pdo, the driver-agnostic facade — DEMAND-GATED. Global namespace, so
+     *  it rides the concatenated blob. Carries PDO/PDOStatement/PDOException,
+     *  the PDO::* constants, the fetch-mode machinery and the __McPdoDrv seam
+     *  every driver implements. */
+    public string $pdoSrc = '';
+    /** pdo_sqlite — the libsqlite3 driver. Implements the interfaces pdoSrc
+     *  declares, so it implies pdoSrc and must be concatenated AFTER it. */
+    public string $pdoSqliteSrc = '';
     /** ext/tokenizer's scanner core — DEMAND-GATED. Names nothing Zend owns so
      *  it stays loadable under `php` for tools/tokenizer_diff.php. */
     public string $tokenizerSrc = '';

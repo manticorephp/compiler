@@ -1,0 +1,3 @@
+# ceiling for tests/aot/cases/abstract_method_dispatch.php — regenerate with tests/ir_budget/run.sh --bless
+max_bytes=366910
+max_defs=108

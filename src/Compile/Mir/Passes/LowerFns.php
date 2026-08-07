@@ -943,8 +943,35 @@ trait LowerFns
                 else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
                 $i = $i + 1;
             }
+            // A FIXED param the call omitted still owns its slot. Without this
+            // the pack landed in the FIRST omitted one instead of the variadic's:
+            // `PDO::query($sql)` — `?int $fetchMode = null` ahead of
+            // `mixed ...$args` — received the empty pack AS $fetchMode, so
+            // `$fetchMode !== null` held, setFetchMode() ran with an array
+            // POINTER, and every default fetch() came back as an object.
+            while ($i < $vidx) {
+                $out[] = $this->lowerOmittedParam($params[$i], $selfClass);
+                $i = $i + 1;
+            }
             $out[] = new ArrayLit($packed, Type::unknown());
             return $out;
+        }
+        // A `...$arr` covers every parameter from its own position on, and how
+        // many that is is a RUN-TIME property — the emitter expands it against
+        // the callee's signature. Padding the params behind it with nulls added
+        // arguments the site never wrote: the call carried [$this, null, null,
+        // e0, e1, e2] for a three-param callee, which read the two nulls as its
+        // first two params.
+        foreach ($astArgs as $a) {
+            if ($a->kind === 'Spread') {
+                $out = [];
+                $i = 0;
+                foreach ($astArgs as $x) {
+                    $out[] = $this->lowerArgForParam($params[$i] ?? null, $x);
+                    $i = $i + 1;
+                }
+                return $out;
+            }
         }
         // Resolve against the signature only when something is missing /
         // reordered; otherwise lower positionally.
@@ -993,27 +1020,28 @@ trait LowerFns
         $out = [];
         $i = 0;
         foreach ($params as $p) {
-            $pd = $this->paramDefault($p);
-            if ($slotSet[$i]) {
-                $out[] = $slotNode[$i];
-            } elseif ($pd !== null) {
-                // A `self::CONST` / `parent::` / `static::` in an omitted param's
-                // default resolves against the callee's DECLARING class, not the
-                // call site — bind `self` to it while lowering (empty for plain
-                // functions keeps the caller context).
-                if ($selfClass !== '') {
-                    $prevSelf = $this->currentLowerClass;
-                    $this->currentLowerClass = $selfClass;
-                    $out[] = $this->lowerExpr($pd);
-                    $this->currentLowerClass = $prevSelf;
-                } else {
-                    $out[] = $this->lowerExpr($pd);
-                }
-            } else {
-                $out[] = new NullConst(Type::null_());
-            }
+            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass);
             $i = $i + 1;
         }
         return $out;
+    }
+
+    /**
+     * The value an OMITTED parameter's slot gets: its default expression, or a
+     * null when it has none. A `self::CONST` / `parent::` / `static::` default
+     * resolves against the callee's DECLARING class and not the call site, so
+     * `self` is bound to it while lowering (an empty `$selfClass` — a plain
+     * function — keeps the caller's context).
+     */
+    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass): Node
+    {
+        $pd = $this->paramDefault($p);
+        if ($pd === null) { return new NullConst(Type::null_()); }
+        if ($selfClass === '') { return $this->lowerExpr($pd); }
+        $prevSelf = $this->currentLowerClass;
+        $this->currentLowerClass = $selfClass;
+        $n = $this->lowerExpr($pd);
+        $this->currentLowerClass = $prevSelf;
+        return $n;
     }
 }

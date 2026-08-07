@@ -909,9 +909,13 @@ trait EmitLlvmBuiltins
         // Unbox the boxed cell value to the element's raw representation.
         $raw = $this->ssa->allocReg();
         if ($elem->kind === Type::KIND_ARRAY && ($elem->element->kind ?? '') !== Type::KIND_CELL) {
-            // Nested concrete array: recursively de-cellify.
+            // Nested concrete array: recursively de-cellify. The element read
+            // out of a cell-element array is a BOXED array cell, and this
+            // function inttoptr's what it is handed — strip the container tag
+            // first or the recursion dereferences the tag bits.
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
+            $out .= $this->unboxCellToType($elem);
             $out .= $this->emitCellArrayToTyped($elem);
             $raw = $this->lastValue;
         } else {
@@ -4972,6 +4976,29 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $payload . ' = and i64 ' . $raw . ", 281474976710655\n";
             $objp = $this->ssa->allocReg();
             $out .= '  ' . $objp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+        } elseif ($args[0]->type->kind === Type::KIND_UNKNOWN) {
+            // An UNKNOWN slot holds EITHER shape: a boxed object cell (an
+            // element of an erased array, a `get_object_vars()` value) or a raw
+            // pointer (a classless `object` hint, which lowers to UNKNOWN and
+            // not to KIND_OBJ). The cell arm above cannot serve it — a raw
+            // pointer's tag bits are 0, so `tag == 8` would send every raw
+            // receiver to the default arm. Mask only when the tag says object;
+            // the mask is the identity on a userspace address either way.
+            // `Parser\Dump::shortClass(object $o)` took a tagged word here and
+            // read the class id off a wild address (dump-ast SIGSEGV on any
+            // non-empty array literal).
+            $out .= $this->coerceToI64();
+            $raw = $this->lastValue;
+            $out .= $this->cellTagIr($raw);
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $masked = $this->ssa->allocReg();
+            $out .= '  ' . $masked . ' = and i64 ' . $raw . ", 281474976710655\n";
+            $pick = $this->ssa->allocReg();
+            $out .= '  ' . $pick . ' = select i1 ' . $isObj . ', i64 ' . $masked
+                  . ', i64 ' . $raw . "\n";
+            $objp = $this->ssa->allocReg();
+            $out .= '  ' . $objp . ' = inttoptr i64 ' . $pick . " to ptr\n";
         } else {
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;

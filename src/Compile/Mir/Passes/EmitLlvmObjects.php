@@ -136,12 +136,28 @@ trait EmitLlvmObjects
 
         $argRegs = [];
         $argKinds = [];
+        $fixedArgs = [];
+        // `new $cls(...$arr)`: the pack's length is a run-time property, so each
+        // candidate ctor arm expands it against its OWN params. Emitting the
+        // Spread_ node as an ordinary argument produced no value at all, so the
+        // ctor was handed the stale lastValue — the CLASS NAME — as its first
+        // parameter (`new $cls(...['C'])` constructed with 'R').
+        $spreadArr = '';
+        $spreadElem = null;
         foreach ($n->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) {
+                $out .= $this->emitNode($a->operand);
+                $out .= $this->coerceToPtr();
+                $spreadArr = $this->lastValue;
+                $spreadElem = $a->operand->type->element ?? null;
+                continue;
+            }
             $out .= $this->emitNode($a);
             $argRegs[] = $this->lastValue;
             $argKinds[] = $this->lastValueType;
+            $fixedArgs[] = $a;
         }
-        $argc = \count($n->args);
+        $argc = \count($fixedArgs);
 
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -183,7 +199,7 @@ trait EmitLlvmObjects
             if ($ctorClass !== '') {
                 $argList = 'i64 ' . $objInt;
                 $ai = 0;
-                foreach ($n->args as $a) {
+                foreach ($fixedArgs as $a) {
                     $this->lastValue = $argRegs[$ai];
                     $this->lastValueType = $argKinds[$ai];
                     if (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -195,10 +211,24 @@ trait EmitLlvmObjects
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
                 }
-                // Default-fill the trailing optional ctor params (param 0 is
-                // `$this`, provided args cover [1 .. argc]).
-                $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
-                $argList .= $this->lastPadArgs;
+                if ($spreadArr !== '') {
+                    // The pack covers every param past the fixed prefix; each
+                    // defaulted one it does not reach falls back to its default.
+                    [$sir, $sregs] = $this->emitSpreadFill(
+                        $spreadArr, $argc + 1, $ptypes, $tmask, $spreadElem,
+                        $ctorClass . '____construct');
+                    $out .= $sir;
+                    foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                } else {
+                    // Default-fill the trailing optional ctor params (param 0 is
+                    // `$this`, provided args cover [1 .. argc]).
+                    $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
+                    $argList .= $this->lastPadArgs;
+                }
+                // func_get_args() channel: what the SOURCE wrote, before the pad
+                // above widened the list. Kept across the merge with the spread
+                // arm — the two are independent, and dropping this makes a ctor
+                // reading func_get_arg() see the padded arity instead.
                 $out .= $this->faPush($this->lsbTarget($ctorClass, '__construct', $cd->name),
                     $n->srcArgc, $n->args, 1);
                 $cr = $this->ssa->allocReg();
@@ -287,18 +317,22 @@ trait EmitLlvmObjects
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $ai = 0;
             foreach ($n->args as $a) {
-                if ($this->argIsByRef($mask, $ai + 1, $a)
-                    && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)) {
-                    $out .= $this->emitByRefCellUnboxArg($a);
-                    $cellBoxSlots[] = $this->refBoxSlot;
-                    $cellBoxTmps[] = $this->refBoxTmp;
-                } elseif ($this->argIsByRef($mask, $ai + 1, $a)
-                    && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
-                    $out .= $this->emitByRefCellBoxArg($a);
-                    $boxSlots[] = $this->refBoxSlot;
-                    $boxTmps[] = $this->refBoxTmp;
-                    $boxTypes[] = $a->type;
-                } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
+                // `new C(...$arr)`: expand the pack across the ctor's remaining
+                // params (param 0 is `$this`). Without an arm here the Spread_
+                // node emitted no value and the ctor read whatever lastValue
+                // still held, so `new R(...['C'])` constructed from garbage.
+                if ($a->kind === Node::KIND_SPREAD) {
+                    $out .= $this->emitNode($a->operand);
+                    $out .= $this->coerceToPtr();
+                    [$sir, $sregs] = $this->emitSpreadFill(
+                        $this->lastValue, $ai + 1, $ptypes, $tmask,
+                        $a->operand->type->element ?? null, $ctorClass . '____construct');
+                    $out .= $sir;
+                    foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                    $ai = \count($ptypes) - 1;
+                    continue;
+                }
+                if ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
@@ -776,13 +810,22 @@ trait EmitLlvmObjects
         $def = $this->ssa->allocLabel('cp.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
+        // Classes sharing a slot share an arm {@see canonArm}.
+        /** @var array<string, string> */
+        $armSeen = [];
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('cp.case');
+            $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $arm .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $arm .= '  br label %' . $end . "\n";
+            $key = $this->canonArm($arm);
+            if (isset($armSeen[$key])) {
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
+                continue;
+            }
+            $armSeen[$key] = $lbl;
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
+            $bodies .= $lbl . ":\n" . $arm;
         }
         foreach ($enumArms as $ename => $ed) {
             $lbl = $this->ssa->allocLabel('cp.enum');
@@ -1052,13 +1095,21 @@ trait EmitLlvmObjects
         $def = $this->ssa->allocLabel('rp.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
+        /** @var array<string, string> {@see canonArm} */
+        $armSeen = [];
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('rp.case');
+            $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
+            $arm .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $arm .= '  br label %' . $end . "\n";
+            $key = $this->canonArm($arm);
+            if (isset($armSeen[$key])) {
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
+                continue;
+            }
+            $armSeen[$key] = $lbl;
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
+            $bodies .= $lbl . ":\n" . $arm;
         }
         foreach ($magic as $cname => $declCls) {
             $lbl = $this->ssa->allocLabel('rp.magic');
@@ -1214,14 +1265,22 @@ trait EmitLlvmObjects
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
         $seen = [];
+        /** @var array<string, string> {@see canonArm} */
+        $armSeen = [];
         foreach ($fixed as $cd) {
             if (isset($seen[$cd->name])) { continue; }
             $seen[$cd->name] = true;
             $lbl = $this->ssa->allocLabel('cs.case');
+            $arm = $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
+            $arm .= '  br label %' . $end . "\n";
+            $key = $this->canonArm($arm);
+            if (isset($armSeen[$key])) {
+                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
+                continue;
+            }
+            $armSeen[$key] = $lbl;
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
-            $bodies .= '  br label %' . $end . "\n";
+            $bodies .= $lbl . ":\n" . $arm;
         }
         foreach ($magic as $cname => $declCls) {
             if (isset($seen[$cname])) { continue; }
@@ -2214,7 +2273,7 @@ trait EmitLlvmObjects
      *  ancestors) or a union (across the atoms) — as name => return Type.
      *  Atoms disagreeing on a method's return kind collapse it to a cell.
      *  Null when the receiver has no static class set (cell / unknown). */
-    private function dynMethodCandidates(Type $t): ?array
+    private function dynMethodCandidates(Type $t, int $argc): ?array
     {
         $roots = [];
         $single = $t->class ?? '';
@@ -2226,7 +2285,7 @@ trait EmitLlvmObjects
                 if ($cn !== '' && isset($this->classes[$cn])) { $roots[] = $cn; }
             }
         }
-        if ($roots === []) { return $this->classlessMethodCandidates(); }
+        if ($roots === []) { return $this->classlessMethodCandidates($argc); }
         $out = [];
         foreach ($roots as $root) {
             $c = $root;
@@ -2235,6 +2294,7 @@ trait EmitLlvmObjects
                     if ($m === '__construct' || $m === '__call') { continue; }
                     $holder = $this->resolveMethodClass($root, $m);
                     if ($holder === '') { continue; }
+                    if (!$this->methodTakesArgc($holder, $m, $argc)) { continue; }
                     $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
                     if (!isset($out[$m])) { $out[$m] = $rt; }
                     elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
@@ -2250,7 +2310,7 @@ trait EmitLlvmObjects
      *  disagree on the return kind collapse to a cell — the emit-side dispatch
      *  boxes each arm's return by its own type (emitMethodCall's per-arm boxing
      *  when the result is cell), so the merged value is a uniform cell. */
-    private function classlessMethodCandidates(): array
+    private function classlessMethodCandidates(int $argc): array
     {
         $out = [];
         foreach ($this->classes as $cd) {
@@ -2258,12 +2318,61 @@ trait EmitLlvmObjects
                 if ($m === '__construct' || $m === '__call') { continue; }
                 $holder = $this->resolveMethodClass($cd->name, $m);
                 if ($holder === '') { continue; }
+                if (!$this->methodTakesArgc($holder, $m, $argc)) { continue; }
                 $rt = $this->sigs->returnType[$holder . '__' . $m] ?? Type::cell();
                 if (!isset($out[$m])) { $out[$m] = $rt; }
                 elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
             }
         }
         return $out;
+    }
+
+    /**
+     * Can `$holder::$m` be called with exactly `$argc` arguments?
+     *
+     * A dynamic name is dispatched by an inline `strcmp` chain, one arm per
+     * candidate NAME, and on an erased receiver the candidate set is every
+     * method of every class — 312 arms and 272 KB of IR for `prelude/ob.php`'s
+     * 15-line `__mc_ob_call`, in a module with 99 classes. Arity is the one
+     * thing the call site knows for certain about the target, and it cuts that
+     * set hard: an ob handler is invoked with two arguments, so no zero-arg
+     * accessor can ever be what `$o->$m($buf, $phase)` reaches.
+     *
+     * ⚠ This is a real semantic edge, not only a size fix. php throws
+     * ArgumentCountError when a method is called with too few arguments; the
+     * dispatch's default arm answers null. Dropping the arm moves the wrong
+     * answer from one shape to the other and neither matches Zend — the fix for
+     * that is a throw in the default arm, which is a separate change.
+     *
+     * Fails OPEN: a method with no recorded meta (an interface method, an
+     * imported class) keeps its arm.
+     */
+    private function methodTakesArgc(string $holder, string $m, int $argc): bool
+    {
+        $hd = $this->classes[$holder] ?? null;
+        if ($hd === null) { return true; }
+        if (!isset($hd->methodMeta[$m])) { return true; }
+        $mm = $this->asMethodMeta($hd->methodMeta[$m]);
+        $total = 0;
+        foreach ($mm->params as $pm) {
+            $p = $this->asParamMeta($pm);
+            if ($p->variadic) { return $argc >= $mm->requiredParams(); }
+            $total = $total + 1;
+        }
+        return $argc >= $mm->requiredParams() && $argc <= $total;
+    }
+
+    /** Read a MethodMeta through a TYPED local: a field read off an untyped
+     *  slot resolves the wrong offset under the self-host. */
+    private function asMethodMeta(\Compile\Mir\MethodMeta $mm): \Compile\Mir\MethodMeta
+    {
+        return $mm;
+    }
+
+    /** {@see asMethodMeta} — same reason. */
+    private function asParamMeta(\Compile\Mir\ParamMeta $p): \Compile\Mir\ParamMeta
+    {
+        return $p;
     }
 
     /**
@@ -2289,7 +2398,7 @@ trait EmitLlvmObjects
     {
         $recv = $dp->object;
         $nameNode = $dp->name;
-        $methods = $this->dynMethodCandidates($recv->type);
+        $methods = $this->dynMethodCandidates($recv->type, \count($iv->args));
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
             // Evaluate the name for side effects and yield null (open case).
@@ -3284,6 +3393,9 @@ trait EmitLlvmObjects
         $ptypes = $this->sigs->paramTypes[$cls . '__' . $n->method] ?? [];
         $ahmask = $this->sigs->arrayHintedParams[$cls . '__' . $n->method] ?? [];
         $tmask = $this->sigs->taggedParams[$cls . '__' . $n->method] ?? [];
+        $cellBoxSlots = [];
+        $cellBoxTmps = [];
+        $cellBoxTypes = [];
         $ai = 0;
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
@@ -3293,7 +3405,8 @@ trait EmitLlvmObjects
                 $out .= $this->coerceToPtr();
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
-                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType);
+                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
+                                                       $cls . '__' . $n->method);
                 $out .= $sir;
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
@@ -3305,19 +3418,15 @@ trait EmitLlvmObjects
             }
             if (!$first) { $argList .= ', '; }
             $first = false;
-            if ($this->argIsByRef($mask, $ai, $a)
-                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai)) {
-                $out .= $this->emitByRefCellUnboxArg($a);
+            if ($this->argIsByRef($mask, $ai, $a) && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellBox($a, $ptypes, $ai)
+            ) {
+                // Raw lvalue → `mixed &$var` param; see emitByRefCellBox.
+                $out .= $this->emitByRefCellBox($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
-            } elseif ($this->argIsByRef($mask, $ai, $a)
-                && $this->byRefNeedsCellBox($a, $ptypes, $ai)) {
-                $out .= $this->emitByRefCellBoxArg($a);
-                $argList .= 'i64 ' . $this->lastValue;
-                $boxSlots[] = $this->refBoxSlot;
-                $boxTmps[] = $this->refBoxTmp;
-                $boxTypes[] = $a->type;
+                $cellBoxTypes[] = $a->type;
             } elseif ($this->argIsByRef($mask, $ai, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
@@ -3353,6 +3462,11 @@ trait EmitLlvmObjects
         $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
         $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
         $out .= $this->freeStrArgTemps($argTemps);
+        $ci = 0;
+        foreach ($cellBoxTmps as $ctmp) {
+            $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
+            $ci = $ci + 1;
+        }
         // By-ref return (`static function &m()`): the callee yields the slot
         // ADDRESS; deref in value context, keep raw under rawRefCall (RefBind).
         if (($this->sigs->returnsByRef[$target] ?? false) && !$this->rawRefCall) {
@@ -3431,10 +3545,12 @@ trait EmitLlvmObjects
      * @param array<int, Type> $srcTypes the repr each arg was emitted in
      * @param array<int, Type> $cTypes   this arm's own signature
      */
-    private function vdArmArgs(string $argList, array $srcTypes, array $cTypes): string
+    private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
-        if (\count($cTypes) === 0 || \count($srcTypes) === 0) { return ''; }
+        if (\count($cTypes) === 0 || \count($srcTypes) === 0) {
+            return $this->vdArmSpread($sym, $cTypes);
+        }
         $parts = \explode(', ', $argList);
         $out = '';
         $changed = false;
@@ -3460,6 +3576,27 @@ trait EmitLlvmObjects
             $i = $i + 1;
         }
         if ($changed) { $this->vdArmList = \implode(', ', $parts); }
+        return $out . $this->vdArmSpread($sym, $cTypes);
+    }
+
+    /**
+     * Append the pending `...$arr` tail to {@see $vdArmList}, expanded against
+     * `$sym`'s OWN parameters — its arity, its tagged mask, its defaults. A
+     * no-op when the call site had no spread.
+     * @param array<int, Type> $cTypes
+     */
+    private function vdArmSpread(string $sym, array $cTypes): string
+    {
+        if ($this->spreadTail === null || $sym === '') { return ''; }
+        $tail = $this->spreadTail;
+        $ptypes = \count($cTypes) > 0 ? $cTypes : ($this->sigs->paramTypes[$sym] ?? []);
+        $tmask = $this->sigs->taggedParams[$sym] ?? [];
+        // Cleared across the fill: a default expression is lowered here too, and
+        // a nested call must not inherit this site's pending tail.
+        $this->spreadTail = null;
+        [$out, $regs] = $this->emitSpreadFill($tail[0], $tail[1], $ptypes, $tmask, $tail[2], $sym);
+        $this->spreadTail = $tail;
+        foreach ($regs as $rg) { $this->vdArmList .= ', i64 ' . $rg; }
         return $out;
     }
 
@@ -3485,21 +3622,58 @@ trait EmitLlvmObjects
         $defLabel = $this->ssa->allocLabel('vd.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $defLabel . " [\n";
         $bodies = '';
-        // Dedupe on the CLASS ID, not the name. The candidate list is built from
-        // names, and two of them can denote one runtime type — a reified
-        // specialization counts as a descendant of the class it specializes
-        // ({@see selfAndDescendants} follows the ORIGIN edge), so the same
-        // class_id reached the switch twice and clang rejected the whole module
-        // with `duplicate case value`. The first name wins, matching the
-        // first-declarer rule the union path already applies by name.
+        // Group the candidates that produce the SAME arm before emitting any.
+        //
+        // An inherited method is the common case, not the exception: 27 classes
+        // deriving from Exception/Error all resolve `getMessage` to one of two
+        // symbols, and emitting one block each duplicated the call, the boxing
+        // and the branch 27 times. LLVM lets many `i64 X, label %L` entries share
+        // a destination, so the switch TABLE still names every class id while the
+        // bodies collapse to one per distinct callee. This is the single biggest
+        // IR-volume term at a megamorphic site — `__mc_ob_call`'s 312 dynamic-name
+        // arms each carried a full copy of one of these switches.
+        //
+        // The key is everything the body depends on: the callee symbol, and — for
+        // a cell-typed merge — the class whose DECLARED return type decides the
+        // boxing. Two candidates agreeing on both emit byte-identical arms.
+        /** @var array<string, string> arm key → block label */
+        $armLabel = [];
+        /** @var array<string, string> arm key → the candidate class to emit it from */
+        $armCand = [];
+        /** @var string[] arm keys, in first-seen order */
+        $armOrder = [];
+        // Dedupe on the CLASS ID as well as on the arm. The candidate list is
+        // built from NAMES, and two of them can denote one runtime type — a
+        // reified specialization counts as a descendant of the class it
+        // specializes ({@see selfAndDescendants} follows the ORIGIN edge) — so
+        // the same class_id reached the switch twice and clang rejected the
+        // whole module with `duplicate case value`. Grouping by arm does NOT
+        // subsume this: two names sharing a class_id can still resolve to
+        // different arms, and each would emit its own case entry for that id.
+        // The first name wins, matching the first-declarer rule the union path
+        // already applies by name.
         $seenCid = [];
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
             if (isset($seenCid[$cd->classId])) { continue; }
             $seenCid[$cd->classId] = true;
-            $caseLabel = $this->ssa->allocLabel('vd.case');
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseLabel . "\n";
+            $tgt = $targets[$c];
+            $rtKey = '';
+            if ($boxCell && !isset($erasedSyms[$tgt])) {
+                $rtKey = $this->resolveMethodClass($c, $method);
+            }
+            $key = $tgt . '|' . $rtKey;
+            if (!isset($armLabel[$key])) {
+                $armLabel[$key] = $this->ssa->allocLabel('vd.case');
+                $armCand[$key] = $c;
+                $armOrder[] = $key;
+            }
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armLabel[$key] . "\n";
+        }
+        foreach ($armOrder as $key) {
+            $c = $armCand[$key];
+            $caseLabel = $armLabel[$key];
             $r = $this->ssa->allocReg();
             $bodies .= $caseLabel . ":\n";
             // The shared $argList was coerced ONCE, to the FALLBACK's signature.
@@ -3509,7 +3683,8 @@ trait EmitLlvmObjects
             // one CELL arm — so the single `cell_to_strptr` the call site emitted
             // handed the InputDefinition arm a raw pointer in a cell parameter.
             // Re-coerce per arm where the repr disagrees.
-            $bodies .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$targets[$c]] ?? []);
+            $bodies .= $this->vdArmArgs($argList, $argOutTypes,
+                                        $this->sigs->paramTypes[$targets[$c]] ?? [], $targets[$c]);
             $bodies .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
                      . '(' . $this->vdArmList . ")\n";
             // Cell-typed result over candidates whose declared returns DISAGREE:
@@ -3532,7 +3707,8 @@ trait EmitLlvmObjects
         $out .= $defLabel . ":\n";
         // The default arm is a candidate like any other — it too can declare a
         // repr the site did not emit.
-        $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$fallback] ?? []);
+        $out .= $this->vdArmArgs($argList, $argOutTypes,
+                                 $this->sigs->paramTypes[$fallback] ?? [], $fallback);
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $this->vdArmList . ")\n";
         if ($boxCell) {
@@ -3733,6 +3909,67 @@ trait EmitLlvmObjects
         $out .= '  ' . $v . ' = load i64, ptr ' . $p . "\n";
         $this->lastValue = $v;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * A class_id-switch arm's body reduced to a form that ignores which SSA
+     * registers it happened to be given — two arms with the same canonical form
+     * compute the same thing and can share one block.
+     *
+     * A property dispatch emits one arm per CLASS, but the arm is a function of
+     * the SLOT (offset, width, signedness, declared type, array-hint), not of the
+     * class: every class inheriting a property at the same offset emits a
+     * byte-identical block down to the register numbering. On an erased receiver
+     * with a deep hierarchy that is the bulk of the site.
+     *
+     * Only registers DEFINED inside the arm are renamed — an outer register
+     * (the receiver pointer, the result slot, the merge label) keeps its name and
+     * must therefore match exactly for two arms to be judged equal. That is what
+     * makes this sound rather than a heuristic: identical remaining text plus a
+     * consistent renaming of purely local names is the same straight-line block.
+     */
+    private function canonArm(string $body): string
+    {
+        // Pass 1: the names this block defines, in definition order.
+        /** @var array<string, string> */
+        $ren = [];
+        $n = 0;
+        $lines = \explode("\n", $body);
+        foreach ($lines as $l) {
+            $t = \ltrim($l);
+            if ($t === '' || $t[0] !== '%') { continue; }
+            $eq = \strpos($t, ' = ');
+            if ($eq === false) { continue; }
+            $name = \substr($t, 0, $eq);
+            if (isset($ren[$name])) { continue; }
+            $ren[$name] = '%#' . (string)$n;
+            $n = $n + 1;
+        }
+        if ($ren === []) { return $body; }
+        // Pass 2: rewrite every occurrence of those names. Hand-rolled rather
+        // than a regex: `%r1` must not match inside `%r12`, and this runs per
+        // dispatch arm on every polymorphic site in the module.
+        $out = '';
+        $len = \strlen($body);
+        $i = 0;
+        while ($i < $len) {
+            $c = $body[$i];
+            if ($c !== '%') { $out = $out . $c; $i = $i + 1; continue; }
+            $j = $i + 1;
+            while ($j < $len) {
+                $d = $body[$j];
+                if (($d >= 'a' && $d <= 'z') || ($d >= 'A' && $d <= 'Z')
+                    || ($d >= '0' && $d <= '9') || $d === '_' || $d === '.') {
+                    $j = $j + 1;
+                    continue;
+                }
+                break;
+            }
+            $tok = \substr($body, $i, $j - $i);
+            $out = $out . ($ren[$tok] ?? $tok);
+            $i = $j;
+        }
         return $out;
     }
 
@@ -3990,34 +4227,40 @@ trait EmitLlvmObjects
         // fallback declares is how an int -1 became a pointer. An index left
         // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
         $argOutTypes = [];
+        // Raw caller lvalue → cell by-ref param: scratch slots to write back
+        // after the call, parallel with the caller's own types.
+        $cellBoxSlots = [];
+        $cellBoxTmps = [];
+        $cellBoxTypes = [];
         $ai = 0;
         foreach ($this->faCallArgsRecv($fallback . '__' . $mc->method, $mc->args) as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
+                // NOT expanded here: the pack's tail is filled from the CALLEE's
+                // defaults, and an erased receiver's arms need not share the
+                // fallback's signature — `$o->__construct(...['C'])` took some
+                // unrelated class's `= 0` for its second param. Each arm (and
+                // the single-target path) expands it against its own params.
                 $out .= $this->emitNode($a->operand);
                 $out .= $this->coerceToPtr();
-                $arr = $this->lastValue;
-                $elemType = $a->operand->type->element ?? null;
-                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai + 1, $ptypes, $tmask, $elemType);
-                $out .= $sir;
-                foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
+                $this->spreadTail = [$this->lastValue, $ai + 1, $a->operand->type->element ?? null];
                 $ai = \count($ptypes) - 1;
                 continue;
             }
             if ($this->argIsByRef($mask, $ai + 1, $a)
-                && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)) {
-                $out .= $this->emitByRefCellUnboxArg($a);
+                && $this->isByRefAddressable($a)
+                && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)
+            ) {
+                // A raw lvalue handed to a `mixed &$var` param: box into a
+                // scratch cell and put back what the callee left. Without it
+                // `PDOStatement::bindParam(mixed &$var)` read an `int 3` as
+                // float(1.5E-323) and bound that.
+                $out .= $this->emitByRefCellBox($a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
-            } elseif ($this->argIsByRef($mask, $ai + 1, $a)
-                && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
-                $out .= $this->emitByRefCellBoxArg($a);
-                $argList .= ', i64 ' . $this->lastValue;
-                $boxSlots[] = $this->refBoxSlot;
-                $boxTmps[] = $this->refBoxTmp;
-                $boxTypes[] = $a->type;
+                $cellBoxTypes[] = $a->type;
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
@@ -4190,6 +4433,7 @@ trait EmitLlvmObjects
             if ($distinct === [] && !isset($this->sigs->paramTypes[$sym])
                 && ($static === '' || !isset($this->classes[$static]))) {
                 if ($btName !== '') { $out .= $this->btPop(); }
+                $this->spreadTail = null;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
                 return $out;
@@ -4197,7 +4441,7 @@ trait EmitLlvmObjects
             // The single resolved target need not be the one the arguments were
             // coerced for either (an erased receiver picks the fallback by
             // method name, then resolves exactly one live candidate).
-            $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? []);
+            $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? [], $sym);
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
                   . '(' . $this->vdArmList . ")\n";
@@ -4210,10 +4454,16 @@ trait EmitLlvmObjects
             $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms, $argOutTypes);
             $reg = $this->vdResult;
         }
+        $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->emitByRefCellRebox($cellBoxSlots, $cellBoxTmps);
         $out .= $this->emitByRefCellUnboxBack($boxSlots, $boxTmps, $boxTypes);
         $out .= $this->freeStrArgTemps($argTemps);
+        $ci = 0;
+        foreach ($cellBoxTmps as $ctmp) {
+            $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
+            $ci = $ci + 1;
+        }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
         // (rawRefCall) keeps the raw address so RefBind can alias through it.

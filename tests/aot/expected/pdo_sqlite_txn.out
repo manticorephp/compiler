@@ -1,0 +1,19 @@
+bool(false)
+bool(true)
+int(2)
+bool(false)
+int(3)
+commit: There is no active transaction
+rollback: There is no active transaction
+begin: There is already an active transaction
+-- rowCount --
+int(2)
+int(2)
+int(0)
+int(2)
+bool(true)
+-- quote --
+string(11) "'O''Reilly'"
+string(7) "'plain'"
+string(5) "'bin'"
+NUL: SQLite PDO::quote does not support null bytes

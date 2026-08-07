@@ -18,10 +18,9 @@
  * `mixed` so the call sites NaN-box them, then the cell array
  * store/get/isset/unset/foreach paths handle them.
  *
- * Injection is demand-gated: Main only lowers this file when the program
- * mentions ArrayIterator / ArrayObject or calls one of the iterator_* helpers
- * below ({@see LowerFromAst}, line 452). There is no second embedded copy —
- * this file is the only definition.
+ * NOTE: LowerFromAst::arrayClassesPreludeSrc() keeps a byte-identical
+ * embedded copy as the bootstrap/distribution fallback (when this file
+ * can't be read). Keep the two in sync.
  */
 
 class ArrayIterator implements Iterator, ArrayAccess, Countable
@@ -29,8 +28,6 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     private mixed $__s;
     private mixed $__k;
     private int $__i = 0;
-    // Declared LAST: a property added mid-class shifts every later offset.
-    private int $__f = 0;
 
     public function __construct(mixed $array = [])
     {
@@ -111,43 +108,11 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     {
         return $this->__s;
     }
-
-    public function getFlags(): int
-    {
-        return $this->__f;
-    }
-
-    public function setFlags(int $flags): void
-    {
-        $this->__f = $flags;
-    }
-
-    /**
-     * php's own shape: [flags, storage, extraProps, iteratorClass]. The 4th is
-     * NULL for an ArrayIterator, and the 3rd is the dynamic properties the
-     * instance carries — always empty here, because this class declares no
-     * public slots and php 8.5 deprecates adding one.
-     */
-    public function __serialize(): array
-    {
-        return [$this->__f, $this->__s, [], null];
-    }
-
-    public function __unserialize(array $data): void
-    {
-        $this->__f = (int)($data[0] ?? 0);
-        $this->__s = $data[1] ?? [];
-        $this->__rebuildKeys();
-        $this->__i = 0;
-    }
 }
 
 class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
 {
     private mixed $__s;
-    // Declared LAST, same reason as ArrayIterator's.
-    private int $__f = 0;
-    private mixed $__ic = null;
 
     public function __construct(mixed $array = [])
     {
@@ -197,43 +162,6 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
     {
         return new ArrayIterator($this->__s);
     }
-
-    public function getFlags(): int
-    {
-        return $this->__f;
-    }
-
-    public function setFlags(int $flags): void
-    {
-        $this->__f = $flags;
-    }
-
-    public function getIteratorClass(): string
-    {
-        // php answers the default name, not null, when none was ever set.
-        $c = $this->__ic;
-        return $c === null ? 'ArrayIterator' : (string)$c;
-    }
-
-    public function setIteratorClass(string $class): void
-    {
-        $this->__ic = $class;
-    }
-
-    /** [flags, storage, extraProps, iteratorClass] — {@see ArrayIterator::__serialize}. */
-    public function __serialize(): array
-    {
-        return [$this->__f, $this->__s, [], $this->__ic];
-    }
-
-    public function __unserialize(array $data): void
-    {
-        $this->__f = (int)($data[0] ?? 0);
-        $this->__s = $data[1] ?? [];
-        // symfony/var-exporter's Hydrator passes only three elements for an
-        // ArrayIterator and four for an ArrayObject, so the tail is optional.
-        $this->__ic = $data[3] ?? null;
-    }
 }
 
 /**
@@ -251,25 +179,12 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
  * typed parameter re-types it at the callee, the same trick the guard folder
  * needed for its AST nodes.
  *
- * A Generator still cannot be recognised POSITIVELY — it is compiler-
- * synthesised state with no class descriptor, so `instanceof \Generator` and
- * `get_class($gen)` both answer as if it were not one. But the question only
- * has to be decided in the other direction: a user Iterator / IteratorAggregate
- * DOES have a descriptor and answers `instanceof` correctly, so the two
- * interface arms are taken first and the generator funnel becomes the default.
- *
- * Without those arms a `CapBag implements IteratorAggregate` was read as a
- * generator frame — `state@8` was really its refcount, and the resume step
- * loaded slot 0 (the class DESCRIPTOR pointer) and called it, jumping into a
- * read-only data page. SIGBUS, which is why this looked like a foreach bug:
- * the crash landed several statements after the two loops that were blamed for
- * it, and both of those are correct.
- *
- * Deliberately decided by `instanceof` rather than by letting an erased
- * `foreach` classify at run time: this body is linkonce_odr, and the erased
- * iterator arm is emitted only for a module that already knows a Traversable
- * class ({@see EmitLlvmControl::hasTraversableClasses}) — which is exactly the
- * shape that gives one symbol two different bodies.
+ * A Generator cannot be recognised directly: it is compiler-synthesised state
+ * with NO class descriptor, so `instanceof \Generator` and `get_class($gen)`
+ * answer false / '' even for a concrete one. The test is therefore INVERTED —
+ * a user Iterator / IteratorAggregate does have a descriptor and answers its
+ * own interfaces, and a Generator answers false to both — so everything with a
+ * real class is handled here and the generator arm keeps the fallthrough.
  */
 function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
 {
@@ -279,23 +194,33 @@ function iterator_to_array(mixed $iterator, bool $preserve_keys = true): array
         foreach ($iterator as $v) { $out[] = $v; }
         return $out;
     }
-    if ($iterator instanceof \IteratorAggregate) {
-        // php unwraps as many aggregate layers as it finds, so recurse rather
-        // than assume getIterator() hands back a Generator.
-        return iterator_to_array($iterator->getIterator(), $preserve_keys);
-    }
-    if ($iterator instanceof \Iterator) {
-        return __mc_iter_obj_to_array($iterator, $preserve_keys);
-    }
+    $it = __mc_iter_resolve($iterator);
+    if ($it !== null) { return __mc_iter_drive_to_array($it, $preserve_keys); }
     return __mc_iter_gen_to_array($iterator, $preserve_keys);
 }
 
 /**
- * The user-Iterator arm: the protocol driven by explicit method calls, so it
- * does not depend on how `foreach` classifies an interface-typed subject.
- * @return array<int|string,mixed>
+ * The concrete \Iterator behind a Traversable, or null when the value is a
+ * Generator (no descriptor) and belongs on the generator path. php resolves an
+ * IteratorAggregate through as many hops as it takes.
  */
-function __mc_iter_obj_to_array(\Iterator $it, bool $preserve_keys): array
+function __mc_iter_resolve(mixed $iterator): ?\Iterator
+{
+    $hops = 0;
+    while ($iterator instanceof \IteratorAggregate && $hops < 16) {
+        $iterator = $iterator->getIterator();
+        $hops = $hops + 1;
+    }
+    if ($iterator instanceof \Iterator) { return $iterator; }
+    return null;
+}
+
+/**
+ * The Iterator protocol driven BY HAND rather than with `foreach`: a foreach
+ * over an erased base classifies its subject at run time and has its own open
+ * holes, and the five methods have none.
+ */
+function __mc_iter_drive_to_array(\Iterator $it, bool $preserve_keys): array
 {
     /** @var array<int|string,mixed> $out */
     $out = [];
@@ -343,7 +268,18 @@ function __mc_iter_gen_to_array(\Generator $g, bool $preserve_keys): array
 function iterator_count(mixed $iterator): int
 {
     if (\is_array($iterator)) { return \count($iterator); }
+    $it = __mc_iter_resolve($iterator);
+    if ($it !== null) { return __mc_iter_drive_count($it); }
     return __mc_iter_gen_count($iterator);
+}
+
+/** iterator_count's object arm — counted without materialising the values. */
+function __mc_iter_drive_count(\Iterator $it): int
+{
+    $n = 0;
+    $it->rewind();
+    while ($it->valid()) { $n = $n + 1; $it->next(); }
+    return $n;
 }
 
 /** The generator arm of iterator_count, behind a TYPED parameter. */

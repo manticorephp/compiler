@@ -1,0 +1,9 @@
+sqlite
+int(0)
+int(2)
+string(1) "2"
+bool(true)
+1|a|1.5
+2|b|2.5
+int(1)
+int(0)

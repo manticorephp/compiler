@@ -310,6 +310,20 @@ final class EmitLlvm implements EmitVisitor
     private string $vdResult = '';
     /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
     private string $vdArmList = '';
+    /** Scratch: caller slot address / scratch cell slot of the by-ref argument
+     *  {@see EmitLlvmCalls::emitByRefCellBox} just boxed. */
+    private string $refBoxSlot = '';
+    private string $refBoxTmp = '';
+    /**
+     * Scratch: a `...$arr` spread the current method call has NOT expanded into
+     * its shared argument list, as `[arrPtrReg, firstParam, elementType]`. A
+     * spread's length and the DEFAULTS behind it belong to the callee, and an
+     * erased receiver's arms need not share a signature — so each arm expands
+     * it against its OWN params ({@see EmitLlvmObjects::vdArmArgs}). Null when
+     * the call site has no spread.
+     * @var array{0:string,1:int,2:?Type}|null
+     */
+    private ?array $spreadTail = null;
     /**
      * @var array<string,bool> params of the function being emitted whose
      * DECLARED hint was a bare `array`. The lowered type erased to unknown
@@ -529,7 +543,38 @@ final class EmitLlvm implements EmitVisitor
         $preamble = $this->linkonceRuntime($this->emitPreamble());
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
-        return $preamble . $functionBodies;
+        $ir = $preamble . $functionBodies;
+        // Expression temporaries are emitted where the expression sits, so a
+        // loop body's `alloca` runs once per iteration and the stack it takes is
+        // not released until the function returns. -O2 hides this (mem2reg
+        // promotes the slots); -O0 — which tools/selfhost.sh uses — does not,
+        // and a hot loop dies on the guard page. {@see \Compile\Mir\HoistAllocas}
+        $statT = \Compile\Stats::now();
+        $hoist = new \Compile\Mir\HoistAllocas();
+        $ir = $hoist->run($ir);
+        \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
+        // Everything above is emitted on DEMAND FLAGS, not on reachability: the
+        // whole unified array runtime, the rc/arena/pool helpers and the
+        // unconditional prelude land in every module whether or not the program
+        // can reach them (`echo "hi";` emitted 203 bodies for 1 user function).
+        // Delete the discardable ones now instead of paying clang to parse,
+        // verify and GlobalDCE them. See {@see \Compile\Mir\PruneIr} for why
+        // only `linkonce_odr` is ever touched.
+        //
+        // Skipped for --emit-library: `stdlib.o` is consumed through its `.sig`
+        // by OTHER modules, so "unreferenced here" says nothing about whether a
+        // helper is needed — and keeping the library's preamble intact is what
+        // the linkonce_odr coalescing contract is written against.
+        if (!$this->emitLibrary) {
+            $statT = \Compile\Stats::now();
+            $prune = new \Compile\Mir\PruneIr();
+            $ir = $prune->run($ir);
+            \Compile\Stats::step('  prune IR', $statT, $prune->kept, $prune->dropped);
+            \Compile\Stats::line('IR: pruned ' . (string)$prune->dropped . ' of '
+                . (string)($prune->dropped + $prune->kept) . ' defs, '
+                . (string)\strlen($ir) . ' bytes');
+        }
+        return $ir;
     }
 
     /**

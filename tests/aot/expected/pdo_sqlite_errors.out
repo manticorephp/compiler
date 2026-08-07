@@ -1,0 +1,67 @@
+-- clean state --
+string(5) "00000"
+array(3) {
+  [0]=>
+  string(5) "00000"
+  [1]=>
+  NULL
+  [2]=>
+  NULL
+}
+-- EXCEPTION mode --
+SQLSTATE[HY000]: General error: 1 near "SELEC": syntax error
+array(3) {
+  [0]=>
+  string(5) "HY000"
+  [1]=>
+  int(1)
+  [2]=>
+  string(26) "near "SELEC": syntax error"
+}
+SQLSTATE[23000]: Integrity constraint violation: 19 UNIQUE constraint failed: t.id
+array(3) {
+  [0]=>
+  string(5) "23000"
+  [1]=>
+  int(19)
+  [2]=>
+  string(30) "UNIQUE constraint failed: t.id"
+}
+SQLSTATE[HY000]: General error: 1 no such table: nope
+-- SILENT mode --
+bool(false)
+string(5) "HY000"
+array(3) {
+  [0]=>
+  string(5) "HY000"
+  [1]=>
+  int(1)
+  [2]=>
+  string(26) "near "SELEC": syntax error"
+}
+bool(false)
+bool(false)
+bool(false)
+array(3) {
+  [0]=>
+  string(5) "23000"
+  [1]=>
+  int(19)
+  [2]=>
+  string(30) "UNIQUE constraint failed: t.id"
+}
+-- unsupported attribute --
+SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
+-- unknown driver --
+PDOException could not find driver
+-- unopenable file --
+SQLSTATE[HY000] [14] unable to open database file
+array(3) {
+  [0]=>
+  string(5) "HY000"
+  [1]=>
+  int(14)
+  [2]=>
+  string(28) "unable to open database file"
+}

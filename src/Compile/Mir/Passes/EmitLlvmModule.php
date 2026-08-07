@@ -1129,8 +1129,15 @@ trait EmitLlvmModule
         $strs = '';
         $cases = '';
         $bodies = '';
+        // Only a Throwable can be the value in `@__mir_thrown`, so only a
+        // Throwable's name can ever be printed here. The switch used to name
+        // EVERY non-struct class in the module — a name string global, a case
+        // entry and a three-line block each, for classes that cannot reach this
+        // handler. In a module with 196 classes that is ~800 lines and 196
+        // globals to print at most one of.
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
+            if (!$this->classImplementsIface($cls->name, 'Throwable')) { continue; }
             $id = (string)$cls->classId;
             $sym = '@__mir_ucn_' . $id;
             $strs .= $this->strGlobalDef($sym, $cls->name);

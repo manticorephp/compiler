@@ -1215,25 +1215,6 @@ trait EmitLlvmCalls
     private string $refBoxSlot = '';
     private string $refBoxTmp = '';
 
-    /**
-     * The MIRROR of {@see byRefNeedsCellUnbox}: a CONCRETE lvalue bound to a
-     * by-ref parameter the callee declared CELL (`?string &$errstr`).
-     *
-     * The two directions are one contract. A cell-declared by-ref parameter
-     * writes a self-describing word — it must, because its caller's slot is
-     * usually a cell — so a caller whose local is a plain `string` has to box
-     * on the way in and unbox on the way out. Without it `fsockopen($h, $p,
-     * $errno, $errstr)` with `$errstr = ''` handed strtolower a NaN-boxed word.
-     *
-     * @param Type[] $ptypes
-     */
-    private function byRefNeedsCellBox(Node $a, array $ptypes, int $ai): bool
-    {
-        $ak = $a->type->kind;
-        if ($ak === Type::KIND_CELL || $ak === Type::KIND_UNKNOWN) { return false; }
-        $pt = $ptypes[$ai] ?? null;
-        return $pt !== null && $pt->kind === Type::KIND_CELL;
-    }
 
     /**
      * Box a concrete lvalue into a scratch slot and hand the callee that slot's
@@ -1798,6 +1779,103 @@ trait EmitLlvmCalls
     }
 
     /**
+     * The MIRROR of {@see byRefNeedsCellUnbox}: a CONCRETE lvalue handed to a
+     * CELL-typed by-ref param. The caller's slot holds a raw word while the
+     * callee reads a tagged cell, so `bindParam(mixed &$var)` given an `int`
+     * local read back `float(1.5E-323)` — the denormal signature of a raw word
+     * read as a cell. A TYPED by-ref param (`int &$n`) was always right; that
+     * is the discriminator.
+     *
+     * KIND_UNKNOWN on either side is left alone: it can hold either shape, and
+     * guessing is what put a raw pointer in a cell slot before.
+     * @param Type[] $ptypes
+     */
+    private function byRefNeedsCellBox(Node $a, array $ptypes, int $ai): bool
+    {
+        $pt = $ptypes[$ai] ?? null;
+        if ($pt === null || $pt->kind !== Type::KIND_CELL) { return false; }
+        $ak = $a->type->kind;
+        return $ak === Type::KIND_INT || $ak === Type::KIND_BOOL
+            || $ak === Type::KIND_FLOAT || $ak === Type::KIND_STRING
+            || $ak === Type::KIND_NULL || $ak === Type::KIND_OBJ
+            || $a->type->isArray();
+    }
+
+    /**
+     * Prologue for {@see byRefNeedsCellBox}: box the caller's raw slot into a
+     * scratch CELL slot and hand the callee that address. Records the pair in
+     * `$refBoxSlot` / `$refBoxTmp` for the caller to push onto its write-back
+     * list; leaves the scratch address in lastValue.
+     *
+     * An ARRAY goes through the full `boxToCell`, which rebuilds it with boxed
+     * elements ONLY when they are concrete — a cell/unknown-element array is
+     * already self-describing and takes the flat `box_array`, so the buffer (and
+     * with it the caller's aliasing) is untouched. A concrete-element array
+     * cannot be handed over flat: the callee reads every element as a cell and
+     * a raw int reads back as a denormal. Its write-back de-cellifies.
+     */
+    private function emitByRefCellBox(Node $a): string
+    {
+        $out = $this->byRefAddrOf($a);
+        $slotAddr = $this->lastValue;
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+        $rv = $this->ssa->allocReg();
+        $out .= '  ' . $rv . ' = load i64, ptr ' . $sp . "\n";
+        $this->lastValue = $rv;
+        $this->lastValueType = 'i64';
+        if ($a->type->kind === Type::KIND_FLOAT) {
+            // A float slot holds the double's BIT PATTERN. Coercing the i64 to
+            // double CONVERTS it (1.5 came back as 4.6E+18); bitcast it and say
+            // so, so box_float sees the value and not the bits as a number.
+            $fb = $this->ssa->allocReg();
+            $out .= '  ' . $fb . ' = bitcast i64 ' . $rv . " to double\n";
+            $this->lastValue = $fb;
+            $this->lastValueType = 'double';
+        }
+        $out .= $a->type->isArray()
+            ? $this->boxToCell($a->type)
+            : $this->boxToCellShallow($a->type);
+        $tmp = $this->ssa->allocReg();
+        $out .= '  ' . $tmp . " = alloca i64\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+        $taddr = $this->ssa->allocReg();
+        $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        $this->refBoxSlot = $slotAddr;
+        $this->refBoxTmp = $tmp;
+        $this->lastValue = $taddr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Epilogue for {@see emitByRefCellBox}: read what the callee left in the
+     * scratch cell and put it back in the caller's slot, in the caller's own
+     * representation. Read back rather than assumed unchanged — an out-param is
+     * the whole point of a by-ref argument.
+     */
+    private function emitByRefCellWriteBack(string $tmp, string $slotAddr, Type $t): string
+    {
+        $cv = $this->ssa->allocReg();
+        $out = '  ' . $cv . ' = load i64, ptr ' . $tmp . "\n";
+        $this->lastValue = $cv;
+        $this->lastValueType = 'i64';
+        // Strip the CONTAINER's tag first: `vec[cell]` is a RAW pointer whose
+        // ELEMENTS are cells, and emitCellArrayToTyped inttoptr's what it is
+        // given — handed the boxed array it dereferenced the tag bits.
+        $out .= $this->unboxCellToType($t);
+        // A CONCRETE-element array slot then takes the de-cellify rebuild, the
+        // same boundary `uasort`'s writeback uses.
+        if ($this->needsDeCellify($t, Type::vec(Type::cell()))) {
+            $out .= $this->emitCellArrayToTyped($t);
+        }
+        $out .= $this->coerceToI64();
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+        return $out . '  store i64 ' . $this->lastValue . ', ptr ' . $sp . "\n";
+    }
+
+    /**
      * The `#[\NoDiscard]` warning for a call whose result is thrown away, or ''.
      *
      * `(void) f();` and `$_ = f();` both stay quiet — the first via the
@@ -1882,15 +1960,26 @@ trait EmitLlvmCalls
      * same boundary rule the inline call-site spread arms use). Returns the IR
      * plus the SSA i64 regs for the produced args (caller appends them to its
      * own arg list with the right separators / `$this` offset).
+     * A spread supplies exactly `count($arr)` arguments, so every DEFAULTED
+     * param the array does not reach takes its default — `$fnKey` names the
+     * callee whose defaults those are. The length is a run-time property, so
+     * each defaulted param selects between its element and its default;
+     * reading element `k` unconditionally handed `__construct(string $t = '-')`
+     * a word from past the end and the callee dereferenced it (SIGSEGV on
+     * `$stmt->fetchAll(PDO::FETCH_CLASS, 'Row', [])`).
+     *
      * @param Type[] $ptypes
      * @param array<int,bool> $tmask
      * @return array{0:string,1:string[]}
      */
-    private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes, array $tmask, ?Type $elemType): array
+    private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes,
+                                    array $tmask, ?Type $elemType, string $fnKey = ''): array
     {
         $out = '';
         $regs = [];
         $n = \count($ptypes);
+        $pdefs = $fnKey !== '' ? ($this->sigs->paramDefaults[$fnKey] ?? []) : [];
+        $cnt = '';
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
@@ -1905,6 +1994,37 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'i64';
                 $out .= $this->boxToCell($elemType);
                 $ev = $this->lastValue;
+            } elseif (!$needBox && $pt !== null
+                && ($elemType === null
+                    || $elemType->kind === Type::KIND_CELL
+                    || $elemType->kind === Type::KIND_UNKNOWN)) {
+                // The pack's element repr is not statically known — a mixed
+                // literal (`[...['C', 5]]`) stores CELLS — and a tagged word
+                // reaching a `string` param is dereferenced as a char*.
+                // Unbox by the param's declared type; the helper is tag-aware,
+                // so an already-raw element passes through unchanged.
+                $this->lastValue = $ev;
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType($pt);
+                $out .= $this->coerceToI64();
+                $ev = $this->lastValue;
+            }
+            $def = $pdefs[$k] ?? null;
+            if ($def !== null) {
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $out .= $this->emitNode($def);
+                $out .= $this->coerceToI64();
+                $dv = $this->lastValue;
+                $has = $this->ssa->allocReg();
+                $out .= '  ' . $has . ' = icmp ugt i64 ' . $cnt . ', '
+                      . (string)($k - $firstParam) . "\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
+                      . ', i64 ' . $dv . "\n";
+                $ev = $sel;
             }
             $regs[] = $ev;
         }
@@ -2041,6 +2161,8 @@ trait EmitLlvmCalls
         // param, re-boxed into the caller's slot after the call. Parallel.
         $reboxSlots = [];
         $reboxTmps = [];
+        // The mirror direction: raw caller lvalue → cell by-ref param. Parallel
+        // with the caller's own types, which the write-back unboxes to.
         $cellBoxSlots = [];
         $cellBoxTmps = [];
         $cellBoxTypes = [];
@@ -2064,32 +2186,15 @@ trait EmitLlvmCalls
                 $out .= $this->coerceToPtr();
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
-                $nparams = \count($ptypes);
-                $k = $ai;
-                while ($k < $nparams) {
+                [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,
+                                                       $elemType, $c->function);
+                $out .= $sir;
+                foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
                     $first = false;
-                    $ev = $this->ssa->allocReg();
-                    $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
-                          . ', i64 ' . (string)($k - $ai) . ")\n";
-                    // A cell/tagged param needs the raw element boxed by its
-                    // source type (a homogeneous int/string vec stores values
-                    // raw); a cell-valued source is already boxed → no rebox.
-                    $pt = $ptypes[$k] ?? null;
-                    $needBox = ($tmask[$k] ?? false)
-                        || ($pt !== null && $pt->kind === Type::KIND_CELL);
-                    if ($needBox && $elemType !== null
-                        && $elemType->kind !== Type::KIND_CELL
-                        && $elemType->kind !== Type::KIND_UNKNOWN) {
-                        $this->lastValue = $ev;
-                        $this->lastValueType = 'i64';
-                        $out .= $this->boxToCell($elemType);
-                        $ev = $this->lastValue;
-                    }
-                    $argList .= 'i64 ' . $ev;
-                    $k = $k + 1;
+                    $argList .= 'i64 ' . $rg;
                 }
-                $ai = $nparams;
+                $ai = \count($ptypes);
                 continue;
             }
             if (!$first) { $argList .= ', '; }
@@ -2120,7 +2225,7 @@ trait EmitLlvmCalls
             } elseif (($mask[$ai] ?? false) && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
-                $out .= $this->emitByRefCellBoxArg($a);
+                $out .= $this->emitByRefCellBox($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
@@ -2247,7 +2352,11 @@ trait EmitLlvmCalls
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $rsp . "\n";
             $bi = $bi + 1;
         }
-        $out .= $this->emitByRefCellUnboxBack($cellBoxSlots, $cellBoxTmps, $cellBoxTypes);
+        $ci = 0;
+        foreach ($cellBoxTmps as $ctmp) {
+            $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
+            $ci = $ci + 1;
+        }
         // Free fresh string-temp args now the callee has read (and retained
         // if kept) them. Skipped when the call returns one of them by ref.
         if (!($this->sigs->returnsByRef[$c->function] ?? false)) {

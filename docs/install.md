@@ -63,6 +63,7 @@ $MANTICORE_HOME/lib/prelude/*.php
 | **libpcre2** (8-bit) + `pcre2-config` | `preg_*` | `Main.php::pcre2_link_flags()`, `src/Runtime/Pcre.php` |
 | **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php::openssl_link_flags()`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
 | **libcurl ≥ 7.68** + `curl-config` — *only* to compile a program that calls `curl_*` | `ext/curl` | `Main.php::generic_link_flags()`, `prelude/curl.php` |
+| **libsqlite3** + `pkg-config sqlite3` — *only* to compile a program that mentions `PDO` | `pdo_sqlite` | `Main.php::generic_link_flags()`, `prelude/pdo_sqlite.php` |
 | `bash`, `find`, `sort`, `xargs`, `sed`, `awk`, `grep`, `mktemp` | build scripts | `bin/compile`, `tools/*.sh` |
 
 `pcre2-config --libs8` and `pkg-config --libs openssl` are how the link flags
@@ -77,6 +78,11 @@ needed, discovery goes `pkg-config --libs curl` → `curl-config --libs` →
 `-lcurl`; the first always fails (the pkg-config module is called `libcurl`), so
 in practice `curl-config` is the one that answers — and it ships in the
 **development** package, not with the `curl` command-line tool.
+
+libsqlite3 is demand-gated the same way, and easier: a program that never
+mentions `PDO` never links it, and `pkg-config --libs sqlite3` answers on the
+first probe. It too lives in the **development** package, not in the `sqlite3`
+command-line tool.
 
 PHP itself is needed **once**. `bin/compile` runs the compiler's own source
 under Zend to produce a throwaway seed binary; that seed then builds the real

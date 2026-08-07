@@ -1,0 +1,26 @@
+-- FETCH_OBJ
+stdClass 1 a
+Array
+(
+    [id] => 1
+    [name] => a
+)
+-- fetchObject()
+stdClass 1
+-- fetchObject('Row')
+Row -:1:a
+-- fetchObject('Row', ctor args)
+T:1:a
+-- FETCH_CLASS
+Row -:1:a
+-- fetchAll(FETCH_CLASS)
+C:1:a
+C:2:b
+-- FETCH_INTO
+bool(true)
+I:1:a
+-- FETCH_LAZY
+PDORow 1 a
+-- FETCH_OBJ through fetchAll
+1=a
+2=b

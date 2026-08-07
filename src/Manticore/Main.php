@@ -482,6 +482,88 @@ function stdlib_sig_list(string $key, array $fallback): array
  *
  * @return \Parser\Ast\FunctionDecl[]
  */
+/**
+ * How many `clang` processes to assemble with. `-j` wins; otherwise the host's
+ * core count, capped — past ~8 the parts get small enough that process startup
+ * and the duplicated file-local definitions eat the gain.
+ */
+function assemble_jobs(): int {
+    if (CompileArgs::$jobs !== 0) { return CompileArgs::$jobs; }
+    $n = 0;
+    $probe = is_darwin() ? "sysctl -n hw.ncpu 2>/dev/null" : "nproc 2>/dev/null";
+    $out = \shell_exec($probe);
+    if ($out !== null && $out !== false) { $n = (int)\trim((string)$out); }
+    if ($n < 1) { return 1; }
+    $n = $n - 1;
+    if ($n < 1) { return 1; }
+    if ($n > 8) { return 8; }
+    return $n;
+}
+
+/**
+ * Assemble `$ir` into one or more objects and return their paths, or `[]` on
+ * failure (the caller reports; the staged files are left for inspection).
+ *
+ * With more than one job the module is split ({@see \Compile\Mir\SplitModule})
+ * and the parts are handed to concurrent `clang` processes. The concurrency is
+ * the SHELL's, one `system()` with `&` and a `wait`: the compiler must run this
+ * identically under the Zend cold seed and natively, and `wait`'s exit status
+ * only reports the last job, so success is decided by checking that every
+ * expected object exists rather than by the shell's status.
+ *
+ * @return string[]
+ */
+function assemble_ir(string $ir, string $base, string $cflags): array {
+    $llPath = $base . ".ll";
+    $objPath = $base . ".o";
+    // Size gate FIRST: assemble_jobs() may shell out to sysctl/nproc, and paying
+    // a process spawn to decide not to split made a hello world 12 ms slower.
+    // Below a few hundred KB the split cannot pay for itself anyway.
+    $jobs = \strlen($ir) < 262144 ? 1 : assemble_jobs();
+    if ($jobs < 2) {
+        // Below a few hundred KB the split cannot pay for itself.
+        if (!write_file($llPath, $ir)) { dprint("assemble: cannot write " . $llPath); return []; }
+        $rc = system("clang -O" . CompileArgs::$optLevel . " " . $cflags
+            . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
+        if ($rc !== 0) { dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath); return []; }
+        return [$objPath];
+    }
+    $statT = \Compile\Stats::now();
+    $splitter = new \Compile\Mir\SplitModule();
+    $parts = $splitter->run($ir, $jobs);
+    \Compile\Stats::step('  split module (' . (string)$jobs . ' parts)', $statT,
+        $splitter->sharedDefs, $splitter->internalDefs);
+    $objs = [];
+    $cmd = '';
+    foreach ($parts as $i => $partIr) {
+        $pll = $base . ".p" . (string)$i . ".ll";
+        $pobj = $base . ".p" . (string)$i . ".o";
+        if (!write_file($pll, $partIr)) { dprint("assemble: cannot write " . $pll); return []; }
+        if ($cmd !== '') { $cmd = $cmd . ' & '; }
+        $cmd = $cmd . "clang -O" . CompileArgs::$optLevel . " " . $cflags
+             . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
+        $objs[] = $pobj;
+    }
+    // Remove stale objects first: existence is what decides success below, so a
+    // leftover from an earlier run must not read as a part that built.
+    foreach ($objs as $o) { system("rm -f " . $o); }
+    $statT = \Compile\Stats::now();
+    // `wait` must be INSIDE the subshell: the background jobs are ITS children,
+    // so an outer `wait` has nothing to wait for and returns at once — the
+    // existence check below then ran before clang had written anything and
+    // reported "part 0 failed to build" on a build that was merely still going.
+    system("( " . $cmd . " ; wait )");
+    \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c x' . (string)\count($parts),
+        $statT, -1, -1);
+    foreach ($objs as $i => $o) {
+        if (!\file_exists($o)) {
+            dprint("assemble: part " . (string)$i . " failed to build; IR at " . $base . ".p" . (string)$i . ".ll");
+            return [];
+        }
+    }
+    return $objs;
+}
+
 function collect_stdlib_extern_decls(): array
 {
     /** @var \Parser\Ast\FunctionDecl[] $decls */
@@ -741,6 +823,29 @@ final class CompileArgs
     public static bool $keepIr = false;
 
     /**
+     * `-j<n>` — assemble the module as `n` independent objects through that many
+     * concurrent `clang` processes ({@see \Compile\Mir\SplitModule}). `-j0`
+     * picks from the host's core count. Unset means 1: ONE object, exactly what
+     * every build did before.
+     *
+     * ⚠ OPT-IN ON PURPOSE, and the default must stay 1. `clang -O2` is the
+     * largest single term in a build (64% of a user compile, ~49% of
+     * `bin/build`) and is single threaded, so splitting is a large BUILD-TIME
+     * win — examples/http/hello.php 4.6 s -> 2.0 s. But a part boundary is an
+     * inlining boundary, and that costs the PRODUCED program: the compiler
+     * built as 8 parts runs 43% slower than the same source built as one object
+     * (hello_world 260 ms -> 372 ms), which then makes every later build slower
+     * in turn. A microbenchmark misses this — fib.php measured 111.7 vs 110.5 ms
+     * — because its hot loop is self-contained; a large program lives on
+     * cross-module inlining.
+     *
+     * So: use it while iterating on a program you are about to run once, never
+     * for an artifact whose own speed matters. `bin/build` deliberately does
+     * not pass it.
+     */
+    public static int $jobs = 1;
+
+    /**
      * `--emit-library` — build the bundled stdlib as a standalone `.o`
      * (no `@main`, no stdlib linking). Used by bin/compile / bin/build to
      * produce `lib/manticore_stdlib.o` once after the compiler is built.
@@ -846,7 +951,7 @@ final class CompileArgs
 /**
  * The compile/dump option spec, shared by every command that takes them:
  *   -o <out> · --memory=<rc|arena|hybrid> · --backend=<mir|ast> · -O<level>
- *   --prelude · --effects · --emit-library
+ *   --prelude · --effects · --emit-library · --keep-ir
  * All value forms (`-o out`, `-O2`, `--memory=rc`, `--memory rc`) are accepted;
  * positionals (files) may appear in any position.
  *
@@ -861,6 +966,8 @@ function compile_arg_spec(): array {
         "prelude" => \Cli\ArgParse::FLAG,
         "effects" => \Cli\ArgParse::FLAG,
         "emit-library" => \Cli\ArgParse::FLAG,
+        "keep-ir" => \Cli\ArgParse::FLAG,
+        "j" => \Cli\ArgParse::VALUE,
     ];
 }
 
@@ -881,6 +988,16 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool {
     CompileArgs::$dumpPrelude = $p->flag("prelude");
     CompileArgs::$dumpEffects = $p->flag("effects");
     if ($p->flag("emit-library")) { CompileArgs::$emitLibrary = true; }
+    if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
+    $jobs = $p->value("j", "");
+    if ($jobs !== "") {
+        $jn = (int)$jobs;
+        if ($jn < 0) {
+            dprint("-j must be >= 0 (got " . $jobs . "); 0 = one job per core");
+            return false;
+        }
+        CompileArgs::$jobs = $jn;
+    }
     if (\strlen($memory) > 0) {
         if (!\Compile\Debug::applyMemoryMode($memory)) {
             dprint("unknown --memory value: " . $memory . " (expected rc|arena|hybrid)");
@@ -1087,7 +1204,10 @@ function cmd_compile(array $args): int {
     // bindings resolve to real syscalls). compile_via_mir consumes them via
     // the static. Skipped when building stdlib.o itself.
     if (!CompileArgs::$emitLibrary) {
+        $sigT = \Compile\Stats::now();
         CompileArgs::$externDecls = collect_stdlib_extern_decls();
+        \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
+            \count(CompileArgs::$externDecls), -1);
         if (CompileArgs::$sigError !== '') {
             dprint(CompileArgs::$sigError);
             return 65;
@@ -1108,25 +1228,39 @@ function cmd_compile(array $args): int {
         return 65;
     }
 
-    $pid = getpid();
-    $base = "/tmp/manticore_" . (string)$pid;
+    // Staging path for the IR and the intermediate object — the same contract
+    // {@see build_target} uses: under --keep-ir they sit next to the target
+    // (stable, one per target, never swept from /tmp), otherwise a pid-derived
+    // /tmp base that is removed once the target links. Staged files are
+    // deliberately LEFT BEHIND on failure: they are the only record of what the
+    // compiler emitted for a build that did not finish, and every failure path
+    // below names the path it kept.
+    //
+    // ⚠ These used to leak unconditionally — `compile` wrote /tmp/manticore_<pid>.ll
+    // and never removed it, so every compile since the tool existed left its
+    // whole module behind. One dev machine had accumulated 56 970 files / 43 GB.
+    // `build_target` always cleaned up; only this path did not.
+    $keep = CompileArgs::$keepIr;
+    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_" . (string)getpid());
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
 
-    if (!write_file($llPath, $ir)) {
-        dprint("compile: cannot write " . $llPath . " (rc=73)");
-        return 73;
-    }
-
-    // Library build: assemble straight to the output .o, no link. The
-    // runtime preamble helpers are emitted linkonce_odr so this object
-    // coexists with a user program's preamble at link time.
+    // Library build: assemble straight to the output .o, no link, and NEVER
+    // split — `stdlib.o` is one object by contract (its `.sig` describes it, and
+    // every consumer links exactly that file). The runtime preamble helpers are
+    // linkonce_odr so it coexists with a user program's preamble at link time.
     if (CompileArgs::$emitLibrary) {
+        if (!write_file($llPath, $ir)) {
+            dprint("compile: cannot write " . $llPath . " (rc=73)");
+            return 73;
+        }
+        if ($keep) { dprint("compile: kept IR " . $llPath); }
         $rcLib = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rcLib !== 0) {
             dprint("compile: clang -c (library) failed (rc=" . (string)$rcLib . "); IR at " . $llPath);
             return 75;
         }
+        if (!$keep) { system("rm -f " . $llPath); }
         return 0;
     }
 
@@ -1136,11 +1270,10 @@ function cmd_compile(array $args): int {
     // link-time dead-strip below drops every unreferenced stdlib function
     // (a hello-world no longer drags in all of Json/Libc/stdlib).
     // Errors on stderr already, but surface our own rc too.
-    $rc1 = system("clang -O" . CompileArgs::$optLevel . " -ffunction-sections -fdata-sections -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
-    if ($rc1 !== 0) {
-        dprint("compile: clang -c failed (rc=" . (string)$rc1 . "); IR at " . $llPath);
-        return 75;
-    }
+    $objs = assemble_ir($ir, $base, "-ffunction-sections -fdata-sections");
+    if ($objs === []) { return 75; }
+    if ($keep) { dprint("compile: kept IR " . $base . ".*.ll"); }
+    $objList = \implode(" ", $objs);
     // Link the prebuilt stdlib.o only when the program imported a bundled
     // stdlib function (str_starts_with / ctype_* / file_*). A self-contained
     // program (e.g. the compiler's own source, which defines the stdlib)
@@ -1202,10 +1335,15 @@ function cmd_compile(array $args): int {
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak)
         : " -Wl,--gc-sections -Wl,--as-needed -lm";
-    $rc2 = system("cc " . $objPath . $linkExtra . $gc . " -o " . $output);
+    $rc2 = system("cc " . $objList . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
-        dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objPath);
+        dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
         return 76;
+    }
+    // Linked: the staged IR and objects have no further use. Kept under
+    // --keep-ir, which is the escape hatch for reading what was emitted.
+    if (!$keep) {
+        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
     }
     return 0;
 }
@@ -1764,9 +1902,13 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     $keep = CompileArgs::$keepIr;
     $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
-    if (!write_file($llPath, $ir)) { dprint("build: cannot write " . $llPath); return 73; }
-    if ($keep) { dprint("build: kept IR " . $llPath); }
+    // The library path assembles this file directly; the application path hands
+    // the IR to assemble_ir, which stages it itself (as one file, or as one per
+    // part when it splits). A library is NEVER split: `stdlib.o` is one object
+    // by contract — its `.sig` describes that file and every consumer links it.
     if ($emitLibrary) {
+        if (!write_file($llPath, $ir)) { dprint("build: cannot write " . $llPath); return 73; }
+        if ($keep) { dprint("build: kept IR " . $llPath); }
         $rc = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }
         if (!$keep) { system("rm -f " . $llPath); }
@@ -1784,10 +1926,9 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         return 0;
     }
     $objPath = $base . ".o";
-    $statT = \Compile\Stats::now();
-    $rc1 = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
-    \Compile\Stats::step('clang -O' . CompileArgs::$optLevel . ' -c', $statT, -1, -1);
-    if ($rc1 !== 0) { dprint("build: clang -c failed for " . $output); return 75; }
+    $objs = assemble_ir($ir, $base, "");
+    if ($objs === []) { dprint("build: assemble failed for " . $output); return 75; }
+    $objList = \implode(" ", $objs);
     $linkExtra = "";
     foreach ($linkObjs as $obj) { $linkExtra = $linkExtra . " " . $obj; }
     if ($linkFlags !== "") { $linkExtra = $linkExtra . " " . $linkFlags; }
@@ -1834,14 +1975,16 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     $stubs = find_link_stubs_script();
     $statT = \Compile\Stats::now();
     if ($stubs !== "") {
-        $rc2 = system("bash " . $stubs . " " . $output . " " . $objPath . $linkExtra);
+        $rc2 = system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
     } else {
-        $rc2 = system("cc " . $objPath . $linkExtra . " -o " . $output);
+        $rc2 = system("cc " . $objList . $linkExtra . " -o " . $output);
     }
     \Compile\Stats::step('link', $statT, -1, -1);
     \Compile\Stats::dumpCounters();
     if ($rc2 !== 0) { dprint("build: link failed for " . $output); return 76; }
-    if (!$keep) { system("rm -f " . $llPath . " " . $objPath); }
+    if (!$keep) {
+        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
+    }
     return 0;
 }
 
@@ -2716,6 +2859,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // binding (a throwing stub under the Zend cold-seed), so guard: an
     // unreadable file provides nothing, and LowerFromAst falls back to its
     // embedded copy for the classes the bootstrap cannot live without.
+    $statT = \Compile\Stats::now();
     $arrayFnsSrc = prelude_src_or_empty("array_fns.php");
     $arrayFnsExtSrc = prelude_src_or_empty("array_fns_ext.php");
     $cliSrc = prelude_src_or_empty("cli.php");
@@ -2795,6 +2939,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $curlSrc = prelude_src_or_empty("curl.php");
     $curlMultiSrc = prelude_src_or_empty("curl_multi.php");
 
+    // ext/pdo — DEMAND-GATED, global namespace, prelude and not the stdlib for
+    // the same reason as curl: `new PDO(...)` hands back an object and
+    // PDO::FETCH_ASSOC is a class constant, neither of which a `.sig` carries.
+    // pdo.php is the driver-agnostic facade; pdo_sqlite.php implements its
+    // driver seam over libsqlite3 and is what puts -lsqlite3 on the link line.
+    $pdoSrc = prelude_src_or_empty("pdo.php");
+    $pdoSqliteSrc = prelude_src_or_empty("pdo_sqlite.php");
+
     // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
     // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
     // can diff our scanner against the C tokenizer with no build in between;
@@ -2802,6 +2954,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // Order is load-bearing — token_get_all() constructs __McTok.
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
+    \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -3038,6 +3191,22 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                                  'CURL_LOCK_DATA_DNS']);
     if ($useCurlMulti) { $useCurl = true; }
 
+    // ext/pdo gates on a MENTION and nothing else. PDO is a class family, not a
+    // `pdo_*` function prefix, so there is no defined-function list to key on
+    // the way curl and pcntl do — and a program that only writes
+    // `function repo(PDO $db)` calls nothing at all.
+    $usePdo = $demand->mentionsAny(['PDO', 'PDOStatement', 'PDOException', 'PDORow']);
+    // ⚠ The sqlite driver rides the facade unconditionally, because a DSN scheme
+    // is a runtime STRING and PreludeDemand is token-based: nothing at compile
+    // time can tell which driver `new PDO($dsn)` will open. One driver exists,
+    // so loading it with the facade is honest. When a second driver lands, this
+    // splits the same way curl_multi does — on the driver's own class names.
+    $usePdoSqlite = $usePdo;
+    // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
+    // errors.php — and the demand gate cannot see a call made from the prelude
+    // itself, only one made from user code.
+    if ($usePdo) { $useErrors = true; }
+
     // No T_* arm here on purpose: the T_* constants are compile-time folds in
     // LowerPrelude, so a program can use T_STRING with no prelude at all. Only
     // the CALLS and the class need the source.
@@ -3136,6 +3305,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         dprint("compile failed: prelude: cannot read curl_multi.php");
         return null;
     }
+    if ($usePdo && ($pdoSrc === "" || $pdoSqliteSrc === "")) {
+        dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php");
+        return null;
+    }
     if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
         dprint("compile failed: prelude: cannot read tokenizer.php / tokenizer_api.php");
         return null;
@@ -3204,6 +3377,8 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
         $lower->curlSrc = $useCurl ? $curlSrc : "";
         $lower->curlMultiSrc = $useCurlMulti ? $curlMultiSrc : "";
+        $lower->pdoSrc = $usePdo ? $pdoSrc : "";
+        $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
@@ -3523,6 +3698,11 @@ function analyze_prelude_files(): array {
         // `function fetch(CurlHandle $ch)` hint is the ordinary way to write
         // ext/curl code, and closed-world it would read as an unknown class.
         "curl.php", "curl_multi.php",
+        // And again for PDO / PDOStatement / PDOException — `function
+        // repo(PDO $db)` is the ordinary way to write PDO code, and closed-world
+        // it would read as an unknown class. pdo_sqlite.php comes along because
+        // it declares the driver classes pdo.php's seam is satisfied by.
+        "pdo.php", "pdo_sqlite.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

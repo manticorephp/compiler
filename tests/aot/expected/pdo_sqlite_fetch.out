@@ -1,0 +1,21 @@
+ASSOC: {"id":1,"name":"a"}
+NUM: [1,"a"]
+BOTH: {"id":1,"0":1,"name":"a","1":"a"}
+NAMED: {"id":1,"name":"a"}
+ALL ASSOC: [{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"a"}]
+COLUMN: ["a","b","a"]
+KEY_PAIR: {"1":"a","2":"b","3":"a"}
+GROUP: {"a":[{"id":1,"1":1},{"id":3,"1":3}],"b":[{"id":2,"1":2}]}
+UNIQUE: {"1":{"name":"a","1":"a"},"2":{"name":"b","1":"b"},"3":{"name":"a","1":"a"}}
+GROUP|COLUMN: {"a":[1,3],"b":[2]}
+FUNC: ["1:a","2:b","3:a"]
+-- past the end --
+bool(false)
+bool(false)
+array(0) {
+}
+-- ATTR_CASE --
+{"ID":1,"NAME":"a"}
+{"mixed":1}
+-- STRINGIFY --
+{"id":"1"}
