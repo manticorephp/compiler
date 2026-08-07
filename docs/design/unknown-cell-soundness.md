@@ -460,6 +460,131 @@ hint has no branch in `lowerTypeHint`, so it falls through to `unknown`). This i
 the blanket `unknown → cell` that §8 measured as BREAKING `cow2`; it belongs to
 the array cluster, not here.
 
+## 17. Re-audit 2026-08-07 + the plan to actually finish this
+
+Audited against `main` `83b8386`. Two things moved since §15/§16, and together they
+make the structural fix affordable in a way it was not before.
+
+**The §2 hinge is half-disarmed.** `boxToCell`'s unmatched-kind tail
+(`EmitLlvmBuiltins.php:543`, tail at `:618`) no longer blind-`box_int`s an erased
+word. It PROBES: an already-boxed word passes through, a raw container is
+identified from its allocator magic at `ptr-8`, anything else is left as it was.
+So the "same value, opposite guesses" pair is now `boxRawValue` (`:1930`, treats
+`CELL || UNKNOWN` alike — correct) against a tail that mostly declines to guess.
+
+**The violations are still not greppable.** There are **223** `=== Type::KIND_CELL`
+gates across `src/Compile/Mir/Passes/`, and only ~45 of them mention `KIND_UNKNOWN`
+at all. As §15 found, essentially no code says `KIND_UNKNOWN ⇒ raw`; rawness
+arrives by FALL-THROUGH out of a `=== KIND_CELL` gate. Anyone starting here by
+grepping `KIND_UNKNOWN` will conclude the problem is already solved.
+
+### 17.1 Why it is still stuck: one type carries two answers
+
+§8 measured the blanket `unknown → cell`: it FIXES offset-16 and every
+scalar/object case, and it BREAKS `cow2` (an erased array read+append) and `s3`.
+The split is **scalar/object vs ARRAY**, not "stdlib vs not". While both live in
+`unknown`, no blanket normalization can ever be right — each one needs the
+opposite answer.
+
+### 17.2 The proposal: give meaning #3 its own type
+
+Introduce a distinct type for *raw array, element unknown* — the stdlib-ABI
+channel — so `unknown` is left meaning ONLY "runtime-polymorphic".
+
+What makes this cheap NOW and not before: **meaning #3 has already narrowed to
+essentially one producer.** §15 recorded that user and closure untyped params
+lower to `cell` on their own; raw-unknown survives at the stdlib extern-signature
+boundary. One producer is a refactor, not an epic.
+
+What it unblocks, in order:
+1. `unknown` means one thing ⇒ the tail `unknown → cell` becomes sound.
+2. The ~5 fall-through predicates §15 named can widen to `CELL || UNKNOWN`
+   WITHOUT touching the array cluster, because the array cluster now has its own
+   type and is no longer collateral.
+3. The stdlib stops being a hazard for anything array-shaped — which is the
+   precondition for moving prelude modules into prebuilt `.o`s (a separate idea:
+   `.sig` v2 already carries classes, so the old blocker there is gone).
+
+### 17.3 Driving regression: `array_fill`
+
+Use it as the test that must go green. It is meaning #3 in its purest form, it
+FAULTS today, and it needs no self-build to reproduce:
+
+    function pick(int $parts): int {
+        $load = array_fill(0, $parts, 0);
+        foreach ([353307, 70000, 53000] as $sz) {
+            $min = 0;
+            for ($p = 1; $p < $parts; $p = $p + 1) {
+                if ($load[$p] < $load[$min]) { $min = $p; }
+            }
+            $load[$min] = $load[$min] + $sz;
+        }
+        return $load[0];
+    }
+    echo pick(8) . "\n";   // php: 353307   native: SIGSEGV
+
+`array_fill` is in the stdlib (`src/Runtime/Stdlib/Arrays.php`), so its `array`
+return crosses the `.o.sig`, which re-erases the element type, and `mixed $value`
+makes the elements cells — writing a raw int in and reading it back faults on an
+integer read as a pointer. The comment under `array_fill` already names the local
+remedy (prelude-injection); the type split is the general one.
+`Compile\Mir\SplitModule` currently fills its counter array with an explicit loop
+to dodge this.
+
+### 17.4 Method — non-negotiable, it is what makes stages land
+
+§15 and §16 landed byte-identical THREE times by obeying one rule:
+
+> **Stop the erasure in inference; do not teach the consumer to guess better.**
+
+The mechanism is not stylistic. An inference fix needs no producer/consumer
+co-flip, so the self-host fixpoint re-converges for free. Flipping a codegen
+A-site requires producer and consumer to change TOGETHER or generation 2 crashes
+— that is exactly how the earlier offset-16 attempts died. So: inference fix
+first, always; A-site only when there is no inference-side cause left.
+
+### 17.5 Staged plan
+
+Each stage: validate on USER programs through the Zend harness (no self-build),
+then `bin/build` twice, then the full gate.
+
+1. **Split the type.** Add the raw-array type; make the stdlib extern-signature
+   boundary its only producer. No consumer changes yet — everything that reads
+   `unknown` today must read the new type identically, so this stage is
+   behaviour-neutral and should land byte-identical.
+2. **Prove it on `array_fill`** (17.3) with no other change.
+3. **Widen the fall-through predicates** to `CELL || UNKNOWN`, one at a time,
+   starting with the ones §15 named (`tmask`, `cellPropBoxed`, `$boxVal`,
+   `coerceArithOperand`). Each is independently gateable now that the array
+   cluster cannot be caught by them.
+4. **InferTypes tail `unknown → cell`**, then delete the raw fallbacks. This is
+   the §8 blanket, now safe because the array meaning left the type.
+5. **Element channel** — only after 1–4. The read-side decode is sound ONLY
+   paired with a store-side re-encode and the channel retyped to CELL; scalars
+   need hint codes too, or a cell reader misreads a raw int as a double. See the
+   withdrawal record in memory `element-repr-hint-nibble-2026-07-29` before
+   rebuilding it a third time.
+
+### 17.6 References belong to the aliasing invariant, not here
+
+The three non-self-describing channels were: **array element · by-ref-captured
+local · static prop**. Static prop is closed (§16). Array element is half done
+(the `ARRAY_ELEM_HINT_*` nibble). The by-ref local is open.
+
+But a reference is not a value-representation problem — it is a **slot-identity**
+problem: a by-ref binding makes two names share one slot, and both ends must agree
+on that slot's representation. That is the invariant the aliasing epic already
+states as "one slot = one representation", so the fix belongs to its agreement
+scan rather than to a new mechanism. The tell that it is the same class: `mixed
+&$var` was closed, while a CLOSURE's `&$v` still stays RAW.
+
+### 17.7 Do not repeat
+
+- The blanket flip before the type split — measured, breaks `cow2` and `s3`.
+- The element read-decode without the store re-encode — built twice, withdrawn
+  twice; only a 2-generation self-build catches it, the AOT suite passes.
+- Grepping `KIND_UNKNOWN` to find the work — it is all fall-through.
+
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
   memory `unknown-receiver-propread-offset16-2026-07-08`.
