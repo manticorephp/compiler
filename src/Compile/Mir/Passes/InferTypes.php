@@ -293,6 +293,15 @@ final class InferTypes implements Pass
     /** @var array<string, Type> */
     private array $sigs = [];
 
+    /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
+     *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
+     *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
+     *  it there asks "what did the LAST pass decide" instead of "what does the
+     *  source say". A specialization whose params were narrowed to floats kept the
+     *  `int` a previous pass adopted for the erased body.
+     *  @var array<string, Type> */
+    private array $declaredReturns = [];
+
     /** @var array<string, FunctionDef> name → def (for closure body re-infer) */
     private array $fnByName = [];
 
@@ -337,6 +346,14 @@ final class InferTypes implements Pass
         $this->sawClosures = false;
         $this->undeclaredReturnFns = [];
         foreach ($module->functions as $fn) {
+            // Remember the DECLARED return before any adoption below rewrites
+            // it in place — a monomorphic clone must start from the declaration,
+            // not from a type derived for the generic body ({@see
+            // Module::$declaredReturnTypes}). First registration wins: this pass
+            // runs several times, and only the first sees the un-narrowed type.
+            if (!isset($module->declaredReturnTypes[$fn->name])) {
+                $module->declaredReturnTypes[$fn->name] = $fn->returnType;
+            }
             $this->sigs[$fn->name] = $fn->returnType;
             $this->fnByName[$fn->name] = $fn;
             // An extern's UNKNOWN return is the library's answer, not a gap to
@@ -348,6 +365,7 @@ final class InferTypes implements Pass
                 $this->undeclaredReturnFns[$fn->name] = true;
             }
         }
+        $this->declaredReturns = $module->declaredReturnTypes;
         // Module pre-scan: a class property string-keyed anywhere
         // (`$this->prop[$k] = v`) is an assoc, not a vec. Retype it in the
         // ClassDef up front so its `[]` default + every load/store use the
@@ -1446,7 +1464,23 @@ final class InferTypes implements Pass
             && $lt->kind === Type::KIND_CELL && $rt->kind === Type::KIND_CELL) {
             return Type::numericCell();
         }
-        return Type::unknown();
+        // Everything left takes the INTEGER path, and that path is total: it
+        // coerces every operand to i64 first (strtol for a string, unbox_int
+        // for a cell, the raw word otherwise — {@see EmitLlvmExpr::
+        // coerceArithOperand}), then emits `add/sub/mul i64`. So the value
+        // this node produces IS a plain int, and typing it `unknown` was the
+        // type lying about a representation codegen had already chosen.
+        //
+        // The lie was not free. An erased sum stored into a cell channel went
+        // through boxToCell(unknown) → the probing boxer, which dereferences
+        // the word at ptr-8 to look for an allocator magic: every result above
+        // 65535 looked like a pointer and SIGSEGV'd (`$a[$i] = $a[$i] + $n`
+        // over an array_fill counter). Into a `mixed` PROPERTY the same word
+        // was stored raw and read back as a denormal double.
+        //
+        // Typing it `int` changes no emitted arithmetic — only what consumers
+        // believe, so they box it with box_int instead of guessing.
+        return Type::int_();
     }
 
     /** A statement/block that always exits its enclosing flow (return/throw). */
@@ -1633,6 +1667,15 @@ final class InferTypes implements Pass
     {
         return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
             || $t->isNumericCell();
+    }
+
+    /** An operand the TAGGED arithmetic helpers can take: a concrete number, or
+     *  any cell (they dispatch on its tag). Deliberately NOT a string/array/obj
+     *  or an erased word — each of those has its own arithmetic path. */
+    private function cellArithOperand(Type $t): bool
+    {
+        return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
+            || $t->kind === Type::KIND_CELL;
     }
 
     /** Cell type for a value union of two arms: a NUMERIC cell (int|float) when

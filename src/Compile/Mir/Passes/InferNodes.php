@@ -402,7 +402,17 @@ trait InferNodes
         // the Generator sig. Narrow: when every return is the SAME closure
         // class, adopt it as the sig. Multi-closure returns union to unknown
         // (no `__closure_` class) and keep the declared type.
-        $rk = $fn->returnType->kind;
+        // The DECLARED kind, not the current one. Every adoption below reads it
+        // as "the source said nothing useful here" — but `$fn->returnType` is
+        // rewritten in place, so after one pass adopts, the next pass sees the
+        // adopted kind and the guard shuts the door. That is wrong the moment
+        // the BODY changes underneath: Monomorphize specializes `array_sum`'s
+        // param to vec[float] IN PLACE, its `int|float` had already been
+        // narrowed to `int` for the erased body, and the float body then sat
+        // behind an `-> int` signature (`echo array_sum([0.1,0.2,0.3])` → 0).
+        // Re-deriving from the declaration every pass converges on the same
+        // value when nothing changed, and follows the body when it does.
+        $rk = ($this->declaredReturns[$fn->name] ?? $fn->returnType)->kind;
         $u = $this->fnReturnUnion;
         if (($rk === Type::KIND_UNKNOWN || $rk === Type::KIND_CLOSURE) && $u !== null
             && $u->class !== null && \str_starts_with($u->class, '__closure_')) {
@@ -1451,6 +1461,17 @@ trait InferNodes
         // list the key is 0..n and key_cell_at returns box_int(i) — still correct.
         if ($at->isVec()
             && ($elem->kind === Type::KIND_CELL || $elem->kind === Type::KIND_UNKNOWN)) {
+            $keyT = Type::cell();
+        }
+        // …and say it DIRECTLY when the array's KEY type already is a cell. A
+        // cell-keyed assoc (`$o[$k] = …` over an erased foreach key) reports
+        // isVec(), since isAssoc() is string-key-only — so the element test
+        // above was standing in for the key, and it only agreed while an erased
+        // key implied an erased element. The moment the element narrowed to a
+        // concrete int, the key silently took the vec path and every string key
+        // came back as its pointer read as an integer (`4364574184=10`).
+        if ($at->isArray() && $at->key !== null
+            && $at->key->kind === Type::KIND_CELL) {
             $keyT = Type::cell();
         }
         $saved = $this->localTypes;
