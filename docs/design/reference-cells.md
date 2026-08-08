@@ -88,6 +88,24 @@ happens when a representation is decided per-consumer: `cell` is a static CLAIM
 that three producers already violate. A ref cell that some readers deref and
 others do not is that bug again, one layer deeper.
 
+## Measured before starting stage 3: the element paths are not ready
+
+The read/write seams are not one place each. In `EmitLlvmArrays`:
+
+- the element STORE has **four near-identical arms** (~1094, 1112, 1143, 1165), each repeating
+  the same `storeElemDeCellifyType` → `unboxCellToType` → `coerceToI64` → `rcRetainByType`
+  sequence, under `emitStoreElement` (261) and `emitStoreElementUnified` (1040);
+- the element READ decodes a cell in several more.
+
+A REF tag has to be honoured in **every one of them**. Honoured in some and not others is
+precisely the failure this document already warns about one section up — the erasure family is
+what a representation decided per-consumer looks like after a year.
+
+⇒ **Prerequisite, and it is a refactor with no behaviour change:** collapse those four store arms
+to one before adding the tag. Then "a ref cell is dereferenced on read and written through on
+store" is two edits instead of ten, and the suite gates the collapse on its own. Doing it the
+other way round means landing the tag in a shape where a missed arm is a silent wrong answer.
+
 ## Staged plan
 
 1. **Write-through first.** Pick the smallest end-to-end shape — `$a = &$b;` on
