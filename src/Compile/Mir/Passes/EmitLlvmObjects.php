@@ -579,8 +579,21 @@ trait EmitLlvmObjects
             // element erased to unknown (still an array at runtime). A cell
             // (heterogeneous) element takes the tag-aware copy so a boxed inner
             // array separates too; a null slot passes through (copy is NULL-safe).
-            $arrHint = ($cd->propertyArrayHinted[$pname] ?? false)
-                || ($pt !== null && $pt->isArray());
+            // ⛔ NOT for a slot the ref-cell promotion retyped to a CELL. The
+            // `array` hint is the SOURCE-level one and survives the promotion,
+            // so a `private array $data` bound by `[&$this->data]` still looked
+            // array-shaped here and the copy inttoptr'd a NaN-boxed word —
+            // SIGSEGV on `clone`, with nibble 7 (ARRAY) still in the address.
+            //
+            // Copying the cell is also what php DOES: a property holding a
+            // reference is SHARED with the clone, not duplicated. Measured on
+            // the witness shape — the clone's `__clone` increments
+            // `$this->clonesCount` and the ORIGINAL sees it. Deep-copying the
+            // array would have broken that even if the pointer had been valid.
+            $promoted = $pt !== null && $pt->kind === Type::KIND_CELL;
+            $arrHint = !$promoted
+                && (($cd->propertyArrayHinted[$pname] ?? false)
+                    || ($pt !== null && $pt->isArray()));
             if ($arrHint) {
                 $vp = $this->ssa->allocReg();
                 $out .= '  ' . $vp . ' = inttoptr i64 ' . $v . " to ptr\n";

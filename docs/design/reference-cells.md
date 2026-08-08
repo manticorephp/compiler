@@ -130,3 +130,54 @@ other way round means landing the tag in a shape where a missed arm is a silent 
   before believing any number.
 - **`bin/build` green says nothing about `bin/build --seed`, in BOTH directions.**
   Both were observed failing while the other passed, on one source tree.
+- **Narrowing a node does NOT work inside a TRAIT.** The
+  `private static function as…(Node $n): X { return $n; }` idiom resolves field
+  offsets correctly in a CLASS (`Walk`, `NodeClone`, `DeadStore`) and not in a
+  trait — and every `EmitLlvm*` / `Infer*` file is a trait on one host. Three
+  symptoms, one cause: a SIGSEGV in `markVecElemBase`, a spurious "not
+  addressable" refusal in `preallocateLocals`, and a SILENT miss in `InferNodes`
+  that left a promoted local `int`. In a trait, take the child through
+  `Walk::children`. ⚠ Zend resolves fields by NAME, so the whole class of bug is
+  invisible when the compiler runs under php.
+
+## The property box — the next instalment, and why it is not optional
+
+S2 retypes a ref-taken PROPERTY to a cell and points the reference at the SLOT.
+That is enough for reads and writes through the reference. It is NOT enough for
+`clone`.
+
+php shares the STORAGE. Measured on the witness shape:
+
+```
+$e = clone $d; $e->dump("three");
+  php:       one,two,three|3|n  /  one,two,three|3|n     <- BOTH objects
+  manticore: one,two|2|n        /  one,two,three|3|n
+$d->reset();
+  php:       |0|y  /  |0|y                               <- BOTH
+```
+
+A property holding a reference is shared by the clone, so the clone's writes are
+the original's writes. Copying the CELL — which is what the clone path does now,
+after the crash fix — copies the value, not the binding.
+
+⇒ The property has to hold `cell(REF, box)` rather than merely be cell-typed:
+the same box indirection the LOCAL promotion already has. Four edits, all
+located:
+
+1. `ClassDef` grows `propertyIsRefCell`, set by `InferScans::scanRefCellProps`
+   (appended LAST — a field added mid-struct shifts every later offset).
+2. `EmitLlvmObjects::emitObjAllocInit` gives a marked slot a fresh box holding
+   `CELL_NULL` and stores `cell(REF, box)` into the slot.
+3. `emitRefCell` over a marked property LOADS the slot — it already IS the
+   reference — instead of taking its address.
+4. `emitStoreProperty` writes THROUGH, the same branch-free two-select shape
+   `emitElemWriteThrough` uses.
+
+The READ side needs nothing: a marked slot decodes by tag, and
+`@__manticore_deref` already sits inside `@__manticore_tag` and
+`unboxCellToType`.
+
+⚠ Until this lands, `clone` of an object with a ref-taken property DIVERGES
+silently. It no longer SIGSEGVs, which is strictly better, but it is a wrong
+answer — and no AOT case asserts the current behaviour, deliberately, because a
+test that pins a divergence makes it permanent.
