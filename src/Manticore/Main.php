@@ -3411,6 +3411,18 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
         }
         CompileArgs::$linkStdlib = $lower->externInjected;
+        // The AST is DEAD from here: lowering produced the module and the two
+        // fields read just above were the last of it. Nothing below this line
+        // touches $lower / $program / $stmts — but they kept the whole tree
+        // reachable for the rest of the compile, INCLUDING the clang run, which
+        // is 12 of the 13 seconds on a 510 KB input. Measured: the AST for that
+        // input is 86 MB (~170x the source), and a 2 MB input carries 1.5 M live
+        // 64-byte nodes. Dropping the references here is the only thing that
+        // frees them — the runtime is refcounted and an AST is a tree, so the
+        // release is immediate and complete.
+        $stmts = [];
+        $program = null;
+        $lower = null;
         $statT = \Compile\Stats::now();
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
