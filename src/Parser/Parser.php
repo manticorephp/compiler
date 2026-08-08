@@ -3199,9 +3199,7 @@ final class Parser
     /** Sub-lex + parse an interpolation `{$expr}` body into a (string)-cast expression. */
     private function parseSubExpr(string $src, Span $span): Expr
     {
-        $lx = new Lexer();
-        $lx->startInPhp();
-        $tokens = $lx->scan($src);
+        $tokens = (new Lexer())->scan($src, true);
         $sub = new self($tokens);
         return Expr::cast('string', $sub->parseExpression(), $span);
     }

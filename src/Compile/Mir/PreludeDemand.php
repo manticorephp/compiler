@@ -103,7 +103,14 @@ final class PreludeDemand
         if ($src === '') { return []; }
         $lx = new Lexer();
         try {
-            $toks = $lx->scan($src);
+            // A prelude file is a FRAGMENT: several of them (errors, sapi,
+            // session, ob, binary, http, buffer) open with a comment instead of
+            // a tag, because they were only ever meant to be spliced into a unit
+            // that had already opened one. Scanned the ordinary way they are
+            // literal OUTPUT, this returns nothing, and the gate that asks "does
+            // the program call anything this file defines" answers no — so the
+            // file is never injected and its functions are undefined at runtime.
+            $toks = $lx->scan($src, true);
         } catch (\Throwable $e) {
             return [];
         }

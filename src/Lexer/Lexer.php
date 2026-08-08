@@ -36,19 +36,6 @@ final class Lexer
     private array $tokens = [];
 
     /**
-     * php starts every file in HTML mode and only enters PHP at an open tag.
-     * Everything scanned while this is false is literal output, which is why a
-     * file of plain text is a valid php program that echoes itself.
-     *
-     * ⚠ Declared LAST on purpose: a new property in the middle of the list
-     * shifts every field after it, and this tree reads some fields by offset.
-     */
-    private bool $inPhp = false;
-
-    /** What the NEXT scan() begins in; see startInPhp(). */
-    private bool $startInPhp = false;
-
-    /**
      * Token lexeme - no need for kind narrowing; the keyword text is the
      * lookup. Keywords are recognised by exact lowercase match.
      * @var array<string>
@@ -73,9 +60,21 @@ final class Lexer
     /**
      * Tokenize a PHP source string. Always ends with a single Eof token.
      *
+     * php starts a file in HTML mode and only enters php at an open tag, so
+     * literal output is the DEFAULT — which is why a file of plain text is a
+     * valid php program that echoes itself. `$startInPhp` says the source is a
+     * FRAGMENT that is already inside php: an interpolation body (`{$a->b}`)
+     * sub-lexed out of a double-quoted string, which is code however it looks.
+     *
+     * ⚠ The mode is a LOCAL and a parameter, not a property. Two `private bool`
+     * fields were tried first and the Zend-run lexer was byte-identical on every
+     * source in the tree while the NATIVELY BUILT one silently lost prelude
+     * demand — `ob_get_contents()` undefined at runtime with no diagnostic
+     * anywhere. Keep new state out of this class.
+     *
      * @return Token[]
      */
-    public function scan(string $source): array
+    public function scan(string $source, bool $startInPhp = false): array
     {
         $this->src = $source;
         $this->len = strlen($source);
@@ -83,30 +82,22 @@ final class Lexer
         $this->line = 1;
         $this->col = 1;
         $this->tokens = [];
-        $this->inPhp = $this->startInPhp;
+        $inPhp = $startInPhp;
 
         while ($this->pos < $this->len) {
-            if (!$this->inPhp) { $this->scanInlineHtml(); continue; }
+            if (!$inPhp) {
+                $this->scanInlineHtml();
+                $inPhp = true;   // an open tag was consumed, or the source ended
+                continue;
+            }
             $this->scanOne();
+            // A close tag returns to HTML mode. Read back what scanOne emitted
+            // rather than having it set a field: the token IS the fact.
+            $n = \count($this->tokens);
+            if ($n > 0 && $this->tokens[$n - 1]->kind === TokenKind::CloseTag) { $inPhp = false; }
         }
         $this->push(TokenKind::Eof, '');
         return $this->tokens;
-    }
-
-    /**
-     * Begin the next {@see scan()} already INSIDE php, for a fragment that has
-     * no open tag of its own — an interpolation body (`{$a->b}`) sub-lexed out
-     * of a double-quoted string, which is code however it looks.
-     *
-     * A setter rather than a `scanInPhp()` wrapper on purpose: a wrapper means
-     * one `array`-returning method returning ANOTHER's result, and a bare
-     * `array` return erases its element type across that hop. The tokens came
-     * back as cells and the seed build died three steps later, complaining that
-     * array_merge was undefined in a file that never mentions it.
-     */
-    public function startInPhp(): void
-    {
-        $this->startInPhp = true;
     }
 
     /**
@@ -151,7 +142,6 @@ final class Lexer
             $this->consume(5);
             $this->tokens[] = new Token(TokenKind::OpenTag, '<?php', $tline, $tcol);
         }
-        $this->inPhp = true;
     }
 
     private function scanOne(): void
@@ -183,7 +173,6 @@ final class Lexer
             $this->tokens[] = new Token(TokenKind::CloseTag, '?>', $line, $col);
             if ($this->pos < $this->len && $this->src[$this->pos] === "\r") { $this->advance(); }
             if ($this->pos < $this->len && $this->src[$this->pos] === "\n") { $this->advance(); }
-            $this->inPhp = false;
             return;
         }
 
