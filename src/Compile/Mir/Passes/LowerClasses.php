@@ -538,7 +538,11 @@ trait LowerClasses
             } else {
                 $def = $this->lowerExpr($prop->default);
                 if ($isCellProp && $def->kind === Node::KIND_NULL_CONST) {
+                    // Already the BOXED null word — never hand it to
+                    // cellDefault(), which would box the sentinel a second time.
                     $def = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
+                } else {
+                    $def = $this->cellDefault($isCellProp, $def);
                 }
             }
             // A PRELUDE class's cell must coalesce, not collide: the prelude is
@@ -639,6 +643,32 @@ trait LowerClasses
         $this->currentTypeBounds = $savedTypeBounds;
         $this->currentTypeSubst = $savedTypeSubst;
         return $cd;
+    }
+
+    /**
+     * A CELL static property's SCALAR default has to reach the slot NaN-boxed.
+     * The null case is handled above with the constant {@see MemoryAbi::CELL_NULL},
+     * but `public static mixed $n = 0;` lowered its `0` raw — and a raw word in a
+     * cell slot is read as an untagged double by every tag consumer, so
+     * `var_dump(T::$n)` printed `float(0)` and a string default printed
+     * `float(2.1E-314)` (its pointer). Wrapping it in `__mir_to_cell` moves the
+     * initialiser off the link-time-constant path onto the runtime one
+     * ({@see Passes\EmitLlvmModule::emitGlobalRuntimeInits}, which runs at
+     * `__main` entry before any statement), where the REAL boxing helpers run —
+     * rather than open-coding the NaN encoding a second time, which is how two
+     * spellings of one encoding drift apart.
+     *
+     * A float default needs no wrap: an untagged double already IS a valid cell.
+     */
+    private function cellDefault(bool $isCellProp, Node $def): Node
+    {
+        if (!$isCellProp) { return $def; }
+        $k = $def->kind;
+        if ($k !== Node::KIND_INT_CONST && $k !== Node::KIND_BOOL_CONST
+            && $k !== Node::KIND_STRING_CONST) {
+            return $def;
+        }
+        return new \Compile\Mir\Call('__mir_to_cell', [$def], Type::cell());
     }
 
     /**

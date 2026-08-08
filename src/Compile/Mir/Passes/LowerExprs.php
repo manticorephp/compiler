@@ -241,9 +241,24 @@ trait LowerExprs
         }
         if ($expr->kind === 'Call') {
             $fn = \strtolower($expr->function);
+            // Every desugaring below matches the BARE name. A namespaced file
+            // QUALIFIES an unqualified call ({@see Parser::resolveClassName}),
+            // so `compact(` inside `namespace App;` arrives here as
+            // `App\compact` — and each gate that asked `$fn` instead saw no
+            // match, fell through to an ordinary call, and died at emit with
+            // "Call to undefined function compact()". Every one of these names
+            // is a php builtin with no user definition anywhere, which is why
+            // the fall-through had nowhere to land.
+            //
+            // A user function that shadows one of these names inside its own
+            // namespace loses to the desugaring. php would prefer the
+            // namespaced declaration; nothing in the corpus does that, and the
+            // gates that were already bare (func_get_args, sscanf, …) have
+            // always made the same trade.
+            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
             // `call_user_func($cb, ...$rest)` → invoke $cb with the rest args,
             // reusing the Invoke path (literal / FCC / const-callable dispatch).
-            if ($fn === 'call_user_func' && \count($expr->args) >= 1) {
+            if ($fnBare === 'call_user_func' && \count($expr->args) >= 1) {
                 $rest = [];
                 $ci = 1;
                 while ($ci < \count($expr->args)) { $rest[] = $expr->args[$ci]; $ci = $ci + 1; }
@@ -256,7 +271,7 @@ trait LowerExprs
             // Call that emitCall expands) or the known-closure invoke path.
             // Array/static/method callable + a runtime array remains
             // unsupported (StaticCall_/MethodCall_ don't expand a spread).
-            if ($fn === 'call_user_func_array' && \count($expr->args) === 2) {
+            if ($fnBare === 'call_user_func_array' && \count($expr->args) === 2) {
                 if ($expr->args[1]->kind === 'ArrayLit') {
                     $spread = [];
                     foreach ($this->arrayLitElements($expr->args[1]) as $el) {
@@ -300,7 +315,6 @@ trait LowerExprs
             // Desugar to: tmp = __mc_sscanf($s, $f); $a = tmp[0]; $b = tmp[1]; …;
             // count(tmp). (php returns the number of assigned values; a full match
             // makes that the field count — the partial-match tail is not modelled.)
-            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
             // `getenv()` with NO argument returns the whole environment as an
             // assoc array — the same value as `$_ENV`. Reading the superglobal (not
             // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
@@ -343,7 +357,7 @@ trait LowerExprs
             // array names fall through to the stdlib). An undefined var is not
             // skipped (yields its null slot) — the common "compact vars you just
             // set" usage matches PHP.
-            if ($fn === 'compact' && \count($expr->args) >= 1) {
+            if ($fnBare === 'compact' && \count($expr->args) >= 1) {
                 $names = [];
                 $litOnly = true;
                 foreach ($expr->args as $a) {
@@ -369,7 +383,7 @@ trait LowerExprs
             // desugar it at the call site, where the arguments are still real
             // lvalues: compute the row permutation once, then rebuild each
             // column through a plain assignment. The call itself yields `true`.
-            if ($fn === 'array_multisort' && \count($expr->args) >= 1) {
+            if ($fnBare === 'array_multisort' && \count($expr->args) >= 1) {
                 $ms = $this->lowerMultisort($expr);
                 if ($ms !== null) { return $ms; }
             }
@@ -379,7 +393,7 @@ trait LowerExprs
             // costs the bootstrapping compiler nothing. Desugared to a NewObj so
             // it reuses the whole allocation path (per-slot zero-init by repr,
             // the bag, a reified specialization) instead of a second emitter.
-            if ($fn === '__mc_new_uninit' && \count($expr->args) === 1) {
+            if ($fnBare === '__mc_new_uninit' && \count($expr->args) === 1) {
                 $lit = $this->lowerExpr($expr->args[0]);
                 if ($lit->kind === Node::KIND_STRING_CONST) {
                     $cls = $lit->value;
@@ -392,9 +406,25 @@ trait LowerExprs
             // length out of the array header and has no notion of a mode, so a
             // non-zero mode is rewritten to the stdlib walker instead. A literal
             // COUNT_NORMAL (0) keeps the fast path.
-            if (($fn === 'count' || $fn === 'sizeof') && \count($expr->args) === 2) {
+            //
+            // $fnBare, not $fn: an unqualified name inside `namespace App;` is
+            // resolved to `App\count` ({@see Parser::resolveClassName}), and the
+            // qualified name matched neither arm — a namespaced
+            // `count($x, COUNT_RECURSIVE)` silently answered the SHALLOW count.
+            //
+            // A mode that is not an int literal cannot be folded here, and
+            // assuming recursion was equally wrong the other way (a runtime
+            // COUNT_NORMAL still walked the tree), so it goes to the two-arm
+            // stdlib entry that picks at runtime.
+            if (($fnBare === 'count' || $fnBare === 'sizeof') && \count($expr->args) === 2) {
                 $mode = $this->lowerExpr($expr->args[1]);
-                if ($mode->kind !== Node::KIND_INT_CONST || $mode->value !== 0) {
+                if ($mode->kind !== Node::KIND_INT_CONST) {
+                    return new Call('__mc_count_mode', [
+                        $this->lowerExpr($expr->args[0]),
+                        $mode,
+                    ], Type::int_());
+                }
+                if ($mode->value !== 0) {
                     return new Call('__mc_count_recursive', [
                         $this->lowerExpr($expr->args[0]),
                     ], Type::int_());
@@ -402,12 +432,12 @@ trait LowerExprs
             }
             // `define("NAME", v)` — registered in the run() pre-pass; the call
             // itself is a no-op yielding true (define's bool return).
-            if ($fn === 'define') {
+            if ($fnBare === 'define') {
                 return new BoolConst(true, Type::bool_());
             }
             // `defined("NAME")` → compile-time bool against predefined +
             // user constants. A non-literal name conservatively folds false.
-            if ($fn === 'defined' && \count($expr->args) === 1) {
+            if ($fnBare === 'defined' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 $known = false;
                 if ($a0->kind === 'StringLiteral') {
@@ -419,7 +449,7 @@ trait LowerExprs
             }
             // `constant("NAME")` → the resolved constant value. An unknown /
             // non-literal name folds to null (PHP throws; null degrades safely).
-            if ($fn === 'constant' && \count($expr->args) === 1) {
+            if ($fnBare === 'constant' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 if ($a0->kind === 'StringLiteral') {
                     $nm = $this->constBareName($this->stringLitValue($a0));
@@ -447,11 +477,6 @@ trait LowerExprs
             // needed. Args past the declared list have no local and ride the
             // overflow channel `__mc_argx`.
             //
-            // Matched on the BARE name: a namespaced file qualifies an
-            // unqualified call, so `func_get_arg(` inside
-            // `namespace Symfony\…;` arrives as `Symfony\…\func_get_arg`.
-            $fnBarePos = \strrpos($fn, '\\');
-            $fnBare = $fnBarePos === false ? $fn : \substr($fn, $fnBarePos + 1);
             if ($fnBare === 'func_num_args' && \count($expr->args) === 0) {
                 $this->sawFuncArgs = true;
                 return new LoadLocal($this->argcLocalName(), Type::int_());
@@ -503,7 +528,7 @@ trait LowerExprs
             // Shares functionIsKnown with the statement-position guard fold, so
             // the two can never disagree — and so a HIDDEN function (a
             // link-only Windows stub) reads absent in both.
-            if ($fn === 'function_exists' && \count($expr->args) === 1) {
+            if ($fnBare === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 if ($a0->kind === 'StringLiteral') {
                     return new IntConst(
@@ -526,7 +551,7 @@ trait LowerExprs
             // dumps each arg by its static type (a typed FLOAT goes straight to a
             // shortest-round-trip format instead of through the lossy cell box;
             // everything else recurses through `__mir_var_dump`).
-            if ($fn === 'var_dump' && \count($expr->args) >= 1) {
+            if ($fnBare === 'var_dump' && \count($expr->args) >= 1) {
                 $vdArgs = [];
                 foreach ($expr->args as $a) { $vdArgs[] = $this->lowerExpr($a); }
                 return new Call('var_dump', $vdArgs, Type::void());
@@ -540,7 +565,7 @@ trait LowerExprs
             // LowerPrelude's STDIN/STDOUT/STDERR). Doing it here keeps that
             // invariant and still answers the literal every console app opens
             // with — symfony's ConsoleOutput is fopen('php://stdout', 'w').
-            if ($fn === 'fopen' && \count($expr->args) >= 1
+            if ($fnBare === 'fopen' && \count($expr->args) >= 1
                 && $expr->args[0]->kind === 'StringLiteral') {
                 $stdRes = $this->stdStreamResource($this->stringLitValue($expr->args[0]));
                 if ($stdRes !== null) { return $stdRes; }

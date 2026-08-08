@@ -525,10 +525,20 @@ final class Monomorphize implements Pass
         // (the uasort decorate chain). Bail (→ unspecialized, dynamic entry) if a
         // closure can't be safely freshened (generator / static local).
         if (!$this->freshenClosures($body)) { return null; }
+        // The DECLARED return, not the generic's adopted one. `array_sum` is
+        // declared `int|float` (a numeric cell) and its erased body narrowed
+        // that to `int`; a vec[float] clone inheriting `int` summed doubles
+        // behind an `-> int` signature and answered 0. Starting from the
+        // declaration lets the re-inference below narrow this clone from ITS
+        // own body — which is the whole point of a specialization.
+        $mod = $this->module;
+        $declaredRet = $mod !== null
+            ? ($mod->declaredReturnTypes[$fn->name] ?? $fn->returnType)
+            : $fn->returnType;
         return new FunctionDef(
             $specName,
             $newParams,
-            $fn->returnType,
+            $declaredRet,
             $body,
             $fn->returnsByRef,
             $fn->isPrelude,

@@ -192,7 +192,13 @@ final class NarrowReturns implements Pass
                 break;
             }
         }
-        $isAssoc = $shapeRef->isAssoc();
+        // KEYED-ness, not isAssoc(): `isAssoc()` is string-key-only, so a
+        // CELL-keyed array (the `$o[$k] = …` an erased foreach key builds)
+        // answers isVec() and its key was rebuilt away here — the returned array
+        // still held string keys at runtime, and the caller's foreach then read
+        // each one as a raw int (`4364574184=10`). Carry whatever key the shape
+        // reference has.
+        $isKeyed = $shapeRef->key !== null;
         $elem = null;
         $key = null;
         foreach ($returns as $ret) {
@@ -201,16 +207,16 @@ final class NarrowReturns implements Pass
             $unrefined = $t->element === null || $t->element->kind === Type::KIND_UNKNOWN;
             // A concrete array must agree on the shape; an unrefined `[]` defers
             // (contributes no element/key info).
-            if (!$unrefined && $t->isAssoc() !== $isAssoc) { return false; }
+            if (!$unrefined && ($t->key !== null) !== $isKeyed) { return false; }
             if ($unrefined) { continue; }
             $elem = $elem === null ? $t->element : $this->joinElem($elem, $t->element);
-            if ($isAssoc) {
+            if ($isKeyed) {
                 $k = $t->key ?? Type::unknown();
                 $key = $key === null ? $k : $key->unionWith($k);
             }
         }
         if ($elem === null) { $elem = Type::unknown(); }
-        $result = $isAssoc
+        $result = $isKeyed
             ? Type::assoc($key ?? Type::unknown(), $elem)
             : Type::vec($elem);
         // Early (pre-Monomorphize) pass: only adopt a fully concrete shape, so an

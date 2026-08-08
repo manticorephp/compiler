@@ -293,6 +293,21 @@ final class InferTypes implements Pass
     /** @var array<string, Type> */
     private array $sigs = [];
 
+    /** @var array<string,bool> locals handed to a by-ref param declared as a
+     *  concrete scalar — the callee writes the slot back in ITS representation,
+     *  so the loop-carried cell promotion must leave these names alone
+     *  ({@see InferScans::scanRefPinnedLocals}). */
+    private array $refPinnedLocals = [];
+
+    /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
+     *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
+     *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
+     *  it there asks "what did the LAST pass decide" instead of "what does the
+     *  source say". A specialization whose params were narrowed to floats kept the
+     *  `int` a previous pass adopted for the erased body.
+     *  @var array<string, Type> */
+    private array $declaredReturns = [];
+
     /** @var array<string, FunctionDef> name → def (for closure body re-infer) */
     private array $fnByName = [];
 
@@ -337,6 +352,14 @@ final class InferTypes implements Pass
         $this->sawClosures = false;
         $this->undeclaredReturnFns = [];
         foreach ($module->functions as $fn) {
+            // Remember the DECLARED return before any adoption below rewrites
+            // it in place — a monomorphic clone must start from the declaration,
+            // not from a type derived for the generic body ({@see
+            // Module::$declaredReturnTypes}). First registration wins: this pass
+            // runs several times, and only the first sees the un-narrowed type.
+            if (!isset($module->declaredReturnTypes[$fn->name])) {
+                $module->declaredReturnTypes[$fn->name] = $fn->returnType;
+            }
             $this->sigs[$fn->name] = $fn->returnType;
             $this->fnByName[$fn->name] = $fn;
             // An extern's UNKNOWN return is the library's answer, not a gap to
@@ -348,6 +371,7 @@ final class InferTypes implements Pass
                 $this->undeclaredReturnFns[$fn->name] = true;
             }
         }
+        $this->declaredReturns = $module->declaredReturnTypes;
         // Module pre-scan: a class property string-keyed anywhere
         // (`$this->prop[$k] = v`) is an assoc, not a vec. Retype it in the
         // ClassDef up front so its `[]` default + every load/store use the
@@ -1468,7 +1492,72 @@ final class InferTypes implements Pass
             && $lt->kind === Type::KIND_CELL && $rt->kind === Type::KIND_CELL) {
             return Type::numericCell();
         }
-        return Type::unknown();
+        // A PLAIN mixed cell in numeric arithmetic. Which of int-or-float PHP
+        // does is decided by the TAG, at runtime — exactly what the numeric-cell
+        // path above already asks `__manticore_tagged_<op>` to do (and that
+        // helper also promotes an int overflow to float, which the raw path
+        // silently wraps). The integer path below instead unboxes every cell
+        // with unbox_int, so a cell holding 1.5 answered `int(1)` for `$v + 1`.
+        //
+        // Both operands must be numeric-ish: a string / array / object / erased
+        // partner has its own arithmetic path (strtol coercion, array union, …)
+        // and must not be dragged into the tagged helpers.
+        //
+        // ⛔ HELD BACK, and NOT for the reason the old comment gave ("SIGKILLs
+        // the self-build" — it does not; two generations build). Tagged arith is
+        // the first consumer that TRUSTS `cell` to mean "the word carries a
+        // tag", and that guarantee is not yet true at the producer side. Three
+        // channels say cell and hold a RAW word, each found by turning this on:
+        //   · the `$GLOBALS['x']` view (lowered cell; `global $x` types the same
+        //     storage from the join, and both read it raw — they agree only by
+        //     accident);
+        //   · an UNHINTED static property read (typed `unknown` while the store
+        //     boxes by the DECLARED type — and typing that read cell was already
+        //     tried and reverted, because an ARRAY rides the same slot raw);
+        //   · the elements of an erased array (`array_combine` + `array_map`),
+        //     whose foreach value types cell and arrives raw — `var_dump($len)`
+        //     answers `float(5.4E-323)` on its own, with no arithmetic involved.
+        // Every one is a PRE-EXISTING producer gap that the integer path hides
+        // by being raw at both ends. Turn this on again once §3's "erased ⟹
+        // cell" holds at the producers, not before — the fix belongs there, and
+        // carving out each consumer one at a time only moves the lie around.
+        // {@see docs/design/unknown-cell-soundness.md §18.3}
+        if (false && ($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
+            && $this->cellArithOperand($lt) && $this->cellArithOperand($rt)) {
+            return Type::numericCell();
+        }
+        // Everything left takes the INTEGER path, and that path is total: it
+        // coerces every operand to i64 first (strtol for a string, unbox_int
+        // for a cell, the raw word otherwise — {@see EmitLlvmExpr::
+        // coerceArithOperand}), then emits `add/sub/mul i64`. So the value
+        // this node produces IS a plain int, and typing it `unknown` was the
+        // type lying about a representation codegen had already chosen.
+        //
+        // The lie was not free. An erased sum stored into a cell channel went
+        // through boxToCell(unknown) → the probing boxer, which dereferences
+        // the word at ptr-8 to look for an allocator magic: every result above
+        // 65535 looked like a pointer and SIGSEGV'd (`$a[$i] = $a[$i] + $n`
+        // over an array_fill counter). Into a `mixed` PROPERTY the same word
+        // was stored raw and read back as a denormal double.
+        //
+        // …but only for operands whose representation is actually known. An
+        // ERASED one may be a BOXED word fed raw into `add i64`, and then the
+        // result is that cell arithmetic-ed: `box_int(42) + 1` is `box_int(43)`,
+        // because the payload lives in the low bits. Claiming `int` there tells
+        // echo to print the tagged word (`-4222124650659797`), where `unknown`
+        // leaves it to dispatch on the tag and answer 43.
+        //
+        // Nothing is lost by conceding this: the CELL operands that motivated
+        // the honest typing — an array_fill element, a `mixed` property — now
+        // take the tagged path above, which is right rather than accidentally
+        // right. What is left here is the genuinely erased case, and `unknown`
+        // is what it is. {@see docs/design/unknown-cell-soundness.md §18}
+        if ($lt->kind === Type::KIND_UNKNOWN || $rt->kind === Type::KIND_UNKNOWN) {
+            return Type::unknown();
+        }
+        // Typing it `int` changes no emitted arithmetic — only what consumers
+        // believe, so they box it with box_int instead of guessing.
+        return Type::int_();
     }
 
     /** A statement/block that always exits its enclosing flow (return/throw). */
@@ -1518,7 +1607,8 @@ final class InferTypes implements Pass
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }
-            if (isset($this->keyUsedLocals[$name])) { continue; }
+            if (isset($this->keyUsedLocals[$name])
+                || isset($this->refPinnedLocals[$name])) { continue; }
             $this->cellMergeLocals[$name] = true;
             $node->then->stmts[] = $this->boxBackStore($name, $tT);
             if ($hasElse) {
@@ -1600,6 +1690,28 @@ final class InferTypes implements Pass
         }
     }
 
+    /** The name behind a by-ref ARGUMENT — a plain lvalue, or the `RefAddr_` the
+     *  lowering wraps one in — pinned to the callee's declared representation. */
+    private function markRefPinnedLocal(Node $arg): void
+    {
+        if ($arg->kind === Node::KIND_LOAD_LOCAL) {
+            $this->refPinnedLocals[$arg->name] = true;
+            return;
+        }
+        if ($arg->kind === Node::KIND_REF_ADDR && $arg->target !== '') {
+            $this->refPinnedLocals[$arg->target] = true;
+        }
+    }
+
+    /** A type whose slot is a RAW scalar, so a by-ref callee writing it back
+     *  fixes the caller's representation too. */
+    private function isScalarReprKind(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_STRING;
+    }
+
     /** The literal `true` (the `||` short-circuit then arm). */
     private function isLiteralTrue(?Node $n): bool
     {
@@ -1656,6 +1768,16 @@ final class InferTypes implements Pass
         return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
             || $t->isNumericCell();
     }
+
+    /** An operand the TAGGED arithmetic helpers can take: a concrete number, or
+     *  any cell (they dispatch on its tag). Deliberately NOT a string/array/obj
+     *  or an erased word — each of those has its own arithmetic path. */
+    private function cellArithOperand(Type $t): bool
+    {
+        return $t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT
+            || $t->kind === Type::KIND_CELL;
+    }
+
 
     /** Cell type for a value union of two arms: a NUMERIC cell (int|float) when
      *  both arms are numeric so arithmetic can promote at runtime, else a plain
@@ -1818,7 +1940,8 @@ final class InferTypes implements Pass
             // `$x = null;` seed via `box_null`. A numeric body types directly, so
             // no entry/body chicken-and-egg — key on the body kind here.
             if ($st->kind === Type::KIND_NULL && ($this->nullBoxesWith($bt) || $arithUnknown)) {
-                if (isset($this->keyUsedLocals[$name])) { continue; }
+                if (isset($this->keyUsedLocals[$name])
+                    || isset($this->refPinnedLocals[$name])) { continue; }
                 $out[$name] = Type::cell();
                 if (!isset($this->cellLoopLocals[$name])) {
                     $this->cellLoopLocals[$name] = true;
@@ -1827,7 +1950,8 @@ final class InferTypes implements Pass
                 continue;
             }
             if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
-            if (isset($this->keyUsedLocals[$name])) { continue; }
+            if (isset($this->keyUsedLocals[$name])
+                || isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
                 $this->cellLoopLocals[$name] = true;
