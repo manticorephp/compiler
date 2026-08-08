@@ -853,6 +853,19 @@ final class CompileArgs
     public static bool $emitLibrary = false;
 
     /**
+     * `--allow-undefined-traps` — permit a LIBRARY target to ship calls the
+     * emitter compiled into a "Call to undefined function" throw
+     * ({@see \Compile\Mir\Passes\EmitLlvm::$undefinedCalls}). Refused by
+     * default: a prebuilt `.o` outlives the build that made it, so a throw stub
+     * baked into `lib/manticore_stdlib.o` keeps failing long after the source is
+     * fixed — the exact way a missed cold seed used to hide for a generation.
+     *
+     * The opt-out exists for the legitimate case: a library whose call sits
+     * behind an `extension_loaded()` guard that never runs.
+     */
+    public static bool $allowUndefinedTraps = false;
+
+    /**
      * Set by {@see compile_via_mir} when at least one bundled-stdlib extern
      * was injected into the module → cmd_compile links the prebuilt
      * `stdlib.o` at the cc step. Stays false for self-contained programs
@@ -1880,6 +1893,8 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     }
     $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
+    /** @var string[] $undefTraps */
+    $undefTraps = [];
     try {
         $statT = \Compile\Stats::now();
         $emit = new \Compile\Mir\Passes\EmitLlvm();
@@ -1887,6 +1902,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $ir = $emit->emit($module);
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
+        $undefTraps = \array_keys($emit->undefinedCalls);
         \Compile\Stats::step('EmitLlvm', $statT, \count($module->functions), -1);
         \Compile\Stats::line('IR: ' . (string)\strlen($ir) . ' bytes');
     } catch (\Throwable $e) {
@@ -1894,6 +1910,25 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         return 65;
     }
     if (\strlen($ir) === 0) { dprint("build: empty IR for " . $output); return 65; }
+    // A call nothing defines compiled into a runtime throw rather than a link
+    // error ({@see \Compile\Mir\Passes\EmitLlvmCalls::emitCall}). That is right
+    // for a guarded `apcu_add`, and it is also exactly what a compiler ONE
+    // GENERATION BEHIND its source produces for a name it does not know yet —
+    // silently, which is why "this needed a cold seed" used to be discovered by
+    // a crash instead of by the build. Name it, in a line a driver can parse.
+    if (\count($undefTraps) > 0) {
+        \sort($undefTraps);
+        $names = \implode(", ", $undefTraps);
+        dprint("build: undefined-function traps (" . (string)\count($undefTraps)
+            . "): " . $names);
+        // For a LIBRARY the stub is written to a `.o` that outlives this build
+        // and is linked by every later program, so refuse it by default.
+        if ($emitLibrary && !CompileArgs::$allowUndefinedTraps) {
+            dprint("build: refusing to write " . $output
+                . " with undefined-function traps (pass --allow-undefined-traps to override)");
+            return 65;
+        }
+    }
     // Staging path for the IR and the intermediate object. Under --keep-ir they
     // sit next to the target (stable, one per target, and not swept from /tmp);
     // otherwise a pid-derived /tmp base, removed once the target links. The
@@ -2022,11 +2057,18 @@ function cmd_build(array $args): int
 {
     // Parse: last positional = manifest path; `--libs-only` builds the library
     // targets and stops (used by the cold seed to refresh stdlib.o without
-    // re-linking the applications). The shared compile spec rides along so a
-    // manifest build accepts `-O0` / `--memory` like `compile` does — same
-    // shape cmd_analyze uses.
+    // re-linking the applications), `--apps-only` is its mirror. The shared
+    // compile spec rides along so a manifest build accepts `-O0` / `--memory`
+    // like `compile` does — same shape cmd_analyze uses.
+    //
+    // The pair is what lets a self-host rebuild put the LIBRARIES on the far
+    // side of the binary swap: one process cannot do it, because the libraries
+    // are built by the compiler that is running, and the point is to build them
+    // with the compiler that was just produced ({@see bin/build}).
     $spec = compile_arg_spec();
     $spec["libs-only"] = \Cli\ArgParse::FLAG;
+    $spec["apps-only"] = \Cli\ArgParse::FLAG;
+    $spec["allow-undefined-traps"] = \Cli\ArgParse::FLAG;
     $spec["keep-ir"] = \Cli\ArgParse::FLAG;
     $p = \Cli\ArgParse::parse($args, $spec);
     if ($p->error !== null) { dprint("build: " . $p->error); return 64; }
@@ -2039,6 +2081,12 @@ function cmd_build(array $args): int
     $nPos = \count($p->positional);
     $manifestPath = $nPos > 0 ? $p->positional[$nPos - 1] : "manticore.json";
     $libsOnly = $p->flag("libs-only");
+    $appsOnly = $p->flag("apps-only");
+    if ($libsOnly && $appsOnly) {
+        dprint("build: --libs-only and --apps-only are mutually exclusive");
+        return 64;
+    }
+    CompileArgs::$allowUndefinedTraps = $p->flag("allow-undefined-traps");
     CompileArgs::$keepIr = $p->flag("keep-ir");
     $src = read_file($manifestPath);
     if ($src === null) {
@@ -2048,6 +2096,10 @@ function cmd_build(array $args): int
     $manifest = json_decode($src, true);
     $libs = isset($manifest["libraries"]) ? $manifest["libraries"] : [];
     foreach ($libs as $lib) {
+        // --apps-only skips BUILDING the libraries; the list itself is still
+        // needed below, where each non-runtime library's `.o`/`.sig` joins the
+        // application's link (they must already exist on disk).
+        if ($appsOnly) { break; }
         $name = (string)$lib["name"];
         $srcDir = (string)$lib["src"];
         $output = (string)$lib["output"];
@@ -3865,6 +3917,13 @@ function cmd_analyze(array $args): int {
     $spec["json"] = \Cli\ArgParse::FLAG;
     $spec["baseline"] = \Cli\ArgParse::VALUE;
     $spec["generate-baseline"] = \Cli\ArgParse::VALUE;
+    // `--only <prefix[,prefix…]>` keeps just the diagnostic codes that start
+    // with one of the prefixes, and gates on ANY survivor whatever its severity.
+    // One caller drives the shape: the self-host preflight
+    // (`analyze src --only undefined.,parse.error`), which asks the narrow
+    // question "can THIS compiler still build this source" and must not be
+    // drowned by the 177 style warnings a full run reports.
+    $spec["only"] = \Cli\ArgParse::VALUE;
     $p = \Cli\ArgParse::parse($args, $spec);
     if ($p->error !== null) { dprint($p->error); return 64; }
     if (!apply_compile_args($p)) { return 64; }
@@ -3872,6 +3931,7 @@ function cmd_analyze(array $args): int {
     $json = $p->flag("json");
     $baselinePath = $p->value("baseline", "");
     $genBaseline = $p->value("generate-baseline", "");
+    $only = $p->value("only", "");
 
     $files = resolve_source_files(CompileArgs::$files);
     if ($files === null) { return 66; }
@@ -3894,8 +3954,24 @@ function cmd_analyze(array $args): int {
         if ($bl !== null) { $diags = \Analyze\Baseline::filter($diags, $bl); }
     }
 
+    if ($only !== "") {
+        /** @var string[] $prefixes */
+        $prefixes = \explode(",", $only);
+        /** @var \Analyze\Diagnostic[] $kept */
+        $kept = [];
+        foreach ($diags as $d) {
+            foreach ($prefixes as $pre) {
+                if ($pre !== "" && \str_starts_with($d->code, $pre)) { $kept[] = $d; break; }
+            }
+        }
+        $diags = $kept;
+    }
+
     echo $json ? \Analyze\Report::json($diags) : \Analyze\Report::human($diags);
 
+    // Under --only the selection IS the gate: a warning-severity undefined
+    // symbol still means this compiler cannot resolve the name.
+    if ($only !== "") { return \count($diags) > 0 ? 1 : 0; }
     foreach ($diags as $d) {
         if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) { return 1; }
     }

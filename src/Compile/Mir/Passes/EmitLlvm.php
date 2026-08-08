@@ -289,6 +289,22 @@ final class EmitLlvm implements EmitVisitor
      */
     public array $weakSyms = [];
     /**
+     * Free-function calls compiled into a runtime "Call to undefined function"
+     * trap ({@see EmitLlvmCalls::emitCall}) — nothing in the module and nothing
+     * in a linked library's `.sig` defines the symbol, so the call becomes a
+     * throw instead of a link error.
+     *
+     * Collected because the trap is SILENT: a compiler that does not yet know a
+     * name still "succeeds" at building source that uses it, and the breakage
+     * surfaces a generation later (a poisoned `lib/*.o`, or a self-built
+     * compiler that throws the first time it reaches the call). That is the
+     * whole shape of "this needed a cold seed and nothing said so". The driver
+     * reports the set, and refuses it outright for a LIBRARY target.
+     *
+     * @var array<string, bool> function name → true
+     */
+    public array $undefinedCalls = [];
+    /**
      * Native FFI-boundary primitives (`manticore_rt_*`) called but not
      * PHP-defined. Declared as externs so the module assembles; the
      * tools/link_stubs.sh link-stubs them (the compiler never invokes the
@@ -304,6 +320,9 @@ final class EmitLlvm implements EmitVisitor
      * the `--emit-library` compile path.
      */
     public bool $emitLibrary = false;
+    /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
+     *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
+    private bool $lastCallWasBuiltin = false;
     /** Scratch: address reg set by foreachElemAddr / foreachKeyAddr. */
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */

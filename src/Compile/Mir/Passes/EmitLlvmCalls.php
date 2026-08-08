@@ -1959,10 +1959,19 @@ trait EmitLlvmCalls
         }
         if ($k === Node::KIND_CALL) {
             // Free-function call: only a USER function reliably +1-owns its
-            // result. Builtins vary (some return borrowed elements) — and a
-            // user fn can never shadow a builtin name (PHP forbids it), so a
-            // hit in fnParamTypes proves it is user-defined, not a builtin.
+            // result. Builtins vary (some return borrowed elements), so a hit
+            // in fnParamTypes is the evidence that a user body was called.
+            //
+            // It is not evidence on its own. `emitCall` consults `emitBuiltin`
+            // BEFORE `definedFns`, so a codegen builtin SHADOWS a same-named
+            // PHP body — nine names ship both today (strpos, array_keys,
+            // array_values, current, key, …) and that pairing is the bootstrap
+            // shim a new builtin travels with. For those the name is in
+            // paramTypes while the emitted code is the builtin, and releasing
+            // its result is a release of something the caller never owned.
+            // Ask what was actually EMITTED.
             $fname = $s->function;
+            if ($this->lastCallWasBuiltin) { return ''; }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
             // A by-ref-returning fn yields an address, not an owned value.
             if ($this->sigs->returnsByRef[$fname] ?? false) { return ''; }
@@ -2132,7 +2141,14 @@ trait EmitLlvmCalls
     {
         $c = $n;
         $b = $this->emitBuiltin($c);
-        if ($b !== null) { return $b; }
+        // Set AFTER the emitter returns, so a nested argument call cannot leave
+        // the flag describing the wrong node: the OUTERMOST call finishes last.
+        // {@see emitDiscardedCallRelease} — the ownership convention differs
+        // between a builtin and a user body, and with a bootstrap shim (a
+        // same-named PHP body under a builtin, as `strpos`/`array_keys` already
+        // ship) the name alone can no longer tell them apart.
+        if ($b !== null) { $this->lastCallWasBuiltin = true; return $b; }
+        $this->lastCallWasBuiltin = false;
         // Nothing will define this symbol, so php's runtime
         // `Error: Call to undefined function f()` is the answer — raised when
         // the call is reached, which for symfony/cache's `apcu_add` behind an
@@ -2157,6 +2173,7 @@ trait EmitLlvmCalls
         // prelude source has no fnDecl yet). It also poisoned lib/*.o with throw
         // stubs that outlived the source fix by a generation.
         if (!isset($this->definedFns[$this->mangle($c->function)])) {
+            $this->undefinedCalls[\ltrim($c->function, '\\')] = true;
             $thr = new Call(
                 '__mir_throw_error',
                 [new \Compile\Mir\StringConst(
