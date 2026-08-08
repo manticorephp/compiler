@@ -195,6 +195,49 @@ touches the manticore arena/rc runtime, so it **adds no rc=139 surface**.
 
 So the same single-module decision (2A) serves stdlib and extensions uniformly.
 
+## Bootstrap: when a rebuild needs the Zend cold seed, and how rarely
+
+`bin/build` self-hosts; `bin/compile` (the Zend front-end) is the cold seed. The
+seed used to be needed unpredictably — "add a function, and sometimes the build
+has to start from Zend" — because three separate things were conflated.
+
+**1. A generation skew was structural.** One `manticore build` runs the manifest
+in one process, libraries first, applications second, so `lib/manticore_stdlib.o`
+was always emitted by the compiler being REPLACED. Every user program then
+linked a stdlib one generation older than the compiler that built it, and a
+change under `src/Runtime` only took effect on the next rebuild — the "run
+`bin/build` twice" folklore. `bin/build` now runs two passes with the binary swap
+between them (`--apps-only`, then `--libs-only` through the NEW binary), and
+`bin/compile` does the same after the seed produces the native compiler. Safe
+because the compiler application is `"stdlib": false` and never links the library
+it rebuilds.
+
+**2. An unresolved call was silent.** `EmitLlvmCalls::emitCall` compiles a call
+no module and no linked `.sig` defines into a runtime
+`Call to undefined function` throw, deliberately — a guarded `apcu_add` must not
+fail the link. But it is also exactly what a compiler one generation behind
+produces for a name it has not learned yet, and nothing said so: the trap rode
+into the next binary, or into `lib/*.o`, where it outlived the source fix. The
+emitter now collects those names (`EmitLlvm::$undefinedCalls`), the driver prints
+them, and a LIBRARY target refuses to be written with any (override:
+`--allow-undefined-traps`).
+
+**3. The gap is now detected before the swap.** `bin/build` preflights with
+`manticore analyze src --only undefined.,parse.error` — the closed-world
+undefined-symbol rules plus parse errors, asked of the INSTALLED compiler about
+the NEW source, in about two seconds and without codegen. On a hit it names the
+symbols and stops with advice; `--auto-seed` escalates to `bin/compile` instead
+(for CI). The outgoing binary is kept as `bin/.manticore.prev`, so a checkout is
+never left without a working compiler.
+
+What remains genuinely irreducible is small: new **syntax** used inside `src/`
+(a parser cannot read what it does not know) and recovery from a broken
+self-build. Everything else is avoided by one rule — **a new codegen builtin
+ships with a same-named PHP body** (`src/Runtime/Stdlib/README.md`). `emitCall`
+consults `emitBuiltin` before `definedFns`, so the builtin shadows the body: the
+old compiler links the PHP, the new one inlines the builtin, and no generation
+ever sees an unresolved name. Nine names already ship both.
+
 ## Open items after #2
 
 - ✅ Unify the Zend cold seed onto the manifest (#4) — done (`ef115f4`,

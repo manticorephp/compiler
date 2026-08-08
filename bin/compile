@@ -68,6 +68,13 @@ if [[ "$OUT" != "bin/manticore" ]]; then
 fi
 "$SEED" build "$MANIFEST"
 
+# The seed built BOTH targets, so lib/manticore_stdlib.o carries the seed's
+# codegen while $OUT carries its own — one generation apart, on the very build
+# whose whole purpose is to establish a known-good pair. Rebuild the libraries
+# with the compiler that just came out, exactly as bin/build's pass 2 does.
+echo "[5b/5] rebuild lib/ with the native compiler (not the seed)"
+"$OUT" build --libs-only "$MANIFEST"
+
 echo "── smoke test the native build ──"
 echo '<?php echo "selfhost-ok\n";' > "$SEED_DIR/smoke.php"
 "$OUT" compile "$SEED_DIR/smoke.php" -o "$SEED_DIR/smoke" >/dev/null

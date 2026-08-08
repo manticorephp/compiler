@@ -2,7 +2,7 @@
 #
 # Canonical compiler rebuild — SELF-HOST by default.
 #
-#   bin/build [--seed] [--verify] [output]
+#   bin/build [--seed] [--auto-seed] [--verify] [output]
 #
 # Manticore builds Manticore. The self-built `bin/manticore` is the
 # canonical builder; the Zend front-end (`bin/compile`) is only the COLD
@@ -11,12 +11,36 @@
 #   default        self-host: bin/manticore compiles src/ -> new bin/manticore
 #                  (falls back to the Zend seed automatically if no binary)
 #   --seed         force the cold bootstrap (Zend front-end via bin/compile)
+#   --auto-seed    on a BOOTSTRAP GAP (below), escalate to the cold seed
+#                  instead of failing — for CI, where nobody reads the advice
 #   --verify       after rebuilding, run the fixpoint + suite gate
 #   output         target path (default bin/manticore)
 #
 # The self build goes to a temp path, is smoke-tested (compile+run a
 # trivial program), and only then atomically swapped into place — a
 # broken self build never clobbers the working binary.
+#
+# TWO PASSES, and the order is the point. The manifest holds a library target
+# (lib/manticore_stdlib.o) and an application target (the compiler). Building
+# both in ONE `manticore build` means the CURRENT binary produces both — so the
+# stdlib every user program links is always one generation behind the compiler
+# that will compile them, and a change to src/Runtime only takes effect on the
+# NEXT rebuild. Hence:
+#
+#   pass 1  --apps-only : the running compiler builds the new compiler
+#   swap    smoke-test, keep the old binary as bin/.manticore.prev
+#   pass 2  --libs-only : the NEW compiler builds lib/manticore_stdlib.o(.sig)
+#
+# Safe in that order because the compiler application is "stdlib": false — it
+# embeds src/Runtime itself and never links the library it is about to rebuild.
+#
+# BOOTSTRAP GAP: the one thing a self-host build cannot do is build source that
+# needs a compiler newer than itself — a call to a codegen builtin this binary
+# does not know (it compiles into a silent "Call to undefined function" trap
+# rather than a link error), or syntax its parser cannot read. Both are detected
+# BEFORE the swap, named, and reported; the answer is a cold seed. See the
+# "PHP body first, codegen builtin second" rule in src/Runtime/Stdlib/README.md
+# for how to add a builtin that needs no seed at all.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,14 +52,16 @@ cd "$ROOT"
 export MANTICORE_PRELUDE="$ROOT/prelude"
 
 SEED=0
+AUTOSEED=0
 VERIFY=0
 OUT="bin/manticore"
 for arg in "$@"; do
     case "$arg" in
-        --seed)   SEED=1 ;;
-        --verify) VERIFY=1 ;;
-        -*)       echo "unknown flag: $arg" >&2; exit 2 ;;
-        *)        OUT="$arg" ;;
+        --seed)      SEED=1 ;;
+        --auto-seed) AUTOSEED=1 ;;
+        --verify)    VERIFY=1 ;;
+        -*)          echo "unknown flag: $arg" >&2; exit 2 ;;
+        *)           OUT="$arg" ;;
     esac
 done
 
@@ -44,33 +70,115 @@ if [[ $SEED -eq 0 && ! -x bin/manticore ]]; then
     SEED=1
 fi
 
+# A bootstrap gap: explain it, and either escalate or stop. Terminal either way
+# — the caller is mid-self-host and must not continue with a compiler that
+# cannot build its own source.
+bootstrap_gap() {
+    echo "" >&2
+    echo "bin/build: this compiler cannot build the new src/ — $1" >&2
+    if [[ $AUTOSEED -eq 1 ]]; then
+        echo "bin/build: --auto-seed → escalating to the cold Zend bootstrap" >&2
+        bin/compile "$OUT"
+        if [[ $VERIFY -eq 1 ]]; then
+            echo "── verify: fixpoint + suite gate ──"
+            bash tools/selfhost_fixpoint.sh
+        fi
+        exit 0
+    fi
+    echo "" >&2
+    echo "  rerun with \`bin/build --seed\` (cold Zend bootstrap, ~2 min)," >&2
+    echo "  or \`bin/build --auto-seed\` to escalate automatically." >&2
+    echo "" >&2
+    echo "  A new codegen builtin needs no seed if it ships with a same-named" >&2
+    echo "  PHP body (as strpos/array_keys already do): the old compiler links" >&2
+    echo "  the body, the new one inlines the builtin." >&2
+    exit 1
+}
+
+# Whether the INSTALLED binary understands a CLI flag this script wants to pass.
+# It is one generation behind by construction — the flag may have been added by
+# the very source it is about to compile — and ArgParse answers 64 for an
+# unknown option, which no other failure uses. Probed against a manifest path
+# that cannot exist, so a supported flag fails later (66, cannot read) and
+# nothing is built either way.
+supports_flag() {
+    local rc=0
+    "$@" >/dev/null 2>&1 || rc=$?
+    [[ $rc -ne 64 ]]
+}
+
+if [[ $SEED -eq 0 ]]; then
+    # Preflight, ~2 s and no codegen: the closed-world undefined-symbol rules
+    # plus parse errors, asked of THIS binary about the NEW source. A name it
+    # cannot resolve is precisely what would become a throw stub below.
+    if supports_flag bin/manticore analyze --only undefined. /nonexistent-preflight-probe.php; then
+        echo "── preflight: can this compiler resolve src/? ──"
+        if ! bin/manticore analyze src --only undefined.,parse.error; then
+            bootstrap_gap "unresolved symbols / parse errors above"
+        fi
+    else
+        echo "── preflight skipped (installed compiler predates \`analyze --only\`) ──"
+    fi
+fi
+
 if [[ $SEED -eq 1 ]]; then
     echo "── cold bootstrap: Zend front-end (bin/compile) ──"
     bin/compile "$OUT"
 else
-    echo "── self-host: bin/manticore build manticore.json ──"
+    echo "── self-host pass 1: bin/manticore build --apps-only ──"
     # Single source of truth: the manifest defines the self-contained
     # compiler target. Build to a temp output, smoke-test, then atomically
     # swap — a broken self build never clobbers the working binary.
     TMP="$(mktemp -d)/manticore_new"
     TMP_MANIFEST="$(mktemp).json"
+    BUILD_LOG="$(mktemp)"
     # Redirect the manifest's output to the temp path (the only edit).
     sed "s#\"$OUT\"#\"$TMP\"#" manticore.json > "$TMP_MANIFEST"
     if ! grep -q "\"$TMP\"" "$TMP_MANIFEST"; then
         echo "fatal: manticore.json has no application output '$OUT' to redirect" >&2
         exit 1
     fi
-    bin/manticore build "$TMP_MANIFEST"
+    # An installed compiler that predates --apps-only builds both targets in one
+    # pass, the old way. Pass 2 below then rebuilds the libraries with the new
+    # binary regardless, so the generation skew is closed either way.
+    APPS_ONLY="--apps-only"
+    if ! supports_flag bin/manticore build --apps-only /nonexistent-manifest-probe.json; then
+        APPS_ONLY=""
+        echo "   (installed compiler predates --apps-only — one-pass build, libraries rebuilt in pass 2)"
+    fi
+    set +e
+    # shellcheck disable=SC2086
+    bin/manticore build $APPS_ONLY "$TMP_MANIFEST" 2>&1 | tee "$BUILD_LOG"
+    BUILD_RC="${PIPESTATUS[0]}"
+    set -e
+    [[ $BUILD_RC -eq 0 ]] || { echo "fatal: self build failed (rc=$BUILD_RC)" >&2; exit 1; }
+    # The emitter reports every call it compiled into an undefined-function
+    # trap. In the compiler's OWN source that is never intentional — there is no
+    # `extension_loaded()` guard in src/ — so treat any as the bootstrap gap.
+    if grep -q "undefined-function traps" "$BUILD_LOG"; then
+        grep "undefined-function traps" "$BUILD_LOG" >&2
+        bootstrap_gap "it compiled calls in src/ into runtime traps (above)"
+    fi
+
     echo "── smoke test the self build ──"
     echo '<?php echo "selfhost-ok\n";' > "$TMP.smoke.php"
-    "$TMP" compile "$TMP.smoke.php" -o "$TMP.smoke" >/dev/null
-    OUTPUT="$("$TMP.smoke")"
-    if [[ "$OUTPUT" != "selfhost-ok" ]]; then
-        echo "fatal: self build smoke test failed (got '$OUTPUT') — keeping current binary" >&2
-        exit 1
+    if ! "$TMP" compile "$TMP.smoke.php" -o "$TMP.smoke" >/dev/null 2>&1; then
+        bootstrap_gap "the compiler it produced cannot compile hello world"
     fi
+    OUTPUT="$("$TMP.smoke" || true)"
+    if [[ "$OUTPUT" != "selfhost-ok" ]]; then
+        bootstrap_gap "the compiler it produced miscompiles hello world (got '$OUTPUT')"
+    fi
+
+    # Keep the outgoing binary: a later gap can retry from HERE instead of from
+    # Zend, and the checkout is never left without a working compiler.
+    if [[ -x "$OUT" ]]; then cp "$OUT" "bin/.manticore.prev"; fi
     mv "$TMP" "$OUT"
     echo "ok: $OUT (self-built via manifest, smoke-tested)"
+
+    echo "── self-host pass 2: $OUT build --libs-only (stdlib rebuilt by the NEW compiler) ──"
+    "$OUT" build --libs-only manticore.json
+    echo "ok: lib/manticore_stdlib.o (built by $OUT)"
 fi
 
 if [[ $VERIFY -eq 1 ]]; then
