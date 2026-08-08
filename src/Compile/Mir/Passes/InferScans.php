@@ -247,6 +247,75 @@ trait InferScans
         }
     }
 
+    /**
+     * A PROPERTY a `&` points at from a storing position (`[&$this->n]`) is a
+     * CELL for its whole lifetime.
+     *
+     * The local promotion's twin ({@see \Compile\Mir\Passes\InferNodes::
+     * collectRefCellLocals}) and it exists for the identical reason: the holder
+     * of the reference reads the slot BY TAG, so a slot that stays `int` hands
+     * it a raw word and the value comes back a denormal. The witness this epic
+     * is aimed at — symfony's DumpDataCollector — takes references to
+     * `private int` and `private bool` properties, which is precisely why
+     * "they are already cells" does not apply and the representation has to
+     * change.
+     *
+     * ⚠ The property must be one machine word. A `#[TypeDef]`-narrowed slot
+     * cannot hold a cell, so this refuses loudly instead of silently writing a
+     * tagged word into a narrower field.
+     */
+    private function scanRefCellProps(Module $module): void
+    {
+        $found = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $this->findRefCellProps($fn->body, $found);
+        }
+        foreach ($found as $key => $unused) {
+            $cut = \strpos($key, '::');
+            if ($cut === false || $cut < 0) { continue; }
+            $cls = \substr($key, 0, $cut);
+            $prop = \substr($key, $cut + 2);
+            $cd = $module->classes[$cls] ?? null;
+            if ($cd === null) { continue; }
+            if (!isset($cd->propertyTypes[$prop])) { continue; }
+            if ($cd->propertyWidth($prop) !== 8) {
+                throw new \RuntimeException(
+                    'unsupported: cannot take a storable reference to ' . $cls . '::$' . $prop
+                    . ' — the slot is ' . (string)$cd->propertyWidth($prop) . ' bytes and a '
+                    . 'reference needs a full word to hold its cell'
+                );
+            }
+            $cd->propertyTypes[$prop] = Type::cell();
+        }
+    }
+
+    /**
+     * `Class::prop` keys for every property a {@see \Compile\Mir\RefCell_}
+     * points at.
+     *
+     * ⚠ The child comes from {@see \Compile\Mir\Walk::children}, never from a
+     * narrowing helper: this file is a TRAIT, and the `as…(Node): X` idiom does
+     * not resolve field offsets there. Three separate symptoms were traced back
+     * to that before it was understood — see the note in
+     * EmitLlvmLocals::preallocateLocals.
+     *
+     * @param array<string, bool> $out
+     */
+    private function findRefCellProps(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $kids = Walk::children($n);
+            $lv = $kids[0];
+            if ($lv->kind === Node::KIND_PROPERTY_ACCESS) {
+                $cls = $lv->object->type->class ?? null;
+                if ($cls !== null && $cls !== '') { $out[$cls . '::' . $lv->property] = true; }
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) { $this->findRefCellProps($c, $out); }
+    }
+
     private function scanCellElemProps(Module $module): void
     {
         $this->cellElemPropsFound = [];

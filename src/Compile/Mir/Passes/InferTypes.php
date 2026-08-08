@@ -402,6 +402,12 @@ final class InferTypes implements Pass
         // keeps it off. symfony's TableCell has both.
         $this->scanCellElemProps($module);
         $this->scanPropElementReturns($module);
+        // BEFORE the first inference walk: a property a `&` points at from a
+        // storing position is a CELL for its whole lifetime, and every read of
+        // it in that walk has to already agree. Same one-slot-one-representation
+        // rule the local promotion follows, and the same reason it is computed
+        // up front rather than forced afterwards.
+        $this->scanRefCellProps($module);
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
         }

@@ -4433,20 +4433,31 @@ final class LowerFromAst implements Pass
             // is written back through, so a copy loses every write.
             if ($el->byRef) {
                 $src = $el->value;
-                if (!\Compile\Debug::$refCells || $src->kind !== 'Variable') {
+                $sk = $src->kind;
+                // A STATIC property is deliberately NOT here yet. Its address is
+                // fine — `$r = &C::$s` has worked since the static-prop arm of
+                // lowerRefAssign — but a STORABLE reference also needs the slot
+                // RETYPED to a cell, and {@see \Compile\Mir\Passes\InferScans::
+                // scanRefCellProps} only promotes an instance property. Enabled
+                // without that, `[&Reg::$name]` compiled, ran, and printed a
+                // denormal: the global kept a raw word while the element decoded
+                // by tag. Refusing is the honest answer until the promotion
+                // covers it.
+                $ok = \Compile\Debug::$refCells
+                    && ($sk === 'Variable' || $sk === 'PropertyAccess');
+                if (!$ok) {
                     throw new \RuntimeException(
-                        'unsupported: an array literal can only bind a plain VARIABLE by '
-                        . 'reference so far (`[&$a, …]`). This element would receive a copy, '
-                        . 'not an alias, so every write through it would be lost.'
+                        'unsupported: an array literal can bind a VARIABLE or a PROPERTY by '
+                        . 'reference (`[&$a, &$this->p, …]`), and nothing else yet. This '
+                        . 'element would receive a copy, not an alias, so every write '
+                        . 'through it would be lost.'
                         . ' at ' . $this->spanWhere($expr->span)
                     );
                 }
+                $lv = $this->lowerExpr($src);
                 $this->module->hasRefCells = true;
                 $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
-                $elems[] = new ArrayElement_(
-                    $k,
-                    new \Compile\Mir\RefCell_($this->lowerExpr($src), Type::cell())
-                );
+                $elems[] = new ArrayElement_($k, new \Compile\Mir\RefCell_($lv, Type::cell()));
                 continue;
             }
             $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
