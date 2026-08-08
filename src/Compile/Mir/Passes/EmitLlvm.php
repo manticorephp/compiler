@@ -527,6 +527,15 @@ final class EmitLlvm implements EmitVisitor
                 \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
             }
             $functionBodies .= $body;
+            // This function's MIR is spent: its text is in $functionBodies and
+            // nothing below reads a body again — not the preamble, not
+            // HoistAllocas or PruneIr (both run on the TEXT), not the driver,
+            // which only counts the functions. Dropping it here is what keeps
+            // the whole MIR from standing alongside the whole IR text; the MIR
+            // is the retention term (a `dump-mir` of a 510 KB input peaks at
+            // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
+            // nodes). An empty Block, not null: the field is typed.
+            $fn->body = new Block([], Type::void());
         }
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
