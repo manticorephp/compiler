@@ -4417,27 +4417,37 @@ final class LowerFromAst implements Pass
     {
         $elems = [];
         foreach ($expr->elements as $el) {
-            // `[&$a[$k], $v]` PARSES now, but an element cannot alias. A
-            // reference here is a property of the SLOT, and the array runtime has
-            // nowhere to record one: ARRAY_REPR_* and ARRAY_ELEM_HINT_* are
-            // whole-array flags, and RefAddr_ binds a LOCAL to a slot address,
-            // not a slot to a source. Building the literal by value would compile
-            // and run and be silently wrong — symfony/polyfill-deepclone's
+            // `[&$a, …]` — the element IS a reference. It lowers to a RefCell_,
+            // whose value is a cell tagged REF pointing at the reference's box;
+            // the array then holds a self-describing reference rather than a
+            // copy. See docs/design/reference-cells.md.
+            //
+            // What is NOT yet covered still REFUSES, and refuses by naming its
+            // site. Lowering sees one statement list flattened across every file
+            // of the build, so a refusal that says only what is unsupported
+            // leaves the reader grepping a whole vendor tree for a construct
+            // that spans lines — which is exactly how long it took to find the
+            // second one of these. Building it by value instead would compile,
+            // run, and be silently wrong: symfony/polyfill-deepclone's
             // `$refsPool[] = [&$refs[$k], $value, &$value]` is an alias pool that
-            // is written back through, so a copy loses every write. A loud stop
-            // beats a wrong answer, exactly as for `fn &()`.
+            // is written back through, so a copy loses every write.
             if ($el->byRef) {
-                // Name the SITE. Lowering sees one statement list flattened
-                // across every file of the build, so a refusal that says only
-                // what is unsupported leaves the reader grepping a whole vendor
-                // tree for a construct that spans lines — which is exactly how
-                // long it took to find the second one of these.
-                throw new \RuntimeException(
-                    'unsupported: an array literal cannot bind an element by reference '
-                    . '(`[&$a[$k], …]`). The element would receive a copy, not an alias, '
-                    . 'so every write through it would be lost.'
-                    . ' at ' . $this->spanWhere($expr->span)
+                $src = $el->value;
+                if (!\Compile\Debug::$refCells || $src->kind !== 'Variable') {
+                    throw new \RuntimeException(
+                        'unsupported: an array literal can only bind a plain VARIABLE by '
+                        . 'reference so far (`[&$a, …]`). This element would receive a copy, '
+                        . 'not an alias, so every write through it would be lost.'
+                        . ' at ' . $this->spanWhere($expr->span)
+                    );
+                }
+                $this->module->hasRefCells = true;
+                $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
+                $elems[] = new ArrayElement_(
+                    $k,
+                    new \Compile\Mir\RefCell_($this->lowerExpr($src), Type::cell())
                 );
+                continue;
             }
             $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
             if ($el->value->kind === 'Spread') {

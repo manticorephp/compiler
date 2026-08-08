@@ -48,6 +48,7 @@ use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
 use Compile\Mir\NewObj;
+use Compile\Mir\RefCell_;
 use Compile\Mir\Node;
 use Compile\Mir\Not_;
 use Compile\Mir\Pass;
@@ -144,6 +145,33 @@ trait InferNodes
         return true;
     }
 
+    /**
+     * Locals a {@see \Compile\Mir\RefCell_} points at, in this body.
+     *
+     * Syntactic, so no fixpoint: unlike {@see InferScans::scanByRefElemWiden},
+     * which has to chase what a CALLEE appends, "this body takes a storable
+     * reference to this name" is visible where it is written.
+     *
+     * @param array<string, bool> $out
+     */
+    private function collectRefCellLocals(Node $n, array &$out): void
+    {
+        // ⚠ Via Walk, never a narrowing helper: this file is a TRAIT, and there
+        // the `as…(Node): RefCell_` idiom does not resolve the field offset —
+        // see EmitLlvmLocals::preallocateLocals. Silent, too: the collector
+        // simply found nothing, so the retype below never fired and `$a` stayed
+        // `int`, which is exactly one wrong line in the witness.
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $kids = \Compile\Mir\Walk::children($n);
+            $lv = $kids[0];
+            if ($lv->kind === Node::KIND_LOAD_LOCAL) { $out[$lv->name] = true; }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $this->collectRefCellLocals($c, $out);
+        }
+    }
+
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
@@ -153,6 +181,12 @@ trait InferNodes
         $this->localTypes = [];
         $this->kindAliasOf = [];
         $this->currentParamTypes = [];
+        // Computed BEFORE the walk, not after it: a store re-derives its local's
+        // type as it is visited, so a force applied at the end of the pass is
+        // undone by `$a = 1` on the next round and the fixpoint never carries it.
+        // The two readers below consult this set directly.
+        $this->refCellLocalsCur = [];
+        $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
@@ -303,6 +337,21 @@ trait InferNodes
             } else {
                 $this->localTypes[$name] = Type::vec(Type::cell());
             }
+        }
+        // A local a `&` points at from a STORING position is a CELL for its whole
+        // lifetime — the tree's one-slot-one-representation rule, applied to the
+        // one construct that can hand a slot to a holder that reads it by TAG.
+        //
+        // Measured, not assumed: with the slot left `int`, `$a = 1; $refs = [&$a];
+        // echo $refs[0];` printed 4.94E-324 — the bit pattern of 1, read as a
+        // double, because the box held a RAW word while the array element decoded
+        // by tag. That is the epic's own disease (a value crossing a cell channel
+        // without being self-describing), and like every other instance of it the
+        // fix belongs at the PRODUCER. Retyping here makes `$a = 1` NaN-box
+        // through machinery that already exists, and every reader of `$a` — the
+        // reference's or its own — then agrees.
+        foreach ($this->refCellLocalsCur as $name => $unused) {
+            $this->localTypes[$name] = Type::cell();
         }
         // Nested-subscript mixed array: a local whose element is an inner array
         // built from an empty `[]` (→ vec[unknown]) that then receives a nested
@@ -554,6 +603,7 @@ trait InferNodes
         if ($kind === Node::KIND_REF_ALIAS) { return $this->inferRefAlias($node); }
         if ($kind === Node::KIND_REF_BIND) { return $this->inferRefBind($node); }
         if ($kind === Node::KIND_REF_ADDR) { return $this->inferRefAddr($node); }
+        if ($kind === Node::KIND_REF_CELL) { return $this->inferRefCell($node); }
         if ($kind === Node::KIND_THROW) { return $this->inferThrow($node); }
         if ($kind === Node::KIND_TRY_CATCH) { return $this->inferTryCatch($node); }
         if ($kind === Node::KIND_TERNARY)     { return $this->inferTernary($node); }
@@ -628,6 +678,13 @@ trait InferNodes
     private function inferLoadLocal(LoadLocal $node): Type
     {
         $name = $node->name;
+        // A ref-taken slot is a CELL wherever it is read, including through the
+        // reference. Answered here rather than left to localTypes because a
+        // store re-derives that map mid-walk.
+        if (isset($this->refCellLocalsCur[$name])) {
+            $node->type = Type::cell();
+            return $node->type;
+        }
         if (isset($this->localTypes[$name])) {
             $node->type = $this->localTypes[$name];
         }
@@ -653,6 +710,15 @@ trait InferNodes
     private function inferStoreLocal(StoreLocal $node): Type
     {
         $valueType = $this->inferNode($node->value);
+        // The slot is a CELL for its whole lifetime — the store does not get to
+        // narrow it back to what this particular value happens to be. The value
+        // is still inferred above, because the emitter needs its type to know
+        // WHAT to box.
+        if (isset($this->refCellLocalsCur[$node->name])) {
+            $this->localTypes[$node->name] = Type::cell();
+            $node->type = Type::cell();
+            return $node->type;
+        }
         // `__main` binds every `global $x` name to the `@g_x` cell WITHOUT a
         // StaticLocalDecl_, so the cross-scope seeding in inferStaticLocalDecl
         // never runs here. Left alone, the top-level `$g = []` retypes the
@@ -912,6 +978,22 @@ trait InferNodes
         $t = $this->inferNode($node->lvalue);
         $this->localTypes[$node->target] = $t;
         return Type::void();
+    }
+
+    /**
+     * A reference cell is a CELL, whatever its target's type is. That is the
+     * point of it: the value became self-describing so it could be stored, and
+     * the element channel that receives it must widen to match — a `[&$a, &$b]`
+     * of two ints is NOT a `vec[int]`.
+     *
+     * The lvalue is still inferred, for its own side effects on the local types.
+     */
+    private function inferRefCell(\Compile\Mir\RefCell_ $node): Type
+    {
+        // ⚠ Via Walk — trait, see collectRefCellLocals.
+        $kids = \Compile\Mir\Walk::children($node);
+        $this->inferNode($kids[0]);
+        return Type::cell();
     }
 
     private function inferRefAlias(RefAlias_ $n): Type

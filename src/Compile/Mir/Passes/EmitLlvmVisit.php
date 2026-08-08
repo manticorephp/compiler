@@ -58,6 +58,7 @@ use Compile\Mir\Goto_;
 use Compile\Mir\Label_;
 use Compile\Mir\RefBind_;
 use Compile\Mir\RefAddr_;
+use Compile\Mir\RefCell_;
 use Compile\Mir\Throw_;
 use Compile\Mir\TryCatch_;
 use Compile\Mir\MirCatch;
@@ -300,6 +301,11 @@ trait EmitLlvmVisit
     public function visitRefAddr(RefAddr_ $n): string
     {
         return $this->emitRefAddr($n);
+    }
+
+    public function visitRefCell(RefCell_ $n): string
+    {
+        return $this->emitRefCell($n);
     }
 
     public function visitGoto(Goto_ $n): string

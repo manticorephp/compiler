@@ -675,6 +675,28 @@ final class RefAddr_ extends Node
     }
 }
 
+/** `&<lvalue>` in a position that STORES the result — an array-literal element
+ *  today. Unlike {@see RefAddr_}, which binds a named local to an address and is
+ *  a statement, this is an EXPRESSION: it evaluates to a NaN-boxed cell tagged
+ *  REF whose payload is the address of the reference's one-word box.
+ *
+ *  Its lvalue is the same shape {@see \Compile\Mir\Passes\EmitLlvmLocals::
+ *  byRefAddrOf} already answers, so the create seam is that address plus a tag.
+ *  What makes the address a BOX rather than a bare slot is the promotion — see
+ *  {@see \Compile\Mir\Module::$hasRefCells} and docs/design/reference-cells.md. */
+final class RefCell_ extends Node
+{
+    public function __construct(public Node $refSource, Type $type)
+    {
+        parent::__construct(Node::KIND_REF_CELL, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitRefCell($this);
+    }
+}
+
 /** `goto L;` — an unconditional branch to the block emitted for label `L`. */
 final class Goto_ extends Node
 {

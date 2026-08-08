@@ -5,6 +5,7 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\AllocationKind;
 use Compile\Mir\MemoryMode;
 use Compile\Mir\Module;
+use Compile\Mir\RefCell_;
 use Compile\Mir\Node;
 use Compile\Mir\Pass;
 use Compile\Mir\Walk;
@@ -24,6 +25,9 @@ use Compile\Mir\Walk;
  */
 final class ApplyMemoryMode implements Pass
 {
+    /** Narrow to the concrete class so a field read uses ITS offsets. */
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
+
     public const NAME = 'apply-memory-mode';
 
     private string $mode;
@@ -154,6 +158,15 @@ final class ApplyMemoryMode implements Pass
             }
         } elseif ($k === Node::KIND_REF_ADDR) {
             $r = $this->rootLocalName($n->lvalue);
+            if ($r !== null) { $out[$r] = true; }
+        } elseif ($k === Node::KIND_REF_CELL) {
+            // A separate arm, not an `||` with the one above: `lvalue` is this
+            // class's first field and RefAddr_'s second, so one shared read
+            // would take the wrong offset for whichever of the two it did not
+            // infer. A write THROUGH the reference mutates this root in place.
+            // ⚠ Through a typed LOCAL — see the same note in EmitLlvmMemory.
+            $rc = self::asRefCell($n);
+            $r = $this->rootLocalName($rc->refSource);
             if ($r !== null) { $out[$r] = true; }
         } elseif ($k === Node::KIND_REF_ALIAS) {
             $out[$n->source] = true;

@@ -2149,7 +2149,7 @@ trait InferScans
                 $bad[$n->name] = true;
             }
         } elseif ($k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_ALIAS
-                  || $k === Node::KIND_REF_BIND) {
+                  || $k === Node::KIND_REF_BIND || $k === Node::KIND_REF_CELL) {
             $this->markLocalNamesIn($n, $bad);
         } elseif ($k === Node::KIND_CALL || $k === Node::KIND_STATIC_CALL
                   || $k === Node::KIND_METHOD_CALL) {

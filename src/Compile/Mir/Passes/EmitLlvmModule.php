@@ -945,6 +945,12 @@ trait EmitLlvmModule
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; }
         $body .= $this->preallocateLocals($fn->body);
         $body .= $this->initRcObjSlots($fn->body, $paramNames);
+        // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
+        // code is a function like any other to the language and unlike any other
+        // to this file, and a prologue step added to only one of the two is
+        // invisible until a program happens to use the feature at top level —
+        // which is exactly how the ref-cell box came to be missing from `__main`
+        // while every function had it.
         // Heap-box locals captured BY-REFERENCE by a closure: an escaping
         // closure keeps the box alive after this frame returns, so the box
         // can't be a stack slot. The box is a 1-word heap cell; the local
@@ -967,6 +973,7 @@ trait EmitLlvmModule
             $body .= '  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n";
             $this->locals->refLocals[$bname] = true;
         }
+        $body .= $this->emitRefCellBoxes($fn->body, $paramNames);
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
         // header). The caller pushed a bare method-name placeholder because a
@@ -982,6 +989,61 @@ trait EmitLlvmModule
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
         $body .= '  ret i64 ' . $this->implicitReturnValue() . "\n";
         return $header . $body . "}\n\n";
+    }
+
+    /**
+     * Heap-box every local a `&` POINTS AT from a storing position
+     * (`$refs = [&$a]`), and make it a refLocal.
+     *
+     * Same box and same contract as the `use (&$x)` capture above, for the same
+     * reason: the reference can outlive this frame, so the storage cannot be the
+     * stack slot. Because the contract is `refLocals` — "the slot holds an
+     * ADDRESS" — the load/store deref, {@see EmitLlvmLocals::byRefAddrOf}'s
+     * forwarding arm and the three write-through plants all already speak it. A
+     * promoted local therefore needs no new read or write path at all.
+     *
+     * The value that was in the slot moves INTO the box: the promotion has to be
+     * invisible to the program, so `$a = 1; $refs = [&$a];` still sees 1 through
+     * the reference.
+     *
+     * Bounded leak, exactly like the capture box: one word per ref-taken local
+     * per call. A reference cell reaches its box only through the cell or the
+     * slot, never as a bare pointer, so nothing reads a header it does not have.
+     *
+     * @param array<string, bool> $paramNames
+     */
+    private function emitRefCellBoxes(Node $body, array $paramNames): string
+    {
+        $this->locals->refCellTargets = [];
+        $this->locals->collectRefCellTargets($body);
+        $out = '';
+        foreach ($this->locals->refCellTargets as $rname => $_) {
+            if (isset($paramNames[$rname])) { continue; }
+            if (!isset($this->locals->slots[$rname])) { continue; }
+            if (isset($this->locals->refLocals[$rname])) { continue; }
+            $rbox = $this->ssa->allocReg();
+            $out .= '  ' . $rbox . " = call ptr @__mir_alloc(i64 8)\n";
+            // NULL, not the slot's current word. The prologue runs before the
+            // program's first store, so that word is whatever the frame held —
+            // and the box is a CELL channel now ({@see \Compile\Mir\Passes\
+            // InferNodes::collectRefCellLocals} retypes the slot), so it has to
+            // start self-describing. php agrees: a variable that exists only
+            // because a reference was taken to it reads null.
+            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
+                  . ', ptr ' . $rbox . "\n";
+            $rbi = $this->ssa->allocReg();
+            $out .= '  ' . $rbi . ' = ptrtoint ptr ' . $rbox . " to i64\n";
+            $out .= '  store i64 ' . $rbi . ', ptr ' . $this->locals->slots[$rname] . "\n";
+            $this->locals->refLocals[$rname] = true;
+            // What the slot READS is what a store through it must WRITE. This is
+            // the same fact `&C::$s` needed ({@see EmitLlvmObjects::emitRefAddr})
+            // and the same field that carries it: the forward-cellify plant in
+            // {@see EmitLlvmLocals::emitStoreLocal} keys off refParamTypes, so
+            // saying CELL here is what makes `$a = 1` NaN-box before it goes
+            // through the address instead of landing as a raw word.
+            $this->locals->refParamTypes[$rname] = \Compile\Mir\Type::cell();
+        }
+        return $out;
     }
 
     /** The @__prof array + bump + atexit dump (preamble, profile mode only). */
@@ -1248,6 +1310,10 @@ trait EmitLlvmModule
         $header .= "  store ptr %argv, ptr @__manticore_argv\n";
         $body = $this->preallocateLocals($fn->body);
         $body .= $this->initRcObjSlots($fn->body);
+        // Top-level code takes references too — `$refs = [&$a];` at file scope
+        // is the shape the corpus actually hits first. See the note at the
+        // matching line in the ordinary function emitter.
+        $body .= $this->emitRefCellBoxes($fn->body, []);
         // A global cell whose default is not a link-time constant (an array
         // literal on a static property) is built HERE, before any top-level
         // statement, so the first read/append sees a real array and not 0.

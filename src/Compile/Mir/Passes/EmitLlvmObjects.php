@@ -2143,6 +2143,48 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `&<lvalue>` as a VALUE — a cell tagged {@see \Compile\MemoryAbi::
+     * CELL_TAG_REF} whose payload is the address of the reference's box.
+     *
+     * The create seam is small because the address is not the hard part and
+     * never was ({@see emitRefAddr}'s own lesson): {@see byRefAddrOf} already
+     * answers it for a local, a property, a static property and an element, and
+     * a promoted local's slot already holds its BOX address rather than its
+     * value, so the same arm yields the box. All this adds is the tag.
+     *
+     * A source that is not addressable is REFUSED rather than degraded. A silent
+     * value copy is what `[&$a, &$b]` did before it was made an error, and every
+     * write through the reference would be lost — see docs/design/
+     * reference-cells.md and finding `parser-ref-in-array-literal`.
+     */
+    private function emitRefCell(\Compile\Mir\RefCell_ $n): string
+    {
+        // ⚠ Via Walk, not `$n->refSource`: this file is a TRAIT, and a field read
+        // narrowed inside a trait does not resolve to the right offset natively.
+        // See the note in EmitLlvmLocals::preallocateLocals.
+        $rcKids = \Compile\Mir\Walk::children($n);
+        $addrIr = $this->byRefAddrOf($rcKids[0]);
+        if ($addrIr === null) {
+            throw new \RuntimeException(
+                'unsupported: cannot take a storable reference to this expression '
+                . '— it has no address, so the reference would be a copy and every '
+                . 'write through it would be lost'
+            );
+        }
+        $out = $addrIr;
+        $this->rt->needsRefCells = true;
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ', '
+              . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = or i64 ' . $m . ', '
+              . (string)\Compile\MemoryAbi::CELL_REF_TAG_BITS . "\n";
+        $this->lastValue = $c;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** Bag byte offset for an object node's class (stdClass default). */
     private function bagOffsetOf(Node $obj): int
     {

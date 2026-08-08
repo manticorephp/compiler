@@ -948,6 +948,14 @@ final class Dump implements EmitVisitor
         return $chunk . $this->indent . 'ref_addr ' . $n->target . ' = &' . $this->lastSlot . "\n";
     }
 
+    public function visitRefCell(RefCell_ $n): string
+    {
+        $chunk = $n->refSource->accept($this);
+        $src = $this->lastSlot;
+        $slot = $this->allocSlot();
+        return $chunk . $this->indent . $slot . ' = ref_cell &' . $src . "\n";
+    }
+
     public function visitNewDynObj(NewDynObj $n): string
     {
         $cChunk = $n->classExpr->accept($this);

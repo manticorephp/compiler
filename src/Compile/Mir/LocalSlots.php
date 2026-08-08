@@ -41,6 +41,34 @@ final class LocalSlots
      *  of an alloca inside a loop.
      *  Declared LAST — a field added mid-struct shifts every later offset. */
     public array $aliasLocals = [];
+    /** @var array<string, true> locals a `&` in a STORING position points at —
+     *  a `[&$a]` element today. Heap-boxed on entry exactly like
+     *  {@see $byRefCaptured}, for the same reason: the reference outlives the
+     *  frame's stack slot. Appended LAST for the same offset reason as above. */
+    public array $refCellTargets = [];
+
+    /**
+     * Locals a reference CELL points at ({@see \Compile\Mir\RefCell_}). Only a
+     * plain local is collected here — a property / element / static-prop source
+     * is addressed through its container and needs no per-frame box.
+     */
+    /** Narrow to the concrete class so a field read uses ITS offsets. */
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
+
+    public function collectRefCellTargets(Node $n): void
+    {
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $rc = self::asRefCell($n);
+            $lv = $rc->refSource;
+            if ($lv->kind === Node::KIND_LOAD_LOCAL) {
+                $this->refCellTargets[$lv->name] = true;
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectRefCellTargets($c);
+        }
+    }
 
     public function collectByRefCaptured(Node $n): void
     {

@@ -139,6 +139,7 @@ final class NodeClone
         if ($k === Node::KIND_THROW)  { $x = self::asThrow($n);  return new Throw_(self::node($x->value), $n->type); }
         if ($k === Node::KIND_REF_BIND) { $x = self::asRefBind($n); return new RefBind_($x->target, self::node($x->call), $n->type); }
         if ($k === Node::KIND_REF_ADDR) { $x = self::asRefAddr($n); return new RefAddr_($x->target, self::node($x->lvalue), $n->type); }
+        if ($k === Node::KIND_REF_CELL) { $x = self::asRefCell($n); return new RefCell_(self::node($x->refSource), $n->type); }
         if ($k === Node::KIND_STORE_STATIC_PROP) { $x = self::asStoreStaticProp($n); return new StoreStaticProp_($x->global, self::node($x->value), $n->type, $x->declared); }
         if ($k === Node::KIND_ISSET)  { $x = self::asIsset($n);  return new Isset_(self::nodes($x->targets), $n->type); }
         if ($k === Node::KIND_UNSET)  { $x = self::asUnset($n);  return new Unset_(self::nodes($x->targets), $n->type); }
@@ -283,6 +284,7 @@ final class NodeClone
     private static function asThrow(Node $n): Throw_ { return $n; }
     private static function asRefBind(Node $n): RefBind_ { return $n; }
     private static function asRefAddr(Node $n): RefAddr_ { return $n; }
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
     private static function asStoreStaticProp(Node $n): StoreStaticProp_ { return $n; }
     private static function asIsset(Node $n): Isset_ { return $n; }
     private static function asUnset(Node $n): Unset_ { return $n; }

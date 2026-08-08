@@ -142,6 +142,10 @@ final class InferTypes implements Pass
     private array $assocValClasses = [];
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
+    /** @var array<string, bool> locals a RefCell_ points at, in the function
+     *  currently being inferred. A CELL for their whole lifetime. */
+    private array $refCellLocalsCur = [];
+
     private array $forcedCellElemLocals = [];
     /** fn name => [local name => true]: locals handed BY-REF to a callee that
      *  appends a FOREIGN element type. Kept apart from {@see $forcedCellElemLocals}

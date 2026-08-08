@@ -747,6 +747,18 @@ trait EmitLlvmArrays
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // A REFERENCE element yields what it refers to. This is not the decode
+        // the ⚠ note below refuses: that one would hand a consumer a CELL where
+        // it was promised a raw word, inventing a representation. A ref deref
+        // only ever REMOVES one — `$refs[0]` in php IS the referenced value, and
+        // there is no rvalue spelling for the binding itself.
+        if ($this->rt->needsRefCells) {
+            $this->rt->needsTagged = true;
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $reg . ")\n";
+            $reg = $d;
+            $this->lastValue = $reg;
+        }
         // ⚠ The element is NOT decoded into a CELL by the array's hint here. Two
         // consumers proved a plain subscript cannot be: an UNKNOWN result is
         // deref'd raw (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }`
@@ -1100,6 +1112,58 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    /**
+     * Write THROUGH a reference already sitting in the element slot.
+     *
+     * `$refs = [&$a]; $refs[0] = 10;` assigns to `$a` — the element holds a
+     * binding, and a store to it is a store to what it binds. Overwriting the
+     * cell instead loses the reference silently, which is the class of answer
+     * this epic exists to remove.
+     *
+     * Branch-free on purpose. The alternative is a two-way split with a `phi`
+     * for the array pointer, in EVERY key arm; this keeps the four arms the
+     * straight-line code {@see emitStoreElemValue} just finished making them.
+     *
+     *  - the value handed to the set call becomes the ORIGINAL cell when the
+     *    slot holds a reference, so the binding survives the store;
+     *  - the write lands in the box when it is a reference and in a scratch
+     *    word when it is not. The dead store costs one word and is what buys
+     *    the absence of a branch.
+     *
+     * `$cur` is the element as it is NOW (the caller emits the matching
+     * `__mir_array_get_*`). Leaves the value to store in {@see elemValReg}.
+     */
+    private function emitElemWriteThrough(string $cur, string $val): string
+    {
+        $istag = $this->ssa->allocReg();
+        $sh = $this->ssa->allocReg();
+        $nib = $this->ssa->allocReg();
+        $isr = $this->ssa->allocReg();
+        $both = $this->ssa->allocReg();
+        $mask = $this->ssa->allocReg();
+        $boxp = $this->ssa->allocReg();
+        $scratch = $this->ssa->allocReg();
+        $dst = $this->ssa->allocReg();
+        $keep = $this->ssa->allocReg();
+        $out  = '  ' . $scratch . " = alloca i64\n";
+        $out .= '  ' . $istag . ' = icmp ugt i64 ' . $cur . ", -4503599627370496\n";
+        $out .= '  ' . $sh . ' = lshr i64 ' . $cur . ", 48\n";
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $out .= '  ' . $isr . ' = icmp eq i64 ' . $nib . ', '
+              . (string)\Compile\MemoryAbi::CELL_TAG_REF . "\n";
+        $out .= '  ' . $both . ' = and i1 ' . $istag . ', ' . $isr . "\n";
+        $out .= '  ' . $mask . ' = and i64 ' . $cur . ', '
+              . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= '  ' . $boxp . ' = inttoptr i64 ' . $mask . " to ptr\n";
+        $out .= '  ' . $dst . ' = select i1 ' . $both . ', ptr ' . $boxp
+              . ', ptr ' . $scratch . "\n";
+        $out .= '  store i64 ' . $val . ', ptr ' . $dst . "\n";
+        $out .= '  ' . $keep . ' = select i1 ' . $both . ', i64 ' . $cur
+              . ', i64 ' . $val . "\n";
+        $this->elemValReg = $keep;
+        return $out;
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -1153,6 +1217,12 @@ trait EmitLlvmArrays
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
+            if ($this->rt->needsRefCells) {
+                $curE = $this->ssa->allocReg();
+                $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
+                $out .= $this->emitElemWriteThrough($curE, $val);
+                $val = $this->elemValReg;
+            }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
             // set_cell's string arm RETAINS the stored key exactly like set_str
             // below — release our own +1 on a FRESH key cell (a mixed-returning
@@ -1174,6 +1244,12 @@ trait EmitLlvmArrays
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
+            if ($this->rt->needsRefCells) {
+                $curE = $this->ssa->allocReg();
+                $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
+                $out .= $this->emitElemWriteThrough($curE, $val);
+                $val = $this->elemValReg;
+            }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
             // set_str RETAINS the stored key (append) — release our own +1 on a
             // fresh key temp (`$m["k".$i]`), or it leaks (borrowed locals/literals
@@ -1186,6 +1262,12 @@ trait EmitLlvmArrays
             $idx = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
+            if ($this->rt->needsRefCells) {
+                $curE = $this->ssa->allocReg();
+                $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
+                $out .= $this->emitElemWriteThrough($curE, $val);
+                $val = $this->elemValReg;
+            }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
         }
         // Stamp the element repr on the persisted buffer ($next may be a

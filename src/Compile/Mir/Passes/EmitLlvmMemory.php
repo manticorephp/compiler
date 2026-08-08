@@ -274,6 +274,13 @@ trait EmitLlvmMemory
         if ($n->kind === Node::KIND_REF_ADDR) {
             $this->markVecElemBase($n->lvalue);
         }
+        // Separate arm — `lvalue` is at a different offset on RefCell_ than on
+        // RefAddr_, so the two cannot share one field read.
+        // No REF_CELL arm: a reference cell's source is a plain LOCAL today, and
+        // {@see markVecElemBase} does nothing for anything but an element. The
+        // arm belongs with the element-source instalment that gives it work to
+        // do — writing it early bought nothing and cost a field read on a
+        // Node-typed receiver, which is how it faulted.
         if ($n->kind === Node::KIND_CALL) {
             foreach ($n->args as $a) { $this->markVecElemBase($a); }
         }

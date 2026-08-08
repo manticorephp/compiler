@@ -128,6 +128,42 @@ final class MemoryAbi
      */
     public const CLOSURE_TAG_MAGIC = 0x7E66000000000007;
 
+    /**
+     * Sentinel at a REFERENCE BOX's `data-8`. A PHP reference is two or more
+     * slots sharing one storage; the storage is this box, and every holder keeps
+     * a cell tagged {@see CELL_TAG_REF} whose payload is `data`.
+     *
+     * The box mimics the obj/vec shape — `[magic@-8, value@0, rc@+8]` — so the
+     * rc helpers find the count where they already look. It does NOT carry
+     * {@see RC_TAG_MAGIC}, because that would also claim `value@0` is a
+     * `class_id`: the release path would hand the referenced VALUE to
+     * drop_dispatch as a class descriptor. Its own magic buys the rc layout
+     * without the object claim, at the cost of one arm in retain/release.
+     *
+     * Never reached as a bare pointer — a box is only ever addressed through a
+     * REF-tagged cell, or through the slot of a promoted local, which holds
+     * `data` and is read by the existing by-ref deref.
+     */
+    public const REF_TAG_MAGIC = 0x7E66000000000008;
+
+    /** The box's value word, relative to the data ptr the cell payload holds. */
+    public const REF_VALUE_OFFSET = 0;
+
+    /**
+     * Cell tag nibble (bits 48-51) for a reference. The others are INT=1,
+     * BOOL=2, NULL=3, PTR=4, BIGINT=5, FLOAT=6 (synthetic — any word outside the
+     * tagged range), ARRAY=7, OBJECT=8; see {@see \Compile\Mir\Passes\
+     * EmitLlvmExpr::cellTagIr}. 9 is the first free one.
+     */
+    public const CELL_TAG_REF = 9;
+
+    /** A cell's 48-bit payload field, `0xFFFFFFFFFFFF`. */
+    public const CELL_PAYLOAD_MASK = 281474976710655;
+
+    /** `(CELL_TAG_REF << 48) | 0xFFF0000000000000` — the header of a REF cell.
+     *  Cross-check: the same formula at tag 3 gives {@see CELL_NULL}. */
+    public const CELL_REF_TAG_BITS = -1970324836974592;
+
     /** Per-closure retain fn, at `env - 24` (the string's unused `cap`). */
     public const CLOSURE_RETAIN_OFFSET = -24;
 
