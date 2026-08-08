@@ -442,6 +442,33 @@ trait EmitLlvmLocals
             $this->lastValueType = 'i64';
             return $out;
         }
+        // The MIRROR of the box-back above: a store NODE typed a concrete SCALAR
+        // whose VALUE is a cell. Same impossible-by-default combo, so the same
+        // precise signal — planted by InferNodes::inferStoreLocal for a slot a
+        // by-ref callee owns the representation of (`int &$pos`). Unbox into the
+        // slot, or the callee writes a raw word where the reader expects a tag.
+        if ($this->isCellScalarParam($sl->type)
+            && $sl->value->type->kind === Type::KIND_CELL
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && isset($this->locals->slots[$sl->name])) {
+            $out = $this->emitNode($sl->value);
+            $out .= $this->unboxCellToType($sl->type);
+            // A float unboxes to a `double`; the slot is an i64, so put the bits
+            // back the way the float-slot plant below does.
+            if ($this->lastValueType === 'double') {
+                $bits = $this->ssa->allocReg();
+                $out .= '  ' . $bits . ' = bitcast double ' . $this->lastValue . " to i64\n";
+                $this->lastValue = $bits;
+                $this->lastValueType = 'i64';
+            }
+            $out .= $this->coerceToI64();
+            $raw = $this->lastValue;
+            $out .= '  store i64 ' . $raw . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $this->lastValue = $raw;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // Float-slot local storing an int/bool value (`$s = 0` init before a
         // float accumulator): convert numerically (sitofp), then bit-store into
         // the i64 slot — else the integer bits land in a slot read as a double.

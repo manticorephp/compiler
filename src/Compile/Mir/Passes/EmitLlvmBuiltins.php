@@ -1685,7 +1685,13 @@ trait EmitLlvmBuiltins
         $out = $this->emitPtrArg($args[0]);
         $s = $this->lastValue;
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToI64();
+        // The OFFSET, so a tagged index has to leave its box — same rule as the
+        // undemoted `$s[$i]` ({@see Passes\EmitLlvmArrays::emitArrayAccess}).
+        // Missing it here was invisible in every obvious way: the demotion only
+        // fires when the character is compared to one-char literals and never
+        // used AS a string, so ADDING a `. $c .` to a debug line disables the
+        // pass and the bug with it.
+        $out .= $this->coerceIntArg($args[1]);
         $i = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_str_byte_at(ptr ' . $s

@@ -585,6 +585,178 @@ scan rather than to a new mechanism. The tell that it is the same class: `mixed
   twice; only a 2-generation self-build catches it, the AOT suite passes.
 - Grepping `KIND_UNKNOWN` to find the work — it is all fall-through.
 
+## 18. What was actually wrong (2026-08-07) — §17 measured, and mostly superseded
+
+§17 was written from a re-audit, not from a run. Measured against its own driver
+on `main` `ac84a52`, two of its three premises do not hold:
+
+| §17 said | measured |
+|---|---|
+| the stdlib `.o.sig` re-erases arrays — meaning #3 is the thing to split out | the `.sig` erases **1 of 900** returns and **17 of 1747** params. `array_fill`'s is `ret:"mixed[]"` — a `vec[cell]`, correct. Splitting the type would have bought almost nothing |
+| §16's "var_dump of an ERASED bare-`array` prints int(ptr)" is still open | fixed at HEAD; matches php |
+| `array_fill` faults because its element re-erased | its element is a **cell**. The fault is in the ARITHMETIC over that cell, and in what boxes the result |
+
+The real chain, off `--keep-ir`:
+
+1. `$a[$i]` reads a cell element → `__manticore_unbox_int` → a raw i64.
+2. `arithType` typed `cell ⊕ int` **`unknown`** — its own comment saying a plain
+   mixed cell "falls through to unknown (the integer path)".
+3. `coerceArithOperand` coerces every non-float operand to i64, so the value IS
+   a raw int. The type said otherwise.
+4. Storing it into the cell array called `boxToCell(unknown)` → the probing
+   boxer, which **dereferences `[v-8]`** for an allocator magic under
+   `plausiblePtrIr` (`65535 < v < 2^48`). Every result above 65535 faulted.
+   Into a `mixed` property the same word was stored raw and read back as a
+   denormal double.
+
+**The two-boxer divergence is the finding that replaces §17.2's type split.**
+The RETURN boundary boxes an erased word with `boxLastByRepr` — a tag test, no
+dereference, `box_int` otherwise — and is correct. The element/property boundary
+uses `boxUnknownShallowIr`, which dereferences. §4 already called the return path
+"the template for the fix"; it is also the SAFE one, and the divergence is what
+turns a wrong value into a SIGSEGV.
+
+### 18.1 What landed
+
+Both halves are inference-side, per §17.4, and both re-converged the self-host.
+
+- **The integer path is total, so its result is an `int`.** Typing it so changes
+  no emitted arithmetic and stops every consumer guessing.
+- **A plain mixed cell in numeric arithmetic promotes by tag** — the numeric-cell
+  route to `__manticore_tagged_<op>`, which also promotes an int overflow to
+  float. The comment claiming this "SIGKILLs the self-build" was **stale**: two
+  generations build, and what it really needed was §18.3.
+
+Eight latent bugs surfaced, each pre-existing and each with its own root:
+
+1. A CELL-KEYED array reports `isVec()` (`isAssoc()` is string-key-only), and the
+   foreach key rode a cell only when the ELEMENT was cell/unknown — the element
+   standing in for the key. A concrete element sent string keys down the vec
+   int-key path, printing pointers.
+2. `NarrowReturns` rebuilt an array return as `isAssoc() ? assoc : vec`, dropping
+   a cell key on the way out of the function that built it.
+3. A monomorphic clone inherited the generic's ADOPTED return type; `array_sum`'s
+   `int|float` had narrowed to `int` for the erased body, so the vec[float]
+   specialization summed doubles behind an `-> int` signature. Fixed by carrying
+   the DECLARED return per function and having the adoption gate read that
+   instead of the type a previous pass wrote in place.
+4. `public static mixed $n = 0;` stored its default RAW into a cell slot — only
+   the `null` default had been boxed. Every tag consumer read it as a double.
+5. The dynamic-name call's SPREAD arm built its call by hand and passed raw
+   scalars to cell params. It survived only because the callee unboxed with
+   `unbox_int`, the identity on a raw int.
+6. `$s[$i]` never unboxed a CELL index — in EITHER emitter. The NaN bits read as
+   an i64 are a vast offset, so `__mir_str_char_at`'s out-of-range arm answered
+   `""` for every character. The second emitter is the one that mattered:
+   {@see DemoteCharLocals} rewrites a character read to a raw `__mir_str_byte_at`
+   whenever the character is only compared to one-char literals and never used
+   AS a string — so **adding a `. $c .` to a debug line disables the pass and
+   the bug with it**. A marker that printed nothing but a constant is what
+   finally kept the failure alive.
+7. `scanKeyUsedLocals` counted a STRING byte offset as an array key. See §18.3.
+8. A local handed to a by-ref param typed `int &$pos` had no pin, so the loop
+   promotion could change a slot whose representation the CALLEE owns.
+
+Note the shape of 3, 4 and 5: each is a place where a value crossed into a cell
+channel without being self-describing, and each was invisible while the consumer
+happened to unbox it with an operation that is the identity on a raw int.
+`unbox_int` is a very forgiving reader, and it hid all of them.
+
+### 18.3b The real blocker, found by merging main in (2026-08-07)
+
+The three predicates below were real and are fixed. But turning tagged
+arithmetic on and then merging `main` — which brought ~60 new suite cases —
+produced a fourth failure of a different KIND, and it is the one that matters:
+
+> **`cell` is not yet a runtime GUARANTEE.** It is a static claim that several
+> producers do not honour: they type a slot `cell` and store a RAW word into it.
+
+Tagged arithmetic is the first consumer that TRUSTS the claim — every other
+consumer either re-probes the word or treats it raw — so it fails on exactly
+those channels, and only there. Three of them, each pre-existing and each
+independently demonstrable with NO arithmetic in the program:
+
+| channel | witness |
+|---|---|
+| the `$GLOBALS['x']` view | lowered `cell`; `global $x` types the same storage from the join. Both read it RAW, so they agree by accident |
+| an UNHINTED static property READ | typed `unknown` while the STORE boxes by the declared type. Typing the read `cell` was already tried and reverted — an ARRAY rides the same slot raw (`staticPropRef`'s ⚠) |
+| the elements of an erased array | `array_combine($k, array_map('strlen', $k))` then `foreach` — the value types `cell` and arrives raw. `var_dump($len)` alone answers `float(5.4E-323)` |
+
+The integer path hides all three by being raw at BOTH ends. That is the same
+accidental agreement §18 found at the element/property boundary, one level up.
+
+So the routing stays built and stays OFF (a `false &&` in `arithType`, with the
+list above). **Do not carve out the consumers one channel at a time** — the
+first carve-out was written and then deleted for exactly this reason: it moves
+the lie around instead of removing it. The fix is §3's invariant at the
+PRODUCERS: a slot typed `cell` must be written boxed, whoever writes it. When
+that holds, delete the `false &&` and move
+`docs/bugs/erased_arith_float_cell.php` back into the suite.
+
+### 18.3 What the tagged-arith half really needed
+
+Not the store plant it first looked like. Once arithmetic over a cell yields a
+cell, a loop-carried slot changes representation across the back edge — and the
+machinery for exactly that already exists and had been running for other kinds
+all along:
+
+> `loopMerge` promotes a re-kinded loop local to a CELL, records it in
+> `cellLoopLocals`, sets `loopPromoGrew`, and `inferFunction` re-infers the
+> whole body — so the pre-loop store, the guard and the body all agree. A
+> promoted PARAM even gets a `$p = box($p)` prepended at entry
+> ({@see InferNodes::coercePromotedParams}).
+
+Three things kept `$pos` out of it, and each was a rule that had quietly
+outgrown its reason:
+
+1. **A STRING byte offset counted as an array KEY.** `scanKeyUsedLocals` marks
+   every subscript index, and a marked name is excluded from cell promotion —
+   because a cell ARRAY key has no dispatch. `$s[$i]` has no key channel at all;
+   it is an offset. That single over-broad mark is why `$pos` stayed pinned raw
+   while the body wrote a boxed word into it. **Ask what the base is.**
+2. **`$s[$i]` did not unbox a cell index** — and the emitter that mattered was
+   the DEMOTED one (`__mir_str_byte_at`), which only exists when the character
+   is never used as a string. Instrumenting with `. $c0 .` disabled the
+   demotion and the symptom together; a constant-only marker was needed to keep
+   it alive.
+3. **A by-ref callee owns its slot's representation.** `int &$pos` writes back a
+   raw int, so the caller must NOT promote that name — a new `refPinnedLocals`
+   pin, and for the store into such a pinned slot the fourth plant after all:
+   a concrete-scalar store node with a cell value un-cellifies
+   ({@see EmitLlvmLocals::emitStoreLocal}, mirror of the box-back).
+
+The lesson is §17.4's, one level up: the cheapest fix was not a new mechanism
+but **finding the predicate that was excluding the value from the mechanism
+already there**. Both exclusions (key-used, ref-pinned) are conservative rules
+whose justification is narrower than their test.
+
+### 18.2 Still open
+
+- **The `$GLOBALS['x']` view and a `global $x` binding disagree about the repr
+  of the SAME cell.** The view is lowered `cell` unconditionally
+  (`LowerSuperglobals::lowerGlobalsRead`); the binding is typed from the
+  cross-scope join, which deliberately declines to record an INT because that
+  is what a `global` decl is hard-lowered to anyway. Both currently read the
+  slot RAW, so they agree by accident. Tagged arithmetic breaks that accident —
+  `$GLOBALS['n'] = $GLOBALS['n'] + 1` would box into a slot the other scope
+  reads raw — so `arithType` carves the view out and keeps the integer path
+  there. Closing it means picking ONE repr for the cell and making both ends
+  say so, INCLUDING `__main`'s seeding store (`$counter = 7`), which writes the
+  slot before any other scope runs. That is a global-storage change, not an
+  arithmetic one, and it is the last known place where one slot still has two
+  representations.
+- **`plausiblePtrIr` still dereferences an unvalidated word** at ~10 call sites
+  (the erased-`foreach` classifier, `is_array` on an erased operand, the memory
+  passes). The two fixes above stop FEEDING it raw ints, which is why the
+  crashes are gone, but the predicate itself is unchanged: any erased raw word
+  in `(65535, 2^48)` is still dereferenced. Hardening it means bounding it by a
+  real allocation range — the pool already brackets its region with
+  `@__mir_pool_base`/`@__mir_pool_top`, but large blocks bypass to `malloc` from
+  ~14 sites, so a watermark needs a single allocation choke point first.
+- The type split of §17.2 is NOT done and, on these numbers, is not worth doing
+  for the stdlib boundary alone. Revisit it only if a new producer of
+  "raw array, element unknown" appears.
+
 ## Related
 - `is_callable` pin, offset-16 crash diagnostics, prior reverted attempts:
   memory `unknown-receiver-propread-offset16-2026-07-08`.

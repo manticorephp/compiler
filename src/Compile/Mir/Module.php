@@ -191,6 +191,18 @@ final class Module
      *  @var array<string, string> */
     public array $attrSiteErrors = [];
 
+    /**
+     * The return type each function was DECLARED with, by name — before any
+     * pass adopted a narrower one into {@see FunctionDef::$returnType} (which
+     * is rewritten in place). A monomorphic clone needs it: the generic's
+     * adopted return describes the GENERIC body, and inheriting it makes the
+     * specialization's signature disagree with its own returns — `array_sum`'s
+     * `int|float` narrowed to `int` for the erased body, and the vec[float]
+     * clone then summed doubles behind an `-> int` signature.
+     * @var array<string, Type>
+     */
+    public array $declaredReturnTypes = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
     public function addGlobalCell(string $name, Node $default,
