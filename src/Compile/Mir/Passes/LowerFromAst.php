@@ -2816,6 +2816,17 @@ final class LowerFromAst implements Pass
      * demand is computed from the SOURCE TEXT, and a call the compiler
      * synthesises appears in no source, so it could never gate itself in.
      */
+    /**
+     * `file:line:col` for a refusal message. The file is '' for the prelude blob
+     * and for anything the compiler synthesises, and saying so beats printing a
+     * bare `:12:5` that reads like a real path.
+     */
+    private function spanWhere(\Parser\Ast\Span $s): string
+    {
+        $f = $s->file === '' ? '<generated>' : $s->file;
+        return $f . ':' . (string)$s->line . ':' . (string)$s->column;
+    }
+
     private function throwErrorExpr(string $message): Node
     {
         return new Call(
@@ -4363,10 +4374,16 @@ final class LowerFromAst implements Pass
             // is written back through, so a copy loses every write. A loud stop
             // beats a wrong answer, exactly as for `fn &()`.
             if ($el->byRef) {
+                // Name the SITE. Lowering sees one statement list flattened
+                // across every file of the build, so a refusal that says only
+                // what is unsupported leaves the reader grepping a whole vendor
+                // tree for a construct that spans lines — which is exactly how
+                // long it took to find the second one of these.
                 throw new \RuntimeException(
                     'unsupported: an array literal cannot bind an element by reference '
                     . '(`[&$a[$k], …]`). The element would receive a copy, not an alias, '
                     . 'so every write through it would be lost.'
+                    . ' at ' . $this->spanWhere($expr->span)
                 );
             }
             $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
