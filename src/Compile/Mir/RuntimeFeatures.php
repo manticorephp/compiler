@@ -57,6 +57,11 @@ public bool $needsClosureRc = false;
     public bool $needsTaggedTruthy = false;
     /** Array indexed by a `mixed`/cell key — int-vs-string key dispatch helpers. */
     public bool $needsCellKey = false;
+    /** This module holds a REFERENCE CELL somewhere ({@see \Compile\Mir\Module::
+     *  $hasRefCells}). Unlike its neighbours here this one is copied in from the
+     *  module at the TOP of {@see EmitLlvm::emit}, not raised during emit — the
+     *  inline tag paths have to consult it before they emit anything. */
+    public bool $needsRefCells = false;
     public bool $needsSubstr = false;
     public bool $needsStrRepeat = false;
     public bool $needsStrtolower = false;
