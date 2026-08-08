@@ -3036,6 +3036,19 @@ final class LowerFromAst implements Pass
             $lv = $this->lowerExpr($expr->source);
             return new RefAddr_($expr->target->name, $lv, $lv->type);
         }
+        // `$r = &C::$s` — the same bind. A static property is an
+        // external-linkage global, so it is addressable exactly like the two
+        // above; it simply had no arm and fell through to a value COPY, which
+        // is a silent wrong answer rather than a refusal. Decided on the LOWERED
+        // node, not the AST kind: `C::CONST` and `C::class` are StaticAccess too
+        // and are not slots.
+        if ($expr->target->kind === 'Variable' && $expr->source->kind === 'StaticAccess') {
+            $lv = $this->lowerExpr($expr->source);
+            if ($lv->kind === Node::KIND_STATIC_PROP) {
+                return new RefAddr_($expr->target->name, $lv, $lv->type);
+            }
+            return $this->storeToTarget($expr->target, $lv);
+        }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
     }
 

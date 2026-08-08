@@ -730,6 +730,18 @@ trait EmitLlvmLocals
             $this->lastValueType = 'i64';
             return $out;
         }
+        if ($a->kind === Node::KIND_STATIC_PROP) {
+            // A static property IS an external-linkage global, so its address is
+            // the global itself — no receiver to walk and no offset to compute.
+            // Without this arm emitRefAddr fell into its "not addressable"
+            // branch, which degrades to a VALUE COPY: `$t = &S::$s; $t = 40;`
+            // left S::$s at its old value and said nothing.
+            $addr = $this->ssa->allocReg();
+            $out = '  ' . $addr . ' = ptrtoint ptr ' . $a->global . " to i64\n";
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $a;
             // No statically knowable slot — a classless receiver, or a class

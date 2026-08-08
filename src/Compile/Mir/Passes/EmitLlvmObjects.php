@@ -2130,6 +2130,14 @@ trait EmitLlvmObjects
         $out .= $addrIr;
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$n->target] . "\n";
         $this->locals->refLocals[$n->target] = true;
+        // The TARGET's type, not just its address. A store through a reference
+        // has to match what the aliased slot's own reader expects, and the store
+        // path already knows how to do that — it just keyed off refParamTypes,
+        // which until now only a by-ref PARAMETER filled in. Without this a
+        // reference to a cell slot (`public static mixed $x`) wrote a raw word
+        // into a self-describing slot and the next tag-decoding read saw a
+        // denormal. The address was never the hard part.
+        $this->locals->refParamTypes[$n->target] = $n->lvalue->type;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
