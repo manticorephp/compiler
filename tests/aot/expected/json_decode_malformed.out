@@ -8,6 +8,15 @@
 '{"a"' => NULL err=4 Syntax error
 '["x"' => NULL err=4 Syntax error
 '{"a":1' => NULL err=4 Syntax error
+'[1,]' => NULL err=4 Syntax error
+'{"a":1,}' => NULL err=4 Syntax error
+'[,]' => NULL err=4 Syntax error
+'[1,,2]' => NULL err=4 Syntax error
+'"ab"' => NULL err=3 Control character error, possibly incorrectly encoded
+'"abc' => NULL err=3 Control character error, possibly incorrectly encoded
+'[01]' => NULL err=4 Syntax error
+'-01' => NULL err=4 Syntax error
+deep600 => NULL err=1 Maximum stack depth exceeded
 '{"a":1}' => {"a":1} err=0
 '[1,2]' => [1,2] err=0
 '"s"' => "s" err=0

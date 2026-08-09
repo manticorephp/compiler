@@ -82,26 +82,66 @@ Two things this got wrong first, both worth remembering:
     (`__mc_json_err` is sticky; only an explicit 0 resets), which closes the same hazard
     at all seven sites that set a code instead of requiring each to remember the order.
 
+### Grammar rejections — one root closed the whole family
+
+`[1,]` used to decode as `[1,0]`, **inventing an element**: the trailing comma sent the
+value dispatcher to `]`, and the dispatcher's catch-all is the number scanner, which
+consumed nothing and answered 0. Chasing that byte-by-byte was a losing game — the first
+patch caught a comma before a closer but not `[1,,2]`, and `[1,:2]` would have been next.
+
+**Consuming nothing IS the syntax error**, whatever the byte. One `pos_after == pos_before`
+check at the `num:` arm covers `[1,]`, `[,]`, `[1,,2]`, `[1,:2]`, `{"a":}` and every other
+garbage byte in value position at once. The post-comma checks are kept, but they are now
+an optimisation (they avoid building the doomed element) rather than the mechanism.
+
+Also closed: a raw C0 byte inside a string, and a string that never closes — both
+`JSON_ERROR_CTRL_CHAR`, which is what php reports there rather than SYNTAX; its scanner
+names the byte class it ran out on.
+
+### Depth on the native path, and leading zeros — closed
+
+`$depth` counts natively now, as a **global** rather than a threaded argument: the
+decoder's symbols are `linkonce_odr` and coalesce by name, so widening one in place is a
+mismatch the linker resolves silently, while a global costs no signature. The decoder
+never yields, so single-threaded is a property of its construction, and the counter is
+reset per document, so a count leaked by an early return cannot outlive the call that
+leaked it. The check sits **before** the recursion — that is the whole point: past it,
+untrusted input used to run to a stack overflow.
+
+The limit is a constant 512 because the gate only sends an absent-or-literal-512 `$depth`
+down this path; anything else goes to the compiled-PHP parser, which counts exactly.
+
+`[01]` and `-01`: JSON forbids a leading zero unless the integer part IS zero, checked
+after the sign and before the digits.
+
 ### ⛔ What validation still misses — measured, not assumed
 
 | input | php | here |
 |---|---|---|
-| `[1,]` | null + SYNTAX | **`[1,0]`** — invents an element |
-| `"a\x01b"` | null + CTRL_CHAR | **`"ab"`** — drops the byte |
-| 600 levels of nesting | null + DEPTH | **decoded, err=0** |
 | `"\x80"` | null + UTF8 | hands back the bad byte, err=0 |
-| `[01]` | null + SYNTAX | `[1]` |
+| `[1.5e]` | null + SYNTAX | `[1.5]` — an exponent marker with no digits |
 
-The first two are **worse than an under-report: they are wrong data with no signal.** A
-trailing comma materialises a `0` element and a control character is silently deleted. Any
-description of the remaining work as "we merely fail to report" is inaccurate — these two
-corrupt.
+UTF-8 is the larger of the two: a correct validator needs lead/continuation ranges **and**
+the overlong and surrogate forms php also rejects, which is a new IR function rather than
+an added branch.
+
+`[1.5e]` has a one-line shape that would close its whole family — **a valid JSON number
+always ends in a digit**, so checking the last consumed byte at the scanner's exit rejects
+`1.5e`, `1e`, `1e+` and `1.` at once, the same way "consumed nothing" rooted the
+value-dispatch family. It is not done here only because it arrived at the end of a
+session; it is a small, self-contained next step.
+
+⚠ **A correction to an earlier version of this file**: it claimed a control character was
+"silently deleted". It was not — the byte survived (`strlen` 3, bytes `97 1 98`), and the
+apparent loss was `var_export` output in a terminal. The category was "accepts what php
+rejects", not corruption. Verify with `ord()`, never by eye.
 
 The depth row is its own trap: the counter went into the compiled-PHP parser, but the gate
 sends anything with a default `$depth` down the NATIVE path, which counts nothing. So the
 common `json_decode($deep)` still runs to a stack overflow rather than
 `JSON_ERROR_DEPTH` — the parameter works only where the parser is used. Encode has the
-same shape.
+same shape. Closing it means threading a depth argument through the recursive decoder,
+which under this epic's own rule means NEW symbol names rather than a changed arity.
 
 Confirmed already matching: `JSON_PARTIAL_OUTPUT_ON_ERROR` (`[1,0]` with the slot at 7)
 and int-overflow-to-float on decode.
