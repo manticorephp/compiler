@@ -1,0 +1,32 @@
+[1,2] 0 No error
+bool(false)
+1 Maximum stack depth exceeded
+string(7) "[[[1]]]"
+0
+NULL
+1 Maximum stack depth exceeded
+array(1) {
+  [0]=>
+  array(1) {
+    [0]=>
+    array(1) {
+      [0]=>
+      int(1)
+    }
+  }
+}
+0
+bool(false)
+7 Inf and NaN cannot be JSON encoded
+bool(false)
+7
+bool(false)
+7
+{"ok":true} 0
+caught Inf and NaN cannot be JSON encoded code=7 last=0
+caught Maximum stack depth exceeded code=1
+bool(true)
+bool(false)
+1
+012345
+6 7 8 9 10 11

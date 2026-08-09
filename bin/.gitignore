@@ -4,6 +4,7 @@
 # here, and a 954k-line .ll that is neither tracked nor ignored rides into the
 # next `git add -A` — which is exactly how it got committed once.
 manticore
+.manticore.prev
 manticore.ll
 manticore.o
 manticore_stubs.c

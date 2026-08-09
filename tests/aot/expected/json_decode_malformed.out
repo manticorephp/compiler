@@ -1,0 +1,27 @@
+'{' => NULL err=4 Syntax error
+'[' => NULL err=4 Syntax error
+'[1,2' => NULL err=4 Syntax error
+'[1,2]x' => NULL err=4 Syntax error
+'' => NULL err=4 Syntax error
+'  ' => NULL err=4 Syntax error
+'{"a" 1}' => NULL err=4 Syntax error
+'{"a"' => NULL err=4 Syntax error
+'["x"' => NULL err=4 Syntax error
+'{"a":1' => NULL err=4 Syntax error
+'{"a":1}' => {"a":1} err=0
+'[1,2]' => [1,2] err=0
+'"s"' => "s" err=0
+'7' => 7 err=0
+'true' => true err=0
+'null' => null err=0
+'  [1]  ' => [1] err=0
+'{"a":1}' valid=true
+'[1,2' valid=false
+'' valid=false
+'[1,2]x' valid=false
+'[[1]]' valid=true
+'{' => NULL err=4
+'[1,2' => NULL err=4
+'{"a":1}' => array (
+  'a' => 1,
+) err=0

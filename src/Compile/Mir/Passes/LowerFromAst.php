@@ -2984,7 +2984,15 @@ final class LowerFromAst implements Pass
         elseif ($c === 'string') { $target = 'string'; $type = Type::string_(); }
         elseif ($c === 'bool' || $c === 'boolean') { $target = 'bool'; $type = Type::bool_(); }
         elseif ($c === 'object') { $target = 'object'; $type = Type::obj('stdClass'); }
-        elseif ($c === 'array')  { $target = 'array'; $type = Type::assoc(Type::string_(), Type::cell()); }
+        // `(array)` keys are NOT string. php's rule is per-kind and decided at
+        // RUNTIME: an object yields its property names, a list yields 0..n-1, a
+        // scalar yields the single key 0 — which is exactly why the emitter
+        // dispatches on the tag ({@see Passes\EmitLlvmExpr::emitCast}). Claiming
+        // `string` let `is_string($k)` FOLD TO TRUE over a key the runtime hands
+        // back as a cell, and the true arm then bitcast that cell to a string
+        // pointer: `foreach ((array)$v as $k => $_) { is_string($k) ? $k : … }`
+        // SIGSEGV'd in `__mir_rc_release_str`. The key is erased; say so.
+        elseif ($c === 'array')  { $target = 'array'; $type = Type::assoc(Type::cell(), Type::cell()); }
         return new Cast($target, $operand, $type);
     }
 

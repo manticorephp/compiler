@@ -294,6 +294,22 @@ final class EmitLlvm implements EmitVisitor
      */
     public array $weakSyms = [];
     /**
+     * Free-function calls compiled into a runtime "Call to undefined function"
+     * trap ({@see EmitLlvmCalls::emitCall}) — nothing in the module and nothing
+     * in a linked library's `.sig` defines the symbol, so the call becomes a
+     * throw instead of a link error.
+     *
+     * Collected because the trap is SILENT: a compiler that does not yet know a
+     * name still "succeeds" at building source that uses it, and the breakage
+     * surfaces a generation later (a poisoned `lib/*.o`, or a self-built
+     * compiler that throws the first time it reaches the call). That is the
+     * whole shape of "this needed a cold seed and nothing said so". The driver
+     * reports the set, and refuses it outright for a LIBRARY target.
+     *
+     * @var array<string, bool> function name → true
+     */
+    public array $undefinedCalls = [];
+    /**
      * Native FFI-boundary primitives (`manticore_rt_*`) called but not
      * PHP-defined. Declared as externs so the module assembles; the
      * tools/link_stubs.sh link-stubs them (the compiler never invokes the
@@ -309,6 +325,9 @@ final class EmitLlvm implements EmitVisitor
      * the `--emit-library` compile path.
      */
     public bool $emitLibrary = false;
+    /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
+     *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
+    private bool $lastCallWasBuiltin = false;
     /** Scratch: address reg set by foreachElemAddr / foreachKeyAddr. */
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */
@@ -533,6 +552,15 @@ final class EmitLlvm implements EmitVisitor
                 \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
             }
             $functionBodies .= $body;
+            // This function's MIR is spent: its text is in $functionBodies and
+            // nothing below reads a body again — not the preamble, not
+            // HoistAllocas or PruneIr (both run on the TEXT), not the driver,
+            // which only counts the functions. Dropping it here is what keeps
+            // the whole MIR from standing alongside the whole IR text; the MIR
+            // is the retention term (a `dump-mir` of a 510 KB input peaks at
+            // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
+            // nodes). An empty Block, not null: the field is typed.
+            $fn->body = new Block([], Type::void());
         }
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
@@ -1744,19 +1772,34 @@ final class EmitLlvm implements EmitVisitor
         // fresh temp exactly like a concat. Only the shapes CondOwn declares
         // owned qualify — one with an erased arm stays borrowed.
         if ($this->condOwnsResult($node)) { return true; }
-        // `$s[$i]` on a STRING base is an ALLOCATION, not a borrow:
-        // `__mir_str_char_at` mints a fresh 1-char headered buffer for every
-        // read ({@see DemoteCharLocals}, which exists because that allocation is
-        // expensive). Only the reads DemoteCharLocals could not prove dead reach
-        // here, and a consumer that frees its other fresh operands has to free
-        // this one too — `$out = $out . $s[$i]` leaked one buffer per character,
-        // which is the whole of urldecode's 305 B/call. An ARRAY element read
-        // stays a borrow: it hands back the container's own reference.
-        if ($k === Node::KIND_ARRAY_ACCESS
-            && $node->array->type->kind === Type::KIND_STRING) { return true; }
+        if ($this->isStrCharRead($node)) { return true; }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;
+    }
+
+    /**
+     * `$s[$i]` on a STRING base is an ALLOCATION, not a borrow:
+     * `__mir_str_char_at` mints a fresh 1-char headered buffer for every read
+     * ({@see DemoteCharLocals}, which exists because that allocation is
+     * expensive). Only the reads DemoteCharLocals could not prove dead reach the
+     * emitter, and a consumer that frees its other fresh operands has to free
+     * this one too — `$out = $out . $s[$i]` leaked one buffer per character,
+     * which is the whole of urldecode's 305 B/call. An ARRAY element read stays
+     * a borrow: it hands back the container's own reference.
+     *
+     * ONE predicate, asked by BOTH sides of the ownership contract. It lived
+     * inline in {@see isFreshStringTemp} only, so {@see EmitLlvmControl::armIsFresh}
+     * read the same node as BORROWED and a conditional arm normalizing to +1
+     * retained a buffer that was already +1: `$out . ($ok ? $s[$i] : '=')` — the
+     * shape of base64_encode's inner loop — leaked one char buffer per iteration
+     * at rc 1, and only the ternary form of it, which is why the identical
+     * ternary-free loop right above it was clean.
+     */
+    private function isStrCharRead(Node $n): bool
+    {
+        return $n->kind === Node::KIND_ARRAY_ACCESS
+            && $n->array->type->kind === Type::KIND_STRING;
     }
 
     /**
@@ -2302,35 +2345,30 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /** The prefix of `$args` the callee actually has parameters for. Keeps the
-     *  emitted call matching its `declare` / `define`.
-     *
-     *  This used to apply ONLY to a func-args callee, i.e. only where the
-     *  surplus had somewhere else to go. But php lets ANY call site pass more
-     *  arguments than the callee declares, and a stdlib entry routinely
-     *  declares fewer parameters than php accepts, so the surplus rode the call
-     *  for every other callee and the emitted `call` disagreed with the
-     *  callee's arity. `json_encode($v, JSON_PRETTY_PRINT)` is the witness:
-     *  `declare i64 @manticore_json_encode(i64)` called with `(i64, i64)`,
-     *  SIGSEGV at runtime — not a dropped flag, a crash. A plain user function
-     *  called with a surplus argument emits the same malformed call and merely
-     *  survives it on this ABI, which is what kept it hidden.
-     *
-     *  Truncating is semantically neutral: a callee with N parameters can read
-     *  N parameters either way, and the surplus was never reachable from its
-     *  body. It only stops lying to LLVM. A callee whose signature is NOT known
-     *  here (an FFI `manticore_rt_*` primitive) is left alone — truncating to a
-     *  guessed arity would drop real arguments.
-     *
-     *  By this point a variadic pack is already ONE argument and a defaulted
-     *  parameter is already padded, so `count($args) > $arity` means a genuine
-     *  surplus and nothing else.
+     *  emitted call matching its `declare` — an UNCONDITIONAL invariant, not a
+     *  func-args one: php accepts surplus positional arguments on any call, and
+     *  passing them anyway emits `call @f(i64, i64)` against `declare @f(i64)`,
+     *  which LLVM treats as undefined behaviour. `json_encode($assoc, $flags)`
+     *  SIGSEGV'd that way — the poisoned return reached `__mir_rc_release_str`
+     *  as a tagged cell. A variadic callee is already packed to exactly
+     *  `count(paramTypes)` arguments BEFORE the call, so it needs no exception;
+     *  a func-args callee additionally re-evaluates the surplus into the
+     *  overflow array ({@see faPush}), and everything else evaluates it for
+     *  effect ({@see Passes\EmitLlvmCalls::surplusArgEffects}).
      *  @param Node[] $args @return Node[] */
     private function faCallArgs(string $callee, array $args, int $recvParams = 0): array
     {
+        // Arity unknown — an undefined-function trap or an `rt_` FFI primitive
+        // whose `declare` is synthesised FROM the call site. Nothing to match.
         if (!isset($this->sigs->paramTypes[$callee])) { return $args; }
         $arity = \count($this->sigs->paramTypes[$callee]) - $recvParams;
         if ($arity < 0) { $arity = 0; }
         if (\count($args) <= $arity) { return $args; }
+        // `f(...$arr)` expands ONE node across the callee's remaining params, so
+        // a positional count proves nothing here — the spread arm fills them.
+        foreach ($args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return $args; }
+        }
         $kept = [];
         $ai = 0;
         foreach ($args as $a) {
@@ -2339,6 +2377,21 @@ final class EmitLlvm implements EmitVisitor
             $ai = $ai + 1;
         }
         return $kept;
+    }
+
+    /** The tail {@see faCallArgs} dropped — the arguments php evaluates and the
+     *  callee has no parameter for. @param Node[] $args @return Node[] */
+    private function faSurplusArgs(string $callee, array $args, int $recvParams = 0): array
+    {
+        $kept = \count($this->faCallArgs($callee, $args, $recvParams));
+        if ($kept >= \count($args)) { return []; }
+        $over = [];
+        $ai = 0;
+        foreach ($args as $a) {
+            if ($ai >= $kept) { $over[] = $a; }
+            $ai = $ai + 1;
+        }
+        return $over;
     }
 
     /** {@see faCallArgs} for a callee whose params[0] is the receiver.

@@ -2606,7 +2606,18 @@ trait EmitLlvmRuntime
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
-        if ($this->rt->needsJsonDec) { $out .= $this->lib->jsonDec(); }
+        if ($this->rt->needsJsonDec) {
+            // stdClass's layout is a constant of the compiler (it declares no
+            // properties), so the emitted text is identical in every module and
+            // the linkonce_odr coalescing stays sound. Absent — a library `.o`
+            // carries no classes — the decoder keeps answering assoc arrays.
+            $std = $this->classes['stdClass'] ?? null;
+            $out .= $this->lib->jsonDec(
+                $std === null ? 0 : $std->instanceSize(),
+                $std === null ? 16 : $std->bagOffset(),
+                $this->lib->descSlotValue($std),
+            );
+        }
         if ($this->rt->needsStrReplaceOne) { $out .= $this->lib->strReplaceOne(); }
         if ($this->rt->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),

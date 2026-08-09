@@ -2763,6 +2763,105 @@ trait EmitLlvmObjects
     }
 
     /** Leave an i64 `0|1` in lastValue for whether `$t` is set. */
+    /**
+     * `isset($erased[$k])` — branch on the runtime tag, because the static type
+     * says nothing. A STRING answers php's string-offset rule (the same
+     * `__mir_str_offset_isset` the statically-typed arm calls); anything else
+     * takes the array path through the VALIDATED {@see arrayPtrOrEmptyIr}, which
+     * hands back the zero word for a non-array instead of a wild pointer.
+     *
+     * php answers false for a non-numeric offset on a string, which is what the
+     * string arm does with a string key.
+     */
+    private function emitErasedIssetElem(\Compile\Mir\ArrayAccess_ $aa): string
+    {
+        $out = $this->emitNode($aa->array);
+        $out .= $this->coerceToI64();
+        $cv = $this->lastValue;
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        $out .= $this->emitNode($aa->index);
+        $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+        $key = $this->lastValue;
+
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
+        $ts = $this->ssa->allocReg();
+        $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+        $isStrNib = $this->ssa->allocReg();
+        $out .= '  ' . $isStrNib . ' = icmp eq i64 ' . $nib . ", 4\n";
+        $isStr = $this->ssa->allocReg();
+        $out .= '  ' . $isStr . ' = and i1 ' . $isBox . ', ' . $isStrNib . "\n";
+        $strL = $this->ssa->allocLabel('iss.str');
+        $arrL = $this->ssa->allocLabel('iss.arr');
+        $endL = $this->ssa->allocLabel('iss.end');
+        $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $arrL . "\n";
+
+        $out .= $strL . ":\n";
+        if ($keyIsString) {
+            $out .= '  store i64 0, ptr ' . $slot . "\n";
+        } else {
+            $sp0 = $this->ssa->allocReg();
+            $out .= '  ' . $sp0 . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $sp0 . " to ptr\n";
+            $ki = $key;
+            if ($keyIsCell) {
+                $this->rt->needsCellKey = true;
+                $ki = $this->ssa->allocReg();
+                $out .= '  ' . $ki . ' = call i64 @__mir_ckey_unbox_int(i64 ' . $key . ")\n";
+            }
+            $ok = $this->ssa->allocReg();
+            $out .= '  ' . $ok . ' = call i1 @__mir_str_offset_isset(ptr ' . $sp
+                  . ', i64 ' . $ki . ")\n";
+            $okz = $this->ssa->allocReg();
+            $out .= '  ' . $okz . ' = zext i1 ' . $ok . " to i64\n";
+            $out .= '  store i64 ' . $okz . ', ptr ' . $slot . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $arrL . ":\n";
+        $out .= $this->arrayPtrOrEmptyIr($cv);
+        $arr = $this->arrayPtrReg;
+        $r = $this->ssa->allocReg();
+        $val = $this->ssa->allocReg();
+        if ($keyIsCell) {
+            $this->rt->needsCellKey = true;
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
+            $out .= '  ' . $val . ' = call i64 @__mir_array_get_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
+        } elseif ($keyIsString) {
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
+            $out .= '  ' . $val . ' = call i64 @__mir_array_get_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
+        } else {
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
+            $out .= '  ' . $val . ' = call i64 @__mir_array_get_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
+        }
+        // Present-but-NULL is unset, the same mask the typed arm applies.
+        $nn = $this->ssa->allocReg();
+        $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n";
+        $nnz = $this->ssa->allocReg();
+        $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
+        $rr = $this->ssa->allocReg();
+        $out .= '  ' . $rr . ' = and i64 ' . $r . ', ' . $nnz . "\n";
+        $out .= '  store i64 ' . $rr . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+
+        $out .= $endL . ":\n";
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
+        }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitIssetTarget(Node $t): string
     {
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
@@ -2780,6 +2879,16 @@ trait EmitLlvmObjects
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
                 return $out;
+            }
+            // An ERASED base is not known to be an array, and the array path
+            // below masks the word to a pointer and DEREFERENCES it. A
+            // single-character string element — `$tokens[$j]` in symfony's
+            // findClass(), where token_get_all yields bare `";"` strings between
+            // the `[id, text, line]` triples — was read as an array header:
+            // SIGSEGV, on main as much as here. Classify at runtime instead.
+            if ($aa->array->type->kind === Type::KIND_CELL
+                || $aa->array->type->kind === Type::KIND_UNKNOWN) {
+                return $this->emitErasedIssetElem($aa);
             }
             if ($aa->array->type->kind !== Type::KIND_STRING) {
                 $out = $this->emitNode($aa->array);
@@ -3566,6 +3675,7 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $out .= $this->surplusArgEffects($target, $n->args);
         // Catch-all default pad (mirrors emitMethodCall); a static call is
         // usually lower-filled, but an unresolved-at-lowering callee may
         // arrive short — never leave a trailing optional unset.
@@ -4463,6 +4573,7 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, 1);
         // Pad omitted trailing optionals: a typed-receiver call (`$x->m()`)
         // isn't default-filled at lowering (class unknown pre-InferTypes),
         // so the callee would read an uninitialized arg register. Param 0 is

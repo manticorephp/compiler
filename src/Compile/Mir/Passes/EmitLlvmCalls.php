@@ -1948,6 +1948,30 @@ trait EmitLlvmCalls
     private function staticCallClass(StaticCall_ $n): string { return $n->class; }
     private function staticCallMethod(StaticCall_ $n): string { return $n->method; }
 
+    /**
+     * php evaluates EVERY argument written at a call site, but the callee has
+     * parameters for only the first `arity` of them and the emitted call must
+     * match its `declare` ({@see EmitLlvm::faCallArgs}). Evaluate the surplus
+     * here, in source order, and drop the value — same ownership rule as an
+     * expression in statement position, so a fresh owned result is released
+     * rather than leaked.
+     *
+     * A func-args callee is skipped: {@see EmitLlvm::faPush} already evaluates
+     * the same nodes into the overflow array, and evaluating them twice would
+     * run their side effects twice.
+     * @param Node[] $args
+     */
+    private function surplusArgEffects(string $callee, array $args, int $recvParams = 0): string
+    {
+        if ($this->sigs->usesFuncArgs[$callee] ?? false) { return ''; }
+        $out = '';
+        foreach ($this->faSurplusArgs($callee, $args, $recvParams) as $a) {
+            $out .= $this->emitNode($a);
+            $out .= $this->emitDiscardedCallRelease($a);
+        }
+        return $out;
+    }
+
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
@@ -1959,10 +1983,19 @@ trait EmitLlvmCalls
         }
         if ($k === Node::KIND_CALL) {
             // Free-function call: only a USER function reliably +1-owns its
-            // result. Builtins vary (some return borrowed elements) — and a
-            // user fn can never shadow a builtin name (PHP forbids it), so a
-            // hit in fnParamTypes proves it is user-defined, not a builtin.
+            // result. Builtins vary (some return borrowed elements), so a hit
+            // in fnParamTypes is the evidence that a user body was called.
+            //
+            // It is not evidence on its own. `emitCall` consults `emitBuiltin`
+            // BEFORE `definedFns`, so a codegen builtin SHADOWS a same-named
+            // PHP body — nine names ship both today (strpos, array_keys,
+            // array_values, current, key, …) and that pairing is the bootstrap
+            // shim a new builtin travels with. For those the name is in
+            // paramTypes while the emitted code is the builtin, and releasing
+            // its result is a release of something the caller never owned.
+            // Ask what was actually EMITTED.
             $fname = $s->function;
+            if ($this->lastCallWasBuiltin) { return ''; }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
             // A by-ref-returning fn yields an address, not an owned value.
             if ($this->sigs->returnsByRef[$fname] ?? false) { return ''; }
@@ -2156,7 +2189,14 @@ trait EmitLlvmCalls
     {
         $c = $n;
         $b = $this->emitBuiltin($c);
-        if ($b !== null) { return $b; }
+        // Set AFTER the emitter returns, so a nested argument call cannot leave
+        // the flag describing the wrong node: the OUTERMOST call finishes last.
+        // {@see emitDiscardedCallRelease} — the ownership convention differs
+        // between a builtin and a user body, and with a bootstrap shim (a
+        // same-named PHP body under a builtin, as `strpos`/`array_keys` already
+        // ship) the name alone can no longer tell them apart.
+        if ($b !== null) { $this->lastCallWasBuiltin = true; return $b; }
+        $this->lastCallWasBuiltin = false;
         // Nothing will define this symbol, so php's runtime
         // `Error: Call to undefined function f()` is the answer — raised when
         // the call is reached, which for symfony/cache's `apcu_add` behind an
@@ -2181,6 +2221,7 @@ trait EmitLlvmCalls
         // prelude source has no fnDecl yet). It also poisoned lib/*.o with throw
         // stubs that outlived the source fix by a generation.
         if (!isset($this->definedFns[$this->mangle($c->function)])) {
+            $this->undefinedCalls[\ltrim($c->function, '\\')] = true;
             $thr = new Call(
                 '__mir_throw_error',
                 [new \Compile\Mir\StringConst(
@@ -2363,6 +2404,10 @@ trait EmitLlvmCalls
         // and inherited the same by-ref hazard.
         $out .= $this->emitDefaultArgPad($c->function, $ai, !$first);
         $argList .= $this->lastPadArgs;
+        // …and the mirror question: arguments the callee has NO parameter for
+        // are truncated off the call ({@see EmitLlvm::faCallArgs}) but php still
+        // evaluates them, so they are emitted here for their effects.
+        $out .= $this->surplusArgEffects($c->function, $c->args);
         $reg = $this->ssa->allocReg();
         $mangled = $this->mangle($c->function);
         // A `manticore_rt_*` callee with no PHP definition is a native

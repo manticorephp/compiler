@@ -2683,16 +2683,19 @@ trait EmitLlvmExpr
                 $out .= '  ' . $op . ' = and i64 ' . $v . ", 281474976710655\n";
                 $opp = $this->ssa->allocReg();
                 $out .= '  ' . $opp . ' = inttoptr i64 ' . $op . " to ptr\n";
-                // The bag slot sits AFTER the declared ones, so its offset is the
-                // instance's OWN class's — reading it at stdClass's offset on an
-                // #[AllowDynamicProperties] class that declares a property loaded
-                // that property as an assoc pointer. The class is only known at
-                // runtime here, so switch on the class id.
-                $out .= $this->emitBagOfUnknownClass($opp);
-                $bagP = $this->lastValue;
-                // Borrowed like the array arm above — co-own it.
-                $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
-                $out .= '  store ptr ' . $bagP . ', ptr ' . $slot . "\n";
+                // php's answer is the DECLARED slots plus whatever the dynamic
+                // bag holds — the same walk the statically-typed arm below does,
+                // dispatched on class_id because the class is only known at
+                // runtime. Reading the BAG alone was wrong twice over: a class
+                // with declared properties and no bag has no arm, so it fell to
+                // the default and loaded its FIRST DECLARED SLOT at stdClass's
+                // bag offset as an assoc pointer — `(array)$cellHoldingP`
+                // SIGSEGV'd on `public int $id`; and where it did not fault it
+                // answered `[]`, which is the `{}` that `json_encode` of an
+                // object has been rendering.
+                $out .= $this->emitObjectVarsOfPtr($opp);
+                // OWNED on every arm — no retain here (see the helper).
+                $out .= '  store ptr ' . $this->lastValue . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 // NULL → the empty array.
                 $out .= $nullChk . ":\n";

@@ -99,14 +99,52 @@ final class Type
         public readonly array $typeArgs = [],
     ) {}
 
-    public static function void():    self { return new self(self::KIND_VOID); }
-    public static function null_():   self { return new self(self::KIND_NULL); }
-    public static function bool_():   self { return new self(self::KIND_BOOL); }
-    public static function int_():    self { return new self(self::KIND_INT); }
-    public static function float_():  self { return new self(self::KIND_FLOAT); }
-    public static function string_(): self { return new self(self::KIND_STRING); }
-    public static function unknown(): self { return new self(self::KIND_UNKNOWN); }
-    public static function closure(): self { return new self(self::KIND_CLOSURE); }
+    /**
+     * The parameterless kinds are INTERNED — one object each, for the whole
+     * compile. Every field of a Type is readonly, so a shared instance cannot
+     * be told from a fresh one; the eight constructors below were simply
+     * minting a new object per call, and a 510 KB input asked for 221 541 of
+     * them — int 60 179, unknown 52 513, string 46 161, void 36 221 — which is
+     * 90% of every Type this compiler builds.
+     *
+     * One slot per kind rather than a keyed array: an array element is an
+     * ERASED channel, and reading a Type back out of one would put it through
+     * the cell boundary at every call. A `bool` flag rather than testing a slot
+     * against null: `=== null` on an object slot is the unsound-native,
+     * invisible-under-Zend shape, and there is no reason to walk into it.
+     */
+    private static bool $scalarsBuilt = false;
+    private static ?self $tVoid = null;
+    private static ?self $tNull = null;
+    private static ?self $tBool = null;
+    private static ?self $tInt = null;
+    private static ?self $tFloat = null;
+    private static ?self $tString = null;
+    private static ?self $tUnknown = null;
+    private static ?self $tClosure = null;
+
+    private static function buildScalars(): void
+    {
+        if (self::$scalarsBuilt) { return; }
+        self::$scalarsBuilt = true;
+        self::$tVoid    = new self(self::KIND_VOID);
+        self::$tNull    = new self(self::KIND_NULL);
+        self::$tBool    = new self(self::KIND_BOOL);
+        self::$tInt     = new self(self::KIND_INT);
+        self::$tFloat   = new self(self::KIND_FLOAT);
+        self::$tString  = new self(self::KIND_STRING);
+        self::$tUnknown = new self(self::KIND_UNKNOWN);
+        self::$tClosure = new self(self::KIND_CLOSURE);
+    }
+
+    public static function void():    self { self::buildScalars(); return self::$tVoid; }
+    public static function null_():   self { self::buildScalars(); return self::$tNull; }
+    public static function bool_():   self { self::buildScalars(); return self::$tBool; }
+    public static function int_():    self { self::buildScalars(); return self::$tInt; }
+    public static function float_():  self { self::buildScalars(); return self::$tFloat; }
+    public static function string_(): self { self::buildScalars(); return self::$tString; }
+    public static function unknown(): self { self::buildScalars(); return self::$tUnknown; }
+    public static function closure(): self { self::buildScalars(); return self::$tClosure; }
 
     /**
      * A callable with its signature known — `callable(int): string`.

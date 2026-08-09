@@ -81,3 +81,30 @@ Two tiers — pick by what the function needs:
 
 Then rebuild and test a **user** program that calls it, plus `tools/difftest.sh`
 for parity with `php`.
+
+### PHP body first, codegen builtin second
+
+A new **codegen builtin must ship with a same-named PHP body**, in this
+directory (public name) or in `prelude/` (a name Zend owns). This is a bootstrap
+rule, not a style one.
+
+The compiler that rebuilds the compiler is always one generation behind the
+source it compiles. It has never heard of the new builtin, and a call it cannot
+resolve does not fail the build — `EmitLlvmCalls::emitCall` compiles it into a
+runtime `Call to undefined function` throw. So the trap rides silently into the
+next binary, or worse into `lib/manticore_stdlib.o`, where it outlives the
+source that caused it. Recovering meant a cold Zend seed, and knowing that you
+needed one.
+
+With the pair, nothing is ever unresolved: the old compiler links the PHP body,
+the new one shadows it (`emitCall` asks `emitBuiltin` before `definedFns`) and
+inlines the builtin. Nine names already work this way — `strpos`, `array_keys`,
+`array_values`, `current`, `key`, `gc_collect_cycles`, `__mc_count_mode`,
+`__mc_count_recursive`, `__mir_str_replace_one`.
+
+Two safety nets stand behind the rule, both in `bin/build`: a preflight
+(`manticore analyze src --only undefined.,parse.error`) run by the INSTALLED
+compiler against the NEW source, and a hard refusal to write a library `.o` that
+contains any trap. New **syntax** is the one case neither rule can rescue — a
+parser cannot read what it does not know, so a construct stays unusable inside
+`src/` until the generation that understands it is installed.

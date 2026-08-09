@@ -257,8 +257,15 @@ trait EmitLlvmBuiltins
         if ($name === 'array_shift')                  { return $this->biArrayShift($c); }
         if ($name === 'array_unshift')                { return $this->biArrayUnshift($c); }
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
-        if ($name === '__mc_json_escape')             { return $this->biJsonEscape($args); }
-        if ($name === 'json_encode' && \count($args) === 1) { return $this->biJsonEncode($args); }
+        // ONE argument only. The builtin reads args[0] and nothing else, so
+        // firing it on `__mc_json_escape($s, $flags)` would drop the flags
+        // silently — a builtin shadowing its own bootstrap body with WEAKER
+        // semantics, which is how the compiled-PHP encoder came to behave as if
+        // JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE were always set.
+        if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
+        if ($name === 'json_encode' && \count($args) >= 1
+            && $this->argIsDefaultInt($args, 1, 0)
+            && $this->argIsDefaultInt($args, 2, 512)) { return $this->biJsonEncode($args); }
         if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
@@ -2481,16 +2488,14 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args */
     private function biChr(array $args): string
     {
+        // The interned single-byte string ({@see RuntimeLibrary::stringCore}) —
+        // `chr()` used to malloc a 34-byte buffer per call, and there are only
+        // 256 possible answers. The `and 255` inside the helper is php's own
+        // wrap, which the old `trunc i64 to i8` performed here.
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
-        $t = $this->ssa->allocReg();
-        $out .= '  ' . $t . ' = trunc i64 ' . $this->lastValue . " to i8\n";
         $buf = $this->ssa->allocReg();
-        $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 2)\n";
-        $out .= '  store i8 ' . $t . ', ptr ' . $buf . "\n";
-        $nul = $this->ssa->allocReg();
-        $out .= '  ' . $nul . ' = getelementptr inbounds i8, ptr ' . $buf . ", i64 1\n";
-        $out .= '  store i8 0, ptr ' . $nul . "\n";
+        $out .= '  ' . $buf . ' = call ptr @__mir_char_of(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
         return $out;
     }
@@ -3636,18 +3641,75 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    /** @param Node[] $args  print_r($v [, $return]) — echo form only. DEEP-boxes
-     *  the value (a nested array's elements become tagged cells, so the recursive
-     *  __mir_print_r reads real cells, not raw pointers) then calls the prelude
-     *  backend. The `$return` arg is ignored; the echo form yields true (1). */
+    /**
+     * `print_r($v [, $return])`. DEEP-boxes the value (a nested array's elements
+     * become tagged cells, so the recursive walker reads real cells, not raw
+     * pointers), then calls the prelude backend — which BUILDS the text. What
+     * happens to that text is the mode, php's:
+     *
+     *   - `print_r($v)` / `print_r($v, false)` writes it and yields `true`
+     *   - `print_r($v, true)` yields the string and writes nothing
+     *   - a RUNTIME flag picks between the two at runtime, so the result is a
+     *     cell (a boxed string on one arm, boxed `true` on the other)
+     *
+     * The literal test is {@see Node::literalBool} — the same predicate
+     * {@see InferCalls::builtinReturnType} types the call with.
+     *
+     * @param Node[] $args
+     */
     private function biPrintR(array $args): string
     {
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $bv = $this->lastValue;
-        $out .= '  call i64 @manticore___mir_print_r(i64 ' . $bv . ', i64 0)' . "\n";
+        if (!isset($this->definedFns[$this->mangle('__mir_print_r_str')])) {
+            $this->libcExtra['manticore___mir_print_r_str']
+                = 'declare i64 @manticore___mir_print_r_str(i64, i64)';
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mir_print_r_str(i64 '
+              . $bv . ", i64 0)\n";
         $out .= $this->cellBoxTempDrop($args[0]->type, $bv);
-        $this->lastValue = '1';
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+
+        $want = Node::literalBool($args[1] ?? null);
+        if ($want === true) {
+            $this->lastValue = $p;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        if ($want === false || !isset($args[1])) {
+            $out .= $this->emitOutStr($p);
+            $this->lastValue = '1';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Runtime flag. Both arms answer a cell so the one static type covers
+        // php's string-or-true; the write lives on the false arm only.
+        $this->rt->needsTagged = true;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+        $lRet = $this->ssa->allocLabel('pr.ret');
+        $lOut = $this->ssa->allocLabel('pr.out');
+        $lEnd = $this->ssa->allocLabel('pr.end');
+        $out .= '  br i1 ' . $fl . ', label %' . $lRet . ', label %' . $lOut . "\n";
+        $out .= $lRet . ":\n";
+        $cs = $this->ssa->allocReg();
+        $out .= '  ' . $cs . ' = call i64 @__manticore_box_ptr(ptr ' . $p . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lOut . ":\n";
+        $out .= $this->emitOutStr($p);
+        $cb = $this->ssa->allocReg();
+        $out .= '  ' . $cb . " = call i64 @__manticore_box_bool(i64 1)\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = phi i64 [' . $cs . ', %' . $lRet . '], ['
+              . $cb . ', %' . $lOut . "]\n";
+        $this->lastValue = $c;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -6298,7 +6360,20 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($obj);
         $out .= ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN)
             ? $this->cellToPtr() : $this->coerceToPtr();
-        $objPtr = $this->lastValue;
+        return $out . $this->emitObjectVarsOfPtr($this->lastValue);
+    }
+
+    /**
+     * {@see emitObjectVarsByClassId} over an object pointer already in hand —
+     * the `(array)` cast's runtime-kind dispatch is inside a branch and cannot
+     * re-emit its operand. lastValue ← an OWNED assoc ptr on every arm (the
+     * declared arm mints one, the bag arm co-owns), so the caller must not
+     * retain it again.
+     */
+    private function emitObjectVarsOfPtr(string $objPtr): string
+    {
+        $this->rt->needsTagged = true;
+        $out = '';
 
         /** @var array<string,mixed> */
         $holders = [];
@@ -6321,8 +6396,27 @@ trait EmitLlvmBuiltins
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname);
+            $props = $this->lastValue;
+            // A class can have BOTH — `#[AllowDynamicProperties] class Q { public
+            // int $a; }` with `$q->extra = 9`. Declared first, bag second, php's
+            // order; the same union the statically-typed arm of the cast does.
+            // Without it this arm answered the declared half alone and silently
+            // dropped every dynamic property off an erased receiver.
+            if ($cd->usesBag()) {
+                $bg = $this->ssa->allocReg();
+                $bodies .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                         . ', i64 ' . (string)$cd->bagOffset() . "\n";
+                $bagI = $this->ssa->allocReg();
+                $bodies .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+                $bagP = $this->ssa->allocReg();
+                $bodies .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+                $un = $this->ssa->allocReg();
+                $bodies .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
+                         . ', ptr ' . $bagP . ")\n";
+                $props = $un;
+            }
             $pi = $this->ssa->allocReg();
-            $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $props . " to i64\n";
             $bodies .= '  store i64 ' . $pi . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
@@ -6636,21 +6730,66 @@ trait EmitLlvmBuiltins
      * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
      */
     /**
-     * Can this `json_decode()` call take the native path? The `$associative`
-     * flag is accepted and IGNORED (objects always decode to assoc arrays —
-     * documented behaviour of {@see \Runtime\Json\Parser}), so a second
-     * argument may only be dropped when it is a literal with no side effect to
-     * lose. Anything else falls through to the compiled PHP parser.
+     * Can this `json_decode()` call take the native path? Every argument after
+     * the first is FOLDED at compile time ({@see jsonAssocMode}), so they may
+     * only be literals — anything else has a side effect the builtin would drop,
+     * and falls through to the compiled PHP parser.
      * @param Node[] $args
      */
     private function jsonDecodeNative(array $args): bool
     {
         $c = \count($args);
-        if ($c === 1) { return true; }
-        if ($c !== 2) { return false; }
-        $k = $args[1]->kind;
-        return $k === Node::KIND_BOOL_CONST || $k === Node::KIND_INT_CONST
-            || $k === Node::KIND_NULL_CONST;
+        if ($c < 1 || $c > 4) { return false; }
+        if ($c >= 2) {
+            $k = $args[1]->kind;
+            if ($k !== Node::KIND_BOOL_CONST && $k !== Node::KIND_INT_CONST
+                && $k !== Node::KIND_NULL_CONST) { return false; }
+        }
+        // The native decoder has no depth limit and reads no flags, so it may
+        // only take a call that asks for neither.
+        return $this->argIsDefaultInt($args, 2, 512)
+            && $this->argIsDefaultInt($args, 3, 0);
+    }
+
+    /**
+     * Is argument `$i` absent, or the literal int `$want`?
+     *
+     * ⚠ Ask what an argument IS, never how many there are. Lowering PADS
+     * omitted defaults, so giving a stdlib function a new defaulted parameter
+     * rewrites every existing call site into a wider one — and an arity-counting
+     * gate then hands the whole builtin back to the compiled-PHP body without a
+     * word. Widening `json_encode` to `($value, $flags = 0, $depth = 512)` moved
+     * EVERY `json_encode($v)` in every program off the native single-buffer
+     * encoder, and `json_decode($s, true)` off the native decoder onto a parser
+     * that does not combine surrogate pairs.
+     * @param Node[] $args
+     */
+    private function argIsDefaultInt(array $args, int $i, int $want): bool
+    {
+        if (!isset($args[$i])) { return true; }
+        if ($args[$i]->kind !== Node::KIND_INT_CONST) { return false; }
+        return Node::literalInt($args[$i]) === $want;
+    }
+
+    /**
+     * 1 when this `json_decode` call wants assoc ARRAYS, 0 when it wants
+     * stdClass OBJECTS. php's rule is `$associative === true`, or `null` with
+     * JSON_OBJECT_AS_ARRAY set in `$flags` — and `null` is the DEFAULT, so a bare
+     * `json_decode($s)` builds objects. Folded here because {@see
+     * jsonDecodeNative} only admits literals; anything else took the PHP body.
+     * @param Node[] $args
+     */
+    private function jsonAssocMode(array $args): int
+    {
+        $flags = Node::literalInt($args[3] ?? null) ?? 0;
+        $objectAsArray = ($flags & 1) !== 0;      // JSON_OBJECT_AS_ARRAY
+        // A php `null` $associative means "objects, unless JSON_OBJECT_AS_ARRAY".
+        // literalBool answers null for BOTH a null literal and a runtime value,
+        // so the gate's literals-only guarantee is what makes reading it here
+        // unambiguous: anything non-literal never reaches this function.
+        $assoc = Node::literalBool($args[1] ?? null);
+        if ($assoc === null) { return $objectAsArray ? 1 : 0; }
+        return $assoc ? 1 : 0;
     }
 
     /**
@@ -6672,10 +6811,27 @@ trait EmitLlvmBuiltins
         $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $sp = $this->lastValue;
+        // php clears json_last_error() on entry. The builtin REPLACES the whole
+        // call, so the PHP body never runs and without this the slot would keep
+        // reporting whatever some earlier json call left in it.
+        $out .= $this->jsonErrSet('0');
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__mir_json_decode(ptr ' . $sp . ")\n";
+        $out .= '  ' . $reg . ' = call i64 @__mir_json_decodea(ptr ' . $sp
+              . ', i64 ' . (string)$this->jsonAssocMode($args) . ")\n";
         $out .= $this->freeStrTemp($args[0], $sp);
-        $this->lastValue = $reg;
+        // php answers null when the document was rejected. The decoder reports
+        // through the shared slot rather than by propagating a failure out of
+        // its recursion, so the verdict is read here.
+        $err = $this->ssa->allocReg();
+        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
+        $nul = $this->ssa->allocReg();
+        $out .= '  ' . $nul . " = call i64 @__manticore_box_null()\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $nul
+              . ', i64 ' . $reg . "\n";
+        $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -6693,13 +6849,39 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cell = $this->lastValue;
+        $out .= $this->jsonErrSet('0');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_enc(i64 ' . $cell . ")\n";
         // The encoder READ the cell into its own buffer and kept nothing.
         $out .= $this->cellBoxTempDrop($args[0]->type, $cell);
-        $this->lastValue = $reg;
-        $this->lastValueType = 'ptr';
+        // `json_encode(): string|false` — a UNION, so the call site expects a
+        // CELL and handing back a raw pointer would be a representation
+        // mismatch. The only failure the native encoder can reach on this gate
+        // (flags 0, depth 512) is INF/NAN, which `__mc_dtoa_bits` flags in the
+        // shared error slot, so read it back and select.
+        $sc = $this->ssa->allocReg();
+        $out .= '  ' . $sc . ' = call i64 @__manticore_box_ptr(ptr ' . $reg . ")\n";
+        $err = $this->ssa->allocReg();
+        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
+        $fc = $this->ssa->allocReg();
+        $out .= '  ' . $fc . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $fc
+              . ', i64 ' . $sc . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Store `$code` into the ONE json error slot — the function-local static in
+     *  `manticore_stdlib.o`. Always a call, never an inlined store to a
+     *  module-local global: that would give the app module a second slot. */
+    private function jsonErrSet(string $code): string
+    {
+        $r = $this->ssa->allocReg();
+        return '  ' . $r . ' = call i64 @manticore___mc_json_err(i64 ' . $code . ")\n";
     }
 
     /**

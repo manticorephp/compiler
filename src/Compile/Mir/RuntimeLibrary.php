@@ -844,8 +844,57 @@ final class RuntimeLibrary
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  ret i1 %eq\n}\n";
 
+        // ── The 256 single-byte strings, interned ───────────────────────────
+        //
+        // A 1-character string has exactly 256 possible values, and both
+        // producers of one — `$s[$i]` and `chr()` — used to malloc a fresh
+        // 34-byte buffer per call. The compiler's own Lexer alone did that
+        // once per source byte; DemoteCharLocals exists to dodge it, but only
+        // where it can PROVE the character is never observed as a string.
+        // Interning removes the allocation unconditionally, including from the
+        // reads no proof covers.
+        //
+        // The table is `zeroinitializer` — .bss, so it costs NOTHING in the
+        // binary (a 10 KB static initializer would have been ~10% of a hello
+        // world) and is faulted in a page at a time as bytes are first used.
+        // rc == 0 is the "not yet built" marker: a live entry carries the
+        // immortal -1, which the rc runtime skips on BOTH retain and release,
+        // so a caller that frees its string temps cannot free the table, and
+        // `.=` on one copies instead of appending in place (that path requires
+        // rc == 1). Both hazards are closed by the convention string literals
+        // already use, not by a new rule.
+        $stride = \Compile\MemoryAbi::STRING_HEADER_SIZE + 8;
+        $out .= "\n@__mir_char_table = linkonce_odr global [" . (string)(256 * $stride)
+              . " x i8] zeroinitializer, align 16\n";
+        $out .= "define ptr @__mir_char_of(i64 %b) {\nentry:\n";
+        $out .= "  %bm = and i64 %b, 255\n";
+        $out .= "  %off = mul i64 %bm, " . (string)$stride . "\n";
+        $out .= "  %ent = getelementptr inbounds i8, ptr @__mir_char_table, i64 %off\n";
+        $out .= "  %datap = getelementptr inbounds i8, ptr %ent, i64 " . $nH . "\n";
+        $out .= "  %rcp = getelementptr inbounds i8, ptr %ent, i64 " . $nRcAt . "\n";
+        $out .= "  %rc = load i64, ptr %rcp\n";
+        $out .= "  %fresh = icmp eq i64 %rc, 0\n";
+        $out .= "  br i1 %fresh, label %fill, label %ret\n";
+        $out .= "fill:\n";
+        $out .= "  %hp = getelementptr inbounds i8, ptr %ent, i64 " . $nHashAt . "\n";
+        $out .= "  store i64 0, ptr %hp\n";
+        $out .= "  %ccp = getelementptr inbounds i8, ptr %ent, i64 " . $nCapAt . "\n";
+        $out .= "  store i64 1, ptr %ccp\n";
+        $out .= "  %llp = getelementptr inbounds i8, ptr %ent, i64 " . $nLenAt . "\n";
+        $out .= "  store i64 1, ptr %llp\n";
+        $out .= "  %b8 = trunc i64 %bm to i8\n";
+        $out .= "  store i8 %b8, ptr %datap\n";
+        $out .= "  %nulp = getelementptr inbounds i8, ptr %datap, i64 1\n";
+        $out .= "  store i8 0, ptr %nulp\n";
+        // rc LAST: it is the published marker, and nothing may observe an entry
+        // as built before its bytes are there.
+        $out .= "  store i64 -1, ptr %rcp\n";
+        $out .= "  br label %ret\n";
+        $out .= "ret:\n";
+        $out .= "  ret ptr %datap\n}\n";
+
         // `$s[$i]` read — negative index counts from the end; out-of-range → "".
-        // Returns a fresh 1-char headered string (binary-safe).
+        // Returns the interned 1-char string (binary-safe, immortal).
         $out .= "\ndefine ptr @__mir_str_char_at(ptr %s, i64 %i) {\nentry:\n";
         $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %neg = icmp slt i64 %i, 0\n";
@@ -860,7 +909,9 @@ final class RuntimeLibrary
         $out .= "  ret ptr %e\n";
         $out .= "one:\n";
         $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %ix\n";
-        $out .= "  %r = call ptr @__mir_str_new(ptr %cp, i64 1)\n";
+        $out .= "  %cb = load i8, ptr %cp\n";
+        $out .= "  %cbz = zext i8 %cb to i64\n";
+        $out .= "  %r = call ptr @__mir_char_of(i64 %cbz)\n";
         $out .= "  ret ptr %r\n}\n";
 
         // `\$s[\$i]` read as a BYTE — the same access as __mir_str_char_at, minus
@@ -2438,7 +2489,14 @@ final class RuntimeLibrary
      * Malformed input DEGRADES rather than throwing, exactly as the PHP parser
      * did — it is not a validator.
      */
-    public function jsonDec(): string
+    /**
+     * @param int    $stdSize   `stdClass` instance size, or 0 when the module has
+     *                          no stdClass — then `$assoc = 0` degrades to the
+     *                          assoc array rather than emitting a null descriptor.
+     * @param int    $stdBagOff offset of stdClass's dynamic-property bag
+     * @param string $stdDesc   i64 operand for its class descriptor
+     */
+    public function jsonDec(int $stdSize = 0, int $stdBagOff = 16, string $stdDesc = '0'): string
     {
         $out = '';
 
@@ -2593,7 +2651,7 @@ final class RuntimeLibrary
         $out .= $this->jsonDecString();
         $out .= $this->jsonDecKey();
         $out .= $this->jsonDecNumber();
-        $out .= $this->jsonDecValue();
+        $out .= $this->jsonDecValue($stdSize, $stdBagOff, $stdDesc);
         return $out;
     }
 
@@ -3042,7 +3100,7 @@ final class RuntimeLibrary
      * growing from zero. An object's key is handed to `__mir_array_set_str`,
      * which takes its own reference, so the parser drops the one it minted.
      */
-    private function jsonDecValue(): string
+    private function jsonDecValue(int $stdSize, int $stdBagOff, string $stdDesc): string
     {
         $cellRepr = (string)\Compile\MemoryAbi::ARRAY_REPR_CELL;
         $notRepr  = (string)(~\Compile\MemoryAbi::ARRAY_REPR_MASK);
@@ -3057,7 +3115,7 @@ final class RuntimeLibrary
             return $o;
         };
 
-        $out  = "\ndefine i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp) {\n";
+        $out  = "\ndefine i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc) {\n";
         $out .= "entry:\n";
         $out .= "  %ap = alloca ptr\n";
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
@@ -3118,7 +3176,8 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %aq = load i64, ptr %pp\n";
         $out .= "  %aoob = icmp sge i64 %aq, %n\n";
-        $out .= "  br i1 %aoob, label %adone, label %achk\n";
+        // Input ending right after `[` — the container never closes.
+        $out .= "  br i1 %aoob, label %aerr, label %achk\n";
         $out .= "achk:\n";
         $out .= "  %acp = getelementptr inbounds i8, ptr %s, i64 %aq\n";
         $out .= "  %acb = load i8, ptr %acp\n";
@@ -3133,7 +3192,7 @@ final class RuntimeLibrary
         $out .= "  %alend = icmp sge i64 %al, %n\n";
         $out .= "  br i1 %alend, label %atail, label %abody\n";
         $out .= "abody:\n";
-        $out .= "  %av = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %av = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
         $out .= "  %acur = load ptr, ptr %ap\n";
         $out .= "  %anx = call ptr @__mir_array_append(ptr %acur, i64 %av)\n";
         $out .= "  store ptr %anx, ptr %ap\n";
@@ -3154,12 +3213,18 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %at = load i64, ptr %pp\n";
         $out .= "  %atoob = icmp sge i64 %at, %n\n";
-        $out .= "  br i1 %atoob, label %adone, label %atchk\n";
+        // Running out of input, or finding a byte that is not `]`, both used to
+        // fall into %adone and hand back a container php would have rejected —
+        // `[1,2` decoded as [1,2]. Both are php's SYNTAX error.
+        $out .= "  br i1 %atoob, label %aerr, label %atchk\n";
         $out .= "atchk:\n";
         $out .= "  %atp = getelementptr inbounds i8, ptr %s, i64 %at\n";
         $out .= "  %atb = load i8, ptr %atp\n";
         $out .= "  %atend = icmp eq i8 %atb, 93\n";
-        $out .= "  br i1 %atend, label %ateat, label %adone\n";
+        $out .= "  br i1 %atend, label %ateat, label %aerr\n";
+        $out .= "aerr:\n";
+        $out .= "  %aerrc = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %adone\n";
         $out .= "ateat:\n";
         $out .= "  %at1 = add i64 %at, 1\n";
         $out .= "  store i64 %at1, ptr %pp\n";
@@ -3178,7 +3243,8 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %oq = load i64, ptr %pp\n";
         $out .= "  %ooob = icmp sge i64 %oq, %n\n";
-        $out .= "  br i1 %ooob, label %odone, label %ochk\n";
+        // Input ending right after `{` — the container never closes.
+        $out .= "  br i1 %ooob, label %oerr, label %ochk\n";
         $out .= "ochk:\n";
         $out .= "  %ocp = getelementptr inbounds i8, ptr %s, i64 %oq\n";
         $out .= "  %ocb = load i8, ptr %ocp\n";
@@ -3198,17 +3264,27 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %oc0 = load i64, ptr %pp\n";
         $out .= "  %oc0ok = icmp slt i64 %oc0, %n\n";
-        $out .= "  br i1 %oc0ok, label %ocolon, label %oval\n";
+        // A missing `:` — or input that ends before one — was tolerated, so
+        // `{"a" 1}` and `{"a"` both decoded as if well formed. php: SYNTAX.
+        $out .= "  br i1 %oc0ok, label %ocolon, label %ocbad\n";
+        $out .= "ocbad:\n";
+        $out .= "  %ocbe = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %oval\n";
         $out .= "ocolon:\n";
         $out .= "  %ocp2 = getelementptr inbounds i8, ptr %s, i64 %oc0\n";
         $out .= "  %ocb2 = load i8, ptr %ocp2\n";
         $out .= "  %iscol = icmp eq i8 %ocb2, 58\n";          // :
+        $out .= "  br i1 %iscol, label %ocok, label %ocmiss\n";
+        $out .= "ocmiss:\n";
+        $out .= "  %ocme = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %ocok\n";
+        $out .= "ocok:\n";
         $out .= "  %oc1 = add i64 %oc0, 1\n";
         $out .= "  %ocn = select i1 %iscol, i64 %oc1, i64 %oc0\n";
         $out .= "  store i64 %ocn, ptr %pp\n";
         $out .= "  br label %oval\n";
         $out .= "oval:\n";
-        $out .= "  %ov = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %ov = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
         $out .= "  %ocur = load ptr, ptr %ap\n";
         $out .= "  %onx = call ptr @__mir_array_set_str(ptr %ocur, ptr %okey, i64 %ov, i64 0, i64 0)\n";
         $out .= "  store ptr %onx, ptr %ap\n";
@@ -3231,12 +3307,15 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %ot = load i64, ptr %pp\n";
         $out .= "  %otoob = icmp sge i64 %ot, %n\n";
-        $out .= "  br i1 %otoob, label %odone, label %otchk\n";
+        $out .= "  br i1 %otoob, label %oerr, label %otchk\n";
         $out .= "otchk:\n";
         $out .= "  %otp = getelementptr inbounds i8, ptr %s, i64 %ot\n";
         $out .= "  %otb = load i8, ptr %otp\n";
         $out .= "  %otend = icmp eq i8 %otb, 125\n";
-        $out .= "  br i1 %otend, label %oteat, label %odone\n";
+        $out .= "  br i1 %otend, label %oteat, label %oerr\n";
+        $out .= "oerr:\n";
+        $out .= "  %oerrc = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %odone\n";
         $out .= "oteat:\n";
         $out .= "  %ot1 = add i64 %ot, 1\n";
         $out .= "  store i64 %ot1, ptr %pp\n";
@@ -3244,16 +3323,60 @@ final class RuntimeLibrary
         $out .= "odone:\n";
         $out .= "  %ofin = load ptr, ptr %ap\n";
         $out .= $stamp('o', '%ofin');
-        $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
-        $out .= "  ret i64 %obx\n}\n";
+        if ($stdSize === 0) {
+            // No stdClass in this module (a library `.o` carries no classes), so
+            // `$assoc = false` degrades to the array rather than minting an
+            // object around a null descriptor.
+            $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
+            $out .= "  ret i64 %obx\n}\n";
+        } else {
+            // php's DEFAULT: a JSON object becomes a stdClass whose dynamic bag
+            // IS the assoc just built — the same five instructions `(object)$a`
+            // emits, and no copy, so `$assoc = false` costs almost nothing.
+            $out .= "  %jsoQ = icmp ne i64 %assoc, 0\n";
+            $out .= "  br i1 %jsoQ, label %jsoarr, label %jsoobj\n";
+            $out .= "jsoarr:\n";
+            $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
+            $out .= "  ret i64 %obx\n";
+            $out .= "jsoobj:\n";
+            $out .= "  %jsoO = call ptr @__mir_alloc_tagged(i64 " . (string)$stdSize . ")\n";
+            $out .= "  store i64 " . $stdDesc . ", ptr %jsoO\n";
+            $out .= "  %jsoRc = getelementptr inbounds i64, ptr %jsoO, i64 1\n";
+            $out .= "  store i64 1, ptr %jsoRc\n";
+            $out .= "  %jsoBag = getelementptr inbounds i8, ptr %jsoO, i64 "
+                  . (string)$stdBagOff . "\n";
+            $out .= "  %jsoFin = ptrtoint ptr %ofin to i64\n";
+            $out .= "  store i64 %jsoFin, ptr %jsoBag\n";
+            $out .= "  %jsoBox = call i64 @__manticore_box_object(ptr %jsoO)\n";
+            $out .= "  ret i64 %jsoBox\n}\n";
+        }
 
         // ── entry point: whole document ──
-        $out .= "\ndefine i64 @__mir_json_decode(ptr %s) {\n";
+        $out .= "\ndefine i64 @__mir_json_decodea(ptr %s, i64 %assoc) {\n";
         $out .= "entry:\n";
         $out .= "  %pp = alloca i64\n";
         $out .= "  store i64 0, ptr %pp\n";
         $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
-        $out .= "  %r = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        // Empty or whitespace-only input is a syntax error in php, not null.
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %jdp0 = load i64, ptr %pp\n";
+        $out .= "  %jdmt = icmp sge i64 %jdp0, %n\n";
+        $out .= "  br i1 %jdmt, label %jdempty, label %jdgo\n";
+        $out .= "jdempty:\n";
+        $out .= "  %jde0 = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  %jdnul = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %jdnul\n";
+        $out .= "jdgo:\n";
+        $out .= "  %r = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
+        // Anything left over after the value is trailing garbage: `[1,2]x`.
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %jdpe = load i64, ptr %pp\n";
+        $out .= "  %jdfin = icmp sge i64 %jdpe, %n\n";
+        $out .= "  br i1 %jdfin, label %jdok, label %jdtrail\n";
+        $out .= "jdtrail:\n";
+        $out .= "  %jde1 = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %jdok\n";
+        $out .= "jdok:\n";
         $out .= "  ret i64 %r\n}\n";
         return $out;
     }

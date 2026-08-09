@@ -127,4 +127,35 @@ abstract class Node
      * (the {@see Passes\TypeCheck} analyzer) can point at a real location.
      */
     public int $line = 0;
+
+    /**
+     * The compile-time truth of a literal flag argument (`print_r($v, true)`),
+     * or null when the argument is missing or only known at runtime.
+     *
+     * ONE owner on purpose: the emitter's mode choice
+     * ({@see Passes\EmitLlvmBuiltins::biPrintR}) and the return type
+     * ({@see Passes\InferCalls::builtinReturnType}) must answer the same
+     * question the same way — a disagreement types the call `string` while the
+     * emitter prints, which is the silent-default dispatch shape.
+     */
+    public static function literalBool(?Node $n): ?bool
+    {
+        if ($n instanceof BoolConst) { return $n->value; }
+        if ($n instanceof IntConst) { return $n->value !== 0; }
+        return null;
+    }
+
+    /**
+     * The compile-time VALUE of a literal int argument, or null when it is
+     * missing or only known at runtime. Sibling of {@see literalBool}, and a
+     * separate question: a builtin gate that must tell `json_encode($v)` from
+     * `json_encode($v, JSON_PRETTY_PRINT)` needs the bits, not the truthiness,
+     * and collapsing them would make every non-zero flag look alike.
+     */
+    public static function literalInt(?Node $n): ?int
+    {
+        if ($n instanceof IntConst) { return $n->value; }
+        if ($n instanceof BoolConst) { return $n->value ? 1 : 0; }
+        return null;
+    }
 }
