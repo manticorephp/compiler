@@ -257,8 +257,15 @@ trait EmitLlvmBuiltins
         if ($name === 'array_shift')                  { return $this->biArrayShift($c); }
         if ($name === 'array_unshift')                { return $this->biArrayUnshift($c); }
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
-        if ($name === '__mc_json_escape')             { return $this->biJsonEscape($args); }
-        if ($name === 'json_encode' && \count($args) === 1) { return $this->biJsonEncode($args); }
+        // ONE argument only. The builtin reads args[0] and nothing else, so
+        // firing it on `__mc_json_escape($s, $flags)` would drop the flags
+        // silently — a builtin shadowing its own bootstrap body with WEAKER
+        // semantics, which is how the compiled-PHP encoder came to behave as if
+        // JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE were always set.
+        if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
+        if ($name === 'json_encode' && \count($args) >= 1
+            && $this->argIsDefaultInt($args, 1, 0)
+            && $this->argIsDefaultInt($args, 2, 512)) { return $this->biJsonEncode($args); }
         if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
@@ -6371,12 +6378,42 @@ trait EmitLlvmBuiltins
     private function jsonDecodeNative(array $args): bool
     {
         $c = \count($args);
-        if ($c === 1) { return true; }
-        if ($c !== 2) { return false; }
-        $k = $args[1]->kind;
-        return $k === Node::KIND_BOOL_CONST || $k === Node::KIND_INT_CONST
-            || $k === Node::KIND_NULL_CONST;
+        if ($c < 1 || $c > 4) { return false; }
+        if ($c >= 2) {
+            $k = $args[1]->kind;
+            if ($k !== Node::KIND_BOOL_CONST && $k !== Node::KIND_INT_CONST
+                && $k !== Node::KIND_NULL_CONST) { return false; }
+        }
+        // The native decoder has no depth limit and reads no flags, so it may
+        // only take a call that asks for neither.
+        return $this->argIsDefaultInt($args, 2, 512)
+            && $this->argIsDefaultInt($args, 3, 0);
     }
+
+    /**
+     * Is argument `$i` absent, or the literal int `$want`?
+     *
+     * ⚠ Ask what an argument IS, never how many there are. Lowering PADS
+     * omitted defaults, so giving a stdlib function a new defaulted parameter
+     * rewrites every existing call site into a wider one — and an arity-counting
+     * gate then hands the whole builtin back to the compiled-PHP body without a
+     * word. Widening `json_encode` to `($value, $flags = 0, $depth = 512)` moved
+     * EVERY `json_encode($v)` in every program off the native single-buffer
+     * encoder, and `json_decode($s, true)` off the native decoder onto a parser
+     * that does not combine surrogate pairs.
+     * @param Node[] $args
+     */
+    private function argIsDefaultInt(array $args, int $i, int $want): bool
+    {
+        if (!isset($args[$i])) { return true; }
+        $a = $args[$i];
+        if ($a->kind !== Node::KIND_INT_CONST) { return false; }
+        return $this->intConstValue($a) === $want;
+    }
+
+    /** Subclass-typed read: narrowing by `instanceof` does not survive inside a
+     *  trait, and every `EmitLlvm*` is one. Guarded by the kind test above. */
+    private function intConstValue(\Compile\Mir\IntConst $n): int { return $n->value; }
 
     /**
      * `json_decode($json)` — native recursive-descent decoder

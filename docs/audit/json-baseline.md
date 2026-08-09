@@ -27,6 +27,28 @@ Speed is not the problem. **Parity is.** The harness refuses to time a case whos
 output differs from php, and the three it refused are exactly the three features
 this epic exists to build.
 
+## After Stage 1a (flags honoured by the compiled-PHP encoder)
+
+| case | speedup then → now | rss-n then → now |
+|---|---|---|
+| `json` | 1.9× → 2.1× | 1.8 → 1.9 |
+| `json_records` | 1.7× → 1.8× | 17.5 → 10.9 |
+| `json_decode` | 2.0× → 2.3× | 16.1 → 16.0 |
+| `json_decode_records` | 2.5× → 2.7× | 10.7 → 10.7 |
+| `json_utf8` | 2.7× → 2.5× | 6.1 → 4.4 |
+| `json_escape_heavy` | 3.5× → 3.6× | 2.6 → 2.6 |
+| `json_deep` | 5.0× → 5.3× | 1.9 → 1.9 |
+| `json_pretty` | **DIFF → 0.8×** | — → **67.6** |
+
+⚠ **Absolute wall times are NOT comparable between these two runs** — the second ran
+on a loaded box and BOTH sides scaled ~3.5× (php's own `json` went 0.13 → 0.50). The
+contention-resistant readings are the **ratio** and **max RSS**, and neither regressed.
+
+`json_pretty` reaching parity is Stage 1a's whole point, and its numbers are the
+honest cost of getting there: a flagged call runs the compiled-PHP encoder, which is
+**slower than php and burns 2.5× its memory**. That is Stage 1b's target, not a
+surprise.
+
 ## What the three DIFFs actually are
 
 | probe | php | manticore |

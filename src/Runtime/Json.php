@@ -10,8 +10,8 @@
  */
 
 /** Encode a value as JSON. */
-function json_encode(mixed $value): string {
-    return __mc_json_enc($value);
+function json_encode(mixed $value, int $flags = 0, int $depth = 512): string {
+    return __mc_json_enc($value, $flags, $depth, 0);
 }
 
 /** `$w` lowercase hex digits of `$v` (JSON `\u` escapes are lowercase). */
@@ -32,12 +32,22 @@ function __mc_json_hex(int $v, int $w): string {
  * BMP as a `\uD800`-`\uDC00` surrogate pair). A fast-return skips the copy when
  * nothing needs escaping — the common case, plain ASCII words. `.=` is amortized.
  */
-function __mc_json_escape(string $s): string {
+function __mc_json_escape(string $s, int $flags = 0): string {
+    $rawSlash = ($flags & 64) !== 0;      // JSON_UNESCAPED_SLASHES
+    $rawUni   = ($flags & 256) !== 0;     // JSON_UNESCAPED_UNICODE
+    $hexTag   = ($flags & 1) !== 0;       // JSON_HEX_TAG   < >
+    $hexAmp   = ($flags & 2) !== 0;       // JSON_HEX_AMP   &
+    $hexApos  = ($flags & 4) !== 0;       // JSON_HEX_APOS  '
+    $hexQuot  = ($flags & 8) !== 0;       // JSON_HEX_QUOT  "
     $n = \strlen($s);
     $needs = false;
     for ($i = 0; $i < $n; $i = $i + 1) {
         $o = \ord($s[$i]);
-        if ($o < 0x20 || $o === 0x22 || $o === 0x5c || $o === 0x2f || $o >= 0x80) {
+        if ($o < 0x20 || $o === 0x22 || $o === 0x5c
+            || ($o === 0x2f && !$rawSlash) || ($o >= 0x80 && !$rawUni)
+            || ($hexTag && ($o === 0x3c || $o === 0x3e))
+            || ($hexAmp && $o === 0x26) || ($hexApos && $o === 0x27)
+        ) {
             $needs = true;
             break;
         }
@@ -47,9 +57,17 @@ function __mc_json_escape(string $s): string {
     $i = 0;
     while ($i < $n) {
         $o = \ord($s[$i]);
-        if ($o === 0x22) { $out = $out . '\\"'; $i = $i + 1; }
+        // The four HEX_* forms are php's own literals and are UPPERCASE, unlike
+        // the lowercase \uXXXX the general path emits. Verified against the
+        // oracle, not assumed: json_encode("<", JSON_HEX_TAG) is "<".
+        if ($o === 0x22 && $hexQuot) { $out = $out . '\\u0022'; $i = $i + 1; }
+        elseif ($o === 0x3c && $hexTag) { $out = $out . '\\u003C'; $i = $i + 1; }
+        elseif ($o === 0x3e && $hexTag) { $out = $out . '\\u003E'; $i = $i + 1; }
+        elseif ($o === 0x26 && $hexAmp) { $out = $out . '\\u0026'; $i = $i + 1; }
+        elseif ($o === 0x27 && $hexApos) { $out = $out . '\\u0027'; $i = $i + 1; }
+        elseif ($o === 0x22) { $out = $out . '\\"'; $i = $i + 1; }
         elseif ($o === 0x5c) { $out = $out . '\\\\'; $i = $i + 1; }
-        elseif ($o === 0x2f) { $out = $out . '\\/'; $i = $i + 1; }
+        elseif ($o === 0x2f) { $out = $out . ($rawSlash ? '/' : '\\/'); $i = $i + 1; }
         elseif ($o === 0x0a) { $out = $out . '\\n'; $i = $i + 1; }
         elseif ($o === 0x09) { $out = $out . '\\t'; $i = $i + 1; }
         elseif ($o === 0x0d) { $out = $out . '\\r'; $i = $i + 1; }
@@ -57,6 +75,18 @@ function __mc_json_escape(string $s): string {
         elseif ($o === 0x0c) { $out = $out . '\\f'; $i = $i + 1; }
         elseif ($o < 0x20) { $out = $out . '\\u00' . \__mc_json_hex($o, 2); $i = $i + 1; }
         elseif ($o < 0x80) { $out = $out . $s[$i]; $i = $i + 1; }
+        elseif ($rawUni) {
+            // JSON_UNESCAPED_UNICODE: the sequence rides through as its own
+            // bytes. Still decoded by LENGTH so a multi-byte character is
+            // copied whole — a byte-at-a-time passthrough would be identical
+            // here, but the length is what a validating pass will need.
+            $w = 1;
+            if ($o >= 0xF0) { $w = 4; }
+            elseif ($o >= 0xE0) { $w = 3; }
+            elseif ($o >= 0xC0) { $w = 2; }
+            $out = $out . \substr($s, $i, $w);
+            $i = $i + $w;
+        }
         else {
             // UTF-8 lead byte → decode the 2/3/4-byte sequence to a codepoint.
             if ($o >= 0xF0) {
@@ -90,7 +120,8 @@ function __mc_json_escape(string $s): string {
  * is what the manifest reader and config consumers want. Delegates to
  * {@see \Runtime\Json\Parser}.
  */
-function json_decode(string $json, bool $associative = true): mixed {
+function json_decode(string $json, ?bool $associative = null, int $depth = 512,
+                     int $flags = 0): mixed {
     $parser = new \Runtime\Json\Parser($json);
     return $parser->parse();
 }
@@ -343,43 +374,105 @@ function __mc_multiple_pow5(int $value, int $p): bool {
     return $count >= $p;
 }
 
-function __mc_json_enc(mixed $v): string {
+function __mc_json_enc(mixed $v, int $flags = 0, int $maxDepth = 512, int $depth = 0): string {
     if (is_null($v)) { return "null"; }
     if (is_bool($v)) { return $v ? "true" : "false"; }
     if (is_int($v)) { return (string)$v; }
-    if (is_float($v)) { return (string)$v; }
-    if (is_string($v)) { return '"' . __mc_json_escape($v) . '"'; }
-    if (is_object($v)) {
-        $out = "{";
-        $first = true;
-        foreach ((array)$v as $k => $val) {
-            if (!$first) { $out = $out . ","; }
-            $first = false;
-            $ks = is_string($k) ? $k : (string)$k;
-            $out = $out . '"' . __mc_json_escape($ks) . '":' . __mc_json_enc($val);
+    if (is_float($v)) { return __mc_json_float($v, $flags); }
+    if (is_string($v)) {
+        // JSON_NUMERIC_CHECK re-reads a numeric string AS a number, so "012"
+        // encodes as 12 and "1.5" as 1.5. Non-numeric strings are untouched.
+        if (($flags & 32) !== 0 && is_numeric($v)) {
+            return __mc_json_numeric($v, $flags);
         }
-        return $out . "}";
+        return '"' . __mc_json_escape($v, $flags) . '"';
+    }
+    if ($depth >= $maxDepth) { return "null"; }
+    $pretty = ($flags & 128) !== 0;                 // JSON_PRETTY_PRINT
+    $nl = $pretty ? "\n" : "";
+    $pad = $pretty ? \str_repeat(" ", 4 * ($depth + 1)) : "";
+    $endPad = $pretty ? \str_repeat(" ", 4 * $depth) : "";
+    $colon = $pretty ? ": " : ":";
+    if (is_object($v)) {
+        return __mc_json_obj((array)$v, $flags, $maxDepth, $depth, $nl, $pad, $endPad, $colon);
     }
     // An array encodes as a JSON list `[...]` only when its keys are
     // 0..n-1 in order; otherwise as a JSON object `{...}` with every key
-    // stringified (PHP semantics).
-    if (array_is_list($v)) {
-        $out = "[";
+    // stringified (PHP semantics). JSON_FORCE_OBJECT removes the list case.
+    if (($flags & 16) === 0 && array_is_list($v)) {
+        // `count(...) === 0`, not `=== []`: an identity compare against an array
+        // literal compares HANDLES, so over an erased carrier it is always false
+        // and the empty list rendered as a pretty-printed `[\n\n]`.
+        if (\count($v) === 0) { return "[]"; }
+        $out = "[" . $nl;
         $first = true;
         foreach ($v as $val) {
-            if (!$first) { $out = $out . ","; }
+            if (!$first) { $out = $out . "," . $nl; }
             $first = false;
-            $out = $out . __mc_json_enc($val);
+            $out = $out . $pad . __mc_json_enc($val, $flags, $maxDepth, $depth + 1);
         }
-        return $out . "]";
+        return $out . $nl . $endPad . "]";
     }
-    $out = "{";
+    return __mc_json_obj($v, $flags, $maxDepth, $depth, $nl, $pad, $endPad, $colon);
+}
+
+/** The `{...}` half of {@see __mc_json_enc}, shared by the object arm, the
+ *  hashed-array arm and JSON_FORCE_OBJECT. @param array<mixed> $a */
+function __mc_json_obj(array $a, int $flags, int $maxDepth, int $depth,
+                       string $nl, string $pad, string $endPad, string $colon): string {
+    if (\count($a) === 0) { return "{}"; }
+    $out = "{" . $nl;
     $first = true;
-    foreach ($v as $k => $val) {
-        if (!$first) { $out = $out . ","; }
+    foreach ($a as $k => $val) {
+        if (!$first) { $out = $out . "," . $nl; }
         $first = false;
         $ks = is_string($k) ? $k : (string)$k;
-        $out = $out . '"' . __mc_json_escape($ks) . '":' . __mc_json_enc($val);
+        $out = $out . $pad . '"' . __mc_json_escape($ks, $flags) . '"' . $colon
+             . __mc_json_enc($val, $flags, $maxDepth, $depth + 1);
     }
-    return $out . "}";
+    return $out . $nl . $endPad . "}";
+}
+
+/**
+ * JSON_NUMERIC_CHECK's conversion, decided LEXICALLY rather than by arithmetic.
+ * php's rule is the one `+ 0` uses: an integer string that fits gives an int,
+ * and a fraction, an exponent or an overflow gives a float. Neither `$cell + 0`
+ * nor `$string + 0` can answer that here — the first reads the erased carrier as
+ * an integer, the second is statically typed `int` and truncates `"1.5"` to 1 —
+ * so the shape of the string decides, and the cast that follows is exact.
+ */
+function __mc_json_numeric(string $s, int $flags): string {
+    $t = \trim($s);
+    $isFloat = \strpos($t, ".") !== false || \strpos($t, "e") !== false
+            || \strpos($t, "E") !== false;
+    if (!$isFloat) {
+        $neg = $t !== "" && $t[0] === "-";
+        $d = \ltrim($t, "+-");
+        $d = \ltrim($d, "0");
+        if ($d === "") { return "0"; }
+        // Compare against the bound as TEXT: the int cast saturates, so it
+        // cannot detect its own overflow, and a float round-trip lands on the
+        // same double for both sides of the boundary.
+        $limit = $neg ? "9223372036854775808" : "9223372036854775807";
+        $ld = \strlen($d);
+        $ll = \strlen($limit);
+        if ($ld > $ll || ($ld === $ll && \strcmp($d, $limit) > 0)) { $isFloat = true; }
+    }
+    if ($isFloat) { return __mc_json_float((float)$t, $flags); }
+    return (string)(int)$t;
+}
+
+/** A float, with JSON_PRESERVE_ZERO_FRACTION's trailing `.0`. php prints an
+ *  integral double as `1` by default and as `1.0` under the flag.
+ *  Formatted by the Ryu shortest-round-trip printer, NOT `(string)$f`: json
+ *  uses serialize_precision=-1, while a string cast uses precision=14 and would
+ *  answer `9.2233720368548E+18` where json says `9.223372036854776e+18`. */
+function __mc_json_float(float $f, int $flags): string {
+    $s = __mc_dtoa($f);
+    if (($flags & 1024) === 0) { return $s; }
+    if (\strpos($s, ".") !== false || \strpos($s, "e") !== false
+        || \strpos($s, "E") !== false) {
+        return $s;
+    }
+    return $s . ".0";
 }
