@@ -390,8 +390,8 @@ function __mc_json_enc(mixed $v, int $flags = 0, int $maxDepth = 512, int $depth
     if ($depth >= $maxDepth) { return "null"; }
     $pretty = ($flags & 128) !== 0;                 // JSON_PRETTY_PRINT
     $nl = $pretty ? "\n" : "";
-    $pad = $pretty ? \str_repeat(" ", 4 * ($depth + 1)) : "";
-    $endPad = $pretty ? \str_repeat(" ", 4 * $depth) : "";
+    $pad = $pretty ? __mc_json_indent($depth + 1) : "";
+    $endPad = $pretty ? __mc_json_indent($depth) : "";
     $colon = $pretty ? ": " : ":";
     if (is_object($v)) {
         return __mc_json_obj((array)$v, $flags, $maxDepth, $depth, $nl, $pad, $endPad, $colon);
@@ -431,6 +431,19 @@ function __mc_json_obj(array $a, int $flags, int $maxDepth, int $depth,
              . __mc_json_enc($val, $flags, $maxDepth, $depth + 1);
     }
     return $out . $nl . $endPad . "}";
+}
+
+/**
+ * A pretty-print indent, memoised by depth. Two `str_repeat` calls PER NODE is
+ * two allocations per node on a path whose whole job is to concatenate — a 10k
+ * row document paid 40k of them. Documents are shallow, so the cache is tiny and
+ * every level after the first is a lookup.
+ * @param int $depth nesting level; 4 spaces each, php's width
+ */
+function __mc_json_indent(int $depth): string {
+    static $pads = [];
+    if (!isset($pads[$depth])) { $pads[$depth] = \str_repeat(" ", 4 * $depth); }
+    return $pads[$depth];
 }
 
 /**
