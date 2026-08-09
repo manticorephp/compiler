@@ -3779,8 +3779,11 @@ trait EmitLlvmObjects
     private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
+        // ARITY first, and OUTSIDE the repr early-return: a site that emitted no
+        // per-argument types still hands every arm the fallback's list length.
         if (\count($cTypes) === 0 || \count($srcTypes) === 0) {
-            return $this->vdArmSpread($sym, $cTypes);
+            $only = $this->vdArmArity(\explode(', ', $argList), $cTypes, $sym);
+            return $only . $this->vdArmSpread($sym, $cTypes);
         }
         $parts = \explode(', ', $argList);
         $out = '';
@@ -3807,7 +3810,67 @@ trait EmitLlvmObjects
             $i = $i + 1;
         }
         if ($changed) { $this->vdArmList = \implode(', ', $parts); }
+        $out .= $this->vdArmArity($parts, $cTypes, $sym);
         return $out . $this->vdArmSpread($sym, $cTypes);
+    }
+
+    /**
+     * Make the arm's list as LONG as this candidate's own signature — the other
+     * half of {@see vdArmArgs}, and for the same reason: the shared list was
+     * built for the FALLBACK.
+     *
+     * Candidates reached through an erased receiver are matched by NAME, so
+     * their arities differ as freely as their reprs do. `$o->__construct()` on
+     * an erased `$o` emitted ONE list sized for the widest candidate
+     * (`Exception::__construct`, four parameters) and handed it to every arm, so
+     * `Row::__construct($this, $tag = '-')` was called as `(…, %arg, 0, 0)`:
+     * two arguments too many, and `$tag` taking a placeholder ZERO instead of
+     * its default. That is what made pdo's `fetchObject('Row')` build a row
+     * whose promoted `$tag` was the empty string — via `makeObject`'s
+     * `$o->__construct()`.
+     *
+     * SHORT arm → default-pad it from the candidate's own declaration; LONG arm
+     * → truncate, exactly as {@see EmitLlvm::faCallArgs} does for a direct call.
+     * A spread arm is left to {@see vdArmSpread}, which fills against the same
+     * signature.
+     *
+     * @param string[]         $parts  the arm's argument list, already re-coerced
+     * @param array<int, Type> $cTypes this arm's own signature
+     */
+    private function vdArmArity(array $parts, array $cTypes, string $sym): string
+    {
+        if ($sym === '' || $this->spreadTail !== null) { return ''; }
+        $want = \count($this->sigs->paramTypes[$sym] ?? $cTypes);
+        if ($want === 0) { return ''; }
+        // Back to what the SITE wrote: the tail past that is the FALLBACK's
+        // defaults, and this arm's own defaults are a different answer. Keeping
+        // them is what handed `Row::__construct($tag = '-')` the placeholder
+        // Exception::$message slot and left `$tag` empty.
+        $have = \count($parts);
+        $site = $this->vdSiteArgc;
+        if ($site > 0 && $site < $have) {
+            $kept = [];
+            $i = 0;
+            while ($i < $site) { $kept[] = $parts[$i]; $i = $i + 1; }
+            $parts = $kept;
+            $have = $site;
+        }
+        if ($have === $want) {
+            $this->vdArmList = \implode(', ', $parts);
+            return '';
+        }
+        if ($have > $want) {
+            // Still too long: a candidate narrower than the site's own call,
+            // truncated as {@see EmitLlvm::faCallArgs} does for a direct call.
+            $kept = [];
+            $i = 0;
+            while ($i < $want) { $kept[] = $parts[$i]; $i = $i + 1; }
+            $this->vdArmList = \implode(', ', $kept);
+            return '';
+        }
+        $out = $this->emitDefaultArgPad($sym, $have, true);
+        $this->vdArmList = \implode(', ', $parts) . $this->lastPadArgs;
+        return $out;
     }
 
     /**
@@ -4580,6 +4643,9 @@ trait EmitLlvmObjects
         // `$this`, so provided params cover indices [0 .. $ai].
         $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true);
         $argList .= $this->lastPadArgs;
+        // The pad above is the FALLBACK's. Record what the site really wrote so
+        // a dispatch arm can cut back to it ({@see vdArmArity}).
+        $this->vdSiteArgc = $ai + 1;
 
         // Virtual dispatch: if any descendant of the static type
         // resolves `$method` to a different class, switch on the

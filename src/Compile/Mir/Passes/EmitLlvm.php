@@ -334,6 +334,12 @@ final class EmitLlvm implements EmitVisitor
     private string $vdResult = '';
     /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
     private string $vdArmList = '';
+
+    /** How many arguments the CALL SITE actually wrote (`$this` included), before
+     *  the fallback's default pad widened the shared dispatch list. Each arm cuts
+     *  back to this and re-pads from its OWN declaration
+     *  ({@see Passes\EmitLlvmObjects::vdArmArity}). */
+    private int $vdSiteArgc = 0;
     /** Scratch: caller slot address / scratch cell slot of the by-ref argument
      *  {@see EmitLlvmCalls::emitByRefCellBox} just boxed. */
     private string $refBoxSlot = '';

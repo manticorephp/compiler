@@ -1127,6 +1127,17 @@ final class NewDynObj extends Node
         parent::__construct(Node::KIND_NEW_DYN_OBJ, $type);
     }
 
+    /** See {@see Call::$srcArgc}. Declared LAST, as on {@see NewObj} — the
+     *  promoted-parameter order is load-bearing.
+     *
+     *  ⚠ {@see EmitLlvmObjects::emitNewDynObj} has ALWAYS read this field, and
+     *  it was never declared: under Zend that is "Undefined property" and a
+     *  TypeError from `faPush`, and self-hosted it is a read of a field that is
+     *  not there. `new $cls()` on a class with a defaulted constructor is the
+     *  witness — pdo's `fetchObject('Row')` built the object with an EMPTY
+     *  promoted `$tag` instead of its default `'-'`. */
+    public int $srcArgc = -1;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNewDynObj($this);

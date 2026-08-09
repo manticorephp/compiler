@@ -4613,12 +4613,18 @@ final class LowerFromAst implements Pass
         if (\count($relaxed) > \count($exactArms)) {
             // Broad (defaulted-ctor) case → boxed object, runtime class_id dispatch.
             $t = \count($relaxed) === 1 ? Type::obj($relaxed[0]) : Type::cell();
-            return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+            $ndo = new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+            $ndo->srcArgc = \count($expr->args);
+            return $ndo;
         }
         $t = Type::unknown();
         if (\count($exactArms) === 1) { $t = $exactArms[0]; }
         elseif (\count($exactArms) > 1) { $t = Type::union($exactArms); }
-        return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+        $ndo = new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+        // What the SOURCE wrote, before the emitter's default-pad widens the
+        // list — the func-args channel ({@see EmitLlvmObjects::emitNewDynObj}).
+        $ndo->srcArgc = \count($expr->args);
+        return $ndo;
     }
 
     private function lowerNewExpr(\Parser\Ast\NewExpr $expr): Node
