@@ -6462,17 +6462,9 @@ trait EmitLlvmBuiltins
     private function argIsDefaultInt(array $args, int $i, int $want): bool
     {
         if (!isset($args[$i])) { return true; }
-        $a = $args[$i];
-        if ($a->kind !== Node::KIND_INT_CONST) { return false; }
-        return $this->intConstValue($a) === $want;
+        if ($args[$i]->kind !== Node::KIND_INT_CONST) { return false; }
+        return Node::literalInt($args[$i]) === $want;
     }
-
-    /** Subclass-typed read: narrowing by `instanceof` does not survive inside a
-     *  trait, and every `EmitLlvm*` is one. Guarded by the kind test above. */
-    private function intConstValue(\Compile\Mir\IntConst $n): int { return $n->value; }
-
-    /** {@see intConstValue}, for a bool literal. */
-    private function boolConstValue(\Compile\Mir\BoolConst $n): bool { return $n->value; }
 
     /**
      * 1 when this `json_decode` call wants assoc ARRAYS, 0 when it wants
@@ -6484,22 +6476,15 @@ trait EmitLlvmBuiltins
      */
     private function jsonAssocMode(array $args): int
     {
-        $flags = 0;
-        if (isset($args[3]) && $args[3]->kind === Node::KIND_INT_CONST) {
-            $flags = $this->intConstValue($args[3]);
-        }
+        $flags = Node::literalInt($args[3] ?? null) ?? 0;
         $objectAsArray = ($flags & 1) !== 0;      // JSON_OBJECT_AS_ARRAY
-        if (!isset($args[1]) || $args[1]->kind === Node::KIND_NULL_CONST) {
-            return $objectAsArray ? 1 : 0;
-        }
-        $a = $args[1];
-        if ($a->kind === Node::KIND_BOOL_CONST) {
-            return $this->boolConstValue($a) ? 1 : 0;
-        }
-        if ($a->kind === Node::KIND_INT_CONST) {
-            return $this->intConstValue($a) !== 0 ? 1 : 0;
-        }
-        return 1;
+        // A php `null` $associative means "objects, unless JSON_OBJECT_AS_ARRAY".
+        // literalBool answers null for BOTH a null literal and a runtime value,
+        // so the gate's literals-only guarantee is what makes reading it here
+        // unambiguous: anything non-literal never reaches this function.
+        $assoc = Node::literalBool($args[1] ?? null);
+        if ($assoc === null) { return $objectAsArray ? 1 : 0; }
+        return $assoc ? 1 : 0;
     }
 
     /**

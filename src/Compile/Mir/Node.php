@@ -143,4 +143,18 @@ abstract class Node
         if ($n instanceof IntConst) { return $n->value !== 0; }
         return null;
     }
+
+    /**
+     * The compile-time VALUE of a literal int argument, or null when it is
+     * missing or only known at runtime. Sibling of {@see literalBool}, and a
+     * separate question: a builtin gate that must tell `json_encode($v)` from
+     * `json_encode($v, JSON_PRETTY_PRINT)` needs the bits, not the truthiness,
+     * and collapsing them would make every non-zero flag look alike.
+     */
+    public static function literalInt(?Node $n): ?int
+    {
+        if ($n instanceof IntConst) { return $n->value; }
+        if ($n instanceof BoolConst) { return $n->value ? 1 : 0; }
+        return null;
+    }
 }
