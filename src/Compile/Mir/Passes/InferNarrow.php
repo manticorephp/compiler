@@ -302,6 +302,7 @@ trait InferNarrow
             Node::KIND_REF_ALIAS => \Compile\Mir\RefAlias_::class,
             Node::KIND_REF_BIND => \Compile\Mir\RefBind_::class,
             Node::KIND_REF_ADDR => \Compile\Mir\RefAddr_::class,
+            Node::KIND_REF_CELL => \Compile\Mir\RefCell_::class,
             Node::KIND_GOTO => \Compile\Mir\Goto_::class,
             Node::KIND_LABEL => \Compile\Mir\Label_::class,
             Node::KIND_CLASS_NAME => \Compile\Mir\ClassName_::class,

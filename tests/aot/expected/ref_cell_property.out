@@ -1,0 +1,7 @@
+init: 0 t a
+prop->elem: 1
+elem->prop: 41
+bool: f
+string: zz
+still bound: 42 42
+independent: 5 42

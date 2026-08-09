@@ -44,6 +44,7 @@ use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
 use Compile\Mir\NewObj;
+use Compile\Mir\RefCell_;
 use Compile\Mir\Node;
 use Compile\Mir\Not_;
 use Compile\Mir\Pass;
@@ -111,6 +112,9 @@ final class DeadStore implements Pass
 
     // ── Pass 1: gather every loaded local name ─────────────────
 
+    /** Narrow to the concrete class so a field read uses ITS offsets. */
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
+
     private function collectUses(Node $n): void
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL) {
@@ -169,6 +173,23 @@ final class DeadStore implements Pass
             // THROUGH to the aliased slot (observable), so keep it used.
             $this->usedLocals[$n->target] = true;
             $this->collectUses($n->call);
+            return;
+        }
+        if ($n->kind === Node::KIND_REF_CELL) {
+            // A reference is a WRITE channel with no store naming its target:
+            // `$refs = [&$a]; $refs[0] = 10;` mutates `$a` through the box, and
+            // nothing in this function reads `$a` by name. Without the arm the
+            // initialising `$a = 1` looked dead, was eliminated, and the verifier
+            // caught the read it left dangling — which is the good outcome. The
+            // bad one is what this dispatch does with a kind it does not know:
+            // it silently contributes NO uses.
+            //
+            // ⚠ TYPED receiver. `lvalue` is RefCell_'s FIRST field and RefAddr_'s
+            // SECOND, so a `Node`-typed `$n->lvalue` reads whichever offset the
+            // static type picked and faults on the other — the same trap
+            // {@see \Compile\Mir\Passes\LowerFromAst::lowerNullCoalesce} names.
+            $rc = self::asRefCell($n);
+            $this->collectUses($rc->refSource);
             return;
         }
         if ($n->kind === Node::KIND_THROW) { $this->collectUses($n->value); return; }

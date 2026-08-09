@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<p>before any php at all</p>
+<p>hello world, WORLD</p>
+<p>list: 2 item(s)</p>
+
+<li>a=1</li>
+<li>b=2</li>
+
+<b>big</b>
+
+<span>f0</span>
+<span>f1</span>
+
+<span>w0</span>
+<span>w1</span>
+
+brace a=1
+brace b=2
+brace big
+tail
+<p>after the last php block</p>

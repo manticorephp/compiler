@@ -675,6 +675,28 @@ final class RefAddr_ extends Node
     }
 }
 
+/** `&<lvalue>` in a position that STORES the result — an array-literal element
+ *  today. Unlike {@see RefAddr_}, which binds a named local to an address and is
+ *  a statement, this is an EXPRESSION: it evaluates to a NaN-boxed cell tagged
+ *  REF whose payload is the address of the reference's one-word box.
+ *
+ *  Its lvalue is the same shape {@see \Compile\Mir\Passes\EmitLlvmLocals::
+ *  byRefAddrOf} already answers, so the create seam is that address plus a tag.
+ *  What makes the address a BOX rather than a bare slot is the promotion — see
+ *  {@see \Compile\Mir\Module::$hasRefCells} and docs/design/reference-cells.md. */
+final class RefCell_ extends Node
+{
+    public function __construct(public Node $refSource, Type $type)
+    {
+        parent::__construct(Node::KIND_REF_CELL, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitRefCell($this);
+    }
+}
+
 /** `goto L;` — an unconditional branch to the block emitted for label `L`. */
 final class Goto_ extends Node
 {
@@ -1104,6 +1126,17 @@ final class NewDynObj extends Node
     ) {
         parent::__construct(Node::KIND_NEW_DYN_OBJ, $type);
     }
+
+    /** See {@see Call::$srcArgc}. Declared LAST, as on {@see NewObj} — the
+     *  promoted-parameter order is load-bearing.
+     *
+     *  ⚠ {@see EmitLlvmObjects::emitNewDynObj} has ALWAYS read this field, and
+     *  it was never declared: under Zend that is "Undefined property" and a
+     *  TypeError from `faPush`, and self-hosted it is a read of a field that is
+     *  not there. `new $cls()` on a class with a defaulted constructor is the
+     *  witness — pdo's `fetchObject('Row')` built the object with an EMPTY
+     *  promoted `$tag` instead of its default `'-'`. */
+    public int $srcArgc = -1;
 
     public function accept(EmitVisitor $v): string
     {

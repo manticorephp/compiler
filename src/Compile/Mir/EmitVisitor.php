@@ -49,6 +49,7 @@ interface EmitVisitor
     public function visitRefAlias(RefAlias_ $n): string;
     public function visitRefBind(RefBind_ $n): string;
     public function visitRefAddr(RefAddr_ $n): string;
+    public function visitRefCell(RefCell_ $n): string;
     public function visitGoto(Goto_ $n): string;
     public function visitLabel(Label_ $n): string;
     public function visitClassName(ClassName_ $n): string;

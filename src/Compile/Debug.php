@@ -21,6 +21,9 @@ namespace Compile;
  *   MANTICORE_POOL=0                    — opt OUT of the small-object pool
  *                                         allocator. ON by default; must be the
  *                                         same for the whole build (see $pool).
+ *   MANTICORE_REF_CELLS=0               — opt OUT of reference cells. ON by
+ *                                         default; must be the same for the
+ *                                         whole build (see $refCells).
  *   MANTICORE_PROFILE=1                 — emit thread-local rc/alloc counters +
  *                                         an atexit tally (memory-traffic profile).
  *   MANTICORE_DEBUG_VERIFY=1            — slow-path invariant checks at memory ops
@@ -132,6 +135,23 @@ final class Debug
     public static bool $pool = true;
 
     /**
+     * Reference cells — a `&` whose result is a storable VALUE rather than an
+     * address ({@see docs/design/reference-cells.md}). DEFAULT ON. Disable with
+     * `MANTICORE_REF_CELLS=0`.
+     *
+     * ⚠ Same whole-build rule as {@see $pool}, and for the same reason: the REF
+     * arms live in `@__manticore_tag` / `@__mir_cell_drop`, which
+     * {@see \Compile\Mir\Passes\EmitLlvm::linkonceRuntime} makes `linkonce_odr`.
+     * Link a stdlib `.o` built without them against a user `.o` built with them
+     * and the linker keeps ONE body — so half the program would deref a ref cell
+     * and the other half would read the box pointer as a value.
+     *
+     * This exists to prove a test is not inert: with it off, every construct the
+     * ref-cell epic added must refuse or fail, never silently pass.
+     */
+    public static bool $refCells = true;
+
+    /**
      * Compile-time profile: per-pass wall time, module size after each pass,
      * per-round lines from the fixpoint passes, and a tail of whole-program
      * scan counters. `MANTICORE_STATS=1`. See {@see \Compile\Stats}.
@@ -189,6 +209,12 @@ final class Debug
             self::$pool = false;
         } elseif ($env !== false && $env !== '') {
             self::$pool = true;
+        }
+        $env = \getenv('MANTICORE_REF_CELLS');
+        if ($env === '0') {
+            self::$refCells = false;
+        } elseif ($env !== false && $env !== '') {
+            self::$refCells = true;
         }
     }
 }

@@ -710,6 +710,27 @@ final class DynamicStaticAccess extends Expr
 }
 
 /**
+ * `Class::${expr}` / `Class::$$var` — a static property whose NAME is computed.
+ * The mirror of {@see DynamicStaticAccess}: there the class is dynamic and the
+ * member is a literal, here the class is known and the member is not.
+ *
+ * The class is resolved the ordinary way (`self` / `static` / `parent` / a
+ * literal name), so the candidate set is exactly that class's declared statics
+ * and is known at compile time — which is what lets this lower to a chain over
+ * the concrete slots instead of needing a runtime name→slot map.
+ */
+final class DynamicStaticProp extends Expr
+{
+    public function __construct(
+        public readonly string $class,
+        public readonly Expr $nameExpr,
+        Span $span,
+    ) {
+        parent::__construct('DynamicStaticProp', $span);
+    }
+}
+
+/**
  * `$receiver::method(args)` — static-style dispatch through the
  * receiver's class. We compile it by reading the class id from the
  * object header at offset 0 and routing through the matching

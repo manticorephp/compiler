@@ -314,6 +314,29 @@ trait EmitLlvmArrays
              . 'ptr @__mir_empty_array, i64 0, i32 1)';
     }
 
+    /**
+     * The VALUE half of an array-LITERAL element, shared by the keyed and
+     * unkeyed arms of {@see emitArrayLitUnified} and by both shapes of
+     * {@see emitArrayLitDirect}.
+     *
+     * The literal's answer is NOT {@see emitStoreElemValue}'s: there is no
+     * de-cellify (a literal has no pre-existing slot to agree with), and the
+     * retain category is the literal's own. Same reason to keep it in one place
+     * — a literal element is where a `&` first has to become a storable value.
+     *
+     * Leaves the value word in {@see elemValReg}.
+     */
+    private function emitArrayLitValue(Node $value, bool $cellVals): string
+    {
+        $out = $this->emitNode($value);
+        if ($cellVals) { $out .= $this->retainCellPayload($value); }
+        $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
+        $val = $this->lastValue;
+        if (!$cellVals) { $out .= $this->rcRetainByType($value, $val, null, 2); }
+        $this->elemValReg = $val;
+        return $out;
+    }
+
     private function emitArrayLitUnified(ArrayLit $al): string
     {
         $cellVals = $this->litBoxesValues($al);
@@ -371,11 +394,8 @@ trait EmitLlvmArrays
                 $out .= $this->emitNode($el->key);
                 $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                 $keyReg = $this->lastValue;
-                $out .= $this->emitNode($el->value);
-                if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
-                $out .= $cellVals ? $this->boxToCell($el->value->type, $el->value) : $this->coerceToI64();
-                $val = $this->lastValue;
-                if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
+                $out .= $this->emitArrayLitValue($el->value, $cellVals);
+                $val = $this->elemValReg;
                 $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
                 $next = $this->ssa->allocReg();
@@ -389,11 +409,8 @@ trait EmitLlvmArrays
                 }
                 $out .= '  store ptr ' . $next . ', ptr ' . $slot . "\n";
             } else {
-                $out .= $this->emitNode($el->value);
-                if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
-                $out .= $cellVals ? $this->boxToCell($el->value->type, $el->value) : $this->coerceToI64();
-                $val = $this->lastValue;
-                if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
+                $out .= $this->emitArrayLitValue($el->value, $cellVals);
+                $val = $this->elemValReg;
                 $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
                 $next = $this->ssa->allocReg();
@@ -465,11 +482,8 @@ trait EmitLlvmArrays
                 $out .= $this->coerceToPtr();
                 $keyReg = $this->lastValue;
             }
-            $out .= $this->emitNode($el->value);
-            if ($cellVals) { $out .= $this->retainCellPayload($el->value); }
-            $out .= $cellVals ? $this->boxToCell($el->value->type, $el->value) : $this->coerceToI64();
-            $val = $this->lastValue;
-            if (!$cellVals) { $out .= $this->rcRetainByType($el->value, $val, null, 2); }
+            $out .= $this->emitArrayLitValue($el->value, $cellVals);
+            $val = $this->elemValReg;
             if ($shape === 'packed') {
                 $off = $hdr + $i * \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
                 $p = $this->ssa->allocReg();
@@ -733,6 +747,18 @@ trait EmitLlvmArrays
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // A REFERENCE element yields what it refers to. This is not the decode
+        // the ⚠ note below refuses: that one would hand a consumer a CELL where
+        // it was promised a raw word, inventing a representation. A ref deref
+        // only ever REMOVES one — `$refs[0]` in php IS the referenced value, and
+        // there is no rvalue spelling for the binding itself.
+        if ($this->rt->needsRefCells) {
+            $this->rt->needsTagged = true;
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $reg . ")\n";
+            $reg = $d;
+            $this->lastValue = $reg;
+        }
         // ⚠ The element is NOT decoded into a CELL by the array's hint here. Two
         // consumers proved a plain subscript cannot be: an UNKNOWN result is
         // deref'd raw (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }`
@@ -1044,6 +1070,100 @@ trait EmitLlvmArrays
         return $el !== null && $el->kind === Type::KIND_CELL;
     }
 
+    /**
+     * The VALUE half of an element store, shared by all four arms of
+     * {@see emitStoreElementUnified}.
+     *
+     * The arms differ only in their KEY channel — which key they emit, how they
+     * coerce it, which `__mir_array_set_*` they call and what they release
+     * afterwards. What lands in the slot is decided by `$se` alone, so it is one
+     * answer, not four. Keeping it one is a precondition for teaching the store
+     * a new element representation: honoured in three arms and missed in the
+     * fourth is a silent wrong answer, which is the shape
+     * {@see \Compile\Mir\Passes\EmitLlvmArrays} has already paid for once
+     * (see docs/design/reference-cells.md).
+     *
+     * The caller must have emitted its key FIRST — both halves write
+     * {@see lastValue} and both can have side effects, so the order is PHP's
+     * evaluation order and not an implementation detail.
+     *
+     * Leaves the value word in {@see elemValReg}.
+     */
+    private function emitStoreElemValue(StoreElement $se, bool $boxVal): string
+    {
+        $out = $this->emitNode($se->value);
+        if ($boxVal) {
+            // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
+            // the cell array-literal path does. Without this the value is freed
+            // by its source's release while the array still points at it:
+            // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
+            // $_SERVER value dangling the moment the temp subject was released.
+            $out .= $this->retainCellPayload($se->value);
+            $out .= $this->boxToCell($se->value->type, $se->value);
+            $this->elemValReg = $this->lastValue;
+            return $out;
+        }
+        $dcT = $this->storeElemDeCellifyType($se);
+        if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); }
+        $out .= $this->coerceToI64();
+        $val = $this->lastValue;
+        $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3);
+        $this->elemValReg = $val;
+        return $out;
+    }
+
+    /**
+     * Write THROUGH a reference already sitting in the element slot.
+     *
+     * `$refs = [&$a]; $refs[0] = 10;` assigns to `$a` — the element holds a
+     * binding, and a store to it is a store to what it binds. Overwriting the
+     * cell instead loses the reference silently, which is the class of answer
+     * this epic exists to remove.
+     *
+     * Branch-free on purpose. The alternative is a two-way split with a `phi`
+     * for the array pointer, in EVERY key arm; this keeps the four arms the
+     * straight-line code {@see emitStoreElemValue} just finished making them.
+     *
+     *  - the value handed to the set call becomes the ORIGINAL cell when the
+     *    slot holds a reference, so the binding survives the store;
+     *  - the write lands in the box when it is a reference and in a scratch
+     *    word when it is not. The dead store costs one word and is what buys
+     *    the absence of a branch.
+     *
+     * `$cur` is the element as it is NOW (the caller emits the matching
+     * `__mir_array_get_*`). Leaves the value to store in {@see elemValReg}.
+     */
+    private function emitElemWriteThrough(string $cur, string $val): string
+    {
+        $istag = $this->ssa->allocReg();
+        $sh = $this->ssa->allocReg();
+        $nib = $this->ssa->allocReg();
+        $isr = $this->ssa->allocReg();
+        $both = $this->ssa->allocReg();
+        $mask = $this->ssa->allocReg();
+        $boxp = $this->ssa->allocReg();
+        $scratch = $this->ssa->allocReg();
+        $dst = $this->ssa->allocReg();
+        $keep = $this->ssa->allocReg();
+        $out  = '  ' . $scratch . " = alloca i64\n";
+        $out .= '  ' . $istag . ' = icmp ugt i64 ' . $cur . ", -4503599627370496\n";
+        $out .= '  ' . $sh . ' = lshr i64 ' . $cur . ", 48\n";
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $out .= '  ' . $isr . ' = icmp eq i64 ' . $nib . ', '
+              . (string)\Compile\MemoryAbi::CELL_TAG_REF . "\n";
+        $out .= '  ' . $both . ' = and i1 ' . $istag . ', ' . $isr . "\n";
+        $out .= '  ' . $mask . ' = and i64 ' . $cur . ', '
+              . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= '  ' . $boxp . ' = inttoptr i64 ' . $mask . " to ptr\n";
+        $out .= '  ' . $dst . ' = select i1 ' . $both . ', ptr ' . $boxp
+              . ', ptr ' . $scratch . "\n";
+        $out .= '  store i64 ' . $val . ', ptr ' . $dst . "\n";
+        $out .= '  ' . $keep . ' = select i1 ' . $both . ', i64 ' . $cur
+              . ', i64 ' . $val . "\n";
+        $this->elemValReg = $keep;
+        return $out;
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -1087,36 +1207,22 @@ trait EmitLlvmArrays
         $boxVal = $this->storeElemBoxesValue($se);
         $next = $this->ssa->allocReg();
         if ($isAppend) {
-            $out .= $this->emitNode($se->value);
-            if ($boxVal) {
-                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
-                // the cell array-literal path does. Without this the value is freed
-                // by its source's release while the array still points at it:
-                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
-                // $_SERVER value dangling the moment the temp subject was released.
-                $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type, $se->value);
-                $val = $this->lastValue;
-            }
-            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
+            $out .= $this->emitStoreElemValue($se, $boxVal);
+            $val = $this->elemValReg;
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
         } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToI64();
             $key = $this->lastValue;
-            $out .= $this->emitNode($se->value);
-            if ($boxVal) {
-                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
-                // the cell array-literal path does. Without this the value is freed
-                // by its source's release while the array still points at it:
-                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
-                // $_SERVER value dangling the moment the temp subject was released.
-                $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type, $se->value);
-                $val = $this->lastValue;
+            $out .= $this->emitStoreElemValue($se, $boxVal);
+            $val = $this->elemValReg;
+            if ($this->rt->needsRefCells) {
+                $curE = $this->ssa->allocReg();
+                $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
+                $out .= $this->emitElemWriteThrough($curE, $val);
+                $val = $this->elemValReg;
             }
-            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
             // set_cell's string arm RETAINS the stored key exactly like set_str
             // below — release our own +1 on a FRESH key cell (a mixed-returning
@@ -1136,18 +1242,14 @@ trait EmitLlvmArrays
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToPtr();
             $key = $this->lastValue;
-            $out .= $this->emitNode($se->value);
-            if ($boxVal) {
-                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
-                // the cell array-literal path does. Without this the value is freed
-                // by its source's release while the array still points at it:
-                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
-                // $_SERVER value dangling the moment the temp subject was released.
-                $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type, $se->value);
-                $val = $this->lastValue;
+            $out .= $this->emitStoreElemValue($se, $boxVal);
+            $val = $this->elemValReg;
+            if ($this->rt->needsRefCells) {
+                $curE = $this->ssa->allocReg();
+                $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
+                $out .= $this->emitElemWriteThrough($curE, $val);
+                $val = $this->elemValReg;
             }
-            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
             // set_str RETAINS the stored key (append) — release our own +1 on a
             // fresh key temp (`$m["k".$i]`), or it leaks (borrowed locals/literals
@@ -1158,18 +1260,14 @@ trait EmitLlvmArrays
             $out .= $this->emitNode($se->index);
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
-            $out .= $this->emitNode($se->value);
-            if ($boxVal) {
-                // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
-                // the cell array-literal path does. Without this the value is freed
-                // by its source's release while the array still points at it:
-                // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
-                // $_SERVER value dangling the moment the temp subject was released.
-                $out .= $this->retainCellPayload($se->value);
-                $out .= $this->boxToCell($se->value->type, $se->value);
-                $val = $this->lastValue;
+            $out .= $this->emitStoreElemValue($se, $boxVal);
+            $val = $this->elemValReg;
+            if ($this->rt->needsRefCells) {
+                $curE = $this->ssa->allocReg();
+                $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
+                $out .= $this->emitElemWriteThrough($curE, $val);
+                $val = $this->elemValReg;
             }
-            else { $dcT = $this->storeElemDeCellifyType($se); if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); } $out .= $this->coerceToI64(); $val = $this->lastValue; $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3); }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
         }
         // Stamp the element repr on the persisted buffer ($next may be a

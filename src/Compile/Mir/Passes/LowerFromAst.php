@@ -2516,6 +2516,31 @@ final class LowerFromAst implements Pass
         return false;
     }
 
+    /**
+     * Whether the node tree binds the named local BY REFERENCE, on either side.
+     *
+     * A reference node names its participants as plain STRINGS
+     * ({@see \Compile\Mir\RefAlias_}), so neither a LoadLocal nor a StoreLocal
+     * is ever emitted for them and the two scanners above are blind to the
+     * position. `$session = &$_SESSION;` in symfony's NativeSessionStorage is
+     * the whole of that function's use of the superglobal, so the demand scan
+     * saw nothing, no cell was bound, and the program was refused with
+     * `dangling local $_SESSION read`.
+     */
+    private function nodeAliasesLocal(Node $n, string $name): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_REF_ALIAS) {
+            if ($n->target === $name || $n->source === $name) { return true; }
+        } elseif ($k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_BIND) {
+            if ($n->target === $name) { return true; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->nodeAliasesLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
     /** Whether the node tree assigns the named local (StoreLocal). */
     private function nodeWritesLocal(Node $n, string $name): bool
     {
@@ -2794,6 +2819,17 @@ final class LowerFromAst implements Pass
      * demand is computed from the SOURCE TEXT, and a call the compiler
      * synthesises appears in no source, so it could never gate itself in.
      */
+    /**
+     * `file:line:col` for a refusal message. The file is '' for the prelude blob
+     * and for anything the compiler synthesises, and saying so beats printing a
+     * bare `:12:5` that reads like a real path.
+     */
+    private function spanWhere(\Parser\Ast\Span $s): string
+    {
+        $f = $s->file === '' ? '<generated>' : $s->file;
+        return $f . ':' . (string)$s->line . ':' . (string)$s->column;
+    }
+
     private function throwErrorExpr(string $message): Node
     {
         return new Call(
@@ -3011,6 +3047,19 @@ final class LowerFromAst implements Pass
             $lv = $this->lowerExpr($expr->source);
             return new RefAddr_($expr->target->name, $lv, $lv->type);
         }
+        // `$r = &C::$s` — the same bind. A static property is an
+        // external-linkage global, so it is addressable exactly like the two
+        // above; it simply had no arm and fell through to a value COPY, which
+        // is a silent wrong answer rather than a refusal. Decided on the LOWERED
+        // node, not the AST kind: `C::CONST` and `C::class` are StaticAccess too
+        // and are not slots.
+        if ($expr->target->kind === 'Variable' && $expr->source->kind === 'StaticAccess') {
+            $lv = $this->lowerExpr($expr->source);
+            if ($lv->kind === Node::KIND_STATIC_PROP) {
+                return new RefAddr_($expr->target->name, $lv, $lv->type);
+            }
+            return $this->storeToTarget($expr->target, $lv);
+        }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
     }
 
@@ -3019,7 +3068,208 @@ final class LowerFromAst implements Pass
         if ($expr->target->kind === 'Variable') {
             $this->trackCallableAssign($this->varName($expr->target), $expr->value);
         }
+        // `self::${$name}[$k] = $v` and its nested spellings. The target is
+        // rebuilt once per candidate static and re-lowered, so an arbitrarily
+        // deep index chain comes along for free — there is no new store node.
+        $dyn = $this->dynStaticPropBase($expr->target);
+        if ($dyn !== null) { return $this->lowerDynStaticStore($dyn, $expr); }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
+    }
+
+    /**
+     * The {@see \Parser\Ast\DynamicStaticProp} an assignment target bottoms out
+     * at, walking down index expressions, or null when it does not.
+     */
+    private function dynStaticPropBase(\Parser\Ast\Expr $t): ?\Parser\Ast\DynamicStaticProp
+    {
+        $cur = $t;
+        while ($cur->kind === 'ArrayAccess') { $cur = $this->arrayAccessBase($cur); }
+        if ($cur->kind === 'DynamicStaticProp') { return $this->asDynStaticProp($cur); }
+        return null;
+    }
+
+    private function arrayAccessBase(\Parser\Ast\ArrayAccess $a): \Parser\Ast\Expr { return $a->array; }
+
+    private function asDynStaticProp(\Parser\Ast\Expr $e): \Parser\Ast\DynamicStaticProp
+    {
+        /** @var \Parser\Ast\DynamicStaticProp $e */
+        return $e;
+    }
+
+    private function dynStaticPropClass(\Parser\Ast\DynamicStaticProp $e): string { return $e->class; }
+    private function dynStaticPropNameExpr(\Parser\Ast\DynamicStaticProp $e): \Parser\Ast\Expr { return $e->nameExpr; }
+
+    /**
+     * Every static property name `$class` can answer to, its own and inherited.
+     * The set is closed at compile time, which is the whole reason a computed
+     * name can be compiled at all.
+     *
+     * @return string[]
+     */
+    private function dynStaticCandidates(string $class): array
+    {
+        /** @var string[] $out */
+        $out = [];
+        $seen = [];
+        $c = $class;
+        while ($c !== '') {
+            $pfx = $c . '::';
+            $n = \strlen($pfx);
+            foreach ($this->staticProps as $key => $_) {
+                if (\substr($key, 0, $n) !== $pfx) { continue; }
+                $nm = \substr($key, $n);
+                if (isset($seen[$nm])) { continue; }
+                $seen[$nm] = true;
+                $out[] = $nm;
+            }
+            if (!isset($this->classTable[$c])) { break; }
+            $c = $this->classTable[$c]->parent;
+        }
+        return $out;
+    }
+
+    /**
+     * `$target` with its {@see \Parser\Ast\DynamicStaticProp} base replaced by
+     * the concrete `Class::$name`, index chain preserved.
+     */
+    private function substDynStaticBase(\Parser\Ast\Expr $target, string $class, string $prop): \Parser\Ast\Expr
+    {
+        if ($target->kind === 'DynamicStaticProp') {
+            return \Parser\Ast\Expr::staticAccess($class, '$' . $prop, $target->span);
+        }
+        $aa = $this->asArrayAccess($target);
+        $base = $this->substDynStaticBase($this->arrayAccessBase($aa), $class, $prop);
+        return \Parser\Ast\Expr::arrayAccess($base, $this->arrayAccessIndex($aa), $target->span);
+    }
+
+    private function asArrayAccess(\Parser\Ast\Expr $e): \Parser\Ast\ArrayAccess
+    {
+        /** @var \Parser\Ast\ArrayAccess $e */
+        return $e;
+    }
+
+    private function arrayAccessIndex(\Parser\Ast\ArrayAccess $a): ?\Parser\Ast\Expr { return $a->index; }
+
+    /**
+     * A read through a computed static-property name, as a ternary chain over
+     * the concrete slots. The name is evaluated once into a temporary — it can
+     * be an arbitrary expression (`self::${$annotation.'Methods'}`), so
+     * re-evaluating it per arm would run its side effects N times.
+     */
+    /**
+     * php's own wording for a computed name that matched nothing, with the name
+     * itself in it — so it is built at RUNTIME, not baked as a constant.
+     */
+    private function dynStaticThrow(string $cls, string $nameTmp): Node
+    {
+        return new Call(
+            '__mir_throw_error',
+            [new Concat(
+                new StringConst('Access to undeclared static property ' . $cls . '::$', Type::string_()),
+                new LoadLocal($nameTmp, Type::string_()),
+            )],
+            Type::cell(),
+        );
+    }
+
+    private function lowerDynStaticPropRead(\Parser\Ast\DynamicStaticProp $dyn): Node
+    {
+        $cls = $this->resolveStaticClass($this->dynStaticPropClass($dyn));
+        $names = $this->dynStaticCandidates($cls);
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameTmp = '__dynsp_r' . $id;
+        // Lower every arm FIRST and unify what the arms actually produce. The
+        // declared slot type is not that: `private static array $a` with a
+        // `@var array<string,string>` docblock reads back through the erased
+        // static channel, so a chain typed from the declaration handed a tagged
+        // word to __mir_array_retain_str and faulted. Typing it `cell`
+        // unconditionally is the other trap — the array then came back EMPTY
+        // while `isset()` still answered correctly, which is the kind of
+        // half-right that hides a bug.
+        /** @var Node[] $arms */
+        $arms = [];
+        foreach ($names as $nm) {
+            $arms[] = $this->lowerExpr(\Parser\Ast\Expr::staticAccess($cls, '$' . $nm, $dyn->span));
+        }
+        $n = \count($names);
+        if ($n === 0) {
+            return new Block([
+                $this->throwErrorExpr('Access to undeclared static property ' . $cls . '::$'),
+                new NullConst(Type::null_()),
+            ], Type::null_());
+        }
+        // The unknown-name throw is a STATEMENT GUARD, not the chain's last
+        // else. Three value-position spellings were tried and all three broke,
+        // each differently: the throw CALL dragged the chain to `cell`
+        // (InferTypes re-derives a call's type from its callee) and a raw vec was
+        // then retained as one, faulting in __mir_array_retain_str; a typed zero
+        // dragged it to `unknown`; and re-reading a real slot still left the
+        // wrapping Block carrying the `unknown` it was CONSTRUCTED with, because
+        // the arms are only refined to their real types later. Nothing decided at
+        // lowering time can be right. Out of value position the question does not
+        // arise: the chain then holds only static-prop reads and InferTypes
+        // unifies them itself.
+        $guard = new Block([
+            $this->dynStaticThrow($cls, $nameTmp),
+        ], Type::void());
+        for ($i = $n - 1; $i >= 0; $i = $i - 1) {
+            $guard = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($names[$i], Type::string_()), '==='),
+                new Block([], Type::void()),
+                $guard,
+            )], Type::void());
+        }
+        $chain = $arms[$n - 1];
+        for ($i = $n - 2; $i >= 0; $i = $i - 1) {
+            $chain = new Ternary(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($names[$i], Type::string_()), '==='),
+                $arms[$i],
+                $chain,
+                $arms[$i]->type,
+            );
+        }
+        return new Block([
+            new StoreLocal($nameTmp, $this->lowerExpr($this->dynStaticPropNameExpr($dyn)), Type::string_()),
+            $guard,
+            $chain,
+        ], $chain->type);
+    }
+
+    /**
+     * A store through a computed static-property name: evaluate the name and the
+     * value ONCE, then dispatch to the concrete slot. An unknown name throws what
+     * php throws, rather than silently writing nowhere — a hand-written dispatch
+     * that quietly takes its default is the costliest bug shape in this compiler.
+     */
+    private function lowerDynStaticStore(\Parser\Ast\DynamicStaticProp $dyn, \Parser\Ast\Assign $expr): Node
+    {
+        $cls = $this->resolveStaticClass($this->dynStaticPropClass($dyn));
+        $names = $this->dynStaticCandidates($cls);
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameTmp = '__dynsp_n' . $id;
+        $valTmp = '__dynsp_v' . $id;
+        $valNode = $this->lowerExpr($expr->value);
+        $stmts = [
+            new StoreLocal($nameTmp, $this->lowerExpr($this->dynStaticPropNameExpr($dyn)), Type::string_()),
+            new StoreLocal($valTmp, $valNode, $valNode->type),
+        ];
+        $chain = new Block([
+            $this->dynStaticThrow($cls, $nameTmp),
+        ], Type::void());
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $nm = $names[$i];
+            $tgt = $this->substDynStaticBase($expr->target, $cls, $nm);
+            $arm = new Block([$this->storeToTarget($tgt, new LoadLocal($valTmp, $valNode->type))], Type::void());
+            $chain = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($nm, Type::string_()), '==='),
+                $arm,
+                $chain,
+            )], Type::void());
+        }
+        $stmts[] = $chain;
+        return new Block($stmts, Type::void());
     }
 
     private function varName(\Parser\Ast\Variable $v): string { return $v->name; }
@@ -3767,6 +4017,8 @@ final class LowerFromAst implements Pass
 
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
+        $expanded = $this->expandBuiltinSpread($fnName, $astArgs);
+        if ($expanded !== null) { $astArgs = $expanded; }
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
@@ -3806,6 +4058,63 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * `builtin(...$pack)` for a builtin whose arity php FIXES — expand the pack
+     * positionally (`$pack[0], $pack[1]`) and let the ordinary path lower it.
+     *
+     * The other half of {@see rejectSpreadIntoBuiltin}. Refusing is right when
+     * nothing can be said about how many arguments the pack stands for; it is
+     * needless when php's own signature says "exactly two", because then the
+     * expansion is the same rewrite `emitSpreadFill` performs against a declared
+     * parameter list. `method_exists(...$controller)` — the tier-4 blocker after
+     * array_unshift (symfony/http-kernel ControllerEvent.php:79 and :98, twig's
+     * ReflectionCallable.php:71) — is exactly that: a `[$obj, 'method']`
+     * callable array unpacked into a two-parameter predicate.
+     *
+     * ⚠ Order of operations, paid for once: this expansion was written FIRST,
+     * and on its own it made the call compile and then answer `false`, because
+     * the emitter behind it was a literal-only fold. A silent wrong answer is
+     * worse than the refusal it replaces. A name belongs in
+     * {@see fixedBuiltinArity} only once its `bi*` emitter can answer with
+     * RUNTIME arguments.
+     *
+     * The pack expression is REPEATED once per position, so only a plain local
+     * or a property read is expanded — a call would be evaluated twice. A pack
+     * that is too short is php's own ArgumentCountError; here it reads a missing
+     * element, the one place this is weaker than the engine.
+     *
+     * @param \Parser\Ast\Expr[] $astArgs
+     * @return \Parser\Ast\Expr[]|null  rewritten arguments, or null to leave alone
+     */
+    private function expandBuiltinSpread(string $fnName, array $astArgs): ?array
+    {
+        if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
+        if (!$this->isCodegenBuiltin($fnName)) { return null; }
+        $arity = $this->fixedBuiltinArity($this->constBareName(\strtolower($fnName)));
+        if ($arity === 0) { return null; }
+        $pack = $astArgs[0]->value;
+        if ($pack->kind !== 'Variable' && $pack->kind !== 'PropertyAccess') { return null; }
+        $span = $astArgs[0]->span;
+        $out = [];
+        $i = 0;
+        while ($i < $arity) {
+            $out[] = new \Parser\Ast\ArrayAccess($pack, new \Parser\Ast\IntLiteral($i, $span), $span);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /** The arity php FIXES for a codegen builtin, or 0 for "not fixed / not
+     *  known here". A name qualifies only when php's signature has no optional
+     *  and no variadic parameter AND the emitter answers with runtime
+     *  arguments ({@see biMethodExistsDynamic}) — otherwise the expansion just
+     *  buys a silent `false`. */
+    private function fixedBuiltinArity(string $bare): int
+    {
+        if ($bare === 'method_exists' || $bare === 'property_exists') { return 2; }
+        return 0;
+    }
+
+    /**
      * `builtin(...$arr)` — refuse it at the call site, with the name and the line.
      *
      * A codegen builtin has no signature ANYWHERE: it is excluded from the
@@ -3822,6 +4131,16 @@ final class LowerFromAst implements Pass
      *
      * sprintf/printf are exempt: they are variadic and biFormatRuntime takes the
      * pack array AS the argument list, which is exactly php's semantics.
+     *
+     * array_unshift is exempt for the same reason since
+     * {@see EmitLlvmBuiltins::biArrayUnshift} learned to walk a pack through
+     * `__mir_array_unshift_all` — one site in the pinned symfony corpus
+     * (`EnvConfigurator.php:50`) and the blocker the tier-4 build stopped on.
+     *
+     * ⚠ The exemption list is the SHAPE CONTRACT of the builtins that have one:
+     * a name belongs here only once its `bi*` emitter reads a `Spread` argument.
+     * `tools/audit/builtin_arity_scan.php` is the standing check that a builtin
+     * accepts what php accepts; this list is its spread-shaped half.
      */
     private function rejectSpreadIntoBuiltin(string $fnName, array $astArgs): void
     {
@@ -3834,7 +4153,7 @@ final class LowerFromAst implements Pass
         if ($spread === null) { return; }
         if (!$this->isCodegenBuiltin($fnName)) { return; }
         $bare = $this->constBareName(\strtolower($fnName));
-        if ($bare === 'sprintf' || $bare === 'printf') { return; }
+        if ($bare === 'sprintf' || $bare === 'printf' || $bare === 'array_unshift') { return; }
         throw new \RuntimeException(
             'argument unpacking into ' . $bare . '() is not supported: it is a '
             . 'codegen builtin with no signature to expand the pack against '
@@ -4175,21 +4494,48 @@ final class LowerFromAst implements Pass
     {
         $elems = [];
         foreach ($expr->elements as $el) {
-            // `[&$a[$k], $v]` PARSES now, but an element cannot alias. A
-            // reference here is a property of the SLOT, and the array runtime has
-            // nowhere to record one: ARRAY_REPR_* and ARRAY_ELEM_HINT_* are
-            // whole-array flags, and RefAddr_ binds a LOCAL to a slot address,
-            // not a slot to a source. Building the literal by value would compile
-            // and run and be silently wrong — symfony/polyfill-deepclone's
+            // `[&$a, …]` — the element IS a reference. It lowers to a RefCell_,
+            // whose value is a cell tagged REF pointing at the reference's box;
+            // the array then holds a self-describing reference rather than a
+            // copy. See docs/design/reference-cells.md.
+            //
+            // What is NOT yet covered still REFUSES, and refuses by naming its
+            // site. Lowering sees one statement list flattened across every file
+            // of the build, so a refusal that says only what is unsupported
+            // leaves the reader grepping a whole vendor tree for a construct
+            // that spans lines — which is exactly how long it took to find the
+            // second one of these. Building it by value instead would compile,
+            // run, and be silently wrong: symfony/polyfill-deepclone's
             // `$refsPool[] = [&$refs[$k], $value, &$value]` is an alias pool that
-            // is written back through, so a copy loses every write. A loud stop
-            // beats a wrong answer, exactly as for `fn &()`.
+            // is written back through, so a copy loses every write.
             if ($el->byRef) {
-                throw new \RuntimeException(
-                    'unsupported: an array literal cannot bind an element by reference '
-                    . '(`[&$a[$k], …]`). The element would receive a copy, not an alias, '
-                    . 'so every write through it would be lost.'
-                );
+                $src = $el->value;
+                $sk = $src->kind;
+                // A STATIC property is deliberately NOT here yet. Its address is
+                // fine — `$r = &C::$s` has worked since the static-prop arm of
+                // lowerRefAssign — but a STORABLE reference also needs the slot
+                // RETYPED to a cell, and {@see \Compile\Mir\Passes\InferScans::
+                // scanRefCellProps} only promotes an instance property. Enabled
+                // without that, `[&Reg::$name]` compiled, ran, and printed a
+                // denormal: the global kept a raw word while the element decoded
+                // by tag. Refusing is the honest answer until the promotion
+                // covers it.
+                $ok = \Compile\Debug::$refCells
+                    && ($sk === 'Variable' || $sk === 'PropertyAccess');
+                if (!$ok) {
+                    throw new \RuntimeException(
+                        'unsupported: an array literal can bind a VARIABLE or a PROPERTY by '
+                        . 'reference (`[&$a, &$this->p, …]`), and nothing else yet. This '
+                        . 'element would receive a copy, not an alias, so every write '
+                        . 'through it would be lost.'
+                        . ' at ' . $this->spanWhere($expr->span)
+                    );
+                }
+                $lv = $this->lowerExpr($src);
+                $this->module->hasRefCells = true;
+                $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
+                $elems[] = new ArrayElement_($k, new \Compile\Mir\RefCell_($lv, Type::cell()));
+                continue;
             }
             $k = $el->key === null ? null : $this->foldNumericKey($this->lowerExpr($el->key));
             if ($el->value->kind === 'Spread') {
@@ -4267,12 +4613,18 @@ final class LowerFromAst implements Pass
         if (\count($relaxed) > \count($exactArms)) {
             // Broad (defaulted-ctor) case → boxed object, runtime class_id dispatch.
             $t = \count($relaxed) === 1 ? Type::obj($relaxed[0]) : Type::cell();
-            return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+            $ndo = new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+            $ndo->srcArgc = \count($expr->args);
+            return $ndo;
         }
         $t = Type::unknown();
         if (\count($exactArms) === 1) { $t = $exactArms[0]; }
         elseif (\count($exactArms) > 1) { $t = Type::union($exactArms); }
-        return new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+        $ndo = new NewDynObj($this->lowerExpr($expr->classExpr), $args, $t);
+        // What the SOURCE wrote, before the emitter's default-pad widens the
+        // list — the func-args channel ({@see EmitLlvmObjects::emitNewDynObj}).
+        $ndo->srcArgc = \count($expr->args);
+        return $ndo;
     }
 
     private function lowerNewExpr(\Parser\Ast\NewExpr $expr): Node

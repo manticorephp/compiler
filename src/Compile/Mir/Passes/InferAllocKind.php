@@ -5,6 +5,7 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\AllocationKind;
 use Compile\Mir\FunctionDef;
 use Compile\Mir\Module;
+use Compile\Mir\RefCell_;
 use Compile\Mir\Node;
 use Compile\Mir\Pass;
 use Compile\Mir\Walk;
@@ -42,6 +43,9 @@ use Compile\Mir\Walk;
  */
 final class InferAllocKind implements Pass
 {
+    /** Narrow to the concrete class so a field read uses ITS offsets. */
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
+
     public const NAME = 'infer-alloc-kind';
 
     public function name(): string { return self::NAME; }
@@ -143,6 +147,18 @@ final class InferAllocKind implements Pass
             $this->escaping[$ra->source] = true;
         } elseif ($k === Node::KIND_REF_BIND) {
             $this->escaping[$n->target] = true;
+        } elseif ($k === Node::KIND_REF_CELL) {
+            // A reference cell can be STORED, so the storage it points at
+            // outlives this frame's view of it by construction. An arena or
+            // stack allocation would be freed at frame leave with the reference
+            // still live — the one thing a reference must never allow.
+            // ⚠ TYPED receiver — `lvalue` sits at a different offset here than
+            // on RefAddr_, so a Node-typed read faults.
+            $rc = self::asRefCell($n);
+            $rlv = $rc->refSource;
+            if ($rlv->kind === Node::KIND_LOAD_LOCAL) {
+                $this->escaping[$rlv->name] = true;
+            }
         } elseif ($k === Node::KIND_REF_ADDR) {
             // The target holds a raw interior address into the aliased
             // container; both the alias and (for `&$obj->prop`) the base object

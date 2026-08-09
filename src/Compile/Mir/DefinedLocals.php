@@ -40,6 +40,9 @@ final class DefinedLocals
         return $c->defined;
     }
 
+    /** Narrow to the concrete class so a field read uses ITS offsets. */
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
+
     private function walk(Node $n): void
     {
         $k = $n->kind;
@@ -69,6 +72,21 @@ final class DefinedLocals
             $ra = $n;
             $this->defined[$ra->target] = true;
             $this->walk($ra->lvalue);
+            return;
+        }
+        if ($k === Node::KIND_REF_CELL) {
+            // Taking a reference DEFINES its target, as php does: after
+            // `$r = [&$undef];` the name exists and is null. The lvalue is
+            // deliberately not walked as a use — it is being bound, not read.
+            // ⚠ TYPED receiver — `lvalue` is this class's FIRST field and
+            // RefAddr_'s SECOND, so a Node-typed read picks the wrong offset.
+            $rc = self::asRefCell($n);
+            $lv = $rc->refSource;
+            if ($lv->kind === Node::KIND_LOAD_LOCAL) {
+                $this->defined[$lv->name] = true;
+                return;
+            }
+            $this->walk($lv);
             return;
         }
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {

@@ -1,0 +1,9 @@
+read: 1 2
+a->elem: 7 2
+elem->a: 10
+still bound: 11
+count: 2
+is_int: yes
+aliased: 42 42
+vivified: NULL
+through fresh: set

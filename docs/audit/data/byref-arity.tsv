@@ -1,0 +1,3 @@
+# function	file	divergence
+fscanf	Scanf.php	missing by-ref param #2 $vars
+sscanf	Scanf.php	missing by-ref param #2 $vars

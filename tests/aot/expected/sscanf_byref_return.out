@@ -1,0 +1,60 @@
+int(2)
+int(12)
+int(34)
+int(1)
+int(5)
+NULL
+int(0)
+NULL
+int(-1)
+NULL
+int(1)
+int(1)
+NULL
+int(0)
+NULL
+NULL
+NULL
+int(2)
+int(25)
+string(3) "Bob"
+array(2) {
+  [0]=>
+  int(25)
+  [1]=>
+  string(3) "Bob"
+}
+array(2) {
+  [0]=>
+  int(5)
+  [1]=>
+  NULL
+}
+array(1) {
+  [0]=>
+  NULL
+}
+NULL
+NULL
+array(1) {
+  [0]=>
+  NULL
+}
+array(3) {
+  [0]=>
+  NULL
+  [1]=>
+  NULL
+  [2]=>
+  NULL
+}
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  NULL
+}
+array(1) {
+  [0]=>
+  int(1)
+}

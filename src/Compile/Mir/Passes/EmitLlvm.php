@@ -148,6 +148,11 @@ final class EmitLlvm implements EmitVisitor
     // Out-slot for {@see arrayPtrOrEmptyIr}: array ptr, or the empty zero word.
     private string $arrayPtrReg = '';
 
+    // Out-slot for {@see emitStoreElemValue} / {@see emitArrayLitValue}: the i64
+    // reg holding the element value word. A field, not a by-ref out-param —
+    // that pattern miscompiles under self-host ({@see cellTagIr}).
+    private string $elemValReg = '';
+
     // Out-slot for {@see magicMatchIr}: the IR computing the `ptr-8` magic test.
     private string $magicMatchOut = '';
 
@@ -329,6 +334,12 @@ final class EmitLlvm implements EmitVisitor
     private string $vdResult = '';
     /** Scratch: per-arm argument list set by {@see EmitLlvmObjects::vdArmArgs}. */
     private string $vdArmList = '';
+
+    /** How many arguments the CALL SITE actually wrote (`$this` included), before
+     *  the fallback's default pad widened the shared dispatch list. Each arm cuts
+     *  back to this and re-pads from its OWN declaration
+     *  ({@see Passes\EmitLlvmObjects::vdArmArity}). */
+    private int $vdSiteArgc = 0;
     /** Scratch: caller slot address / scratch cell slot of the by-ref argument
      *  {@see EmitLlvmCalls::emitByRefCellBox} just boxed. */
     private string $refBoxSlot = '';
@@ -441,6 +452,7 @@ final class EmitLlvm implements EmitVisitor
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;
+        $this->rt->needsRefCells = $module->hasRefCells && \Compile\Debug::$refCells;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;
         $this->hasObjToStr = $module->hasObjToStr;

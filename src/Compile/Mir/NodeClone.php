@@ -139,6 +139,7 @@ final class NodeClone
         if ($k === Node::KIND_THROW)  { $x = self::asThrow($n);  return new Throw_(self::node($x->value), $n->type); }
         if ($k === Node::KIND_REF_BIND) { $x = self::asRefBind($n); return new RefBind_($x->target, self::node($x->call), $n->type); }
         if ($k === Node::KIND_REF_ADDR) { $x = self::asRefAddr($n); return new RefAddr_($x->target, self::node($x->lvalue), $n->type); }
+        if ($k === Node::KIND_REF_CELL) { $x = self::asRefCell($n); return new RefCell_(self::node($x->refSource), $n->type); }
         if ($k === Node::KIND_STORE_STATIC_PROP) { $x = self::asStoreStaticProp($n); return new StoreStaticProp_($x->global, self::node($x->value), $n->type, $x->declared); }
         if ($k === Node::KIND_ISSET)  { $x = self::asIsset($n);  return new Isset_(self::nodes($x->targets), $n->type); }
         if ($k === Node::KIND_UNSET)  { $x = self::asUnset($n);  return new Unset_(self::nodes($x->targets), $n->type); }
@@ -169,8 +170,12 @@ final class NodeClone
         if ($k === Node::KIND_STORE_ELEMENT) { $x = self::asStoreElement($n); return new StoreElement(self::node($x->array), self::node($x->index), self::node($x->value), $n->type); }
 
         // ── Objects ───────────────────────────────────────────────
-        if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; return $c; }
-        if ($k === Node::KIND_NEW_DYN_OBJ) { $d = $n; return new NewDynObj(self::node($d->classExpr), self::nodes($d->args), $n->type); }
+        // ⚠ `srcArgc` is the func-args channel and it is NOT a constructor
+        // argument, so a rebuild drops it unless it is copied here — a cloned
+        // `new` (Monomorphize, InlineClosures) would otherwise hand the ctor the
+        // PADDED arity instead of what the source wrote.
+        if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; $c->srcArgc = $x->srcArgc; return $c; }
+        if ($k === Node::KIND_NEW_DYN_OBJ) { $d = $n; $c = new NewDynObj(self::node($d->classExpr), self::nodes($d->args), $n->type); $c->srcArgc = $d->srcArgc; return $c; }
         if ($k === Node::KIND_PROPERTY_ACCESS) { $x = self::asPropertyAccess($n); return new PropertyAccess_(self::node($x->object), $x->property, $n->type); }
         if ($k === Node::KIND_STORE_PROPERTY) { $x = self::asStoreProperty($n); return new StoreProperty(self::node($x->object), $x->property, self::node($x->value), $n->type); }
         if ($k === Node::KIND_DYN_PROP) { $x = self::asDynProp($n); return new DynProp_(self::node($x->object), self::node($x->name), $n->type); }
@@ -283,6 +288,7 @@ final class NodeClone
     private static function asThrow(Node $n): Throw_ { return $n; }
     private static function asRefBind(Node $n): RefBind_ { return $n; }
     private static function asRefAddr(Node $n): RefAddr_ { return $n; }
+    private static function asRefCell(Node $n): RefCell_ { return $n; }
     private static function asStoreStaticProp(Node $n): StoreStaticProp_ { return $n; }
     private static function asIsset(Node $n): Isset_ { return $n; }
     private static function asUnset(Node $n): Unset_ { return $n; }

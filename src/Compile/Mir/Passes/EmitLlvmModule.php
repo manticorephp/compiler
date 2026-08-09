@@ -203,6 +203,38 @@ trait EmitLlvmModule
                 $fnNamesCount = $fnNamesCount + 1;
             }
         }
+        // The (class, method) table, same interning deadline. Two PARALLEL rows
+        // rather than one "Class::method" row: the caller holds the two names
+        // separately and joining them at runtime would mean allocating a string
+        // per call just to compare it.
+        $mxClsRows = '';
+        $mxMthRows = '';
+        $mxCount = 0;
+        if ($this->rt->needsMethodExists) {
+            foreach ($this->classes as $cd) {
+                $disp = $this->displayClassName($cd->name);
+                foreach ($this->reflAllMethods($cd->name) as $m) {
+                    if ($mxCount > 0) { $mxClsRows .= ', '; $mxMthRows .= ', '; }
+                    $mxClsRows .= 'ptr ' . $this->litStr($disp);
+                    $mxMthRows .= 'ptr ' . $this->litStr($m);
+                    $mxCount = $mxCount + 1;
+                }
+            }
+        }
+        $pxClsRows = '';
+        $pxPrpRows = '';
+        $pxCount = 0;
+        if ($this->rt->needsPropExists) {
+            foreach ($this->classes as $cd) {
+                $disp = $this->displayClassName($cd->name);
+                foreach ($this->reflAllProps($cd->name) as $p) {
+                    if ($pxCount > 0) { $pxClsRows .= ', '; $pxPrpRows .= ', '; }
+                    $pxClsRows .= 'ptr ' . $this->litStr($disp);
+                    $pxPrpRows .= 'ptr ' . $this->litStr($p);
+                    $pxCount = $pxCount + 1;
+                }
+            }
+        }
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
         // literal share one layout so retain/release work on either.
@@ -307,6 +339,17 @@ trait EmitLlvmModule
             $out .= "miss:\n";
             $out .= "  ret i64 0\n}\n";
             $this->rt->needsStrcmp = true;
+        }
+        if ($this->rt->needsMethodExists) {
+            // php resolves a METHOD name case-insensitively.
+            $out .= $this->memberExistsTable('mx', '__mir_method_exists',
+                $mxClsRows, $mxMthRows, $mxCount, 'strcasecmp');
+        }
+        if ($this->rt->needsPropExists) {
+            // …and a PROPERTY name case-SENSITIVELY. Same table, different
+            // comparison — the one thing the two questions do not share.
+            $out .= $this->memberExistsTable('px', '__mir_property_exists',
+                $pxClsRows, $pxPrpRows, $pxCount, 'strcmp');
         }
         if ($this->rt->needsFibers) {
             $out .= $this->fiberRuntime();
@@ -945,6 +988,12 @@ trait EmitLlvmModule
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; }
         $body .= $this->preallocateLocals($fn->body);
         $body .= $this->initRcObjSlots($fn->body, $paramNames);
+        // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
+        // code is a function like any other to the language and unlike any other
+        // to this file, and a prologue step added to only one of the two is
+        // invisible until a program happens to use the feature at top level —
+        // which is exactly how the ref-cell box came to be missing from `__main`
+        // while every function had it.
         // Heap-box locals captured BY-REFERENCE by a closure: an escaping
         // closure keeps the box alive after this frame returns, so the box
         // can't be a stack slot. The box is a 1-word heap cell; the local
@@ -967,6 +1016,7 @@ trait EmitLlvmModule
             $body .= '  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n";
             $this->locals->refLocals[$bname] = true;
         }
+        $body .= $this->emitRefCellBoxes($fn->body, $paramNames);
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
         // header). The caller pushed a bare method-name placeholder because a
@@ -982,6 +1032,121 @@ trait EmitLlvmModule
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
         $body .= '  ret i64 ' . $this->implicitReturnValue() . "\n";
         return $header . $body . "}\n\n";
+    }
+
+    /**
+     * Heap-box every local a `&` POINTS AT from a storing position
+     * (`$refs = [&$a]`), and make it a refLocal.
+     *
+     * Same box and same contract as the `use (&$x)` capture above, for the same
+     * reason: the reference can outlive this frame, so the storage cannot be the
+     * stack slot. Because the contract is `refLocals` — "the slot holds an
+     * ADDRESS" — the load/store deref, {@see EmitLlvmLocals::byRefAddrOf}'s
+     * forwarding arm and the three write-through plants all already speak it. A
+     * promoted local therefore needs no new read or write path at all.
+     *
+     * The value that was in the slot moves INTO the box: the promotion has to be
+     * invisible to the program, so `$a = 1; $refs = [&$a];` still sees 1 through
+     * the reference.
+     *
+     * Bounded leak, exactly like the capture box: one word per ref-taken local
+     * per call. A reference cell reaches its box only through the cell or the
+     * slot, never as a bare pointer, so nothing reads a header it does not have.
+     *
+     * @param array<string, bool> $paramNames
+     */
+    /**
+     * The closed-world (class, member) table plus the scan over it — what
+     * answers `method_exists($o, $m)` / `property_exists($o, $p)` once either
+     * name is a RUNTIME value. Two parallel `ptr` rows and a linear walk, the
+     * same trade {@see $fnNamesRows} makes: the set is closed but large, so one
+     * scan beats thousands of emitted blocks, and neither question is hot.
+     *
+     * An EMPTY table still defines the symbol — a module that asks the question
+     * while declaring no classes has to link, and its answer is simply "no".
+     *
+     * `$cmp` is the member comparison: php matches a METHOD name
+     * case-insensitively and a PROPERTY name exactly.
+     */
+    private function memberExistsTable(string $prefix, string $fn, string $clsRows,
+                                       string $memRows, int $n, string $cmp): string
+    {
+        $len = $n > 0 ? $n : 1;
+        $cls = '@__mir_' . $prefix . '_cls';
+        $mem = '@__mir_' . $prefix . '_mem';
+        $out = $cls . ' = internal constant [' . (string)$len . ' x ptr] ['
+             . ($n > 0 ? $clsRows : 'ptr null') . "]\n";
+        $out .= $mem . ' = internal constant [' . (string)$len . ' x ptr] ['
+             . ($n > 0 ? $memRows : 'ptr null') . "]\n";
+        $out .= 'define i64 @' . $fn . "(ptr %cls, ptr %m) {\n";
+        $out .= "entry:\n";
+        $out .= "  %cnull = icmp eq ptr %cls, null\n";
+        $out .= "  %mnull = icmp eq ptr %m, null\n";
+        $out .= "  %anynull = or i1 %cnull, %mnull\n";
+        $out .= "  br i1 %anynull, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
+        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  br i1 %done, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= '  %cp = getelementptr inbounds [' . (string)$len
+              . ' x ptr], ptr ' . $cls . ", i64 0, i64 %i\n";
+        $out .= "  %ccand = load ptr, ptr %cp\n";
+        // The CLASS name is case-insensitive in php whichever member is asked about.
+        $out .= "  %cc = call i32 @strcasecmp(ptr %cls, ptr %ccand)\n";
+        $out .= "  %ceq = icmp eq i32 %cc, 0\n";
+        $out .= "  br i1 %ceq, label %mtest, label %next\n";
+        $out .= "mtest:\n";
+        $out .= '  %mp = getelementptr inbounds [' . (string)$len
+              . ' x ptr], ptr ' . $mem . ", i64 0, i64 %i\n";
+        $out .= "  %mcand = load ptr, ptr %mp\n";
+        $out .= '  %mc = call i32 @' . $cmp . "(ptr %m, ptr %mcand)\n";
+        $out .= "  %meq = icmp eq i32 %mc, 0\n";
+        $out .= "  br i1 %meq, label %hit, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "hit:\n";
+        $out .= "  ret i64 1\n";
+        $out .= "miss:\n";
+        $out .= "  ret i64 0\n}\n";
+        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
+        $this->rt->needsStrcmp = true;
+        return $out;
+    }
+
+    private function emitRefCellBoxes(Node $body, array $paramNames): string
+    {
+        $this->locals->refCellTargets = [];
+        $this->locals->collectRefCellTargets($body);
+        $out = '';
+        foreach ($this->locals->refCellTargets as $rname => $_) {
+            if (isset($paramNames[$rname])) { continue; }
+            if (!isset($this->locals->slots[$rname])) { continue; }
+            if (isset($this->locals->refLocals[$rname])) { continue; }
+            $rbox = $this->ssa->allocReg();
+            $out .= '  ' . $rbox . " = call ptr @__mir_alloc(i64 8)\n";
+            // NULL, not the slot's current word. The prologue runs before the
+            // program's first store, so that word is whatever the frame held —
+            // and the box is a CELL channel now ({@see \Compile\Mir\Passes\
+            // InferNodes::collectRefCellLocals} retypes the slot), so it has to
+            // start self-describing. php agrees: a variable that exists only
+            // because a reference was taken to it reads null.
+            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
+                  . ', ptr ' . $rbox . "\n";
+            $rbi = $this->ssa->allocReg();
+            $out .= '  ' . $rbi . ' = ptrtoint ptr ' . $rbox . " to i64\n";
+            $out .= '  store i64 ' . $rbi . ', ptr ' . $this->locals->slots[$rname] . "\n";
+            $this->locals->refLocals[$rname] = true;
+            // What the slot READS is what a store through it must WRITE. This is
+            // the same fact `&C::$s` needed ({@see EmitLlvmObjects::emitRefAddr})
+            // and the same field that carries it: the forward-cellify plant in
+            // {@see EmitLlvmLocals::emitStoreLocal} keys off refParamTypes, so
+            // saying CELL here is what makes `$a = 1` NaN-box before it goes
+            // through the address instead of landing as a raw word.
+            $this->locals->refParamTypes[$rname] = \Compile\Mir\Type::cell();
+        }
+        return $out;
     }
 
     /** The @__prof array + bump + atexit dump (preamble, profile mode only). */
@@ -1248,6 +1413,10 @@ trait EmitLlvmModule
         $header .= "  store ptr %argv, ptr @__manticore_argv\n";
         $body = $this->preallocateLocals($fn->body);
         $body .= $this->initRcObjSlots($fn->body);
+        // Top-level code takes references too — `$refs = [&$a];` at file scope
+        // is the shape the corpus actually hits first. See the note at the
+        // matching line in the ordinary function emitter.
+        $body .= $this->emitRefCellBoxes($fn->body, []);
         // A global cell whose default is not a link-time constant (an array
         // literal on a static property) is built HERE, before any top-level
         // statement, so the first read/append sees a real array and not 0.

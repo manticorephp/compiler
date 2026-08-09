@@ -1,0 +1,23 @@
+int(40)
+int(40)
+int(7)
+int(7)
+string(3) "zzz"
+string(3) "zzz"
+string(12) "now a string"
+string(12) "now a string"
+string(22) "from the property side"
+string(22) "from the property side"
+array(2) {
+  ["k"]=>
+  int(99)
+  ["fresh"]=>
+  int(5)
+}
+int(10)
+int(10)
+int(20)
+int(20)
+int(30)
+int(30)
+int(5)

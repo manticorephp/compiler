@@ -72,6 +72,7 @@ use Compile\Mir\Mod;
 use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
+use Compile\Mir\RefCell_;
 use Compile\Mir\Node;
 use Compile\Mir\Not_;
 use Compile\Mir\NullConst;
@@ -112,6 +113,34 @@ trait EmitLlvmLocals
                 $out .= '  ' . $slot . " = alloca i64\n";
             }
             return $out . $this->preallocateLocals($n->value);
+        }
+        if ($k === Node::KIND_REF_CELL) {
+            // Taking a reference VIVIFIES its target, exactly as php does:
+            // `$r = [&$undef];` leaves `$undef` defined and null rather than
+            // undefined. Without the slot the promotion below has nothing to
+            // box and byRefAddrOf would answer "not addressable", which degrades
+            // to a value copy — silently, which is the failure this epic exists
+            // to remove. Zeroed, because a fresh php variable is null and not
+            // whatever the frame happened to hold.
+            // ⚠ Through {@see \Compile\Mir\Walk::children}, NOT a narrowing
+            // helper of our own. A `private static function as…(Node): RefCell_`
+            // resolves the field offset correctly in a CLASS (Walk, NodeClone,
+            // DeadStore all rely on it) and NOT in a TRAIT — and every EmitLlvm*
+            // file is a trait on one host. Read here off a trait-local helper,
+            // `refSource` came back as garbage and faulted, natively only: Zend
+            // resolves the field by NAME, so the whole class of bug is invisible
+            // under the fast loop.
+            $kids = \Compile\Mir\Walk::children($n);
+            $lv = $kids[0];
+            if ($lv->kind === Node::KIND_LOAD_LOCAL
+                && !isset($this->locals->globalBacked[$lv->name])
+                && !isset($this->locals->slots[$lv->name])) {
+                $slot = $this->ssa->allocReg();
+                $this->locals->slots[$lv->name] = $slot;
+                return '  ' . $slot . " = alloca i64\n"
+                     . '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $slot . "\n";
+            }
+            return $this->preallocateLocals($lv);
         }
         if ($k === Node::KIND_BLOCK) {
             $out = '';
@@ -753,6 +782,18 @@ trait EmitLlvmLocals
             } else {
                 $out = '  ' . $addr . ' = ptrtoint ptr ' . $this->locals->slots[$name] . " to i64\n";
             }
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($a->kind === Node::KIND_STATIC_PROP) {
+            // A static property IS an external-linkage global, so its address is
+            // the global itself — no receiver to walk and no offset to compute.
+            // Without this arm emitRefAddr fell into its "not addressable"
+            // branch, which degrades to a VALUE COPY: `$t = &S::$s; $t = 40;`
+            // left S::$s at its old value and said nothing.
+            $addr = $this->ssa->allocReg();
+            $out = '  ' . $addr . ' = ptrtoint ptr ' . $a->global . " to i64\n";
             $this->lastValue = $addr;
             $this->lastValueType = 'i64';
             return $out;

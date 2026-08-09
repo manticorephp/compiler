@@ -167,7 +167,7 @@ final class Parser
 
         $stmts = [];
         while (!$this->isAtEnd()) {
-            if ($this->check(TokenKind::CloseTag)) {
+            if ($this->check(TokenKind::CloseTag) || $this->check(TokenKind::OpenTag)) {
                 $this->advance();
                 continue;
             }
@@ -187,6 +187,38 @@ final class Parser
 
     private function parseStatement(): Stmt
     {
+        // Literal output, and php's short echo tag. Handled here rather than in
+        // parseProgram alone because a template interleaves them with the
+        // ALTERNATIVE syntax — an open tag, `foreach (…):`, a close tag, some
+        // markup, then a tag pair around `endforeach;` — so both of them appear
+        // wherever a statement can, not only at the top level.
+        // (Spelling the tags out here would end THIS file's php block.)
+        if ($this->check(TokenKind::InlineHtml)) {
+            $span = $this->span();
+            $tok = $this->advance();
+            // php echoes it verbatim: one echo of one string constant, and no
+            // escape processing of any kind applies to it.
+            return Stmt::echo_([Expr::string($tok->lexeme, $span)], $span);
+        }
+        if ($this->check(TokenKind::OpenTagEcho)) {
+            $span = $this->span();
+            $this->advance();
+            // The short echo tag takes a comma-separated expression LIST, like
+            // `echo` does, and its `;` is optional before the close tag.
+            $args = [$this->parseExpression()];
+            while ($this->match(TokenKind::Comma)) { $args[] = $this->parseExpression(); }
+            $this->match(TokenKind::Semicolon);
+            return Stmt::echo_($args, $span);
+        }
+        // A tag straddling a statement boundary carries no statement of its own;
+        // a close tag also ends a statement, the way a `;` does. There is no
+        // no-op statement to return, so an empty echo is the one that costs
+        // nothing (the emitter drops a zero-expression echo).
+        if ($this->check(TokenKind::CloseTag) || $this->check(TokenKind::OpenTag)) {
+            $span = $this->span();
+            $this->advance();
+            return Stmt::echo_([], $span);
+        }
         // A doc comment at the head of a statement (inline `/** @var T $x */`
         // before an assignment) — captured before anything advances so an
         // expression statement can carry it for local-type seeding.
@@ -1136,6 +1168,45 @@ final class Parser
         return new Block([$this->parseStatement()]);
     }
 
+    /**
+     * php's ALTERNATIVE syntax body: a `:` where a `{` would go, statements up
+     * to one of `$stops`, and the terminator keyword left UNCONSUMED for the
+     * caller (which is what lets `if:` hand off to `elseif` / `else` / `endif`).
+     *
+     * This is the form every template is written in, because a brace spanning
+     * markup is unreadable — so it arrives together with inline HTML rather
+     * than as a separate nicety.
+     *
+     * @param string[] $stops
+     */
+    private function parseAltBody(array $stops): Block
+    {
+        $stmts = [];
+        while (!$this->isAtEnd()) {
+            $stop = false;
+            foreach ($stops as $kw) {
+                if ($this->checkKeyword($kw)) { $stop = true; break; }
+            }
+            if ($stop) { break; }
+            $stmts[] = $this->parseStatement();
+        }
+        return new Block($stmts);
+    }
+
+    /**
+     * Close an alternative-syntax body: the `end…` keyword and its `;`. php
+     * also accepts a close tag in place of that `;`, and a template usually
+     * writes it that way.
+     */
+    private function endAltBody(string $keyword): void
+    {
+        if (!$this->checkKeyword($keyword)) {
+            throw $this->error("expected '" . $keyword . "'");
+        }
+        $this->advance();
+        $this->match(TokenKind::Semicolon);
+    }
+
     private function parseReturn(): Stmt
     {
         $span = $this->span();
@@ -1167,6 +1238,30 @@ final class Parser
         $this->expect(TokenKind::OpenParen, "expected '(' after if");
         $cond = $this->parseExpression();
         $this->expect(TokenKind::CloseParen, "expected ')' after condition");
+
+        // The alternative form: arms are separated by keywords rather than
+        // nested in braces, so each body runs up to the next arm or to `endif`.
+        if ($this->match(TokenKind::Colon)) {
+            $then = $this->parseAltBody(['elseif', 'else', 'endif']);
+            $elseifs = [];
+            $else = null;
+            while ($this->checkKeyword('elseif')) {
+                $this->advance();
+                $this->expect(TokenKind::OpenParen, "expected '(' after elseif");
+                $eCond = $this->parseExpression();
+                $this->expect(TokenKind::CloseParen, "expected ')' after elseif condition");
+                $this->expect(TokenKind::Colon, "expected ':' after elseif condition");
+                $elseifs[] = new ElseIfArm($eCond, $this->parseAltBody(['elseif', 'else', 'endif']));
+            }
+            if ($this->checkKeyword('else')) {
+                $this->advance();
+                $this->expect(TokenKind::Colon, "expected ':' after else");
+                $else = $this->parseAltBody(['endif']);
+            }
+            $this->endAltBody('endif');
+            return Stmt::if_($cond, $then, $elseifs, $else, $span);
+        }
+
         $then = $this->parseBlockOrStatement();
 
         $elseifs = [];
@@ -1225,6 +1320,11 @@ final class Parser
         $this->expect(TokenKind::OpenParen, "expected '(' after while");
         $cond = $this->parseExpression();
         $this->expect(TokenKind::CloseParen, "expected ')' after while condition");
+        if ($this->match(TokenKind::Colon)) {
+            $body = $this->parseAltBody(['endwhile']);
+            $this->endAltBody('endwhile');
+            return Stmt::while_($cond, $body, $span);
+        }
         $body = $this->parseBlockOrStatement();
         return Stmt::while_($cond, $body, $span);
     }
@@ -1265,6 +1365,11 @@ final class Parser
         $this->expect(TokenKind::Semicolon, "expected ';' in for");
         $update = $this->check(TokenKind::CloseParen) ? [] : $this->parseExprList();
         $this->expect(TokenKind::CloseParen, "expected ')' after for clauses");
+        if ($this->match(TokenKind::Colon)) {
+            $body = $this->parseAltBody(['endfor']);
+            $this->endAltBody('endfor');
+            return Stmt::for_($init, $cond, $update, $body, $span);
+        }
         $body = $this->parseBlockOrStatement();
         return Stmt::for_($init, $cond, $update, $body, $span);
     }
@@ -1304,6 +1409,11 @@ final class Parser
             $value = $this->parseExpression();
         }
         $this->expect(TokenKind::CloseParen, "expected ')' after foreach clause");
+        if ($this->match(TokenKind::Colon)) {
+            $body = $this->parseAltBody(['endforeach']);
+            $this->endAltBody('endforeach');
+            return Stmt::foreach_($expr, $key, $value, $valueByRef, $body, $span);
+        }
         $body = $this->parseBlockOrStatement();
         return Stmt::foreach_($expr, $key, $value, $valueByRef, $body, $span);
     }
@@ -2729,6 +2839,24 @@ final class Parser
         if ($tok->kind === TokenKind::DoubleColon) {
             $this->advance();
             $member = $this->advance();
+            // `Class::${expr}` / `Class::$$var` — the static property NAME is
+            // computed. The lexer scans `$` on its own when no identifier
+            // follows, so a bare `$` lexeme here is the marker; `{ … }` wraps an
+            // arbitrary expression (symfony/error-handler DebugClassLoader
+            // writes `self::${$annotation.'Methods'}`) and a following Variable
+            // is the `$$name` spelling.
+            if ($member->kind === TokenKind::Variable && $member->lexeme === '$') {
+                if ($this->match(TokenKind::OpenBrace)) {
+                    $nameExpr = $this->parseExpression();
+                    $this->expect(TokenKind::CloseBrace, "expected '}' after a dynamic static property name");
+                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
+                }
+                if ($this->check(TokenKind::Variable)) {
+                    $inner = $this->advance();
+                    $nameExpr = Expr::variable(\substr($inner->lexeme, 1), $span);
+                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
+                }
+            }
             // `Class::method(...)`
             if ($this->check(TokenKind::OpenParen)) {
                 $args = $this->parseArgList();
@@ -3071,7 +3199,7 @@ final class Parser
     /** Sub-lex + parse an interpolation `{$expr}` body into a (string)-cast expression. */
     private function parseSubExpr(string $src, Span $span): Expr
     {
-        $tokens = (new Lexer())->scan($src);
+        $tokens = (new Lexer())->scan($src, true);
         $sub = new self($tokens);
         return Expr::cast('string', $sub->parseExpression(), $span);
     }

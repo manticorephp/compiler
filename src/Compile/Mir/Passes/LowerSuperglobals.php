@@ -70,7 +70,8 @@ trait LowerSuperglobals
         foreach ($module->functions as $fn) {
             foreach ($names as $sg) {
                 if ($this->nodeReadsLocal($fn->body, $sg)
-                    || $this->nodeWritesLocal($fn->body, $sg)) {
+                    || $this->nodeWritesLocal($fn->body, $sg)
+                    || $this->nodeAliasesLocal($fn->body, $sg)) {
                     $demanded[$sg] = true;
                 }
             }
@@ -85,7 +86,8 @@ trait LowerSuperglobals
                 // other scope binds only what it actually touches.
                 if ($isMain
                     || $this->nodeReadsLocal($fn->body, $sg)
-                    || $this->nodeWritesLocal($fn->body, $sg)) {
+                    || $this->nodeWritesLocal($fn->body, $sg)
+                    || $this->nodeAliasesLocal($fn->body, $sg)) {
                     $used[] = $sg;
                 }
             }

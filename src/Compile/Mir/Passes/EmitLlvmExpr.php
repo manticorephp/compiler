@@ -170,10 +170,41 @@ trait EmitLlvmExpr
         // __manticore_tag: a tagged cell has header bits > 0xFFF0000000000000
         // (int=0xFFF1 … object=0xFFF8); anything else (a finite double, ±Inf,
         // canonical NaN) is a raw double → synthetic FLOAT tag 6.
+        // __manticore_deref: a REF cell (nibble 9) is a POINTER TO the value, so
+        // every consumer of a cell has to see through it first. Reading `$r`
+        // yields what `$r` refers to — php has no way to spell "the reference
+        // itself" in an rvalue, which is why this is a deref and not a tag arm.
+        //
+        // ⚠ UNCONDITIONAL, like the arm below it. Both bodies are `linkonce_odr`
+        // ({@see EmitLlvm::linkonceRuntime}) and coalesce with stdlib.o's copy,
+        // so a version of them that depends on whether THIS module happens to
+        // hold a reference would give the linker two different bodies for one
+        // symbol — the trap {@see \Compile\Debug::$pool} documents.
+        $out .= "define i64 @__manticore_deref(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %dtag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  %dsh = lshr i64 %v, 48\n";
+        $out .= "  %dnib = and i64 %dsh, 15\n";
+        $out .= "  %disref = icmp eq i64 %dnib, "
+              . (string)\Compile\MemoryAbi::CELL_TAG_REF . "\n";
+        $out .= "  %dboth = and i1 %dtag, %disref\n";
+        $out .= "  br i1 %dboth, label %box, label %plain\n";
+        $out .= "box:\n";
+        $out .= "  %dm = and i64 %v, "
+              . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= "  %dp = inttoptr i64 %dm to ptr\n";
+        $out .= "  %dx = load i64, ptr %dp\n";
+        $out .= "  ret i64 %dx\n";
+        $out .= "plain:\n";
+        $out .= "  ret i64 %v\n";
+        $out .= "}\n";
         $out .= "define i64 @__manticore_tag(i64 %v) {\n";
         $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
-        $out .= "  %s = lshr i64 %v, 48\n";
+        // A reference reports the tag of what it REFERS TO: `is_int($refs[0])`
+        // is a question about the target, never about the binding.
+        $out .= "  %v0 = call i64 @__manticore_deref(i64 %v)\n";
+        $out .= "  %istag = icmp ugt i64 %v0, -4503599627370496\n";
+        $out .= "  %s = lshr i64 %v0, 48\n";
         $out .= "  %nibr = and i64 %s, 15\n";
         // BIGINT (nibble 5, a heap-boxed int) is an INT for every tag consumer.
         $out .= "  %is5 = icmp eq i64 %nibr, 5\n";
@@ -369,6 +400,21 @@ trait EmitLlvmExpr
      */
     private function cellTagIr(string $v): string
     {
+        // A REF cell must be seen through before its tag means anything, and a
+        // deref is a LOAD — it cannot be folded into the select chain below.
+        // Rather than split ~20 caller basic blocks (several of which emit their
+        // own labels around this, e.g. {@see arrayPtrOrEmptyIr}), defer to the
+        // runtime body that already has to be ref-aware for ODR reasons.
+        //
+        // The inline form therefore stays the FAST PATH and the runtime stays
+        // its AUTHORITY, instead of the two being mirrors that can drift. IR is
+        // byte-identical for every program that holds no reference.
+        if ($this->rt->needsRefCells) {
+            $this->rt->needsTagged = true;
+            $tagr = $this->ssa->allocReg();
+            $this->cellTagReg = $tagr;
+            return '  ' . $tagr . ' = call i64 @__manticore_tag(i64 ' . $v . ")\n";
+        }
         $istag = $this->ssa->allocReg();
         $ts = $this->ssa->allocReg();
         $nib = $this->ssa->allocReg();
@@ -4581,6 +4627,28 @@ trait EmitLlvmExpr
      * inttoptr's the tagged bits → fault).
      */
     private function unboxCellToType(Type $pt): string
+    {
+        // See through a reference before decoding it. This is the single most
+        // reused typed decoder in the tree, so it is where the read seam earns
+        // the most: the call arg, the `return`, the by-ref store plants and the
+        // element paths all arrive here. A WRAPPER rather than a prologue inside
+        // the body, because the body has a dozen returns and a prologue that has
+        // to be threaded through every one of them is a missed arm waiting to
+        // happen — the failure this epic is built to avoid.
+        //
+        // Gated: a program that holds no reference emits exactly the IR it did
+        // before, byte for byte.
+        if (!$this->rt->needsRefCells) { return $this->unboxCellToTypeRaw($pt); }
+        $this->rt->needsTagged = true;
+        $dr = $this->ssa->allocReg();
+        $pre = '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
+        $this->lastValue = $dr;
+        $this->lastValueType = 'i64';
+        return $pre . $this->unboxCellToTypeRaw($pt);
+    }
+
+    /** {@see unboxCellToType} with no reference deref — its body. */
+    private function unboxCellToTypeRaw(Type $pt): string
     {
         $pk = $pt->kind;
         if ($pk === Type::KIND_BOOL) {

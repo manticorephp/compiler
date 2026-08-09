@@ -112,6 +112,13 @@ final class Module
      *  needles here so a self-build does not trip its own gate). */
     public bool $needsBacktrace = false;
 
+    /** Some slot in this module is a REFERENCE CELL — a `&` whose result had to
+     *  become a storable VALUE ({@see docs/design/reference-cells.md}), not just
+     *  an address. A module-level fact so the inline cell-tag paths can consult
+     *  it BEFORE emit starts; a demand flag set during emit ({@see
+     *  RuntimeFeatures::$needsCellKey}) is answered too late for that. */
+    public bool $hasRefCells = false;
+
     /** The error/shutdown prelude is compiled in, so main() registers the
      *  atexit trampoline that drains register_shutdown_function's queue and the
      *  uncaught path offers the Throwable to a set_exception_handler() first.

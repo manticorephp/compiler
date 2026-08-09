@@ -221,7 +221,14 @@ trait LowerPrelude
             // and token_get_all() constructs __McTok.
             $src = $src . $this->tokenizerSrc . $this->tokenizerApiSrc;
         }
-        $program = \Parser\Parser::parseSource($src);
+        // Belt and braces: the concatenation ALREADY starts with the Throwable
+        // prelude's own `<?php`, so this leading tag is redundant today and the
+        // parser skips the duplicate. It is here so that the invariant — this
+        // blob is CODE, whatever fragment happens to lead it — does not depend
+        // on which fragment that is. (It is not what fixed the headerless
+        // fragments; that was PreludeDemand::definedFunctions, which decides
+        // whether they are injected at all.)
+        $program = \Parser\Parser::parseSource("<?php\n" . $src);
         $stmts = $program->statements;
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
         // PHP forbids mixing bracketed + unbracketed namespaces in one unit, so

@@ -1,0 +1,29 @@
+bool(true)
+bool(false)
+string(17) " deprecated here."
+string(5) "final"
+array(2) {
+  ["Cfinal"]=>
+  string(12) " final here."
+  ["Second"]=>
+  string(12) " also final."
+}
+string(10) "deprecated"
+array(1) {
+  ["Cdeprecated"]=>
+  string(17) " deprecated here."
+}
+string(8) "internal"
+array(2) {
+  ["Cinternal"]=>
+  string(15) " internal here."
+  ["DD"]=>
+  string(7) " via $$"
+}
+string(12) "finalMethods"
+array(1) {
+  ["M"]=>
+  string(13) " final method"
+}
+string(5) "Error"
+string(49) "Access to undeclared static property Reg::$nosuch"

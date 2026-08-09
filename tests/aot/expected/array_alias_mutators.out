@@ -1,0 +1,15 @@
+pop      src=3,1 alias=3,1,2
+shift    src=1,2 alias=3,1,2
+unshift  src=9,3,1,2 alias=3,1,2
+push     src=3,1,2,9 alias=3,1,2
+sort     src=1,2,3 alias=3,1,2
+rsort    src=3,2,1 alias=3,1,2
+splice   src=1,2 alias=3,1,2
+usort    src=1,2,3 alias=3,1,2
+shuffle  alias=3,1,2
+str      src=a,b,c alias=b,c
+ksort    src=a,b alias=b,a
+asort    src=a,b alias=b,a
+aliasmut src=1,2 alias=0,1,2
+next     src=2 alias=1
+three    1 | 1,2 | 1,2

@@ -304,8 +304,17 @@ function __mc_response_headers(): array<int, string>
  * gone. Outside one it is the process-wide CLI answer, which is what a plain
  * script sees.
  */
-function headers_sent(): bool
+function headers_sent(#[RefOut] string &$filename = '', #[RefOut] int &$line = 0): bool
 {
+    // php's out-parameters. It fills them with the source position where output
+    // STARTED; we do not record that position — no output path carries a
+    // file/line — so they answer php's not-yet-sent values ('' and 0) either
+    // way. Symfony's NativeSessionStorage::start() reads them straight into an
+    // exception message, and passing them at all is the point: an argument in a
+    // by-ref position is a DEFINITION, so without the `&` the caller's `$file`
+    // was a dangling local and the whole program was refused.
+    $filename = '';
+    $line = 0;
     if (\__McSapi::$active) {
         return \__McSapi::$sent;
     }

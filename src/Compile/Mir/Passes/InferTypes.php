@@ -142,6 +142,10 @@ final class InferTypes implements Pass
     private array $assocValClasses = [];
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
+    /** @var array<string, bool> locals a RefCell_ points at, in the function
+     *  currently being inferred. A CELL for their whole lifetime. */
+    private array $refCellLocalsCur = [];
+
     private array $forcedCellElemLocals = [];
     /** fn name => [local name => true]: locals handed BY-REF to a callee that
      *  appends a FOREIGN element type. Kept apart from {@see $forcedCellElemLocals}
@@ -398,6 +402,12 @@ final class InferTypes implements Pass
         // keeps it off. symfony's TableCell has both.
         $this->scanCellElemProps($module);
         $this->scanPropElementReturns($module);
+        // BEFORE the first inference walk: a property a `&` points at from a
+        // storing position is a CELL for its whole lifetime, and every read of
+        // it in that walk has to already agree. Same one-slot-one-representation
+        // rule the local promotion follows, and the same reason it is computed
+        // up front rather than forced afterwards.
+        $this->scanRefCellProps($module);
         foreach ($module->functions as $fn) {
             $this->inferFunction($fn);
         }
@@ -540,6 +550,16 @@ final class InferTypes implements Pass
         // Bounded — a seed only widens unknown → cell, so it converges at once.
         $guard = 0;
         while ($guard < 4 && $this->scanLocalElemFromStores($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
+        // The same erasure through a MUTATING BUILTIN instead of a store:
+        // `array_unshift($local, 's', 2)` has no signature for the by-ref scans
+        // to read ({@see scanUnshiftElemWiden}).
+        $guard = 0;
+        while ($guard < 4 && $this->scanUnshiftElemWiden($module)) {
             foreach ($module->functions as $fn) {
                 $this->inferFunction($fn);
             }
