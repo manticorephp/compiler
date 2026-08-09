@@ -19,11 +19,15 @@
 $mode = $argv[1] ?? '';
 $path = $argv[2] ?? '';
 $top = isset($argv[3]) ? (int)$argv[3] : 40;
-if ($mode === '' || $path === '' || !is_file($path)) {
-    fwrite(STDERR, "usage: report.php <sample|malloc|heaptrack> <file> [top]\n");
+if ($mode === '' || $path === '') {
+    fwrite(STDERR, "usage: report.php <sample|heap|trend|malloc|heaptrack|phase|callers> <file|dir> [top]\n");
     exit(2);
 }
-$text = (string)file_get_contents($path);
+if ($mode !== 'trend' && !is_file($path)) {
+    fwrite(STDERR, "report.php: no such file: " . $path . "\n");
+    exit(2);
+}
+$text = $mode === 'trend' ? '' : (string)file_get_contents($path);
 
 /**
  * `_manticore_Compile_Mir_Passes_InferTypes__inferFn` -> `Compile\Mir\Passes\InferTypes::inferFn`.
@@ -393,6 +397,44 @@ function prof_parse_heap(string $text): array
         $bytes[$sym] = ($bytes[$sym] ?? 0) + (int)$m[2];
     }
     return ['bytes' => $bytes, 'calls' => $calls];
+}
+
+/**
+ * Live blocks per site ACROSS a run's snapshots — the shape that separates a
+ * working set from retention. A site whose count only ever climbs is holding;
+ * one that rises and falls is churn the profiler happened to catch.
+ *
+ *   php tools/prof/report.php trend <outdir> [top]
+ */
+if ($mode === 'trend') {
+    $files = glob(rtrim($path, '/') . '/heap-*.txt');
+    if ($files === false || $files === []) {
+        fwrite(STDERR, "trend: no heap-*.txt in " . $path . "\n");
+        exit(2);
+    }
+    sort($files);
+    /** @var array<string,array<int,int>> $series  site => [snapshot index => blocks] */
+    $series = [];
+    /** @var string[] $cols */
+    $cols = [];
+    foreach ($files as $i => $f) {
+        $cols[] = str_replace(['heap-', '.txt'], '', basename($f));
+        $r = prof_parse_heap((string)file_get_contents($f));
+        foreach ($r['calls'] as $sym => $n) { $series[$sym][$i] = $n; }
+    }
+    $last = count($files) - 1;
+    uasort($series, static fn(array $a, array $b): int => ($b[$last] ?? 0) <=> ($a[$last] ?? 0));
+    printf("%-46s", 'blocks live per site');
+    foreach ($cols as $c) { printf('%10s', (int)$c / 1000 . 's'); }
+    echo "\n";
+    $i = 0;
+    foreach ($series as $sym => $row) {
+        if ($i++ >= $top) { break; }
+        printf('%-46s', substr($sym, 0, 46));
+        foreach ($cols as $j => $_) { printf('%10s', isset($row[$j]) ? number_format($row[$j]) : '-'); }
+        echo "\n";
+    }
+    exit(0);
 }
 
 if ($mode === 'heap') {
