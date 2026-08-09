@@ -3176,7 +3176,8 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %aq = load i64, ptr %pp\n";
         $out .= "  %aoob = icmp sge i64 %aq, %n\n";
-        $out .= "  br i1 %aoob, label %adone, label %achk\n";
+        // Input ending right after `[` — the container never closes.
+        $out .= "  br i1 %aoob, label %aerr, label %achk\n";
         $out .= "achk:\n";
         $out .= "  %acp = getelementptr inbounds i8, ptr %s, i64 %aq\n";
         $out .= "  %acb = load i8, ptr %acp\n";
@@ -3212,12 +3213,18 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %at = load i64, ptr %pp\n";
         $out .= "  %atoob = icmp sge i64 %at, %n\n";
-        $out .= "  br i1 %atoob, label %adone, label %atchk\n";
+        // Running out of input, or finding a byte that is not `]`, both used to
+        // fall into %adone and hand back a container php would have rejected —
+        // `[1,2` decoded as [1,2]. Both are php's SYNTAX error.
+        $out .= "  br i1 %atoob, label %aerr, label %atchk\n";
         $out .= "atchk:\n";
         $out .= "  %atp = getelementptr inbounds i8, ptr %s, i64 %at\n";
         $out .= "  %atb = load i8, ptr %atp\n";
         $out .= "  %atend = icmp eq i8 %atb, 93\n";
-        $out .= "  br i1 %atend, label %ateat, label %adone\n";
+        $out .= "  br i1 %atend, label %ateat, label %aerr\n";
+        $out .= "aerr:\n";
+        $out .= "  %aerrc = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %adone\n";
         $out .= "ateat:\n";
         $out .= "  %at1 = add i64 %at, 1\n";
         $out .= "  store i64 %at1, ptr %pp\n";
@@ -3236,7 +3243,8 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %oq = load i64, ptr %pp\n";
         $out .= "  %ooob = icmp sge i64 %oq, %n\n";
-        $out .= "  br i1 %ooob, label %odone, label %ochk\n";
+        // Input ending right after `{` — the container never closes.
+        $out .= "  br i1 %ooob, label %oerr, label %ochk\n";
         $out .= "ochk:\n";
         $out .= "  %ocp = getelementptr inbounds i8, ptr %s, i64 %oq\n";
         $out .= "  %ocb = load i8, ptr %ocp\n";
@@ -3256,11 +3264,21 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %oc0 = load i64, ptr %pp\n";
         $out .= "  %oc0ok = icmp slt i64 %oc0, %n\n";
-        $out .= "  br i1 %oc0ok, label %ocolon, label %oval\n";
+        // A missing `:` — or input that ends before one — was tolerated, so
+        // `{"a" 1}` and `{"a"` both decoded as if well formed. php: SYNTAX.
+        $out .= "  br i1 %oc0ok, label %ocolon, label %ocbad\n";
+        $out .= "ocbad:\n";
+        $out .= "  %ocbe = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %oval\n";
         $out .= "ocolon:\n";
         $out .= "  %ocp2 = getelementptr inbounds i8, ptr %s, i64 %oc0\n";
         $out .= "  %ocb2 = load i8, ptr %ocp2\n";
         $out .= "  %iscol = icmp eq i8 %ocb2, 58\n";          // :
+        $out .= "  br i1 %iscol, label %ocok, label %ocmiss\n";
+        $out .= "ocmiss:\n";
+        $out .= "  %ocme = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %ocok\n";
+        $out .= "ocok:\n";
         $out .= "  %oc1 = add i64 %oc0, 1\n";
         $out .= "  %ocn = select i1 %iscol, i64 %oc1, i64 %oc0\n";
         $out .= "  store i64 %ocn, ptr %pp\n";
@@ -3289,12 +3307,15 @@ final class RuntimeLibrary
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %ot = load i64, ptr %pp\n";
         $out .= "  %otoob = icmp sge i64 %ot, %n\n";
-        $out .= "  br i1 %otoob, label %odone, label %otchk\n";
+        $out .= "  br i1 %otoob, label %oerr, label %otchk\n";
         $out .= "otchk:\n";
         $out .= "  %otp = getelementptr inbounds i8, ptr %s, i64 %ot\n";
         $out .= "  %otb = load i8, ptr %otp\n";
         $out .= "  %otend = icmp eq i8 %otb, 125\n";
-        $out .= "  br i1 %otend, label %oteat, label %odone\n";
+        $out .= "  br i1 %otend, label %oteat, label %oerr\n";
+        $out .= "oerr:\n";
+        $out .= "  %oerrc = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %odone\n";
         $out .= "oteat:\n";
         $out .= "  %ot1 = add i64 %ot, 1\n";
         $out .= "  store i64 %ot1, ptr %pp\n";
@@ -3336,7 +3357,26 @@ final class RuntimeLibrary
         $out .= "  %pp = alloca i64\n";
         $out .= "  store i64 0, ptr %pp\n";
         $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        // Empty or whitespace-only input is a syntax error in php, not null.
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %jdp0 = load i64, ptr %pp\n";
+        $out .= "  %jdmt = icmp sge i64 %jdp0, %n\n";
+        $out .= "  br i1 %jdmt, label %jdempty, label %jdgo\n";
+        $out .= "jdempty:\n";
+        $out .= "  %jde0 = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  %jdnul = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %jdnul\n";
+        $out .= "jdgo:\n";
         $out .= "  %r = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
+        // Anything left over after the value is trailing garbage: `[1,2]x`.
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %jdpe = load i64, ptr %pp\n";
+        $out .= "  %jdfin = icmp sge i64 %jdpe, %n\n";
+        $out .= "  br i1 %jdfin, label %jdok, label %jdtrail\n";
+        $out .= "jdtrail:\n";
+        $out .= "  %jde1 = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %jdok\n";
+        $out .= "jdok:\n";
         $out .= "  ret i64 %r\n}\n";
         return $out;
     }

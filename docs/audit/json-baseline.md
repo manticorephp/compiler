@@ -49,21 +49,86 @@ honest cost of getting there: a flagged call runs the compiled-PHP encoder, whic
 **slower than php and burns 2.5× its memory**. That is Stage 1b's target, not a
 surprise.
 
-## ⚠ `$depth` is ACCEPTED but not honoured the way php honours it
+## Stage 3: the error model exists — and what of it does NOT
+
+Present and matching the oracle: `json_last_error()`, `json_last_error_msg()` (php's own
+texts, taken from the oracle rather than paraphrased), `json_validate()`, all twelve
+`JSON_ERROR_*` constants, `JSON_THROW_ON_ERROR` raising `JsonException` and leaving the
+slot at NONE, `json_encode(): string|false`, INF/NAN failing with `JSON_ERROR_INF_OR_NAN`
+instead of encoding as the number 0, and `$depth` failing the whole call on both sides
+with `JSON_ERROR_DEPTH`.
+
+**Stage 3(b): both decoders now REJECT rather than degrade.** `[1,2`, `[`, `{`, `{"a"`,
+`{"a" 1}`, `[1,2]x`, `""` and whitespace-only input all answer null with
+`JSON_ERROR_SYNTAX`, on the native path and the compiled-PHP one alike — the test drives
+both, because `json_validate` and a non-literal `$assoc` take the PHP parser while
+everything else takes the builtin, and the two must not disagree.
+
+The error travels through the shared slot rather than being propagated out of the
+recursion, so the whole change is six branches that **already existed** — every place the
+decoder used to fall into `%adone`/`%odone` without consuming a closer is exactly an
+end-of-input or wrong-byte condition. Cost is one call on the failure path and **zero on
+the success path**.
+
+Two things this got wrong first, both worth remembering:
+
+  - **The container HEAD is a separate exit from its tail.** Fixing `%atoob`/`%otoob` (the
+    tail) left `%aoob`/`%ooob` — input ending immediately after `[` or `{` — jumping
+    straight to `%adone`. `[1,2` was rejected while `[` was not, and the first test set
+    happened to contain only the former.
+  - **The FIRST error must win.** `json_decode('[[[1]]]', true, 2)` hits the depth limit,
+    aborts, and therefore leaves input unconsumed — so the trailing-garbage check
+    relabelled `JSON_ERROR_DEPTH` as `JSON_ERROR_SYNTAX`. Fixed in the slot itself
+    (`__mc_json_err` is sticky; only an explicit 0 resets), which closes the same hazard
+    at all seven sites that set a code instead of requiring each to remember the order.
+
+### ⛔ What validation still misses — measured, not assumed
+
+| input | php | here |
+|---|---|---|
+| `[1,]` | null + SYNTAX | **`[1,0]`** — invents an element |
+| `"a\x01b"` | null + CTRL_CHAR | **`"ab"`** — drops the byte |
+| 600 levels of nesting | null + DEPTH | **decoded, err=0** |
+| `"\x80"` | null + UTF8 | hands back the bad byte, err=0 |
+| `[01]` | null + SYNTAX | `[1]` |
+
+The first two are **worse than an under-report: they are wrong data with no signal.** A
+trailing comma materialises a `0` element and a control character is silently deleted. Any
+description of the remaining work as "we merely fail to report" is inaccurate — these two
+corrupt.
+
+The depth row is its own trap: the counter went into the compiled-PHP parser, but the gate
+sends anything with a default `$depth` down the NATIVE path, which counts nothing. So the
+common `json_decode($deep)` still runs to a stack overflow rather than
+`JSON_ERROR_DEPTH` — the parameter works only where the parser is used. Encode has the
+same shape.
+
+Confirmed already matching: `JSON_PARTIAL_OUTPUT_ON_ERROR` (`[1,0]` with the slot at 7)
+and int-overflow-to-float on decode.
+
+Two mechanics worth keeping in mind when extending this:
+
+  - The builtin REPLACES the whole call, so the PHP body never runs — anything php does
+    on entry (clearing the slot) has to be emitted by the builtin too, or the slot keeps
+    reporting a previous call's result.
+  - `json_encode(): string|false` is a UNION, so its call sites expect a CELL. A builtin
+    that hands back a raw pointer is a representation mismatch that nothing diagnoses.
+
+## ⚠ `$depth` — FIXED in Stage 3; the divergence below is what it looked like
 
 Stage 1a gave `json_encode` a `$depth` parameter and Stage 2 gave `json_decode` one.
-Neither matches php yet, and the parameter's presence makes that easy to miss:
+For two commits neither matched php, and the parameter's presence made that easy to
+miss — the signature advertised a feature that did nothing:
 
 | | php | here |
 |---|---|---|
 | `json_encode($deep, 0, 2)` | `false` + `JSON_ERROR_DEPTH` | the over-deep node encodes as the string `null` |
 | `json_decode($deep, true, 2)` | `null` + `JSON_ERROR_DEPTH` | decoded in full — the native decoder counts no depth at all |
 
-Returning `false` needs `json_encode`'s return type to become `string|false`, which is
-Stage 3's error-model work; the decoder needs a depth counter threaded the way `$assoc`
-now is. Until then the parameter is accepted for signature compatibility and its limit
-is approximate on encode and absent on decode. **This is a divergence introduced by
-this work, not a pre-existing one.**
+Both are now php-exact: `json_encode` returns `string|false`, the PHP parser counts
+CONTAINERS the way php does, and both set `JSON_ERROR_DEPTH`. Recorded here because the
+shape is instructive — **adding a parameter and implementing it approximately is worse
+than not having it**, since the signature says the feature works.
 
 ## Found while building Stage 2, NOT fixed: `get_debug_type` over a cell
 

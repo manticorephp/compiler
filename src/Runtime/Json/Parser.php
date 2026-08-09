@@ -19,19 +19,29 @@ final class Parser
     private int $len;
     /** false → a JSON object becomes a stdClass, php's DEFAULT. */
     private bool $assoc;
+    private int $maxDepth;
+    private int $depth;
 
-    public function __construct(string $src, bool $assoc = true)
+    public function __construct(string $src, bool $assoc = true, int $maxDepth = 512)
     {
         $this->src = $src;
         $this->pos = 0;
         $this->len = \strlen($src);
         $this->assoc = $assoc;
+        $this->maxDepth = $maxDepth;
+        $this->depth = 0;
     }
 
     public function parse(): mixed
     {
         $this->skipWs();
-        return $this->parseValue();
+        // php rejects an empty or whitespace-only document rather than answering
+        // null for it, and rejects anything left over after the value.
+        if ($this->pos >= $this->len) { \__mc_json_err(4); return null; }
+        $v = $this->parseValue();
+        $this->skipWs();
+        if ($this->pos < $this->len) { \__mc_json_err(4); return null; }
+        return $v;
     }
 
     private function skipWs(): void
@@ -53,12 +63,23 @@ final class Parser
         if ($this->pos >= $this->len) { return null; }
         $c = $this->src[$this->pos];
         if ($c === '{') {
+            // php counts CONTAINERS: at $depth the next one is one too many, and
+            // the whole call fails rather than the node degrading.
+            if ($this->depth >= $this->maxDepth) { \__mc_json_err(1); return null; }
+            $this->depth = $this->depth + 1;
             $o = $this->parseObject();
+            $this->depth = $this->depth - 1;
             // The cast is five instructions and no copy: the assoc just built
             // BECOMES the object's dynamic-property bag.
             return $this->assoc ? $o : (object)$o;
         }
-        if ($c === '[') { return $this->parseArray(); }
+        if ($c === '[') {
+            if ($this->depth >= $this->maxDepth) { \__mc_json_err(1); return null; }
+            $this->depth = $this->depth + 1;
+            $a = $this->parseArray();
+            $this->depth = $this->depth - 1;
+            return $a;
+        }
         if ($c === '"') { return $this->parseString(); }
         if ($c === 't') { $this->pos = $this->pos + 4; return true; }
         if ($c === 'f') { $this->pos = $this->pos + 5; return false; }
@@ -83,6 +104,8 @@ final class Parser
             $this->skipWs();
             if ($this->pos < $this->len && $this->src[$this->pos] === ':') {
                 $this->pos = $this->pos + 1;
+            } else {
+                \__mc_json_err(4);   // `{"a" 1}` / input that ends before the `:`
             }
             $val = $this->parseValue();
             $obj[$key] = $val;
@@ -96,6 +119,8 @@ final class Parser
         $this->skipWs();
         if ($this->pos < $this->len && $this->src[$this->pos] === '}') {
             $this->pos = $this->pos + 1;
+        } else {
+            \__mc_json_err(4);   // ran out of input, or a byte that is not `}`
         }
         return $obj;
     }
@@ -124,6 +149,8 @@ final class Parser
         $this->skipWs();
         if ($this->pos < $this->len && $this->src[$this->pos] === ']') {
             $this->pos = $this->pos + 1;
+        } else {
+            \__mc_json_err(4);   // ran out of input, or a byte that is not `]`
         }
         return $arr;
     }

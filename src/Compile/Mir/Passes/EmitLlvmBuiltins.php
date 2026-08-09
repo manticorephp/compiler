@@ -6464,11 +6464,27 @@ trait EmitLlvmBuiltins
         $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $sp = $this->lastValue;
+        // php clears json_last_error() on entry. The builtin REPLACES the whole
+        // call, so the PHP body never runs and without this the slot would keep
+        // reporting whatever some earlier json call left in it.
+        $out .= $this->jsonErrSet('0');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_json_decodea(ptr ' . $sp
               . ', i64 ' . (string)$this->jsonAssocMode($args) . ")\n";
         $out .= $this->freeStrTemp($args[0], $sp);
-        $this->lastValue = $reg;
+        // php answers null when the document was rejected. The decoder reports
+        // through the shared slot rather than by propagating a failure out of
+        // its recursion, so the verdict is read here.
+        $err = $this->ssa->allocReg();
+        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
+        $nul = $this->ssa->allocReg();
+        $out .= '  ' . $nul . " = call i64 @__manticore_box_null()\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $nul
+              . ', i64 ' . $reg . "\n";
+        $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -6486,13 +6502,39 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cell = $this->lastValue;
+        $out .= $this->jsonErrSet('0');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_enc(i64 ' . $cell . ")\n";
         // The encoder READ the cell into its own buffer and kept nothing.
         $out .= $this->cellBoxTempDrop($args[0]->type, $cell);
-        $this->lastValue = $reg;
-        $this->lastValueType = 'ptr';
+        // `json_encode(): string|false` — a UNION, so the call site expects a
+        // CELL and handing back a raw pointer would be a representation
+        // mismatch. The only failure the native encoder can reach on this gate
+        // (flags 0, depth 512) is INF/NAN, which `__mc_dtoa_bits` flags in the
+        // shared error slot, so read it back and select.
+        $sc = $this->ssa->allocReg();
+        $out .= '  ' . $sc . ' = call i64 @__manticore_box_ptr(ptr ' . $reg . ")\n";
+        $err = $this->ssa->allocReg();
+        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
+        $fc = $this->ssa->allocReg();
+        $out .= '  ' . $fc . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $fc
+              . ', i64 ' . $sc . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Store `$code` into the ONE json error slot — the function-local static in
+     *  `manticore_stdlib.o`. Always a call, never an inlined store to a
+     *  module-local global: that would give the app module a second slot. */
+    private function jsonErrSet(string $code): string
+    {
+        $r = $this->ssa->allocReg();
+        return '  ' . $r . ' = call i64 @manticore___mc_json_err(i64 ' . $code . ")\n";
     }
 
     /**

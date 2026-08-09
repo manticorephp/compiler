@@ -9,9 +9,66 @@
  * json_roundtrip.php.
  */
 
-/** Encode a value as JSON. */
-function json_encode(mixed $value, int $flags = 0, int $depth = 512): string {
-    return __mc_json_enc($value, $flags, $depth, 0);
+/**
+ * json_last_error() state. Pass -1 to read, >= 0 to set; returns the current
+ * code. Same shape as {@see \__preg_error}: a function-local static becomes one
+ * module global with EXTERNAL linkage in `manticore_stdlib.o`, so the whole
+ * program shares ONE slot. ⚠ A caller must never inline its own store to that
+ * global — it would split the slot in two.
+ */
+function __mc_json_err(int $set = -1): int {
+    static $err = 0;
+    // The FIRST error wins, php's rule — a later check must not relabel it.
+    // `json_decode('[[[1]]]', true, 2)` hits the depth limit and then leaves
+    // input unconsumed, and the trailing-garbage check was overwriting
+    // JSON_ERROR_DEPTH with JSON_ERROR_SYNTAX. Only an explicit 0 resets.
+    if ($set === 0) { $err = 0; }
+    elseif ($set > 0 && $err === 0) { $err = $set; }
+    return $err;
+}
+
+function json_last_error(): int {
+    return \__mc_json_err(-1);
+}
+
+/** php's own texts, taken from the oracle rather than paraphrased. */
+function json_last_error_msg(): string {
+    $e = \__mc_json_err(-1);
+    if ($e === 0) { return "No error"; }
+    if ($e === 1) { return "Maximum stack depth exceeded"; }
+    if ($e === 2) { return "State mismatch (invalid or malformed JSON)"; }
+    if ($e === 3) { return "Control character error, possibly incorrectly encoded"; }
+    if ($e === 4) { return "Syntax error"; }
+    if ($e === 5) { return "Malformed UTF-8 characters, possibly incorrectly encoded"; }
+    if ($e === 6) { return "Recursion detected"; }
+    if ($e === 7) { return "Inf and NaN cannot be JSON encoded"; }
+    if ($e === 8) { return "Type is not supported"; }
+    if ($e === 9) { return "The decoded property name is invalid"; }
+    if ($e === 10) { return "Single unpaired UTF-16 surrogate in unicode escape"; }
+    return "Non-backed enums have no default serialization";
+}
+
+/** JSON_THROW_ON_ERROR: raise, and leave the slot at NONE — php's rule, so a
+ *  caught exception is not followed by a stale json_last_error(). */
+function __mc_json_throw(int $flags): void {
+    $e = \__mc_json_err(-1);
+    if ($e === 0) { return; }
+    if (($flags & 4194304) === 0) { return; }
+    $msg = \json_last_error_msg();
+    \__mc_json_err(0);
+    throw new \JsonException($msg, $e);
+}
+
+/**
+ * Encode a value as JSON, or `false` when it cannot be encoded — php's own
+ * contract. Clears the error slot on entry, as php does.
+ */
+function json_encode(mixed $value, int $flags = 0, int $depth = 512): string|false {
+    \__mc_json_err(0);
+    $s = __mc_json_enc($value, $flags, $depth, 0);
+    \__mc_json_throw($flags);
+    if (\__mc_json_err(-1) !== 0 && ($flags & 512) === 0) { return false; }
+    return $s;
 }
 
 /** `$w` lowercase hex digits of `$v` (JSON `\u` escapes are lowercase). */
@@ -125,8 +182,27 @@ function json_decode(string $json, ?bool $associative = null, int $depth = 512,
     // DEFAULT) and JSON_OBJECT_AS_ARRAY is set. Otherwise stdClass.
     $assoc = $associative === true
         || ($associative === null && ($flags & 1) !== 0);
-    $parser = new \Runtime\Json\Parser($json, $assoc);
-    return $parser->parse();
+    \__mc_json_err(0);
+    $parser = new \Runtime\Json\Parser($json, $assoc, $depth);
+    $v = $parser->parse();
+    \__mc_json_throw($flags);
+    if (\__mc_json_err(-1) !== 0) { return null; }
+    return $v;
+}
+
+/**
+ * json_validate() (php 8.3+). Parses without keeping the result and reports
+ * whether the document was accepted, leaving json_last_error() set exactly as a
+ * decode would. ⚠ It shares the DECODER's strictness, which is still partial —
+ * see the note in docs/audit/json-baseline.md — so it currently answers false
+ * only for what the parser actually detects.
+ */
+function json_validate(string $json, int $depth = 512, int $flags = 0): bool {
+    \__mc_json_err(0);
+    $parser = new \Runtime\Json\Parser($json, true, $depth);
+    $parser->parse();
+    \__mc_json_throw($flags);
+    return \__mc_json_err(-1) === 0;
 }
 
 /**
@@ -147,7 +223,10 @@ function __mc_dtoa(float $value): string {
  *  with a lowercase `e` and no trailing `.0`. */
 function __mc_dtoa_bits(int $bits): string {
     $ieeeExponent = ($bits >> 52) & 2047;
-    if ($ieeeExponent === 2047) { return "0"; }    // INF / NAN → 0 for json
+    // INF / NAN: php refuses them outright. Flagged HERE because the NATIVE
+    // encoder's float emitter also falls back to this function for a non-finite
+    // double, so one line covers both paths.
+    if ($ieeeExponent === 2047) { \__mc_json_err(7); return "0"; }
     return \__mc_dtoa_core($bits, 0, 0);
 }
 
@@ -390,7 +469,10 @@ function __mc_json_enc(mixed $v, int $flags = 0, int $maxDepth = 512, int $depth
         }
         return '"' . __mc_json_escape($v, $flags) . '"';
     }
-    if ($depth >= $maxDepth) { return "null"; }
+    // php stops at $depth and fails the WHOLE call; the caller turns a set slot
+    // into `false`. Emitting "null" here and carrying on was this epic's own
+    // divergence, introduced when the parameter was added.
+    if ($depth >= $maxDepth) { \__mc_json_err(1); return "null"; }
     $pretty = ($flags & 128) !== 0;                 // JSON_PRETTY_PRINT
     $nl = $pretty ? "\n" : "";
     $pad = $pretty ? __mc_json_indent($depth + 1) : "";
@@ -484,6 +566,9 @@ function __mc_json_numeric(string $s, int $flags): string {
  *  uses serialize_precision=-1, while a string cast uses precision=14 and would
  *  answer `9.2233720368548E+18` where json says `9.223372036854776e+18`. */
 function __mc_json_float(float $f, int $flags): string {
+    // php refuses INF and NAN outright. __mc_dtoa answers "0" for both, which is
+    // what json_encode used to emit — a wrong number instead of a failure.
+    if (\is_nan($f) || \is_infinite($f)) { \__mc_json_err(7); return "0"; }
     $s = __mc_dtoa($f);
     if (($flags & 1024) === 0) { return $s; }
     if (\strpos($s, ".") !== false || \strpos($s, "e") !== false
