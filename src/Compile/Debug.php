@@ -26,6 +26,9 @@ namespace Compile;
  *   MANTICORE_DEBUG_VERIFY=1            — slow-path invariant checks at memory ops
  *                                         (abort on failure); bisects rc-balance bugs.
  *   MANTICORE_REFLECT_REPORT=1          — report which classes reflection kept alive.
+ *   MANTICORE_FRAME_POINTERS=1          — give every emitted function a frame
+ *                                         record, so a profiler can name the
+ *                                         CALLER and not just the leaf.
  *
  * The two array flags are ON by default; every other switch is off.
  * `MANTICORE_TYPECHECK=1` gates the TypeCheck pass and is read in the driver,
@@ -138,6 +141,16 @@ final class Debug
      */
     public static bool $stats = false;
 
+    /**
+     * Splice `"frame-pointer"="all"` into every emitted function, so a host
+     * profiler can unwind out of a leaf and name its PHP caller. Costs a
+     * prologue in the profiled binary — it is a MEASUREMENT build, never the
+     * shipped one. `MANTICORE_FRAME_POINTERS=1`; see `with_frame_pointers()` in
+     * `src/Manticore/Main.php` for why the driver flag cannot do this and the
+     * attribute has to be spliced into the IR text.
+     */
+    public static bool $framePointers = false;
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {
@@ -161,6 +174,10 @@ final class Debug
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
+        }
+        $env = \getenv('MANTICORE_FRAME_POINTERS');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$framePointers = true;
         }
         $env = \getenv('MANTICORE_STATS');
         if ($env !== false && $env !== '0' && $env !== '') {
