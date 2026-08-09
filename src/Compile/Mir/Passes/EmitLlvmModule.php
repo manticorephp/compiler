@@ -203,6 +203,38 @@ trait EmitLlvmModule
                 $fnNamesCount = $fnNamesCount + 1;
             }
         }
+        // The (class, method) table, same interning deadline. Two PARALLEL rows
+        // rather than one "Class::method" row: the caller holds the two names
+        // separately and joining them at runtime would mean allocating a string
+        // per call just to compare it.
+        $mxClsRows = '';
+        $mxMthRows = '';
+        $mxCount = 0;
+        if ($this->rt->needsMethodExists) {
+            foreach ($this->classes as $cd) {
+                $disp = $this->displayClassName($cd->name);
+                foreach ($this->reflAllMethods($cd->name) as $m) {
+                    if ($mxCount > 0) { $mxClsRows .= ', '; $mxMthRows .= ', '; }
+                    $mxClsRows .= 'ptr ' . $this->litStr($disp);
+                    $mxMthRows .= 'ptr ' . $this->litStr($m);
+                    $mxCount = $mxCount + 1;
+                }
+            }
+        }
+        $pxClsRows = '';
+        $pxPrpRows = '';
+        $pxCount = 0;
+        if ($this->rt->needsPropExists) {
+            foreach ($this->classes as $cd) {
+                $disp = $this->displayClassName($cd->name);
+                foreach ($this->reflAllProps($cd->name) as $p) {
+                    if ($pxCount > 0) { $pxClsRows .= ', '; $pxPrpRows .= ', '; }
+                    $pxClsRows .= 'ptr ' . $this->litStr($disp);
+                    $pxPrpRows .= 'ptr ' . $this->litStr($p);
+                    $pxCount = $pxCount + 1;
+                }
+            }
+        }
         // Emit each interned string constant as a headered @.str.N
         // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
         // literal share one layout so retain/release work on either.
@@ -307,6 +339,17 @@ trait EmitLlvmModule
             $out .= "miss:\n";
             $out .= "  ret i64 0\n}\n";
             $this->rt->needsStrcmp = true;
+        }
+        if ($this->rt->needsMethodExists) {
+            // php resolves a METHOD name case-insensitively.
+            $out .= $this->memberExistsTable('mx', '__mir_method_exists',
+                $mxClsRows, $mxMthRows, $mxCount, 'strcasecmp');
+        }
+        if ($this->rt->needsPropExists) {
+            // …and a PROPERTY name case-SENSITIVELY. Same table, different
+            // comparison — the one thing the two questions do not share.
+            $out .= $this->memberExistsTable('px', '__mir_property_exists',
+                $pxClsRows, $pxPrpRows, $pxCount, 'strcmp');
         }
         if ($this->rt->needsFibers) {
             $out .= $this->fiberRuntime();
@@ -1012,6 +1055,66 @@ trait EmitLlvmModule
      *
      * @param array<string, bool> $paramNames
      */
+    /**
+     * The closed-world (class, member) table plus the scan over it — what
+     * answers `method_exists($o, $m)` / `property_exists($o, $p)` once either
+     * name is a RUNTIME value. Two parallel `ptr` rows and a linear walk, the
+     * same trade {@see $fnNamesRows} makes: the set is closed but large, so one
+     * scan beats thousands of emitted blocks, and neither question is hot.
+     *
+     * An EMPTY table still defines the symbol — a module that asks the question
+     * while declaring no classes has to link, and its answer is simply "no".
+     *
+     * `$cmp` is the member comparison: php matches a METHOD name
+     * case-insensitively and a PROPERTY name exactly.
+     */
+    private function memberExistsTable(string $prefix, string $fn, string $clsRows,
+                                       string $memRows, int $n, string $cmp): string
+    {
+        $len = $n > 0 ? $n : 1;
+        $cls = '@__mir_' . $prefix . '_cls';
+        $mem = '@__mir_' . $prefix . '_mem';
+        $out = $cls . ' = internal constant [' . (string)$len . ' x ptr] ['
+             . ($n > 0 ? $clsRows : 'ptr null') . "]\n";
+        $out .= $mem . ' = internal constant [' . (string)$len . ' x ptr] ['
+             . ($n > 0 ? $memRows : 'ptr null') . "]\n";
+        $out .= 'define i64 @' . $fn . "(ptr %cls, ptr %m) {\n";
+        $out .= "entry:\n";
+        $out .= "  %cnull = icmp eq ptr %cls, null\n";
+        $out .= "  %mnull = icmp eq ptr %m, null\n";
+        $out .= "  %anynull = or i1 %cnull, %mnull\n";
+        $out .= "  br i1 %anynull, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
+        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  br i1 %done, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= '  %cp = getelementptr inbounds [' . (string)$len
+              . ' x ptr], ptr ' . $cls . ", i64 0, i64 %i\n";
+        $out .= "  %ccand = load ptr, ptr %cp\n";
+        // The CLASS name is case-insensitive in php whichever member is asked about.
+        $out .= "  %cc = call i32 @strcasecmp(ptr %cls, ptr %ccand)\n";
+        $out .= "  %ceq = icmp eq i32 %cc, 0\n";
+        $out .= "  br i1 %ceq, label %mtest, label %next\n";
+        $out .= "mtest:\n";
+        $out .= '  %mp = getelementptr inbounds [' . (string)$len
+              . ' x ptr], ptr ' . $mem . ", i64 0, i64 %i\n";
+        $out .= "  %mcand = load ptr, ptr %mp\n";
+        $out .= '  %mc = call i32 @' . $cmp . "(ptr %m, ptr %mcand)\n";
+        $out .= "  %meq = icmp eq i32 %mc, 0\n";
+        $out .= "  br i1 %meq, label %hit, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "hit:\n";
+        $out .= "  ret i64 1\n";
+        $out .= "miss:\n";
+        $out .= "  ret i64 0\n}\n";
+        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
+        $this->rt->needsStrcmp = true;
+        return $out;
+    }
+
     private function emitRefCellBoxes(Node $body, array $paramNames): string
     {
         $this->locals->refCellTargets = [];

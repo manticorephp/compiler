@@ -124,6 +124,17 @@ public bool $needsClosureRc = false;
      */
     public bool $needsFnExists = false;
 
+    /**
+     * The program asks `method_exists($o, $m)` where the class or the method is
+     * a RUNTIME value — emit the closed-world (class, method) table and the
+     * scan over it. The literal form still folds; the two are decided by the
+     * same enumeration, so they agree.
+     */
+    public bool $needsMethodExists = false;
+
+    /** As {@see $needsMethodExists}, for `property_exists`. */
+    public bool $needsPropExists = false;
+
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union
     // once here keeps the subtle "why" with the flags instead of re-deriving

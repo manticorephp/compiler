@@ -4009,6 +4009,8 @@ final class LowerFromAst implements Pass
 
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
+        $expanded = $this->expandBuiltinSpread($fnName, $astArgs);
+        if ($expanded !== null) { $astArgs = $expanded; }
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
@@ -4045,6 +4047,63 @@ final class LowerFromAst implements Pass
             return $out;
         }
         return $this->defaultFillArgs($params, $astArgs);
+    }
+
+    /**
+     * `builtin(...$pack)` for a builtin whose arity php FIXES — expand the pack
+     * positionally (`$pack[0], $pack[1]`) and let the ordinary path lower it.
+     *
+     * The other half of {@see rejectSpreadIntoBuiltin}. Refusing is right when
+     * nothing can be said about how many arguments the pack stands for; it is
+     * needless when php's own signature says "exactly two", because then the
+     * expansion is the same rewrite `emitSpreadFill` performs against a declared
+     * parameter list. `method_exists(...$controller)` — the tier-4 blocker after
+     * array_unshift (symfony/http-kernel ControllerEvent.php:79 and :98, twig's
+     * ReflectionCallable.php:71) — is exactly that: a `[$obj, 'method']`
+     * callable array unpacked into a two-parameter predicate.
+     *
+     * ⚠ Order of operations, paid for once: this expansion was written FIRST,
+     * and on its own it made the call compile and then answer `false`, because
+     * the emitter behind it was a literal-only fold. A silent wrong answer is
+     * worse than the refusal it replaces. A name belongs in
+     * {@see fixedBuiltinArity} only once its `bi*` emitter can answer with
+     * RUNTIME arguments.
+     *
+     * The pack expression is REPEATED once per position, so only a plain local
+     * or a property read is expanded — a call would be evaluated twice. A pack
+     * that is too short is php's own ArgumentCountError; here it reads a missing
+     * element, the one place this is weaker than the engine.
+     *
+     * @param \Parser\Ast\Expr[] $astArgs
+     * @return \Parser\Ast\Expr[]|null  rewritten arguments, or null to leave alone
+     */
+    private function expandBuiltinSpread(string $fnName, array $astArgs): ?array
+    {
+        if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
+        if (!$this->isCodegenBuiltin($fnName)) { return null; }
+        $arity = $this->fixedBuiltinArity($this->constBareName(\strtolower($fnName)));
+        if ($arity === 0) { return null; }
+        $pack = $astArgs[0]->value;
+        if ($pack->kind !== 'Variable' && $pack->kind !== 'PropertyAccess') { return null; }
+        $span = $astArgs[0]->span;
+        $out = [];
+        $i = 0;
+        while ($i < $arity) {
+            $out[] = new \Parser\Ast\ArrayAccess($pack, new \Parser\Ast\IntLiteral($i, $span), $span);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /** The arity php FIXES for a codegen builtin, or 0 for "not fixed / not
+     *  known here". A name qualifies only when php's signature has no optional
+     *  and no variadic parameter AND the emitter answers with runtime
+     *  arguments ({@see biMethodExistsDynamic}) — otherwise the expansion just
+     *  buys a silent `false`. */
+    private function fixedBuiltinArity(string $bare): int
+    {
+        if ($bare === 'method_exists' || $bare === 'property_exists') { return 2; }
+        return 0;
     }
 
     /**

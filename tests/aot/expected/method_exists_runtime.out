@@ -1,0 +1,23 @@
+obj + var method   : y
+obj + var absent   : n
+obj + case-insens  : y
+var class + lit    : y
+var class + var    : y
+sub inherited      : y
+sub own            : y
+protected counts   : y
+absent class       : n
+lit + lit          : y
+prop var           : y
+prop absent        : n
+prop static        : y
+prop private       : y
+prop inherited     : y
+prop case-SENS     : n
+prop var class     : y
+prop lit           : y
+spread obj+method  : y
+spread absent      : n
+spread class name  : y
+spread property    : y
+spread prop_exists : y

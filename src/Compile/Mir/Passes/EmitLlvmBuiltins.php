@@ -5770,21 +5770,113 @@ trait EmitLlvmBuiltins
     /** method_exists($obj|'C', 'm') — walk the parent chain for the method. */
     private function biMethodExists(array $args): string
     {
-        $out = $this->reflEvalArgs($args);
+        if (\count($args) < 2) { return $this->biMethodExistsDynamic($args); }
         $cls = $this->reflClassName($args[0]);
         $m = $this->reflLitStr($args[1]);
-        return $this->biConstBool($out, $cls !== '' && $m !== ''
-            && $this->resolveMethodClass($cls, $m) !== '');
+        if ($cls !== '' && $m !== '') {
+            $out = $this->reflEvalArgs($args);
+            return $this->biConstBool($out, $this->resolveMethodClass($cls, $m) !== '');
+        }
+        return $this->biMethodExistsDynamic($args);
+    }
+
+    /**
+     * `method_exists($o, $m)` where the class or the method name is only known
+     * at RUNTIME — a scan of the closed-world (class, method) table
+     * ({@see EmitLlvmModule}). Exactly what `function_exists($var)` does, and
+     * fixed for the same reason: the fold answered FALSE for every non-literal
+     * argument, silently, and a dispatcher asking `method_exists($obj, $method)`
+     * is the normal way to ask. The literal form still folds; both are decided
+     * by the same enumeration ({@see reflAllMethods}), so they agree.
+     *
+     * The class name comes from {@see biGetClass} for an object receiver, which
+     * already knows how to read a class id out of an obj / cell / unknown slot
+     * and hand back the display name — the same name the table is built from.
+     * A STRING receiver IS the class name.
+     * @param Node[] $args
+     */
+    private function biMethodExistsDynamic(array $args): string
+    {
+        // php's own answer to a one-argument call is an ArgumentCountError, but
+        // a COMPILER CRASH is the worst possible answer to any program: reading
+        // `$args[1]` here is an undefined index under Zend and a null node —
+        // SIGSEGV inside emitNode — self-hosted. The old fold had the same hole
+        // through reflLitStr.
+        if (\count($args) < 2) {
+            return $this->biConstBool($this->reflEvalArgs($args), false);
+        }
+        $this->rt->needsMethodExists = true;
+        if ($this->subjectIsString($args[0])) {
+            $out = $this->emitPtrArg($args[0]);
+            $clsP = $this->lastValue;
+        } else {
+            $out = $this->biGetClass([$args[0]]);
+            $clsP = $this->lastValue;
+        }
+        $out .= $this->emitPtrArg($args[1]);
+        $mP = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_method_exists(ptr ' . $clsP
+              . ', ptr ' . $mP . ")\n";
+        $out .= $this->freeStrTemp($args[1], $mP);
+        return $this->finishI64($out, $r);
     }
 
     /** property_exists($obj|'C', 'p') — walk the parent chain for the prop. */
     private function biPropertyExists(array $args): string
     {
-        $out = $this->reflEvalArgs($args);
+        if (\count($args) < 2) {
+            return $this->biConstBool($this->reflEvalArgs($args), false);
+        }
         $cls = $this->reflClassName($args[0]);
         $p = $this->reflLitStr($args[1]);
-        return $this->biConstBool($out, $cls !== '' && $p !== ''
-            && $this->reflPropertyDecl($cls, $p) !== '');
+        if ($cls !== '' && $p !== '') {
+            $out = $this->reflEvalArgs($args);
+            return $this->biConstBool($out, $this->reflPropertyDecl($cls, $p) !== '');
+        }
+        // A runtime class or property name — the same table scan
+        // {@see biMethodExistsDynamic} uses, over the property rows, and the
+        // same short-argument guard.
+        if (\count($args) < 2) {
+            return $this->biConstBool($this->reflEvalArgs($args), false);
+        }
+        $this->rt->needsPropExists = true;
+        if ($this->subjectIsString($args[0])) {
+            $out = $this->emitPtrArg($args[0]);
+            $clsP = $this->lastValue;
+        } else {
+            $out = $this->biGetClass([$args[0]]);
+            $clsP = $this->lastValue;
+        }
+        $out .= $this->emitPtrArg($args[1]);
+        $pP = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_property_exists(ptr ' . $clsP
+              . ', ptr ' . $pP . ")\n";
+        $out .= $this->freeStrTemp($args[1], $pP);
+        return $this->finishI64($out, $r);
+    }
+
+    /** Every property name visible on $cls — own plus inherited plus static,
+     *  which is what php's property_exists() answers over.
+     *  @return string[] */
+    private function reflAllProps(string $cls): array
+    {
+        $names = [];
+        $seen = [];
+        $c = $cls;
+        while ($c !== '') {
+            $cd = $this->classes[$c] ?? null;
+            if ($cd === null) { break; }
+            foreach ($cd->propertyNames as $p) {
+                if (!isset($seen[$p])) { $seen[$p] = true; $names[] = $p; }
+            }
+            foreach ($cd->staticPropNames as $p) {
+                if (!isset($seen[$p])) { $seen[$p] = true; $names[] = $p; }
+            }
+            $c = $cd->parent;
+        }
+        return $names;
     }
 
     /** The ancestor class that declares property $p, or '' if none. */
