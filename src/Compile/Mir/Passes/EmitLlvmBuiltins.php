@@ -5991,7 +5991,20 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($obj);
         $out .= ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN)
             ? $this->cellToPtr() : $this->coerceToPtr();
-        $objPtr = $this->lastValue;
+        return $out . $this->emitObjectVarsOfPtr($this->lastValue);
+    }
+
+    /**
+     * {@see emitObjectVarsByClassId} over an object pointer already in hand —
+     * the `(array)` cast's runtime-kind dispatch is inside a branch and cannot
+     * re-emit its operand. lastValue ← an OWNED assoc ptr on every arm (the
+     * declared arm mints one, the bag arm co-owns), so the caller must not
+     * retain it again.
+     */
+    private function emitObjectVarsOfPtr(string $objPtr): string
+    {
+        $this->rt->needsTagged = true;
+        $out = '';
 
         /** @var array<string,mixed> */
         $holders = [];
@@ -6014,8 +6027,27 @@ trait EmitLlvmBuiltins
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname);
+            $props = $this->lastValue;
+            // A class can have BOTH — `#[AllowDynamicProperties] class Q { public
+            // int $a; }` with `$q->extra = 9`. Declared first, bag second, php's
+            // order; the same union the statically-typed arm of the cast does.
+            // Without it this arm answered the declared half alone and silently
+            // dropped every dynamic property off an erased receiver.
+            if ($cd->usesBag()) {
+                $bg = $this->ssa->allocReg();
+                $bodies .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                         . ', i64 ' . (string)$cd->bagOffset() . "\n";
+                $bagI = $this->ssa->allocReg();
+                $bodies .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+                $bagP = $this->ssa->allocReg();
+                $bodies .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+                $un = $this->ssa->allocReg();
+                $bodies .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
+                         . ', ptr ' . $bagP . ")\n";
+                $props = $un;
+            }
             $pi = $this->ssa->allocReg();
-            $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $props . " to i64\n";
             $bodies .= '  store i64 ' . $pi . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
