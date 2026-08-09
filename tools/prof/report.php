@@ -4,6 +4,7 @@
  * names, aggregated by function.
  *
  *   php tools/prof/report.php sample <sample.txt> [top]
+ *   php tools/prof/report.php heap <heap.txt> [top]
  *   php tools/prof/report.php malloc <malloc_history.txt> [top]
  *   php tools/prof/report.php heaptrack <heaptrack_print.txt> [top]
  *   php tools/prof/report.php phase <stats.txt> <elapsed-ms>    # which pass ran then
@@ -75,6 +76,15 @@ function prof_unmangle_ns(string $s): string
     return $out;
 }
 
+/** `0x104e44874 (fixture) __mir_pool_alloc` -> `__mir_pool_alloc`. */
+function prof_frame_symbol(string $frame): string
+{
+    $f = trim($frame);
+    $p = strpos($f, ') ');
+    if ($p !== false && str_starts_with($f, '0x')) { return trim(substr($f, $p + 2)); }
+    return $f;
+}
+
 /** Frames that are plumbing, never an answer: the allocator wrappers and libc. */
 function prof_is_noise(string $sym): bool
 {
@@ -117,10 +127,12 @@ function prof_parse_sample(string $text): array
 }
 
 /**
- * `malloc_history <pid> -allBySize` prints one stanza per distinct call stack,
- * headed by a count/size line and followed by the stack, innermost first:
+ * `malloc_history <pid> -allBySize` prints one line per distinct call stack:
  *
- *     4211 calls for 2695040 bytes: thread_... | start | main | ... | malloc
+ *     9 calls for 1073807360 bytes: 0x104e44874 (fixture) __mir_pool_alloc | 0x188ede9fc (libsystem_kernel.dylib) mmap
+ *
+ * Each frame is `0xADDR (image) symbol`, and the stack runs CALLER → CALLEE,
+ * the opposite of `prof_charge_frame`'s contract, so it is reversed here.
  *
  * The stack is charged to its DEEPEST non-plumbing `manticore_*` frame — the
  * allocator wrappers are shared by every site and would collapse the whole
@@ -138,8 +150,11 @@ function prof_parse_malloc(string $text): array
         if (!preg_match('/^\s*(\d+)\s+calls?\s+for\s+(\d+)\s+bytes:\s*(.*)$/', $ln, $m)) { continue; }
         $n = (int)$m[1];
         $b = (int)$m[2];
-        $frames = array_map('trim', explode('|', $m[3]));
-        $site = prof_charge_frame($frames);
+        $frames = [];
+        foreach (explode('|', $m[3]) as $f) {
+            $frames[] = prof_frame_symbol($f);
+        }
+        $site = prof_charge_frame(array_reverse($frames));
         $bytes[$site] = ($bytes[$site] ?? 0) + $b;
         $calls[$site] = ($calls[$site] ?? 0) + $n;
     }
@@ -211,11 +226,18 @@ function prof_charge_frame(array $frames): string
         }
         return '(unknown)';
     }
+    // 1. a PHP function — the answer whenever the unwind reached one.
     foreach ($frames as $f) {
-        if ($f === '') { continue; }
-        if (prof_is_noise($f)) { continue; }
+        if ($f === '' || prof_is_noise($f)) { continue; }
         if (!str_starts_with(ltrim($f, '_'), 'manticore_')) { continue; }
         return prof_demangle($f);
+    }
+    // 2. no PHP frame in the stack (the unwinder stopped inside the runtime):
+    //    name the runtime path rather than libc, so the row still says something.
+    foreach ($frames as $f) {
+        if ($f === '') { continue; }
+        $s = ltrim($f, '_');
+        if (str_starts_with($s, 'mir_') || str_starts_with($s, 'manticore_')) { return $f; }
     }
     foreach ($frames as $f) {
         if ($f !== '') { return prof_demangle($f); }
@@ -337,6 +359,51 @@ if ($mode === 'sample') {
         $folded[prof_demangle($sym)] = ($folded[prof_demangle($sym)] ?? 0) + $n;
     }
     prof_render($folded, [], 'samples', '', $top, 'count');
+    exit(0);
+}
+
+/**
+ * `heap <pid>` ALREADY attributes the live set — it derives a type name for each
+ * non-object block from the allocation backtrace and prints one row per site:
+ *
+ *    COUNT      BYTES       AVG   CLASS_NAME                              TYPE  BINARY
+ *  1036066   66308224      64.0   malloc in manticore_Lexer_Lexer__emit   C     manticore.nopool
+ *
+ * This is the cheap path and the default: seconds, against minutes for a
+ * malloc_history dump of the same process. It reports the ALLOCATING FUNCTION
+ * only — no caller — so `malloc` mode stays for when the caller is the question.
+ *
+ * @return array{bytes: array<string,int>, calls: array<string,int>}
+ */
+function prof_parse_heap(string $text): array
+{
+    /** @var array<string,int> $bytes */
+    $bytes = [];
+    /** @var array<string,int> $calls */
+    $calls = [];
+    foreach (explode("\n", $text) as $ln) {
+        if (!preg_match('/^\s*(\d+)\s+(\d+)\s+[\d.]+\s+(.+?)\s{2,}\S+\s+\S+\s*$/', $ln, $m)) { continue; }
+        $what = trim($m[3]);
+        // "malloc in <symbol>" / "realloc in <symbol>"; an ObjC class name has
+        // no " in " and is kept verbatim (the runtime allocates a handful).
+        $p = strpos($what, ' in ');
+        $sym = $p === false ? $what : substr($what, $p + 4);
+        $sym = prof_demangle(trim($sym));
+        $calls[$sym] = ($calls[$sym] ?? 0) + (int)$m[1];
+        $bytes[$sym] = ($bytes[$sym] ?? 0) + (int)$m[2];
+    }
+    return ['bytes' => $bytes, 'calls' => $calls];
+}
+
+if ($mode === 'heap') {
+    if (preg_match('/^All zones:.*\((\d+) bytes\)/m', $text, $m)) {
+        echo 'heap: ' . number_format((int)$m[1] / 1048576, 1) . " MB live in malloced nodes\n";
+    }
+    if (preg_match('/^Physical footprint:\s+(\S+)/m', $text, $m)) {
+        echo 'heap: physical footprint ' . $m[1] . "\n\n";
+    }
+    $r = prof_parse_heap($text);
+    prof_render($r['bytes'], $r['calls'], 'live', 'blocks', $top, 'bytes');
     exit(0);
 }
 

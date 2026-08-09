@@ -9,7 +9,7 @@ host profiler needs to be useful.
 |---|---|---|
 | `scale.sh` | does peak RSS track input size? | `/usr/bin/time` |
 | `cpu.sh` | which PHP function burns the wall clock? | macOS `sample` |
-| `live.sh` | which PHP function holds the peak live set? | macOS `MallocStackLogging` + `malloc_history` + `heap` |
+| `live.sh` | which PHP function holds the peak live set? | macOS `MallocStackLogging` + `heap` |
 | `../docker/prof/run.sh` | the same, on Linux | `heaptrack` in the gate toolchain image |
 | `report.php` | folds any of the above into PHP names | — |
 
@@ -22,6 +22,7 @@ attribute to.
 ```
 php tools/prof/report.php sample    <sample.txt>  [top]
 php tools/prof/report.php callers   <sample.txt>  <symbol> [top]
+php tools/prof/report.php heap      <heap.txt>    [top]
 php tools/prof/report.php malloc    <snap.txt>    [top]
 php tools/prof/report.php heaptrack <peak.txt>    [top]
 php tools/prof/report.php phase     <stats.txt>   <elapsed-ms>
@@ -47,9 +48,15 @@ rows are a biased sample: read them for direction, never as a share.
 `fixture.php` is a program whose live set has a known owner and size:
 
 ```bash
-./bin/manticore.nopool compile tools/prof/fixture.php -o /tmp/fixture
-OUTDIR=/tmp/fx BIN=/tmp/fixture bash tools/prof/live.sh -- 400000
+MANTICORE_POOL=0 ./bin/manticore.nopool compile tools/prof/fixture.php -o /tmp/fixture
+MINMB=8 SNAPS=1 OUTDIR=/tmp/fx BIN=/tmp/fixture bash tools/prof/live.sh -- 1000000
 ```
+
+⚠ `MANTICORE_POOL=0` on that **compile** line is not redundant. The flag is read
+from the environment of whichever compiler process is running and is baked into
+the IR it emits — a pool-free compiler still emits a POOLED program unless the
+variable is set again for that compile. Without it the fixture reports one 1 GiB
+`__mir_pool_alloc` block and nothing else, which is how this was found.
 
 The report must rank `fixtureAllocs` first with ~N blocks. If it names
 `__mir_alloc_tagged` or `__main` instead, the harness is broken (or clang
@@ -62,7 +69,10 @@ inlined the fixture — which is why the fixture has two call sites).
   see inside it. `MANTICORE_POOL=0` is a **compile-time** flag baked into the
   emitted IR, so it must hold for the whole build — hence a worktree of its own,
   never the main checkout.
-- `SNAPS=` caps `malloc_history` snapshots (each takes minutes on a multi-GB
-  process). `RISE=` sets how much RSS must climb before another one is taken.
+- `heap` is the cheap path and the default (seconds per snapshot, `EVERY=10s`,
+  `MINMB=128`); it names the ALLOCATING function. `malloc_history <pid>
+  -allBySize` names the CALLER instead and costs minutes per dump on a multi-GB
+  process — run it by hand when that is the question, and feed it to
+  `report.php malloc`.
 - `cpu.sh` runs the **default** build. A no-pool binary's timings are not this
   compiler's timings.
