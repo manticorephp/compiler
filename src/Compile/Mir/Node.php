@@ -100,6 +100,21 @@ abstract class Node
      */
     abstract public function accept(EmitVisitor $v): string;
 
+    /**
+     * Value/control sub-nodes of this node — the same contract {@see Walk}
+     * documents, answered by the node itself instead of by a chain of `kind`
+     * string comparisons. Profiling charged ~25% of the compiler's own CPU to
+     * `__mir_str_eq`, 90% of the attributable part to that chain.
+     *
+     * ABSTRACT on purpose. A defaulted `return []` would let a new subclass
+     * silently drop its whole subtree out of every generic traversal, which is
+     * the costliest bug shape in this compiler; a missing override has to be a
+     * compile error instead.
+     *
+     * @return Node[]
+     */
+    abstract public function children(): array;
+
     public function __construct(
         public readonly string $kind,
         public Type $type,

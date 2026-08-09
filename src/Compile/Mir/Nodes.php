@@ -27,6 +27,12 @@ final class IntConst extends Node
     {
         return $v->visitIntConst($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 final class FloatConst extends Node
@@ -39,6 +45,12 @@ final class FloatConst extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitFloatConst($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }
 
@@ -53,6 +65,12 @@ final class StringConst extends Node
     {
         return $v->visitStringConst($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 final class BoolConst extends Node
@@ -66,6 +84,12 @@ final class BoolConst extends Node
     {
         return $v->visitBoolConst($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 final class NullConst extends Node
@@ -78,6 +102,12 @@ final class NullConst extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNullConst($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }
 
@@ -93,6 +123,12 @@ final class LoadLocal extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitLoadLocal($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }
 
@@ -114,6 +150,12 @@ final class StoreLocal extends Node
     {
         return $v->visitStoreLocal($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->value];
+    }
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────
@@ -132,6 +174,12 @@ final class Add extends Node
     {
         return $v->visitAdd($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 final class Sub extends Node
@@ -147,6 +195,12 @@ final class Sub extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitSub($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
     }
 }
 
@@ -164,6 +218,12 @@ final class Mul extends Node
     {
         return $v->visitMul($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 final class Div extends Node
@@ -180,6 +240,12 @@ final class Div extends Node
     {
         return $v->visitDiv($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 final class Mod extends Node
@@ -195,6 +261,12 @@ final class Mod extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitMod($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
     }
 }
 
@@ -213,6 +285,12 @@ final class Neg extends Node
     {
         return $v->visitNeg($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
+    }
 }
 
 final class Not_ extends Node
@@ -225,6 +303,12 @@ final class Not_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNot($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
     }
 }
 
@@ -244,6 +328,12 @@ final class BitOp extends Node
     {
         return $v->visitBitOp($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 /** `~$x` — integer bitwise complement. */
@@ -257,6 +347,12 @@ final class BitNot_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitBitNot($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
     }
 }
 
@@ -278,6 +374,12 @@ final class Concat extends Node
     {
         return $v->visitConcat($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 // ── Statements ────────────────────────────────────────────────────
@@ -294,6 +396,12 @@ final class Echo_ extends Node
     {
         return $v->visitEcho($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->exprs;
+    }
 }
 
 final class Return_ extends Node
@@ -306,6 +414,12 @@ final class Return_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitReturn($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->value === null ? [] : [$this->value];
     }
 }
 
@@ -340,6 +454,12 @@ final class Call extends Node
     {
         return $v->visitCall($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->args;
+    }
 }
 
 final class Block extends Node
@@ -353,6 +473,12 @@ final class Block extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitBlock($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->stmts;
     }
 }
 
@@ -383,6 +509,12 @@ final class MemoryOp_ extends Node
     {
         return $v->visitMemoryOp($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->target === null ? [] : [$this->target];
+    }
 }
 
 // ── Comparison ────────────────────────────────────────────────────
@@ -404,6 +536,12 @@ final class Cmp extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCmp($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
     }
 }
 
@@ -427,6 +565,12 @@ final class Spaceship extends Node
     {
         return $v->visitSpaceship($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 
@@ -446,6 +590,14 @@ final class If_ extends Node
     {
         return $v->visitIf($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->cond, $this->then];
+        if ($this->else !== null) { $out[] = $this->else; }
+        return $out;
+    }
 }
 
 final class While_ extends Node
@@ -460,6 +612,12 @@ final class While_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitWhile($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->cond, $this->body];
     }
 }
 
@@ -478,6 +636,12 @@ final class IncDec extends Node
     {
         return $v->visitIncDec($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 final class StaticProp_ extends Node
@@ -490,6 +654,12 @@ final class StaticProp_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStaticProp($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }
 
@@ -512,6 +682,12 @@ final class StoreStaticProp_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreStaticProp($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->value];
     }
 }
 
@@ -537,6 +713,12 @@ final class StaticLocalDecl_ extends Node
     {
         return $v->visitStaticLocalDecl($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->init === null ? [] : [$this->init];
+    }
 }
 
 /** `throw $value` — store + longjmp to the topmost active jmp_buf. */
@@ -550,6 +732,12 @@ final class Throw_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitThrow($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->value];
     }
 }
 
@@ -573,6 +761,15 @@ final class Yield_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitYield($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [];
+        if ($this->key !== null) { $out[] = $this->key; }
+        if ($this->value !== null) { $out[] = $this->value; }
+        return $out;
     }
 }
 
@@ -629,6 +826,18 @@ final class TryCatch_ extends Node
     {
         return $v->visitTryCatch($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [];
+        foreach ($this->tryBody as $s) { $out[] = $s; }
+        foreach ($this->catches as $c) {
+            foreach ($c->body as $s) { $out[] = $s; }
+        }
+        foreach ($this->finallyBody as $s) { $out[] = $s; }
+        return $out;
+    }
 }
 
 /** `$y = &$x` — bind local `target` as an alias of local `source`. */
@@ -643,6 +852,12 @@ final class RefAlias_ extends Node
     {
         return $v->visitRefAlias($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 /** `$r = &fn(...)` — bind `$r` as a reference to a by-ref return. */
@@ -656,6 +871,12 @@ final class RefBind_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitRefBind($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->call];
     }
 }
 
@@ -673,6 +894,12 @@ final class RefAddr_ extends Node
     {
         return $v->visitRefAddr($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->lvalue];
+    }
 }
 
 /** `goto L;` — an unconditional branch to the block emitted for label `L`. */
@@ -686,6 +913,12 @@ final class Goto_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitGoto($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }
 
@@ -701,6 +934,12 @@ final class Label_ extends Node
     {
         return $v->visitLabel($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 /** `$obj::class` — the runtime class name of `operand` as a string. */
@@ -714,6 +953,12 @@ final class ClassName_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitClassName($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
     }
 }
 
@@ -730,6 +975,12 @@ final class Isset_ extends Node
     {
         return $v->visitIsset($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->targets;
+    }
 }
 
 /** `unset($a, $b, ...)` — clear each target. */
@@ -744,6 +995,12 @@ final class Unset_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitUnset($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->targets;
     }
 }
 
@@ -770,6 +1027,12 @@ final class Closure_ extends Node
     {
         return $v->visitClosure($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->captures;
+    }
 }
 
 final class Invoke_ extends Node
@@ -787,6 +1050,14 @@ final class Invoke_ extends Node
     {
         return $v->visitInvoke($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->callee];
+        foreach ($this->args as $a) { $out[] = $a; }
+        return $out;
+    }
 }
 
 final class NullCoalesce_ extends Node
@@ -803,6 +1074,12 @@ final class NullCoalesce_ extends Node
     {
         return $v->visitNullCoalesce($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->left, $this->right];
+    }
 }
 
 final class Instanceof_ extends Node
@@ -817,6 +1094,12 @@ final class Instanceof_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitInstanceof($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
     }
 }
 
@@ -833,6 +1116,12 @@ final class Cast extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCast($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
     }
 }
 
@@ -854,6 +1143,14 @@ final class Ternary extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitTernary($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->cond, $this->else_];
+        if ($this->then !== null) { $out[] = $this->then; }
+        return $out;
     }
 }
 
@@ -881,6 +1178,17 @@ final class Switch_ extends Node
     {
         return $v->visitSwitch($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->subject];
+        foreach ($this->arms as $arm) {
+            if ($arm->value !== null) { $out[] = $arm->value; }
+            foreach ($arm->body as $s) { $out[] = $s; }
+        }
+        return $out;
+    }
 }
 
 /** One `conds => body` arm of a {@see Match_}. conds null = default. */
@@ -907,6 +1215,23 @@ final class Match_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitMatch($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->subject];
+        /** @var MatchArm_[] $marms */
+        $marms = $this->arms;
+        foreach ($marms as $arm) {
+            /** @var Node[]|null $conds */
+            $conds = $arm->conds;
+            if ($conds !== null) {
+                foreach ($conds as $c) { $out[] = $c; }
+            }
+            $out[] = $arm->body;
+        }
+        return $out;
     }
 }
 
@@ -949,6 +1274,12 @@ final class Foreach_ extends Node
     {
         return $v->visitForeach($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->array, $this->body];
+    }
 }
 
 final class For_ extends Node
@@ -966,6 +1297,17 @@ final class For_ extends Node
     {
         return $v->visitFor($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [];
+        if ($this->init !== null) { $out[] = $this->init; }
+        if ($this->cond !== null) { $out[] = $this->cond; }
+        if ($this->step !== null) { $out[] = $this->step; }
+        $out[] = $this->body;
+        return $out;
+    }
 }
 
 final class DoWhile_ extends Node
@@ -981,6 +1323,12 @@ final class DoWhile_ extends Node
     {
         return $v->visitDoWhile($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->body, $this->cond];
+    }
 }
 
 final class Break_ extends Node
@@ -994,6 +1342,12 @@ final class Break_ extends Node
     {
         return $v->visitBreak($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
+    }
 }
 
 final class Continue_ extends Node
@@ -1006,6 +1360,12 @@ final class Continue_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitContinue($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }
 
@@ -1037,6 +1397,17 @@ final class ArrayLit extends Node
     {
         return $v->visitArrayLit($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [];
+        foreach ($this->elements as $el) {
+            if ($el->key !== null) { $out[] = $el->key; }
+            $out[] = $el->value;
+        }
+        return $out;
+    }
 }
 
 final class ArrayAccess_ extends Node
@@ -1053,6 +1424,12 @@ final class ArrayAccess_ extends Node
     {
         return $v->visitArrayAccess($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->array, $this->index];
+    }
 }
 
 final class Spread_ extends Node
@@ -1067,6 +1444,12 @@ final class Spread_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitSpread($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->operand];
     }
 }
 
@@ -1084,6 +1467,12 @@ final class StoreElement extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreElement($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->array, $this->index, $this->value];
     }
 }
 
@@ -1108,6 +1497,14 @@ final class NewDynObj extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNewDynObj($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->classExpr];
+        foreach ($this->args as $a) { $out[] = $a; }
+        return $out;
     }
 }
 
@@ -1137,6 +1534,12 @@ final class NewObj extends Node
     {
         return $v->visitNewObj($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->args;
+    }
 }
 
 final class PropertyAccess_ extends Node
@@ -1152,6 +1555,12 @@ final class PropertyAccess_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitPropertyAccess($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->object];
     }
 }
 
@@ -1185,6 +1594,14 @@ final class Clone_ extends Node
     {
         return $v->visitClone($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->object];
+        foreach ($this->withProps as $pair) { $out[] = $pair->value; }
+        return $out;
+    }
 }
 
 final class DynProp_ extends Node
@@ -1198,6 +1615,12 @@ final class DynProp_ extends Node
     {
         return $v->visitDynProp($this);
     }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->object, $this->name];
+    }
 }
 
 final class StoreDynProp_ extends Node
@@ -1210,6 +1633,12 @@ final class StoreDynProp_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreDynProp($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->object, $this->name, $this->value];
     }
 }
 
@@ -1230,6 +1659,12 @@ final class StoreProperty extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreProperty($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [$this->object, $this->value];
     }
 }
 
@@ -1255,6 +1690,14 @@ final class MethodCall_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitMethodCall($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        $out = [$this->object];
+        foreach ($this->args as $a) { $out[] = $a; }
+        return $out;
     }
 }
 
@@ -1289,5 +1732,11 @@ final class StaticCall_ extends Node
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStaticCall($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return $this->args;
     }
 }
