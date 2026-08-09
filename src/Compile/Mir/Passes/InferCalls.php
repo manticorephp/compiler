@@ -414,6 +414,18 @@ trait InferCalls
             }
             return Type::int_();
         }
+        // print_r's mode is its second argument, php's: the echo form yields
+        // `true`, the return form the rendered text. A runtime flag picks at
+        // runtime, so the value is self-describing. {@see Node::literalBool} is
+        // the SAME predicate {@see EmitLlvmBuiltins::biPrintR} emits from —
+        // typing `string` while the emitter prints would flavour the `i64 1` an
+        // owned string and release it.
+        if ($n === 'print_r') {
+            if (!isset($args[1])) { return Type::bool_(); }
+            $want = Node::literalBool($args[1]);
+            if ($want === null) { return Type::cell(); }
+            return $want ? Type::string_() : Type::bool_();
+        }
         return null;
     }
 

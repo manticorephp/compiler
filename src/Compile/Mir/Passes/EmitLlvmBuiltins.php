@@ -3639,18 +3639,75 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    /** @param Node[] $args  print_r($v [, $return]) — echo form only. DEEP-boxes
-     *  the value (a nested array's elements become tagged cells, so the recursive
-     *  __mir_print_r reads real cells, not raw pointers) then calls the prelude
-     *  backend. The `$return` arg is ignored; the echo form yields true (1). */
+    /**
+     * `print_r($v [, $return])`. DEEP-boxes the value (a nested array's elements
+     * become tagged cells, so the recursive walker reads real cells, not raw
+     * pointers), then calls the prelude backend — which BUILDS the text. What
+     * happens to that text is the mode, php's:
+     *
+     *   - `print_r($v)` / `print_r($v, false)` writes it and yields `true`
+     *   - `print_r($v, true)` yields the string and writes nothing
+     *   - a RUNTIME flag picks between the two at runtime, so the result is a
+     *     cell (a boxed string on one arm, boxed `true` on the other)
+     *
+     * The literal test is {@see Node::literalBool} — the same predicate
+     * {@see InferCalls::builtinReturnType} types the call with.
+     *
+     * @param Node[] $args
+     */
     private function biPrintR(array $args): string
     {
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $bv = $this->lastValue;
-        $out .= '  call i64 @manticore___mir_print_r(i64 ' . $bv . ', i64 0)' . "\n";
+        if (!isset($this->definedFns[$this->mangle('__mir_print_r_str')])) {
+            $this->libcExtra['manticore___mir_print_r_str']
+                = 'declare i64 @manticore___mir_print_r_str(i64, i64)';
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mir_print_r_str(i64 '
+              . $bv . ", i64 0)\n";
         $out .= $this->cellBoxTempDrop($args[0]->type, $bv);
-        $this->lastValue = '1';
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+
+        $want = Node::literalBool($args[1] ?? null);
+        if ($want === true) {
+            $this->lastValue = $p;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        if ($want === false || !isset($args[1])) {
+            $out .= $this->emitOutStr($p);
+            $this->lastValue = '1';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // Runtime flag. Both arms answer a cell so the one static type covers
+        // php's string-or-true; the write lives on the false arm only.
+        $this->rt->needsTagged = true;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+        $lRet = $this->ssa->allocLabel('pr.ret');
+        $lOut = $this->ssa->allocLabel('pr.out');
+        $lEnd = $this->ssa->allocLabel('pr.end');
+        $out .= '  br i1 ' . $fl . ', label %' . $lRet . ', label %' . $lOut . "\n";
+        $out .= $lRet . ":\n";
+        $cs = $this->ssa->allocReg();
+        $out .= '  ' . $cs . ' = call i64 @__manticore_box_ptr(ptr ' . $p . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lOut . ":\n";
+        $out .= $this->emitOutStr($p);
+        $cb = $this->ssa->allocReg();
+        $out .= '  ' . $cb . " = call i64 @__manticore_box_bool(i64 1)\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = phi i64 [' . $cs . ', %' . $lRet . '], ['
+              . $cb . ', %' . $lOut . "]\n";
+        $this->lastValue = $c;
         $this->lastValueType = 'i64';
         return $out;
     }
