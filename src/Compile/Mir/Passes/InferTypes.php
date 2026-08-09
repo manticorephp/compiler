@@ -296,7 +296,7 @@ final class InferTypes implements Pass
     /** @var array<string,bool> locals handed to a by-ref param declared as a
      *  concrete scalar — the callee writes the slot back in ITS representation,
      *  so the loop-carried cell promotion must leave these names alone
-     *  ({@see InferScans::scanRefPinnedLocals}). */
+     *  ({@see InferScans::scanRefPinnedNode}). */
     private array $refPinnedLocals = [];
 
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
@@ -521,10 +521,10 @@ final class InferTypes implements Pass
         }
         // Element-as-key erasure: `$o=[]; foreach($a as $v){ $o[$v]=1; }` with a
         // now-typed string foreach value `$v` must make `$o` an ASSOC, not a vec.
-        // scanAssocLocals runs at the START of inferFunction (before `$v` is
+        // scanLocalShapes runs at the START of inferFunction (before `$v` is
         // typed by inferForeach), so the first pass leaves `$o` a vec and a
         // string-key store appends positional ints. Once the value type is set
-        // on the index node (prior passes), re-infer: scanAssocLocals reads the
+        // on the index node (prior passes), re-infer: scanLocalShapes reads the
         // node ->type and flips `$o`'s `[]` literal to assoc. Bounded loop —
         // each flip removes the vec base, so it converges in one iteration.
         $guard = 0;
@@ -1355,7 +1355,7 @@ final class InferTypes implements Pass
 
     /** True when any fn stores into a vec-typed local base under a STRING-typed
      *  key — an assoc that erased to a vec because the key (a foreach value)
-     *  was typed only after scanAssocLocals already ran. A re-infer flips it. */
+     *  was typed only after scanLocalShapes already ran. A re-infer flips it. */
     private function hasUntypedAssocKeyStore(Module $module): bool
     {
         foreach ($module->functions as $fn) {

@@ -1864,9 +1864,45 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->scanLocalElemNode($c, $found); }
     }
 
-    private function scanFloatLocals(Node $n): void
+    /**
+     * ONE traversal for the three SHAPE facts that used to take three: which
+     * locals are assoc / record / mixed-element containers, which are `++`'d
+     * strings, and which are float slots.
+     *
+     * They fuse because they are independent — disjoint output sets, and none
+     * reads another's. What they are NOT independent of is {@see
+     * InferTypes::$localTypes}: `isStringKey` consults it, so this scan has to
+     * stay on the same side of the seeding loops in {@see
+     * InferNodes::inferFunctionOnce} that it is on today. That is also why the
+     * key-used / arith-used group ({@see scanLocalFacts}) is a SECOND walk and
+     * not part of this one: the float seeding writes `localTypes` in between,
+     * and `subscriptBaseIsString` reads it.
+     *
+     * Profiling: 43 of 43 callers of `Walk::children` were `InferTypes`, and the
+     * seven whole-body scans allocated 9.5 MB of child arrays EACH on the 1/4
+     * manifest — the same tree, once per predicate.
+     *
+     * @param array<string,bool> $incTargets IncDec-target local names
+     * @param array<string,bool> $strAssigned locals assigned a string-producing value;
+     *        the INTERSECTION with $incTargets is a string local that gets `++`'d
+     *        (see {@see inferIncDec})
+     */
+    private function scanLocalShapes(Node $n, array &$incTargets, array &$strAssigned): void
     {
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
+        $k = $n->kind;
+
+        // ── `++` on a string local ───────────────────────────────────────
+        if ($k === Node::KIND_INCDEC) {
+            if ($n->op === '+') { $incTargets[$n->name] = true; }
+        } elseif ($k === Node::KIND_STORE_LOCAL) {
+            $vk = $n->value->kind;
+            if ($vk === Node::KIND_STRING_CONST || $vk === Node::KIND_CONCAT) {
+                $strAssigned[$n->name] = true;
+            }
+        }
+
+        // ── float slots ──────────────────────────────────────────────────
+        if ($k === Node::KIND_STORE_LOCAL) {
             $sl = $n;
             // Only a SELF-REFERENTIAL float store (`$s = $s + 1.5`, i.e. a `+=`
             // compound) makes a float slot — the loop-accumulator shape. A plain
@@ -1878,33 +1914,17 @@ trait InferScans
                 $this->floatLocals[$sl->name] = true;
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanFloatLocals($c); }
-    }
 
-    /**
-     * Collect IncDec-target local names and locals assigned a string-producing
-     * value (a string literal or a concat). Their intersection is a string local
-     * that gets `++`'d — see {@see inferIncDec}.
-     * @param array<string,bool> $incTargets
-     * @param array<string,bool> $strAssigned
-     */
-    private function scanIncStrLocals(Node $n, array &$incTargets, array &$strAssigned): void
-    {
-        if ($n->kind === Node::KIND_INCDEC) {
-            if ($n->op === '+') { $incTargets[$n->name] = true; }
-        } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = $n;
-            $vk = $sl->value->kind;
-            if ($vk === Node::KIND_STRING_CONST || $vk === Node::KIND_CONCAT) {
-                $strAssigned[$sl->name] = true;
-            }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            $this->scanIncStrLocals($c, $incTargets, $strAssigned);
+        // ── container shape ──────────────────────────────────────────────
+        $this->scanAssocNode($n);
+
+        foreach (Walk::children($n) as $c) {
+            $this->scanLocalShapes($c, $incTargets, $strAssigned);
         }
     }
 
-    private function scanAssocLocals(Node $n): void
+    /** The per-node half of the container-shape scan — see {@see scanLocalShapes}. */
+    private function scanAssocNode(Node $n): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
@@ -1985,7 +2005,6 @@ trait InferScans
                 $this->recordDisqualified[$sl->name] = true;
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanAssocLocals($c); }
     }
 
     /** Mark locals used as an array index/key — a merge-cell key does not
@@ -1997,15 +2016,13 @@ trait InferScans
      *  which is how an `int $pos` that a loop body reassigns from `strpos()`
      *  missed the cell promotion — and then held a boxed word while the loop
      *  guard still compared it with a raw `icmp slt`. */
-    private function scanKeyUsedLocals(Node $n): void
+    private function scanKeyUsedNode(Node $n, string $k): void
     {
-        $k = $n->kind;
         if ($k === Node::KIND_ARRAY_ACCESS) {
             if (!$this->subscriptBaseIsString($n->array)) { $this->markKeyLocal($n->index); }
         } elseif ($k === Node::KIND_STORE_ELEMENT) {
             if (!$this->subscriptBaseIsString($n->array)) { $this->markKeyLocal($n->index); }
         }
-        foreach (Walk::children($n) as $c) { $this->scanKeyUsedLocals($c); }
     }
 
     /**
@@ -2039,28 +2056,24 @@ trait InferScans
      * decode loop then read the raw word as a tagged one, so every value after
      * the first came back NULL / float(0).
      */
-    private function scanRefPinnedLocals(Node $n): void
+    private function scanRefPinnedNode(Node $n, string $k): void
     {
-        if ($n->kind === Node::KIND_CALL) {
-            $callee = $this->fnByName[$n->function] ?? null;
-            if ($callee !== null) {
-                foreach ($n->args as $i => $a) {
-                    $p = $callee->params[$i] ?? null;
-                    if ($p === null || !$p->byRef) { continue; }
-                    if (!$this->isScalarReprKind($p->type)) { continue; }
-                    $this->markRefPinnedLocal($a);
-                }
-            }
+        if ($k !== Node::KIND_CALL) { return; }
+        $callee = $this->fnByName[$n->function] ?? null;
+        if ($callee === null) { return; }
+        foreach ($n->args as $i => $a) {
+            $p = $callee->params[$i] ?? null;
+            if ($p === null || !$p->byRef) { continue; }
+            if (!$this->isScalarReprKind($p->type)) { continue; }
+            $this->markRefPinnedLocal($a);
         }
-        foreach (Walk::children($n) as $c) { $this->scanRefPinnedLocals($c); }
     }
 
     /** Mark locals used as an ARITHMETIC operand ({@see InferTypes::$arithUsedLocals}) —
      *  the signal that a null-seeded, UNKNOWN-bodied loop accumulator is NUMERIC
      *  (must carry a tag) rather than an object handle (rides raw as ptr 0). */
-    private function scanArithUsedLocals(Node $n): void
+    private function scanArithUsedNode(Node $n, string $k): void
     {
-        $k = $n->kind;
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
             || $k === Node::KIND_DIV || $k === Node::KIND_MOD) {
             $this->markArithLocal($n->left);
@@ -2068,7 +2081,6 @@ trait InferScans
         } elseif ($k === Node::KIND_NEG) {
             $this->markArithLocal($n->operand);
         }
-        foreach (Walk::children($n) as $c) { $this->scanArithUsedLocals($c); }
     }
 
     /**
@@ -2098,12 +2110,12 @@ trait InferScans
      * and the key repr check caught it. Two generations, not one — a fix to
      * inference is only proven by the build that USES it.
      */
-    private function scanLocalBuiltArrays(Node $body): void
+    private function scanLocalFacts(Node $body): void
     {
         $seed = [];
         $bad = [];
         $read = [];
-        $this->walkLocalBuiltArrays($body, $seed, $bad, $read, false);
+        $this->walkLocalFacts($body, $seed, $bad, $read, false);
         $out = [];
         foreach ($seed as $name => $unused) {
             if (isset($bad[$name])) { continue; }
@@ -2123,13 +2135,28 @@ trait InferScans
     }
 
     /**
+     * ONE traversal for the four LATE per-local facts: built-from-`[]`,
+     * key-used, arith-used, by-ref-pinned. Four whole-body walks before, and
+     * they fuse for the same reason as {@see scanLocalShapes} — disjoint output
+     * sets, no scan reading another's, and nothing writes `localTypes` between
+     * the four call sites they used to occupy.
+     *
+     * The `$seed` / `$bad` / `$read` by-ref accumulators stay by-ref: `$bad` is
+     * handed to {@see markLocalNamesIn}, which takes `array &$out`, and passing
+     * a PROPERTY through a by-ref parameter is a different (and much less
+     * settled) representation question than passing a local. This signature is
+     * the one that already worked.
+     *
      * @param array<string,bool> $seed
      * @param array<string,bool> $bad
      * @param array<string,bool> $read
      */
-    private function walkLocalBuiltArrays(Node $n, array &$seed, array &$bad, array &$read, bool $inClosure): void
+    private function walkLocalFacts(Node $n, array &$seed, array &$bad, array &$read, bool $inClosure): void
     {
         $k = $n->kind;
+        $this->scanKeyUsedNode($n, $k);
+        $this->scanArithUsedNode($n, $k);
+        $this->scanRefPinnedNode($n, $k);
         if ($k === Node::KIND_ARRAY_ACCESS && $n->array->kind === Node::KIND_LOAD_LOCAL) {
             // An element READ of a local. A plain `$out[$k] = v` does NOT reach
             // here — a StoreElement holds its base directly, not wrapped in an
@@ -2156,7 +2183,7 @@ trait InferScans
             foreach ($n->args as $a) { $this->markLocalNamesIn($a, $bad); }
         }
         foreach (Walk::children($n) as $c) {
-            $this->walkLocalBuiltArrays($c, $seed, $bad, $read, $inClosure);
+            $this->walkLocalFacts($c, $seed, $bad, $read, $inClosure);
         }
     }
 

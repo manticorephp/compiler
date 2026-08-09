@@ -222,14 +222,21 @@ trait InferNodes
         $this->recordLitLocals = [];
         $this->recordDisqualified = [];
         $this->recordLocals = [];
-        $this->scanAssocLocals($fn->body);
         // A string local that is `++`'d rides a cell (numeric→int/float, else the
         // Perl-incremented string). Detect: the local is BOTH an IncDec target and
         // assigned a string-producing value (literal / concat).
         $this->incStrLocals = [];
+        // Float-slot pre-pass: a local that ever receives a float-producing value
+        // is seeded FLOAT further down, so the body infers it float throughout — a
+        // loop accumulator (`$s = 0; for(...) { $s += 1.5; }`) keeps the float
+        // type the back-edge merge would otherwise erase (int ∪ float → unknown).
+        // Collected HERE rather than at its seeding site: the predicate is purely
+        // syntactic, so the only thing that pinned it later was the walk it rode.
+        $this->floatLocals = [];
         $incTargets = [];
         $strAssigned = [];
-        $this->scanIncStrLocals($fn->body, $incTargets, $strAssigned);
+        // ONE walk for all three shape scans ({@see InferScans::scanLocalShapes}).
+        $this->scanLocalShapes($fn->body, $incTargets, $strAssigned);
         foreach ($incTargets as $name => $unused) {
             if (isset($strAssigned[$name])) { $this->incStrLocals[$name] = true; }
         }
@@ -330,13 +337,8 @@ trait InferNodes
                 $this->localTypes[$name] = Type::vec($val);
             }
         }
-        // Float-slot pre-pass: a local that ever receives a float-producing value
-        // is seeded FLOAT up front, so the body infers it float throughout — a
-        // loop accumulator (`$s = 0; for(...) { $s += 1.5; }`) keeps the float
-        // type the back-edge merge would otherwise erase (int ∪ float → unknown).
-        // An array local (assoc) is never a float slot.
-        $this->floatLocals = [];
-        $this->scanFloatLocals($fn->body);
+        // Seed the float slots collected by the shape scan above. An array local
+        // (assoc) is never a float slot.
         // A loop-widened numeric (found by inferring a PREVIOUS round — a plain
         // `$f = 2.5` in the body, which the syntactic scan above deliberately
         // ignores) joins the float slots, so its pre-loop int store sitofp's.
@@ -355,14 +357,16 @@ trait InferNodes
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
         $this->keyUsedLocals = [];
-        $this->scanKeyUsedLocals($fn->body);
         $this->arithUsedLocals = [];
-        $this->scanArithUsedLocals($fn->body);
         $this->refPinnedLocals = [];
-        $this->scanRefPinnedLocals($fn->body);
-        // Which arrays this function builds from `[]` — the soundness gate on the
-        // elemLoopLocals pin below ({@see scanLocalBuiltArrays}).
-        $this->scanLocalBuiltArrays($fn->body);
+        // ONE walk for the four late facts — key-used, arith-used, by-ref-pinned,
+        // and which arrays this function builds from `[]` (the soundness gate on
+        // the elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
+        //
+        // It has to stay a SECOND walk, after the float seeding above: that
+        // seeding writes `localTypes`, and `subscriptBaseIsString` reads it to
+        // decide whether a subscript index is a key or a byte offset.
+        $this->scanLocalFacts($fn->body);
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
         // re-kinds is a cell from function ENTRY — its reads dispatch by tag
@@ -707,7 +711,7 @@ trait InferNodes
             return $node->type;
         }
         // The opposite pin: a slot whose representation a CALLEE owns
-        // ({@see InferScans::scanRefPinnedLocals} — `int &$pos` writes it back
+        // ({@see InferScans::scanRefPinnedNode} — `int &$pos` writes it back
         // raw), assigned a CELL. The slot cannot follow the value here, so the
         // value has to leave its box AT THE STORE. Typing the store NODE with
         // the SLOT type while the value stays a cell is the same (node ≠ value)
@@ -1313,7 +1317,7 @@ trait InferNodes
     {
         // `$s++` on a STRING local is Perl-style / numeric-string increment: the
         // slot rides a CELL (a numeric string → int/float; else the incremented
-        // string) — pinned up front by scanIncStrLocals so every use boxes/unboxes.
+        // string) — pinned up front by scanLocalShapes so every use boxes/unboxes.
         if (isset($this->incStrLocals[$node->name])) {
             $this->localTypes[$node->name] = Type::cell();
             $node->type = Type::cell();
