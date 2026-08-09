@@ -1,0 +1,32 @@
+len=97
+Array
+(
+    [0] => 1
+    [1] => two
+    [2] => Array
+        (
+            [k] => v
+        )
+
+)
+---
+hi|42|3.5|1|||
+string(1) "x"
+Y
+bool(true)
+Array
+(
+    [0] => 1
+)
+21
+dyn-true len=36
+Array
+(
+    [0] => 3
+    [1] => 4
+)
+bool(true)
+cap=0 inner=23
+cap2=23
+keepme keepme 6
+obj ok
