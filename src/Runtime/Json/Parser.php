@@ -17,12 +17,15 @@ final class Parser
     private string $src;
     private int $pos;
     private int $len;
+    /** false → a JSON object becomes a stdClass, php's DEFAULT. */
+    private bool $assoc;
 
-    public function __construct(string $src)
+    public function __construct(string $src, bool $assoc = true)
     {
         $this->src = $src;
         $this->pos = 0;
         $this->len = \strlen($src);
+        $this->assoc = $assoc;
     }
 
     public function parse(): mixed
@@ -49,7 +52,12 @@ final class Parser
         $this->skipWs();
         if ($this->pos >= $this->len) { return null; }
         $c = $this->src[$this->pos];
-        if ($c === '{') { return $this->parseObject(); }
+        if ($c === '{') {
+            $o = $this->parseObject();
+            // The cast is five instructions and no copy: the assoc just built
+            // BECOMES the object's dynamic-property bag.
+            return $this->assoc ? $o : (object)$o;
+        }
         if ($c === '[') { return $this->parseArray(); }
         if ($c === '"') { return $this->parseString(); }
         if ($c === 't') { $this->pos = $this->pos + 4; return true; }

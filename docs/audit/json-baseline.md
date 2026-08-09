@@ -49,6 +49,44 @@ honest cost of getting there: a flagged call runs the compiled-PHP encoder, whic
 **slower than php and burns 2.5× its memory**. That is Stage 1b's target, not a
 surprise.
 
+## ⚠ `$depth` is ACCEPTED but not honoured the way php honours it
+
+Stage 1a gave `json_encode` a `$depth` parameter and Stage 2 gave `json_decode` one.
+Neither matches php yet, and the parameter's presence makes that easy to miss:
+
+| | php | here |
+|---|---|---|
+| `json_encode($deep, 0, 2)` | `false` + `JSON_ERROR_DEPTH` | the over-deep node encodes as the string `null` |
+| `json_decode($deep, true, 2)` | `null` + `JSON_ERROR_DEPTH` | decoded in full — the native decoder counts no depth at all |
+
+Returning `false` needs `json_encode`'s return type to become `string|false`, which is
+Stage 3's error-model work; the decoder needs a depth counter threaded the way `$assoc`
+now is. Until then the parameter is accepted for signature compatibility and its limit
+is approximate on encode and absent on decode. **This is a divergence introduced by
+this work, not a pre-existing one.**
+
+## Found while building Stage 2, NOT fixed: `get_debug_type` over a cell
+
+```php
+$o = json_decode('{"a":1}');
+get_class($o);         // "stdClass"  — correct
+$o instanceof stdClass // true        — correct
+get_debug_type($o);    // "object"    — php says "stdClass"
+```
+
+The decode is right; the naming is not. `biGettype`'s CELL arm resolves the class
+through the prelude `__mir_obj_type_name` instanceof chain, which has no arm for a
+class it was not generated for and falls into a bare `"object"` — while
+`get_class()` over the very same cell resolves off the class id and is exact. A
+statically-typed receiver takes the `biGetClass` path and is also exact, which is
+what makes the cell case easy to miss.
+
+Deliberately **not** covered by a test case: a red test makes
+`tools/selfhost_fixpoint.sh` exit before the MIR-golden and rebuild-stability
+sub-gates, so a documentation-only failure would cost two gates. The fix belongs
+with the class-descriptor work that also stops `json_encode` of an object
+answering `{}` (`docs/ROADMAP.md`, per-class function pointers).
+
 ## What the three DIFFs actually are
 
 | probe | php | manticore |

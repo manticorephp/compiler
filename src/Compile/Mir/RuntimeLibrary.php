@@ -2489,7 +2489,14 @@ final class RuntimeLibrary
      * Malformed input DEGRADES rather than throwing, exactly as the PHP parser
      * did — it is not a validator.
      */
-    public function jsonDec(): string
+    /**
+     * @param int    $stdSize   `stdClass` instance size, or 0 when the module has
+     *                          no stdClass — then `$assoc = 0` degrades to the
+     *                          assoc array rather than emitting a null descriptor.
+     * @param int    $stdBagOff offset of stdClass's dynamic-property bag
+     * @param string $stdDesc   i64 operand for its class descriptor
+     */
+    public function jsonDec(int $stdSize = 0, int $stdBagOff = 16, string $stdDesc = '0'): string
     {
         $out = '';
 
@@ -2644,7 +2651,7 @@ final class RuntimeLibrary
         $out .= $this->jsonDecString();
         $out .= $this->jsonDecKey();
         $out .= $this->jsonDecNumber();
-        $out .= $this->jsonDecValue();
+        $out .= $this->jsonDecValue($stdSize, $stdBagOff, $stdDesc);
         return $out;
     }
 
@@ -3093,7 +3100,7 @@ final class RuntimeLibrary
      * growing from zero. An object's key is handed to `__mir_array_set_str`,
      * which takes its own reference, so the parser drops the one it minted.
      */
-    private function jsonDecValue(): string
+    private function jsonDecValue(int $stdSize, int $stdBagOff, string $stdDesc): string
     {
         $cellRepr = (string)\Compile\MemoryAbi::ARRAY_REPR_CELL;
         $notRepr  = (string)(~\Compile\MemoryAbi::ARRAY_REPR_MASK);
@@ -3108,7 +3115,7 @@ final class RuntimeLibrary
             return $o;
         };
 
-        $out  = "\ndefine i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp) {\n";
+        $out  = "\ndefine i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc) {\n";
         $out .= "entry:\n";
         $out .= "  %ap = alloca ptr\n";
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
@@ -3184,7 +3191,7 @@ final class RuntimeLibrary
         $out .= "  %alend = icmp sge i64 %al, %n\n";
         $out .= "  br i1 %alend, label %atail, label %abody\n";
         $out .= "abody:\n";
-        $out .= "  %av = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %av = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
         $out .= "  %acur = load ptr, ptr %ap\n";
         $out .= "  %anx = call ptr @__mir_array_append(ptr %acur, i64 %av)\n";
         $out .= "  store ptr %anx, ptr %ap\n";
@@ -3259,7 +3266,7 @@ final class RuntimeLibrary
         $out .= "  store i64 %ocn, ptr %pp\n";
         $out .= "  br label %oval\n";
         $out .= "oval:\n";
-        $out .= "  %ov = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %ov = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
         $out .= "  %ocur = load ptr, ptr %ap\n";
         $out .= "  %onx = call ptr @__mir_array_set_str(ptr %ocur, ptr %okey, i64 %ov, i64 0, i64 0)\n";
         $out .= "  store ptr %onx, ptr %ap\n";
@@ -3295,16 +3302,41 @@ final class RuntimeLibrary
         $out .= "odone:\n";
         $out .= "  %ofin = load ptr, ptr %ap\n";
         $out .= $stamp('o', '%ofin');
-        $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
-        $out .= "  ret i64 %obx\n}\n";
+        if ($stdSize === 0) {
+            // No stdClass in this module (a library `.o` carries no classes), so
+            // `$assoc = false` degrades to the array rather than minting an
+            // object around a null descriptor.
+            $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
+            $out .= "  ret i64 %obx\n}\n";
+        } else {
+            // php's DEFAULT: a JSON object becomes a stdClass whose dynamic bag
+            // IS the assoc just built — the same five instructions `(object)$a`
+            // emits, and no copy, so `$assoc = false` costs almost nothing.
+            $out .= "  %jsoQ = icmp ne i64 %assoc, 0\n";
+            $out .= "  br i1 %jsoQ, label %jsoarr, label %jsoobj\n";
+            $out .= "jsoarr:\n";
+            $out .= "  %obx = call i64 @__manticore_box_array(ptr %ofin)\n";
+            $out .= "  ret i64 %obx\n";
+            $out .= "jsoobj:\n";
+            $out .= "  %jsoO = call ptr @__mir_alloc_tagged(i64 " . (string)$stdSize . ")\n";
+            $out .= "  store i64 " . $stdDesc . ", ptr %jsoO\n";
+            $out .= "  %jsoRc = getelementptr inbounds i64, ptr %jsoO, i64 1\n";
+            $out .= "  store i64 1, ptr %jsoRc\n";
+            $out .= "  %jsoBag = getelementptr inbounds i8, ptr %jsoO, i64 "
+                  . (string)$stdBagOff . "\n";
+            $out .= "  %jsoFin = ptrtoint ptr %ofin to i64\n";
+            $out .= "  store i64 %jsoFin, ptr %jsoBag\n";
+            $out .= "  %jsoBox = call i64 @__manticore_box_object(ptr %jsoO)\n";
+            $out .= "  ret i64 %jsoBox\n}\n";
+        }
 
         // ── entry point: whole document ──
-        $out .= "\ndefine i64 @__mir_json_decode(ptr %s) {\n";
+        $out .= "\ndefine i64 @__mir_json_decodea(ptr %s, i64 %assoc) {\n";
         $out .= "entry:\n";
         $out .= "  %pp = alloca i64\n";
         $out .= "  store i64 0, ptr %pp\n";
         $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
-        $out .= "  %r = call i64 @__mir_json_dec(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %r = call i64 @__mir_json_deca(ptr %s, i64 %n, ptr %pp, i64 %assoc)\n";
         $out .= "  ret i64 %r\n}\n";
         return $out;
     }

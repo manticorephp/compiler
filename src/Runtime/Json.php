@@ -114,15 +114,18 @@ function __mc_json_escape(string $s, int $flags = 0): string {
 }
 
 /**
- * Decode a JSON string. Objects → assoc arrays, arrays → vecs, scalars →
- * int/float/string/bool/null. The `$associative` flag is accepted for PHP
- * compatibility but ignored — we always return arrays (no stdClass), which
- * is what the manifest reader and config consumers want. Delegates to
- * {@see \Runtime\Json\Parser}.
+ * Decode a JSON string. A JSON object becomes a stdClass by DEFAULT, php's
+ * own rule, and an assoc array when $associative is true (or when it is null
+ * and JSON_OBJECT_AS_ARRAY is set). Arrays → vecs, scalars →
+ * int/float/string/bool/null. Delegates to {@see \Runtime\Json\Parser}.
  */
 function json_decode(string $json, ?bool $associative = null, int $depth = 512,
                      int $flags = 0): mixed {
-    $parser = new \Runtime\Json\Parser($json);
+    // php's rule: arrays when $associative is true, or when it is null (the
+    // DEFAULT) and JSON_OBJECT_AS_ARRAY is set. Otherwise stdClass.
+    $assoc = $associative === true
+        || ($associative === null && ($flags & 1) !== 0);
+    $parser = new \Runtime\Json\Parser($json, $assoc);
     return $parser->parse();
 }
 

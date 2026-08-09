@@ -6368,11 +6368,10 @@ trait EmitLlvmBuiltins
      * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
      */
     /**
-     * Can this `json_decode()` call take the native path? The `$associative`
-     * flag is accepted and IGNORED (objects always decode to assoc arrays —
-     * documented behaviour of {@see \Runtime\Json\Parser}), so a second
-     * argument may only be dropped when it is a literal with no side effect to
-     * lose. Anything else falls through to the compiled PHP parser.
+     * Can this `json_decode()` call take the native path? Every argument after
+     * the first is FOLDED at compile time ({@see jsonAssocMode}), so they may
+     * only be literals — anything else has a side effect the builtin would drop,
+     * and falls through to the compiled PHP parser.
      * @param Node[] $args
      */
     private function jsonDecodeNative(array $args): bool
@@ -6415,6 +6414,37 @@ trait EmitLlvmBuiltins
      *  trait, and every `EmitLlvm*` is one. Guarded by the kind test above. */
     private function intConstValue(\Compile\Mir\IntConst $n): int { return $n->value; }
 
+    /** {@see intConstValue}, for a bool literal. */
+    private function boolConstValue(\Compile\Mir\BoolConst $n): bool { return $n->value; }
+
+    /**
+     * 1 when this `json_decode` call wants assoc ARRAYS, 0 when it wants
+     * stdClass OBJECTS. php's rule is `$associative === true`, or `null` with
+     * JSON_OBJECT_AS_ARRAY set in `$flags` — and `null` is the DEFAULT, so a bare
+     * `json_decode($s)` builds objects. Folded here because {@see
+     * jsonDecodeNative} only admits literals; anything else took the PHP body.
+     * @param Node[] $args
+     */
+    private function jsonAssocMode(array $args): int
+    {
+        $flags = 0;
+        if (isset($args[3]) && $args[3]->kind === Node::KIND_INT_CONST) {
+            $flags = $this->intConstValue($args[3]);
+        }
+        $objectAsArray = ($flags & 1) !== 0;      // JSON_OBJECT_AS_ARRAY
+        if (!isset($args[1]) || $args[1]->kind === Node::KIND_NULL_CONST) {
+            return $objectAsArray ? 1 : 0;
+        }
+        $a = $args[1];
+        if ($a->kind === Node::KIND_BOOL_CONST) {
+            return $this->boolConstValue($a) ? 1 : 0;
+        }
+        if ($a->kind === Node::KIND_INT_CONST) {
+            return $this->intConstValue($a) !== 0 ? 1 : 0;
+        }
+        return 1;
+    }
+
     /**
      * `json_decode($json)` — native recursive-descent decoder
      * ({@see \Compile\Mir\RuntimeLibrary::jsonDec}). Returns a NaN-boxed cell:
@@ -6435,7 +6465,8 @@ trait EmitLlvmBuiltins
         $out = $this->emitPtrArg($args[0]);
         $sp = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__mir_json_decode(ptr ' . $sp . ")\n";
+        $out .= '  ' . $reg . ' = call i64 @__mir_json_decodea(ptr ' . $sp
+              . ', i64 ' . (string)$this->jsonAssocMode($args) . ")\n";
         $out .= $this->freeStrTemp($args[0], $sp);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
