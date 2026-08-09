@@ -52,7 +52,13 @@ if [[ "${1:-}" == "--build" ]]; then
                      exit 1 ;;
     esac
     echo "── building a no-pool compiler (MANTICORE_POOL=0, both passes) ──"
-    MANTICORE_POOL=0 bin/build
+    # Frame pointers too: without them a leaf has no frame record, so
+    # `malloc_history` cannot name the PHP function that ASKED for a block —
+    # it folds onto __mir_realloc_tagged / index_build and the "who holds the
+    # string-keyed maps" question stays unanswerable. Same reasoning as
+    # MANTICORE_POOL: read from the env of the compiler process and baked into
+    # the IR it emits, so it has to hold for the whole build.
+    MANTICORE_POOL=0 MANTICORE_FRAME_POINTERS=1 bin/build
     cp bin/manticore "$NOPOOL"
     echo "ok: $NOPOOL (lib/*.o in this worktree are no-pool too — do not copy them out)"
     exit 0

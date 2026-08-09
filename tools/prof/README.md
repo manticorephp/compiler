@@ -17,6 +17,25 @@ Granularity is **the function, forever**: `-g` is never passed to clang
 (`Main.php:526`), so the binary has no DWARF and no line numbers exist to
 attribute to.
 
+CALLERS, on the other hand, are now reachable. `MANTICORE_FRAME_POINTERS=1`
+splices `"frame-pointer"="all"` into every emitted function, so `sample` and
+`malloc_history` can unwind out of a leaf; `live.sh --build` sets it alongside
+`MANTICORE_POOL=0`. Without it `malloc_history` folds every stack onto
+`__mir_realloc_tagged` / `__mir_array_index_build` and the question "which pass
+HOLDS this" has no answer. `clang -fno-omit-frame-pointer` does not substitute
+for it — measured, the driver flag changes nothing for `-x ir` input.
+
+Naming the caller of a live block:
+
+```bash
+bash tools/prof/live.sh --build                # no-pool + frame-pointer compiler
+# start the target under MallocStackLogging=1, then, at the peak:
+malloc_history <pid> -allBySize >mh.txt        # ~12 s, ~380 MB of stacks
+```
+
+Then tally the frame above the allocator — that is what turned "55% of the peak
+is string-keyed array machinery" into "69.7% of it is `InferTypes::mergeLocals`".
+
 ## Reading `report.php`
 
 ```
