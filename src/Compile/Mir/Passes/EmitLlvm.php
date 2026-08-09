@@ -2301,14 +2301,34 @@ final class EmitLlvm implements EmitVisitor
         return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
     }
 
-    /** The prefix of `$args` the callee actually has parameters for, when the
-     *  surplus has been diverted to the func-args overflow channel; `$args`
-     *  unchanged otherwise. Keeps the emitted call matching its `declare`.
+    /** The prefix of `$args` the callee actually has parameters for. Keeps the
+     *  emitted call matching its `declare` / `define`.
+     *
+     *  This used to apply ONLY to a func-args callee, i.e. only where the
+     *  surplus had somewhere else to go. But php lets ANY call site pass more
+     *  arguments than the callee declares, and a stdlib entry routinely
+     *  declares fewer parameters than php accepts, so the surplus rode the call
+     *  for every other callee and the emitted `call` disagreed with the
+     *  callee's arity. `json_encode($v, JSON_PRETTY_PRINT)` is the witness:
+     *  `declare i64 @manticore_json_encode(i64)` called with `(i64, i64)`,
+     *  SIGSEGV at runtime — not a dropped flag, a crash. A plain user function
+     *  called with a surplus argument emits the same malformed call and merely
+     *  survives it on this ABI, which is what kept it hidden.
+     *
+     *  Truncating is semantically neutral: a callee with N parameters can read
+     *  N parameters either way, and the surplus was never reachable from its
+     *  body. It only stops lying to LLVM. A callee whose signature is NOT known
+     *  here (an FFI `manticore_rt_*` primitive) is left alone — truncating to a
+     *  guessed arity would drop real arguments.
+     *
+     *  By this point a variadic pack is already ONE argument and a defaulted
+     *  parameter is already padded, so `count($args) > $arity` means a genuine
+     *  surplus and nothing else.
      *  @param Node[] $args @return Node[] */
     private function faCallArgs(string $callee, array $args, int $recvParams = 0): array
     {
-        if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return $args; }
-        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if (!isset($this->sigs->paramTypes[$callee])) { return $args; }
+        $arity = \count($this->sigs->paramTypes[$callee]) - $recvParams;
         if ($arity < 0) { $arity = 0; }
         if (\count($args) <= $arity) { return $args; }
         $kept = [];

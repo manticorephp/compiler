@@ -4064,6 +4064,16 @@ final class LowerFromAst implements Pass
      *
      * sprintf/printf are exempt: they are variadic and biFormatRuntime takes the
      * pack array AS the argument list, which is exactly php's semantics.
+     *
+     * array_unshift is exempt for the same reason since
+     * {@see EmitLlvmBuiltins::biArrayUnshift} learned to walk a pack through
+     * `__mir_array_unshift_all` — one site in the pinned symfony corpus
+     * (`EnvConfigurator.php:50`) and the blocker the tier-4 build stopped on.
+     *
+     * ⚠ The exemption list is the SHAPE CONTRACT of the builtins that have one:
+     * a name belongs here only once its `bi*` emitter reads a `Spread` argument.
+     * `tools/audit/builtin_arity_scan.php` is the standing check that a builtin
+     * accepts what php accepts; this list is its spread-shaped half.
      */
     private function rejectSpreadIntoBuiltin(string $fnName, array $astArgs): void
     {
@@ -4076,7 +4086,7 @@ final class LowerFromAst implements Pass
         if ($spread === null) { return; }
         if (!$this->isCodegenBuiltin($fnName)) { return; }
         $bare = $this->constBareName(\strtolower($fnName));
-        if ($bare === 'sprintf' || $bare === 'printf') { return; }
+        if ($bare === 'sprintf' || $bare === 'printf' || $bare === 'array_unshift') { return; }
         throw new \RuntimeException(
             'argument unpacking into ' . $bare . '() is not supported: it is a '
             . 'codegen builtin with no signature to expand the pack against '

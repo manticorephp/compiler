@@ -1478,6 +1478,85 @@ trait InferScans
         return '';
     }
 
+    /**
+     * `array_unshift($local, 's', 2, null)` — a MIXED prepend into a local the
+     * function itself built. The array is genuinely heterogeneous, so its
+     * element has to be a cell before either end is emitted.
+     *
+     * A codegen builtin carries no signature, so none of the by-ref scans see
+     * this call: {@see scanByRefElemWiden} reads the CALLEE's body and there is
+     * no body to read. {@see InferCalls::inferUnshiftElem} refines the local
+     * mid-pass, which is enough for a HOMOGENEOUS prepend (store and read stay
+     * raw together) and NOT enough here — the argument node was typed before the
+     * refinement, so the emitter saw `vec[int]` and stored raw while every later
+     * read saw `vec[cell]` and decoded a tag. Seeding through
+     * `forcedCellElemLocals` instead makes the driver re-infer, so both ends
+     * agree.
+     *
+     * The container's CURRENT element counts as one of the classes: `$c = [1]`
+     * then `array_unshift($c, 's')` is mixed even though the call contributes a
+     * single kind.
+     */
+    private function scanUnshiftElemWiden(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            // Same two exclusions as {@see scanLocalElemFromStores}: a shared
+            // prelude body must not be specialized from module-local facts, and
+            // an imported body is not ours to retype.
+            if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
+            if ($fn->isExtern) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            $classes = [];
+            $this->scanUnshiftClasses($fn->body, $classes);
+            foreach ($classes as $name => $seen) {
+                // A lone `null` also forces a cell — raw 0 and box_null differ,
+                // the reason spelled out in {@see InferNodes} at the
+                // assocValClasses seed.
+                if (\count($seen) < 2 && !isset($seen['null'])) { continue; }
+                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
+                if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Value classes prepended into each local by `array_unshift`, plus the
+     *  container's own current element class. @param array<string, array<string,bool>> $out */
+    private function scanUnshiftClasses(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_CALL && \count($n->args) >= 2) {
+            $fname = $n->function;
+            $bs = \strrpos($fname, '\\');
+            if ($bs !== false) { $fname = \substr($fname, $bs + 1); }
+            $arr = $n->args[0];
+            if ($fname === 'array_unshift' && $arr->kind === Node::KIND_LOAD_LOCAL) {
+                $name = $arr->name;
+                $cur = $arr->type->element ?? null;
+                if ($cur !== null) {
+                    $c = $this->typeValueClass($cur);
+                    if ($c !== '') { $out[$name][$c] = true; }
+                }
+                $i = 1;
+                while ($i < \count($n->args)) {
+                    $a = $n->args[$i];
+                    $vt = $a->kind === Node::KIND_SPREAD
+                        ? ($a->type->element ?? Type::cell())
+                        : $a->type;
+                    $c = $this->typeValueClass($vt);
+                    if ($c !== '') { $out[$name][$c] = true; }
+                    $i = $i + 1;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanUnshiftClasses($c, $out); }
+    }
+
     /** Locals assigned an array LITERAL in this body — the ones whose element
      *  representation this function itself owns. @param array<string,bool> $out */
     private function scanArrayLitLocals(Node $n, array &$out): void

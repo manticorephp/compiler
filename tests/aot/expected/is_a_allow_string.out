@@ -1,0 +1,25 @@
+obj default     : y
+obj self        : y
+obj iface       : y
+obj unrelated   : n
+obj allow=false : y
+str default     : n
+str allow=true  : y
+str allow=false : n
+str self allow  : y
+str iface allow : y
+str unrel allow : n
+sub obj default : y
+sub obj self    : n
+sub str default : y
+sub str allow=f : n
+sub str self    : n
+sub str iface   : y
+dyn on  is_a    : y
+dyn off is_a    : n
+dyn on  sub     : y
+dyn off sub     : n
+dyn on  obj     : y
+dyn off obj     : y
+var subj allow  : y
+var subj default: n

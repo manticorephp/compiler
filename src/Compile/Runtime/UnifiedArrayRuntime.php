@@ -94,6 +94,7 @@ final class UnifiedArrayRuntime
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
         $this->emitTakeCell('__mir_array_shift_cell', '__mir_array_shift');
         $this->emitUnshift();
+        $this->emitUnshiftAll();
         $this->emitImplode();
         $this->emitImplodeInt();
         $this->emitIssetInt();
@@ -3425,6 +3426,66 @@ final class UnifiedArrayRuntime
         $b->store($newlen, $reloc);
         $b->store($newlen, $this->hdr($b, $reloc, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
         $b->ret($reloc);
+    }
+
+    /**
+     * `__mir_array_unshift_all(arr, vals) -> ptr` — prepend every element of
+     * `vals`, keeping their order, in front of `arr`. This is
+     * `array_unshift($a, ...$pack)`, whose pack is a runtime array and so has no
+     * fixed argument count to expand against.
+     *
+     * Walks `vals` BACK TO FRONT calling `__mir_array_unshift`, so the pack's
+     * first element ends up in front. That prepends into `arr`'s OWN buffer and
+     * keeps its repr stamp, which is the whole reason this is here and not a
+     * call-site rewrite to `[$pack…, ...$a]`: rebuilding the array gives the
+     * result a FRESH stamp, and a bare-`array` property whose reads decode by
+     * tag then reads its elements as denormals. Measured, not assumed — the
+     * rewrite was written, tried against the oracle, and printed
+     * `2.1250588003432E-314` for `$this->stack`.
+     *
+     * Each value gains a second owner (`__mir_retain_by_repr` under the PACK's
+     * repr bits, as `__mir_array_union` does): the pack is a temporary that is
+     * released after the call, while its elements now live in `arr`.
+     */
+    private function emitUnshiftAll(): void
+    {
+        $fn = $this->module->func('__mir_array_unshift_all', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $vals = $fn->param(Type::ptr(), 'vals');
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $ret = $fn->block('ret');
+
+        $curSlot = $e->alloca(Type::ptr(), 'cur');
+        $e->store($arr, $curSlot);
+        $iSlot = $e->alloca(Type::i64(), 'i');
+        $e->store(Value::int(Type::i64(), -1), $iSlot);
+        // The null test comes BEFORE the header reads: an empty pack is a legal
+        // `array_unshift($a, ...[])` and must not deref a null buffer.
+        $e->brIf($e->icmp('eq', $vals, Value::null()), $ret, $go);
+
+        // live_len compacts tombstones out so the walk sees a clean 0..len range.
+        $n = $go->call('__mir_array_live_len', Type::i64(), [$vals]);
+        $go->store($go->sub($n, Value::int(Type::i64(), 1)), $iSlot);
+        $vflags = $go->load(Type::i64(), $this->hdr($go, $vals, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $vrepr = $go->and_($vflags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $go->br($head);
+
+        $hi = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('slt', $hi, Value::int(Type::i64(), 0)), $ret, $body);
+
+        $bi = $body->load(Type::i64(), $iSlot);
+        $v = $body->call('__mir_array_value_at', Type::i64(), [$vals, $bi]);
+        $body->call('__mir_retain_by_repr', Type::void(), [$v, $vrepr]);
+        $new = $body->call('__mir_array_unshift', Type::ptr(),
+            [$body->load(Type::ptr(), $curSlot), $v]);
+        $body->store($new, $curSlot);
+        $body->store($body->sub($bi, Value::int(Type::i64(), 1)), $iSlot);
+        $body->br($head);
+
+        $ret->ret($ret->load(Type::ptr(), $curSlot));
     }
 
     /**

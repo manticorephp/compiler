@@ -555,6 +555,16 @@ final class InferTypes implements Pass
             }
             $guard = $guard + 1;
         }
+        // The same erasure through a MUTATING BUILTIN instead of a store:
+        // `array_unshift($local, 's', 2)` has no signature for the by-ref scans
+        // to read ({@see scanUnshiftElemWiden}).
+        $guard = 0;
+        while ($guard < 4 && $this->scanUnshiftElemWiden($module)) {
+            foreach ($module->functions as $fn) {
+                $this->inferFunction($fn);
+            }
+            $guard = $guard + 1;
+        }
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
         // MIXED array: left alone, the callee is narrowed to the caller's

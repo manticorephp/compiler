@@ -232,19 +232,33 @@ trait EmitLlvmMemory
      */
     private function collectMutatedVecs(Node $n): void
     {
-        // A cursor MOVE writes the array header (php's nInternalPointer lives
-        // in the value), so `next`/`prev`/`reset`/`end` mutate their argument
-        // exactly like an element store. Without this a prior `$b = $a` shared
-        // the buffer and `next($a)` moved `$b`'s cursor too — the CoW inside
-        // the builtin cannot help, because a read-only alias is never retained
-        // and the buffer's rc stays 1. `current`/`key` only read.
-        if ($n->kind === Node::KIND_CALL
-            && ($n->function === 'next' || $n->function === 'prev'
-                || $n->function === 'reset' || $n->function === 'end')
-            && \count($n->args) === 1) {
+        // A builtin whose FIRST parameter php declares by reference mutates its
+        // argument exactly like an element store, and the CoW inside the builtin
+        // cannot save it: a read-only alias is never retained, so the buffer's
+        // rc stays 1 and the copy never triggers.
+        //
+        // This arm knew only the four cursor moves (`next`/`prev`/`reset`/`end`,
+        // which write the header's internal pointer). Every OTHER by-ref
+        // builtin was a silent wrong answer — 7 of 9 probed shapes, e.g.
+        // `$b = $a; array_pop($a);` left `$b` short an element and
+        // `array_unshift($a, 9)` left `$b` reading an EMPTY array off the
+        // reallocated base. The list is the shape contract: a name belongs here
+        // when php declares its first parameter `&$array`.
+        // `current`/`key`/`array_key_first` only read.
+        if ($n->kind === Node::KIND_CALL && \count($n->args) > 0) {
+            // Shape first, NAME second: a kind compare is a word compare while
+            // the name test is a walk of string equalities, and this pre-scan
+            // visits every node of every function.
             $a0 = $n->args[0];
-            if ($a0->kind === Node::KIND_LOAD_LOCAL && $a0->type->isArray()) {
-                $this->frame->mutatedVecLocals[$a0->name] = true;
+            $base = $a0;
+            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
+                // `array_pop($x[0])` mutates the ROOT local too — the same walk
+                // the nested element store below does.
+                $base = $base->array;
+            }
+            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()
+                && $this->mutatesArg0($n->function)) {
+                $this->frame->mutatedVecLocals[$base->name] = true;
             }
         }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
@@ -293,6 +307,42 @@ trait EmitLlvmMemory
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->collectMutatedVecs($c);
         }
+    }
+
+    /**
+     * Whether php declares $fn's FIRST parameter by reference over an array,
+     * i.e. whether the call mutates the argument in place
+     * ({@see collectMutatedVecs}). Independent of HOW the name is implemented
+     * here — a codegen builtin (`array_pop`), a prelude body (`sort`) and a
+     * desugar (`array_multisort`) all mutate the caller's array, and the
+     * copy-on-assign decision is about php's contract, not ours.
+     *
+     * The four cursor moves are in the list because php's internal pointer
+     * lives IN the array value: `next($a)` writes the header.
+     * `array_multisort` is here for its first array too, even though the
+     * desugar packs the rest.
+     */
+    private function mutatesArg0(string $fn): bool
+    {
+        $bare = $fn;
+        // Monomorphize has already run, so a prelude body arrives as
+        // `sort$mono$p0_vec_int` — matching the raw callee name found the four
+        // codegen builtins and MISSED every php-bodied one (`sort`, `usort`,
+        // `array_push`), which is why the first cut still printed a mutated
+        // alias for them.
+        $m = \strpos($bare, '$mono$');
+        if ($m !== false) { $bare = \substr($bare, 0, $m); }
+        $p = \strrpos($bare, '\\');
+        if ($p !== false) { $bare = \substr($bare, $p + 1); }
+        foreach ([
+            'array_multisort', 'array_pop', 'array_push', 'array_shift', 'array_splice',
+            'array_unshift', 'array_walk', 'array_walk_recursive', 'arsort', 'asort',
+            'each', 'end', 'krsort', 'ksort', 'natcasesort', 'natsort', 'next', 'prev',
+            'reset', 'rsort', 'shuffle', 'sort', 'uasort', 'uksort', 'usort',
+        ] as $k) {
+            if ($k === $bare) { return true; }
+        }
+        return false;
     }
 
     /**

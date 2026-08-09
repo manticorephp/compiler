@@ -78,6 +78,7 @@ trait InferCalls
             $this->inferNode($a);
         }
         $callee = $node->function;
+        $this->inferUnshiftElem($node);
         // A tagged-cell builtin (`strpos` → int|false, `getenv` →
         // string|false) is emitted by EmitLlvm as the NaN-boxed builtin
         // even when a same-named stdlib function is in scope (emitBuiltin
@@ -102,6 +103,47 @@ trait InferCalls
         }
         if ($bt !== null) { $node->type = $bt; }
         return $node->type;
+    }
+
+    /**
+     * `array_unshift($local, $v)` teaches `$local` its element type, exactly as
+     * `$local[] = $v` does ({@see InferNodes::inferStoreElement}'s vec arm).
+     *
+     * A codegen builtin has NO SIGNATURE, so none of the by-ref machinery that
+     * covers `array_push` / `array_splice` (php bodies whose `&$arr` parameter
+     * the call-site scans read) can see this one. Left out, `$f = [];
+     * array_unshift($f, "a");` kept `$f` a `vec[unknown]` — the READ side
+     * decodes an unknown element as a tagged cell while the emitter stored the
+     * string raw, so `implode` printed `2.15E-314`. push, append and splice all
+     * printed `x`; unshift alone was wrong, which is what pointed at the
+     * missing signature rather than at the parked element-repr gap.
+     */
+    private function inferUnshiftElem(Call $node): void
+    {
+        $n = $node->function;
+        $bs = \strrpos($n, '\\');
+        if ($bs !== false) { $n = \substr($n, $bs + 1); }
+        if ($n !== 'array_unshift' || \count($node->args) < 2) { return; }
+        $arr = $node->args[0];
+        if ($arr->kind !== Node::KIND_LOAD_LOCAL) { return; }
+        $at = $this->localTypes[$arr->name] ?? $arr->type;
+        // A vec, or a still-unknown local. An ASSOC is left alone: unshift
+        // renumbers its int keys and says nothing about the key channel.
+        if (!$at->isVec() && $at->kind !== Type::KIND_UNKNOWN) { return; }
+        $elem = $at->element ?? null;
+        $i = 1;
+        while ($i < \count($node->args)) {
+            $a = $node->args[$i];
+            // `...$pack` contributes its ELEMENT type, not the pack.
+            $vt = $a->kind === Node::KIND_SPREAD
+                ? ($a->type->element ?? Type::cell())
+                : $a->type;
+            $elem = $this->arrayElemMerge($elem, $vt);
+            $i = $i + 1;
+        }
+        $this->localTypes[$arr->name] = Type::vec(
+            isset($this->cellElemLocals[$arr->name]) ? Type::cell() : $elem
+        );
     }
 
     /**

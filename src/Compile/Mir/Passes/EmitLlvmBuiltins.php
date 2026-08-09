@@ -275,8 +275,10 @@ trait EmitLlvmBuiltins
         if ($name === 'trait_exists')                 { return $this->biClassExists($args, 'trait'); }
         if ($name === 'method_exists')                { return $this->biMethodExists($args); }
         if ($name === 'property_exists')              { return $this->biPropertyExists($args); }
-        if ($name === 'is_a')                         { return $this->biIsA($args, false); }
-        if ($name === 'is_subclass_of')               { return $this->biIsA($args, true); }
+        // The third argument is `allow_string`, and php gives the two functions
+        // OPPOSITE defaults: is_a false, is_subclass_of true.
+        if ($name === 'is_a')                         { return $this->biIsA($args, false, $this->allowStringArg($args, false)); }
+        if ($name === 'is_subclass_of')               { return $this->biIsA($args, true, $this->allowStringArg($args, true)); }
         if ($name === 'get_parent_class')             { return $this->biGetParentClass($args); }
         if ($name === 'get_class_methods')            { return $this->biGetClassMethods($args); }
         return null;
@@ -5220,27 +5222,118 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * `array_unshift($v, $x)` — prepend `$x`: realloc to len+1 capacity,
-     * slide the existing elements right one slot (memmove), store `$x` at
-     * index 0, bump length, write the relocated ptr back through the
-     * array's local / property slot. Returns the new count. Single-value
-     * form (the only shape the self-host source uses).
+     * `array_unshift($v, $x, …)` — prepend every value: realloc to len+1
+     * capacity, slide the existing elements right one slot (memmove), store the
+     * value at index 0, bump length, and after the last one write the relocated
+     * ptr back through the array's local / property slot. Returns the new count.
+     *
+     * php's signature is `array_unshift(array &$array, mixed ...$values)`, and
+     * this used to implement only the TWO-argument shape — "the only shape the
+     * self-host source uses". Every value past the second was dropped IN
+     * SILENCE: `$a = [3,4]; array_unshift($a, 1, 2)` answered `3: 1,3,4` where
+     * php answers `4: 1,2,3,4`. The corpus has 5 such sites.
+     *
+     * Widening the emitter beats routing to a PHP body. The by-ref array is the
+     * problem: a `function f(array &$arr, array $vals)` helper is miscompiled
+     * the moment a SECOND call site gives `$vals` a different element type —
+     * Monomorphize keys the specialization on `$vals` alone, so the by-ref
+     * array's erased element channel is re-typed from the other call site and
+     * the caller reads its elements as denormals. Here the repr is known and
+     * `vecWriteBack` already speaks it.
+     *
+     * Values are EMITTED left to right (php's evaluation order — an argument
+     * may call) and PREPENDED right to left, which is what puts them in front
+     * in source order. Only the final pointer is written back; the intermediate
+     * ones alias the same growing buffer.
      */
     private function biArrayUnshift(Call $c): string
     {
         $arrNode = $c->args[0];
         $out = $this->emitNode($arrNode);
-        $out .= $this->coerceToPtr();
-        $arr = $this->lastValue;
-        $out .= $this->emitNode($c->args[1]);
-        $out .= $this->coerceToI64();
-        $val = $this->lastValue;
-        $out .= $this->rcRetainByType($c->args[1], $val, null, 2);
-        $new = $this->ssa->allocReg();
-        $out .= '  ' . $new . ' = call ptr @__mir_array_unshift(ptr ' . $arr . ', i64 ' . $val . ")\n";
-        $out .= $this->vecWriteBack($arrNode, $new);
+        // arrayArgToPtr, NOT a bare coerceToPtr: a CELL base carries the buffer
+        // pointer NaN-boxed, and inttoptr-ing the tagged word walks a wild
+        // address. array_pop / array_shift have used it since
+        // `array_shift($_SERVER['argv'])` SIGSEGV'd every console app; unshift
+        // was left on the bare coercion and crashed on the same shape
+        // (`function g(mixed $m) { array_unshift($m, 'a'); }`).
+        // Boxed exactly when an element STORE would box
+        // ({@see EmitLlvmArrays::storeElemBoxesValue}): an erased base carries
+        // its elements NaN-boxed, and so does a vec whose ELEMENT is a cell —
+        // which is what a mixed-value unshift infers now
+        // ({@see InferCalls::inferUnshiftElem}). Reading only the base's own
+        // kind missed the second shape and stored raw words into a cell vec.
+        // ⚠ Two different questions, and they are NOT the same flag: how each
+        // VALUE is stored (boxed for a cell element channel) vs how the
+        // relocated BUFFER goes back into the slot (boxed only when the SLOT
+        // itself is a cell). A `vec[cell]` local holds a raw pointer to a
+        // buffer of boxed elements.
+        $bt = $arrNode->type;
+        $slotIsCell = $bt->kind === Type::KIND_CELL;
+        $cellBase = $slotIsCell
+            || ($bt->element !== null && $bt->element->kind === Type::KIND_CELL);
+        $out .= $this->arrayArgToPtr($arrNode);
+        // COW before the prepend, as array_shift does: this REALLOCS, so a
+        // buffer some other variable still holds would be moved out from under
+        // it. `$d = $c; array_unshift($c, 6);` printed `d=` — $d left pointing
+        // at the freed base — where php keeps `7,8`.
+        $out .= $this->mutArrayCow($arrNode, $this->lastValue);
+        $cur = $this->lastValue;
+        $vals = [];
+        $packs = [];
+        $i = 1;
+        while ($i < \count($c->args)) {
+            // `...$pack` — a runtime array with no fixed count to expand
+            // against, which is why this call used to be REFUSED outright (the
+            // symfony tier-4 blocker). The pack POINTER is collected here and
+            // `__mir_array_unshift_all` walks it below.
+            if ($c->args[$i]->kind === Node::KIND_SPREAD) {
+                $out .= $this->emitNode($c->args[$i]->operand);
+                $out .= $this->arrayArgToPtr($c->args[$i]->operand);
+                $vals[] = $this->lastValue;
+                $packs[] = true;
+                $i = $i + 1;
+                continue;
+            }
+            $packs[] = false;
+            $out .= $this->emitNode($c->args[$i]);
+            // A cell base stores its elements BOXED — the same answer
+            // {@see EmitLlvmArrays::storeElemBoxesValue} gives, and for the same
+            // reason: the reader decodes by tag, so a raw word read back is a
+            // denormal. (An `unknown` element channel is the parked
+            // element-repr gap and deliberately still stores raw.)
+            if ($cellBase) {
+                $out .= $this->retainCellPayload($c->args[$i]);
+                $out .= $this->boxToCell($c->args[$i]->type, $c->args[$i]);
+                $vals[] = $this->lastValue;
+                $i = $i + 1;
+                continue;
+            }
+            $out .= $this->coerceToI64();
+            $v = $this->lastValue;
+            $out .= $this->rcRetainByType($c->args[$i], $v, null, 2);
+            $vals[] = $v;
+            $i = $i + 1;
+        }
+        $j = \count($vals) - 1;
+        while ($j >= 0) {
+            $new = $this->ssa->allocReg();
+            $out .= $packs[$j]
+                ? '  ' . $new . ' = call ptr @__mir_array_unshift_all(ptr ' . $cur
+                  . ', ptr ' . $vals[$j] . ")\n"
+                : '  ' . $new . ' = call ptr @__mir_array_unshift(ptr ' . $cur
+                  . ', i64 ' . $vals[$j] . ")\n";
+            $cur = $new;
+            $j = $j - 1;
+        }
+        // The base's OWN representation decides how the relocated buffer goes
+        // back into its slot: a cell slot is read by tag, so a `ptrtoint` word
+        // stored there reads back as a denormal. Every other mutator passes this
+        // ({@see mutArrayCow}, EmitLlvmArrays' element stores); unshift did not,
+        // and only `arrayArgToPtr` above made the shape reachable instead of
+        // fatal.
+        $out .= $this->vecWriteBack($arrNode, $cur, $slotIsCell);
         $nl = $this->ssa->allocReg();
-        $out .= '  ' . $nl . ' = load i64, ptr ' . $new . "\n";
+        $out .= '  ' . $nl . ' = load i64, ptr ' . $cur . "\n";
         $this->lastValue = $nl;
         $this->lastValueType = 'i64';
         return $out;
@@ -5707,10 +5800,72 @@ trait EmitLlvmBuiltins
         return '';
     }
 
-    /** is_a($obj|'C', 'X') / is_subclass_of (strict — excludes the class itself).
-     *  Reuses the instanceof ancestor+interface walk ({@see classIsA}). */
-    private function biIsA(array $args, bool $strict): string
+    /**
+     * The `allow_string` third argument, folded. php's defaults are OPPOSITE —
+     * `is_a(..., false)`, `is_subclass_of(..., true)` — so the default is the
+     * caller's to pass. `null` means the argument is a RUNTIME value and cannot
+     * be folded; {@see biIsA} answers that with a real branch rather than
+     * guessing the default, which answered `n` for a `$flag` that was true.
+     * @param Node[] $args
+     */
+    private function allowStringArg(array $args, bool $default): ?bool
     {
+        if (\count($args) < 3) { return $default; }
+        $a = $args[2];
+        if ($a->kind === Node::KIND_BOOL_CONST) { return (bool)$a->value; }
+        if ($a->kind === Node::KIND_INT_CONST) { return $a->value !== 0; }
+        return null;
+    }
+
+    /**
+     * Whether the SUBJECT is a class-name STRING rather than an object. php
+     * only resolves a string subject as a class name when `allow_string` is on;
+     * with it off the answer is false however related the two classes are.
+     */
+    private function subjectIsString(Node $a): bool
+    {
+        return $a->kind === Node::KIND_STRING_CONST
+            || ($a->type->kind ?? -1) === Type::KIND_STRING;
+    }
+
+    /** is_a($obj|'C', 'X') / is_subclass_of (strict — excludes the class itself).
+     *  Reuses the instanceof ancestor+interface walk ({@see classIsA}).
+     *
+     *  `$allowString` is php's third argument. Ignoring it answered `y` for
+     *  `is_a('Derived', 'Base')` where php answers `n`: the subject is a STRING
+     *  and is_a's default is false, so php never resolves it as a class name.
+     *  `reflClassName` cannot see the difference — it returns the literal for a
+     *  string and the class for an object — so the test has to be made here,
+     *  before the fold. */
+    private function biIsA(array $args, bool $strict, ?bool $allowString = true): string
+    {
+        // allow_string only ever matters for a STRING subject: an object is
+        // resolved either way.
+        if ($this->subjectIsString($args[0])) {
+            // A string subject with allow_string off is false in php whatever
+            // the classes are, so nothing below needs to run. The arguments are
+            // still emitted for their side effects.
+            if ($allowString === false) {
+                return $this->biConstBool($this->reflEvalArgs($args), false);
+            }
+            // A RUNTIME flag: the class relation is still a compile-time fact,
+            // so the branch is a select over the folded answer and 0. The flag
+            // is emitted HERE and the recursive call gets the two-argument
+            // slice, so each argument is emitted exactly once, in php's order.
+            if ($allowString === null) {
+                $out = $this->biIsA([$args[0], $args[1]], $strict, true);
+                $val = $this->lastValue;
+                $out .= $this->emitNode($args[2]);
+                $out .= $this->coerceToI64();
+                $c = $this->ssa->allocReg();
+                $out .= '  ' . $c . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+                $r = $this->ssa->allocReg();
+                $out .= '  ' . $r . ' = select i1 ' . $c . ', i64 ' . $val . ", i64 0\n";
+                $this->lastValue = $r;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
         $target = $this->reflClassName($args[1]);
         // A runtime-valued target class (`$obj instanceof $cls`, lowered to is_a):
         // the name is only known at runtime, so enumerate the module's classes and
@@ -5720,6 +5875,15 @@ trait EmitLlvmBuiltins
             return $this->biIsADynamic($args, $strict);
         }
         $sub = $this->reflClassName($args[0]);
+        // A runtime STRING subject with allow_string on — `is_a($class,
+        // Driver::class, true)`, which is EVERY 3-argument site in the pinned
+        // corpus. `reflClassName` answers '' for a variable, so the fold below
+        // said false for a name that names a real subclass. The class relation
+        // is still compile-time: only "which name is it" is runtime, so this is
+        // a string compare against the classes that already ARE-A the target.
+        if ($target !== '' && $sub === '' && $this->subjectIsString($args[0])) {
+            return $this->biIsAStringSubject($args, $strict, $target);
+        }
         // A runtime SUBJECT. `reflClassName` answers '' for an erased slot and,
         // for an INTERFACE-typed one, a name that has no ClassDef — and
         // `classIsA` bails on the first unknown name. Either way the fold below
@@ -5749,6 +5913,47 @@ trait EmitLlvmBuiltins
             && (!$strict || $sub !== $target)
             && $this->classIsA($sub, $target);
         return $this->biConstBool($out, $r);
+    }
+
+    /**
+     * `is_a($nameVar, 'Target', true)` — the subject is a class-name STRING
+     * only known at runtime. Every class that is-a the target is known HERE, so
+     * the test is `strcmp(subject, "C") == 0` OR-ed over that set; no class-id
+     * read, because a string has no descriptor to read one from.
+     *
+     * php matches class names case-insensitively; this compares exactly, the
+     * same simplification {@see emitInstanceofArm} already makes for a runtime
+     * TARGET name.
+     * @param Node[] $args
+     */
+    private function biIsAStringSubject(array $args, bool $strict, string $target): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $strP = $this->ssa->allocReg();
+        $out .= '  ' . $strP . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $out .= $this->emitNode($args[1]);
+        $acc = '';
+        foreach ($this->classes as $name => $cd) {
+            if ($strict && $name === $target) { continue; }
+            if (!$this->classIsA($name, $target)) { continue; }
+            $lit = $this->strLitId($this->pool->intern($name));
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $strP . ', ptr ' . $lit . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            if ($acc === '') { $acc = $eq; continue; }
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $eq . "\n";
+            $acc = $or;
+        }
+        if ($acc === '') { return $this->biConstBool($out, false); }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $acc . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** True when the SUBJECT's class can only be known at runtime: an erased
