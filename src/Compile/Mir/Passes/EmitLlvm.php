@@ -2338,16 +2338,31 @@ final class EmitLlvm implements EmitVisitor
         return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
     }
 
-    /** The prefix of `$args` the callee actually has parameters for, when the
-     *  surplus has been diverted to the func-args overflow channel; `$args`
-     *  unchanged otherwise. Keeps the emitted call matching its `declare`.
+    /** The prefix of `$args` the callee actually has parameters for. Keeps the
+     *  emitted call matching its `declare` — an UNCONDITIONAL invariant, not a
+     *  func-args one: php accepts surplus positional arguments on any call, and
+     *  passing them anyway emits `call @f(i64, i64)` against `declare @f(i64)`,
+     *  which LLVM treats as undefined behaviour. `json_encode($assoc, $flags)`
+     *  SIGSEGV'd that way — the poisoned return reached `__mir_rc_release_str`
+     *  as a tagged cell. A variadic callee is already packed to exactly
+     *  `count(paramTypes)` arguments BEFORE the call, so it needs no exception;
+     *  a func-args callee additionally re-evaluates the surplus into the
+     *  overflow array ({@see faPush}), and everything else evaluates it for
+     *  effect ({@see Passes\EmitLlvmCalls::surplusArgEffects}).
      *  @param Node[] $args @return Node[] */
     private function faCallArgs(string $callee, array $args, int $recvParams = 0): array
     {
-        if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return $args; }
-        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        // Arity unknown — an undefined-function trap or an `rt_` FFI primitive
+        // whose `declare` is synthesised FROM the call site. Nothing to match.
+        if (!isset($this->sigs->paramTypes[$callee])) { return $args; }
+        $arity = \count($this->sigs->paramTypes[$callee]) - $recvParams;
         if ($arity < 0) { $arity = 0; }
         if (\count($args) <= $arity) { return $args; }
+        // `f(...$arr)` expands ONE node across the callee's remaining params, so
+        // a positional count proves nothing here — the spread arm fills them.
+        foreach ($args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return $args; }
+        }
         $kept = [];
         $ai = 0;
         foreach ($args as $a) {
@@ -2356,6 +2371,21 @@ final class EmitLlvm implements EmitVisitor
             $ai = $ai + 1;
         }
         return $kept;
+    }
+
+    /** The tail {@see faCallArgs} dropped — the arguments php evaluates and the
+     *  callee has no parameter for. @param Node[] $args @return Node[] */
+    private function faSurplusArgs(string $callee, array $args, int $recvParams = 0): array
+    {
+        $kept = \count($this->faCallArgs($callee, $args, $recvParams));
+        if ($kept >= \count($args)) { return []; }
+        $over = [];
+        $ai = 0;
+        foreach ($args as $a) {
+            if ($ai >= $kept) { $over[] = $a; }
+            $ai = $ai + 1;
+        }
+        return $over;
     }
 
     /** {@see faCallArgs} for a callee whose params[0] is the receiver.

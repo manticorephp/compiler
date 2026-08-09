@@ -3553,6 +3553,7 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $out .= $this->surplusArgEffects($target, $n->args);
         // Catch-all default pad (mirrors emitMethodCall); a static call is
         // usually lower-filled, but an unresolved-at-lowering callee may
         // arrive short — never leave a trailing optional unset.
@@ -4411,6 +4412,7 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, 1);
         // Pad omitted trailing optionals: a typed-receiver call (`$x->m()`)
         // isn't default-filled at lowering (class unknown pre-InferTypes),
         // so the callee would read an uninitialized arg register. Param 0 is

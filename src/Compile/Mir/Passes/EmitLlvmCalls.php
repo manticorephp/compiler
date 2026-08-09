@@ -1948,6 +1948,30 @@ trait EmitLlvmCalls
     private function staticCallClass(StaticCall_ $n): string { return $n->class; }
     private function staticCallMethod(StaticCall_ $n): string { return $n->method; }
 
+    /**
+     * php evaluates EVERY argument written at a call site, but the callee has
+     * parameters for only the first `arity` of them and the emitted call must
+     * match its `declare` ({@see EmitLlvm::faCallArgs}). Evaluate the surplus
+     * here, in source order, and drop the value — same ownership rule as an
+     * expression in statement position, so a fresh owned result is released
+     * rather than leaked.
+     *
+     * A func-args callee is skipped: {@see EmitLlvm::faPush} already evaluates
+     * the same nodes into the overflow array, and evaluating them twice would
+     * run their side effects twice.
+     * @param Node[] $args
+     */
+    private function surplusArgEffects(string $callee, array $args, int $recvParams = 0): string
+    {
+        if ($this->sigs->usesFuncArgs[$callee] ?? false) { return ''; }
+        $out = '';
+        foreach ($this->faSurplusArgs($callee, $args, $recvParams) as $a) {
+            $out .= $this->emitNode($a);
+            $out .= $this->emitDiscardedCallRelease($a);
+        }
+        return $out;
+    }
+
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
@@ -2342,6 +2366,7 @@ trait EmitLlvmCalls
             }
             $ai = $ai + 1;
         }
+        $out .= $this->surplusArgEffects($c->function, $c->args);
         $reg = $this->ssa->allocReg();
         $mangled = $this->mangle($c->function);
         // A `manticore_rt_*` callee with no PHP definition is a native
