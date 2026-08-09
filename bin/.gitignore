@@ -13,3 +13,6 @@ manticore_self*
 manticore_g[0-9]*
 # tools/prof/live.sh --build: the no-pool compiler it profiles
 manticore.nopool
+manticore.base
+manticore.chg
+manticore.noarena
