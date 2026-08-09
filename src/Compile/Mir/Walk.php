@@ -31,11 +31,42 @@ final class Walk
             || $k === Node::KIND_NULL_CONST) {
             return [];
         }
+        // Then the hot COMPOSITES, in measured static frequency order
+        // (`php tools/prof/kindfreq.php` over four real files: store_local 12.4%,
+        // call 5.8%, method_call 5.7%, property_access 5.2%, cmp 5.1%, if 3.6%,
+        // return 2.8%, ternary 2.7%). The chain costs one string compare per arm
+        // passed, so the total is sum(freq * position) — minimised by this order,
+        // and method_call alone used to sit at arm ~50.
+        if ($k === Node::KIND_STORE_LOCAL) { return [self::asStoreLocal($n)->value]; }
+        if ($k === Node::KIND_CALL) { return self::asCall($n)->args; }
+        if ($k === Node::KIND_METHOD_CALL) {
+            $mc = self::asMethodCall($n);
+            $out = [$mc->object];
+            foreach ($mc->args as $a) { $out[] = $a; }
+            return $out;
+        }
+        if ($k === Node::KIND_PROPERTY_ACCESS) { return [self::asPropertyAccess($n)->object]; }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
             || $k === Node::KIND_DIV || $k === Node::KIND_MOD || $k === Node::KIND_CMP
             || $k === Node::KIND_SPACESHIP
             || $k === Node::KIND_CONCAT) {
             return [self::binLeft($n), self::binRight($n)];
+        }
+        if ($k === Node::KIND_IF) {
+            $i = self::asIf($n);
+            $out = [$i->cond, $i->then];
+            if ($i->else !== null) { $out[] = $i->else; }
+            return $out;
+        }
+        if ($k === Node::KIND_RETURN) {
+            $v = self::asReturn($n)->value;
+            return $v === null ? [] : [$v];
+        }
+        if ($k === Node::KIND_TERNARY) {
+            $t = self::asTernary($n);
+            $out = [$t->cond, $t->else_];
+            if ($t->then !== null) { $out[] = $t->then; }
+            return $out;
         }
         if ($k === Node::KIND_NEG)  { return [self::asNeg($n)->operand]; }
         if ($k === Node::KIND_NOT)  { return [self::asNot($n)->operand]; }
@@ -67,30 +98,12 @@ final class Walk
             if ($y->value !== null) { $out[] = $y->value; }
             return $out;
         }
-        if ($k === Node::KIND_TERNARY) {
-            $t = self::asTernary($n);
-            $out = [$t->cond, $t->else_];
-            if ($t->then !== null) { $out[] = $t->then; }
-            return $out;
-        }
         if ($k === Node::KIND_ECHO) { return self::asEcho($n)->exprs; }
-        if ($k === Node::KIND_RETURN) {
-            $v = self::asReturn($n)->value;
-            return $v === null ? [] : [$v];
-        }
-        if ($k === Node::KIND_CALL) { return self::asCall($n)->args; }
-        if ($k === Node::KIND_STORE_LOCAL) { return [self::asStoreLocal($n)->value]; }
         if ($k === Node::KIND_REF_BIND) { return [self::asRefBind($n)->call]; }
         if ($k === Node::KIND_REF_ADDR) { return [self::asRefAddr($n)->lvalue]; }
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
             $sld = self::asStaticLocalDecl($n);
             return $sld->init === null ? [] : [$sld->init];
-        }
-        if ($k === Node::KIND_IF) {
-            $i = self::asIf($n);
-            $out = [$i->cond, $i->then];
-            if ($i->else !== null) { $out[] = $i->else; }
-            return $out;
         }
         if ($k === Node::KIND_WHILE) {
             $w = self::asWhile($n);
@@ -177,7 +190,6 @@ final class Walk
             foreach ($cl->withProps as $pair) { $out[] = $pair->value; }
             return $out;
         }
-        if ($k === Node::KIND_PROPERTY_ACCESS) { return [self::asPropertyAccess($n)->object]; }
         if ($k === Node::KIND_STORE_PROPERTY) {
             $sp = self::asStoreProperty($n);
             return [$sp->object, $sp->value];
@@ -189,12 +201,6 @@ final class Walk
         if ($k === Node::KIND_STORE_DYN_PROP) {
             $sd = self::asStoreDynProp($n);
             return [$sd->object, $sd->name, $sd->value];
-        }
-        if ($k === Node::KIND_METHOD_CALL) {
-            $mc = self::asMethodCall($n);
-            $out = [$mc->object];
-            foreach ($mc->args as $a) { $out[] = $a; }
-            return $out;
         }
         if ($k === Node::KIND_STATIC_CALL) { return self::asStaticCall($n)->args; }
         if ($k === Node::KIND_MEMORY_OP) {
