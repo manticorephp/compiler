@@ -20,6 +20,17 @@ final class Walk
     public static function children(Node $n): array
     {
         $k = $n->kind;
+        // Leaves are the commonest nodes in any MIR and reach `return []` at the
+        // BOTTOM of this chain — after ~54 string comparisons apiece. Profiling
+        // charges ~25% of the compiler's own CPU to `__mir_str_eq`, 90% of the
+        // attributable part to this function. These five (the whole hot part of
+        // the childless set, which is exactly the kinds this chain never names)
+        // reach the same verdict in five.
+        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_INT_CONST
+            || $k === Node::KIND_STRING_CONST || $k === Node::KIND_BOOL_CONST
+            || $k === Node::KIND_NULL_CONST) {
+            return [];
+        }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
             || $k === Node::KIND_DIV || $k === Node::KIND_MOD || $k === Node::KIND_CMP
             || $k === Node::KIND_SPACESHIP
