@@ -378,6 +378,28 @@ final class InsertMemoryOps implements Pass
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return true;
         }
+        // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
+        // allocation — the one producer this pass could not see, because it gates
+        // on `effects->alloc`. {@see EmitLlvmLocals::emitStoreLocal}'s snapshot
+        // path already takes a +1 on it (`$saved = $this->map`) so that a later
+        // mutation of either side copy-on-writes instead of clobbering the
+        // other's buffer; the retain cannot simply be dropped, because a borrow
+        // that left rc alone would let a mutation through the local see rc == 1
+        // and write THROUGH into the property. The local genuinely owns — and
+        // nothing ever released it, neither on a rebind nor at scope exit.
+        //
+        // That is ROOT 1 of the compiler's own monotone climb: InferTypes::
+        // mergeLocals' per-block local-type maps (402 MB of __mir_array_set_str,
+        // 69.7% of that allocator) were still resident at a snapshot taken with
+        // the process blocked in clang, with nothing on any stack holding them.
+        //
+        // The slot's REPRESENTATION decides the flavor ({@see slotStoredType}),
+        // which is what makes this claim safe: a nullable array property reads
+        // back a NaN-boxed cell, and it is released as a cell.
+        if ($k === Node::KIND_PROPERTY_ACCESS
+            && ($value->type->isVec() || $value->type->isAssoc())) {
+            return true;
+        }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so
@@ -518,9 +540,20 @@ final class InsertMemoryOps implements Pass
             // double-free / over-release a borrow); an owned-obj store
             // (a `new` or an obj-returning call — both yield rc=1)
             // registers it.
-            if ($this->isOwnedObj($value)) {
-                $slotType = $this->slotStoredType($sl);
-                $boxedSlot = $slotType->kind === Type::KIND_CELL;
+            $slotType = $this->slotStoredType($sl);
+            $boxedSlot = $slotType->kind === Type::KIND_CELL;
+            // A property read owns BY RETAIN, and the arm that boxes a concrete
+            // value into a cell slot ({@see EmitLlvmLocals::emitStoreLocal}, the
+            // merge box-back) returns BEFORE the alias retain the general store
+            // path emits. Claiming ownership there plants a release with no
+            // matching retain — this pass's own invariant, and the crash it
+            // predicts: `$conds = $arm->conds;` in InferTypes::inferMatch went
+            // through the box-back, and the gen-2 compiler wrote through a freed
+            // buffer at `str x8, [x0]` with x0 == 0. An allocation-owned producer
+            // (a call's +1) keeps its reference through the same arm, so only the
+            // retain-owned one is dropped here.
+            $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS;
+            if ($this->isOwnedObj($value) && !($ownedByRetain && $boxedSlot)) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit
                 // release reads the slot, not the producer. Block: a leak, never a
