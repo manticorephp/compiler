@@ -3213,6 +3213,17 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                                            'ReflectionParameter', 'ReflectionNamedType',
                                            'ReflectionAttribute', 'ReflectionFunction',
                                            'ReflectionClassConstant',
+                                           // The enum + composite-type surface. A program
+                                           // may name ONLY one of these — `new
+                                           // ReflectionEnum(S::class)` mentions no other
+                                           // Reflection name — and without them here the
+                                           // whole file stayed out: the class was then
+                                           // undefined and every call became the
+                                           // "Call to undefined method" trap, which is
+                                           // what the enum probe's IR actually contained.
+                                           'ReflectionEnum', 'ReflectionEnumUnitCase',
+                                           'ReflectionEnumBackedCase',
+                                           'ReflectionUnionType', 'ReflectionIntersectionType',
                                            'ReflectionException'])
         // get_declared_* are plain FUNCTIONS living in the same file — a program
         // may call one without ever naming a Reflection class, and would then

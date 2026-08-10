@@ -674,6 +674,67 @@ trait LowerPrelude
      *    visibility is enforced, and the readonly guard exempts this frame.
      *  - `__mc_unser_enum(spec, st)` — `Enum:Case` back to the case singleton.
      */
+    /**
+     * `__mc_refl_alloc(cls)` — an instance with NO constructor run, for
+     * `ReflectionClass::newInstanceWithoutConstructor()`. The same `===` chain
+     * over the closed world that {@see unserSrc}'s allocator uses, minus the
+     * unserialize state: hydration (doctrine, symfony's var-exporter and the
+     * serializer) builds objects exactly this way, and php's own
+     * newInstanceWithoutConstructor is the documented door for it.
+     *
+     * GENERATED, not written in the prelude file: it names every class in THIS
+     * module, and a prelude body must never be built from module-local
+     * information ({@see prelude/reflection.php}'s ODR note). An unknown name
+     * returns null, which is what a closed world can honestly say.
+     */
+    /**
+     * `__mc_enum_meta(cls)` — `['backing' => 'string'|'int'|'', 'cases' => C::cases()]`
+     * for every enum in this module, or null for anything else. What
+     * ReflectionEnum reports.
+     *
+     * The two facts come from opposite places and neither is reachable from a
+     * prelude body: the BACKING TYPE lives only on the AST declaration (the MIR
+     * ClassDef records nothing about enums), and the CASES are the enum's own
+     * compiler-generated `cases()`, which can only be named per class. So the
+     * generated dispatcher, exactly like {@see reflAllocSrc}.
+     *
+     * Boxed through `__mir_to_cell`: the only caller reaches it as a cell, and a
+     * raw array pointer there decodes as a double — the lesson the attribute
+     * factories already paid for.
+     */
+    private function reflEnumMetaSrc(): string
+    {
+        $src = "function __mc_enum_meta(string \$cls): mixed {\n";
+        foreach ($this->classDecls as $cname => $decl) {
+            if ($this->declKind($decl) !== 'enum') { continue; }
+            $backing = $this->declEnumBacking($decl);
+            $q = $this->dqBody($cname);
+            $src = $src . "  if (\$cls === \"" . $q . "\") { return __mir_to_cell(['backing' => \""
+                 . $this->dqBody($backing) . "\", 'cases' => \\" . $cname . "::cases()]); }\n";
+        }
+        return $src . "  return null;\n}\n";
+    }
+
+    /** `kind` / `enumBackingType` through a typed param, so the field read takes
+     *  the right offset under the self-host ({@see declConsts}'s reason). */
+    private function declKind(\Parser\Ast\ClassDecl $d): string { return $d->kind; }
+
+    private function declEnumBacking(\Parser\Ast\ClassDecl $d): string
+    {
+        return $d->enumBackingType === null ? '' : $d->enumBackingType;
+    }
+
+    private function reflAllocSrc(): string
+    {
+        $src = "function __mc_refl_alloc(string \$cls): mixed {\n"
+             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
+        foreach ($this->walkableClassesDerivedFirst() as $cname) {
+            $src = $src . "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
+                 . $this->dqBody($cname) . "\"); }\n";
+        }
+        return $src . "  return null;\n}\n";
+    }
+
     private function unserSrc(): string
     {
         $names = $this->walkableClassesDerivedFirst();
