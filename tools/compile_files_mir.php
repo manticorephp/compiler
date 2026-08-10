@@ -40,9 +40,38 @@ if ($argc < 2) {
     exit(64);
 }
 
-$sources = [];
+/**
+ * `@<listfile>` — the RESOLVED file list a manifest build wrote with
+ * `MANTICORE_DUMP_SOURCES` ({@see Manticore\dump_resolved_sources}). Each line
+ * is `  <path>` or `D <path>` for a demand-loaded one, whose top-level side
+ * effects the builder drops while keeping its declarations.
+ *
+ * This is how a manifest build that CRASHES gets diagnosed: the same unit,
+ * compiled by the Zend front end, where a null against a typed parameter is a
+ * TypeError with a stack trace rather than a SIGSEGV with no unwind. A
+ * hand-reconstructed list does not reproduce — it misses these two rules.
+ */
+$paths = [];
 for ($i = 1; $i < $argc; $i++) {
-    $path = $argv[$i];
+    $arg = $argv[$i];
+    if ($arg === '' || $arg[0] !== '@') { $paths[] = $arg; continue; }
+    $listFile = substr($arg, 1);
+    if (!is_file($listFile)) {
+        fwrite(STDERR, "not a file: $listFile\n");
+        exit(66);
+    }
+    foreach (explode("\n", file_get_contents($listFile)) as $line) {
+        if ($line === '') { continue; }
+        $demand = str_starts_with($line, 'D ');
+        $p = substr($line, 2);
+        if ($p === '') { continue; }
+        $paths[] = $p;
+        if ($demand) { \Manticore\CompileArgs::$demandLoadedPaths[rtrim($p, '/')] = true; }
+    }
+}
+
+$sources = [];
+foreach ($paths as $path) {
     if (!is_file($path)) {
         fwrite(STDERR, "not a file: $path\n");
         exit(66);

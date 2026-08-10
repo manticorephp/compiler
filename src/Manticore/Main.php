@@ -767,6 +767,42 @@ function write_file(string $path, string $bytes): bool {
 }
 
 /**
+ * `MANTICORE_DUMP_SOURCES=<path>` — write the compile unit's RESOLVED file list
+ * and stop being the only thing that knows it.
+ *
+ * The manifest builder is what turns a manifest into a set of files: composer's
+ * psr-4/psr-0/classmap roots, minus the manifest's excludes, minus composer's
+ * own, minus the scripts that declare nothing, plus the entry. Nothing else can
+ * reproduce that, which is exactly the problem when the build CRASHES: the one
+ * tool that would name the site is the Zend front end
+ * (`tools/compile_files_mir.php`, where a null against a typed parameter is a
+ * TypeError with a stack trace instead of a SIGSEGV) and it takes a FILE LIST.
+ * Reconstructing that list from the build log does NOT reproduce the build — it
+ * misses the skips and the demand-loaded marking, so it fails on errors the real
+ * build never sees.
+ *
+ * A demand-loaded path (declarations kept, top-level side effects dropped) is
+ * written with a `D ` prefix so the driver can mark it the same way.
+ *
+ * @param string[] $paths
+ */
+function dump_resolved_sources(array $paths): void
+{
+    $out = \getenv("MANTICORE_DUMP_SOURCES");
+    if ($out === false || $out === "") { return; }
+    $buf = "";
+    foreach ($paths as $p) {
+        $norm = \rtrim($p, "/");
+        $buf .= (isset(CompileArgs::$demandLoadedPaths[$norm]) ? "D " : "  ") . $p . "\n";
+    }
+    if (!write_file($out, $buf)) {
+        dprint("build: could not write MANTICORE_DUMP_SOURCES to " . $out);
+        return;
+    }
+    dprint("build: resolved " . (string)\count($paths) . " source file(s) -> " . $out);
+}
+
+/**
  * Heterogeneous return values across `assoc<string, mixed>` get
  * flattened to i64 by the self-host compiler today, so we stash the
  * parsed argv into typed static class properties instead of building
@@ -2259,6 +2295,7 @@ function cmd_build(array $args): int
             dprint("build: no sources for application '" . $name . "'");
             return 66;
         }
+        dump_resolved_sources($paths);
         // Library dependencies. A library marked "runtime": true (the bundled
         // stdlib) is the ALWAYS-ON runtime: every app imports + links it by
         // default, so the stdlib is transparently available with no manifest
