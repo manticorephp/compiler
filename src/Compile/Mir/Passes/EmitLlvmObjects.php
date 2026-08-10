@@ -1909,6 +1909,21 @@ trait EmitLlvmObjects
         $gep = $this->ssa->allocReg();
         $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
               . $objPtr . ', i64 ' . (string)$offset . "\n";
+        // Release-before-overwrite. A LOCAL slot has always dropped its previous
+        // value; a property slot never has, so every rc value an overwritten
+        // property leaves behind is immortal — 191.7 MB at 100k iterations of
+        // `$o->arr = fresh()`, 761.3 MB at 400k, where the same value into a local
+        // is flat and php is flat ({@see tools/prof/propleak.php}).
+        //
+        // AFTER the retain above and BEFORE the store, which is what makes
+        // `$this->a = $this->a` safe: the new value is at +1 before the old one
+        // drops, so a self-assignment goes 1 -> 2 -> 1 instead of freeing itself.
+        $drop = $this->propSlotDropsOldValue($n, $propType);
+        if ($drop !== '') {
+            $old = $this->ssa->allocReg();
+            $out .= '  ' . $old . ' = load i64, ptr ' . $gep . "\n";
+            $out .= $this->rcReleaseReg($old, $drop);
+        }
         $out .= $this->emitSlotStore(
             $gep,
             $this->slotHolder($n->object, $n->property),
@@ -5052,6 +5067,45 @@ trait EmitLlvmObjects
             return Type::vec(Type::unknown());
         }
         return $propType;
+    }
+
+    /**
+     * The release flavor for the value a property store OVERWRITES, or '' when
+     * this slot must keep leaking it.
+     *
+     * Every condition is a soundness condition, not a heuristic:
+     *   - ARRAY slots only, and only RAW ones. A string / object property read
+     *     takes no reference at all ({@see EmitLlvmLocals::emitStoreLocal} retains
+     *     a LoadLocal alias, never a PROPERTY_ACCESS one), so dropping those slots
+     *     frees a value a live local still points at — the shape that made the
+     *     one-line version of this fix pass gen-1 and then emit
+     *     `getelementptr … ptr 19` out of gen-2. An array slot is different only
+     *     because the snapshot alias DOES retain.
+     *   - a boxed cell slot is excluded: the flavor would have to come from the
+     *     tag, and the box-back arm that fills such a slot takes no reference.
+     *   - the class must be declared HERE and not exported. An importing module's
+     *     borrow is invisible to this scan, and the borrow that matters is
+     *     cross-frame: `$s = $o->items[0]; $o->set([...]); return $s;` — the frame
+     *     that overwrites never reads the property at all.
+     *   - and the property must never be read in a borrowing position anywhere in
+     *     this module ({@see EmitLlvm::$propRawBorrow}).
+     * Anything unproven keeps today's behaviour, which leaks. That is the
+     * direction this codebase has already chosen everywhere else.
+     */
+    private function propSlotDropsOldValue(\Compile\Mir\StoreProperty $n, ?Type $propType): string
+    {
+        if ($this->propBorrowUnknown) { return ''; }
+        $cls = $n->object->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return ''; }
+        $holder = $this->slotHolder($n->object, $n->property);
+        if ($holder === null || $holder->isExternClass) { return ''; }
+        if ($holder->propertyWidth($n->property) !== 8) { return ''; }
+        if ($this->cellPropBoxed($propType, $cls, $n->property)) { return ''; }
+        $t = $this->propStoreRetainType($n);
+        if ($t === null || !$t->isArray()) { return ''; }
+        $key = $this->cellPropKey($cls, $n->property);
+        if (isset($this->propRawBorrow[$key]) || isset($this->propRawBorrow[$n->property])) { return ''; }
+        return $this->discardReleaseFlavor($t);
     }
 
     private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool

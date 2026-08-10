@@ -540,6 +540,11 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropHasVecCellArrayStore = [];
         $this->cellPropTagRead = [];
         $this->cellPropElemAsIndex = [];
+        $this->propRawBorrow = [];
+        // A LIBRARY's classes go into a `.sig`, so "nobody borrows this property"
+        // is not answerable here at all — veto every slot rather than reason about
+        // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
+        $this->propBorrowUnknown = $module->isLibraryModule;
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
         // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
@@ -1171,8 +1176,47 @@ final class EmitLlvm implements EmitVisitor
      *  boxed into cells. The raw veto for {@see $cellPropHasVecCellArrayStore}. */
     private array $cellPropElemAsIndex = [];
 
+    /**
+     * Prop keys whose value is read somewhere that takes NO REFERENCE — the veto
+     * for release-before-overwrite on the slot ({@see propSlotDropsOldValue}).
+     *
+     * Exactly ONE read shape retains: `$x = $this->arr`, the snapshot alias in
+     * {@see EmitLlvmLocals::emitStoreLocal} — and even that one does not when the
+     * store takes the cell box-back arm, which returns before the retain. Every
+     * other read borrows the raw buffer, proven from emitted IR rather than from
+     * reading code:
+     *   - `foreach ($this->items as $it)` — no retain, no copy; the loop walks the
+     *     buffer, so freeing it in the body would pull the ground out of the walk;
+     *   - `$s = $h->items[0]` — `array_get_int` + `elem_untag` + `store`, no retain,
+     *     so the local borrows the ELEMENT and a drop of the buffer frees it too.
+     * Anything else — a call argument, a return, a store into another container —
+     * is counted as a borrow as well: this scan is a VETO, and its false positives
+     * only cost the leak we already have.
+     */
+    private array $propRawBorrow = [];
+
+    /** True when this module cannot answer the borrow question at all (a library
+     *  target). Every slot then keeps its old value — the leak, never a free. */
+    private bool $propBorrowUnknown = false;
+
     private function scanCellPropStores(Node $n): void
     {
+        // Every property READ that is not the retaining snapshot alias vetoes its
+        // slot. Judged at the PARENT, because the shape that retains is a property
+        // of the parent (a StoreLocal), not of the read.
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $v = $n->value;
+            if ($v->kind === Node::KIND_PROPERTY_ACCESS
+                && $n->type->kind === Type::KIND_CELL
+                && $v->type->kind !== Type::KIND_CELL) {
+                // The box-back arm returns BEFORE the alias retain — the same
+                // exclusion InsertMemoryOps makes for ownership.
+                $this->markPropBorrow($v);
+            }
+            foreach (\Compile\Mir\Walk::children($v) as $c) { $this->markPropBorrowsIn($c); }
+        } else {
+            foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markPropBorrowsIn($c); }
+        }
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             // Key by the DECLARING class (+ a bare-name global fallback when the
             // receiver is erased), so a same-named property in an unrelated class
@@ -1236,6 +1280,23 @@ final class EmitLlvm implements EmitVisitor
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
         }
+    }
+
+    /** Mark `$n` as a raw borrow iff it IS a property read. Deliberately NOT
+     *  recursive — {@see scanCellPropStores} already walks the tree, and every
+     *  node judges its own direct children. */
+    private function markPropBorrowsIn(Node $n): void
+    {
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) { $this->markPropBorrow($n); }
+    }
+
+    /** Veto both the class-qualified key and the bare name, the same pair
+     *  {@see cellPropBoxed} consults — an erased receiver names no class, so the
+     *  bare name has to carry the veto for every class that declares it. */
+    private function markPropBorrow(Node $pa): void
+    {
+        $this->propRawBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+        $this->propRawBorrow[$pa->property] = true;
     }
 
     /** Builtins whose argument's array-ness must be visible at runtime (they
