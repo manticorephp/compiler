@@ -5118,6 +5118,20 @@ trait EmitLlvmObjects
             if ($dbg) { \error_log('  no: borrowed (' . $key . ')'); }
             return '';
         }
+        // Borrowed ELEMENT-WISE only: the buffer itself is nobody else's, so give
+        // it back — buffer + hashed keys, elements untouched ({@see
+        // EmitLlvm::$propElemBorrow}). A map that is rebuilt every round
+        // (`$this->localTypes = $this->mergeLocals(…)`) otherwise keeps every
+        // buffer it ever had.
+        if (isset($this->propElemBorrow[$key]) || isset($this->propElemBorrow[$n->property])) {
+            // Both names resolve to `__mir_array_release_buf`, which is
+            // MODE-driven at runtime (hashed → drop the string keys, packed →
+            // nothing), so an ERASED `private array $x` slot is served too.
+            $bufFlavor = ($t->isAssoc() || $t->isVec()
+                || $this->slotIsArrayHinted($n->object, $n->property, $t)) ? 'assocbuf' : '';
+            if ($dbg) { \error_log('  ' . ($bufFlavor === '' ? 'no: elem-borrowed, not an array' : 'YES ' . $bufFlavor . ' (buffer only)')); }
+            return $bufFlavor;
+        }
         $flavor = $this->discardReleaseFlavor($t);
         // The slot owns one element ref per element (every store hands it a
         // reference that carries them — {@see EmitLlvm::$propOwnElem}), so it
