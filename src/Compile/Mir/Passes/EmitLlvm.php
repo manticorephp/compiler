@@ -1311,13 +1311,20 @@ final class EmitLlvm implements EmitVisitor
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { $this->markPropBorrow($n); }
     }
 
-    /** Veto both the class-qualified key and the bare name, the same pair
-     *  {@see cellPropBoxed} consults — an erased receiver names no class, so the
-     *  bare name has to carry the veto for every class that declares it. */
+    /**
+     * Veto the DECLARING class's key — and the bare name only when the receiver
+     * names no class, where {@see cellPropKey} already answers the bare name and
+     * the veto has to cover every class that declares it.
+     *
+     * ⚠ Marking the bare name UNCONDITIONALLY makes this scan nearly global: the
+     * prelude and the stdlib are compiled into every module, so one borrow of any
+     * `arr` / `items` / `keys` anywhere vetoed that name for every unrelated class
+     * in the program. It read as "the analysis is just conservative" — the slot
+     * simply never dropped, silently — and it cost the whole `snap` row.
+     */
     private function markPropBorrow(Node $pa): void
     {
         $this->propRawBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
-        $this->propRawBorrow[$pa->property] = true;
     }
 
     /** Builtins whose argument's array-ness must be visible at runtime (they

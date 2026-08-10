@@ -5098,21 +5098,27 @@ trait EmitLlvmObjects
      */
     private function propSlotDropsOldValue(\Compile\Mir\StoreProperty $n, ?Type $propType): string
     {
-        if ($this->propBorrowUnknown) { return ''; }
+        $dbg = \getenv('MANTICORE_DROP_TRACE') !== false;
         $cls = $n->object->type->class ?? '';
-        if ($cls === '' || !isset($this->classes[$cls])) { return ''; }
+        if ($dbg) { \error_log('DROP? ' . $cls . '::' . $n->property); }
+        if ($this->propBorrowUnknown) { if ($dbg) { \error_log('  no: library'); } return ''; }
+        if ($cls === '' || !isset($this->classes[$cls])) { if ($dbg) { \error_log('  no: class'); } return ''; }
         $holder = $this->slotHolder($n->object, $n->property);
-        if ($holder === null || $holder->isExternClass) { return ''; }
-        if ($holder->propertyWidth($n->property) !== 8) { return ''; }
-        if ($this->cellPropBoxed($propType, $cls, $n->property)) { return ''; }
+        if ($holder === null || $holder->isExternClass) { if ($dbg) { \error_log('  no: holder'); } return ''; }
+        if ($holder->propertyWidth($n->property) !== 8) { if ($dbg) { \error_log('  no: width'); } return ''; }
+        if ($this->cellPropBoxed($propType, $cls, $n->property)) { if ($dbg) { \error_log('  no: boxed'); } return ''; }
         $t = $this->propStoreRetainType($n);
-        if ($t === null) { return ''; }
+        if ($t === null) { if ($dbg) { \error_log('  no: type'); } return ''; }
         // A CELL slot that is NOT boxed is a raw pointer whose static type claims
         // a tag it does not carry — `cell` is a static CLAIM, not a runtime
         // guarantee. __mir_cell_drop would dispatch on bits that are an address.
-        if ($t->kind === Type::KIND_CELL) { return ''; }
+        if ($t->kind === Type::KIND_CELL) { if ($dbg) { \error_log('  no: cell slot'); } return ''; }
         $key = $this->cellPropKey($cls, $n->property);
-        if (isset($this->propRawBorrow[$key]) || isset($this->propRawBorrow[$n->property])) { return ''; }
+        if (isset($this->propRawBorrow[$key]) || isset($this->propRawBorrow[$n->property])) {
+            if ($dbg) { \error_log('  no: borrowed (' . $key . ')'); }
+            return '';
+        }
+        if ($dbg) { \error_log('  YES ' . $this->discardReleaseFlavor($t)); }
         return $this->discardReleaseFlavor($t);
     }
 
