@@ -1,0 +1,7 @@
+one: r=1 m1=42
+all: r=3 n=3
+miss: r=0 empty=y
+two-group: ab
+reused   : xy
+plain: 4
+method: 1.2
