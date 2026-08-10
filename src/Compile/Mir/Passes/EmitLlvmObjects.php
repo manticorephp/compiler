@@ -5118,8 +5118,23 @@ trait EmitLlvmObjects
             if ($dbg) { \error_log('  no: borrowed (' . $key . ')'); }
             return '';
         }
-        if ($dbg) { \error_log('  YES ' . $this->discardReleaseFlavor($t)); }
-        return $this->discardReleaseFlavor($t);
+        $flavor = $this->discardReleaseFlavor($t);
+        // The slot owns one element ref per element (every store hands it a
+        // reference that carries them — {@see EmitLlvm::$propOwnElem}), so it
+        // gives one back on EVERY release. Without this the drop runs at rc > 0
+        // whenever anything else holds the buffer, returns NOTHING, and strands
+        // the ref its own store's retain took: `$m = build(); $h->set($m);` in a
+        // loop leaked every key and value while the buffer itself was reclaimed.
+        if ($this->isOwnElemFlavor($flavor)
+            && isset($this->propOwnElem[$key])
+            && !isset($this->propOwnElemVeto[$key])
+            && !isset($this->propOwnElemVeto[$n->property])
+            && $this->propOwnElem[$key] === $flavor) {
+            if ($dbg) { \error_log('  YES ' . $flavor . 'own'); }
+            return $flavor . 'own';
+        }
+        if ($dbg) { \error_log('  YES ' . $flavor); }
+        return $flavor;
     }
 
     private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool

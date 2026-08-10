@@ -954,7 +954,26 @@ trait EmitLlvmArrays
         return $out;
     }
 
-    private function cowSymbolFor(Type $t): string
+    /**
+     * `$base` (when given) is the container being mutated: a local whose
+     * reference OWNS one element ref per element hands that ref to the cow,
+     * which consumes the reference — so the cow must give it back. Without it
+     * `$s = $this->map; $s[$k] = v;` in a loop strands every key and value on
+     * the source buffer ({@see UnifiedArrayRuntime::emitCowVariant}).
+     */
+    private function cowSymbolFor(Type $t, ?Node $base = null): string
+    {
+        $sym = $this->cowSymbolPlain($t);
+        if ($base !== null && $base->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->frame->ownElemLocals[$base->name])
+            && ($sym === '@__mir_array_cow_str' || $sym === '@__mir_array_cow_obj'
+                || $sym === '@__mir_array_cow_cell')) {
+            return \str_replace('_cow_', '_cow_ownel_', $sym);
+        }
+        return $sym;
+    }
+
+    private function cowSymbolPlain(Type $t): string
     {
         // A genuinely-CELL carrier holds boxed cells → cow_cell. An ERASED
         // (unknown) array/element carries RAW homogeneous elements stamped with
@@ -1182,7 +1201,7 @@ trait EmitLlvmArrays
         // A STATIC property is a mutable shared slot exactly like the other two
         // (and {@see vecWriteBack} already threads the realloced buffer back
         // into its cell), so it COWs on the same terms.
-        $cowFn = $this->cowSymbolFor($se->array->type);
+        $cowFn = $this->cowSymbolFor($se->array->type, $se->array);
         if ($se->array->kind === Node::KIND_LOAD_LOCAL
             || $se->array->kind === Node::KIND_PROPERTY_ACCESS
             || $se->array->kind === Node::KIND_STATIC_PROP) {

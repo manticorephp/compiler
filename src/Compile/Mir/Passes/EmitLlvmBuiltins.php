@@ -1151,7 +1151,16 @@ trait EmitLlvmBuiltins
         // first `$bag = __mir_obj_bag($v);` frees the object's own properties.
         $bagP = $this->lastValue;
         $this->rt->needsRc = true;
-        $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+        $this->rt->needsStrRc = true;
+        // At the DEPTH the caller will release by. The bag is typed
+        // `assoc<string, cell>` ({@see InferCalls}), so the caller's release is
+        // `__mir_array_release_cell` — a plain repr retain co-owns the elements
+        // only when the buffer happens to carry repr bits, and the difference
+        // stayed dormant only because that release never reached rc → 0. It is
+        // not dormant for a symmetric release: `var_export($o)` twice printed an
+        // EMPTY nested array the second time, the bag's cells having been
+        // dropped by a release that never retained them.
+        $out .= '  call void @__mir_array_retain_cell(ptr ' . $bagP . ")\n";
         $this->lastValue = $bagP;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2087,7 +2096,7 @@ trait EmitLlvmBuiltins
             && ($arrNode->kind === Node::KIND_LOAD_LOCAL
                 || $arrNode->kind === Node::KIND_PROPERTY_ACCESS
                 || $arrNode->kind === Node::KIND_STATIC_PROP)) {
-            $cowFn = $this->cowSymbolFor($arrT);
+            $cowFn = $this->cowSymbolFor($arrT, $arrNode);
             $cow = $this->ssa->allocReg();
             $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $this->lastValue . ")\n";
             $out .= $this->vecWriteBack($arrNode, $cow, $baseCell);
@@ -5258,7 +5267,7 @@ trait EmitLlvmBuiltins
             return '';
         }
         $cow = $this->ssa->allocReg();
-        $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type)
+        $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type, $arrNode)
              . '(ptr ' . $arr . ")\n";
         $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
         $this->lastValue = $cow;
@@ -6446,7 +6455,9 @@ trait EmitLlvmBuiltins
         $out = $this->emitBagOfUnknownClass($objPtr);
         $bagP = $this->lastValue;
         $this->rt->needsRc = true;
-        $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+        $this->rt->needsStrRc = true;
+        // Element depth, not buffer-only — see {@see biObjBag}.
+        $out .= '  call void @__mir_array_retain_cell(ptr ' . $bagP . ")\n";
         $this->lastValue = $bagP;
         $this->lastValueType = 'ptr';
         return $out;

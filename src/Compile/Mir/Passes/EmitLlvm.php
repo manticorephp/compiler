@@ -541,6 +541,8 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropTagRead = [];
         $this->cellPropElemAsIndex = [];
         $this->propRawBorrow = [];
+        $this->propOwnElem = [];
+        $this->propOwnElemVeto = [];
         // A LIBRARY's classes go into a `.sig`, so "nobody borrows this property"
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
@@ -1195,6 +1197,36 @@ final class EmitLlvm implements EmitVisitor
      */
     private array $propRawBorrow = [];
 
+    /**
+     * Prop keys whose SLOT owns one element ref per element — every store to
+     * them hands the slot a reference that carries the element refs the drop
+     * flavor names, so the slot's release-before-overwrite can give them back on
+     * EVERY release instead of only at rc → 0 ({@see UnifiedArrayRuntime}'s
+     * `_ownel_` variants).
+     *
+     * The count that makes this the fix, and not a double free: a buffer's
+     * elements carry ONE base ref (the builder's) plus one per retain, and there
+     * are exactly retains+1 releases. Every release giving back exactly one is
+     * therefore balanced — while a release that gives back nothing (today, at
+     * rc > 0) strands the ref its retain took. `$m = build(); $h->set($m);` in a
+     * loop leaked every key and value that way: `set`'s retain co-owned them and
+     * its release-before-overwrite ran at rc 2 → 1, dropping nothing.
+     *
+     * @var array<string, string> key => the drop flavor proven for it
+     */
+    private array $propOwnElem = [];
+
+    /**
+     * Keys disqualified from the above: a store whose reference does NOT carry
+     * element refs the drop would give back — a `_buf` / repr-mode retain, a
+     * store with no retain type at all, a non-array value. One such store and
+     * the slot keeps today's drop-at-zero, because a release that gives back a
+     * ref it never held is an over-release on a LIVE buffer.
+     *
+     * @var array<string, bool>
+     */
+    private array $propOwnElemVeto = [];
+
     /** True when this module cannot answer the borrow question at all (a library
      *  target). Every slot then keeps its old value — the leak, never a free. */
     private bool $propBorrowUnknown = false;
@@ -1218,6 +1250,7 @@ final class EmitLlvm implements EmitVisitor
             // receiver is erased), so a same-named property in an unrelated class
             // no longer poisons this slot's box decision. See cellPropBoxed.
             $key = $this->cellPropKey($n->object->type->class ?? '', $n->property);
+            $this->markPropOwnElem($n, $key);
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_ARRAY) {
                 // A concrete array can box (boxToCell rebuilds it as a cell-array),
@@ -1325,6 +1358,55 @@ final class EmitLlvm implements EmitVisitor
     private function markPropBorrow(Node $pa): void
     {
         $this->propRawBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+    }
+
+    /**
+     * Judge ONE store into a property slot: does the reference it hands the slot
+     * carry the element refs the slot's drop would give back?
+     *
+     * The question is a pure TYPE one — {@see EmitLlvmMemory::arrayRetainFlavor}
+     * answers exactly what the store's retain co-owns, and it answers the same
+     * for a MOVE (an owned literal / call return transfers its +1 without a
+     * retain, and that reference carries the builder's base element refs). What
+     * must not slip through is a reference with NO element refs behind it: a
+     * `*buf` or repr-mode flavor, an unretainable value, or a store whose retain
+     * type disagrees with the flavor the drop will use.
+     *
+     * ⚠ A veto is module-wide and permanent — one bad store anywhere and the
+     * slot keeps the leak. That is the safe direction, and it is the direction
+     * every other conservative gate here already takes.
+     */
+    private function markPropOwnElem(\Compile\Mir\StoreProperty $n, string $key): void
+    {
+        $t = $this->propStoreRetainType($n);
+        $drop = $t === null ? '' : $this->discardReleaseFlavor($t);
+        $ok = $t !== null
+            && $n->value->type->isArray()
+            && $this->isOwnElemFlavor($drop)
+            && $this->arrayRetainFlavor($n->value, $t) === $drop;
+        if (!$ok) {
+            $this->propOwnElemVeto[$key] = true;
+            // An ERASED receiver names no class, so the veto has to cover every
+            // class declaring the name — the same fallback {@see cellPropKey}
+            // already relies on.
+            if (($n->object->type->class ?? '') === '') { $this->propOwnElemVeto[$n->property] = true; }
+            return;
+        }
+        if (isset($this->propOwnElem[$key]) && $this->propOwnElem[$key] !== $drop) {
+            $this->propOwnElemVeto[$key] = true;
+            return;
+        }
+        $this->propOwnElem[$key] = $drop;
+    }
+
+    /** The flavors that name element refs a release can give back. `vec`/`assoc`
+     *  (repr mode) read ownership off the BUFFER's own bits, which a per-slot
+     *  claim cannot speak for; `*buf` holds none at all. */
+    private function isOwnElemFlavor(string $flavor): bool
+    {
+        return $flavor === 'vecstr' || $flavor === 'assocstr'
+            || $flavor === 'vecobj' || $flavor === 'assocobj'
+            || $flavor === 'veccell' || $flavor === 'assoccell';
     }
 
     /** Builtins whose argument's array-ness must be visible at runtime (they

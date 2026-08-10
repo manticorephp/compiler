@@ -65,4 +65,14 @@ final class FunctionEmitFrame
      *  shared elements. Element-drop stays valid only for a SOLE-owner confined
      *  vec (built and discarded, never shared). */
     public array $elementSharedLocals = [];
+    /** @var array<string, bool> locals whose value was acquired BY RETAIN — the
+     *  `$saved = $this->map` property snapshot, the one read shape that takes a
+     *  reference — and whose retain and release name the SAME flavor. Their
+     *  release drops the element refs its own retain took, on EVERY release
+     *  (`__mir_array_release_ownel_*`), instead of only at rc → 0. Element
+     *  ownership is a property of the REFERENCE: a name qualifies only when
+     *  EVERY store to it is that one shape, so both ends of the pair are the
+     *  same site with the same static type. {@see EmitLlvmMemory::
+     *  collectOwnElemLocals}. Appended at the END — no mid-struct insertion. */
+    public array $ownElemLocals = [];
 }
