@@ -1211,7 +1211,7 @@ trait EmitLlvmRuntime
         foreach ($cls->methodMeta as $mn => $mm) {
             $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $mn);
-            $pp = $this->rmetaParamTable($mm, $id, $i);
+            $pp = $this->rmetaParamTable($mm, $id, $i, $cls->name);
             $defs .= $pp[0];
             $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
             $ap = $this->attrTableFor($mm->attributes, $mdecl, 'm', $mn, '@.rmeta.mattr.' . $id . '.' . (string)$i);
@@ -1246,11 +1246,18 @@ trait EmitLlvmRuntime
      *   `count($mm->params)`, pushed by the caller as an int so every rmetaTable
      *   column keeps ONE repr across the method + property call sites).
      */
-    private function rmetaParamTable(\Compile\Mir\MethodMeta $mm, string $id, int $mi): array
+    private function rmetaParamTable(\Compile\Mir\MethodMeta $mm, string $id, int $mi,
+                                     string $ownerClass = ''): array
     {
         $names = [];
         $types = [];
         $flags = [];
+        /** @var string[] $attrs per param: its attribute table symbol, or 'null' */
+        $attrs = [];
+        /** @var int[] $nattrs */
+        $nattrs = [];
+        /** @var string[] $defFns per param: its default-value factory, or 'null' */
+        $defFns = [];
         $defs = '';
         $pi = 0;
         foreach ($mm->params as $pm) {
@@ -1273,10 +1280,31 @@ trait EmitLlvmRuntime
                 $types[] = 'null';
             }
             $flags[] = $f;
+            // The parameter's own attribute rows. The site key must be the SAME
+            // string {@see Passes\LowerFromAst::synthAttrFactories} used when it
+            // synthesized the factories — `<method>_<position>` — or this table
+            // names symbols nothing defines. `attrTableFor` already drops a row
+            // whose factory was not synthesized, so an attribute class the
+            // module does not declare costs nothing here.
+            $pdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $ownerClass;
+            $pa = $this->attrTableFor($pm->attributes, $pdecl, 'a',
+                $mm->name . '_' . (string)$pi,
+                '@.rmeta.paattr.' . $id . '.' . (string)$mi . '.' . (string)$pi);
+            $defs .= $pa[0];
+            $nattrs[] = $pa[1];
+            $attrs[] = $pa[2];
+            // The default-value factory, referenced by symbol only when it was
+            // actually synthesized — an undefined DATA reference is a link
+            // error, the same guard the method trampoline field carries.
+            $dfn = \Compile\Mir\Passes\ReflectSynth::paramDefaultFn(
+                $pdecl, $mm->name, $pi);
+            $defFns[] = isset($this->sigs->paramTypes[$dfn])
+                ? ('@manticore_' . $this->mangle($dfn)) : 'null';
             $pi = $pi + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaParamTable(
-            '@.rmeta.parm.' . $id . '.' . (string)$mi, $names, $types, $flags);
+            '@.rmeta.parm.' . $id . '.' . (string)$mi, $names, $types, $flags,
+            $attrs, $nattrs, $defFns);
         return [$defs . $pair[0], $pair[1]];
     }
 
@@ -1368,6 +1396,7 @@ trait EmitLlvmRuntime
         $target = \Compile\BuiltinAttributes::TARGET_CLASS;
         if ($kind === 'm') { $target = \Compile\BuiltinAttributes::TARGET_METHOD; }
         elseif ($kind === 'p') { $target = \Compile\BuiltinAttributes::TARGET_PROPERTY; }
+        elseif ($kind === 'a') { $target = \Compile\BuiltinAttributes::TARGET_PARAMETER; }
         // A repeat is a property of the SITE, so it is counted over all names
         // here, not per surviving row.
         $counts = [];

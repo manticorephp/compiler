@@ -61,6 +61,24 @@ final class ReflectSynth
              . $c . '__' . $kind . '_' . $m . '_' . (string)$k;
     }
 
+    /**
+     * One parameter's DEFAULT-VALUE factory: `__mc_pdef_<C>__<method>_<pos>()`
+     * → the default expression, evaluated in the declaring class's scope.
+     *
+     * A default is an EXPRESSION, not a constant — `= []`, `= self::MODE`,
+     * `= new Foo` are all legal — so the row cannot hold the value itself. A
+     * synthesized nullary function can hold anything, and the reader calls it
+     * exactly as `getConstants()` calls its own factory. Matched on the
+     * synthesis ({@see \Compile\Mir\Passes\LowerFromAst}) and emission
+     * ({@see \Compile\Mir\Passes\EmitLlvmRuntime}) sides.
+     */
+    public static function paramDefaultFn(string $declClass, string $method, int $pos): string
+    {
+        $c = \str_replace('\\', '_', \ltrim($declClass, '\\'));
+        $m = \str_replace(['\\', '$'], '_', $method);
+        return '__mc_pdef_' . $c . '__' . $m . '_' . (string)$pos;
+    }
+
     /** The class-constants factory symbol (Ф5): `__mc_consts_<C>()` → assoc
      *  `name => value`. Matched on the synthesis + emission sides. */
     public static function constsFn(string $class): string

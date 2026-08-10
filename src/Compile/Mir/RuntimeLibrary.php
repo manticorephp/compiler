@@ -77,7 +77,7 @@ final class RuntimeLibrary
     /** One parameter entry: `{ ptr name, ptr type, i64 flags }`. */
     public static function rmetaParamType(): string
     {
-        return '{ ptr, ptr, i64 }';
+        return '{ ptr, ptr, i64, ptr, i64, ptr }';
     }
 
     /** One attribute entry: `{ ptr name, ptr args_fn, ptr new_fn, i64 target,
@@ -115,24 +115,33 @@ final class RuntimeLibrary
     }
 
     /**
-     * A method's parameter table: `[N x { ptr name, ptr type, i64 flags }]`, plus
-     * the `{ count, ptr }` pair. Empty ⇒ `{ i64 0, ptr null }` (a no-arg method).
+     * A method's parameter table:
+     * `[N x { ptr name, ptr type, i64 flags, ptr attrs, i64 nattrs, ptr default_fn }]`,
+     * plus the `{ count, ptr }` pair. Empty ⇒ `{ i64 0, ptr null }` (a no-arg method).
      *
      * @param string[] $namesIr per param: the name's data-ptr IR
      * @param string[] $typesIr per param: the type-name data-ptr IR, or 'null'
      * @param int[]    $flags   per param: the packed RMETA_PARAM_* word
+     * @param string[] $attrsIr per param: its attribute table symbol, or 'null'
+     * @param int[]    $nattrs  per param: how many attribute rows that table has
+     * @param string[] $defFns  per param: `@<mangled default factory>`, or 'null'
      * @return string[] [globalDef, tableSym|'null'] — both STRINGS (the count is
      *   `count($params)`, computed by the caller). A heterogeneous return tuple
      *   would erase to vec[cell] and mis-decode under the native self-host.
      */
-    public static function rmetaParamTable(string $sym, array $namesIr, array $typesIr, array $flags): array
+    public static function rmetaParamTable(string $sym, array $namesIr, array $typesIr, array $flags,
+                                           array $attrsIr = [], array $nattrs = [], array $defFns = []): array
     {
         $n = \count($flags);
         if ($n === 0) { return ['', 'null']; }
         $items = [];
         for ($i = 0; $i < $n; $i = $i + 1) {
+            $at = $attrsIr[$i] ?? 'null';
+            $an = $nattrs[$i] ?? 0;
+            $df = $defFns[$i] ?? 'null';
             $items[] = self::rmetaParamType() . ' { ptr ' . $namesIr[$i] . ', ptr ' . $typesIr[$i]
-                 . ', i64 ' . (string)$flags[$i] . ' }';
+                 . ', i64 ' . (string)$flags[$i]
+                 . ', ptr ' . $at . ', i64 ' . (string)$an . ', ptr ' . $df . ' }';
         }
         $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x ' . self::rmetaParamType()
              . '] [' . \implode(', ', $items) . "]\n";

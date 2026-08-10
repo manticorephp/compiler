@@ -1,0 +1,17 @@
+count      : 1
+name       : Inject
+args       : logger,5
+instance   : logger/5
+filtered   : 1
+no attrs   : 0
+dep avail=true value='x' declaring=Svc
+count avail=true value=7 declaring=Svc
+label avail=true value='from-const' declaring=Svc
+opts avail=true value=NULL declaring=Svc
+list avail=true value=array (
+  0 => 1,
+  1 => 2,
+) declaring=Svc
+method dflt: 3
+declaring  : noAttrs
+class attr : OnClass args=cls

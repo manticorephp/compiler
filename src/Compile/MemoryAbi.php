@@ -415,13 +415,24 @@ final class MemoryAbi
     public const RMETA_ROW_SIZE = 72;
 
     /** One parameter entry of a method's param table:
-     *  `{ ptr name, ptr type, i64 flags }`. `type` is the declared type name with
-     *  a leading `?` / `...` stripped (empty when untyped); `flags` packs the
-     *  RMETA_PARAM_* bits. Feeds ReflectionParameter / ReflectionNamedType. */
-    public const RMETA_PARAM_NAME_OFFSET  = 0;
-    public const RMETA_PARAM_TYPE_OFFSET  = 8;
-    public const RMETA_PARAM_FLAGS_OFFSET = 16;
-    public const RMETA_PARAM_SIZE = 24;
+     *  `{ ptr name, ptr type, i64 flags, ptr attrs, i64 nattrs, ptr default_fn }`.
+     *  `type` is the declared type name with a leading `?` / `...` stripped
+     *  (empty when untyped); `flags` packs the RMETA_PARAM_* bits. Feeds
+     *  ReflectionParameter / ReflectionNamedType.
+     *
+     *  `attrs` addresses the same RMETA_ATTR_* rows a method or property site
+     *  uses — DI autowiring reads `#[Autowire]` / `#[Target]` off a PARAMETER,
+     *  and the row had nowhere to say so. `default_fn` is a synthesized nullary
+     *  function returning the parameter's default VALUE ({@see
+     *  \Compile\Mir\Passes\ReflectSynth::paramDefaultFn}); null when the
+     *  parameter has no default, which the HAS_DEFAULT flag already states. */
+    public const RMETA_PARAM_NAME_OFFSET   = 0;
+    public const RMETA_PARAM_TYPE_OFFSET   = 8;
+    public const RMETA_PARAM_FLAGS_OFFSET  = 16;
+    public const RMETA_PARAM_ATTRS_OFFSET  = 24;
+    public const RMETA_PARAM_NATTRS_OFFSET = 32;
+    public const RMETA_PARAM_DEFFN_OFFSET  = 40;
+    public const RMETA_PARAM_SIZE = 48;
 
     /** One attribute entry (Ф4): `{ ptr name, ptr args_factory, ptr new_factory }`.
      *  The factories are {@see \Compile\Mir\Passes\ReflectSynth}'s synthesized

@@ -237,7 +237,9 @@ trait InferCalls
             || $n === '__mc_refl_attr_target' || $n === '__mc_refl_attr_repeated'
             || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn'
             || $n === '__mc_refl_fn_find' || $n === '__mc_refl_row_tramp'
-            || $n === '__mc_refl_param_flags') { return Type::int_(); }
+            || $n === '__mc_refl_param_flags'
+            || $n === '__mc_refl_param_nattrs' || $n === '__mc_refl_param_attrs'
+            || $n === '__mc_refl_param_deffn') { return Type::int_(); }
         if ($n === '__mc_refl_name'
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
             || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name'

@@ -193,15 +193,21 @@ function class_implements(object|string $objectOrClass, bool $autoload = true): 
  *
  * @return ReflectionAttribute[]
  */
-function __mc_refl_attrs_of(int $base, int $n, ?string $filter): array
+function __mc_refl_attrs_of(int $base, int $n, ?string $filter, int $flags = 0): array
 {
     /** @var ReflectionAttribute[] $out */
     $out = [];
     $want = $filter === null ? "" : __mc_refl_unqualify($filter);
+    // ReflectionAttribute::IS_INSTANCEOF — match a SUBCLASS of the filter, not
+    // just the exact name. The flag was accepted and ignored, so filtering by a
+    // base attribute class answered 0 where php answers 1; doctrine and symfony
+    // both read attributes that way. `is_a` with allow_string resolves the two
+    // class-name strings.
+    $sub = ($flags & 2) !== 0;
     $i = 0;
     while ($i < $n) {
         $nm = __mc_refl_attr_name($base, $i);
-        if ($want === "" || $nm === $want) {
+        if ($want === "" || $nm === $want || ($sub && \is_a($nm, $want, true))) {
             // Every argument passed explicitly: emitNewObj does NOT pad defaults.
             $out[] = new ReflectionAttribute(
                 $nm, __mc_refl_attr_args($base, $i), __mc_refl_attr_new($base, $i),
@@ -349,6 +355,22 @@ class ReflectionClass
     }
 
     /**
+     * An instance whose declared slots are initialized but whose CONSTRUCTOR
+     * never runs — how every hydrator builds an object (doctrine, symfony's
+     * var-exporter and serializer). The allocator is compiler-generated per
+     * module ({@see \Compile\Mir\Passes\LowerPrelude::reflAllocSrc}), because
+     * naming every class is exactly what a prelude body may not do.
+     */
+    public function newInstanceWithoutConstructor(): object
+    {
+        $o = __mc_refl_alloc($this->name);
+        if ($o === null) {
+            throw new ReflectionException("Cannot instantiate " . $this->name);
+        }
+        return $o;
+    }
+
+    /**
      * A new instance, constructor arguments from an array. The `mixed[]` hint
      * boxes a concrete-element array to the `vec[cell]` the ctor trampoline
      * expects.
@@ -433,7 +455,7 @@ class ReflectionClass
     {
         return __mc_refl_attrs_of(
             __mc_refl_class_attrs($this->h),
-            __mc_refl_class_nattrs($this->h), $name);
+            __mc_refl_class_nattrs($this->h), $name, $flags);
     }
 
     /**
@@ -577,7 +599,7 @@ class ReflectionMethod
         $out = [];
         $i = 0;
         while ($i < $n) {
-            $out[] = new ReflectionParameter($base, $i);
+            $out[] = new ReflectionParameter($base, $i, $this->class, $this->name);
             $i = $i + 1;
         }
         return $out;
@@ -695,7 +717,7 @@ class ReflectionMethod
      * leading `?` is nullability; `self`/`static` resolve to the reached class
      * (best-effort — `parent` is left as written).
      */
-    public function getReturnType(): ReflectionNamedType|null
+    public function getReturnType(): object|null
     {
         $t = __mc_refl_row_rettype($this->row);
         if ($t === "") { return null; }
@@ -703,7 +725,7 @@ class ReflectionMethod
         if (\substr($t, 0, 1) === "?") { $nullable = true; $t = \substr($t, 1); }
         $lc = \strtolower($t);
         if ($lc === "self" || $lc === "static") { $t = $this->class; }
-        return new ReflectionNamedType($t, $nullable);
+        return __mc_refl_type_of($t, $nullable);
     }
 
     /**
@@ -714,7 +736,7 @@ class ReflectionMethod
     {
         return __mc_refl_attrs_of(
             __mc_refl_row_attrs($this->row),
-            __mc_refl_row_nattrs($this->row), $name);
+            __mc_refl_row_nattrs($this->row), $name, $flags);
     }
 }
 
@@ -806,13 +828,13 @@ class ReflectionProperty
 
     /** The declared type as a ReflectionNamedType, or null when untyped. A
      *  leading `?` is nullability, not part of the name. */
-    public function getType(): ReflectionNamedType|null
+    public function getType(): object|null
     {
         $t = __mc_refl_prow_type($this->extra);
         if ($t === "") { return null; }
         $nullable = false;
         if (\substr($t, 0, 1) === "?") { $nullable = true; $t = \substr($t, 1); }
-        return new ReflectionNamedType($t, $nullable);
+        return __mc_refl_type_of($t, $nullable);
     }
 
     public function isPublic(): bool
@@ -893,7 +915,7 @@ class ReflectionProperty
     {
         return __mc_refl_attrs_of(
             __mc_refl_row_attrs($this->row),
-            __mc_refl_row_nattrs($this->row), $name);
+            __mc_refl_row_nattrs($this->row), $name, $flags);
     }
 
     /** Manticore has no per-object uninitialized-slot tracking; typed slots
@@ -917,12 +939,19 @@ class ReflectionParameter
     private int $pos = 0;
     private int $flags = 0;
 
-    public function __construct(int $base, int $pos)
+    /** The declaring class + function, carried from the site that built this —
+     *  the row itself has no back-pointer, and the caller always knows. */
+    private string $declClass = "";
+    private string $declFn = "";
+
+    public function __construct(int $base, int $pos, string $declClass = "", string $declFn = "")
     {
         $this->base = $base;
         $this->pos = $pos;
         $this->name = __mc_refl_param_name($base, $pos);
         $this->flags = __mc_refl_param_flags($base, $pos);
+        $this->declClass = $declClass;
+        $this->declFn = $declFn;
     }
 
     public function getName(): string
@@ -941,11 +970,11 @@ class ReflectionParameter
     }
 
     /** The declared type as a ReflectionNamedType, or null when untyped. */
-    public function getType(): ReflectionNamedType|null
+    public function getType(): object|null
     {
         if (($this->flags & 16) === 0) { return null; }
         $t = __mc_refl_param_type($this->base, $this->pos);
-        return new ReflectionNamedType($t, ($this->flags & 2) !== 0);
+        return __mc_refl_type_of($t, ($this->flags & 2) !== 0);
     }
 
     public function isOptional(): bool
@@ -971,6 +1000,54 @@ class ReflectionParameter
     public function allowsNull(): bool
     {
         return ($this->flags & 2) !== 0;
+    }
+
+    /**
+     * The attributes written ON THIS PARAMETER. Same rows, same reader as a
+     * class or method site — the parameter row simply had nowhere to point
+     * until now. DI autowiring resolves `#[Autowire]`, `#[Target]` and
+     * `#[TaggedIterator]` through exactly this call, and controller argument
+     * resolution `#[MapRequestPayload]` / `#[MapQueryParameter]`.
+     *
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return __mc_refl_attrs_of(
+            __mc_refl_param_attrs($this->base, $this->pos),
+            __mc_refl_param_nattrs($this->base, $this->pos), $name, $flags);
+    }
+
+    /**
+     * The declared default, evaluated. A default is an EXPRESSION — `[]`,
+     * `self::MODE`, `new Foo` — so the metadata row holds a synthesized nullary
+     * FACTORY rather than a value, and this calls it. php raises when the
+     * parameter has none; symfony's DefaultValueResolver and AutowirePass both
+     * ask `isDefaultValueAvailable()` first.
+     */
+    public function getDefaultValue(): mixed
+    {
+        $fn = __mc_refl_param_deffn($this->base, $this->pos);
+        if ($fn === 0) {
+            throw new ReflectionException(
+                "Internal error: Failed to retrieve the default value");
+        }
+        return __mc_refl_call0($fn);
+    }
+
+    /** The class that declares the function this parameter belongs to, or null
+     *  for a plain function. AutowirePass reports it in every failure message. */
+    public function getDeclaringClass(): ReflectionClass|null
+    {
+        if ($this->declClass === "") { return null; }
+        return new ReflectionClass($this->declClass);
+    }
+
+    /** The method (or function) this parameter belongs to. */
+    public function getDeclaringFunction(): ReflectionMethod|null
+    {
+        if ($this->declClass === "" || $this->declFn === "") { return null; }
+        return new ReflectionMethod($this->declClass, $this->declFn);
     }
 }
 
@@ -1024,6 +1101,230 @@ class ReflectionNamedType
         }
         return $this->name;
     }
+}
+
+/**
+ * One enum case. `getValue()` is the CASE OBJECT (php's own contract — the
+ * singleton, not the scalar); the scalar is `getBackingValue()`, and only a
+ * backed enum has one.
+ */
+class ReflectionEnumUnitCase
+{
+    public string $name = "";
+    public string $class = "";
+
+    private mixed $case = null;
+
+    public function __construct(string $class, string $name, mixed $case)
+    {
+        $this->class = $class;
+        $this->name = $name;
+        $this->case = $case;
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    /** The case SINGLETON. */
+    public function getValue(): mixed
+    {
+        return $this->case;
+    }
+
+    public function getDeclaringClass(): ReflectionClass
+    {
+        return new ReflectionClass($this->class);
+    }
+}
+
+/** A case of a BACKED enum: it also carries the scalar behind it. */
+class ReflectionEnumBackedCase extends ReflectionEnumUnitCase
+{
+    public function getBackingValue(): int|string
+    {
+        return $this->getValue()->value;
+    }
+}
+
+/**
+ * `new ReflectionEnum(Status::class)` — the enum-shaped view php adds on top of
+ * ReflectionClass. The two facts it adds, the backing type and the case list,
+ * come from a compiler-generated dispatcher ({@see
+ * \Compile\Mir\Passes\LowerPrelude::reflEnumMetaSrc}): the backing type exists
+ * only on the AST declaration, and `cases()` can only be named per class —
+ * neither is reachable from a prelude body, which may not enumerate a module's
+ * classes.
+ */
+class ReflectionEnum extends ReflectionClass
+{
+    public function isBacked(): bool
+    {
+        $m = __mc_enum_meta($this->name);
+        if ($m === null) { return false; }
+        return $m['backing'] !== "";
+    }
+
+    public function getBackingType(): object|null
+    {
+        $m = __mc_enum_meta($this->name);
+        if ($m === null) { return null; }
+        $b = $m['backing'];
+        if ($b === "") { return null; }
+        return new ReflectionNamedType($b, false);
+    }
+
+    /** @return ReflectionEnumUnitCase[] */
+    public function getCases(): array
+    {
+        $m = __mc_enum_meta($this->name);
+        $out = [];
+        if ($m === null) { return $out; }
+        $backed = $m['backing'] !== "";
+        foreach ($m['cases'] as $c) {
+            $out[] = $backed
+                ? new ReflectionEnumBackedCase($this->name, $c->name, $c)
+                : new ReflectionEnumUnitCase($this->name, $c->name, $c);
+        }
+        return $out;
+    }
+
+    /** One case by NAME, or an exception — php's own shape. */
+    public function getCase(string $name): ReflectionEnumUnitCase
+    {
+        foreach ($this->getCases() as $c) {
+            if ($c->getName() === $name) { return $c; }
+        }
+        throw new ReflectionException("Case " . $name . " does not exist");
+    }
+
+    public function hasCase(string $name): bool
+    {
+        foreach ($this->getCases() as $c) {
+            if ($c->getName() === $name) { return true; }
+        }
+        return false;
+    }
+}
+
+/**
+ * `A|B` and `A&B`. The metadata stores the declaration as ONE string, so the
+ * two composite kinds are recovered by splitting it — the parts are named types
+ * by construction, php forbids nesting a union inside a union.
+ *
+ * Built by {@see __mc_refl_type_of}, which is what every getType() goes
+ * through: returning a plain ReflectionNamedType for `string|int` reported
+ * `getName() === "string|int"` and `$t instanceof ReflectionUnionType` false,
+ * which is how a consumer decides whether it may call getName() at all.
+ *
+ * ⚠ The ORDER is the compiler's normalized one, not the source spelling —
+ * `string|int` comes back as `int|string`. Recorded rather than papered over:
+ * the normalization happens where the type is built, long before this.
+ */
+class ReflectionUnionType
+{
+    /** @var ReflectionNamedType[] */
+    private array $types = [];
+    private bool $nullable = false;
+
+    /** @param ReflectionNamedType[] $types */
+    public function __construct(array $types, bool $nullable)
+    {
+        $this->types = $types;
+        $this->nullable = $nullable;
+    }
+
+    /** @return ReflectionNamedType[] */
+    public function getTypes(): array
+    {
+        return $this->types;
+    }
+
+    public function allowsNull(): bool
+    {
+        if ($this->nullable) { return true; }
+        foreach ($this->types as $t) {
+            if ($t->allowsNull()) { return true; }
+        }
+        return false;
+    }
+
+    public function __toString(): string
+    {
+        $out = "";
+        foreach ($this->types as $t) {
+            if ($out !== "") { $out = $out . "|"; }
+            $out = $out . $t->getName();
+        }
+        if ($this->nullable) { $out = $out . "|null"; }
+        return $out;
+    }
+}
+
+/** `A&B`. Same recovery as {@see ReflectionUnionType}; an intersection never
+ *  admits null (php rejects `?A&B`). */
+class ReflectionIntersectionType
+{
+    /** @var ReflectionNamedType[] */
+    private array $types = [];
+
+    /** @param ReflectionNamedType[] $types */
+    public function __construct(array $types)
+    {
+        $this->types = $types;
+    }
+
+    /** @return ReflectionNamedType[] */
+    public function getTypes(): array
+    {
+        return $this->types;
+    }
+
+    public function allowsNull(): bool
+    {
+        return false;
+    }
+
+    public function __toString(): string
+    {
+        $out = "";
+        foreach ($this->types as $t) {
+            if ($out !== "") { $out = $out . "&"; }
+            $out = $out . $t->getName();
+        }
+        return $out;
+    }
+}
+
+/**
+ * The right Reflection*Type for a recorded declaration string. ONE owner for
+ * the composite question, so a parameter, a property and a return type cannot
+ * answer it differently.
+ */
+function __mc_refl_type_of(string $decl, bool $nullable): object
+{
+    $parts = [];
+    $sep = "";
+    if (\strpos($decl, "|") !== false) { $sep = "|"; }
+    elseif (\strpos($decl, "&") !== false) { $sep = "&"; }
+    if ($sep === "") { return new ReflectionNamedType($decl, $nullable); }
+    $cur = "";
+    $i = 0;
+    $n = \strlen($decl);
+    while ($i < $n) {
+        $ch = \substr($decl, $i, 1);
+        if ($ch === $sep) {
+            if ($cur !== "") { $parts[] = new ReflectionNamedType($cur, false); }
+            $cur = "";
+        } else {
+            $cur = $cur . $ch;
+        }
+        $i = $i + 1;
+    }
+    if ($cur !== "") { $parts[] = new ReflectionNamedType($cur, false); }
+    if ($sep === "&") { return new ReflectionIntersectionType($parts); }
+    return new ReflectionUnionType($parts, $nullable);
 }
 
 /**
@@ -1185,13 +1486,13 @@ class ReflectionFunction
         return __mc_refl_row_rettype($this->row) !== "";
     }
 
-    public function getReturnType(): ReflectionNamedType|null
+    public function getReturnType(): object|null
     {
         $t = __mc_refl_row_rettype($this->row);
         if ($t === "") { return null; }
         $nullable = false;
         if (\substr($t, 0, 1) === "?") { $nullable = true; $t = \substr($t, 1); }
-        return new ReflectionNamedType($t, $nullable);
+        return __mc_refl_type_of($t, $nullable);
     }
 
     public function invoke(mixed ...$args): mixed

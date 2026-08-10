@@ -198,6 +198,14 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_param_name')         { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_NAME_OFFSET, true); }
         if ($name === '__mc_refl_param_type')         { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_TYPE_OFFSET, true); }
         if ($name === '__mc_refl_param_flags')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_FLAGS_OFFSET, false); }
+        // A PARAMETER's own attribute rows — the same RMETA_ATTR_* shape a class
+        // or method site has, so ReflectionParameter::getAttributes() reuses the
+        // reader ReflectionMethod already uses.
+        if ($name === '__mc_refl_param_nattrs')       { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_NATTRS_OFFSET, false); }
+        if ($name === '__mc_refl_param_attrs')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_ATTRS_OFFSET, true); }
+        // The parameter's default-value factory, 0 when it has none. Called
+        // through `__mc_refl_call0`, exactly as a class-constants factory is.
+        if ($name === '__mc_refl_param_deffn')        { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_PARAM_DEFFN_OFFSET, true); }
         if ($name === '__mc_refl_prow')               { return $this->biMcReflProw($args); }
         if ($name === '__mc_refl_prow_type')          { return $this->emitReflFieldI64($args, 0, true); }
         if ($name === '__mc_refl_prop_getter')        { return $this->emitReflFieldI64($args, 8, true); }

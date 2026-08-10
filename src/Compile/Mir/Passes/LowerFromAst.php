@@ -331,6 +331,12 @@ final class LowerFromAst implements Pass
      *  @var array<string, \Parser\Ast\Expr> bare name → value expression */
     private array $userConstants = [];
 
+    /** Synthesized reflection factories, registered early (the params pre-pass
+     *  reads `$fnDecls`) and lowered late (their bodies may name a global
+     *  constant, and `$userConstants` is filled after that pre-pass).
+     *  @var \Parser\Ast\FunctionDecl[] */
+    private array $pendingSynthFns = [];
+
     /**
      * Static-property registry keyed by "Class::prop". String-keyed
      * assoc lookups round-trip in self-host; reading back `string[]`
@@ -975,6 +981,20 @@ final class LowerFromAst implements Pass
         // ({@see EmitLlvmRuntime::reflectWants}) prunes a non-reflectable class's
         // trampoline before clang, and dead-strip drops the rest.
         if ($this->includeReflection) {
+            // The constructor-less allocator hydration needs. Emitted even for a
+            // module with no classes — the prelude's
+            // newInstanceWithoutConstructor() calls it unconditionally, and an
+            // undefined symbol here does not fail the link, it silently stubs to
+            // `return 0`.
+            $allocProg = \Parser\Parser::parseSource(
+                "<?php\n" . $this->reflAllocSrc() . $this->reflEnumMetaSrc());
+            foreach ($allocProg->statements as $astmt) {
+                if ($astmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$astmt->decl->name] = $astmt->decl;
+                $afn = $this->lowerFunction($astmt->decl);
+                $afn->isPrelude = true;
+                $module->addFunction($afn);
+            }
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -992,20 +1012,29 @@ final class LowerFromAst implements Pass
             // directly (reusing the attribute's own arg Expr subtrees) so array /
             // enum-case / const args lower for free. rmeta references them by the
             // ReflectSynth naming.
+            // ⚠ REGISTERED here, LOWERED after the constant tables are complete
+            // (see `$this->pendingSynthFns` below). A synthesized body may name
+            // a GLOBAL constant — an attribute argument `#[Foo(BAR)]`, and every
+            // defaulted parameter `= DEFAULT_LABEL` — and `$userConstants` is
+            // not filled until the `define()` / `const` scan further down. Lowered
+            // here, those resolved through the undefined-constant throw and the
+            // factory raised `Undefined constant "DEFAULT_LABEL"` at runtime.
+            // The declaration still has to be registered NOW: the params pre-pass
+            // right below reads `$this->fnDecls`.
             foreach ($this->synthAttrFactories($module) as $decl) {
                 $this->fnDecls[$decl->name] = $decl;
-                $module->addFunction($this->lowerFunction($decl));
+                $this->pendingSynthFns[] = $decl;
             }
             // Ф5: a class-constants factory per class with any constant, built as
             // AST that references each constant by `\C::NAME` — reusing the
             // existing class-const resolution (self:: / inherited all resolve).
             foreach ($this->synthConstFactories($module) as $decl) {
                 $this->fnDecls[$decl->name] = $decl;
-                $module->addFunction($this->lowerFunction($decl));
+                $this->pendingSynthFns[] = $decl;
             }
             foreach ($this->synthIfaceFactories($module) as $decl) {
                 $this->fnDecls[$decl->name] = $decl;
-                $module->addFunction($this->lowerFunction($decl));
+                $this->pendingSynthFns[] = $decl;
             }
         }
 
@@ -1067,6 +1096,12 @@ final class LowerFromAst implements Pass
             if (isset($this->userConstants[$xn])) { continue; }
             $this->userConstants[$xn] = $xv;
         }
+        // The synthesized reflection factories, lowered now that every constant
+        // a body of theirs might name is known — see the registration above.
+        foreach ($this->pendingSynthFns as $decl) {
+            $module->addFunction($this->lowerFunction($decl));
+        }
+        $this->pendingSynthFns = [];
 
         // Inject bundled-stdlib signatures as declare-only externs. Skipped
         // when the program defines the name itself (the compiler's own source
@@ -1404,6 +1439,45 @@ final class LowerFromAst implements Pass
             $this->attrFactoriesFor($cd->name, 'c', '', $decl->attributes, $out);
             foreach ($decl->methods as $m) {
                 $this->attrFactoriesFor($cd->name, 'm', $m->name, $m->attributes, $out);
+                // …and one site per PARAMETER. `ParamMeta` has carried the names
+                // all along, but nothing synthesized their factories, so
+                // `ReflectionParameter::getAttributes()` had nothing to return —
+                // which is what DI autowiring reads `#[Autowire]`, `#[Target]`
+                // and `#[TaggedIterator]` from, and controller argument
+                // resolution `#[MapRequestPayload]`. The site key is
+                // `<method>_<position>`: unique per parameter, and the same
+                // string {@see Passes\EmitLlvmRuntime::rmetaParamTable} rebuilds
+                // when it emits the row — the two must agree or the table points
+                // at symbols nothing defines.
+                $pi = -1;
+                foreach ($m->params as $p) {
+                    $pi = $pi + 1;
+                    if ($p->attributes !== []) {
+                        $this->attrFactoriesFor($cd->name, 'a', $m->name . '_' . (string)$pi,
+                                                $p->attributes, $out);
+                    }
+                    // …and the parameter's DEFAULT, as its own nullary factory.
+                    // `mixed`, not the declared hint: the only caller is the
+                    // indirect `__mc_refl_call0`, which is CELL-typed, and a
+                    // concrete return hands it a raw word with no tag — the same
+                    // lesson the attribute `new` factory above records.
+                    if ($p->default !== null) {
+                        // Boxed for the same reason the attribute factories are:
+                        // `__mc_refl_call0` reads a CELL, and a bare `int 7`
+                        // returned raw came back as `3.5E-323` — the integer
+                        // decoded as a double. Declaring the factory `mixed` is
+                        // NOT enough on its own; the box has to be explicit.
+                        $dbody = new \Parser\Ast\Block([
+                            \Parser\Ast\Stmt::return_(
+                                \Parser\Ast\Expr::call('__mir_to_cell', [$p->default],
+                                                       $p->default->span),
+                                $p->default->span),
+                        ]);
+                        $out[] = new \Parser\Ast\FunctionDecl(
+                            \Compile\Mir\Passes\ReflectSynth::paramDefaultFn($cd->name, $m->name, $pi),
+                            [], 'mixed', $dbody, $p->default->span);
+                    }
+                }
             }
             foreach ($decl->properties as $prop) {
                 $this->attrFactoriesFor($cd->name, 'p', $prop->name, $prop->attributes, $out);
@@ -1437,12 +1511,23 @@ final class LowerFromAst implements Pass
                     $pos = $pos + 1;
                 }
             }
+            // ⚠ `__mir_to_cell(...)`, and the factory is declared `mixed`: the
+            // only caller is the indirect `__mc_refl_call0`, whose result type
+            // is a CELL. A factory returning a bare `array` handed it a RAW vec
+            // pointer with no tag, and `getArguments()` printed
+            // `float(6.36E-314)` — the pointer decoded as a double. It was
+            // never right for ANY site (class, method, property); the parameter
+            // probe is simply the first thing that ever read the arguments
+            // back. Same lesson as the `new` factory below.
             $argsBody = new \Parser\Ast\Block([
-                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $span), $span),
+                \Parser\Ast\Stmt::return_(
+                    \Parser\Ast\Expr::call('__mir_to_cell',
+                        [\Parser\Ast\Expr::arrayLit($elems, $span)], $span),
+                    $span),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
-                [], 'array', $argsBody, $span);
+                [], 'mixed', $argsBody, $span);
             // new factory: return new <AttrClass>(<original args, named preserved>);
             // Declared `mixed`, NOT `object`: the only caller is the indirect
             // `__mc_refl_call0`, which is typed CELL. An `object` return handed
