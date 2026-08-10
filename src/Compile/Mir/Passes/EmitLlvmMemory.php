@@ -729,6 +729,25 @@ trait EmitLlvmMemory
         return $flavor === '' ? 'vec' : $flavor;
     }
 
+    /**
+     * Co-own the KEYS and ELEMENTS of a buffer this frame already owns outright
+     * — a fresh `__mir_array_copy` result — without touching its rc.
+     * {@see UnifiedArrayRuntime::emitRetainVariant}'s `$bumpRc = false` twin of
+     * the flavor's retain, so a copy gives back exactly what its release drops.
+     */
+    private function arrayAdoptIr(string $i64reg, string $flavor): string
+    {
+        $sym = '@__mir_array_adopt';
+        if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
+        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
+        elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
+        else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n"
+            . '  call void ' . $sym . '(ptr ' . $p . ")\n";
+    }
+
     /** Emit a release of the rc value held in `$slot` (obj / vec / vecobj / str). */
     private function rcReleaseSlot(string $slot, string $flavor): string
     {

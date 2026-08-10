@@ -65,6 +65,18 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
         $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
+        // ADOPT = retain MINUS the rc bump: co-own the hashed keys and the
+        // elements of a buffer this frame already owns outright. That is exactly
+        // what a value COPY needs — `__mir_array_copy` hands back a FRESH rc=1
+        // buffer whose keys and elements are still the SOURCE's, so a full retain
+        // would leave it at rc 2 against one release and the buffer would never
+        // be freed (one per `$stmts = $n->stmts;`, i.e. per call of every
+        // predicate that reads an array property).
+        $this->emitRetainVariant('__mir_array_adopt_obj', 'obj', false);
+        $this->emitRetainVariant('__mir_array_adopt_str', 'str', false);
+        $this->emitRetainVariant('__mir_array_adopt_cell', 'cell', false);
+        $this->emitRetainVariant('__mir_array_adopt_buf', '', false);
+        $this->emitRetainVariant('__mir_array_adopt', 'repr', false);
         $this->emitRelease();
         $this->emitIsHashed();
         $this->emitGetInt();
@@ -1455,7 +1467,7 @@ final class UnifiedArrayRuntime
      * child on its release without ever having retained one: the tree's nodes
      * were freed under it. Retain must undo exactly what release does.
      */
-    private function emitRetainVariant(string $symbol, string $valueFlavor): void
+    private function emitRetainVariant(string $symbol, string $valueFlavor, bool $bumpRc = true): void
     {
         $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
@@ -1487,7 +1499,11 @@ final class UnifiedArrayRuntime
             $bump = $ok;
             $rcAddr = $bump->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::ARRAY_RC_OFFSET)]);
         }
-        $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
+        // ADOPT skips this and only walks the keys / elements below: the caller
+        // already holds the buffer's single reference (a fresh copy).
+        if ($bumpRc) {
+            $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
+        }
 
         // ── co-own exactly what the matching release will drop ──
         $ret = $fn->block('rt_ret');

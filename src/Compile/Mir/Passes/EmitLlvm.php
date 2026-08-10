@@ -1242,6 +1242,23 @@ final class EmitLlvm implements EmitVisitor
                 $this->markPropBorrow($v);
             }
             foreach (\Compile\Mir\Walk::children($v) as $c) { $this->markPropBorrowsIn($c); }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            // The BASE of an element store is NOT an escaping borrow. The
+            // statement cows it and {@see EmitLlvmBuiltins::vecWriteBack} stores
+            // the (possibly reallocated) buffer straight back into the slot with
+            // a plain `store` — no release, no retain — so the pointer it read
+            // never outlives the statement.
+            //
+            // Counting it vetoed the slot of every ACCUMULATOR property: fill
+            // `$this->map[$k] = v` in a loop and the slot can never drop, so the
+            // next whole-slot store (`$this->map = []`) leaks the ENTIRE previous
+            // array — buffer, keys and values, 25 blocks an iteration for a
+            // 12-entry map. The index and the value are judged as usual.
+            $base = $n->array;
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if ($c === $base) { continue; }
+                $this->markPropBorrowsIn($c);
+            }
         } else {
             foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markPropBorrowsIn($c); }
         }

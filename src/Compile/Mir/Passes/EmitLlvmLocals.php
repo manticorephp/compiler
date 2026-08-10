@@ -642,6 +642,7 @@ trait EmitLlvmLocals
         // A STATIC property (`$copy = B::$xs`) is the same snapshot through a
         // different node — without it the local ALIASED the static's buffer and
         // `$copy[] = v` mutated `B::$xs` too (`1 2` in php, `2 2` here).
+        $copiedVecProp = false;
         if (($v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP)
             && $v->type->isVec()) {
             $out .= $this->coerceToPtr();
@@ -650,6 +651,7 @@ trait EmitLlvmLocals
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
+            $copiedVecProp = true;
         }
         // `$m = $obj` / `$b = $s` — a second owner of a by-handle object or
         // string. Retain so the source local's scope-exit release can't free
@@ -688,7 +690,17 @@ trait EmitLlvmLocals
             if ($aliasArrayProp && !$v->type->isArray()) {
                 $fallback = Type::vec(Type::unknown());
             }
-            $out .= $this->rcRetainByType($v, $aliasV, $fallback, 0);
+            // A COPIED vec property is already this frame's own rc=1 buffer — its
+            // KEYS and ELEMENTS are still the source's, but its BUFFER is not. A
+            // full retain there left it at rc 2 against one release, so the copy
+            // was never freed: `$stmts = $n->stmts;` — a read to look at the last
+            // statement — leaked the whole copied buffer on EVERY call, 16360
+            // blocks from `InferTypes::blockDiverges` alone in one front-end run.
+            // Adopt takes the element refs the release will give back, and
+            // nothing else.
+            $out .= $copiedVecProp
+                ? $this->arrayAdoptIr($aliasV, $this->arrayRetainFlavor($v, $fallback))
+                : $this->rcRetainByType($v, $aliasV, $fallback, 0);
             $this->lastValue = $aliasV;
             $this->lastValueType = 'i64';
         }
