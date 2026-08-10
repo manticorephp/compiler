@@ -501,6 +501,33 @@ function assemble_jobs(): int {
 }
 
 /**
+ * How many parts may assemble AT ONCE.
+ *
+ * NOT `assemble_jobs()`: that answers "how many parts did the user ask for",
+ * and its default is 1 because `bin/build` deliberately never passes `-j` (a
+ * part boundary is an inlining boundary). Once the split is forced by SIZE the
+ * two questions come apart — the tier-4 module split into 45 parts and then
+ * assembled them ONE AT A TIME, ~15 minutes each, which is eleven hours for a
+ * build that has nothing wrong with it.
+ *
+ * An explicit `-j` still wins; otherwise the machine's cores decide, capped at
+ * 4. The cap is memory, not politeness: clang holds a whole part at -O2 and
+ * those parts run to ~120 MB of IR, so eight at once is how a 32 GB box ends up
+ * in swap.
+ */
+function assemble_wave(): int {
+    if (CompileArgs::$jobs > 1) { return CompileArgs::$jobs; }
+    $n = 0;
+    $probe = is_darwin() ? "sysctl -n hw.ncpu 2>/dev/null" : "nproc 2>/dev/null";
+    $out = \shell_exec($probe);
+    if ($out !== null && $out !== false) { $n = (int)\trim((string)$out); }
+    $n = $n - 1;
+    if ($n < 1) { return 1; }
+    if ($n > 4) { return 4; }
+    return $n;
+}
+
+/**
  * Assemble `$ir` into one or more objects and return their paths, or `[]` on
  * failure (the caller reports; the staged files are left for inspection).
  *
@@ -532,7 +559,13 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     // after the compiler had emitted every byte of it correctly. So the split
     // is forced by SIZE here even at `-j1`; a program small enough to fit keeps
     // exactly the single-TU behaviour, inlining and all.
-    $partCeiling = 48 * 1024 * 1024;
+    // ⚠ The ceiling is a TRADE, and 48 MB was the wrong side of it. The splitter
+    // copies every SHARED definition into every part, so the part count is a
+    // multiplier on the preamble: symfony tier 4 (a 2.1 GB module once the
+    // reflection metadata is in) came out as 45 parts of ~120 MB each — ~5 GB of
+    // text for 2.1 GB of module. Fewer, larger parts duplicate less and still
+    // clear clang's source-location space by a wide margin.
+    $partCeiling = 128 * 1024 * 1024;
     $needed = \intdiv(\strlen($ir) + $partCeiling - 1, $partCeiling);
     if ($needed > $jobs) { $jobs = $needed; }
     if ($jobs < 2) {
@@ -573,8 +606,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
-    $wave = assemble_jobs();
-    if ($wave < 1) { $wave = 1; }
+    $wave = assemble_wave();
     $cmd = '';
     $inWave = 0;
     foreach ($cmds as $c) {
