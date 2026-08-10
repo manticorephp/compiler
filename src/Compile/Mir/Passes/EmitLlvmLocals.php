@@ -764,6 +764,16 @@ trait EmitLlvmLocals
         return $out;
     }
 
+    /** php's superglobals, minus `$GLOBALS` (syntax, not a variable). Mirrors
+     *  {@see LowerSuperglobals::superglobalNames} — the two must agree, because
+     *  what this list stands for HERE is "seeded as `assoc[string, cell]` over
+     *  there". */
+    private function isSuperglobalName(string $n): bool
+    {
+        return $n === '_SERVER' || $n === '_ENV' || $n === '_GET' || $n === '_POST'
+            || $n === '_COOKIE' || $n === '_FILES' || $n === '_REQUEST' || $n === '_SESSION';
+    }
+
     /**
      * IR computing the by-ref ADDRESS of lvalue `$a` as i64 in
      * `$this->lastValue`; null when `$a` is not addressable. A plain local
@@ -775,6 +785,38 @@ trait EmitLlvmLocals
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
+            // A GLOBAL-BACKED local — `global $x`, and every SUPERGLOBAL, which
+            // {@see LowerSuperglobals} declares as one — has no alloca: the
+            // module cell IS its storage, so the cell's address is the answer.
+            // Exactly the static-property arm below, one storage class over.
+            // Without it `['session' => &$_SESSION]`
+            // (symfony/runtime GenericRuntime.php:162) was refused as "no
+            // address", and the tier-4 build stopped there.
+            //
+            // ⚠ SUPERGLOBALS only. A reference writes THROUGH the cell channel,
+            // and a superglobal's storage is cell-elemented by construction —
+            // {@see LowerSuperglobals::superglobalInit} seeds every one of them
+            // as `assoc[string, cell]`. A plain `global $store` is the same
+            // STORAGE class with a different element repr
+            // (`$store = ['x' => 1]` → assoc[string,int]), and handing that one
+            // an address made `$store['y']` read back a denormal: the write
+            // boxed, the owner's own read did not. It keeps the loud refusal
+            // below rather than becoming a silent wrong answer — closing it is
+            // the ref-taken-slot-is-CELL-for-its-lifetime rule
+            // (docs/design/reference-cells.md) applied to global storage.
+            //
+            // The predicate is the NAME because the guarantee comes from the
+            // seeder, not from this node's static type: at `&$_SESSION` the
+            // LoadLocal can still be typed `unknown`, and asking the type here
+            // refused the very shape this arm exists for.
+            if ($this->isSuperglobalName($name) && isset($this->locals->globalBacked[$name])) {
+                $addr = $this->ssa->allocReg();
+                $out = '  ' . $addr . ' = ptrtoint ptr '
+                     . $this->locals->globalBacked[$name] . " to i64\n";
+                $this->lastValue = $addr;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
             if (!isset($this->locals->slots[$name])) { return null; }
             $addr = $this->ssa->allocReg();
             if (isset($this->locals->refLocals[$name])) {
