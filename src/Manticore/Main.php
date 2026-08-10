@@ -513,6 +513,41 @@ function assemble_jobs(): int {
  *
  * @return string[]
  */
+/**
+ * Give every function in a module a frame record, when `MANTICORE_FRAME_POINTERS=1`.
+ *
+ * Profilers on this compiler can name the ALLOCATING or SAMPLED function but not
+ * its PHP caller: leaf routines are compiled without a frame record, so 20 498 of
+ * 26 682 `__mir_str_eq` samples had no caller in the file at all and
+ * `malloc_history` folded onto `__mir_realloc_tagged` instead of onto a pass.
+ * That is what makes "who holds the string-keyed maps" unanswerable.
+ *
+ * `clang -fno-omit-frame-pointer` does NOT help here (measured): the frame
+ * pointer is a per-function IR attribute and the driver flag does not synthesise
+ * one for `-x ir` input. So the attribute is spliced into the IR TEXT — which
+ * also covers {@see \Compile\Mir\RuntimeLibrary}'s hand-written bodies, unlike a
+ * change at the dozens of `"\ndefine …"` emission sites.
+ *
+ * Off by default, and the transform is skipped entirely when off, so the emitted
+ * IR is byte-identical unless the variable is set. Every `define` this compiler
+ * emits is one line ending in `") {"` (4 107 checked across 40 programs) and no
+ * module carries an attribute group of its own, so `#0` is free; a define that
+ * ever stops matching is simply left alone rather than mangled.
+ */
+function with_frame_pointers(string $ir): string {
+    if (!\Compile\Debug::$framePointers) { return $ir; }
+    $lines = \explode("\n", $ir);
+    $n = 0;
+    foreach ($lines as $i => $l) {
+        if (\substr($l, 0, 7) !== "define ") { continue; }
+        if (\substr($l, -3) !== ") {") { continue; }
+        $lines[$i] = \substr($l, 0, -2) . "#0 {";
+        $n++;
+    }
+    if ($n === 0) { return $ir; }
+    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n";
+}
+
 function assemble_ir(string $ir, string $base, string $cflags): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
@@ -522,7 +557,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     $jobs = \strlen($ir) < 262144 ? 1 : assemble_jobs();
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
-        if (!write_file($llPath, $ir)) { dprint("assemble: cannot write " . $llPath); return []; }
+        if (!write_file($llPath, with_frame_pointers($ir))) { dprint("assemble: cannot write " . $llPath); return []; }
         $rc = system("clang -O" . CompileArgs::$optLevel . " " . $cflags
             . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
         if ($rc !== 0) { dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath); return []; }
@@ -538,7 +573,10 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     foreach ($parts as $i => $partIr) {
         $pll = $base . ".p" . (string)$i . ".ll";
         $pobj = $base . ".p" . (string)$i . ".o";
-        if (!write_file($pll, $partIr)) { dprint("assemble: cannot write " . $pll); return []; }
+        // Per PART, never before the split: the attribute group must sit in the
+        // same file as the `#0` references, and a split would leave every other
+        // part naming an undefined group.
+        if (!write_file($pll, with_frame_pointers($partIr))) { dprint("assemble: cannot write " . $pll); return []; }
         if ($cmd !== '') { $cmd = $cmd . ' & '; }
         $cmd = $cmd . "clang -O" . CompileArgs::$optLevel . " " . $cflags
              . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
@@ -1263,7 +1301,7 @@ function cmd_compile(array $args): int {
     // every consumer links exactly that file). The runtime preamble helpers are
     // linkonce_odr so it coexists with a user program's preamble at link time.
     if (CompileArgs::$emitLibrary) {
-        if (!write_file($llPath, $ir)) {
+        if (!write_file($llPath, with_frame_pointers($ir))) {
             dprint("compile: cannot write " . $llPath . " (rc=73)");
             return 73;
         }
@@ -1942,7 +1980,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     // part when it splits). A library is NEVER split: `stdlib.o` is one object
     // by contract — its `.sig` describes that file and every consumer links it.
     if ($emitLibrary) {
-        if (!write_file($llPath, $ir)) { dprint("build: cannot write " . $llPath); return 73; }
+        if (!write_file($llPath, with_frame_pointers($ir))) { dprint("build: cannot write " . $llPath); return 73; }
         if ($keep) { dprint("build: kept IR " . $llPath); }
         $rc = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }

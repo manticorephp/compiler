@@ -107,6 +107,11 @@ final class Type
      * them — int 60 179, unknown 52 513, string 46 161, void 36 221 — which is
      * 90% of every Type this compiler builds.
      *
+     * The bare `cell` joins them: `cell()` takes an atom list, but every one of
+     * its 179 call sites passes NOTHING, and `heap` charged 424 358 live blocks
+     * (39 MB of a 1.27 GB peak) to it. The parameter stays for the API; only the
+     * empty case is shared. `numericCell()` is parameterless outright.
+     *
      * One slot per kind rather than a keyed array: an array element is an
      * ERASED channel, and reading a Type back out of one would put it through
      * the cell boundary at every call. A `bool` flag rather than testing a slot
@@ -122,6 +127,8 @@ final class Type
     private static ?self $tString = null;
     private static ?self $tUnknown = null;
     private static ?self $tClosure = null;
+    private static ?self $tCell = null;
+    private static ?self $tNumericCell = null;
 
     private static function buildScalars(): void
     {
@@ -135,6 +142,8 @@ final class Type
         self::$tString  = new self(self::KIND_STRING);
         self::$tUnknown = new self(self::KIND_UNKNOWN);
         self::$tClosure = new self(self::KIND_CLOSURE);
+        self::$tCell        = new self(self::KIND_CELL);
+        self::$tNumericCell = new self(self::KIND_CELL, numeric: true);
     }
 
     public static function void():    self { self::buildScalars(); return self::$tVoid; }
@@ -394,9 +403,16 @@ final class Type
         return $this->kind === self::KIND_OBJ && $this->class === 'Generator';
     }
 
-    /** @param self[] $atoms */
+    /**
+     * The atom-less cell is INTERNED — see {@see buildScalars}. `\count()` and
+     * not `$atoms === []`: array `===` compares pointers here, so the
+     * literal-empty test is not a reliable emptiness check.
+     *
+     * @param self[] $atoms
+     */
     public static function cell(array $atoms = []): self
     {
+        if (\count($atoms) === 0) { self::buildScalars(); return self::$tCell; }
         return new self(self::KIND_CELL, atoms: $atoms);
     }
 
@@ -404,7 +420,8 @@ final class Type
      *  float, so arithmetic over it promotes at runtime instead of forcing int. */
     public static function numericCell(): self
     {
-        return new self(self::KIND_CELL, numeric: true);
+        self::buildScalars();
+        return self::$tNumericCell;
     }
 
     /** A `cell` whose arms are all numeric (int|float) — arithmetic may promote. */
