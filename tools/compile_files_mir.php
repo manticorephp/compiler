@@ -79,7 +79,12 @@ foreach ($paths as $path) {
     $sources[] = file_get_contents($path);
 }
 
-$ir = \Manticore\compile_via_mir($sources);
+// PATHS matter, not just the sources: the demand-loaded keep/drop test keys on
+// the file's path, so passing sources alone silently compiles every top-level
+// statement of a demand-loaded file — a template's short-echo of a property
+// then lands in `__main` and Verify refuses the whole unit for a `$this` the
+// real build never sees.
+$ir = \Manticore\compile_via_mir($sources, $paths);
 if ($ir === null) {
     fwrite(STDERR, "compile error (MIR)\n");
     exit(70);

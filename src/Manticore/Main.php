@@ -520,6 +520,21 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     // a process spawn to decide not to split made a hello world 12 ms slower.
     // Below a few hundred KB the split cannot pay for itself anyway.
     $jobs = \strlen($ir) < 262144 ? 1 : assemble_jobs();
+    // A CEILING, not a preference. `-j` is a speed knob and `bin/build`
+    // deliberately never passes it (a part boundary is an inlining boundary),
+    // but past a certain size one translation unit stops being slow and becomes
+    // IMPOSSIBLE: clang's source-location space is finite, and the symfony
+    // tier-4 unit — 785 MB of IR from 1548 files — died on
+    //
+    //   fatal error: translation unit is too large for Clang to process:
+    //   ran out of source locations
+    //
+    // after the compiler had emitted every byte of it correctly. So the split
+    // is forced by SIZE here even at `-j1`; a program small enough to fit keeps
+    // exactly the single-TU behaviour, inlining and all.
+    $partCeiling = 48 * 1024 * 1024;
+    $needed = \intdiv(\strlen($ir) + $partCeiling - 1, $partCeiling);
+    if ($needed > $jobs) { $jobs = $needed; }
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, $ir)) { dprint("assemble: cannot write " . $llPath); return []; }
@@ -534,13 +549,13 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     \Compile\Stats::step('  split module (' . (string)$jobs . ' parts)', $statT,
         $splitter->sharedDefs, $splitter->internalDefs);
     $objs = [];
-    $cmd = '';
+    /** @var string[] $cmds one clang invocation per part */
+    $cmds = [];
     foreach ($parts as $i => $partIr) {
         $pll = $base . ".p" . (string)$i . ".ll";
         $pobj = $base . ".p" . (string)$i . ".o";
         if (!write_file($pll, $partIr)) { dprint("assemble: cannot write " . $pll); return []; }
-        if ($cmd !== '') { $cmd = $cmd . ' & '; }
-        $cmd = $cmd . "clang -O" . CompileArgs::$optLevel . " " . $cflags
+        $cmds[] = "clang -O" . CompileArgs::$optLevel . " " . $cflags
              . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
         $objs[] = $pobj;
     }
@@ -548,11 +563,31 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     // leftover from an earlier run must not read as a part that built.
     foreach ($objs as $o) { system("rm -f " . $o); }
     $statT = \Compile\Stats::now();
+    // In WAVES, not all at once. The part count is now driven by SIZE as well as
+    // by `-j` ({@see the ceiling above}), so a big application can produce far
+    // more parts than the machine has cores — and each clang holds its whole
+    // part in memory at -O2. The wave width is the job count the machine asked
+    // for; a `-j`-sized build is one wave, exactly as before.
+    //
     // `wait` must be INSIDE the subshell: the background jobs are ITS children,
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
-    system("( " . $cmd . " ; wait )");
+    $wave = assemble_jobs();
+    if ($wave < 1) { $wave = 1; }
+    $cmd = '';
+    $inWave = 0;
+    foreach ($cmds as $c) {
+        if ($cmd !== '') { $cmd = $cmd . ' & '; }
+        $cmd = $cmd . $c;
+        $inWave = $inWave + 1;
+        if ($inWave >= $wave) {
+            system("( " . $cmd . " ; wait )");
+            $cmd = '';
+            $inWave = 0;
+        }
+    }
+    if ($cmd !== '') { system("( " . $cmd . " ; wait )"); }
     \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c x' . (string)\count($parts),
         $statT, -1, -1);
     foreach ($objs as $i => $o) {
