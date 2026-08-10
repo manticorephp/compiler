@@ -6381,6 +6381,37 @@ trait EmitLlvmBuiltins
      */
     private function emitObjectVarsOfPtr(string $objPtr): string
     {
+        // ONE copy per module, CALLED — not spliced into every site. The walk is
+        // a switch with one arm per class that declares properties, and each arm
+        // BUILDS an assoc (an alloc, a `set_str` per property, a box per value),
+        // so a single expansion is ~350 KB of IR for a 262-class table. Eleven
+        // sites carried one each: `Parser\Dump::field` alone reached 3.86 MB —
+        // 6.7% of the whole module in ONE function, at 660x its PHP source,
+        // against a module average of 12x. Three functions held 6.3 MB (10%).
+        //
+        // `internal` because the body is specialized from THIS module's class
+        // table — a shared symbol would let the linker pick another module's
+        // table ({@see EmitLlvm::linkonceRuntime} is for the preamble, whose
+        // helpers carry no module-local information). `noinline` because -O2
+        // would otherwise splice it straight back into the few callers.
+        $this->needsObjectVarsFn = true;
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return '  ' . $r . ' = call ptr @__mir_object_vars(ptr ' . $objPtr . ")\n";
+    }
+
+    /** The one shared body {@see emitObjectVarsOfPtr} calls. Emitted beside the
+     *  function bodies (not the preamble) when a site asked for it. */
+    private function emitObjectVarsFn(): string
+    {
+        $body = $this->emitObjectVarsInline('%gov.obj');
+        return "define internal ptr @__mir_object_vars(ptr %gov.obj) noinline {\n"
+            . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
+    }
+
+    private function emitObjectVarsInline(string $objPtr): string
+    {
         $this->rt->needsTagged = true;
         $out = '';
 
