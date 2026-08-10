@@ -328,6 +328,21 @@ final class VivifyRefArgs implements Pass
                 $this->scanArgs($cls, $iv->args, $this->closureCaptures[$cls]);
             } elseif ($this->closureRefUnion !== 0 && $this->isErasedCallee($iv->callee)) {
                 $this->scanErasedArgs($iv->args);
+            } elseif ($iv->callee->type->kind === Type::KIND_STRING) {
+                // A callee that is a function NAME in a variable —
+                // `$match = 'preg_match'; … $match($re, $s, $matches, …)`
+                // (symfony/string AbstractUnicodeString::match). The target is
+                // chosen at run time, so its by-ref mask is exactly as
+                // unknowable as an undeclared callee's, and the same trade
+                // applies: vivify the bare locals rather than refuse a legal
+                // program. Without it `$matches` had no definition anywhere and
+                // the whole compile unit died on
+                // `MIR.verify: dangling local $matches read`.
+                //
+                // NOT folded into {@see isErasedCallee}: that predicate gates
+                // the CLOSURE-union path, whose slot mask only describes
+                // closures, and a string callee is never one.
+                $this->vivifyBareLocals($iv->args);
             }
         }
         foreach (Walk::children($n) as $c) { $this->walk($c); }
