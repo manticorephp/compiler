@@ -81,7 +81,13 @@ final class ReflectAnalysis
     {
         if ($n instanceof \Compile\Mir\NewObj) {
             $cls = \ltrim($n->class, '\\');
-            if ($cls === 'ReflectionClass' || $cls === 'ReflectionObject') {
+            // ReflectionEnum reads the SAME metadata block through the same
+            // constructor — it extends ReflectionClass. Left out, `new
+            // ReflectionEnum(Status::class)` demanded no metadata for Status and
+            // the constructor threw `Class "Status" does not exist` on a class
+            // that plainly does.
+            if ($cls === 'ReflectionClass' || $cls === 'ReflectionObject'
+                || $cls === 'ReflectionEnum') {
                 $args = $n->args;
                 if (\count($args) === 1) {
                     $this->fromArg($args[0]);

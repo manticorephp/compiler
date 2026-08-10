@@ -1079,7 +1079,12 @@ trait LowerClasses
         // on being the ctor's prologue, and a shared subtree would be lowered
         // twice under two frames. Gated on the program actually unserialising —
         // nothing else needs the defaults without the ctor.
-        if ($this->includeUnserialize && $defaultStores !== []) {
+        // …and REFLECTION needs the same thing for the same reason:
+        // `newInstanceWithoutConstructor()` is php's other door to an object
+        // whose constructor never ran, and php applies the declared defaults
+        // there too. Gated on either, so a program that only reflects still
+        // gets `private string $title = 'unset'` instead of NULL.
+        if (($this->includeUnserialize || $this->includeReflection) && $defaultStores !== []) {
             $copies = [];
             foreach ($defaultStores as $ds) { $copies[] = \Compile\Mir\NodeClone::node($ds); }
             $module->addFunction(new FunctionDef(

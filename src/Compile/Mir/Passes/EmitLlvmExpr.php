@@ -3237,7 +3237,7 @@ trait EmitLlvmExpr
         }
         $ts = $this->toStringClassOf($operand);
         if ($ts !== '') {
-            return $this->emitToStringCall($ts);
+            return $this->emitToStringCall($ts, $this->staticClassOf($operand));
         }
         // When the result feeds an arena-bound consumer (an Arena concat),
         // the coercion buffer is confined too — bump-allocate it so it is
@@ -4499,7 +4499,7 @@ trait EmitLlvmExpr
         // Stringable object → __toString, then print as a string.
         $ts = $this->toStringClassOf($e);
         if ($ts !== '') {
-            $out .= $this->emitToStringCall($ts);
+            $out .= $this->emitToStringCall($ts, $this->staticClassOf($e));
             $kind = Type::KIND_STRING;
         }
         // A NaN-boxed cell (e.g. `int|false` from strpos) dispatches

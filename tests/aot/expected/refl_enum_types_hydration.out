@@ -1,0 +1,24 @@
+exact derived : 1
+exact base    : 0
+instanceof    : 1
+unrelated     : 0
+backed        : true
+backing type  : string
+cases         : 2
+  case Draft = draft value-is-case=true
+  case Live = live value-is-case=true
+has Draft     : true
+get Live      : live
+plain backed  : false
+plain cases   : 2
+hydrated title: unset
+hydrated n    : 42
+after setValue: set / set
+union class   : ReflectionUnionType
+union parts   : 2
+has string    : true
+has int       : true
+union null    : false
+named class   : ReflectionNamedType
+named str     : ?int
+mixed str     : mixed null=true

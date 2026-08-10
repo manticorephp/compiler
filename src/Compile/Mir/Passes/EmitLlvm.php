@@ -2234,15 +2234,67 @@ final class EmitLlvm implements EmitVisitor
         return $this->resolveMethodClass($cls, '__toString');
     }
 
+    /** The STATIC class of an expression, for the `__toString` dispatch. */
+    private function staticClassOf(Node $e): string
+    {
+        if ($e->type->kind !== Type::KIND_OBJ) { return ''; }
+        return $e->type->class ?? '';
+    }
+
+    /**
+     * Classes a `__toString` call site can really reach: the static class and
+     * every descendant that resolves the method to a DIFFERENT body. One entry
+     * means the direct call is exact, which is the common case and keeps the
+     * old IR byte-for-byte.
+     *
+     * @return string[]
+     */
+    private function toStringCandidates(string $staticClass, string $tsClass): array
+    {
+        if ($staticClass === '') { return [$tsClass]; }
+        $seen = [];
+        $out = [];
+        foreach ($this->selfAndDescendants($staticClass) as $d) {
+            $t = $this->resolveMethodClass($d, '__toString');
+            if ($t === '') { continue; }
+            if (isset($seen[$t])) { continue; }
+            $seen[$t] = true;
+            $out[] = $d;
+        }
+        if ($out === []) { return [$tsClass]; }
+        return $out;
+    }
+
     /**
      * Given `$this->lastValue` holding an object, call its (already
      * resolved) `$tsClass::__toString` and leave the resulting string
      * ptr in `$this->lastValue`. Returns the IR.
      */
-    private function emitToStringCall(string $tsClass): string
+    private function emitToStringCall(string $tsClass, string $staticClass = ''): string
     {
         $out = $this->coerceToI64();
         $obj = $this->lastValue;
+        // VIRTUAL, when the static type has descendants that answer differently.
+        // `__toString` was resolved once, from the STATIC class, and called
+        // directly — so a value typed as a base printed the BASE's answer
+        // whatever it really was. `(string)$type` over php's own
+        // ReflectionType hierarchy is the witness: every subclass returned the
+        // base's empty string. Reuses the ordinary method dispatch, so the two
+        // cannot drift.
+        $cands = $this->toStringCandidates($staticClass, $tsClass);
+        if (\count($cands) > 1) {
+            $targets = [];
+            foreach ($cands as $c) {
+                $targets[$c] = $this->resolveMethodClass($c, '__toString') . '____toString';
+            }
+            $out .= $this->emitVirtualDispatch($obj, 'i64 ' . $obj, $cands, $targets,
+                $tsClass . '____toString', '__toString');
+            $p0 = $this->ssa->allocReg();
+            $out .= '  ' . $p0 . ' = inttoptr i64 ' . $this->vdResult . " to ptr\n";
+            $this->lastValue = $p0;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($tsClass) . '____toString(i64 ' . $obj . ")\n";
         $p = $this->ssa->allocReg();

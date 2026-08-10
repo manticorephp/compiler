@@ -221,6 +221,24 @@ trait EmitLlvmModule
                 }
             }
         }
+        // The (class, ancestor) pairs `is_a` needs when BOTH names are runtime
+        // strings. One row per is-a edge INCLUDING the class itself, so the
+        // scan answers php's non-strict is_a directly.
+        $isaSubRows = '';
+        $isaAncRows = '';
+        $isaCount = 0;
+        if ($this->rt->needsClassIsa) {
+            foreach ($this->classes as $cd) {
+                $sub = $this->displayClassName($cd->name);
+                foreach ($this->classes as $cd2) {
+                    if (!$this->classIsA($cd->name, $cd2->name)) { continue; }
+                    if ($isaCount > 0) { $isaSubRows .= ', '; $isaAncRows .= ', '; }
+                    $isaSubRows .= 'ptr ' . $this->litStr($sub);
+                    $isaAncRows .= 'ptr ' . $this->litStr($this->displayClassName($cd2->name));
+                    $isaCount = $isaCount + 1;
+                }
+            }
+        }
         $pxClsRows = '';
         $pxPrpRows = '';
         $pxCount = 0;
@@ -344,6 +362,12 @@ trait EmitLlvmModule
             // php resolves a METHOD name case-insensitively.
             $out .= $this->memberExistsTable('mx', '__mir_method_exists',
                 $mxClsRows, $mxMthRows, $mxCount, 'strcasecmp');
+        }
+        if ($this->rt->needsClassIsa) {
+            // Both class names are runtime strings, so both compare
+            // case-insensitively — php resolves a class name that way.
+            $out .= $this->memberExistsTable('isa', '__mir_class_isa',
+                $isaSubRows, $isaAncRows, $isaCount, 'strcasecmp');
         }
         if ($this->rt->needsPropExists) {
             // …and a PROPERTY name case-SENSITIVELY. Same table, different

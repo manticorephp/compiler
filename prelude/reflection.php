@@ -717,7 +717,7 @@ class ReflectionMethod
      * leading `?` is nullability; `self`/`static` resolve to the reached class
      * (best-effort — `parent` is left as written).
      */
-    public function getReturnType(): object|null
+    public function getReturnType(): ReflectionType|null
     {
         $t = __mc_refl_row_rettype($this->row);
         if ($t === "") { return null; }
@@ -828,7 +828,7 @@ class ReflectionProperty
 
     /** The declared type as a ReflectionNamedType, or null when untyped. A
      *  leading `?` is nullability, not part of the name. */
-    public function getType(): object|null
+    public function getType(): ReflectionType|null
     {
         $t = __mc_refl_prow_type($this->extra);
         if ($t === "") { return null; }
@@ -970,7 +970,7 @@ class ReflectionParameter
     }
 
     /** The declared type as a ReflectionNamedType, or null when untyped. */
-    public function getType(): object|null
+    public function getType(): ReflectionType|null
     {
         if (($this->flags & 16) === 0) { return null; }
         $t = __mc_refl_param_type($this->base, $this->pos);
@@ -1055,7 +1055,27 @@ class ReflectionParameter
  * A single named type (`int`, `?App\Foo`). Unions/intersections are Ф3. The
  * name is stored WITHOUT a leading `?`; nullability is a separate flag.
  */
-class ReflectionNamedType
+/**
+ * The base php gives all three type shapes. It exists here for a REPRESENTATION
+ * reason, not for tidiness: a getter declared `object|null` makes `(string)$t`
+ * print the POINTER — the cast has no class in its static type to find
+ * `__toString` on. Declaring the getters `ReflectionType|null` is what routes
+ * the cast, and it is also what php declares.
+ */
+class ReflectionType
+{
+    public function allowsNull(): bool
+    {
+        return false;
+    }
+
+    public function __toString(): string
+    {
+        return "";
+    }
+}
+
+class ReflectionNamedType extends ReflectionType
 {
     private string $name = "";
     private bool $nullable = false;
@@ -1166,7 +1186,7 @@ class ReflectionEnum extends ReflectionClass
         return $m['backing'] !== "";
     }
 
-    public function getBackingType(): object|null
+    public function getBackingType(): ReflectionType|null
     {
         $m = __mc_enum_meta($this->name);
         if ($m === null) { return null; }
@@ -1222,7 +1242,7 @@ class ReflectionEnum extends ReflectionClass
  * `string|int` comes back as `int|string`. Recorded rather than papered over:
  * the normalization happens where the type is built, long before this.
  */
-class ReflectionUnionType
+class ReflectionUnionType extends ReflectionType
 {
     /** @var ReflectionNamedType[] */
     private array $types = [];
@@ -1264,7 +1284,7 @@ class ReflectionUnionType
 
 /** `A&B`. Same recovery as {@see ReflectionUnionType}; an intersection never
  *  admits null (php rejects `?A&B`). */
-class ReflectionIntersectionType
+class ReflectionIntersectionType extends ReflectionType
 {
     /** @var ReflectionNamedType[] */
     private array $types = [];
@@ -1486,7 +1506,7 @@ class ReflectionFunction
         return __mc_refl_row_rettype($this->row) !== "";
     }
 
-    public function getReturnType(): object|null
+    public function getReturnType(): ReflectionType|null
     {
         $t = __mc_refl_row_rettype($this->row);
         if ($t === "") { return null; }

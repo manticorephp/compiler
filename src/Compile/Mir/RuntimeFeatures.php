@@ -135,6 +135,14 @@ public bool $needsClosureRc = false;
     /** As {@see $needsMethodExists}, for `property_exists`. */
     public bool $needsPropExists = false;
 
+    /**
+     * `is_a($subjectName, $targetName, true)` where BOTH names are runtime
+     * strings — emit the closed world's (class, ancestor) table and the scan
+     * over it. The shape symfony reaches through
+     * `getAttributes($className, IS_INSTANCEOF)`.
+     */
+    public bool $needsClassIsa = false;
+
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union
     // once here keeps the subtle "why" with the flags instead of re-deriving

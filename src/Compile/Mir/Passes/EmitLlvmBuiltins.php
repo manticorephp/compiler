@@ -6063,7 +6063,7 @@ trait EmitLlvmBuiltins
         // match the runtime string against each, testing the operand's class_id
         // against that class's is-a id set (same idiom as emitNewDynObj).
         if ($target === '' && $this->classArgIsRuntime($args[1])) {
-            return $this->biIsADynamic($args, $strict);
+            return $this->biIsADynamic($args, $strict, $allowString === true);
         }
         $sub = $this->reflClassName($args[0]);
         // A runtime STRING subject with allow_string on — `is_a($class,
@@ -6177,11 +6177,40 @@ trait EmitLlvmBuiltins
      *  then ORs, over every module class C, `strcmp(name,"C")==0 AND class_id
      *  in idsOf(C)`. `idsOf` is C's is-a set (descendants + implementers); the
      *  strict form drops C's own id (proper-subclass only). */
-    private function biIsADynamic(array $args, bool $strict): string
+    private function biIsADynamic(array $args, bool $strict, bool $allowString = false): string
     {
         // A scalar operand (string/int/float/bool/null) is an instance of
         // nothing — the 2-arg is_a never treats a string as a class name.
         $ok = $args[0]->type->kind;
+        if ($ok === Type::KIND_STRING && $allowString) {
+            // …unless allow_string is on and BOTH names are runtime strings.
+            // `getAttributes($className, IS_INSTANCEOF)` inside the reflection
+            // prelude is exactly that, and it answered a flat FALSE: the
+            // string-subject arm needs a literal TARGET to enumerate against,
+            // and the dynamic-target arm reads a class id off what is only a
+            // string. Neither can serve, so the closed world's is-a EDGES go
+            // into a table and the two names are matched against it at runtime.
+            $this->rt->needsClassIsa = true;
+            $out = $this->emitPtrArg($args[0]);
+            $subP = $this->lastValue;
+            $out .= $this->emitPtrArg($args[1]);
+            $tgtP = $this->lastValue;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__mir_class_isa(ptr ' . $subP
+                  . ', ptr ' . $tgtP . ")\n";
+            if (!$strict) { return $this->finishI64($out, $r); }
+            // is_subclass_of is PROPER: the class is not its own subclass, so a
+            // name equal to the target loses.
+            $this->rt->needsStrcmp = true;
+            $same = $this->ssa->allocReg();
+            $out .= '  ' . $same . ' = call i32 @strcasecmp(ptr ' . $subP
+                  . ', ptr ' . $tgtP . ")\n";
+            $isSame = $this->ssa->allocReg();
+            $out .= '  ' . $isSame . ' = icmp eq i32 ' . $same . ", 0\n";
+            $rr = $this->ssa->allocReg();
+            $out .= '  ' . $rr . ' = select i1 ' . $isSame . ', i64 0, i64 ' . $r . "\n";
+            return $this->finishI64($out, $rr);
+        }
         if ($ok === Type::KIND_STRING || $ok === Type::KIND_INT
             || $ok === Type::KIND_FLOAT || $ok === Type::KIND_BOOL
             || $ok === Type::KIND_NULL) {
