@@ -3603,6 +3603,33 @@ trait EmitLlvmObjects
         $reboxTmps = [];
         $cls = $this->resolveMethodClass($n->class, $n->method);
         if ($cls === '') { $cls = $n->class; }
+        // Nothing defines it — anywhere. The INSTANCE path has answered this
+        // with php's own runtime Error since the tier-2 link
+        // ({@see methodHasNoImpl}); the STATIC path named its callee on faith,
+        // so the module carried a symbol with no definition and clang failed
+        // the whole build over a branch that may never run.
+        //
+        // `self::assertThat(…)` inside symfony/framework-bundle's
+        // BrowserKitAssertionsTrait is the tier-4 witness: the name comes from
+        // PHPUnit's Assert, which `--no-dev` leaves out, and `self::` binds to
+        // the USING class — so the module asked for
+        // `KernelTestCase::assertThat` and 46 IR parts each failed with
+        // `use of undefined value`.
+        //
+        // Same policy as the undefined-FUNCTION traps the build already
+        // reports: php raises when the call is REACHED, so the build must not
+        // die for it.
+        if ($this->methodHasNoImpl($cls, $n->method)) {
+            $name = $cls !== '' ? $cls : ($n->class !== '' ? $n->class : 'object');
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst(
+                    'Call to undefined method ' . $name . '::' . $n->method . '()',
+                    Type::string_())],
+                Type::cell(),
+            );
+            return $out . $this->emitNode($thr);
+        }
         // Late static binding: route to the per-descendant specialisation
         // matching the called class (`$n->staticClass`) when one exists.
         $lsbScope = $n->staticClass !== '' ? $n->staticClass : $n->class;
