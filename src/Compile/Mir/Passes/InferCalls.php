@@ -402,9 +402,12 @@ trait InferCalls
         if ($n === 'strpos') {
             return Type::cell();
         }
-        // getenv is `string|false` — a tagged cell.
+        // getenv is `string|false` — a tagged cell. With NO argument it is php's
+        // whole environment instead ({@see EmitLlvmBuiltins::biGetenv}).
         if ($n === 'getenv') {
-            return Type::cell();
+            return \count($args) === 0
+                ? Type::assoc(Type::string_(), Type::string_())
+                : Type::cell();
         }
         if ($n === 'putenv') {
             return Type::bool_();

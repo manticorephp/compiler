@@ -5483,6 +5483,35 @@ trait EmitLlvmBuiltins
      * a copy of the C env string, or boxed false when unset. */
     private function biGetenv(array $args): string
     {
+        // php's `getenv()` with NO name is the WHOLE environment as an assoc
+        // array. LowerExprs rewrites that shape to a `$_ENV` read, which is what
+        // keeps the builder alive through tree-shaking — but a call that reaches
+        // the emitter without having gone through that rewrite used to read
+        // `$args[0]` anyway: an undefined index under Zend, a NULL node and a
+        // SIGSEGV inside emitNode self-hosted. It is the tier-4 build's crash,
+        // and `tools/audit/builtin_arity_scan.php` had listed `getenv` as
+        // arity-divergent-but-unprobed months before.
+        //
+        // The same walker either way (`__mc_env`, prelude/cli.php, already gated
+        // on `calls('getenv')`), so the two spellings cannot drift.
+        if (\count($args) === 0) {
+            $sym = $this->mangle('__mc_env');
+            if (!isset($this->definedFns[$sym])) {
+                // Nothing to call — answer php's shape with an empty array
+                // rather than emit a link stub.
+                $r = $this->ssa->allocReg();
+                $this->lastValue = $r;
+                $this->lastValueType = 'ptr';
+                return '  ' . $r . " = call ptr @__mir_array_alloc(i64 0)\n";
+            }
+            $r = $this->ssa->allocReg();
+            $out = '  ' . $r . ' = call i64 @manticore_' . $sym . "()\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+            $this->lastValue = $p;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $this->rt->needsTagged = true;
         $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
