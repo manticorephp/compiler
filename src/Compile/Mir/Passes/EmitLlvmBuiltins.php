@@ -6406,7 +6406,12 @@ trait EmitLlvmBuiltins
     private function emitObjectVarsFn(): string
     {
         $body = $this->emitObjectVarsInline('%gov.obj');
-        return "define internal ptr @__mir_object_vars(ptr %gov.obj) noinline {\n"
+        // `optnone` on top: this walk is a REFLECTIVE fallback (an erased receiver),
+        // cold by construction, and at 1.2 MB it was the single most expensive
+        // function in the whole backend — 7.22 s of clang's 136.7 s of
+        // per-function optimization (5.3%), measured with `-ftime-trace`.
+        // Optimizing a cold dispatcher buys nothing at runtime.
+        return "define internal ptr @__mir_object_vars(ptr %gov.obj) noinline optnone {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 
