@@ -12,6 +12,7 @@ host profiler needs to be useful.
 | `live.sh` | which PHP function holds the peak live set? | macOS `MallocStackLogging` + `heap` |
 | `../docker/prof/run.sh` | the same, on Linux | `heaptrack` in the gate toolchain image |
 | `report.php` | folds any of the above into PHP names | — |
+| `propleak.php` | is an rc value in a PROPERTY ever released? (no) | `/usr/bin/time -l` |
 
 Granularity is **the function, forever**: `-g` is never passed to clang
 (`Main.php:526`), so the binary has no DWARF and no line numbers exist to
