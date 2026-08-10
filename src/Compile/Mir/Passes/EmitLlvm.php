@@ -1206,11 +1206,7 @@ final class EmitLlvm implements EmitVisitor
         // of the parent (a StoreLocal), not of the read.
         if ($n->kind === Node::KIND_STORE_LOCAL) {
             $v = $n->value;
-            if ($v->kind === Node::KIND_PROPERTY_ACCESS
-                && $n->type->kind === Type::KIND_CELL
-                && $v->type->kind !== Type::KIND_CELL) {
-                // The box-back arm returns BEFORE the alias retain — the same
-                // exclusion InsertMemoryOps makes for ownership.
+            if ($v->kind === Node::KIND_PROPERTY_ACCESS && !$this->storeLocalRetainsProp($n, $v)) {
                 $this->markPropBorrow($v);
             }
             foreach (\Compile\Mir\Walk::children($v) as $c) { $this->markPropBorrowsIn($c); }
@@ -1280,6 +1276,31 @@ final class EmitLlvm implements EmitVisitor
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
         }
+    }
+
+    /**
+     * Whether `$x = $obj->prop` takes a REFERENCE on what it reads — the ONE read
+     * shape in the tree that does, and therefore the only one that does not veto
+     * its slot.
+     *
+     * Character-for-character the `$aliasArrayProp` gate of
+     * {@see EmitLlvmLocals::emitStoreLocal}, because that is the code that emits
+     * the retain; if the two ever disagree this scan either leaks (harmless) or
+     * blesses a borrow as owned (a free of a live value).
+     *
+     * ARRAY only. A `string` / object property read emits NO retain at all, so
+     * `$s = $this->name;` leaves the local pointing at a value the slot still
+     * owns — which is exactly why a string slot may only drop when the property
+     * is read NOWHERE. And an array read through the cell box-back arm does not
+     * retain either: that arm returns before ever reaching the retain.
+     */
+    private function storeLocalRetainsProp(Node $store, Node $pa): bool
+    {
+        if ($store->type->kind === Type::KIND_CELL && $pa->type->kind !== Type::KIND_CELL) {
+            return false;
+        }
+        return $pa->type->isArray()
+            || $this->slotIsArrayHinted($pa->object, $pa->property, $pa->type);
     }
 
     /** Mark `$n` as a raw borrow iff it IS a property read. Deliberately NOT

@@ -5074,13 +5074,17 @@ trait EmitLlvmObjects
      * this slot must keep leaking it.
      *
      * Every condition is a soundness condition, not a heuristic:
-     *   - ARRAY slots only, and only RAW ones. A string / object property read
-     *     takes no reference at all ({@see EmitLlvmLocals::emitStoreLocal} retains
-     *     a LoadLocal alias, never a PROPERTY_ACCESS one), so dropping those slots
-     *     frees a value a live local still points at — the shape that made the
-     *     one-line version of this fix pass gen-1 and then emit
-     *     `getelementptr … ptr 19` out of gen-2. An array slot is different only
-     *     because the snapshot alias DOES retain.
+     *   - RAW slots only, of a kind the rc vocabulary has a release for
+     *     ({@see EmitLlvm::discardReleaseFlavor} — '' for a #[Struct] / closure /
+     *     enum ordinal / Ffi\Ptr, which have no header to touch).
+     *     ⚠ARRAY and STRING/OBJ reach this on DIFFERENT arguments. An array
+     *     snapshot (`$saved = $this->map`) RETAINS, so a live alias holds its own
+     *     reference; a string / object property read retains NOTHING, so such a
+     *     slot may drop only when the property is read NOWHERE in the module —
+     *     which is precisely what {@see EmitLlvm::$propRawBorrow} answers, since
+     *     the scan exempts the retaining array alias and only that. Dropping a
+     *     borrowed string slot is what made the one-line version of this fix pass
+     *     gen-1 and then emit `getelementptr … ptr 19` out of gen-2.
      *   - a boxed cell slot is excluded: the flavor would have to come from the
      *     tag, and the box-back arm that fills such a slot takes no reference.
      *   - the class must be declared HERE and not exported. An importing module's
@@ -5102,7 +5106,11 @@ trait EmitLlvmObjects
         if ($holder->propertyWidth($n->property) !== 8) { return ''; }
         if ($this->cellPropBoxed($propType, $cls, $n->property)) { return ''; }
         $t = $this->propStoreRetainType($n);
-        if ($t === null || !$t->isArray()) { return ''; }
+        if ($t === null) { return ''; }
+        // A CELL slot that is NOT boxed is a raw pointer whose static type claims
+        // a tag it does not carry — `cell` is a static CLAIM, not a runtime
+        // guarantee. __mir_cell_drop would dispatch on bits that are an address.
+        if ($t->kind === Type::KIND_CELL) { return ''; }
         $key = $this->cellPropKey($cls, $n->property);
         if (isset($this->propRawBorrow[$key]) || isset($this->propRawBorrow[$n->property])) { return ''; }
         return $this->discardReleaseFlavor($t);
