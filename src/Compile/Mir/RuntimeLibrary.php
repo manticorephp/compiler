@@ -2507,7 +2507,17 @@ final class RuntimeLibrary
      */
     public function jsonDec(int $stdSize = 0, int $stdBagOff = 16, string $stdDesc = '0'): string
     {
-        $out = '';
+        // Recursion depth, as a global rather than a threaded argument: the
+        // decoder's symbols are linkonce_odr and coalesce BY NAME, so widening
+        // one in place is a mismatch the linker resolves silently. A global
+        // costs no signature. Single-threaded by construction — the decoder
+        // never yields — and it is reset at every document entry, so a leaked
+        // count cannot outlive the call that leaked it.
+        //
+        // The LIMIT is 512 because {@see Passes\EmitLlvmBuiltins::jsonDecodeNative}
+        // only admits an absent or literal-512 $depth; any other value goes to
+        // the compiled-PHP parser, which counts it exactly.
+        $out = "\n@__mir_jd_depth = internal global i64 0\n";
 
         // ── skip space / tab / LF / CR ──
         $out .= "\ndefine void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp) {\n";
@@ -2805,7 +2815,12 @@ final class RuntimeLibrary
         $out .= "scan:\n";
         $out .= "  %i = load i64, ptr %kk\n";
         $out .= "  %iend = icmp sge i64 %i, %n\n";
-        $out .= "  br i1 %iend, label %plain, label %scanb\n";
+        // Input ending before the closing quote. php answers CTRL_CHAR here, not
+        // SYNTAX — its scanner reports the byte class it ran out on.
+        $out .= "  br i1 %iend, label %unterm, label %scanb\n";
+        $out .= "unterm:\n";
+        $out .= "  %unte = call i64 @manticore___mc_json_err(i64 3)\n";
+        $out .= "  br label %plain\n";
         $out .= "scanb:\n";
         $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
         $out .= "  %sb = load i8, ptr %sp\n";
@@ -2813,7 +2828,17 @@ final class RuntimeLibrary
         $out .= "  br i1 %isq2, label %plain, label %scanbs\n";
         $out .= "scanbs:\n";
         $out .= "  %isbs = icmp eq i8 %sb, 92\n";
-        $out .= "  br i1 %isbs, label %slow, label %scannext\n";
+        $out .= "  br i1 %isbs, label %slow, label %scanctl\n";
+        // A raw C0 byte inside a string literal is invalid JSON; php rejects it
+        // with CTRL_CHAR. `ult` on the i8 is right for the whole byte range —
+        // 0x80.. read as large unsigned, not as negative. The run still carries
+        // the byte, so this reports rather than repairs.
+        $out .= "scanctl:\n";
+        $out .= "  %isctl = icmp ult i8 %sb, 32\n";
+        $out .= "  br i1 %isctl, label %ctlerr, label %scannext\n";
+        $out .= "ctlerr:\n";
+        $out .= "  %ctle = call i64 @manticore___mc_json_err(i64 3)\n";
+        $out .= "  br label %scannext\n";
         $out .= "scannext:\n";
         $out .= "  %i1 = add i64 %i, 1\n";
         $out .= "  store i64 %i1, ptr %kk\n";
@@ -3016,11 +3041,37 @@ final class RuntimeLibrary
         $out .= "  %mp = getelementptr inbounds i8, ptr %s, i64 %st\n";
         $out .= "  %mb = load i8, ptr %mp\n";
         $out .= "  %ism = icmp eq i8 %mb, 45\n";
-        $out .= "  br i1 %ism, label %doneg, label %scan\n";
+        $out .= "  br i1 %ism, label %doneg, label %lzchk\n";
         $out .= "doneg:\n";
         $out .= "  store i64 1, ptr %neg\n";
         $out .= "  %st1 = add i64 %st, 1\n";
         $out .= "  store i64 %st1, ptr %ii\n";
+        $out .= "  br label %lzchk\n";
+        // JSON forbids a leading zero unless the integer part IS zero, so `01`
+        // and `-01` are syntax errors where `0` and `0.5` are fine. The scanner
+        // happily read `01` as 1. Checked after the sign, before the digits.
+        $out .= "lzchk:\n";
+        $out .= "  %lzi = load i64, ptr %ii\n";
+        $out .= "  %lzok = icmp slt i64 %lzi, %n\n";
+        $out .= "  br i1 %lzok, label %lzb, label %scan\n";
+        $out .= "lzb:\n";
+        $out .= "  %lzp = getelementptr inbounds i8, ptr %s, i64 %lzi\n";
+        $out .= "  %lzc = load i8, ptr %lzp\n";
+        $out .= "  %lziz = icmp eq i8 %lzc, 48\n";
+        $out .= "  br i1 %lziz, label %lznext, label %scan\n";
+        $out .= "lznext:\n";
+        $out .= "  %lzi1 = add i64 %lzi, 1\n";
+        $out .= "  %lzok2 = icmp slt i64 %lzi1, %n\n";
+        $out .= "  br i1 %lzok2, label %lzb2, label %scan\n";
+        $out .= "lzb2:\n";
+        $out .= "  %lzp2 = getelementptr inbounds i8, ptr %s, i64 %lzi1\n";
+        $out .= "  %lzc2 = load i8, ptr %lzp2\n";
+        $out .= "  %lzge = icmp uge i8 %lzc2, 48\n";
+        $out .= "  %lzle = icmp ule i8 %lzc2, 57\n";
+        $out .= "  %lzdig = and i1 %lzge, %lzle\n";
+        $out .= "  br i1 %lzdig, label %lzerr, label %scan\n";
+        $out .= "lzerr:\n";
+        $out .= "  %lze = call i64 @manticore___mc_json_err(i64 4)\n";
         $out .= "  br label %scan\n";
         $out .= "scan:\n";
         $out .= "  %i = load i64, ptr %ii\n";
@@ -3173,11 +3224,37 @@ final class RuntimeLibrary
         $out .= "  store i64 %pn, ptr %pp\n";
         $out .= "  %nv = call i64 @__manticore_box_null()\n";
         $out .= "  ret i64 %nv\n";
+        // The number scanner is the dispatcher's catch-all: every byte that is
+        // not `{ [ " t f n` lands here. On a byte that cannot start a value it
+        // consumes NOTHING and answers 0, which is how `[1,]`, `[,]` and
+        // `[1,,2]` came to invent elements. Consuming nothing IS the syntax
+        // error, and rooting it here covers the whole family at once instead of
+        // enumerating bad bytes one at a time.
         $out .= "num:\n";
+        $out .= "  %numb4 = load i64, ptr %pp\n";
         $out .= "  %numv = call i64 @__mir_jd_num(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %numaf = load i64, ptr %pp\n";
+        $out .= "  %numnil = icmp eq i64 %numaf, %numb4\n";
+        $out .= "  br i1 %numnil, label %numerr, label %numok\n";
+        $out .= "numerr:\n";
+        $out .= "  %nume = call i64 @manticore___mc_json_err(i64 4)\n";
+        $out .= "  br label %numok\n";
+        $out .= "numok:\n";
         $out .= "  ret i64 %numv\n";
         // ── [ … ] ──
         $out .= "arr:\n";
+        // Refuse BEFORE recursing — that is the whole point: past this the
+        // native decoder used to run to a stack overflow on untrusted input.
+        $out .= "  %adep = load i64, ptr @__mir_jd_depth\n";
+        $out .= "  %adeep = icmp sge i64 %adep, 512\n";
+        $out .= "  br i1 %adeep, label %adeperr, label %arrgo\n";
+        $out .= "adeperr:\n";
+        $out .= "  %adepe = call i64 @manticore___mc_json_err(i64 1)\n";
+        $out .= "  %adepn = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %adepn\n";
+        $out .= "arrgo:\n";
+        $out .= "  %adep1 = add i64 %adep, 1\n";
+        $out .= "  store i64 %adep1, ptr @__mir_jd_depth\n";
         $out .= "  %a0 = call ptr @__mir_array_alloc(i64 8)\n";
         $out .= "  store ptr %a0, ptr %ap\n";
         $out .= "  %ap1 = add i64 %p, 1\n";
@@ -3217,7 +3294,18 @@ final class RuntimeLibrary
         $out .= "anext:\n";
         $out .= "  %ac1 = add i64 %ac, 1\n";
         $out .= "  store i64 %ac1, ptr %pp\n";
-        $out .= "  br label %aloop\n";
+        // A trailing comma used to send the value dispatcher at `]`, where the
+        // number scanner consumed nothing and returned 0 — so `[1,]` decoded as
+        // [1,0], INVENTING an element. php: SYNTAX.
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %atc = load i64, ptr %pp\n";
+        $out .= "  %atcoob = icmp sge i64 %atc, %n\n";
+        $out .= "  br i1 %atcoob, label %aerr, label %atcchk\n";
+        $out .= "atcchk:\n";
+        $out .= "  %atcp = getelementptr inbounds i8, ptr %s, i64 %atc\n";
+        $out .= "  %atcb = load i8, ptr %atcp\n";
+        $out .= "  %atcend = icmp eq i8 %atcb, 93\n";
+        $out .= "  br i1 %atcend, label %aerr, label %aloop\n";
         $out .= "atail:\n";
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %at = load i64, ptr %pp\n";
@@ -3239,12 +3327,25 @@ final class RuntimeLibrary
         $out .= "  store i64 %at1, ptr %pp\n";
         $out .= "  br label %adone\n";
         $out .= "adone:\n";
+        $out .= "  %adepd = load i64, ptr @__mir_jd_depth\n";
+        $out .= "  %adepd1 = sub i64 %adepd, 1\n";
+        $out .= "  store i64 %adepd1, ptr @__mir_jd_depth\n";
         $out .= "  %afin = load ptr, ptr %ap\n";
         $out .= $stamp('a', '%afin');
         $out .= "  %abx = call i64 @__manticore_box_array(ptr %afin)\n";
         $out .= "  ret i64 %abx\n";
         // ── { … } ──
         $out .= "obj:\n";
+        $out .= "  %odep = load i64, ptr @__mir_jd_depth\n";
+        $out .= "  %odeep = icmp sge i64 %odep, 512\n";
+        $out .= "  br i1 %odeep, label %odeperr, label %objgo\n";
+        $out .= "odeperr:\n";
+        $out .= "  %odepe = call i64 @manticore___mc_json_err(i64 1)\n";
+        $out .= "  %odepn = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %odepn\n";
+        $out .= "objgo:\n";
+        $out .= "  %odep1 = add i64 %odep, 1\n";
+        $out .= "  store i64 %odep1, ptr @__mir_jd_depth\n";
         $out .= "  %o0 = call ptr @__mir_array_alloc_hashed(i64 8)\n";
         $out .= "  store ptr %o0, ptr %ap\n";
         $out .= "  %op1 = add i64 %p, 1\n";
@@ -3311,7 +3412,16 @@ final class RuntimeLibrary
         $out .= "onext:\n";
         $out .= "  %occ1 = add i64 %occ, 1\n";
         $out .= "  store i64 %occ1, ptr %pp\n";
-        $out .= "  br label %oloop\n";
+        // `{"a":1,}` — a trailing comma, php's SYNTAX. Mirror of the array arm.
+        $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
+        $out .= "  %otc = load i64, ptr %pp\n";
+        $out .= "  %otcoob = icmp sge i64 %otc, %n\n";
+        $out .= "  br i1 %otcoob, label %oerr, label %otcchk\n";
+        $out .= "otcchk:\n";
+        $out .= "  %otcp = getelementptr inbounds i8, ptr %s, i64 %otc\n";
+        $out .= "  %otcb = load i8, ptr %otcp\n";
+        $out .= "  %otcend = icmp eq i8 %otcb, 125\n";
+        $out .= "  br i1 %otcend, label %oerr, label %oloop\n";
         $out .= "otail:\n";
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %ot = load i64, ptr %pp\n";
@@ -3330,6 +3440,9 @@ final class RuntimeLibrary
         $out .= "  store i64 %ot1, ptr %pp\n";
         $out .= "  br label %odone\n";
         $out .= "odone:\n";
+        $out .= "  %odepd = load i64, ptr @__mir_jd_depth\n";
+        $out .= "  %odepd1 = sub i64 %odepd, 1\n";
+        $out .= "  store i64 %odepd1, ptr @__mir_jd_depth\n";
         $out .= "  %ofin = load ptr, ptr %ap\n";
         $out .= $stamp('o', '%ofin');
         if ($stdSize === 0) {
@@ -3365,6 +3478,9 @@ final class RuntimeLibrary
         $out .= "entry:\n";
         $out .= "  %pp = alloca i64\n";
         $out .= "  store i64 0, ptr %pp\n";
+        // Reset per DOCUMENT, so a count leaked by an early return cannot
+        // outlive the call that leaked it.
+        $out .= "  store i64 0, ptr @__mir_jd_depth\n";
         $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
         // Empty or whitespace-only input is a syntax error in php, not null.
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";

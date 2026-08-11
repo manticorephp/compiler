@@ -11,3 +11,10 @@ manticore_stubs.c
 manticore_stubs.o
 manticore_self*
 manticore_g[0-9]*
+# tools/prof/live.sh --build: the no-pool compiler it profiles
+manticore.nopool
+# tools/prof A/B and fixpoint generations
+manticore.base
+manticore.chg*
+manticore.noarena
+manticore.g*

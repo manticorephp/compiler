@@ -1,0 +1,18 @@
+v0,v1,v2|v0,v1
+v0,v1,x|v0,v1
+a,b,c,d|z
+1:v0 2:v0-v1 3:v0-v1-v2 4:v0-v1-v2-v3
+(object) array(
+   'n' => 
+  array (
+    'a' => 1,
+  ),
+   's' => 'kept',
+)
+(object) array(
+   'n' => 
+  array (
+    'a' => 1,
+  ),
+   's' => 'kept',
+)

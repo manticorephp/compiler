@@ -68,9 +68,30 @@ final class CondOwn
         $arms = self::arms($n);
         if (\count($arms) === 0) { return false; }
         foreach ($arms as $arm) {
+            if (self::isEmptyArrayLit($arm)) { continue; }
             if (!self::armCoverable($arm->type, $n->type)) { return false; }
         }
         return true;
+    }
+
+    /**
+     * An EMPTY array literal is coverable at ANY depth: a retain or a release of
+     * it walks zero elements, whatever flavor the result names (and the empty
+     * singleton is immortal, so both are no-ops on it outright).
+     *
+     * Without this it is the arm that disqualifies the whole conditional, because
+     * `[]` carries no element type and {@see sameArrayShape} then reads the pair
+     * as two different shapes. `return $this->value === null ? [] : [$this->value];`
+     * — `Node::children()`, the hottest method in the compiler — was therefore
+     * treated as BORROWED at the return, and {@see Passes\EmitLlvmModule::
+     * emitReturn} put a +1 on top of the fresh literal's own: ONE array leaked per
+     * call, 46431 blocks in a single file's front-end run. The statement-`if`
+     * spelling of the same function never leaked, which is what named it.
+     */
+    public static function isEmptyArrayLit(?Node $n): bool
+    {
+        if ($n === null) { return false; }
+        return $n->kind === Node::KIND_ARRAY_LIT && \count(self::asArrayLit($n)->elements) === 0;
     }
 
     /**
@@ -130,6 +151,7 @@ final class CondOwn
         return true;
     }
 
+    private static function asArrayLit(Node $n): ArrayLit { return $n; }
     private static function asTernary(Node $n): Ternary { return $n; }
     private static function asNullCoalesce(Node $n): NullCoalesce_ { return $n; }
     private static function asMatch(Node $n): Match_ { return $n; }

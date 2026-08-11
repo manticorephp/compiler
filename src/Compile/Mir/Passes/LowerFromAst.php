@@ -1259,6 +1259,7 @@ final class LowerFromAst implements Pass
             $module->knownFnNames = $this->collectKnownFnNames();
         }
         if ($this->emitLibrary) { $this->recordExportConstants($module); }
+        $module->isLibraryModule = $this->emitLibrary;
         $module->markPassApplied(self::NAME);
         return $module;
     }
