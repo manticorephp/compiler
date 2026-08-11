@@ -1458,6 +1458,20 @@ trait InferNodes
             // single shared class collapses back to `obj<…>` in Type::union.
             $node->type = Type::union([$t, $e]);
         }
+        // `$c ? [] : [$x]` — an EMPTY array literal carries NO element type, so
+        // the sibling arm's type is the whole answer. The `$t->kind === $e->kind`
+        // join below would take the then-arm's `vec[unknown]` and erase the
+        // element for every consumer; worse, the arms then read as two different
+        // SHAPES, so {@see CondOwn::armsCoverable} calls the conditional
+        // uncoverable and {@see Passes\EmitLlvmModule::emitReturn} adds a BORROW
+        // +1 on top of the fresh literal's own — one array leaked per call, on
+        // `children()`, the hottest method in the compiler (46431 leaked blocks
+        // in a single file's front-end run). The same function written with a
+        // statement `if` never leaked, because each arm is then its own return.
+        elseif ($t->isArray() && $e->isArray()
+            && \Compile\Mir\CondOwn::isEmptyArrayLit($node->then)) { $node->type = $e; }
+        elseif ($t->isArray() && $e->isArray()
+            && \Compile\Mir\CondOwn::isEmptyArrayLit($node->else_)) { $node->type = $t; }
         elseif ($t->kind === $e->kind)        { $node->type = $t; }
         elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
             && $e->kind === Type::KIND_UNKNOWN) {

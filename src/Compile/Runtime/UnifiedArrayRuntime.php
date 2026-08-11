@@ -65,6 +65,18 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
         $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
+        // ADOPT = retain MINUS the rc bump: co-own the hashed keys and the
+        // elements of a buffer this frame already owns outright. That is exactly
+        // what a value COPY needs — `__mir_array_copy` hands back a FRESH rc=1
+        // buffer whose keys and elements are still the SOURCE's, so a full retain
+        // would leave it at rc 2 against one release and the buffer would never
+        // be freed (one per `$stmts = $n->stmts;`, i.e. per call of every
+        // predicate that reads an array property).
+        $this->emitRetainVariant('__mir_array_adopt_obj', 'obj', false);
+        $this->emitRetainVariant('__mir_array_adopt_str', 'str', false);
+        $this->emitRetainVariant('__mir_array_adopt_cell', 'cell', false);
+        $this->emitRetainVariant('__mir_array_adopt_buf', '', false);
+        $this->emitRetainVariant('__mir_array_adopt', 'repr', false);
         $this->emitRelease();
         $this->emitIsHashed();
         $this->emitGetInt();
@@ -78,6 +90,13 @@ final class UnifiedArrayRuntime
         $this->emitCowVariant('__mir_array_cow_obj', 'obj');
         $this->emitCowVariant('__mir_array_cow_str', 'str');
         $this->emitCowVariant('__mir_array_cow_cell', 'cell');
+        // A cow CONSUMES the caller's reference (it hands back the clone and
+        // gives up the source), so a caller whose reference owns element refs
+        // must give them back here too — otherwise `$s = $this->map; $s[$k] = v;`
+        // strands one ref per element on the SOURCE buffer every iteration.
+        $this->emitCowVariant('__mir_array_cow_ownel_obj', 'obj', true);
+        $this->emitCowVariant('__mir_array_cow_ownel_str', 'str', true);
+        $this->emitCowVariant('__mir_array_cow_ownel_cell', 'cell', true);
         $this->emitRefSlot();
         $this->emitRefSlotStr();
         $this->emitValueAt();
@@ -1448,7 +1467,7 @@ final class UnifiedArrayRuntime
      * child on its release without ever having retained one: the tree's nodes
      * were freed under it. Retain must undo exactly what release does.
      */
-    private function emitRetainVariant(string $symbol, string $valueFlavor): void
+    private function emitRetainVariant(string $symbol, string $valueFlavor, bool $bumpRc = true): void
     {
         $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
@@ -1480,7 +1499,11 @@ final class UnifiedArrayRuntime
             $bump = $ok;
             $rcAddr = $bump->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::ARRAY_RC_OFFSET)]);
         }
-        $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
+        // ADOPT skips this and only walks the keys / elements below: the caller
+        // already holds the buffer's single reference (a fresh copy).
+        if ($bumpRc) {
+            $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
+        }
 
         // ── co-own exactly what the matching release will drop ──
         $ret = $fn->block('rt_ret');
@@ -1588,6 +1611,22 @@ final class UnifiedArrayRuntime
         $this->emitReleaseVariant('__mir_array_release_obj', 'obj');
         $this->emitReleaseVariant('__mir_array_release_str', 'str');
         $this->emitReleaseVariant('__mir_array_release_cell', 'cell');
+        // ── PAIRWISE-SYMMETRIC variants: drop the elements on EVERY release,
+        // not only at rc → 0. {@see emitRetainVariant} co-owns the elements on
+        // every retain, so a retain/release pair around a buffer that does NOT
+        // die leaves +1 on every element:
+        //   rc=1 el=1 → retain → rc=2 el=2 → release(keep) → rc=1 el=2
+        //                      → release(free) → free, el=1   LEAKED
+        // These are emitted ONLY where the release is the proven partner of an
+        // emitted retain of the SAME flavor ({@see EmitLlvmMemory::
+        // collectOwnElemLocals}), which is what makes the extra drop legal:
+        // element ownership is a property of the REFERENCE, not of the buffer.
+        // Blanket-symmetric release is REFUTED — a buffer retained as `_buf` at
+        // one site and released as `_str` at another then over-releases a LIVE
+        // buffer (json / pdo / preg / unserialize / var_export went red).
+        $this->emitReleaseVariant('__mir_array_release_ownel_obj', 'obj', true);
+        $this->emitReleaseVariant('__mir_array_release_ownel_str', 'str', true);
+        $this->emitReleaseVariant('__mir_array_release_ownel_cell', 'cell', true);
     }
 
     /**
@@ -1867,7 +1906,7 @@ final class UnifiedArrayRuntime
         $done->retVoid();
     }
 
-    private function emitReleaseVariant(string $symbol, string $valueFlavor): void
+    private function emitReleaseVariant(string $symbol, string $valueFlavor, bool $dropAlways = false): void
     {
         $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
@@ -1877,7 +1916,7 @@ final class UnifiedArrayRuntime
         $bail = $fn->block('bail');
         $dec = $fn->block('dec');
         $free = $fn->block('free');
-        $keep = $fn->block('keep');
+        $keep = $dropAlways ? null : $fn->block('keep');
 
         $entry->brIf($entry->icmp('eq', $arr, Value::null()), $skipNull, $cont);
         $skipNull->retVoid();
@@ -1904,8 +1943,17 @@ final class UnifiedArrayRuntime
         }
         $next = $dec->sub($cur, Value::int(Type::i64(), 1));
         $dec->store($next, $rcAddr);
-        $dec->brIf($dec->icmp('sle', $next, Value::int(Type::i64(), 0)), $free, $keep);
-        $keep->retVoid();
+        // `$dec` dominates every block below, so the symmetric variants can use
+        // this i1 again at the reclaim gate.
+        $isZero = $dec->icmp('sle', $next, Value::int(Type::i64(), 0));
+        if ($keep !== null) {
+            $dec->brIf($isZero, $free, $keep);
+            $keep->retVoid();
+        } else {
+            // SYMMETRIC: the element walk runs on every release (it undoes this
+            // reference's retain); only the BUFFER reclaim stays at rc → 0.
+            $dec->br($free);
+        }
 
         // ── free path: drop elements (mode-driven), then free buffer ──
         $freeb = $fn->block('freeb');
@@ -1994,6 +2042,16 @@ final class UnifiedArrayRuntime
         }
         $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
         $hadv->br($hhead);
+
+        // A symmetric variant reaches `freeb` on every release — the elements
+        // are already dropped; the buffer itself dies only at rc → 0.
+        if ($dropAlways) {
+            $reclaim = $fn->block('reclaim');
+            $stillLive = $fn->block('still_live');
+            $freeb->brIf($isZero, $reclaim, $stillLive);
+            $stillLive->retVoid();
+            $freeb = $reclaim;
+        }
 
         // Free the hashed bucket side-array if present (PACKED has null here).
         $bptr = $freeb->load(Type::ptr(), $this->hdr($freeb, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
@@ -2636,7 +2694,7 @@ final class UnifiedArrayRuntime
      * borrowed ASSOC return started being +1-retained, which is what makes a
      * `$t = $pool->all(); … $pool->intern(x)` pair two real owners.
      */
-    private function emitCowVariant(string $symbol, string $valueFlavor): void
+    private function emitCowVariant(string $symbol, string $valueFlavor, bool $dropSource = false): void
     {
         $fn = $this->module->func($symbol, Type::ptr());
         $arr = $fn->param(Type::ptr(), 'arr');
@@ -2662,7 +2720,14 @@ final class UnifiedArrayRuntime
         $clone->store(Value::int(Type::i64(), 1), $this->hdr($clone, $copy, MemoryAbi::ARRAY_RC_OFFSET));
         $clone->store(Value::int(Type::i64(), 0), $this->hdr($clone, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $clone->store(Value::null(), $this->hdr($clone, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
-        $clone->store($clone->sub($rc, Value::int(Type::i64(), 1)), $rcAddr);
+        // The source rc-1 is the caller's reference going away. `$dropSource`
+        // routes it through the symmetric release instead, so the element refs
+        // that reference held go back too — AFTER the clone's deep-retain below
+        // (which is why it sits at `$ret`), and it can never free: this path only
+        // runs at rc > 1, so the decrement lands at rc >= 1.
+        if (!$dropSource) {
+            $clone->store($clone->sub($rc, Value::int(Type::i64(), 1)), $rcAddr);
+        }
 
         // ── co-own everything the clone now shares with the source ──
         $ret = $fn->block('cow_ret');
@@ -2730,6 +2795,9 @@ final class UnifiedArrayRuntime
             $hval->br($hhead);
         }
 
+        if ($dropSource) {
+            $ret->call('__mir_array_release_ownel_' . $valueFlavor, Type::void(), [$arr]);
+        }
         $ret->ret($copy);
         $keep->ret($arr);
     }

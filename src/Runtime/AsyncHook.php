@@ -24,14 +24,14 @@ namespace Runtime;
  */
 final class AsyncHook
 {
-    public static mixed $waitReadable = null;
-    public static mixed $waitWritable = null;
-    public static mixed $onClose = null;
-    public static mixed $waitReadableFor = null;
-    public static mixed $waitWritableFor = null;
-    public static mixed $sleeper = null;
-    public static mixed $dnsGet = null;
-    public static mixed $dnsPut = null;
+    public static ?\Closure $waitReadable = null;
+    public static ?\Closure $waitWritable = null;
+    public static ?\Closure $onClose = null;
+    public static ?\Closure $waitReadableFor = null;
+    public static ?\Closure $waitWritableFor = null;
+    public static ?\Closure $sleeper = null;
+    public static ?\Closure $dnsGet = null;
+    public static ?\Closure $dnsPut = null;
 
     /**
      * select(2) over N fds at once. Registration is per-fd and separate from the
@@ -42,13 +42,13 @@ final class AsyncHook
      * fired) · `selectDone: fn(): void` releases every registration.
      * Installed separately from the eight above only to keep install() readable.
      */
-    public static mixed $selectAdd = null;
-    public static mixed $selectWait = null;
-    public static mixed $selectDone = null;
+    public static ?\Closure $selectAdd = null;
+    public static ?\Closure $selectWait = null;
+    public static ?\Closure $selectDone = null;
 
-    public static function install(mixed $waitReadable, mixed $waitWritable, mixed $onClose,
-                                   mixed $waitReadableFor, mixed $waitWritableFor,
-                                   mixed $sleeper, mixed $dnsGet, mixed $dnsPut): void
+    public static function install(?\Closure $waitReadable, ?\Closure $waitWritable, ?\Closure $onClose,
+                                   ?\Closure $waitReadableFor, ?\Closure $waitWritableFor,
+                                   ?\Closure $sleeper, ?\Closure $dnsGet, ?\Closure $dnsPut): void
     {
         self::$waitReadable = $waitReadable;
         self::$waitWritable = $waitWritable;
@@ -60,7 +60,7 @@ final class AsyncHook
         self::$dnsPut = $dnsPut;
     }
 
-    public static function installSelect(mixed $add, mixed $wait, mixed $done): void
+    public static function installSelect(?\Closure $add, ?\Closure $wait, ?\Closure $done): void
     {
         self::$selectAdd = $add;
         self::$selectWait = $wait;
@@ -88,27 +88,27 @@ final class AsyncHook
         return self::$waitReadable !== null && \Fiber::getCurrent() !== null;
     }
 
-    public static function readable(): mixed { return self::$waitReadable; }
-    public static function writable(): mixed { return self::$waitWritable; }
-    public static function closer(): mixed { return self::$onClose; }
+    public static function readable(): ?\Closure { return self::$waitReadable; }
+    public static function writable(): ?\Closure { return self::$waitWritable; }
+    public static function closer(): ?\Closure { return self::$onClose; }
     /** Bounded readable wait: `fn(\Resource, float $seconds): bool`. */
-    public static function readableFor(): mixed { return self::$waitReadableFor; }
+    public static function readableFor(): ?\Closure { return self::$waitReadableFor; }
     /** Bounded writable wait: `fn(\Resource, float $seconds): bool`. */
-    public static function writableFor(): mixed { return self::$waitWritableFor; }
+    public static function writableFor(): ?\Closure { return self::$waitWritableFor; }
     /** Fiber-aware sleep: `fn(float $seconds): void`. */
-    public static function sleeper(): mixed { return self::$sleeper; }
+    public static function sleeper(): ?\Closure { return self::$sleeper; }
     /**
      * Resolver cache, held by the SCHEDULER because a stdlib static cannot own an
      * assoc (the array-repr trap) and a per-run lifetime is the right scope anyway.
      * `dnsGet: fn(string $host): string` ('' = miss/expired) ·
      * `dnsPut: fn(string $host, string $ip, int $ttl): void`.
      */
-    public static function dnsGetter(): mixed { return self::$dnsGet; }
-    public static function dnsPutter(): mixed { return self::$dnsPut; }
+    public static function dnsGetter(): ?\Closure { return self::$dnsGet; }
+    public static function dnsPutter(): ?\Closure { return self::$dnsPut; }
 
     /** True when the scheduler can park a select on the reactor. */
     public static function selectReady(): bool { return self::$selectWait !== null; }
-    public static function selectAdder(): mixed { return self::$selectAdd; }
-    public static function selectWaiter(): mixed { return self::$selectWait; }
-    public static function selectFinisher(): mixed { return self::$selectDone; }
+    public static function selectAdder(): ?\Closure { return self::$selectAdd; }
+    public static function selectWaiter(): ?\Closure { return self::$selectWait; }
+    public static function selectFinisher(): ?\Closure { return self::$selectDone; }
 }

@@ -314,6 +314,17 @@ final class Module
         $this->classIdOwner[$id] = $name;
     }
 
+    /**
+     * True when this module is a LIBRARY target — its classes go into a `.sig`
+     * and an importing module may do anything with them.
+     *
+     * The one question a whole-module analysis has to ask before it may act on
+     * "nobody borrows this": whether "nobody" can be answered at all. A library's
+     * answer is always "unknown", so any such analysis must decline here.
+     * {@see Passes\EmitLlvm::$propRawBorrow} is the first caller.
+     */
+    public bool $isLibraryModule = false;
+
     public function markPassApplied(string $name): void
     {
         $this->passesApplied[$name] = true;

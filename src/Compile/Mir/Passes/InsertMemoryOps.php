@@ -11,6 +11,7 @@ use Compile\Mir\MemoryOp_;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
 use Compile\Mir\Pass;
+use Compile\Mir\StoreLocal;
 use Compile\Mir\Type;
 use Compile\Mir\Walk;
 
@@ -80,6 +81,11 @@ final class InsertMemoryOps implements Pass
      *  than a conditional. */
     private array $rcObjPlainOwner = [];
 
+    /** @var array<string, bool> owned rc local → whether the SLOT holds a
+     *  NaN-boxed cell ({@see slotStoredType}). A name whose stores disagree
+     *  about this has no single correct release flavor and is blocked. */
+    private array $rcObjSlotBoxed = [];
+
     /** @var array<string, bool> FFI function names (foreign, non-rc return) */
     private array $ffiFns = [];
 
@@ -118,6 +124,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjType = [];
         $this->rcObjNeutral = [];
         $this->rcObjPlainOwner = [];
+        $this->rcObjSlotBoxed = [];
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -221,6 +228,10 @@ final class InsertMemoryOps implements Pass
         foreach ($this->rcObjOrder as $name) {
             if (isset($this->rcObjBlocked[$name])) { continue; }
             $type = $this->rcObjType[$name];
+            // A slot the emitter fills with a RAW scalar has nothing to release,
+            // and the flavor ladder below has no arm for it — its `obj` default
+            // would rc-release an int. {@see slotStoredType}'s second arm.
+            if (!$this->slotTypeIsRc($type)) { continue; }
             // CELL before the 'obj' default: a cell is NaN-boxed, so releasing
             // it as an obj would inttoptr the tag bits and fault.
             $flavor = $type->kind === Type::KIND_STRING ? 'str'
@@ -367,6 +378,28 @@ final class InsertMemoryOps implements Pass
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return true;
         }
+        // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
+        // allocation — the one producer this pass could not see, because it gates
+        // on `effects->alloc`. {@see EmitLlvmLocals::emitStoreLocal}'s snapshot
+        // path already takes a +1 on it (`$saved = $this->map`) so that a later
+        // mutation of either side copy-on-writes instead of clobbering the
+        // other's buffer; the retain cannot simply be dropped, because a borrow
+        // that left rc alone would let a mutation through the local see rc == 1
+        // and write THROUGH into the property. The local genuinely owns — and
+        // nothing ever released it, neither on a rebind nor at scope exit.
+        //
+        // That is ROOT 1 of the compiler's own monotone climb: InferTypes::
+        // mergeLocals' per-block local-type maps (402 MB of __mir_array_set_str,
+        // 69.7% of that allocator) were still resident at a snapshot taken with
+        // the process blocked in clang, with nothing on any stack holding them.
+        //
+        // The slot's REPRESENTATION decides the flavor ({@see slotStoredType}),
+        // which is what makes this claim safe: a nullable array property reads
+        // back a NaN-boxed cell, and it is released as a cell.
+        if ($k === Node::KIND_PROPERTY_ACCESS
+            && ($value->type->isVec() || $value->type->isAssoc())) {
+            return true;
+        }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so
@@ -378,6 +411,48 @@ final class InsertMemoryOps implements Pass
         // FRESH +1 array, so it is owned exactly like a literal.
         return $k === Node::KIND_ARRAY_LIT
             || ($tk === Type::KIND_ARRAY && $k === Node::KIND_ADD);
+    }
+
+    /**
+     * The type of what the SLOT actually receives — which is NOT always the
+     * value's type, and the release reads the SLOT.
+     *
+     * {@see EmitLlvmLocals::emitStoreLocal} has two arms where the store NODE's
+     * type and its VALUE's type deliberately disagree, and in both the emitter
+     * CONVERTS on the way into the slot:
+     *   - store typed CELL, value concrete — the merge box-back InferTypes plants
+     *     at an if/else join; the slot receives a NaN-BOXED word;
+     *   - store typed a concrete scalar/string, value a CELL — the by-ref
+     *     representation plant; the slot receives the RAW payload.
+     * Everywhere else `inferStoreLocal` types the store = its value, so this
+     * answers exactly what it always did.
+     *
+     * Reading the value's type through those two arms is what emitted
+     * `__mir_array_release_buf` on a boxed array cell: `/** @var int[]|null $c *\/
+     * $c = mkList();` inside a loop — a plain owned CALL, a cell-typed slot —
+     * SIGSEGV'd at scope exit on `0xfff7…`, i.e. the tag, not a heap pointer.
+     * One owner for the slot's representation, or the release frees a tag.
+     */
+    private function slotStoredType(StoreLocal $sl): Type
+    {
+        $st = $sl->type->kind;
+        $vt = $sl->value->type->kind;
+        if ($st === Type::KIND_CELL && $vt !== Type::KIND_CELL) { return $sl->type; }
+        if ($vt === Type::KIND_CELL
+            && ($st === Type::KIND_INT || $st === Type::KIND_FLOAT
+                || $st === Type::KIND_BOOL || $st === Type::KIND_STRING)) {
+            return $sl->type;
+        }
+        return $sl->value->type;
+    }
+
+    /** Whether a SLOT of this type is rc-managed at all. A concrete scalar slot
+     *  is not: the flavor ladder's `obj` default would rc-release an int. */
+    private function slotTypeIsRc(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_OBJ || $k === Type::KIND_ARRAY
+            || $k === Type::KIND_STRING || $k === Type::KIND_CELL;
     }
 
     /** A store that neither owns nor borrows: a string LITERAL (immortal, `rc <
@@ -465,10 +540,32 @@ final class InsertMemoryOps implements Pass
             // double-free / over-release a borrow); an owned-obj store
             // (a `new` or an obj-returning call — both yield rc=1)
             // registers it.
-            if ($this->isOwnedObj($value)) {
+            $slotType = $this->slotStoredType($sl);
+            $boxedSlot = $slotType->kind === Type::KIND_CELL;
+            // A property read owns BY RETAIN, and the arm that boxes a concrete
+            // value into a cell slot ({@see EmitLlvmLocals::emitStoreLocal}, the
+            // merge box-back) returns BEFORE the alias retain the general store
+            // path emits. Claiming ownership there plants a release with no
+            // matching retain — this pass's own invariant, and the crash it
+            // predicts: `$conds = $arm->conds;` in InferTypes::inferMatch went
+            // through the box-back, and the gen-2 compiler wrote through a freed
+            // buffer at `str x8, [x0]` with x0 == 0. An allocation-owned producer
+            // (a call's +1) keeps its reference through the same arm, so only the
+            // retain-owned one is dropped here.
+            $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS;
+            if ($this->isOwnedObj($value) && !($ownedByRetain && $boxedSlot)) {
+                // Two stores that disagree about the slot's REPRESENTATION leave
+                // no single release flavor that is right for both — the scope-exit
+                // release reads the slot, not the producer. Block: a leak, never a
+                // free of a tag.
+                if (isset($this->rcObjSlotBoxed[$name])
+                    && $this->rcObjSlotBoxed[$name] !== $boxedSlot) {
+                    $this->rcObjBlocked[$name] = true;
+                }
+                $this->rcObjSlotBoxed[$name] = $boxedSlot;
                 if (!isset($this->rcObjType[$name])) {
                     $this->rcObjOrder[] = $name;
-                    $this->rcObjType[$name] = $value->type;
+                    $this->rcObjType[$name] = $slotType;
                 }
                 if (!CondOwn::isConditional($value)) { $this->rcObjPlainOwner[$name] = true; }
             } elseif ($this->isRcNeutralStore($value)) {

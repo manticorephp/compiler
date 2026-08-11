@@ -117,6 +117,10 @@ trait EmitLlvmMemory
         $this->collectTransferredLocals($body);
         $this->frame->elementSharedLocals = [];
         $this->collectElementSharedLocals($body);
+        // LAST: its gate reads paramNames, transferredLocals, elementSharedLocals
+        // and rcObjLocals, and asks rcReleaseFlavor with the flag map still empty.
+        $this->frame->ownElemLocals = [];
+        $this->collectOwnElemLocals($body);
         $out = '';
         foreach ($this->frame->rcObjLocals as $name => $mo) {
             // A reassigned obj/str/vec/assoc PARAM holds the caller's
@@ -213,6 +217,126 @@ trait EmitLlvmMemory
             }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectElementSharedLocals($c); }
+    }
+
+    /**
+     * Pre-pass for PAIRWISE-SYMMETRIC element drop: find the locals whose value
+     * was acquired BY RETAIN and whose retain and release name the SAME flavor,
+     * so their release can undo exactly what their retain did — on every
+     * release, not only at rc → 0 ({@see UnifiedArrayRuntime::emitRelease}'s
+     * `_ownel_` variants).
+     *
+     * The retain co-owns the elements on EVERY retain while the release walks
+     * them out of the `rc → 0` block, so a pair around a buffer that does not
+     * die leaks +1 per element per pair — the propleak `snap` row, ~24 small
+     * strings an iteration. Making that symmetric for ALL release sites is
+     * REFUTED (AOT 1006/1011): one buffer is retained as `_buf` at one site and
+     * released as `_str` at another, and every mismatched pair then becomes an
+     * over-release on a LIVE buffer. Element ownership is a property of the
+     * REFERENCE, so the drop is only legal where BOTH ends are the same site:
+     *
+     *   1. EVERY store to the name is the retaining property snapshot
+     *      (`$saved = $this->map` — {@see EmitLlvm::storeLocalRetainsProp}, the
+     *      one read shape in the tree that takes a reference). A single
+     *      producer store (call / literal / `new`) vetoes the name: its +1 has
+     *      no element refs behind it, so the counts stop matching.
+     *   2. The retain's flavor ({@see arrayRetainFlavor}, the emitter's own) and
+     *      the release's ({@see rcReleaseFlavor}) are EQUAL and element-bearing.
+     *      Anything else is vetoed, never "fixed".
+     *   3. A PARAM is excluded (its slot arrives holding the caller's value, and
+     *      {@see initRcObjSlots} balances that with an entry retain of its own),
+     *      as are a transferred local (release suppressed) and an element-shared
+     *      one (deliberately buffer-only — the parser `$args` UAF).
+     *
+     * ⚠ A conservative gate fails SILENTLY — `MANTICORE_OWNEL_TRACE=1` prints
+     * each accepted / rejected name, so a gate that matches 3 sites cannot pass
+     * for one that matches 46.
+     */
+    private function collectOwnElemLocals(Node $body): void
+    {
+        /** @var array<string, string> $cand */
+        $cand = [];
+        /** @var array<string, bool> $veto */
+        $veto = [];
+        $this->scanOwnElemStores($body, $cand, $veto);
+        $dbg = \getenv('MANTICORE_OWNEL_TRACE') !== false;
+        foreach ($cand as $name => $flavor) {
+            $why = '';
+            if (isset($veto[$name])) { $why = 'mixed store'; }
+            elseif (isset($this->frame->paramNames[$name])) { $why = 'param'; }
+            elseif (isset($this->frame->transferredLocals[$name])) { $why = 'transferred'; }
+            elseif (isset($this->frame->elementSharedLocals[$name])) { $why = 'element-shared'; }
+            elseif (!isset($this->frame->rcObjLocals[$name])) { $why = 'no release'; }
+            elseif ($this->rcReleaseFlavor($this->frame->rcObjLocals[$name]) !== $flavor) {
+                $why = 'flavor ' . $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]) . ' != ' . $flavor;
+            }
+            if ($why !== '') {
+                if ($dbg) { \error_log('OWNEL? $' . $name . ' no: ' . $why); }
+                continue;
+            }
+            if ($dbg) { \error_log('OWNEL? $' . $name . ' YES ' . $flavor); }
+            $this->frame->ownElemLocals[$name] = true;
+        }
+    }
+
+    /**
+     * @param array<string, string> $cand name => the pair's retain flavor
+     * @param array<string, bool>   $veto names disqualified by any other store
+     */
+    private function scanOwnElemStores(Node $n, array &$cand, array &$veto): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $name = $n->name;
+            $v = $n->value;
+            // `null` neither owns nor borrows — every release helper null-guards,
+            // so it decides nothing either way.
+            if ($v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL) {
+                $f = $this->ownElemPairFlavor($n, $v);
+                if ($f === null || (isset($cand[$name]) && $cand[$name] !== $f)) {
+                    $veto[$name] = true;
+                } else {
+                    $cand[$name] = $f;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanOwnElemStores($c, $cand, $veto); }
+    }
+
+    /**
+     * The flavor of the element refs this store gives the local, or null when
+     * the store cannot be spoken for.
+     *
+     * TWO shapes give a local its own element refs, and both must drop them:
+     *   - the retaining PROPERTY SNAPSHOT (`$s = $this->map`), whose retain took
+     *     a +1 on every element ({@see EmitLlvmLocals::emitStoreLocal});
+     *   - an OWNED PRODUCER (a literal, a call's +1 return, a union), which
+     *     carries the BUILDER's one ref per element. `$m = build(); $h->set($m);`
+     *     is the shape: the property store retains (+1 per element) and the
+     *     local's own release must give back the ref it holds, or every element
+     *     leaks exactly once per iteration — `noread` in the probe, no snapshot
+     *     anywhere. InsertMemoryOps only plants a release for an OWNED value
+     *     (a borrowed alias blocks the name outright), so reaching here with a
+     *     release at all is the ownership proof.
+     *
+     * Element-bearing flavors only: `vec` / `assoc` (repr mode) read ownership
+     * off the BUFFER's own repr bits, which no per-reference pairing can speak
+     * for, and `*buf` has nothing to drop.
+     */
+    private function ownElemPairFlavor(Node $store, Node $value): ?string
+    {
+        $fallback = null;
+        if ($value->kind === Node::KIND_PROPERTY_ACCESS) {
+            if (!$this->storeLocalRetainsProp($store, $value)) { return null; }
+            // ⚠ Character-for-character {@see EmitLlvmLocals::emitStoreLocal}'s
+            // `$fallback`: an array-HINTED slot whose type erased to unknown
+            // carries no kind for the retain to dispatch on, so the emitter names
+            // the array explicitly there — and the pair's flavor follows from it.
+            if (!$value->type->isArray()) { $fallback = Type::vec(Type::unknown()); }
+        } elseif (!$value->type->isArray()) {
+            return null;
+        }
+        $flavor = $this->arrayRetainFlavor($value, $fallback);
+        return $this->isOwnElemFlavor($flavor) ? $flavor : null;
     }
 
     /**
@@ -409,6 +533,21 @@ trait EmitLlvmMemory
         // the parser `$args` UAF). See {@see $elementSharedLocals}.
         $shared = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
             && isset($this->frame->elementSharedLocals[$t->name]);
+        // This reference OWNS its element refs (it took them in its own retain)
+        // ⇒ it drops them on every release, not only at rc → 0. Only the
+        // element-bearing flavors below can carry the suffix, and the gate that
+        // sets the flag already proved retain and release name the same one
+        // ({@see collectOwnElemLocals}).
+        $ownEl = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->frame->ownElemLocals[$t->name]);
+        $f = $this->rcReleaseFlavorPlain($mo, $shared);
+        return $ownEl && $this->isOwnElemFlavor($f) ? $f . 'own' : $f;
+    }
+
+    /** {@see rcReleaseFlavor}'s answer before the ownership suffix. */
+    private function rcReleaseFlavorPlain(\Compile\Mir\MemoryOp_ $mo, bool $shared): string
+    {
+        $t = $mo->target;
         if ($mo->flavor === 'vec') {
             // A shared buffer (passed by value to a callee that co-owns and
             // drops the element refs) releases BUFFER-ONLY — ignore the repr
@@ -555,10 +694,58 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
+        // The `own` suffix is a RELEASE-side distinction — retain already co-owns
+        // the elements on every call, which is the asymmetry the suffix repairs.
+        // Mapped rather than left to the default, so an `own` flavor arriving
+        // here can never silently degrade into the repr-mode retain.
+        elseif ($flavor === 'vecobjown' || $flavor === 'assocobjown') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
+        elseif ($flavor === 'vecstrown' || $flavor === 'assocstrown') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
+        elseif ($flavor === 'veccellown' || $flavor === 'assoccellown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
         $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
         return $out;
+    }
+
+    /**
+     * The DEPTH an array retain co-owns to — one owner for the question, so the
+     * pairwise-symmetric gate ({@see ownElemPairFlavor}) reads exactly what
+     * {@see rcRetainByType} emits instead of a copy that can drift.
+     *
+     * Depth is decided by the DESTINATION's type, never the value's: a
+     * bare-`array` property (`Isset_::$targets`) erases its element, so
+     * retaining by the value's type takes the buffer alone while the caller —
+     * who sees the declared `Node[]` — drops every element. The fallback IS what
+     * the other side assumes.
+     */
+    private function arrayRetainFlavor(Node $valueNode, ?Type $fallback): string
+    {
+        $at = $valueNode->type->kind === Type::KIND_ARRAY ? $valueNode->type : null;
+        if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY
+            && ($at === null || $at->element === null)) {
+            $at = $fallback;
+        }
+        $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
+        return $flavor === '' ? 'vec' : $flavor;
+    }
+
+    /**
+     * Co-own the KEYS and ELEMENTS of a buffer this frame already owns outright
+     * — a fresh `__mir_array_copy` result — without touching its rc.
+     * {@see UnifiedArrayRuntime::emitRetainVariant}'s `$bumpRc = false` twin of
+     * the flavor's retain, so a copy gives back exactly what its release drops.
+     */
+    private function arrayAdoptIr(string $i64reg, string $flavor): string
+    {
+        $sym = '@__mir_array_adopt';
+        if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
+        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
+        elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
+        else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n"
+            . '  call void ' . $sym . '(ptr ' . $p . ")\n";
     }
 
     /** Emit a release of the rc value held in `$slot` (obj / vec / vecobj / str). */
@@ -597,6 +784,12 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_cell'; }
+        // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
+        // retain, so its release gives them back — every time, not only at
+        // rc → 0 ({@see collectOwnElemLocals}).
+        elseif ($flavor === 'vecobjown' || $flavor === 'assocobjown') { $this->rt->needsRc = true; $fn = '@__mir_array_release_ownel_obj'; }
+        elseif ($flavor === 'vecstrown' || $flavor === 'assocstrown') { $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_str'; }
+        elseif ($flavor === 'veccellown' || $flavor === 'assoccellown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_cell'; }
         $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
@@ -745,14 +938,7 @@ trait EmitLlvmMemory
             // retaining by the value's type takes the buffer alone while the
             // caller — who sees the declared `Node[]` — drops every element.
             // The fallback IS what the other side assumes.
-            $at = $valueNode->type->kind === Type::KIND_ARRAY ? $valueNode->type : null;
-            if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY
-                && ($at === null || $at->element === null)) {
-                $at = $fallback;
-            }
-            $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
-            if ($flavor === '') { $flavor = 'vec'; }
-            return $out . $this->rcRetainReg($i64reg, $flavor);
+            return $out . $this->rcRetainReg($i64reg, $this->arrayRetainFlavor($valueNode, $fallback));
         } else {
             $this->rt->needsRc = true;
             $out .= '  call void @__mir_rc_retain(ptr ' . $p . ")\n";

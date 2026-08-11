@@ -1151,7 +1151,16 @@ trait EmitLlvmBuiltins
         // first `$bag = __mir_obj_bag($v);` frees the object's own properties.
         $bagP = $this->lastValue;
         $this->rt->needsRc = true;
-        $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+        $this->rt->needsStrRc = true;
+        // At the DEPTH the caller will release by. The bag is typed
+        // `assoc<string, cell>` ({@see InferCalls}), so the caller's release is
+        // `__mir_array_release_cell` — a plain repr retain co-owns the elements
+        // only when the buffer happens to carry repr bits, and the difference
+        // stayed dormant only because that release never reached rc → 0. It is
+        // not dormant for a symmetric release: `var_export($o)` twice printed an
+        // EMPTY nested array the second time, the bag's cells having been
+        // dropped by a release that never retained them.
+        $out .= '  call void @__mir_array_retain_cell(ptr ' . $bagP . ")\n";
         $this->lastValue = $bagP;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2087,7 +2096,7 @@ trait EmitLlvmBuiltins
             && ($arrNode->kind === Node::KIND_LOAD_LOCAL
                 || $arrNode->kind === Node::KIND_PROPERTY_ACCESS
                 || $arrNode->kind === Node::KIND_STATIC_PROP)) {
-            $cowFn = $this->cowSymbolFor($arrT);
+            $cowFn = $this->cowSymbolFor($arrT, $arrNode);
             $cow = $this->ssa->allocReg();
             $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $this->lastValue . ")\n";
             $out .= $this->vecWriteBack($arrNode, $cow, $baseCell);
@@ -5258,7 +5267,7 @@ trait EmitLlvmBuiltins
             return '';
         }
         $cow = $this->ssa->allocReg();
-        $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type)
+        $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type, $arrNode)
              . '(ptr ' . $arr . ")\n";
         $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
         $this->lastValue = $cow;
@@ -6372,6 +6381,42 @@ trait EmitLlvmBuiltins
      */
     private function emitObjectVarsOfPtr(string $objPtr): string
     {
+        // ONE copy per module, CALLED — not spliced into every site. The walk is
+        // a switch with one arm per class that declares properties, and each arm
+        // BUILDS an assoc (an alloc, a `set_str` per property, a box per value),
+        // so a single expansion is ~350 KB of IR for a 262-class table. Eleven
+        // sites carried one each: `Parser\Dump::field` alone reached 3.86 MB —
+        // 6.7% of the whole module in ONE function, at 660x its PHP source,
+        // against a module average of 12x. Three functions held 6.3 MB (10%).
+        //
+        // `internal` because the body is specialized from THIS module's class
+        // table — a shared symbol would let the linker pick another module's
+        // table ({@see EmitLlvm::linkonceRuntime} is for the preamble, whose
+        // helpers carry no module-local information). `noinline` because -O2
+        // would otherwise splice it straight back into the few callers.
+        $this->needsObjectVarsFn = true;
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return '  ' . $r . ' = call ptr @__mir_object_vars(ptr ' . $objPtr . ")\n";
+    }
+
+    /** The one shared body {@see emitObjectVarsOfPtr} calls. Emitted beside the
+     *  function bodies (not the preamble) when a site asked for it. */
+    private function emitObjectVarsFn(): string
+    {
+        $body = $this->emitObjectVarsInline('%gov.obj');
+        // `optnone` on top: this walk is a REFLECTIVE fallback (an erased receiver),
+        // cold by construction, and at 1.2 MB it was the single most expensive
+        // function in the whole backend — 7.22 s of clang's 136.7 s of
+        // per-function optimization (5.3%), measured with `-ftime-trace`.
+        // Optimizing a cold dispatcher buys nothing at runtime.
+        return "define internal ptr @__mir_object_vars(ptr %gov.obj) noinline optnone {\n"
+            . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
+    }
+
+    private function emitObjectVarsInline(string $objPtr): string
+    {
         $this->rt->needsTagged = true;
         $out = '';
 
@@ -6446,7 +6491,9 @@ trait EmitLlvmBuiltins
         $out = $this->emitBagOfUnknownClass($objPtr);
         $bagP = $this->lastValue;
         $this->rt->needsRc = true;
-        $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+        $this->rt->needsStrRc = true;
+        // Element depth, not buffer-only — see {@see biObjBag}.
+        $out .= '  call void @__mir_array_retain_cell(ptr ' . $bagP . ")\n";
         $this->lastValue = $bagP;
         $this->lastValueType = 'ptr';
         return $out;
