@@ -5217,6 +5217,13 @@ final class LowerFromAst implements Pass
         $sym = $c . '__' . $method;
         if (isset($this->fnDecls[$sym])) { return false; }
         if (isset($this->externMethodSyms[$sym])) { return false; }
+        // Dependency signatures use the linker's wire class name (FQN with
+        // namespace separators replaced by underscores), while MIR static
+        // calls retain the PHP FQN. Treat either spelling as an exported
+        // method; otherwise internal Runtime classes such as AsyncHook are
+        // falsely diagnosed as absent although stdlib.o defines them.
+        $wireSym = \str_replace('\\', '_', $c) . '__' . $method;
+        if (isset($this->externMethodSyms[$wireSym])) { return false; }
         return true;
     }
 

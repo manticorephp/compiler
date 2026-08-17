@@ -1385,7 +1385,13 @@ trait EmitLlvmObjects
     {
         $out = $this->emitNode($value);
         $k = $value->type->kind;
-        if ($k === Type::KIND_OBJ || $k === Type::KIND_ARRAY
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $raw = $this->lastValue;
+            $out .= $this->byRefValueCopyRetainIr($raw);
+            $this->lastValue = $raw;
+            $this->lastValueType = 'i64';
+        } elseif ($k === Type::KIND_OBJ || $k === Type::KIND_ARRAY
             || $k === Type::KIND_STRING || $k === Type::KIND_UNION) {
             $out .= $this->coerceToI64();
             $raw = $this->lastValue;
@@ -4139,6 +4145,14 @@ trait EmitLlvmObjects
     private function staticMethodHasNoImpl(string $class, string $method): bool
     {
         if ($method === '') { return false; }
+        // A bundled/library class may intentionally be signature-only in this
+        // module. Its linked method is still a valid implementation; the
+        // emitter must not replace the call with an undefined-method trap.
+        $fqn = \ltrim($class, '\\') . '__' . $method;
+        $wire = \str_replace('\\', '_', \ltrim($class, '\\')) . '__' . $method;
+        if (isset($this->sigs->paramTypes[$fqn]) || isset($this->sigs->paramTypes[$wire])) {
+            return false;
+        }
         $decl = $this->resolveMethodClass($class, $method);
         if ($decl === '') { return true; }
         return !$this->methodResolvesToBody($class, $method);
