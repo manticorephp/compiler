@@ -1577,12 +1577,31 @@ trait EmitLlvmObjects
         $out .= '  ' . $si . ' = ptrtoint ptr ' . $this->strLitId($kid) . " to i64\n";
         $args = 'i64 ' . $oi . ', i64 ' . $si;
         if ($valArg !== null) { $args .= ', i64 ' . $valArg; }
+        $target = $methodCls . '__' . $method;
+        if (!$this->hasEmittedFunction($target)) {
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst(
+                    'Call to undefined method ' . $methodCls . '::' . $method . '()',
+                    Type::string_())],
+                Type::cell(),
+            );
+            return $out . $this->emitNode($thr);
+        }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($methodCls)
               . '__' . $method . '(' . $args . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    private function hasEmittedFunction(string $name): bool
+    {
+        return isset($this->definedFns[$this->mangle($name)])
+            || isset($this->definedFns[$name]);
     }
 
     /** Classes implementing `$iface` that actually resolve `$method` — the arm
@@ -4156,8 +4175,11 @@ trait EmitLlvmObjects
     {
         $d = $this->resolveMethodClass($class, $method);
         if ($d === '') { return false; }
-        if (isset($this->sigs->paramTypes[$d . '__' . $method])) { return true; }
-        return isset($this->sigs->paramTypes[$this->lsbTarget($d, $method, $class)]);
+        // paramTypes also contains signature-only/abstract declarations.  The
+        // emitter's definedFns registry is the authoritative set of symbols
+        // that actually have a body or an emitted external declaration.
+        if ($this->hasEmittedFunction($d . '__' . $method)) { return true; }
+        return $this->hasEmittedFunction($this->lsbTarget($d, $method, $class));
     }
 
     private function resolveMethodClass(string $class, string $method): string
@@ -4771,7 +4793,7 @@ trait EmitLlvmObjects
             // An ABSTRACT method (declared, no emitted body) has no function —
             // an abstract class is never instantiated, so its switch case is
             // dead and would reference an undefined symbol. Drop the candidate.
-            if (!isset($this->sigs->paramTypes[$full])) { continue; }
+            if (!$this->hasEmittedFunction($full)) { continue; }
             $liveCands[] = $c;
             $targets[$c] = $full;
             if (\Compile\Stats::$on) { \Compile\Stats::bump('dispatch.in_array_probes', \count($distinct)); }
@@ -4781,7 +4803,7 @@ trait EmitLlvmObjects
         $fallbackFull = $this->lsbTarget($fallback, $mc->method, $static);
         // The static receiver's own method may be abstract (`$this->m()` inside
         // an abstract base) — fall back to a concrete implementation.
-        if (!isset($this->sigs->paramTypes[$fallbackFull])) {
+        if (!$this->hasEmittedFunction($fallbackFull)) {
             $fallbackFull = $distinct[0] ?? $fallbackFull;
         }
         $btName = '';
@@ -4801,6 +4823,20 @@ trait EmitLlvmObjects
         $boxCell = $n->type->kind === Type::KIND_CELL;
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
+            // The fallback is derived from the static type before the candidate
+            // scan.  For an erased/optional/abstract method it can therefore be
+            // a plausible-looking name (notably plain `__get`) even though no
+            // body was emitted.  Never put such a symbol into LLVM: clang treats
+            // a call without a declaration in a split part as an invalid value,
+            // and the final link would fail anyway.  The runtime-error path is
+            // the PHP semantics for reaching an unavailable method.
+            if (!$this->hasEmittedFunction($sym)) {
+                if ($btName !== '') { $out .= $this->btPop(); }
+                $this->spreadTail = null;
+                $this->lastValue = '0';
+                $this->lastValueType = 'i64';
+                return $out;
+            }
             // Absent-optional-dependency method call: no candidate resolved the
             // method AND the receiver's static class is genuinely ABSENT (never
             // compiled — an EventDispatcher / ext type that was not installed). A

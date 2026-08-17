@@ -1611,6 +1611,40 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $f . " = call i64 @__manticore_box_bool(i64 0)\n";
             return $this->finishI64($out, $f);
         }
+        // ONE copy per module, CALLED — not spliced into every site. The chain has
+        // one arm per COMPILE UNIT (a strcmp, an icmp, a branch and two labels),
+        // so a site costs O(files) and a program costs O(sites x files): symfony's
+        // 556 `require`/`include` sites over 6592 units is ~3.7 M arms, on the
+        // order of a gigabyte of IR from this construct alone. Same shape, and the
+        // same fix, as the class-table walk {@see emitObjectVarsFn}.
+        $this->needsInclResolveFn = true;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_incl_resolve(ptr ' . $pathP . ")\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /** The one shared body {@see biRequireValue} calls. Emitted beside the
+     *  function bodies (not the preamble) when a site asked for it. */
+    private function emitInclResolveFn(): string
+    {
+        $body = $this->emitInclResolveInline('%incl.path');
+        // `optnone` for the same reason as {@see emitObjectVarsFn}: a linear
+        // strcmp walk over the include table is cold by construction — each
+        // `require` of a given file runs once — and optimization cost grows
+        // faster than function size.
+        return "define internal i64 @__mir_incl_resolve(ptr %incl.path) noinline optnone {\n"
+            . "entry:\n" . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+    }
+
+    /**
+     * The chain itself, specialized from THIS module's include-slot table — which
+     * is why the body is `internal` and not `linkonce_odr`: a shared symbol would
+     * let the linker pick another module's table.
+     */
+    private function emitInclResolveInline(string $pathP): string
+    {
+        $out = '';
+        $slots = $this->includeSlots;
         $this->rt->needsTagged = true;
         $this->rt->needsStrcmp = true;
         $res = $this->ssa->allocReg();

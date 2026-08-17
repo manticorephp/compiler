@@ -543,6 +543,7 @@ final class EmitLlvm implements EmitVisitor
         $this->propRawBorrow = [];
         $this->propElemBorrow = [];
         $this->needsObjectVarsFn = false;
+        $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
         // A LIBRARY's classes go into a `.sig`, so "nobody borrows this property"
@@ -584,6 +585,7 @@ final class EmitLlvm implements EmitVisitor
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $functionBodies .= $this->emitObjectVarsFn(); }
+        if ($this->needsInclResolveFn) { $functionBodies .= $this->emitInclResolveFn(); }
         \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
@@ -1235,6 +1237,10 @@ final class EmitLlvm implements EmitVisitor
     /** A site asked for `get_object_vars`' class-table walk, so the module needs
      *  the one shared body ({@see EmitLlvmBuiltins::emitObjectVarsFn}). */
     private bool $needsObjectVarsFn = false;
+
+    /** A `require`/`include` site asked for the include-slot chain, so the module
+     *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */
+    private bool $needsInclResolveFn = false;
 
     /**
      * Keys disqualified from the above: a store whose reference does NOT carry

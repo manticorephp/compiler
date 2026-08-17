@@ -908,6 +908,31 @@ function dump_resolved_sources(array $paths): void
 }
 
 /**
+ * `MANTICORE_DUMP_TRAPS=<path>` — write the undefined-function trap names, one
+ * per line, and stop being the only thing that knows them.
+ *
+ * The trap list IS the honest remaining-work list of a large build: every name
+ * here compiled into a runtime throw instead of a link error, so the build looks
+ * clean and the program dies on the first guarded call. Today it exists only as
+ * one comma-joined line inside a build log nobody parses — symfony tier 4 printed
+ * 83 names and the list survived exactly as long as the log did.
+ *
+ * @param string[] $names sorted trap names
+ */
+function dump_undefined_traps(array $names): void
+{
+    $out = \getenv("MANTICORE_DUMP_TRAPS");
+    if ($out === false || $out === "") { return; }
+    $buf = "";
+    foreach ($names as $n) { $buf .= $n . "\n"; }
+    if (!write_file($out, $buf)) {
+        dprint("build: could not write MANTICORE_DUMP_TRAPS to " . $out);
+        return;
+    }
+    dprint("build: wrote " . (string)\count($names) . " undefined-function trap name(s) -> " . $out);
+}
+
+/**
  * Heterogeneous return values across `assoc<string, mixed>` get
  * flattened to i64 by the self-host compiler today, so we stash the
  * parsed argv into typed static class properties instead of building
@@ -2062,6 +2087,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $names = \implode(", ", $undefTraps);
         dprint("build: undefined-function traps (" . (string)\count($undefTraps)
             . "): " . $names);
+        dump_undefined_traps($undefTraps);
         // For a LIBRARY the stub is written to a `.o` that outlives this build
         // and is linked by every later program, so refuse it by default.
         if ($emitLibrary && !CompileArgs::$allowUndefinedTraps) {

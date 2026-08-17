@@ -48,12 +48,17 @@ final class SplitModule
     /** Definitions duplicated because they are file-local. */
     public int $internalDefs = 0;
 
+    /** Cached symbol references for definitions reused by several parts. */
+    /** @var array<string, array<string, bool>> */
+    private array $refsCache = [];
+
     /**
      * @return string[] one complete module text per part
      */
     public function run(string $ir, int $parts): array
     {
         if ($parts < 2) { return [$ir]; }
+        $this->refsCache = [];
         $lines = \explode("\n", $ir);
         $n = \count($lines);
 
@@ -170,7 +175,9 @@ final class SplitModule
         }
         /** @var array<string, bool> */
         $refs = [];
-        foreach ($mine as $s) { $this->collectRefs($defs[$s], $refs); }
+        foreach ($mine as $s) {
+            foreach ($this->refsOf($s, $defs[$s]) as $r => $_) { $refs[$r] = true; }
+        }
         // Every file-local definition reachable from here, to a fixpoint.
         /** @var array<string, bool> */
         $haveInternal = [];
@@ -180,7 +187,7 @@ final class SplitModule
             foreach ($defOrder as $s) {
                 if (!isset($internal[$s]) || isset($haveInternal[$s]) || !isset($refs[$s])) { continue; }
                 $haveInternal[$s] = true;
-                $this->collectRefs($defs[$s], $refs);
+                foreach ($this->refsOf($s, $defs[$s]) as $r => $_) { $refs[$r] = true; }
                 $changed = true;
             }
         }
@@ -203,7 +210,7 @@ final class SplitModule
             foreach ($globalOrder as $g) {
                 if (!isset($refs[$g]) || isset($needG[$g])) { continue; }
                 $needG[$g] = true;
-                $this->collectRefs($globals[$g], $refs);
+                foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) { $refs[$r] = true; }
                 $changed = true;
             }
         }
@@ -392,6 +399,16 @@ final class SplitModule
             $i = $at + 1 + \strlen($s);
             if ($i <= $at) { $i = $at + 1; }
         }
+    }
+
+    /** @return array<string, bool> */
+    private function refsOf(string $key, string $text): array
+    {
+        if (isset($this->refsCache[$key])) { return $this->refsCache[$key]; }
+        $refs = [];
+        $this->collectRefs($text, $refs);
+        $this->refsCache[$key] = $refs;
+        return $refs;
     }
 
     private function readSymbol(string $s, int $p): string
