@@ -3598,6 +3598,11 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
         }
         CompileArgs::$linkStdlib = $lower->externInjected;
+        $analysisContext = null;
+        $worklistMode = \getenv('MANTICORE_WORKLIST');
+        if ($worklistMode === 'collect' || $worklistMode === 'verify' || $worklistMode === 'on') {
+            $analysisContext = new \Compile\Mir\AnalysisContext($module);
+        }
         // The AST is DEAD from here: lowering produced the module and the two
         // fields read just above were the last of it. Nothing below this line
         // touches $lower / $program / $stmts — but they kept the whole tree
@@ -3638,10 +3643,14 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
         $statT = \Compile\Stats::now();
-        $module = (new \Compile\Mir\Passes\NarrowReturns(true))->run($module);
+        $module = (new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext))->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
         $statT = \Compile\Stats::now();
-        $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
+        $infer2 = new \Compile\Mir\Passes\InferTypes(
+            ($analysisContext !== null && $worklistMode === 'on')
+                ? $analysisContext->scope() : null
+        );
+        $module = $infer2->run($module);
         \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
         // Eliminate the boxed-cell closure ABI where it's avoidable: inline
         // captureless single-expr arrow closures at known invoke sites, and
@@ -3777,6 +3786,13 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
+        if ($analysisContext !== null) {
+            $finalScope = $analysisContext->scope();
+            \Compile\Stats::line('deps-final: changes=' . (string)\count($analysisContext->changes->functions)
+                . ' returns=' . (string)\count($analysisContext->changes->returns)
+                . ' scope=' . $finalScope->mode
+                . ' invalidated=' . (string)\count($finalScope->functions));
+        }
         return $module;
     } catch (\Throwable $e) {
         dprint("compile failed: " . $e->getMessage());
@@ -3787,6 +3803,24 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
 function compile_via_mir(array $sources, array $paths = []): ?string {
     $module = lower_module($sources, null, $paths);
     if ($module === null) { return null; }
+    $worklistMode = \getenv('MANTICORE_WORKLIST');
+    if ($worklistMode === 'collect' || $worklistMode === 'verify' || $worklistMode === 'on') {
+        $analysis = new \Compile\Mir\AnalysisContext($module);
+        $deps = $analysis->dependencies;
+        $scope = $analysis->scope();
+        $invalidated = $scope->functions;
+        \Compile\Stats::line('deps: fns=' . (string)$deps->functionCount()
+            . ' edges=' . (string)$deps->edgeCount()
+            . ' dynamic=' . (string)$deps->dynamicCallerCount()
+            . ' invalidated=' . (string)\count($invalidated)
+            . ' barriers=' . (string)$analysis->barriers->reasonCount()
+            . ' barrier_nodes=' . (string)$analysis->barriers->nodeCount()
+            . ' scope=' . $scope->mode
+            . ' unknown=' . ($analysis->isConservativeFallback() ? '1' : '0'));
+        if ($analysis->isConservativeFallback()) {
+            \Compile\Stats::line('deps: conservative fallback=full-module');
+        }
+    }
     try {
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;

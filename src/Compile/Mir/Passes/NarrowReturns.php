@@ -59,7 +59,7 @@ final class NarrowReturns implements Pass
      *   that Monomorphize must specialize first. The default (post-Mono) pass
      *   narrows every agreeing array return.
      */
-    public function __construct(private bool $concreteOnly = false) {}
+    public function __construct(private bool $concreteOnly = false, private ?\Compile\Mir\AnalysisContext $analysis = null) {}
 
     public function name(): string { return self::NAME; }
 
@@ -93,7 +93,11 @@ final class NarrowReturns implements Pass
             $narrowed = 0;
             foreach ($module->functions as $fn) {
                 if (isset($generic[$fn->name])) { continue; }
-                if ($this->narrowFunction($fn)) { $changed = true; $narrowed = $narrowed + 1; }
+                if ($this->narrowFunction($fn)) {
+                    $changed = true;
+                    $narrowed = $narrowed + 1;
+                    if ($this->analysis !== null) { $this->analysis->changes->addReturn($fn->name); }
+                }
             }
             \Compile\Stats::step('  narrow round ' . (string)$iters
                 . ' (narrowed ' . (string)$narrowed . ')', $roundT, -1, -1);

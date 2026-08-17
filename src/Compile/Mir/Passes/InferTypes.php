@@ -91,6 +91,25 @@ final class InferTypes implements Pass
     public function name(): string { return self::NAME; }
 
     public function requires(): array { return [LowerFromAst::NAME]; }
+    /** @var array<string, true>|null */
+    private ?array $scopeNames = null;
+    public function __construct(?\Compile\Mir\InferenceScope $scope = null)
+    {
+        if ($scope !== null && $scope->isTargeted()) {
+            $this->scopeNames = [];
+            foreach ($scope->functions as $name) { $this->scopeNames[$name] = true; }
+        }
+    }
+    /** @return FunctionDef[] */
+    private function functionsForScope(Module $module): array
+    {
+        if ($this->scopeNames === null) { return $module->functions; }
+        $out = [];
+        foreach ($module->functions as $fn) {
+            if (isset($this->scopeNames[$fn->name])) { $out[] = $fn; }
+        }
+        return $out;
+    }
 
     /** @var array<string, Type> */
     private array $localTypes = [];
@@ -355,7 +374,7 @@ final class InferTypes implements Pass
         $this->closureNodeByName = [];
         $this->sawClosures = false;
         $this->undeclaredReturnFns = [];
-        foreach ($module->functions as $fn) {
+        foreach ($this->functionsForScope($module) as $fn) {
             // Remember the DECLARED return before any adoption below rewrites
             // it in place — a monomorphic clone must start from the declaration,
             // not from a type derived for the generic body ({@see
@@ -408,7 +427,7 @@ final class InferTypes implements Pass
         // rule the local promotion follows, and the same reason it is computed
         // up front rather than forced afterwards.
         $this->scanRefCellProps($module);
-        foreach ($module->functions as $fn) {
+        foreach ($this->functionsForScope($module) as $fn) {
             $this->inferFunction($fn);
         }
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
@@ -423,7 +442,7 @@ final class InferTypes implements Pass
         // their own rebuild buffer is typed. Bounded: a seed only widens to cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $guard = $guard + 1;
@@ -435,7 +454,7 @@ final class InferTypes implements Pass
         // element-used-as-key lands under a positional int. Externs (the
         // separately-linked stdlib) can't be specialized this way.
         if ($this->scanCallSiteArrayElems($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -450,7 +469,7 @@ final class InferTypes implements Pass
         // guard is a backstop, not the termination argument.
         $docGuard = 0;
         while ($docGuard < 4 && $this->scanDocListKeyPromote($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $docGuard = $docGuard + 1;
@@ -461,7 +480,7 @@ final class InferTypes implements Pass
         // tagged cell instead of a raw i64 (the property analogue of a typed
         // local literal). Runs before the element scan so the shape is set first.
         if ($this->scanPropTypeFromArrayAssign($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -473,7 +492,7 @@ final class InferTypes implements Pass
         // it the property element stays erased and a read-back bitcasts each raw
         // i64 to a garbage double.
         if ($this->scanPropElemFromStores($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -481,7 +500,7 @@ final class InferTypes implements Pass
         // declaring class, so neither the lowering-time AST scan nor the
         // instance scan above can reach them.
         if ($this->scanStaticPropElemFromStores($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -490,7 +509,7 @@ final class InferTypes implements Pass
         // makes string/array ops misread it as a NaN-boxed value. Refine it to
         // the concrete type every call site passes (a TYPED `&$p` already works).
         if ($this->scanCallSiteRefParams($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -499,13 +518,13 @@ final class InferTypes implements Pass
         // reachable from the store that filled it and keeps the int. Join every
         // store and re-infer, exactly as the global unification below does.
         if ($this->scanStaticLocalTypes($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 if (isset($this->undeclaredReturnFns[$fn->name])) {
                     $fn->returnType = Type::unknown();
                     $this->sigs[$fn->name] = Type::unknown();
                 }
             }
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -519,13 +538,13 @@ final class InferTypes implements Pass
             // is still unknown). Reset every UNDECLARED return to unknown so the
             // re-infer re-adopts the now-string global return; declared returns
             // keep their hint.
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 if (isset($this->undeclaredReturnFns[$fn->name])) {
                     $fn->returnType = Type::unknown();
                     $this->sigs[$fn->name] = Type::unknown();
                 }
             }
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -539,7 +558,7 @@ final class InferTypes implements Pass
         // each flip removes the vec base, so it converges in one iteration.
         $guard = 0;
         while ($guard < 4 && $this->hasUntypedAssocKeyStore($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $guard = $guard + 1;
@@ -550,7 +569,7 @@ final class InferTypes implements Pass
         // Bounded — a seed only widens unknown → cell, so it converges at once.
         $guard = 0;
         while ($guard < 4 && $this->scanLocalElemFromStores($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $guard = $guard + 1;
@@ -560,7 +579,7 @@ final class InferTypes implements Pass
         // to read ({@see scanUnshiftElemWiden}).
         $guard = 0;
         while ($guard < 4 && $this->scanUnshiftElemWiden($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $guard = $guard + 1;
@@ -578,11 +597,11 @@ final class InferTypes implements Pass
         // there and overrides an earlier refinement.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             if ($this->scanCallSiteArrayElems($module)) {
-                foreach ($module->functions as $fn) {
+                foreach ($this->functionsForScope($module) as $fn) {
                     $this->inferFunction($fn);
                 }
             }
@@ -594,7 +613,7 @@ final class InferTypes implements Pass
         // capture site and the closure body have been typed once.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $guard = $guard + 1;
@@ -616,7 +635,7 @@ final class InferTypes implements Pass
         // the assoc path → assoc_cow reads past the 16-byte vec buffer.
         if ($this->scanAssocProps($module)) { $changed = true; }
         if ($changed) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
         }
@@ -639,7 +658,7 @@ final class InferTypes implements Pass
                 foreach ($this->closureNodeByName as $cn) {
                     foreach ($cn->captures as $c) { $before .= $c->type->kind . ','; }
                 }
-                foreach ($module->functions as $fn) {
+                foreach ($this->functionsForScope($module) as $fn) {
                     $this->inferFunction($fn);
                 }
                 $after = '';
@@ -659,7 +678,7 @@ final class InferTypes implements Pass
         // printed the address.
         $guard = 0;
         while ($guard < 4 && $this->scanPropElemFromStores($module)) {
-            foreach ($module->functions as $fn) {
+            foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
             }
             $guard = $guard + 1;
@@ -1378,7 +1397,7 @@ final class InferTypes implements Pass
      *  was typed only after scanLocalShapes already ran. A re-infer flips it. */
     private function hasUntypedAssocKeyStore(Module $module): bool
     {
-        foreach ($module->functions as $fn) {
+        foreach ($this->functionsForScope($module) as $fn) {
             if ($this->bodyHasUntypedAssocKeyStore($fn->body)) { return true; }
         }
         return false;
