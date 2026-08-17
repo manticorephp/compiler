@@ -55,6 +55,10 @@ function fopen(string $path, string $mode): \Ffi\Ptr {}
 function fwrite(string $buf, #[CType('size_t')] int $size,
                 #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
 
+#[Library('c'), Symbol('fwrite')]
+function fwrite_buf(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
+                    #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
+
 #[Library('c'), Symbol('fread')]
 function fread(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
                #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
@@ -181,6 +185,10 @@ function collect_argv(): array {
  * the file can't be opened.
  */
 function read_file(string $path): ?string {
+    if (\class_exists('FFI')) {
+        $raw = \file_get_contents($path);
+        return $raw === false ? null : $raw;
+    }
     $fp = fopen($path, "rb");
     if ($fp === null) {
         dprint("read_file: fopen failed: " . $path);
@@ -551,10 +559,19 @@ function with_frame_pointers(string $ir): string {
 function assemble_ir(string $ir, string $base, string $cflags): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
-    // Size gate FIRST: assemble_jobs() may shell out to sysctl/nproc, and paying
-    // a process spawn to decide not to split made a hello world 12 ms slower.
-    // Below a few hundred KB the split cannot pay for itself anyway.
-    $jobs = \strlen($ir) < 262144 ? 1 : assemble_jobs();
+    $stagedPrefix = "\x1eMANTICORE_STAGED_IR\n";
+    if (\substr($ir, 0, \strlen($stagedPrefix)) === $stagedPrefix) {
+        $payload = \substr($ir, \strlen($stagedPrefix));
+        $cut = \strrpos($payload, "\n");
+        if ($cut === false) { dprint('assemble: malformed staged IR marker'); return []; }
+        return assemble_ir_file(\substr($payload, 0, $cut), $base, $cflags, (int)\substr($payload, $cut + 1));
+    }
+    $irBytes = \strlen($ir);
+    $largeModule = $irBytes > 536870912;
+    if ($largeModule) {
+        \Compile\Stats::line('  assembly: large module, serial IR path (' . (string)$irBytes . ' bytes)');
+    }
+    $jobs = $largeModule ? 1 : ($irBytes < 262144 ? 1 : assemble_jobs());
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, with_frame_pointers($ir))) { dprint("assemble: cannot write " . $llPath); return []; }
@@ -600,6 +617,17 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         }
     }
     return $objs;
+}
+
+/** Assemble already-staged large IR without reading it back into PHP. */
+function assemble_ir_file(string $llPath, string $base, string $cflags, int $irBytes): array {
+    $objPath = $base . '.o';
+    \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
+    $statT = \Compile\Stats::now();
+    $rc = system('clang -O' . CompileArgs::$optLevel . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
+    \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c staged IR', $statT, -1, -1);
+    if ($rc !== 0) { dprint('assemble: clang -c staged IR failed (rc=' . (string)$rc . '); IR at ' . $llPath); return []; }
+    return [$objPath];
 }
 
 function collect_stdlib_extern_decls(): array
@@ -1691,6 +1719,13 @@ function __mc_source_may_declare(string $src): bool
 function __mc_stmt_declares(\Parser\Ast\Stmt $s): bool
 {
     $k = $s->kind;
+    if ($k === 'Expression' && $s instanceof \Parser\Ast\ExpressionStmt
+        && $s->expr instanceof \Parser\Ast\Call) {
+        $fn = $s->expr->function;
+        $p = \strrpos($fn, '\\');
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        if (\strtolower($bare) === 'define') { return true; }
+    }
     if ($k === 'Class' || $k === 'Function' || $k === 'UseDecl'
         || $k === 'Namespace' || $k === 'StaticLocal' || $k === 'Label') {
         return true;

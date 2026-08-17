@@ -24,8 +24,14 @@ trait EmitLlvmBuiltins
     private function emitBuiltin(Call $c): ?string
     {
         $name = \strtolower($c->function);
-        if (\str_contains($name, '\\')) {
-            $name = \substr($name, \strrpos($name, '\\') + 1);
+        if ($name === "runtime\\libc\\strlen") {
+            $name = "strlen";
+        } elseif (\str_contains($name, '\\')) {
+            // A leading slash is PHP's explicit global-namespace spelling.
+            // Any other namespace segment denotes a distinct user function.
+            $separator = \strrpos($name, '\\');
+            if ($separator !== 0) { return null; }
+            $name = \substr($name, 1);
         }
         $args = $c->args;
         // Routed to one `bi*` emitter per builtin. NB: a `match ($name)`
@@ -43,6 +49,7 @@ trait EmitLlvmBuiltins
         if ($name === 'str_from_buffer')              { return $this->biStrFromBuffer($args); }
         if ($name === 'str_bytes')                    { return $this->biStrBytes($args); }
         if ($name === 'manticore_str_bytes')                    { return $this->biStrBytes($args); }
+        if ($name === 'manticore_raw_str_bytes')     { return $this->biRawStrBytes($args); }
         if ($name === 'cstr_to_str')                  { return $this->biCstrToStr($args); }
         if ($name === 'ptr_offset')                   { return $this->biPtrOffset($args); }
         if ($name === 'int_to_ptr')                   { return $this->biIntToPtr($args); }
@@ -1215,6 +1222,30 @@ trait EmitLlvmBuiltins
         $this->lastValueType = 'i64';
         return $out;
     }
+    /**
+     * Raw data address of a string, preserving a null data pointer.
+     *
+     * Unlike `str_bytes`, this is an internal representation probe: it must
+     * not map null to the immortal empty-string sentinel. The self-hosted
+     * compiler uses it when rendering compile-time string literals, where an
+     * empty host string is represented by a null data pointer.
+     *  Node[] $args
+     */
+    private function biRawStrBytes(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        if ($args[0]->type->kind === Type::KIND_CELL) {
+            $out .= $this->cellToPtr();
+        } elseif ($args[0]->type->kind === Type::KIND_UNKNOWN) {
+            $out .= $this->unboxCellToType(Type::string_());
+            $out .= $this->coerceToPtr();
+        } else {
+            $out .= $this->coerceToPtr();
+        }
+        $out .= $this->coerceToI64();
+        $this->lastValueType = 'i64';
+        return $out;
+    }
 
     /**
      * `ptr_offset(\Ffi\Ptr $p, int $n): \Ffi\Ptr` — the address $n bytes past
@@ -2164,8 +2195,22 @@ trait EmitLlvmBuiltins
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src
                   . ', i64 ' . $pos . ")\n";
-            $out .= $this->boxRawElem($ev, $arrT);
-            $boxed = $this->lastValue;
+            $elem = ($arrT->isVec() || $arrT->isAssoc()) ? $arrT->element : null;
+            if ($elem === null || $elem->kind === Type::KIND_UNKNOWN || $elem->kind === Type::KIND_CELL) {
+                $flp = $this->ssa->allocReg();
+                $out .= "  " . $flp . " = getelementptr inbounds i8, ptr " . $src . ", i64 " . (string) \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+                $flags = $this->ssa->allocReg();
+                $out .= "  " . $flags . " = load i64, ptr " . $flp . "\n";
+                $hint = $this->ssa->allocReg();
+                $out .= "  " . $hint . " = and i64 " . $flags . ", " . (string) \Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+                $boxed = $this->ssa->allocReg();
+                $out .= "  " . $boxed . " = call i64 @__mir_box_by_repr(i64 " . $ev . ", i64 " . $hint . ")\n";
+                $this->lastValue = $boxed;
+                $this->lastValueType = "i64";
+            } else {
+                $out .= $this->boxRawElem($ev, $arrT);
+                $boxed = $this->lastValue;
+            }
         }
         $out .= '  store i64 ' . $boxed . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $done . "\n";
@@ -2908,15 +2953,21 @@ trait EmitLlvmBuiltins
      * read by strlen() / compare). Data bytes start at offset 24, reached via
      * {@see strSymBytes}.
      */
-    private function strGlobalDef(string $sym, string $value): string
+    private function strGlobalDef(string $sym, string $value, bool $empty = false): string
     {
-        $bytes = $this->llvmStringBytes($value);
-        $content = \strlen($value);
-        $len = $content + 1; // bytes incl. NUL
-        // Header [hash, cap, len, rc]; hash is the compile-time FNV of the
-        // content (bit-matches __mir_array_hash_str), so a literal map key never
-        // hashes at runtime. rc -1 = immortal. Data at +STRING_HEADER_SIZE.
-        $hash = $this->fnvHash64($value);
+        if ($empty) {
+            $bytes = '';
+            $content = 0;
+            $hash = $this->fnvHash64('');
+        } else {
+            if (\getenv('MANTICORE_STRING_GLOBAL_TRACE') !== false) {
+                \error_log('str-global: ' . $sym . ' type=' . \gettype($value));
+            }
+            $bytes = $this->llvmStringBytes($value);
+            $content = \strlen($value);
+            $hash = $this->fnvHash64($value);
+        }
+        $len = $content + 1;
         return $sym . ' = private unnamed_addr constant { i64, i64, i64, i64, ['
             . (string)$len . ' x i8] } { i64 ' . (string)$hash . ', i64 '
             . (string)$content . ', i64 ' . (string)$content . ', i64 -1, ['
@@ -5547,7 +5598,10 @@ trait EmitLlvmBuiltins
         if ($arg->kind === Node::KIND_STRING_CONST) {
             return \ltrim($arg->value, '\\');
         }
-        return \ltrim($arg->type->class ?? '', '\\');
+        if ($arg->type->kind !== Type::KIND_OBJ) { return ''; }
+        // Type::class is populated for concrete object types only. Do not
+        // route erased scalar/cell metadata through ltrim(null) natively.
+        return \ltrim($arg->type->class, '\\');
     }
 
     /**

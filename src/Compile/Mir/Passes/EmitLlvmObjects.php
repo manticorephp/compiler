@@ -1409,6 +1409,7 @@ trait EmitLlvmObjects
         $nb = $this->ssa->allocReg();
         $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
               . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+        $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
         $nbI = $this->ssa->allocReg();
         $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
         $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
@@ -1774,6 +1775,7 @@ trait EmitLlvmObjects
             $nb = $this->ssa->allocReg();
                         $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
                   . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $val . ", i64 0, i64 0)\n";
+        $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
             $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
@@ -2654,6 +2656,7 @@ trait EmitLlvmObjects
             $nb = $this->ssa->allocReg();
             $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
                   . ', ptr ' . $keyP . ', i64 ' . $val . ", i64 0, i64 0)\n";
+        $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
             $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
@@ -4356,9 +4359,12 @@ trait EmitLlvmObjects
         // Closure methods. `$fn->bindTo($obj, $scope?)` rebinds `$this`;
         // `$fn->call($obj, ...args)` rebinds then invokes in one step. Gated on
         // a closure receiver so a user class's own `call`/`bindTo` is untouched.
-        $recvCls = $mc->object->type->class ?? '';
-        $isClosureRecv = $mc->object->type->kind === Type::KIND_CLOSURE
-            || \str_starts_with($recvCls, '__closure_');
+        $recvType = $mc->object->type;
+        // Only object types carry a class name. Reading class metadata from an
+        // erased receiver can be null; keep it out of the string-prefix helper.
+        $recvCls = $recvType->kind === Type::KIND_OBJ ? $recvType->class : '';
+        $isClosureRecv = $recvType->kind === Type::KIND_CLOSURE
+            || ($recvCls !== '' && $this->isClosureClass($recvCls));
         if ($isClosureRecv && $mc->method === 'bindTo' && \count($mc->args) >= 1) {
             return $this->emitClosureRebind($mc->object, $mc->args[0]);
         }

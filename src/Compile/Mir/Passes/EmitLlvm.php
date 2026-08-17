@@ -325,6 +325,10 @@ final class EmitLlvm implements EmitVisitor
      * the `--emit-library` compile path.
      */
     public bool $emitLibrary = false;
+    /** Driver-visible location of a file-backed large application IR module. */
+    public string $largeModuleIrPath = '';
+    /** Total bytes in `largeModuleIrPath`, zero unless `emit()` staged it. */
+    public int $largeModuleIrBytes = 0;
     /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
      *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
     private bool $lastCallWasBuiltin = false;
@@ -402,6 +406,9 @@ final class EmitLlvm implements EmitVisitor
      *  @var array<string, string> */
     private array $attrSiteErrors = [];
 
+    /** Staging-only state; kept last to preserve existing self-host slots. */
+    private bool $deferStringGlobals = false;
+
     public function emit(Module $module): string
     {
         $this->rt = new RuntimeFeatures();
@@ -412,6 +419,7 @@ final class EmitLlvm implements EmitVisitor
         // A program module (not the bundled stdlib) always links stdlib.o, which
         // CAN throw even when the user's own code never does. The exception
         // runtime — @main's depth:=1 + base landing pad and the process-global
+        $this->largeModuleIrBytes = 0;
         // jmp state — is what makes any throw land; gated on the caller's own
         // `needsExceptions` it would be absent for e.g. `<?php stat($p);`, and a
         // stdlib throw would then read an uninitialised depth 0 → slot -1 → a bogus
@@ -419,6 +427,7 @@ final class EmitLlvm implements EmitVisitor
         // on for every program (a lone base setjmp + BSS; no-op if nothing throws).
         if (!$this->emitLibrary) { $this->rt->needsExceptions = true; }
         $this->pool = new StringPool();
+        $this->deferStringGlobals = false;
         $this->ssa = new SsaBuilder();
         $this->gen = new GeneratorContext();
         $this->cf = new ControlFlow();
@@ -551,83 +560,216 @@ final class EmitLlvm implements EmitVisitor
         $this->propBorrowUnknown = $module->isLibraryModule;
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
         $functionBodies = '';
-        // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
-        // it is emitted — the last line printed before a codegen SIGSEGV names the
-        // offending function. Off by default (one env read, not per-function).
+        $bodyBytes = 0;
+        // Provisional staging starts while IR is still bounded. A later body
+        // total below the old 512 MiB large-module threshold may still use the
+        // staged representation, but it preserves LLVM's valid body-first
+        // ordering and avoids ever slicing a multi-GB PHP string.
+        $streamLimit = 8388608;
+        $streamLimitEnv = \getenv('MANTICORE_STREAM_IR_LIMIT');
+        if ($streamLimitEnv !== false && (int)$streamLimitEnv > 0) {
+            $streamLimit = (int)$streamLimitEnv;
+        }
+        if (!$this->emitLibrary && $this->largeModuleIrPath === '') {
+            $this->largeModuleIrPath = '/tmp/manticore_large_module.ll';
+        }
+        $canStreamLarge = !$this->emitLibrary
+            && $this->largeModuleIrPath !== ''
+            && !\Compile\Debug::$framePointers
+            && \getenv('MANTICORE_NO_STREAM_IR') === false;
+        $largeBodyPath = $this->largeModuleIrPath . '.body';
+        $largeStreaming = false;
         $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
-        // Under MANTICORE_STATS, report every function whose IR crosses
-        // FAT_FN_IR bytes. A megamorphic dispatch site (one switch arm per
-        // implementing class) shows up here by name — the IR-size explosion is
-        // per-function, so a top-N list beats a total.
         $fatFn = 262144;
         foreach ($module->functions as $fn) {
             if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
             $body = $this->emitFunction($fn);
-            if (\Compile\Stats::$on && \strlen($body) >= $fatFn) {
-                \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
+            $bodyLen = \strlen($body);
+            $bodyBytes = $bodyBytes + $bodyLen;
+            if (\Compile\Stats::$on && $bodyLen >= $fatFn) {
+                \Compile\Stats::line('fat fn: ' . (string)$bodyLen . ' bytes  ' . $fn->name);
             }
-            $functionBodies .= $body;
-            // This function's MIR is spent: its text is in $functionBodies and
-            // nothing below reads a body again — not the preamble, not
-            // HoistAllocas or PruneIr (both run on the TEXT), not the driver,
-            // which only counts the functions. Dropping it here is what keeps
-            // the whole MIR from standing alongside the whole IR text; the MIR
-            // is the retention term (a `dump-mir` of a 510 KB input peaks at
-            // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
-            // nodes). An empty Block, not null: the field is typed.
+            if ($largeStreaming) {
+                $this->writeStagedIr($largeBodyPath, $body, true);
+            } else {
+                $functionBodies .= $body;
+                if ($canStreamLarge && $bodyBytes > $streamLimit) {
+                    $this->writeStagedIr($largeBodyPath, $functionBodies, false);
+                    $functionBodies = '';
+                    $largeStreaming = true;
+                    \Compile\Stats::line('IR: streaming enabled ' . (string)$bodyBytes . ' bytes');
+                }
+            }
             $fn->body = new Block([], Type::void());
         }
-        // One `__mc_drop` per capturing closure literal seen above — it releases
-        // the captures its env co-owns, and its address is already stamped into
-        // every env {@see EmitLlvmCalls::emitClosure}.
-        $functionBodies .= $this->emitClosureDropFns();
-        // AFTER the bodies: the flag is set while they emit, and the body it adds
-        // sets runtime flags of its own that the preamble below still reads.
-        if ($this->needsObjectVarsFn) { $functionBodies .= $this->emitObjectVarsFn(); }
-        \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
+        $tailBodies = $this->emitClosureDropFns();
+        if ($this->needsObjectVarsFn) { $tailBodies .= $this->emitObjectVarsFn(); }
+        $tailBytes = \strlen($tailBodies);
+        $bodyBytes = $bodyBytes + $tailBytes;
+        if ($largeStreaming) {
+            $this->writeStagedIr($largeBodyPath, $tailBodies, true);
+        } else {
+            $functionBodies .= $tailBodies;
+            if ($canStreamLarge && $bodyBytes > $streamLimit) {
+                $this->writeStagedIr($largeBodyPath, $functionBodies, false);
+                $functionBodies = '';
+                $largeStreaming = true;
+                \Compile\Stats::line('IR: streaming enabled ' . (string)$bodyBytes . ' bytes');
+            }
+        }
+        \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
+        $stageLargeModule = $largeStreaming;
+        if ($stageLargeModule) {
+            // Function emission interns literals and records runtime needs, so
+            // the preamble remains deliberately body-last. Transform its few
+            // `define` tokens while writing, rather than allocating another
+            // full preamble string with linkonceRuntime().
+            \Compile\Stats::line('IR: preamble begin');
+            $this->deferStringGlobals = true;
+            $statT = \Compile\Stats::now();
+            $preamble = $this->emitPreamble();
+            $this->deferStringGlobals = false;
+            \Compile\Stats::step('  emit preamble', $statT, -1, -1);
+            $preambleBytes = \strlen($preamble);
+            \Compile\Stats::line('IR: preamble ' . (string)$preambleBytes . ' bytes');
+            \Compile\Stats::line('IR: staged preamble linkonce');
+            $this->writeStagedLinkoncePreamble($this->largeModuleIrPath, $preamble, false);
+            $this->appendStagedIrFile($largeBodyPath, $this->largeModuleIrPath);
+            \Manticore\system('rm -f ' . $largeBodyPath);
+            \Compile\Stats::line('IR: deferred string globals begin ' . (string)$this->pool->size());
+            $stringGlobalBytes = $this->writeStagedStringGlobals($this->largeModuleIrPath);
+            \Compile\Stats::line('IR: deferred string globals ' . (string)$stringGlobalBytes . ' bytes');
+            $this->largeModuleIrBytes = $bodyBytes + $preambleBytes + $stringGlobalBytes;
+            \Compile\Stats::line('IR: large module staged preamble-first '
+                . (string)$this->largeModuleIrBytes . ' bytes');
+            \Compile\Stats::line('  hoist allocas skipped for staged module');
+            \Compile\Stats::line('IR: prune skipped ' . (string)$this->largeModuleIrBytes . ' bytes'
+                . ' (limit ' . (string)\Compile\Mir\PruneIr::MAX_INPUT_BYTES . ')');
+            return "\x1eMANTICORE_STAGED_IR\n" . $this->largeModuleIrPath . "\n" . (string)$this->largeModuleIrBytes;
+        }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
-        // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
-        // is linked against the prebuilt `stdlib.o` — both objects carry the
-        // same preamble. Only the preamble block is rewritten; user / stdlib
-        // PHP functions stay external (unique) and `@main` lives in the
-        // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
+        // helpers) `linkonce_odr` so user and stdlib objects may coexist.
         $statT = \Compile\Stats::now();
         $preamble = $this->linkonceRuntime($this->emitPreamble());
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
-        \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
+        $preambleBytes = \strlen($preamble);
+        \Compile\Stats::line('IR: preamble ' . (string)$preambleBytes . ' bytes');
         $ir = $preamble . $functionBodies;
-        // Expression temporaries are emitted where the expression sits, so a
-        // loop body's `alloca` runs once per iteration and the stack it takes is
-        // not released until the function returns. -O2 hides this (mem2reg
-        // promotes the slots); -O0 — which tools/selfhost.sh uses — does not,
-        // and a hot loop dies on the guard page. {@see \Compile\Mir\HoistAllocas}
         $statT = \Compile\Stats::now();
         $hoist = new \Compile\Mir\HoistAllocas();
         $ir = $hoist->run($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
-        // Everything above is emitted on DEMAND FLAGS, not on reachability: the
-        // whole unified array runtime, the rc/arena/pool helpers and the
-        // unconditional prelude land in every module whether or not the program
-        // can reach them (`echo "hi";` emitted 203 bodies for 1 user function).
-        // Delete the discardable ones now instead of paying clang to parse,
-        // verify and GlobalDCE them. See {@see \Compile\Mir\PruneIr} for why
-        // only `linkonce_odr` is ever touched.
-        //
-        // Skipped for --emit-library: `stdlib.o` is consumed through its `.sig`
-        // by OTHER modules, so "unreferenced here" says nothing about whether a
-        // helper is needed — and keeping the library's preamble intact is what
-        // the linkonce_odr coalescing contract is written against.
         if (!$this->emitLibrary) {
-            $statT = \Compile\Stats::now();
-            $prune = new \Compile\Mir\PruneIr();
-            $ir = $prune->run($ir);
-            \Compile\Stats::step('  prune IR', $statT, $prune->kept, $prune->dropped);
-            \Compile\Stats::line('IR: pruned ' . (string)$prune->dropped . ' of '
-                . (string)($prune->dropped + $prune->kept) . ' defs, '
-                . (string)\strlen($ir) . ' bytes');
+            $irBytes = \strlen($ir);
+            if (\Compile\Mir\PruneIr::shouldRun($irBytes)) {
+                $statT = \Compile\Stats::now();
+                $prune = new \Compile\Mir\PruneIr();
+                $ir = $prune->run($ir);
+                \Compile\Stats::step('  prune IR', $statT, $prune->kept, $prune->dropped);
+                \Compile\Stats::line('IR: pruned ' . (string)$prune->dropped . ' of '
+                    . (string)($prune->dropped + $prune->kept) . ' defs, '
+                    . (string)\strlen($ir) . ' bytes');
+            } else {
+                \Compile\Stats::line('IR: prune skipped ' . (string)$irBytes . ' bytes'
+                    . ' (limit ' . (string)\Compile\Mir\PruneIr::MAX_INPUT_BYTES . ')');
+            }
         }
         return $ir;
     }
+
+    private function writeStagedIr(string $path, string $bytes, bool $append): void
+    {
+        $fp = \Manticore\fopen($path, $append ? 'ab' : 'wb');
+        if ($fp === null) { throw new \RuntimeException('EmitLlvm: cannot open staged IR at ' . $path); }
+        $total = \strlen($bytes);
+        $base = \int_to_ptr(\str_bytes($bytes));
+        $offset = 0;
+        while ($offset < $total) {
+            $remaining = $total - $offset;
+            $count = $remaining > 1048576 ? 1048576 : $remaining;
+            $written = \Manticore\fwrite_buf(\ptr_offset($base, $offset), 1, $count, $fp);
+            if ($written !== $count) {
+                \Manticore\fclose($fp);
+                throw new \RuntimeException('EmitLlvm: short write staging IR at ' . $path);
+            }
+            $offset = $offset + $written;
+        }
+        \Manticore\fclose($fp);
+    }
+
+    private function writeStagedIrSpan(\Ffi\Ptr $fp, \Ffi\Ptr $base, int $offset, int $length, string $path): void
+    {
+        while ($length > 0) {
+            $count = $length > 1048576 ? 1048576 : $length;
+            $written = \Manticore\fwrite_buf(\ptr_offset($base, $offset), 1, $count, $fp);
+            if ($written !== $count) {
+                throw new \RuntimeException('EmitLlvm: short write staging IR at ' . $path);
+            }
+            $offset = $offset + $written;
+            $length = $length - $written;
+        }
+    }
+
+    /** Append a linkonce_odr runtime preamble without copying the full string. */
+    private function writeStagedLinkoncePreamble(string $path, string $preamble, bool $append): void
+    {
+        $fp = \Manticore\fopen($path, $append ? 'ab' : 'wb');
+        if ($fp === null) { throw new \RuntimeException('EmitLlvm: cannot open staged IR at ' . $path); }
+        $base = \int_to_ptr(\str_bytes($preamble));
+        $total = \strlen($preamble);
+        $needle = "\ndefine ";
+        $needleLen = \strlen($needle);
+        $tag = 'linkonce_odr ';
+        $tagBase = \int_to_ptr(\str_bytes($tag));
+        $tagLen = \strlen($tag);
+        $cursor = 0;
+        while (true) {
+            $at = \strpos($preamble, $needle, $cursor);
+            if ($at === false) {
+                $this->writeStagedIrSpan($fp, $base, $cursor, $total - $cursor, $path);
+                break;
+            }
+            $prefixEnd = $at + $needleLen;
+            $this->writeStagedIrSpan($fp, $base, $cursor, $prefixEnd - $cursor, $path);
+            $this->writeStagedIrSpan($fp, $tagBase, 0, $tagLen, $path);
+            $cursor = $prefixEnd;
+        }
+        \Manticore\fclose($fp);
+    }
+
+    /** Render string literals in bounded chunks after a staged module body. */
+    private function writeStagedStringGlobals(string $path): int
+    {
+        $chunk = '';
+        $total = 0;
+        $count = $this->pool->size();
+        for ($id = 0; $id < $count; $id = $id + 1) {
+            if (($id & 8191) === 0) { \Compile\Stats::line('IR: deferred string globals at ' . (string)$id); }
+            if (!$this->pool->hasId($id)) { throw new \RuntimeException('EmitLlvm: missing deferred string global id ' . (string)$id . ' of ' . (string)$count); }
+            $value = $this->pool->valueAt($id);
+            if (!\is_string($value)) { throw new \RuntimeException('EmitLlvm: bad deferred string global id ' . (string)$id . ' type=' . \gettype($value)); }
+            $def = $this->strGlobalDef('@.str.' . (string)$id, $value, $this->pool->isEmpty($id));
+            $total = $total + \strlen($def);
+            $chunk .= $def;
+            if (\strlen($chunk) >= 1048576) {
+                $this->writeStagedIr($path, $chunk, true);
+                $chunk = '';
+            }
+        }
+        if ($chunk !== '') { $this->writeStagedIr($path, $chunk, true); }
+        return $total;
+    }
+
+
+    /** Append one already-staged IR file to another without reading either into PHP. */
+    private function appendStagedIrFile(string $source, string $target): void
+    {
+        $rc = \Manticore\system('cat ' . $source . ' >> ' . $target);
+        if ($rc !== 0) {
+            throw new \RuntimeException('EmitLlvm: cannot append staged IR ' . $source . ' to ' . $target);
+        }
+    }
+
 
     /**
      * Promote every `define` in the runtime preamble to `linkonce_odr`
@@ -1425,7 +1567,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** The node kinds that pass their operands as CALL ARGUMENTS — where an
      *  array's pointer is handed over for the duration of the call only. */
-    private function isCallLike(int $kind): bool
+    private function isCallLike(string $kind): bool
     {
         return $kind === Node::KIND_CALL || $kind === Node::KIND_METHOD_CALL
             || $kind === Node::KIND_STATIC_CALL || $kind === Node::KIND_INVOKE

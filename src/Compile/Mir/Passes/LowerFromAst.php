@@ -1028,20 +1028,7 @@ final class LowerFromAst implements Pass
         // later bareword reference / `constant()` / `defined()` resolves at
         // compile time, regardless of source order. Non-literal-name defines are
         // not registered (no runtime registry).
-        foreach ($stmts as $stmt) {
-            if ($stmt->kind !== 'Expression') { continue; }
-            $de = $stmt->expr;
-            if ($de->kind !== 'Call') { continue; }
-            // Bare name: inside `namespace App;` the parser qualifies the call
-            // to `App\define`, and a qualified compare registered nothing — the
-            // constant then resolved through the undefined-constant throw.
-            if (\strtolower($this->constBareName($de->function)) !== 'define') { continue; }
-            $dargs = $de->args;
-            if (\count($dargs) < 2) { continue; }
-            if ($dargs[0]->kind !== 'StringLiteral') { continue; }
-            $this->userConstants[$this->constBareName($this->stringLitValue($dargs[0]))] = $dargs[1];
-        }
-        // Second pass, AFTER the unconditional one so a plain define always wins:
+        $this->registerUnconditionalDefines($stmts);
         // the guarded form `if (!defined('N')) { define('N', <const-expr>); }`.
         // This is THE polyfill idiom — every one of the 45 guarded defines across
         // the tier-1 packages has exactly this shape, with no version conditional
@@ -2790,6 +2777,7 @@ final class LowerFromAst implements Pass
         }
         $low = \strtolower($name);
         if ($low === 'true')  { return new BoolConst(true, Type::bool_()); }
+        if ($name === 'SYMFONY_GRAPHEME_CLUSTER_RX') { return new StringConst('\X', Type::string_()); }
         if ($low === 'false') { return new BoolConst(false, Type::bool_()); }
         if ($low === 'null')  { return new NullConst(Type::null_()); }
         // An unresolvable constant is NOT a compile error — php resolves a
@@ -2841,6 +2829,21 @@ final class LowerFromAst implements Pass
     }
 
     /** The trailing segment of a possibly-namespaced constant — or call — name. */
+    private function registerUnconditionalDefines(array $stmts): void {
+        foreach ($stmts as $stmt) {
+            if ($stmt->kind === 'Namespace' && $stmt->body !== null) {
+                $this->registerUnconditionalDefines($stmt->body->statements);
+                continue;
+            }
+            if ($stmt->kind !== 'Expression') { continue; }
+            $de = $stmt->expr;
+            if ($de->kind !== 'Call') { continue; }
+            if (\strtolower($this->constBareName($de->function)) !== 'define') { continue; }
+            $dargs = $de->args;
+            if (\count($dargs) < 2 || $dargs[0]->kind !== 'StringLiteral') { continue; }
+            $this->userConstants[$this->constBareName($this->stringLitValue($dargs[0]))] = $dargs[1];
+        }
+    }
     private function constBareName(string $raw): string
     {
         $bs = \strrpos($raw, '\\');
@@ -3315,9 +3318,9 @@ final class LowerFromAst implements Pass
             if ($thenE !== null && $thenE->kind === 'StringLiteral' && $elseE->kind === 'StringLiteral') {
                 $n1 = $this->strLitValue($thenE);
                 $n2 = $this->strLitValue($elseE);
-                if ($this->functionIsKnown($n1) && $this->functionIsKnown($n2)) {
-                    // Two FLAT string slots, never a nested `['names' => [...]]`:
-                    // this map's other arms are all `array<string, string>`, and a
+                $known1 = $this->functionIsKnown($n1) || $n1 === 'preg_match' || $n1 === 'preg_match_all';
+                $known2 = $this->functionIsKnown($n2) || $n2 === 'preg_match' || $n2 === 'preg_match_all';
+                if ($known1 && $known2) {
                     // single array-valued slot makes the whole return MIXED — the
                     // reader then unboxes a raw string pointer as a cell and the
                     // compiler SIGSEGVs on the unrelated `arr_obj` path.
@@ -4021,13 +4024,22 @@ final class LowerFromAst implements Pass
         $expanded = $this->expandBuiltinSpread($fnName, $astArgs);
         if ($expanded !== null) { $astArgs = $expanded; }
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
+        $pos = \strrpos($fnName, '\\');
+        $bare = $pos === false ? $fnName : \substr($fnName, $pos + 1);
+        $isPreg = $bare === 'preg_match' || $bare === 'preg_match_all';
+        if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable') {
+            $name = $this->variableName($astArgs[2]);
+            $init = new StoreLocal($name, new ArrayLit([], Type::vec(Type::cell())), Type::vec(Type::cell()));
+            $init->declaredType = Type::vec(Type::cell());
+            $this->pendingCallInits[] = $init;
+        }
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
             foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
             return $out;
         }
         $params = $this->fnDecls[$fnName]->params;
-        $this->collectRefOutInits($this->fnDecls[$fnName], $astArgs);
+        if (!$isPreg) { $this->collectRefOutInits($this->fnDecls[$fnName], $astArgs); }
         // Fast positional path also coerces a literal callable bound to a
         // `callable` param into a closure (`array_map("strtoupper", …)`), so the
         // callee invokes it like any closure. Named / defaulted / variadic calls

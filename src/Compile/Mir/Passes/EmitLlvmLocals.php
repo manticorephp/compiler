@@ -787,6 +787,16 @@ trait EmitLlvmLocals
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
+            if (isset($this->locals->globalBacked[$name])) {
+                // Static locals and lowered superglobals already own a stable
+                // module-global cell; a by-reference source aliases that cell.
+                $addr = $this->ssa->allocReg();
+                $out = '  ' . $addr . ' = ptrtoint ptr '
+                     . $this->locals->globalBacked[$name] . " to i64\n";
+                $this->lastValue = $addr;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
             if (!isset($this->locals->slots[$name])) { return null; }
             $addr = $this->ssa->allocReg();
             if (isset($this->locals->refLocals[$name])) {

@@ -235,11 +235,13 @@ trait EmitLlvmModule
                 }
             }
         }
-        // Emit each interned string constant as a headered @.str.N
-        // ({i64 -1, [L x i8]}); the rc word lets a heap string and a
-        // literal share one layout so retain/release work on either.
-        foreach ($this->pool->all() as $id => $value) {
-            $out .= $this->strGlobalDef('@.str.' . (string)$id, $value);
+        // Emit each interned string constant as a headered @.str.N. A staged
+        // module writes them afterwards in bounded chunks, avoiding a second
+        // multi-hundred-MiB preamble string at peak codegen memory.
+        if (!$this->deferStringGlobals) {
+            foreach ($this->pool->all() as $id => $value) {
+                $out .= $this->strGlobalDef('@.str.' . (string)$id, $value, $this->pool->isEmpty($id));
+        }
         }
         $out .= $globalCells;
         // Zero word: a null vec/assoc base (the empty-literal optimization

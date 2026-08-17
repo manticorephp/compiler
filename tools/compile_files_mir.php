@@ -32,6 +32,7 @@ spl_autoload_register(function ($class) {
 });
 
 require_once __DIR__ . '/../src/Manticore/Main.php';
+if (!function_exists('str_bytes')) { function str_bytes(string $s): int { return $s === "" ? 0 : 1; } function manticore_raw_str_bytes(string $s): int { return $s === "" ? 0 : 1; } }
 
 \Compile\Debug::initFromEnvironment();
 
