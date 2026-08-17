@@ -1079,7 +1079,15 @@ trait EmitLlvmArrays
         // gen-2 compiler segfaults on its own smoke test. Closing it needs the
         // erased element channel RETYPED to cell end-to-end, which is the parked
         // element-repr epic, not a change to this predicate.
-        return $et !== null && $et->kind === Type::KIND_CELL;
+        if ($et !== null && $et->kind === Type::KIND_CELL) { return true; }
+        if ($se->value->type->kind === Type::KIND_CELL && ($et === null || $et->kind === Type::KIND_UNKNOWN)) { return true; }
+        if ($se->value instanceof \Compile\Mir\Call) {
+            $fn = $se->value->function;
+            $p = \strrpos($fn, \chr(92));
+            $bare = $p === false ? $fn : \substr($fn, $p + 1);
+            if ($bare === 'key' || $bare === 'current' || $bare === 'pos') { return true; }
+        }
+        return false;
     }
 
     /** As {@see storeElemBoxesValue} for an array LITERAL — its `$cellVals`. */
@@ -1111,6 +1119,8 @@ trait EmitLlvmArrays
     private function emitStoreElemValue(StoreElement $se, bool $boxVal): string
     {
         $out = $this->emitNode($se->value);
+        $savedValue = $this->lastValue;
+        $savedValueType = $this->lastValueType;
         if ($boxVal) {
             // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
             // the cell array-literal path does. Without this the value is freed
@@ -1118,6 +1128,8 @@ trait EmitLlvmArrays
             // `foreach (__mc_env() as $k => $v) { $out[$k] = $v; }` left every
             // $_SERVER value dangling the moment the temp subject was released.
             $out .= $this->retainCellPayload($se->value);
+            $this->lastValue = $savedValue;
+            $this->lastValueType = $savedValueType;
             $out .= $this->boxToCell($se->value->type, $se->value);
             $this->elemValReg = $this->lastValue;
             return $out;
@@ -1229,6 +1241,9 @@ trait EmitLlvmArrays
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
+            if ($boxVal && ($se->value instanceof \Compile\Mir\Call)) {
+                $out .= $this->emitReprStamp($next, \Compile\MemoryAbi::ARRAY_REPR_CELL);
+            }
         } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
             $out .= $this->emitNode($se->index);

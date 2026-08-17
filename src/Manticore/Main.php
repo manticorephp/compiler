@@ -55,6 +55,10 @@ function fopen(string $path, string $mode): \Ffi\Ptr {}
 function fwrite(string $buf, #[CType('size_t')] int $size,
                 #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
 
+#[Library('c'), Symbol('fwrite')]
+function fwrite_buf(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
+                    #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
+
 #[Library('c'), Symbol('fread')]
 function fread(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
                #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
@@ -181,6 +185,10 @@ function collect_argv(): array {
  * the file can't be opened.
  */
 function read_file(string $path): ?string {
+    if (\class_exists('FFI')) {
+        $raw = \file_get_contents($path);
+        return $raw === false ? null : $raw;
+    }
     $fp = fopen($path, "rb");
     if ($fp === null) {
         dprint("read_file: fopen failed: " . $path);
@@ -501,33 +509,6 @@ function assemble_jobs(): int {
 }
 
 /**
- * How many parts may assemble AT ONCE.
- *
- * NOT `assemble_jobs()`: that answers "how many parts did the user ask for",
- * and its default is 1 because `bin/build` deliberately never passes `-j` (a
- * part boundary is an inlining boundary). Once the split is forced by SIZE the
- * two questions come apart — the tier-4 module split into 45 parts and then
- * assembled them ONE AT A TIME, ~15 minutes each, which is eleven hours for a
- * build that has nothing wrong with it.
- *
- * An explicit `-j` still wins; otherwise the machine's cores decide, capped at
- * 4. The cap is memory, not politeness: clang holds a whole part at -O2 and
- * those parts run to ~120 MB of IR, so eight at once is how a 32 GB box ends up
- * in swap.
- */
-function assemble_wave(): int {
-    if (CompileArgs::$jobs > 1) { return CompileArgs::$jobs; }
-    $n = 0;
-    $probe = is_darwin() ? "sysctl -n hw.ncpu 2>/dev/null" : "nproc 2>/dev/null";
-    $out = \shell_exec($probe);
-    if ($out !== null && $out !== false) { $n = (int)\trim((string)$out); }
-    $n = $n - 1;
-    if ($n < 1) { return 1; }
-    if ($n > 4) { return 4; }
-    return $n;
-}
-
-/**
  * Assemble `$ir` into one or more objects and return their paths, or `[]` on
  * failure (the caller reports; the staged files are left for inspection).
  *
@@ -578,31 +559,19 @@ function with_frame_pointers(string $ir): string {
 function assemble_ir(string $ir, string $base, string $cflags): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
-    // Size gate FIRST: assemble_jobs() may shell out to sysctl/nproc, and paying
-    // a process spawn to decide not to split made a hello world 12 ms slower.
-    // Below a few hundred KB the split cannot pay for itself anyway.
-    $jobs = \strlen($ir) < 262144 ? 1 : assemble_jobs();
-    // A CEILING, not a preference. `-j` is a speed knob and `bin/build`
-    // deliberately never passes it (a part boundary is an inlining boundary),
-    // but past a certain size one translation unit stops being slow and becomes
-    // IMPOSSIBLE: clang's source-location space is finite, and the symfony
-    // tier-4 unit — 785 MB of IR from 1548 files — died on
-    //
-    //   fatal error: translation unit is too large for Clang to process:
-    //   ran out of source locations
-    //
-    // after the compiler had emitted every byte of it correctly. So the split
-    // is forced by SIZE here even at `-j1`; a program small enough to fit keeps
-    // exactly the single-TU behaviour, inlining and all.
-    // ⚠ The ceiling is a TRADE, and 48 MB was the wrong side of it. The splitter
-    // copies every SHARED definition into every part, so the part count is a
-    // multiplier on the preamble: symfony tier 4 (a 2.1 GB module once the
-    // reflection metadata is in) came out as 45 parts of ~120 MB each — ~5 GB of
-    // text for 2.1 GB of module. Fewer, larger parts duplicate less and still
-    // clear clang's source-location space by a wide margin.
-    $partCeiling = 128 * 1024 * 1024;
-    $needed = \intdiv(\strlen($ir) + $partCeiling - 1, $partCeiling);
-    if ($needed > $jobs) { $jobs = $needed; }
+    $stagedPrefix = "\x1eMANTICORE_STAGED_IR\n";
+    if (\substr($ir, 0, \strlen($stagedPrefix)) === $stagedPrefix) {
+        $payload = \substr($ir, \strlen($stagedPrefix));
+        $cut = \strrpos($payload, "\n");
+        if ($cut === false) { dprint('assemble: malformed staged IR marker'); return []; }
+        return assemble_ir_file(\substr($payload, 0, $cut), $base, $cflags, (int)\substr($payload, $cut + 1));
+    }
+    $irBytes = \strlen($ir);
+    $largeModule = $irBytes > 536870912;
+    if ($largeModule) {
+        \Compile\Stats::line('  assembly: large module, serial IR path (' . (string)$irBytes . ' bytes)');
+    }
+    $jobs = $largeModule ? 1 : ($irBytes < 262144 ? 1 : assemble_jobs());
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, with_frame_pointers($ir))) { dprint("assemble: cannot write " . $llPath); return []; }
@@ -617,8 +586,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     \Compile\Stats::step('  split module (' . (string)$jobs . ' parts)', $statT,
         $splitter->sharedDefs, $splitter->internalDefs);
     $objs = [];
-    /** @var string[] $cmds one clang invocation per part */
-    $cmds = [];
+    $cmd = '';
     foreach ($parts as $i => $partIr) {
         $pll = $base . ".p" . (string)$i . ".ll";
         $pobj = $base . ".p" . (string)$i . ".o";
@@ -626,7 +594,8 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         // same file as the `#0` references, and a split would leave every other
         // part naming an undefined group.
         if (!write_file($pll, with_frame_pointers($partIr))) { dprint("assemble: cannot write " . $pll); return []; }
-        $cmds[] = "clang -O" . CompileArgs::$optLevel . " " . $cflags
+        if ($cmd !== '') { $cmd = $cmd . ' & '; }
+        $cmd = $cmd . "clang -O" . CompileArgs::$optLevel . " " . $cflags
              . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
         $objs[] = $pobj;
     }
@@ -634,30 +603,11 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     // leftover from an earlier run must not read as a part that built.
     foreach ($objs as $o) { system("rm -f " . $o); }
     $statT = \Compile\Stats::now();
-    // In WAVES, not all at once. The part count is now driven by SIZE as well as
-    // by `-j` ({@see the ceiling above}), so a big application can produce far
-    // more parts than the machine has cores — and each clang holds its whole
-    // part in memory at -O2. The wave width is the job count the machine asked
-    // for; a `-j`-sized build is one wave, exactly as before.
-    //
     // `wait` must be INSIDE the subshell: the background jobs are ITS children,
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
-    $wave = assemble_wave();
-    $cmd = '';
-    $inWave = 0;
-    foreach ($cmds as $c) {
-        if ($cmd !== '') { $cmd = $cmd . ' & '; }
-        $cmd = $cmd . $c;
-        $inWave = $inWave + 1;
-        if ($inWave >= $wave) {
-            system("( " . $cmd . " ; wait )");
-            $cmd = '';
-            $inWave = 0;
-        }
-    }
-    if ($cmd !== '') { system("( " . $cmd . " ; wait )"); }
+    system("( " . $cmd . " ; wait )");
     \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c x' . (string)\count($parts),
         $statT, -1, -1);
     foreach ($objs as $i => $o) {
@@ -667,6 +617,17 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         }
     }
     return $objs;
+}
+
+/** Assemble already-staged large IR without reading it back into PHP. */
+function assemble_ir_file(string $llPath, string $base, string $cflags, int $irBytes): array {
+    $objPath = $base . '.o';
+    \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
+    $statT = \Compile\Stats::now();
+    $rc = system('clang -O' . CompileArgs::$optLevel . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
+    \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c staged IR', $statT, -1, -1);
+    if ($rc !== 0) { dprint('assemble: clang -c staged IR failed (rc=' . (string)$rc . '); IR at ' . $llPath); return []; }
+    return [$objPath];
 }
 
 function collect_stdlib_extern_decls(): array
@@ -869,67 +830,6 @@ function write_file(string $path, string $bytes): bool {
     $w = fwrite($bytes, 1, $n, $fp);
     fclose($fp);
     return $w === $n;
-}
-
-/**
- * `MANTICORE_DUMP_SOURCES=<path>` — write the compile unit's RESOLVED file list
- * and stop being the only thing that knows it.
- *
- * The manifest builder is what turns a manifest into a set of files: composer's
- * psr-4/psr-0/classmap roots, minus the manifest's excludes, minus composer's
- * own, minus the scripts that declare nothing, plus the entry. Nothing else can
- * reproduce that, which is exactly the problem when the build CRASHES: the one
- * tool that would name the site is the Zend front end
- * (`tools/compile_files_mir.php`, where a null against a typed parameter is a
- * TypeError with a stack trace instead of a SIGSEGV) and it takes a FILE LIST.
- * Reconstructing that list from the build log does NOT reproduce the build — it
- * misses the skips and the demand-loaded marking, so it fails on errors the real
- * build never sees.
- *
- * A demand-loaded path (declarations kept, top-level side effects dropped) is
- * written with a `D ` prefix so the driver can mark it the same way.
- *
- * @param string[] $paths
- */
-function dump_resolved_sources(array $paths): void
-{
-    $out = \getenv("MANTICORE_DUMP_SOURCES");
-    if ($out === false || $out === "") { return; }
-    $buf = "";
-    foreach ($paths as $p) {
-        $norm = \rtrim($p, "/");
-        $buf .= (isset(CompileArgs::$demandLoadedPaths[$norm]) ? "D " : "  ") . $p . "\n";
-    }
-    if (!write_file($out, $buf)) {
-        dprint("build: could not write MANTICORE_DUMP_SOURCES to " . $out);
-        return;
-    }
-    dprint("build: resolved " . (string)\count($paths) . " source file(s) -> " . $out);
-}
-
-/**
- * `MANTICORE_DUMP_TRAPS=<path>` — write the undefined-function trap names, one
- * per line, and stop being the only thing that knows them.
- *
- * The trap list IS the honest remaining-work list of a large build: every name
- * here compiled into a runtime throw instead of a link error, so the build looks
- * clean and the program dies on the first guarded call. Today it exists only as
- * one comma-joined line inside a build log nobody parses — symfony tier 4 printed
- * 83 names and the list survived exactly as long as the log did.
- *
- * @param string[] $names sorted trap names
- */
-function dump_undefined_traps(array $names): void
-{
-    $out = \getenv("MANTICORE_DUMP_TRAPS");
-    if ($out === false || $out === "") { return; }
-    $buf = "";
-    foreach ($names as $n) { $buf .= $n . "\n"; }
-    if (!write_file($out, $buf)) {
-        dprint("build: could not write MANTICORE_DUMP_TRAPS to " . $out);
-        return;
-    }
-    dprint("build: wrote " . (string)\count($names) . " undefined-function trap name(s) -> " . $out);
 }
 
 /**
@@ -1819,6 +1719,13 @@ function __mc_source_may_declare(string $src): bool
 function __mc_stmt_declares(\Parser\Ast\Stmt $s): bool
 {
     $k = $s->kind;
+    if ($k === 'Expression' && $s instanceof \Parser\Ast\ExpressionStmt
+        && $s->expr instanceof \Parser\Ast\Call) {
+        $fn = $s->expr->function;
+        $p = \strrpos($fn, '\\');
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        if (\strtolower($bare) === 'define') { return true; }
+    }
     if ($k === 'Class' || $k === 'Function' || $k === 'UseDecl'
         || $k === 'Namespace' || $k === 'StaticLocal' || $k === 'Label') {
         return true;
@@ -2087,7 +1994,6 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $names = \implode(", ", $undefTraps);
         dprint("build: undefined-function traps (" . (string)\count($undefTraps)
             . "): " . $names);
-        dump_undefined_traps($undefTraps);
         // For a LIBRARY the stub is written to a `.o` that outlives this build
         // and is linked by every later program, so refuse it by default.
         if ($emitLibrary && !CompileArgs::$allowUndefinedTraps) {
@@ -2426,7 +2332,6 @@ function cmd_build(array $args): int
             dprint("build: no sources for application '" . $name . "'");
             return 66;
         }
-        dump_resolved_sources($paths);
         // Library dependencies. A library marked "runtime": true (the bundled
         // stdlib) is the ALWAYS-ON runtime: every app imports + links it by
         // default, so the stdlib is transparently available with no manifest
@@ -3309,17 +3214,6 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                                            'ReflectionParameter', 'ReflectionNamedType',
                                            'ReflectionAttribute', 'ReflectionFunction',
                                            'ReflectionClassConstant',
-                                           // The enum + composite-type surface. A program
-                                           // may name ONLY one of these — `new
-                                           // ReflectionEnum(S::class)` mentions no other
-                                           // Reflection name — and without them here the
-                                           // whole file stayed out: the class was then
-                                           // undefined and every call became the
-                                           // "Call to undefined method" trap, which is
-                                           // what the enum probe's IR actually contained.
-                                           'ReflectionEnum', 'ReflectionEnumUnitCase',
-                                           'ReflectionEnumBackedCase',
-                                           'ReflectionUnionType', 'ReflectionIntersectionType',
                                            'ReflectionException'])
         // get_declared_* are plain FUNCTIONS living in the same file — a program
         // may call one without ever naming a Reflection class, and would then

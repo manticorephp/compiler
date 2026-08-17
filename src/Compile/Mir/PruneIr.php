@@ -38,6 +38,29 @@ namespace Compile\Mir;
  */
 final class PruneIr
 {
+    /**
+     * Pruning is a userland graph walk over the final textual IR. It needs an
+     * exploded copy of every line, indexes all definitions, then walks every
+     * reachable body looking for `@symbol` references. That is useful when the
+     * whole module fits comfortably in memory, but it is the wrong algorithm
+     * once the retained IR is hundreds of MiB: LLVM's own GlobalDCE can discard
+     * the same `linkonce_odr` helpers after parsing, while this pass would first
+     * retain several additional full-text representations.
+     *
+     * Keep the gate above the 54 MiB self-hosted module, where the pass remains
+     * inexpensive and preserves its existing clang-saving benefit. Symfony Tier
+     * 4 produces roughly 1.8 GiB of IR and has only 73 discardable helper
+     * definitions, so walking its bodies in PHP is overwhelmingly more costly
+     * than leaving that tiny tail to LLVM.
+     */
+    public const MAX_INPUT_BYTES = 64 * 1024 * 1024;
+
+    /** Whether final-text pruning is bounded enough to be worthwhile. */
+    public static function shouldRun(int $bytes): bool
+    {
+        return $bytes <= self::MAX_INPUT_BYTES;
+    }
+
     /** Definitions dropped by the last {@see run} — for MANTICORE_STATS. */
     public int $dropped = 0;
     /** Definitions kept by the last {@see run}. */

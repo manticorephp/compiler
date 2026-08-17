@@ -4805,10 +4805,10 @@ trait EmitLlvmExpr
 
     private function llvmStringBytes(string $s): string
     {
+        if (\is_null($s) || $s === '') { return ''; }
         $out = '';
         $n = \strlen($s);
         for ($i = 0; $i < $n; $i = $i + 1) {
-            // Index (`$s[$i]`), NOT substr: string indexing is binary-safe but
             // the runtime substr is C-strlen bounded, so `substr($s,$i,1)` on a
             // string with an embedded NUL truncates → bytes after the NUL emit
             // as \00 (the trim mask `\0\x0B`, any `\xNN`/binary literal).

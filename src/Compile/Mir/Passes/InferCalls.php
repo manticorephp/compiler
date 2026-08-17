@@ -156,13 +156,15 @@ trait InferCalls
     private function builtinReturnType(string $name, array $args): ?Type
     {
         $n = \strtolower($name);
-        // Strip a leading namespace (`\substr` → `substr`) so a fully
-        // qualified builtin call infers its real return type — matching
-        // EmitLlvm::emitBuiltin's own normalisation. Without this the call
-        // types as `unknown`, which mis-flavours an owned string result as
-        // an obj rc-local (→ obj release on a str_alloc buffer → bad-free).
-        $bs = \strrpos($n, '\\');
-        if ($bs !== false) { $n = \substr($n, $bs + 1); }
+        // A leading slash denotes PHP's explicit global-namespace spelling.
+        // Any other namespace segment denotes a distinct user function, not a
+        // global builtin with the same short name. Keep this decision identical
+        // to EmitLlvmBuiltins::emitBuiltin so the ABI sees the inferred type.
+        if (\str_contains($n, '\\')) {
+            $separator = \strrpos($n, '\\');
+            if ($separator !== 0) { return null; }
+            $n = \substr($n, 1);
+        }
         // CLI / stdio primitives: the `__mir_std*` BUILTINS load libc's FILE*
         // globals and a raw argv entry is a char* — both obj<Ffi\Ptr>; the
         // captured argc is a plain int. NOTE the STDIN/STDOUT/STDERR CONSTANTS
@@ -257,7 +259,7 @@ trait InferCalls
         // same pointer C sees when a `string` is passed through an FFI `char *`
         // parameter). Used to poke an iovec.iov_base for a writev syscall
         // without materialising a Ptr handle. Returns i64.
-        if ($n === 'str_bytes') { return Type::int_(); }
+        if ($n === 'str_bytes' || $n === 'manticore_raw_str_bytes') { return Type::int_(); }
 
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
