@@ -325,6 +325,8 @@ final class EmitLlvm implements EmitVisitor
      * the `--emit-library` compile path.
      */
     public bool $emitLibrary = false;
+    /** Whether staged emission defers string globals to the body writer. */
+    public bool $deferStringGlobals = false;
     /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
      *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
     private bool $lastCallWasBuiltin = false;
@@ -619,7 +621,8 @@ final class EmitLlvm implements EmitVisitor
         // by OTHER modules, so "unreferenced here" says nothing about whether a
         // helper is needed — and keeping the library's preamble intact is what
         // the linkonce_odr coalescing contract is written against.
-        if (!$this->emitLibrary) {
+        $pruneMode = \getenv('MANTICORE_PRUNE_IR');
+        if (!$this->emitLibrary && $pruneMode !== 'off') {
             $statT = \Compile\Stats::now();
             $prune = new \Compile\Mir\PruneIr();
             $ir = $prune->run($ir);
@@ -627,6 +630,8 @@ final class EmitLlvm implements EmitVisitor
             \Compile\Stats::line('IR: pruned ' . (string)$prune->dropped . ' of '
                 . (string)($prune->dropped + $prune->kept) . ' defs, '
                 . (string)\strlen($ir) . ' bytes');
+        } elseif (!$this->emitLibrary && $pruneMode === 'off') {
+            \Compile\Stats::line('  prune IR skipped (MANTICORE_PRUNE_IR=off)');
         }
         return $ir;
     }
@@ -1431,7 +1436,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** The node kinds that pass their operands as CALL ARGUMENTS — where an
      *  array's pointer is handed over for the duration of the call only. */
-    private function isCallLike(int $kind): bool
+    private function isCallLike(string $kind): bool
     {
         return $kind === Node::KIND_CALL || $kind === Node::KIND_METHOD_CALL
             || $kind === Node::KIND_STATIC_CALL || $kind === Node::KIND_INVOKE

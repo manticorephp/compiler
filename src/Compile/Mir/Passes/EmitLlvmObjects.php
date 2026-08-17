@@ -3656,7 +3656,7 @@ trait EmitLlvmObjects
         // Same policy as the undefined-FUNCTION traps the build already
         // reports: php raises when the call is REACHED, so the build must not
         // die for it.
-        if ($this->methodHasNoImpl($cls, $n->method)) {
+        if ($this->staticMethodHasNoImpl($n->class, $n->method)) {
             $name = $cls !== '' ? $cls : ($n->class !== '' ? $n->class : 'object');
             $thr = new \Compile\Mir\Call(
                 '__mir_throw_error',
@@ -4136,6 +4136,14 @@ trait EmitLlvmObjects
      * FALSE. `__call` is not consulted here because both of its reroutes have
      * already run by the time this is asked.
      */
+    private function staticMethodHasNoImpl(string $class, string $method): bool
+    {
+        if ($method === '') { return false; }
+        $decl = $this->resolveMethodClass($class, $method);
+        if ($decl === '') { return true; }
+        return !$this->methodResolvesToBody($class, $method);
+    }
+
     private function methodHasNoImpl(string $class, string $method): bool
     {
         if ($method === '') { return false; }

@@ -302,6 +302,13 @@ function read_stdlib_dir(string $dir): array {
  * Falls back to a bare `-lpcre2-8`; empty only if that too would be pointless.
  * Used by the preg_* stdlib wrappers; dead-strip drops it when regex is unused.
  */
+function homebrew_opt_lib(string $formula): string {
+    foreach (['/opt/homebrew/opt/' . $formula . '/lib', '/usr/local/opt/' . $formula . '/lib'] as $d) {
+        if (\is_dir($d)) { return $d; }
+    }
+    return '';
+}
+
 function pcre2_link_flags(): string {
     $listPath = "/tmp/manticore_pcre2_" . (string)getpid() . ".txt";
     $rc = system("pcre2-config --libs8 > " . $listPath . " 2>/dev/null");
@@ -312,7 +319,11 @@ function pcre2_link_flags(): string {
             if ($t !== "") { return $t; }
         }
     }
-    return "-lpcre2-8";
+    $home = homebrew_opt_lib('pcre2');
+    if ($home !== '' && \is_file($home . '/libpcre2-8.dylib')) {
+        return '-L' . $home . ' -lpcre2-8';
+    }
+    return '-lpcre2-8';
 }
 
 /**
@@ -332,7 +343,11 @@ function openssl_link_flags(): string {
             if ($t !== "") { return $t; }
         }
     }
-    return "-lssl -lcrypto";
+    $home = homebrew_opt_lib('openssl@3');
+    if ($home !== '' && \is_file($home . '/libssl.dylib') && \is_file($home . '/libcrypto.dylib')) {
+        return '-L' . $home . ' -lssl -lcrypto';
+    }
+    return '-lssl -lcrypto';
 }
 
 /**
@@ -556,6 +571,11 @@ function with_frame_pointers(string $ir): string {
     return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n";
 }
 
+function clang_opt_level(): string {
+    $e = \getenv('MANTICORE_LLVM_OPT_LEVEL');
+    if ($e !== false && \in_array($e, ['0', '1', '2', '3', 's', 'z'], true)) { return $e; }
+    return CompileArgs::$optLevel;
+}
 function assemble_ir(string $ir, string $base, string $cflags): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
@@ -571,11 +591,18 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     if ($largeModule) {
         \Compile\Stats::line('  assembly: large module, serial IR path (' . (string)$irBytes . ' bytes)');
     }
-    $jobs = $largeModule ? 1 : ($irBytes < 262144 ? 1 : assemble_jobs());
+    $forcedSplit = \getenv('MANTICORE_SPLIT_JOBS');
+    $forcedJobs = $forcedSplit === false ? 0 : (int)$forcedSplit;
+    if ($forcedJobs > 64) { $forcedJobs = 64; }
+    $jobs = $forcedJobs >= 2
+        ? $forcedJobs : ($largeModule ? 1 : ($irBytes < 262144 ? 1 : assemble_jobs()));
+    if ($largeModule && $forcedJobs >= 2) {
+        \Compile\Stats::line('  assembly: forced split jobs=' . (string)$jobs);
+    }
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, with_frame_pointers($ir))) { dprint("assemble: cannot write " . $llPath); return []; }
-        $rc = system("clang -O" . CompileArgs::$optLevel . " " . $cflags
+        $rc = system("clang -O" . clang_opt_level() . " " . $cflags
             . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
         if ($rc !== 0) { dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath); return []; }
         return [$objPath];
@@ -595,7 +622,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         // part naming an undefined group.
         if (!write_file($pll, with_frame_pointers($partIr))) { dprint("assemble: cannot write " . $pll); return []; }
         if ($cmd !== '') { $cmd = $cmd . ' & '; }
-        $cmd = $cmd . "clang -O" . CompileArgs::$optLevel . " " . $cflags
+        $cmd = $cmd . "clang -O" . clang_opt_level() . " " . $cflags
              . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
         $objs[] = $pobj;
     }
@@ -608,7 +635,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
     system("( " . $cmd . " ; wait )");
-    \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c x' . (string)\count($parts),
+    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($parts),
         $statT, -1, -1);
     foreach ($objs as $i => $o) {
         if (!\file_exists($o)) {
@@ -624,8 +651,8 @@ function assemble_ir_file(string $llPath, string $base, string $cflags, int $irB
     $objPath = $base . '.o';
     \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
     $statT = \Compile\Stats::now();
-    $rc = system('clang -O' . CompileArgs::$optLevel . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
-    \Compile\Stats::step('  clang -O' . CompileArgs::$optLevel . ' -c staged IR', $statT, -1, -1);
+    $rc = system('clang -O' . clang_opt_level() . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
+    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c staged IR', $statT, -1, -1);
     if ($rc !== 0) { dprint('assemble: clang -c staged IR failed (rc=' . (string)$rc . '); IR at ' . $llPath); return []; }
     return [$objPath];
 }
@@ -1395,7 +1422,7 @@ function cmd_compile(array $args): int {
             return 73;
         }
         if ($keep) { dprint("compile: kept IR " . $llPath); }
-        $rcLib = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
+        $rcLib = system("clang -O" . clang_opt_level() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rcLib !== 0) {
             dprint("compile: clang -c (library) failed (rc=" . (string)$rcLib . "); IR at " . $llPath);
             return 75;
@@ -2079,7 +2106,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     if ($emitLibrary) {
         if (!write_file($llPath, with_frame_pointers($ir))) { dprint("build: cannot write " . $llPath); return 73; }
         if ($keep) { dprint("build: kept IR " . $llPath); }
-        $rc = system("clang -O" . CompileArgs::$optLevel . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
+        $rc = system("clang -O" . clang_opt_level() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }
         if (!$keep) { system("rm -f " . $llPath); }
         // Emit the module-interface .sig next to the object so dependents
@@ -3643,7 +3670,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
         $statT = \Compile\Stats::now();
-        $module = (new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext))->run($module);
+        $module = (new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on'))->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
         $statT = \Compile\Stats::now();
         $infer2 = new \Compile\Mir\Passes\InferTypes(
@@ -3718,7 +3745,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             }
         }
         $statT = \Compile\Stats::now();
-        $narrow = new \Compile\Mir\Passes\NarrowReturns();
+        $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         // The `#[TypeDef]` soundness gate: an erased value must never reach a

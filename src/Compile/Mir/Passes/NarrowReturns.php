@@ -59,7 +59,7 @@ final class NarrowReturns implements Pass
      *   that Monomorphize must specialize first. The default (post-Mono) pass
      *   narrows every agreeing array return.
      */
-    public function __construct(private bool $concreteOnly = false, private ?\Compile\Mir\AnalysisContext $analysis = null) {}
+    public function __construct(private bool $concreteOnly = false, private ?\Compile\Mir\AnalysisContext $analysis = null, private bool $targetedInfer = false) {}
 
     public function name(): string { return self::NAME; }
 
@@ -103,8 +103,13 @@ final class NarrowReturns implements Pass
                 . ' (narrowed ' . (string)$narrowed . ')', $roundT, -1, -1);
             \Compile\Stats::bump('narrow.rounds', 1);
             if (!$changed) { break; }
-            $infer = new InferTypes();
+            $inferT = \Compile\Stats::now();
+            $scope = ($this->targetedInfer && $this->analysis !== null)
+                ? $this->analysis->scope() : null;
+            $infer = new InferTypes($scope);
             $infer->run($module);
+            \Compile\Stats::step('  narrow InferTypes round ' . (string)$iters,
+                $inferT, \count($module->functions), -1);
         }
         if ($iters >= $max) {
             \Compile\Stats::line('narrow: HIT THE ROUND CAP (' . (string)$max . ')');
