@@ -10,6 +10,15 @@
  *     php tools/compile_files_mir.php $(find src -name '*.php' | sort) > out.ll
  */
 
+// Large multi-file bootstrap inputs can exceed PHP CLI's default 128M while
+// the lexer, filtered token stream, AST and merged MIR are simultaneously live.
+// Keep the tool usable without requiring every caller to remember `-d`.
+$parserMemory = \getenv('MANTICORE_PHP_MEMORY_LIMIT');
+if ($parserMemory === false || $parserMemory === '') { $parserMemory = '2048M'; }
+@\ini_set('memory_limit', $parserMemory);
+$xdebugNesting = \getenv('MANTICORE_XDEBUG_NESTING');
+if ($xdebugNesting === false || $xdebugNesting === '') { $xdebugNesting = '100000'; }
+@\ini_set('xdebug.max_nesting_level', $xdebugNesting);
 spl_autoload_register(function ($class) {
     $base = __DIR__ . '/../src/';
     $path = $base . str_replace('\\', '/', $class) . '.php';
