@@ -644,7 +644,9 @@ final class Parser
             }
 
             if ($this->checkKeyword('const')) {
-                $consts[] = $this->parseClassConst($modifiers, $memberAttrs, $memberSpan);
+                foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan) as $const) {
+                    $consts[] = $const;
+                }
                 continue;
             }
 
@@ -863,9 +865,15 @@ final class Parser
     }
 
     /**
+     * Parse one PHP class-constant declaration, which may contain multiple
+     * comma-separated name/value pairs. PHP permits both `const A = 1;` and
+     * `const A = 1, B = 2;`; the AST deliberately keeps one ConstDecl per
+     * pair because all MIR consumers already operate on that representation.
+     *
      * @param AttributeNode[] $attrs
+     * @return ConstDecl[]
      */
-    private function parseClassConst(MemberModifiers $modifiers, array $attrs, Span $span): ConstDecl
+    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span): array
     {
         $this->advance(); // 'const'
         $typeHint = null;
@@ -875,18 +883,22 @@ final class Parser
                 $typeHint = $this->parseTypeHint();
             }
         }
-        $nameTok = $this->expectMemberName('expected const name');
-        $this->expect(TokenKind::Equals, "expected '=' in const");
-        $value = $this->parseExpression();
+        $consts = [];
+        do {
+            $nameTok = $this->expectMemberName('expected const name');
+            $this->expect(TokenKind::Equals, "expected '=' in const");
+            $value = $this->parseExpression();
+            $consts[] = new ConstDecl(
+                $nameTok->lexeme,
+                $value,
+                $modifiers->visibility,
+                $typeHint,
+                $attrs,
+                $span,
+            );
+        } while ($this->match(TokenKind::Comma));
         $this->expect(TokenKind::Semicolon, "expected ';' after const");
-        return new ConstDecl(
-            $nameTok->lexeme,
-            $value,
-            $modifiers->visibility,
-            $typeHint,
-            $attrs,
-            $span,
-        );
+        return $consts;
     }
 
     /**
@@ -2710,6 +2722,18 @@ final class Parser
         // Anonymous class: `new class(args) extends X implements Y { … }`.
         if ($this->checkKeyword('class')) {
             return $this->parseAnonClass($span);
+        }
+        // PHP also permits a parenthesized class expression:
+        // `new ($expr)(args)`. Reuse NewDynExpr so lowering and emission keep
+        // the existing runtime class-id dispatch and ownership behavior.
+        if ($this->match(TokenKind::OpenParen)) {
+            $classExpr = $this->parseExpression();
+            $this->expect(TokenKind::CloseParen, "expected ')' after dynamic class expression");
+            $dargs = [];
+            if ($this->check(TokenKind::OpenParen)) {
+                $dargs = $this->parseArgList();
+            }
+            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
         }
         // `new $cls(args)` — the class is named by a value, not written in the
         // source. Only the variable form: `new ($expr)(args)` would make the

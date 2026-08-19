@@ -28,6 +28,8 @@ namespace Compile\Mir\Passes;
  */
 trait EmitLlvmFiber
 {
+    /** True only for the bundled stdlib library, the sole owner of fcontext asm. */
+    public bool $emitFiberAsm = true;
     /** Module-level fiber runtime: current-fiber global, switch declares, and the
      *  arch-branched fcontext `module asm`. Emitted in the preamble under needsFibers.
      *
@@ -130,7 +132,7 @@ trait EmitLlvmFiber
         $out .= "declare i32 @mprotect(ptr, i64, i32)\n";
         // Only the stdlib build carries the fcontext DEFINITIONS; app builds
         // inherit them by linking against manticore_stdlib.o.
-        if ($this->emitLibrary) {
+        if ($this->emitLibrary && $this->emitFiberAsm) {
             foreach ($this->fiberAsmLines() as $line) {
                 $out .= 'module asm "' . $line . '"' . "\n";
             }

@@ -732,6 +732,28 @@ trait LowerClasses
         $cd->methodNames = $m->methodNames;
         $cd->methodMeta = $m->methodMeta;
         $cd->propertyMeta = $m->propertyMeta;
+        // The library propertyMeta is the complete effective property order
+        // (inherited first, then own). It is authoritative for imported classes:
+        // builtin parent declarations can have a different synthetic order.
+        $importProps = [];
+        $importTypes = [];
+        $importStaticNames = [];
+        $importStaticTypes = [];
+        foreach ($m->propertyMeta as $pn => $pm) {
+            $pt = $cd->propertyTypes[$pn] ?? ($pm->typeHint === ""
+                ? Type::cell() : $this->lowerTypeHint($pm->typeHint));
+            if ($pm->isStatic) {
+                $importStaticNames[] = $pn;
+                $importStaticTypes[] = $pt;
+            } else {
+                $importProps[] = $pn;
+                $importTypes[$pn] = $pt;
+            }
+        }
+        $cd->propertyNames = $importProps;
+        $cd->propertyTypes = $importTypes;
+        $cd->staticPropNames = $importStaticNames;
+        $cd->staticPropTypes = $importStaticTypes;
         $cd->propertyArrayHinted = $m->propertyArrayHinted;
         $cd->propertyReadonly = $m->propertyReadonly;
         $cd->propertyWidths = $m->propertyWidths;

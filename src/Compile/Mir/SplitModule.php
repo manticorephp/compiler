@@ -149,8 +149,17 @@ final class SplitModule
         $declText = \implode("\n", $declares);
         $out = [];
         for ($p = 0; $p < $parts; $p++) {
-            $out[] = $this->emitPart($p, $parts, $defOrder, $defs, $assign, $internal,
-                                     $globalOrder, $globals, $headerText, $declText);
+            // `module asm` may contain global symbol definitions (the ARM
+            // fiber switch helpers). Copying that header verbatim to every
+            // part creates duplicate symbols when relocatable objects merge.
+            // Keep module asm in part 0; ordinary headers/declarations remain
+            // shared by every part.
+            $partHeader = $headerText;
+            if ($p !== 0) {
+                $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
+            }
+            $out[] = $this->emitPart($p, $parts, $defOrder, $defs, $assign,
+                                     $internal, $globalOrder, $globals, $partHeader, $declText);
         }
         return $out;
     }

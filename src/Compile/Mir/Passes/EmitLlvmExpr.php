@@ -4303,18 +4303,21 @@ trait EmitLlvmExpr
         }
 
         // Float comparison when either side carries a double.
+        // Use the operand-aware coercion path: strings require strtod and
+        // tagged cells require tagged_to_double; only raw integer/bool
+        // carriers use sitofp. The old generic sitofp path treated a ptr
+        // returned by __mir_int_to_str as i64, producing invalid split IR.
         if ($lt === 'double' || $rt === 'double'
             || $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT) {
-            $ld = $l;
-            if ($lt !== 'double') {
-                $ld = $this->ssa->allocReg();
-                $out .= '  ' . $ld . ' = sitofp i64 ' . $l . " to double\n";
-            }
-            $rd = $r;
-            if ($rt !== 'double') {
-                $rd = $this->ssa->allocReg();
-                $out .= '  ' . $rd . ' = sitofp i64 ' . $r . " to double\n";
-            }
+            $this->lastValue = $l;
+            $this->lastValueType = $lt;
+            $out .= $this->coerceDoubleOperand($c->left);
+            $ld = $this->lastValue;
+            $this->lastValue = $r;
+            $this->lastValueType = $rt;
+            $out .= $this->coerceDoubleOperand($c->right);
+            $rd = $this->lastValue;
+
             $cmpReg = $this->ssa->allocReg();
             $out .= '  ' . $cmpReg . ' = fcmp ' . $this->cmpPredicateF($c->op)
                   . ' double ' . $ld . ', ' . $rd . "\n";

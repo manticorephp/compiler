@@ -604,6 +604,10 @@ final class LowerFromAst implements Pass
     public function run(Module $module): Module
     {
         $this->module = $module;
+        // Lowering passes such as injectSuperglobals need the target kind
+        // before they register globals; a vendor library must import app-owned
+        // superglobal cells rather than define duplicate @g__* symbols.
+        $module->isLibraryModule = $this->emitLibrary;
         $this->lowerSourceFile = $module->sourceFile;
         // Built-in Exception hierarchy (parsed prelude) is lowered like
         // any user class, so `throw` / `catch` / `getMessage` resolve
@@ -1246,7 +1250,6 @@ final class LowerFromAst implements Pass
             $module->knownFnNames = $this->collectKnownFnNames();
         }
         if ($this->emitLibrary) { $this->recordExportConstants($module); }
-        $module->isLibraryModule = $this->emitLibrary;
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -3815,7 +3818,24 @@ final class LowerFromAst implements Pass
                 return $this->guardOf($lower);
             }
         }
-        if (\count($e->args) !== 1) { return self::GUARD_UNKNOWN; }
+        $guardQual = \ltrim($e->function, '\\');
+        $guardPos = \strrpos($guardQual, '\\');
+        $guardFn = $guardPos === false ? $guardQual : \substr($guardQual, $guardPos + 1);
+        if (\count($e->args) === 2 && \strtolower($guardFn) === 'method_exists') {
+            $cn = $this->guardClassArgName($e->args[0]);
+            if ($cn === null || $e->args[1]->kind !== 'StringLiteral') {
+                return self::GUARD_UNKNOWN;
+            }
+            $method = $this->stringLitValue($e->args[1]);
+            $state = $this->classDeclMethodState($cn, $method);
+            if ($state !== null) { return $this->guardOf($state); }
+            if (isset($this->classTable[$cn])) {
+                return $this->guardOf($this->declaresMethod($cn, $method));
+            }
+            $known = isset($this->knownClassNames[$cn]) || isset($this->traitTable[$cn]);
+            return $known ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
+        }
+        if (count($e->args) !== 1) { return self::GUARD_UNKNOWN; }
         if (true) {
             // An unqualified builtin call inside a namespace resolves to
             // `Ns\class_exists` in the AST (PHP falls back to the global at
@@ -3842,17 +3862,26 @@ final class LowerFromAst implements Pass
                 return $this->guardOf($this->predefinedConstant($nm) !== null || isset($this->userConstants[$nm]));
             }
             // `class_exists(X)` / interface_ / trait_ / enum_exists guarding an
-            // OPTIONAL-dependency branch (`if (class_exists(CliDumper::class)) {
-            // … CliDumper::CONST … }`). A name the whole-program build does NOT
-            // contain is definitively absent → fold FALSE so the dead branch
-            // (which references the missing class) never reaches lowering. A KNOWN
-            // name is left unfolded (null) — the branch compiles normally, so no
-            // guess about class-vs-interface truthiness is needed.
+            // optional-dependency branch. An absent name is definitively false.
+            // When the declaration is known, use its actual kind: this is both
+            // more precise and required for packages that conditionally declare
+            // the same class in the true/false arms (Twig Extra Bundle).
+            // If a name is known only through opaque extern metadata, preserve
+            // the conservative unknown result rather than guessing its kind.
             if ($fn === 'class_exists' || $fn === 'interface_exists'
                 || $fn === 'trait_exists' || $fn === 'enum_exists') {
                 $cn = $this->guardClassArgName($a0);
                 if ($cn === null) { return self::GUARD_UNKNOWN; }
-                $known = isset($this->knownClassNames[$cn]) || isset($this->traitTable[$cn]);
+                $decl = $this->classDecls[$cn] ?? ($this->traitTable[$cn] ?? null);
+                if ($decl !== null) {
+                    $kind = $decl->kind ?? 'class';
+                    $matches = ($fn === 'class_exists' && $kind === 'class')
+                        || ($fn === 'interface_exists' && $kind === 'interface')
+                        || ($fn === 'trait_exists' && $kind === 'trait')
+                        || ($fn === 'enum_exists' && $kind === 'enum');
+                    return $this->guardOf($matches);
+                }
+                $known = isset($this->knownClassNames[$cn]);
                 return $known ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
             }
             // `extension_loaded('X')`. A whole-program build has a FIXED set of
@@ -4118,6 +4147,18 @@ final class LowerFromAst implements Pass
             $init->declaredType = Type::vec(Type::cell());
             $this->pendingCallInits[] = $init;
         }
+        // Builtin `is_callable` has an optional by-ref textual-name output,
+        // unlike ordinary codegen builtins it has no FunctionDecl for the
+        // generic RefOut pass. Define the scalar slot before lowering the call;
+        // the builtin emitter may replace it when a concrete callable form is
+        // available, while unknown forms still satisfy PHP's string contract.
+        if ($bare === 'is_callable' && \count($astArgs) >= 3
+            && $astArgs[2]->kind === 'Variable') {
+            $textName = $this->variableName($astArgs[2]);
+            $textInit = new StoreLocal($textName, new StringConst('', Type::string_()), Type::string_());
+            $textInit->declaredType = Type::string_();
+            $this->pendingCallInits[] = $textInit;
+        }
         if (!isset($this->fnDecls[$fnName])) {
             $out = [];
             foreach ($astArgs as $a) { $out[] = $this->lowerExpr($a); }
@@ -4378,6 +4419,26 @@ final class LowerFromAst implements Pass
     /** DynProp object/name via typed params (subclass fields, self-host offset). */
     private function dynPropObject(\Parser\Ast\DynProp $d): \Parser\Ast\Expr { return $d->object; }
     private function dynPropName(\Parser\Ast\DynProp $d): \Parser\Ast\Expr { return $d->name; }
+    /**
+     * Return true/false when a declaration and all of its parent interfaces are
+     * known, or null when an opaque parent prevents a sound answer.
+     */
+    private function classDeclMethodState(string $name, string $method, int $depth = 0): ?bool
+    {
+        if ($depth > 64) { return null; }
+        $decl = $this->classDecls[$name] ?? ($this->traitTable[$name] ?? null);
+        if ($decl === null) { return null; }
+        foreach ($this->classDeclMethods($decl) as $m) {
+            if ($this->methodDeclName($m) === $method) { return true; }
+        }
+        $unknown = false;
+        foreach ($this->classDeclExtends($decl) as $parent) {
+            $state = $this->classDeclMethodState(\ltrim($parent, '\\'), $method, $depth + 1);
+            if ($state === true) { return true; }
+            if ($state === null) { $unknown = true; }
+        }
+        return $unknown ? null : false;
+    }
     private function classDeclMethods(\Parser\Ast\ClassDecl $d): array { return $d->methods; }
     /** @return string[] */
     private function classDeclExtends(\Parser\Ast\ClassDecl $d): array { return $d->extends; }

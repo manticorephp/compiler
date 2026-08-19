@@ -576,6 +576,13 @@ function clang_opt_level(): string {
     if ($e !== false && \in_array($e, ['0', '1', '2', '3', 's', 'z'], true)) { return $e; }
     return CompileArgs::$optLevel;
 }
+function clang_tuning_flags(): string {
+    $e = \getenv("MANTICORE_FAT_FUNCTION_SPLIT");
+    if ($e !== false && $e !== "" && $e !== "0" && $e !== "off") {
+        return " -mllvm -enable-split-machine-functions";
+    }
+    return "";
+}
 function assemble_ir(string $ir, string $base, string $cflags): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
@@ -602,7 +609,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, with_frame_pointers($ir))) { dprint("assemble: cannot write " . $llPath); return []; }
-        $rc = system("clang -O" . clang_opt_level() . " " . $cflags
+        $rc = system("clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
             . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
         if ($rc !== 0) { dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath); return []; }
         return [$objPath];
@@ -622,7 +629,7 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         // part naming an undefined group.
         if (!write_file($pll, with_frame_pointers($partIr))) { dprint("assemble: cannot write " . $pll); return []; }
         if ($cmd !== '') { $cmd = $cmd . ' & '; }
-        $cmd = $cmd . "clang -O" . clang_opt_level() . " " . $cflags
+        $cmd = $cmd . "clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
              . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
         $objs[] = $pobj;
     }
@@ -651,7 +658,7 @@ function assemble_ir_file(string $llPath, string $base, string $cflags, int $irB
     $objPath = $base . '.o';
     \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
     $statT = \Compile\Stats::now();
-    $rc = system('clang -O' . clang_opt_level() . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
+    $rc = system('clang -O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
     \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c staged IR', $statT, -1, -1);
     if ($rc !== 0) { dprint('assemble: clang -c staged IR failed (rc=' . (string)$rc . '); IR at ' . $llPath); return []; }
     return [$objPath];
@@ -1422,7 +1429,7 @@ function cmd_compile(array $args): int {
             return 73;
         }
         if ($keep) { dprint("compile: kept IR " . $llPath); }
-        $rcLib = system("clang -O" . clang_opt_level() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
+        $rcLib = system("clang -O" . clang_opt_level() . clang_tuning_flags() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
         if ($rcLib !== 0) {
             dprint("compile: clang -c (library) failed (rc=" . (string)$rcLib . "); IR at " . $llPath);
             return 75;
@@ -1781,6 +1788,25 @@ function __mc_source_may_declare(string $src): bool
 }
 
 /**
+ * Composer library variant of the declaration filter. It parses the source so
+ * words such as `class` inside SVG/HTML/template strings cannot keep a file
+ * whose top-level `$this` would otherwise be flattened into `__main`. Any
+ * parser ambiguity is conservative: retain the source rather than risk
+ * dropping a declaration.
+ */
+function __mc_library_source_may_declare(string $src): bool
+{
+    try {
+        $program = Parser\Parser::parseSource($src);
+        foreach ($program->statements as $stmt) {
+            if (__mc_stmt_declares($stmt)) { return true; }
+        }
+        return false;
+    } catch (Throwable $e) {
+        return true;
+    }
+}
+/**
  * Does this top-level statement DECLARE something, at any depth?
  *
  * The keep/drop test for a demand-loaded file ({@see CompileArgs::$demandLoadedPaths}).
@@ -2043,9 +2069,11 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     // any manifest target dir, not just the stdlib's `lib/`.
     system("mkdir -p \"$(dirname \"" . $output . "\")\"");
     // Always-on stdlib runtime: merge its externs alongside any user-library
-    // externs the caller already set. Skipped for --emit-library and when the
-    // app opted out (the self-contained compiler).
-    if ($withStdlib && !$emitLibrary) {
+    // externs the caller already set. Applications use this unconditionally;
+    // a library needs the same declarations only for opt-in split assembly,
+    // because its `.o` is deliberately unresolved and linked by the app.
+    $splitLibrary = $emitLibrary && (int)(\getenv("MANTICORE_SPLIT_JOBS") ?: "0") >= 2;
+    if (($withStdlib && !$emitLibrary) || $splitLibrary) {
         foreach (collect_stdlib_extern_decls() as $d) { CompileArgs::$externDecls[] = $d; }
         if (CompileArgs::$sigError !== '') {
             dprint(CompileArgs::$sigError);
@@ -2060,6 +2088,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $statT = \Compile\Stats::now();
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
+        $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
         $ir = $emit->emit($module);
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
@@ -2099,16 +2128,37 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
     $keep = CompileArgs::$keepIr;
     $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
-    // The library path assembles this file directly; the application path hands
-    // the IR to assemble_ir, which stages it itself (as one file, or as one per
-    // part when it splits). A library is NEVER split: `stdlib.o` is one object
-    // by contract — its `.sig` describes that file and every consumer links it.
+    // Libraries keep one public `.o`/`.sig` pair. By default this remains the
+    // historical single clang translation unit. When MANTICORE_SPLIT_JOBS is
+    // explicitly set, split the IR into relocatable parts and merge them with
+    // clang -r. This preserves the library artifact contract while avoiding
+    // Clang's source-location ceiling on large vendor modules.
     if ($emitLibrary) {
-        if (!write_file($llPath, with_frame_pointers($ir))) { dprint("build: cannot write " . $llPath); return 73; }
+        if ($keep && !write_file($llPath, with_frame_pointers($ir))) {
+            dprint("build: cannot write " . $llPath); return 73;
+        }
         if ($keep) { dprint("build: kept IR " . $llPath); }
-        $rc = system("clang -O" . clang_opt_level() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module");
-        if ($rc !== 0) { dprint("build: clang -c (library) failed for " . $output); return 75; }
-        if (!$keep) { system("rm -f " . $llPath); }
+        $objs = assemble_ir($ir, $base, "");
+        if (\count($objs) === 0) {
+            dprint("build: clang -c (library) failed for " . $output);
+            return 75;
+        }
+        if (\count($objs) === 1) {
+            $rc = system("mv -f " . $objs[0] . " " . $output);
+        } else {
+            $objList = \implode(" ", $objs);
+            $rc = system("clang -r " . $objList . " -o " . $output);
+            \Compile\Stats::line("  library: merged " . (string)\count($objs)
+                . " relocatable objects");
+        }
+        if ($rc !== 0) {
+            dprint("build: library object merge failed for " . $output);
+            return 75;
+        }
+        if (!$keep) {
+            system("rm -f " . $llPath . " " . $base . ".p*.ll "
+                . $base . ".p*.o " . $base . ".o");
+        }
         // Emit the module-interface .sig next to the object so dependents
         // import this library's exported symbols without re-parsing it.
         // The .sig carries this library's LINK requirements alongside its
@@ -2273,9 +2323,51 @@ function cmd_build(array $args): int
         $sources = [];
         /** @var string[] $paths */
         $paths = [];
-        foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
-            $sources[] = $sf->contents;
-            $paths[] = $sf->path;
+        $libComposer = isset($lib["composer"]) ? $lib["composer"] : false;
+        $libComposerOn = ($libComposer === true) || \is_array($libComposer);
+        if ($libComposerOn) {
+            $withVendor = !(
+                \is_array($libComposer)
+                && isset($libComposer["vendor"])
+                && $libComposer["vendor"] === false
+            );
+            // Libraries can opt into the same Composer-resolved source set as
+            // applications. This is deliberately opt-in: the old `src` walk
+            // remains byte-for-byte the default for existing manifests.
+            $libExcludes = \array_merge(
+                $excludes,
+                composer_classmap_excludes(".", $withVendor),
+            );
+            $bootFiles = composer_autoload_file_entries(".", $withVendor);
+            /** @var array<string,bool> $seenPath */
+            $seenPath = [];
+            /** @var array<string,bool> $covered */
+            $covered = [];
+            foreach (composer_source_dirs(".", $withVendor) as $cdir) {
+                $nd = \rtrim($cdir, "/");
+                if (isset($covered[$nd])) { continue; }
+                $covered[$nd] = true;
+                foreach (collect_php_source_files($nd, $libExcludes) as $sf) {
+                    $sfNorm = \rtrim($sf->path, "/");
+                    if (\str_starts_with($sfNorm, "./")) {
+                        $sfNorm = \substr($sfNorm, 2);
+                    }
+                    if (isset($seenPath[$sfNorm])) { continue; }
+                    $seenPath[$sfNorm] = true;
+                    // Composer files are application bootstrap code, not a
+                    // library declaration unit. The application-side
+                    // `bootstrap:true` path adds them later.
+                    if (isset($bootFiles[$sfNorm])) { continue; }
+                    if (!__mc_library_source_may_declare($sf->contents)) { continue; }
+                    $sources[] = $sf->contents;
+                    $paths[] = $sf->path;
+                }
+            }
+        } else {
+            foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
+                $sources[] = $sf->contents;
+                $paths[] = $sf->path;
+            }
         }
         if (\count($sources) === 0) {
             dprint("build: no sources for library '" . $name . "'");
@@ -2287,7 +2379,13 @@ function cmd_build(array $args): int
         CompileArgs::$externConstants = [];
         CompileArgs::$exportTypes =
             !(isset($lib["runtime"]) && (string)$lib["runtime"] === "1");
-        $rc = build_compile_module($sources, $output, true, [], '', false, $paths);
+        if (build_cache_hit($sources, $paths, $output, true, [], "", false)) {
+            dprint("build: cache hit library " . $name);
+            $rc = 0;
+        } else {
+            $rc = build_compile_module($sources, $output, true, [], "", false, $paths);
+            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", false); }
+        }
         CompileArgs::$exportTypes = true;
         if ($rc !== 0) { return $rc; }
     }
@@ -2345,6 +2443,7 @@ function cmd_build(array $args): int
         $composerOn = ($composer === true) || \is_array($composer);
         if ($composerOn) {
             $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
+            $withVendorBootstrap = $withVendor || (\is_array($composer) && isset($composer["bootstrap"]) && $composer["bootstrap"] === true);
             // Composer's own exclusions join the manifest's. Applied to the
             // composer-discovered roots only: the manifest's `src` is the
             // project's own code, where the author's `exclude` is the authority.
@@ -2358,7 +2457,7 @@ function cmd_build(array $args): int
             // composer's BOOTSTRAP set. Everything else it autoloads is
             // demand-driven, so a file there that declares nothing is not a
             // compile unit at all ({@see __mc_source_may_declare}).
-            $bootFiles = composer_autoload_file_entries(".", $withVendor);
+            $bootFiles = composer_autoload_file_entries(".", $withVendorBootstrap);
             $skippedScripts = 0;
             foreach (composer_source_dirs(".", $withVendor) as $cdir) {
                 $nd = \rtrim($cdir, "/");
@@ -2382,6 +2481,18 @@ function cmd_build(array $args): int
                     $paths[] = $sf->path;
                 }
             }
+            if (!$withVendor && $withVendorBootstrap) {
+                foreach ($bootFiles as $bootPath => $_boot) {
+                    $bootNorm = str_starts_with($bootPath, "./") ? substr($bootPath, 2) : $bootPath;
+                    if (isset($seenPath[$bootNorm])) { continue; }
+                    $bootSrc = read_file($bootPath);
+                    if ($bootSrc === null) { continue; }
+                    $seenPath[$bootNorm] = true;
+                    $sources[] = $bootSrc;
+                    $paths[] = $bootNorm;
+                    dprint("build: + composer bootstrap \"" . $bootNorm . "\"");
+                }
+                }
             if ($skippedScripts > 0) {
                 dprint("build: skipped " . (string)$skippedScripts
                     . " non-declaring script(s) under demand-loaded autoload roots");
@@ -2501,7 +2612,13 @@ function cmd_build(array $args): int
         CompileArgs::$externClassDecls = $externClassDecls;
         CompileArgs::$externClassMeta = $externClassMeta;
         CompileArgs::$externConstants = $externConstants;
-        $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
+        if (build_cache_hit($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib)) {
+            dprint("build: cache hit application " . $name);
+            $rc = 0;
+        } else {
+            $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
+            if ($rc === 0) { build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib); }
+        }
         if ($rc !== 0) { return $rc; }
     }
     return 0;
@@ -4228,4 +4345,90 @@ function main_driver(): int {
     $cli->command('help', 'Show this help text')
         ->run(function (array $args) use ($cli): int { return $cli->runHelp(); });
     return $cli->run(collect_argv());
+}
+
+/**
+ * Optional build artifact cache. Disabled unless MANTICORE_BUILD_CACHE is set.
+ * The cache is deliberately whole-target, not a semantic partial-module cache:
+ * a hit is therefore exact and cannot weaken conservative invalidation.
+ */
+function build_cache_dir(): string
+{
+    $raw = \getenv('MANTICORE_BUILD_CACHE');
+    if (!\is_string($raw) || $raw === '' || $raw === '0' || $raw === 'off') { return ''; }
+    if ($raw === '1' || $raw === 'on' || $raw === 'true') { return '.manticore-cache'; }
+    return $raw;
+}
+
+function build_cache_file_stamp(string $path): string
+{
+    if ($path === '' || !file_exists($path)) { return 'missing:' . $path; }
+    $size = \filesize($path);
+    $mtime = \filemtime($path);
+    return $path . ':' . (string)$size . ':' . (string)$mtime;
+}
+
+function build_cache_key(array $sources, array $paths, string $output, bool $emitLibrary,
+    array $linkObjs, string $linkFlags, bool $withStdlib): string
+{
+    $parts = [
+        'manticore-build-cache-v1',
+        'target=' . $output,
+        'artifact=' . build_cache_file_stamp($output),
+        'library=' . ($emitLibrary ? '1' : '0'),
+        'artifact-sig=' . ($emitLibrary ? build_cache_file_stamp($output . '.sig') : ''),
+        'stdlib=' . ($withStdlib ? '1' : '0'),
+        'link=' . $linkFlags,
+        'opt=' . clang_opt_level() . clang_tuning_flags(),
+        'split=' . (string)(\getenv('MANTICORE_SPLIT_JOBS') ?: ''),
+        'prune=' . (string)(\getenv('MANTICORE_PRUNE_IR') ?: ''),
+        'memory=' . (string)(\getenv('MANTICORE_MEMORY') ?: ''),
+        'compiler=' . build_cache_file_stamp(\cstr_to_str(argv(0))),
+    ];
+    foreach ($sources as $i => $source) {
+        $path = isset($paths[$i]) ? (string)$paths[$i] : ('<source-' . (string)$i . '>');
+        $parts[] = 'src:' . $path . ':' . \hash('sha256', $source);
+    }
+    foreach ($linkObjs as $obj) {
+        $objPath = (string)$obj;
+        $parts[] = 'dep:' . build_cache_file_stamp($objPath);
+        $sig = $objPath . '.sig';
+        if (file_exists($sig)) {
+            $sigBytes = read_file($sig);
+            $parts[] = 'sig:' . $sig . ':' . ($sigBytes === null ? 'unreadable' : \hash('sha256', $sigBytes));
+        }
+    }
+    $prelude = (string)(\getenv('MANTICORE_PRELUDE') ?: '');
+    $parts[] = 'prelude=' . $prelude;
+    return \hash('sha256', \implode("\n", $parts));
+}
+
+function build_cache_stamp_path(string $output): string
+{
+    $dir = build_cache_dir();
+    if ($dir === '') { return ''; }
+    return \rtrim($dir, '/') . '/' . \hash('sha256', $output) . '.stamp';
+}
+
+function build_cache_hit(array $sources, array $paths, string $output, bool $emitLibrary,
+    array $linkObjs, string $linkFlags, bool $withStdlib): bool
+{
+    if (build_cache_dir() === '' || !file_exists($output)) { return false; }
+    if ($emitLibrary && !file_exists($output . '.sig')) { return false; }
+    $stampPath = build_cache_stamp_path($output);
+    $stamp = read_file($stampPath);
+    if ($stamp === null) { return false; }
+    return $stamp === build_cache_key($sources, $paths, $output, $emitLibrary,
+        $linkObjs, $linkFlags, $withStdlib);
+}
+
+function build_cache_store(array $sources, array $paths, string $output, bool $emitLibrary,
+    array $linkObjs, string $linkFlags, bool $withStdlib): void
+{
+    $dir = build_cache_dir();
+    if ($dir === '') { return; }
+    if (!file_exists($dir)) { @mkdir($dir, 0777, true); }
+    $stampPath = build_cache_stamp_path($output);
+    write_file($stampPath, build_cache_key($sources, $paths, $output, $emitLibrary,
+        $linkObjs, $linkFlags, $withStdlib));
 }

@@ -95,7 +95,7 @@ trait LowerSuperglobals
             $pre = [];
             foreach ($used as $sg) {
                 $cell = '@g_' . $sg;
-                $module->addGlobalCell($cell, new IntConst(0, Type::int_()));
+                $module->addGlobalCell($cell, new IntConst(0, Type::int_()), false, $module->isLibraryModule);
                 // A superglobal IS an implicit `global $x`, so register the name
                 // as one. Without it scanGlobalTypes bails on its
                 // `globalVarNames === []` guard and never unifies the type, so
