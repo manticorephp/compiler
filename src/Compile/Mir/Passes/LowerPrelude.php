@@ -297,9 +297,17 @@ trait LowerPrelude
         $dispatch = "function __mir_obj_to_str(mixed \$v): string {\n"
             . "  switch (__mir_object_class_id(\$v)) {\n";
         $arm = 0;
+        $helperByOwner = [];
         foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            if (!$this->declaresMethod($cname, '__toString')) { continue; }
+            $owner = $this->methodOwnerClass($cname, "__toString");
+            if ($owner === "") { continue; }
+            if (isset($helperByOwner[$owner])) {
+                $helper = $helperByOwner[$owner];
+                $dispatch = $dispatch . "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
+                continue;
+            }
             $helper = '__mir_obj_to_str_arm_' . (string)$arm;
+            $helperByOwner[$owner] = $helper;
             $body = $body . "function " . $helper . "(mixed \$v): string {\n"
                 . "  if (\$v instanceof \\" . $cname . ") { return \$v->__toString(); }\n"
                 . "  return '';\n}\n";
@@ -451,6 +459,15 @@ trait LowerPrelude
             $i = $i + 1;
         }
         return $names;
+    }
+    private function methodOwnerClass(string $cls, string $m): string
+    {
+        $c = $cls;
+        while ($c !== "" && isset($this->classTable[$c])) {
+            if (isset($this->classTable[$c]->methodNames[$m])) { return $c; }
+            $c = $this->classTable[$c]->parent;
+        }
+        return "";
     }
     private function declaresMethod(string $cls, string $m): bool
     {
