@@ -2307,88 +2307,8 @@ function cmd_build(array $args): int
     }
     $manifest = json_decode($src, true);
     $libs = isset($manifest["libraries"]) ? $manifest["libraries"] : [];
-    foreach ($libs as $lib) {
-        // --apps-only skips BUILDING the libraries; the list itself is still
-        // needed below, where each non-runtime library's `.o`/`.sig` joins the
-        // application's link (they must already exist on disk).
-        if ($appsOnly) { break; }
-        $name = (string)$lib["name"];
-        $srcDir = (string)$lib["src"];
-        $output = (string)$lib["output"];
-        /** @var string[] $excludes */
-        $excludes = [];
-        foreach ($lib["exclude"] as $e) { $excludes[] = (string)$e; }
-        dprint("build: library '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        /** @var string[] $sources */
-        $sources = [];
-        /** @var string[] $paths */
-        $paths = [];
-        $libComposer = isset($lib["composer"]) ? $lib["composer"] : false;
-        $libComposerOn = ($libComposer === true) || \is_array($libComposer);
-        if ($libComposerOn) {
-            $withVendor = !(
-                \is_array($libComposer)
-                && isset($libComposer["vendor"])
-                && $libComposer["vendor"] === false
-            );
-            // Libraries can opt into the same Composer-resolved source set as
-            // applications. This is deliberately opt-in: the old `src` walk
-            // remains byte-for-byte the default for existing manifests.
-            $libExcludes = \array_merge(
-                $excludes,
-                composer_classmap_excludes(".", $withVendor),
-            );
-            $bootFiles = composer_autoload_file_entries(".", $withVendor);
-            /** @var array<string,bool> $seenPath */
-            $seenPath = [];
-            /** @var array<string,bool> $covered */
-            $covered = [];
-            foreach (composer_source_dirs(".", $withVendor) as $cdir) {
-                $nd = \rtrim($cdir, "/");
-                if (isset($covered[$nd])) { continue; }
-                $covered[$nd] = true;
-                foreach (collect_php_source_files($nd, $libExcludes) as $sf) {
-                    $sfNorm = \rtrim($sf->path, "/");
-                    if (\str_starts_with($sfNorm, "./")) {
-                        $sfNorm = \substr($sfNorm, 2);
-                    }
-                    if (isset($seenPath[$sfNorm])) { continue; }
-                    $seenPath[$sfNorm] = true;
-                    // Composer files are application bootstrap code, not a
-                    // library declaration unit. The application-side
-                    // `bootstrap:true` path adds them later.
-                    if (isset($bootFiles[$sfNorm])) { continue; }
-                    if (!__mc_library_source_may_declare($sf->contents)) { continue; }
-                    $sources[] = $sf->contents;
-                    $paths[] = $sf->path;
-                }
-            }
-        } else {
-            foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
-                $sources[] = $sf->contents;
-                $paths[] = $sf->path;
-            }
-        }
-        if (\count($sources) === 0) {
-            dprint("build: no sources for library '" . $name . "'");
-            return 66;
-        }
-        CompileArgs::$externDecls = [];
-        CompileArgs::$externClassDecls = [];
-        CompileArgs::$externClassMeta = [];
-        CompileArgs::$externConstants = [];
-        CompileArgs::$exportTypes =
-            !(isset($lib["runtime"]) && (string)$lib["runtime"] === "1");
-        if (build_cache_hit($sources, $paths, $output, true, [], "", false)) {
-            dprint("build: cache hit library " . $name);
-            $rc = 0;
-        } else {
-            $rc = build_compile_module($sources, $output, true, [], "", false, $paths);
-            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", false); }
-        }
-        CompileArgs::$exportTypes = true;
-        if ($rc !== 0) { return $rc; }
-    }
+    $rc = build_manifest_libraries($libs, $appsOnly);
+    if ($rc !== 0) { return $rc; }
     if ($libsOnly) { return 0; }
     $apps = isset($manifest["applications"]) ? $manifest["applications"] : [];
     foreach ($apps as $app) {
@@ -2619,6 +2539,93 @@ function cmd_build(array $args): int
             $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
             if ($rc === 0) { build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib); }
         }
+        if ($rc !== 0) { return $rc; }
+    }
+    return 0;
+}
+
+function build_manifest_libraries(array $libs, bool $appsOnly): int
+{
+    foreach ($libs as $lib) {
+        // --apps-only skips BUILDING the libraries; the list itself is still
+        // needed below, where each non-runtime library's `.o`/`.sig` joins the
+        // application's link (they must already exist on disk).
+        if ($appsOnly) { break; }
+        $name = (string)$lib["name"];
+        $srcDir = (string)$lib["src"];
+        $output = (string)$lib["output"];
+        /** @var string[] $excludes */
+        $excludes = [];
+        foreach ($lib["exclude"] as $e) { $excludes[] = (string)$e; }
+        dprint("build: library '" . $name . "' (" . $srcDir . " -> " . $output . ")");
+        /** @var string[] $sources */
+        $sources = [];
+        /** @var string[] $paths */
+        $paths = [];
+        $libComposer = isset($lib["composer"]) ? $lib["composer"] : false;
+        $libComposerOn = ($libComposer === true) || \is_array($libComposer);
+        if ($libComposerOn) {
+            $withVendor = !(
+                \is_array($libComposer)
+                && isset($libComposer["vendor"])
+                && $libComposer["vendor"] === false
+            );
+            // Libraries can opt into the same Composer-resolved source set as
+            // applications. This is deliberately opt-in: the old `src` walk
+            // remains byte-for-byte the default for existing manifests.
+            $libExcludes = \array_merge(
+                $excludes,
+                composer_classmap_excludes(".", $withVendor),
+            );
+            $bootFiles = composer_autoload_file_entries(".", $withVendor);
+            /** @var array<string,bool> $seenPath */
+            $seenPath = [];
+            /** @var array<string,bool> $covered */
+            $covered = [];
+            foreach (composer_source_dirs(".", $withVendor) as $cdir) {
+                $nd = \rtrim($cdir, "/");
+                if (isset($covered[$nd])) { continue; }
+                $covered[$nd] = true;
+                foreach (collect_php_source_files($nd, $libExcludes) as $sf) {
+                    $sfNorm = \rtrim($sf->path, "/");
+                    if (\str_starts_with($sfNorm, "./")) {
+                        $sfNorm = \substr($sfNorm, 2);
+                    }
+                    if (isset($seenPath[$sfNorm])) { continue; }
+                    $seenPath[$sfNorm] = true;
+                    // Composer files are application bootstrap code, not a
+                    // library declaration unit. The application-side
+                    // `bootstrap:true` path adds them later.
+                    if (isset($bootFiles[$sfNorm])) { continue; }
+                    if (!__mc_library_source_may_declare($sf->contents)) { continue; }
+                    $sources[] = $sf->contents;
+                    $paths[] = $sf->path;
+                }
+            }
+        } else {
+            foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
+                $sources[] = $sf->contents;
+                $paths[] = $sf->path;
+            }
+        }
+        if (\count($sources) === 0) {
+            dprint("build: no sources for library '" . $name . "'");
+            return 66;
+        }
+        CompileArgs::$externDecls = [];
+        CompileArgs::$externClassDecls = [];
+        CompileArgs::$externClassMeta = [];
+        CompileArgs::$externConstants = [];
+        CompileArgs::$exportTypes =
+            !(isset($lib["runtime"]) && (string)$lib["runtime"] === "1");
+        if (build_cache_hit($sources, $paths, $output, true, [], "", false)) {
+            dprint("build: cache hit library " . $name);
+            $rc = 0;
+        } else {
+            $rc = build_compile_module($sources, $output, true, [], "", false, $paths);
+            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", false); }
+        }
+        CompileArgs::$exportTypes = true;
         if ($rc !== 0) { return $rc; }
     }
     return 0;
