@@ -3370,6 +3370,82 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    private function emitNumericCmpTail(Cmp $c, string $out, string $l, string $r, string $lt, string $rt, string $lk, string $rk, bool $isEq, bool $isNe): string
+    {
+        // Float comparison when either side carries a double.
+        // Use the operand-aware coercion path: strings require strtod and
+        // tagged cells require tagged_to_double; only raw integer/bool
+        // carriers use sitofp. The old generic sitofp path treated a ptr
+        // returned by __mir_int_to_str as i64, producing invalid split IR.
+        if ($lt === 'double' || $rt === 'double'
+            || $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT) {
+            $this->lastValue = $l;
+            $this->lastValueType = $lt;
+            $out .= $this->coerceDoubleOperand($c->left);
+            $ld = $this->lastValue;
+            $this->lastValue = $r;
+            $this->lastValueType = $rt;
+            $out .= $this->coerceDoubleOperand($c->right);
+            $rd = $this->lastValue;
+
+            $cmpReg = $this->ssa->allocReg();
+            $out .= '  ' . $cmpReg . ' = fcmp ' . $this->cmpPredicateF($c->op)
+                  . ' double ' . $ld . ', ' . $rd . "\n";
+            $extReg = $this->ssa->allocReg();
+            $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+            $this->lastValue = $extReg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+
+        // A tagged-cell operand (e.g. `strpos(...)` → int|false) carries
+        // its int payload NaN-boxed; the raw carrier is meaningless in a
+        // numeric compare. Unbox to the signed int (false → 0) so
+        // `strpos(...) > 0` / `< 0` / `=== 3` work. Restrict to numeric
+        // contexts — an ordering op, or eq/ne against an int/bool side —
+        // so a `string|false` cell (`getenv`) isn't mangled. (`=== false`
+        // returned above via the tag-compare branch.)
+        $numericCtx = (!$isEq && !$isNe)
+            || $rk === Type::KIND_INT || $rk === Type::KIND_BOOL
+            || $lk === Type::KIND_INT || $lk === Type::KIND_BOOL;
+        if ($lk === Type::KIND_CELL && $numericCtx) {
+            if ($lt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; $lt = 'i64'; }
+            $this->rt->needsTagged = true;
+            $u = $this->ssa->allocReg();
+            $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $l . ")\n";
+            $l = $u; $lt = 'i64';
+        }
+        if ($rk === Type::KIND_CELL && $numericCtx) {
+            if ($rt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; $rt = 'i64'; }
+            $this->rt->needsTagged = true;
+            $u = $this->ssa->allocReg();
+            $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $r . ")\n";
+            $r = $u; $rt = 'i64';
+        }
+        // Handle comparison (identity / equality of vec / assoc / obj
+        // handles, e.g. `$x !== []`): the carrier is i64, so a ptr operand
+        // (a fresh array-literal / alloc) must be ptrtoint'd first.
+        if ($lt === 'ptr') {
+            $lp = $this->ssa->allocReg();
+            $out .= '  ' . $lp . ' = ptrtoint ptr ' . $l . " to i64\n";
+            $l = $lp;
+        }
+        if ($rt === 'ptr') {
+            $rp = $this->ssa->allocReg();
+            $out .= '  ' . $rp . ' = ptrtoint ptr ' . $r . " to i64\n";
+            $r = $rp;
+        }
+        $pred = $this->cmpPredicate($c->op);
+        $cmpReg = $this->ssa->allocReg();
+        $out .= '  ' . $cmpReg . ' = icmp ' . $pred . ' i64 ' . $l . ', ' . $r . "\n";
+        $extReg = $this->ssa->allocReg();
+        $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+        $this->lastValue = $extReg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
@@ -4302,79 +4378,8 @@ trait EmitLlvmExpr
             }
         }
 
-        // Float comparison when either side carries a double.
-        // Use the operand-aware coercion path: strings require strtod and
-        // tagged cells require tagged_to_double; only raw integer/bool
-        // carriers use sitofp. The old generic sitofp path treated a ptr
-        // returned by __mir_int_to_str as i64, producing invalid split IR.
-        if ($lt === 'double' || $rt === 'double'
-            || $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT) {
-            $this->lastValue = $l;
-            $this->lastValueType = $lt;
-            $out .= $this->coerceDoubleOperand($c->left);
-            $ld = $this->lastValue;
-            $this->lastValue = $r;
-            $this->lastValueType = $rt;
-            $out .= $this->coerceDoubleOperand($c->right);
-            $rd = $this->lastValue;
-
-            $cmpReg = $this->ssa->allocReg();
-            $out .= '  ' . $cmpReg . ' = fcmp ' . $this->cmpPredicateF($c->op)
-                  . ' double ' . $ld . ', ' . $rd . "\n";
-            $extReg = $this->ssa->allocReg();
-            $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
-            $this->lastValue = $extReg;
-            $this->lastValueType = 'i64';
-            return $out;
-        }
-
-        // A tagged-cell operand (e.g. `strpos(...)` → int|false) carries
-        // its int payload NaN-boxed; the raw carrier is meaningless in a
-        // numeric compare. Unbox to the signed int (false → 0) so
-        // `strpos(...) > 0` / `< 0` / `=== 3` work. Restrict to numeric
-        // contexts — an ordering op, or eq/ne against an int/bool side —
-        // so a `string|false` cell (`getenv`) isn't mangled. (`=== false`
-        // returned above via the tag-compare branch.)
-        $numericCtx = (!$isEq && !$isNe)
-            || $rk === Type::KIND_INT || $rk === Type::KIND_BOOL
-            || $lk === Type::KIND_INT || $lk === Type::KIND_BOOL;
-        if ($lk === Type::KIND_CELL && $numericCtx) {
-            if ($lt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; $lt = 'i64'; }
-            $this->rt->needsTagged = true;
-            $u = $this->ssa->allocReg();
-            $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $l . ")\n";
-            $l = $u; $lt = 'i64';
-        }
-        if ($rk === Type::KIND_CELL && $numericCtx) {
-            if ($rt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; $rt = 'i64'; }
-            $this->rt->needsTagged = true;
-            $u = $this->ssa->allocReg();
-            $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $r . ")\n";
-            $r = $u; $rt = 'i64';
-        }
-        // Handle comparison (identity / equality of vec / assoc / obj
-        // handles, e.g. `$x !== []`): the carrier is i64, so a ptr operand
-        // (a fresh array-literal / alloc) must be ptrtoint'd first.
-        if ($lt === 'ptr') {
-            $lp = $this->ssa->allocReg();
-            $out .= '  ' . $lp . ' = ptrtoint ptr ' . $l . " to i64\n";
-            $l = $lp;
-        }
-        if ($rt === 'ptr') {
-            $rp = $this->ssa->allocReg();
-            $out .= '  ' . $rp . ' = ptrtoint ptr ' . $r . " to i64\n";
-            $r = $rp;
-        }
-        $pred = $this->cmpPredicate($c->op);
-        $cmpReg = $this->ssa->allocReg();
-        $out .= '  ' . $cmpReg . ' = icmp ' . $pred . ' i64 ' . $l . ', ' . $r . "\n";
-        $extReg = $this->ssa->allocReg();
-        $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
-        $this->lastValue = $extReg;
-        $this->lastValueType = 'i64';
-        return $out;
+        return $this->emitNumericCmpTail($c, $out, $l, $r, $lt, $rt, $lk, $rk, $isEq, $isNe);
     }
-
     /**
      * The ONLY way to reach stdout from codegen.
      *
