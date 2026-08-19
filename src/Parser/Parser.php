@@ -2101,7 +2101,7 @@ final class Parser
             // module's classes. A written class name keeps the static path.
             // parsePostfix so the RHS may be a full access expression, e.g.
             // `$x instanceof $arg->typeName` (symfony) or `$x instanceof $a[0]`.
-            if ($this->check(TokenKind::Variable)) {
+            if ($this->check(TokenKind::Variable) || $this->check(TokenKind::OpenParen)) {
                 $classExpr = $this->parsePostfix($this->parsePrimary());
                 return Expr::call('is_a', [$left, $classExpr], $span);
             }
@@ -2224,7 +2224,7 @@ final class Parser
                     continue;
                 }
                 $nameTok = $this->advance();
-                if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword) {
+                if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword && $nameTok->kind !== TokenKind::MagicConstant) {
                     throw $this->error('expected member name after ->');
                 }
                 $name = $nameTok->lexeme;

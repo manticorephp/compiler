@@ -4234,7 +4234,15 @@ final class LowerFromAst implements Pass
     {
         if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
         if (!$this->isCodegenBuiltin($fnName)) { return null; }
-        $arity = $this->fixedBuiltinArity($this->constBareName(\strtolower($fnName)));
+        $bare = $this->constBareName(\strtolower($fnName));
+        // min/max are variadic, but their spread form is exactly the
+        // existing single-array "winner element" lowering. Keep the
+        // original array expression intact so it may be an arbitrary call
+        // such as max(...array_map(...)).
+        if ($bare === 'min' || $bare === 'max') {
+            return [$astArgs[0]->value];
+        }
+        $arity = $this->fixedBuiltinArity($bare);
         if ($arity === 0) { return null; }
         $pack = $astArgs[0]->value;
         if ($pack->kind !== 'Variable' && $pack->kind !== 'PropertyAccess') { return null; }
@@ -4298,7 +4306,7 @@ final class LowerFromAst implements Pass
         if ($spread === null) { return; }
         if (!$this->isCodegenBuiltin($fnName)) { return; }
         $bare = $this->constBareName(\strtolower($fnName));
-        if ($bare === 'sprintf' || $bare === 'printf' || $bare === 'array_unshift') { return; }
+        if ($bare === 'sprintf' || $bare === 'printf' || $bare === 'array_unshift' || $bare === 'min' || $bare === 'max') { return; }
         throw new \RuntimeException(
             'argument unpacking into ' . $bare . '() is not supported: it is a '
             . 'codegen builtin with no signature to expand the pack against '
