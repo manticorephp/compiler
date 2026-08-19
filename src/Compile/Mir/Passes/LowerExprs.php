@@ -523,6 +523,16 @@ trait LowerExprs
         return null;
     }
 
+    private function lowerDynamicStaticAccessExpr(\Parser\Ast\DynamicStaticAccess $expr): Node
+    {
+            // `$obj::class` → the operand's class name as a string. Read the
+            // subclass `name` / `receiver` through a typed param (T5 offset).
+            if ($this->dynStaticName($expr) === 'class') {
+                return new ClassName_($this->lowerExpr($this->dynStaticReceiver($expr)), Type::string_());
+            }
+            return $this->lowerDynStaticAccess($expr);
+    }
+
     private function lowerExprInner(\Parser\Ast\Expr $expr): Node
     {
         if ($expr->kind === 'IntLiteral') {
@@ -590,14 +600,7 @@ trait LowerExprs
             // value and needs nothing of its own, and so does `isset(...)`.
             return $this->lowerDynStaticPropRead($this->asDynStaticProp($expr));
         }
-        if ($expr->kind === 'DynamicStaticAccess') {
-            // `$obj::class` → the operand's class name as a string. Read the
-            // subclass `name` / `receiver` through a typed param (T5 offset).
-            if ($this->dynStaticName($expr) === 'class') {
-                return new ClassName_($this->lowerExpr($this->dynStaticReceiver($expr)), Type::string_());
-            }
-            return $this->lowerDynStaticAccess($expr);
-        }
+        if ($expr->kind === 'DynamicStaticAccess') { return $this->lowerDynamicStaticAccessExpr($expr); }
         if ($expr->kind === 'DynamicStaticCall') {
             return $this->lowerDynStaticCall($expr);
         }
