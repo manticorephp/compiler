@@ -293,12 +293,23 @@ trait LowerPrelude
      */
     private function objToStrSrc(): string
     {
-        $body = "function __mir_obj_to_str(mixed \$v): string {\n";
+        $body = '';
+        $dispatch = "function __mir_obj_to_str(mixed \$v): string {\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $arm = 0;
         foreach ($this->walkableClassesDerivedFirst() as $cname) {
             if (!$this->declaresMethod($cname, '__toString')) { continue; }
-            $body = $body . "  if (\$v instanceof \\" . $cname . ") { return \$v->__toString(); }\n";
+            $helper = '__mir_obj_to_str_arm_' . (string)$arm;
+            $body = $body . "function " . $helper . "(mixed \$v): string {\n"
+                . "  if (\$v instanceof \\" . $cname . ") { return \$v->__toString(); }\n"
+                . "  return '';\n}\n";
+            $dispatch = $dispatch . "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
+            $arm = $arm + 1;
         }
-        return $body . "  return '';\n}\n";
+        if ($arm === 1) {
+            return $body . "function __mir_obj_to_str(mixed \$v): string { return __mir_obj_to_str_arm_0(\$v); }\n";
+        }
+        return $body . $dispatch . "  }\n  return '';\n}\n";
     }
 
     /**
@@ -409,13 +420,22 @@ trait LowerPrelude
         $names = [];
         $depths = [];
         foreach ($this->classTable as $cname => $cd) {
-            if ($cname === 'stdClass') { continue; }
+            if ($cname === "stdClass") { continue; }
             if ($cd->isStruct) { continue; }
             if ($this->isTypeDef($cname)) { continue; }
+            if ($this->walkerReachabilityKnown) {
+                $keep = isset($this->walkerReachableClasses[$cname]);
+                $cur = $cd->parent;
+                while (!$keep && $cur !== "" && isset($this->classTable[$cur])) {
+                    $keep = isset($this->walkerReachableClasses[$cur]);
+                    $cur = $this->classTable[$cur]->parent;
+                }
+                if (!$keep) { continue; }
+            }
             $names[] = $cname;
             $depths[] = $this->classDepth($cname);
         }
-        $n = \count($names);
+        $n = count($names);
         $i = 0;
         while ($i < $n) {
             $max = $i;
@@ -432,11 +452,6 @@ trait LowerPrelude
         }
         return $names;
     }
-
-    /** Whether `$cls` or an ancestor declares method `$m`. `ClassDef::$methodNames`
-     *  carries declared + trait-mixed methods ONLY, so an inherited magic method
-     *  needs the parent walk (the same one {@see InferCalls::classDefinesMagic}
-     *  does on the infer side). */
     private function declaresMethod(string $cls, string $m): bool
     {
         $c = $cls;
@@ -611,97 +626,54 @@ trait LowerPrelude
     private function exportObjectSrc(): string
     {
         $names = $this->walkableClassesDerivedFirst();
-        $body = "function __mir_export_object(mixed \$v, int \$indent): string {\n"
+        $body = '';
+        $dispatch = "function __mir_export_object(mixed \$v, int \$indent): string {\n"
             . "  \$pad = str_repeat(' ', \$indent);\n"
             . "  \$ipad = \$pad . '   ';\n"
             . "  \$lead = \$indent > 0 ? (\"\\n\" . \$pad) : '';\n"
-            // An enum case is a bare `\Enum::Case` — no array literal, but it is
-            // still a nested VALUE, so it takes the same line break.
             . "  \$en = __mir_enum_name(\$v);\n"
-            . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n";
+            . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
             $disp = $cd->display();
-            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n"
-                . "    \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
+            $helper = '__mir_export_object_arm_' . (string)$arm;
+            $body = $body . "function " . $helper . "(mixed \$v, int \$indent, string \$pad, string \$ipad, string \$lead): string {\n"
+                . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
                 $body = $body . "    \$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
                     . $p . ", \$indent + 2) . \",\\n\";\n";
             }
             if ($cd->usesBag()) {
-                // #[AllowDynamicProperties]: the declared slots, then the bag.
-                // `__mir_obj_bag($v)` reads the BAG ONLY, which is what is left to add.
-                $body = $body . "    foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
-                    . "      \$ks = is_int(\$bk) ? (string)\$bk : (\"'\" . __mc_var_export_qstr((string)\$bk) . \"'\");\n"
-                    . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
-                    . "    }\n";
+                $body = $body . "  foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
+                    . "    \$ks = is_int(\$bk) ? (string)\$bk : (\"'\" . __mc_var_export_qstr((string)\$bk) . \"'\");\n"
+                    . "    \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
+                    . "  }\n";
             }
-            $body = $body . "    return \$out . \$pad . '))';\n  }\n";
+            $body = $body . "  return \$out . \$pad . '))';\n}\n";
+            $dispatch = $dispatch . "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead);\n";
+            $arm = $arm + 1;
         }
-        // stdClass prints `(object) array(…)` and closes with ONE paren. An
-        // EXPLICIT arm, not the fallthrough — see the closure note below.
-        $body = $body
-            . "  if (\$v instanceof \\stdClass) {\n"
-            . "    \$out = \$lead . \"(object) array(\\n\";\n"
-            . "    foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
-            . "      \$ks = is_int(\$k) ? (string)\$k : (\"'\" . __mc_var_export_qstr((string)\$k) . \"'\");\n"
-            . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n"
-            . "    }\n"
-            . "    return \$out . \$pad . ')';\n"
+        $dispatch = $dispatch
             . "  }\n"
-            // Every class in the table has an arm above, so what is left is a
-            // CLOSURE: `[fn_ptr, capture…]` from `__mir_alloc`, with no class
-            // descriptor. Walking it would read a code address as one. php
-            // prints an empty __set_state literal for a Closure, so print that
-            // rather than deref.
-            . "  return \$lead . \"\\\\Closure::__set_state(array(\\n\" . \$pad . '))';\n}\n";
-        return $body;
+            . "  \$out = \$lead . \"(object) array(\\n\";\n"
+            . "  foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
+            . "    \$ks = is_int(\$k) ? (string)\$k : (\"'\" . __mc_var_export_qstr((string)\$k) . \"'\");\n"
+            . "    \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n"
+            . "  }\n"
+            . "  return \$out . \$pad . ')';\n}\n";
+        if ($arm === 1) {
+            $mark = "  switch (__mir_object_class_id(\$v)) {\n";
+            $at = strpos($dispatch, $mark);
+            if ($at !== false) {
+                $prefix = substr($dispatch, 0, $at);
+                return $body . $prefix . "  return __mir_export_object_arm_0(\$v, \$indent, \$pad, \$ipad, \$lead);\n}\n";
+            }
+        }
+        return $body . $dispatch;
     }
 
-    /**
-     * PHP source for unserialize's three generated helpers, written from the
-     * complete class table — the reader's half of {@see serObjectSrc}.
-     *
-     *  - `__mc_unser_alloc(cls, st)` — a `===` chain naming every known class,
-     *    each arm allocating WITHOUT running __construct (`__mc_new_uninit`,
-     *    desugared to a bare NewObj in LowerExprs). A name that falls out of the
-     *    chain is unknown to the closed world, which is the same answer php
-     *    gives for a class that does not exist.
-     *  - `__mc_unser_fill(o, props, st)` — one `instanceof` arm per class,
-     *    storing each declared property the stream carried. The keys arrive
-     *    DEMANGLED (the parser strips the `\0…\0` prefix), so the arms compare
-     *    plain names. A free function may write a private or readonly slot: no
-     *    visibility is enforced, and the readonly guard exempts this frame.
-     *  - `__mc_unser_enum(spec, st)` — `Enum:Case` back to the case singleton.
-     */
-    /**
-     * `__mc_refl_alloc(cls)` — an instance with NO constructor run, for
-     * `ReflectionClass::newInstanceWithoutConstructor()`. The same `===` chain
-     * over the closed world that {@see unserSrc}'s allocator uses, minus the
-     * unserialize state: hydration (doctrine, symfony's var-exporter and the
-     * serializer) builds objects exactly this way, and php's own
-     * newInstanceWithoutConstructor is the documented door for it.
-     *
-     * GENERATED, not written in the prelude file: it names every class in THIS
-     * module, and a prelude body must never be built from module-local
-     * information ({@see prelude/reflection.php}'s ODR note). An unknown name
-     * returns null, which is what a closed world can honestly say.
-     */
-    /**
-     * `__mc_enum_meta(cls)` — `['backing' => 'string'|'int'|'', 'cases' => C::cases()]`
-     * for every enum in this module, or null for anything else. What
-     * ReflectionEnum reports.
-     *
-     * The two facts come from opposite places and neither is reachable from a
-     * prelude body: the BACKING TYPE lives only on the AST declaration (the MIR
-     * ClassDef records nothing about enums), and the CASES are the enum's own
-     * compiler-generated `cases()`, which can only be named per class. So the
-     * generated dispatcher, exactly like {@see reflAllocSrc}.
-     *
-     * Boxed through `__mir_to_cell`: the only caller reaches it as a cell, and a
-     * raw array pointer there decodes as a double — the lesson the attribute
-     * factories already paid for.
-     */
     private function reflEnumMetaSrc(): string
     {
         $src = "function __mc_enum_meta(string \$cls): mixed {\n";
@@ -758,40 +730,43 @@ trait LowerPrelude
         // enum property got the singleton pointer instead of its ordinal. Crossing
         // a `mixed` parameter makes the value a CELL by construction, which is the
         // one shape the typed-slot store knows how to unbox.
-        $fill = "function __mc_unser_set(mixed \$o, string \$k, mixed \$v): void {\n";
+        $fillDispatch = "function __mc_unser_set(mixed \$o, string \$k, mixed \$v): void {\n"
+            . "  switch (__mir_object_class_id(\$o)) {\n";
+        $fillBody = '';
+        $magic = "function __mc_unser_has_magic(mixed \$o): bool {\n"
+            . "  switch (__mir_object_class_id(\$o)) {\n";
+        $call = "function __mc_unser_magic(mixed \$o, array \$props): void {\n"
+            . "  switch (__mir_object_class_id(\$o)) {\n";
+        $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
             if ($this->declaresMethod($cname, '__unserialize')) { continue; }
             if ($cd->propertyNames === [] && !$cd->usesBag()) { continue; }
-            $fill = $fill . "  if (\$o instanceof \\" . $cname . ") {\n";
+            $helper = '__mc_unser_set_arm_' . (string)$arm;
+            $fillDispatch = $fillDispatch . "    case " . (string)$cd->classId . ": " . $helper . "(\$o, \$k, \$v); return;\n";
+            $fillBody = $fillBody . "function " . $helper . "(mixed \$o, string \$k, mixed \$v): void {\n"
+                . "  if (\$o instanceof \\" . $cname . ") {\n";
             foreach ($cd->propertyNames as $p) {
-                $fill = $fill . "    if (\$k === '" . $p . "') { \$o->" . $p . " = \$v; return; }\n";
+                $fillBody = $fillBody . "  if (\$k === '" . $p . "') { \$o->" . $p . " = \$v; return; }\n";
             }
             if ($cd->usesBag()) {
-                // #[AllowDynamicProperties]: whatever no declared slot claimed
-                // lands in the bag, as php does.
-                $fill = $fill . "    \$o->\$k = \$v;\n";
+                $fillBody = $fillBody . "  \$o->\$k = \$v;\n";
             }
-            $fill = $fill . "    return;\n  }\n";
+            $fillBody = $fillBody . "  }\n}\n";
+            $arm = $arm + 1;
         }
-        // stdClass and __PHP_Incomplete_Class: every key is dynamic.
-        $fill = $fill . "  \$o->\$k = \$v;\n}\n";
-
-        // php 7.4+: __unserialize REPLACES the slot fill and is handed the array
-        // __serialize produced, keys verbatim. It takes the WHOLE array, so it
-        // stays a separate entry point — and nothing is stored into a typed slot
-        // here, so the erasure above does not apply.
-        $magic = "function __mc_unser_has_magic(mixed \$o): bool {\n";
-        $call = "function __mc_unser_magic(mixed \$o, array \$props): void {\n";
+        $fillDispatch = $fillBody . $fillDispatch
+            . "  }\n"
+            . "  \$o->\$k = \$v;\n}\n";
         foreach ($names as $cname) {
             if (!$this->declaresMethod($cname, '__unserialize')) { continue; }
-            $magic = $magic . "  if (\$o instanceof \\" . $cname . ") { return true; }\n";
-            $call = $call . "  if (\$o instanceof \\" . $cname . ") { \$o->__unserialize(\$props); return; }\n";
+            $cd = $this->classTable[$cname];
+            $magic = $magic . "    case " . (string)$cd->classId . ": return true;\n";
+            $call = $call . "    case " . (string)$cd->classId . ": \$o->__unserialize(\$props); return;\n";
         }
-        $magic = $magic . "  return false;\n}\n";
-        $call = $call . "}\n";
-        $fill = $fill . $magic . $call;
-
+        $magic = $magic . "  }\n  return false;\n}\n";
+        $call = $call . "  }\n}\n";
+        $fill = $fillDispatch . $magic . $call;
         $enum = "function __mc_unser_enum(string \$spec, \\__McUnSt \$st): mixed {\n";
         foreach ($this->enumTable as $ename => $ed) {
             foreach ($ed->caseNames as $case) {

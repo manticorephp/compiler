@@ -110,6 +110,10 @@ final class LowerFromAst implements Pass
 
     /** @var array<string, ClassDef> built during the class pre-pass */
     private array $classTable = [];
+    /**  array<string, true> Classes that can reach the generated object walkers. */
+    public array $walkerReachableClasses = [];
+    /** True when the class set above is a sound closed-world subset. */
+    public bool $walkerReachabilityKnown = false;
 
     /** Set by the store scan when a bare `array` property is written with a
      *  string key (→ assoc, not vec). Reset per property in buildClassDef. */
@@ -884,6 +888,8 @@ final class LowerFromAst implements Pass
         // first mentions it, and `new Box()` can be pointed at it.
         $this->reifyPreScan($module);
 
+        // Compute the closed-world class set before synthesizing the fat walkers.
+        // Dynamic class construction and unserialize remain conservative and keep all arms.
         // Built-in `stdClass`: a bag-only object (dynamic properties),
         // used by `(object)` casts and `json_decode`.
         if (!isset($this->classTable['stdClass'])) {

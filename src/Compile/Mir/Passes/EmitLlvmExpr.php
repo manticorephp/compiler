@@ -2508,11 +2508,11 @@ trait EmitLlvmExpr
         $cid = $this->classIdReg;
         $end = $this->ssa->allocLabel('bag.end');
         $def = $this->ssa->allocLabel('bag.default');
-        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $caseMap = [];
         $bodies = '';
         foreach ($arms as $cd) {
             $lbl = $this->ssa->allocLabel('bag.case');
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $caseMap[$cd->classId] = $lbl;
             $bodies .= $lbl . ":\n";
             $g = $this->ssa->allocReg();
             $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
@@ -2522,7 +2522,7 @@ trait EmitLlvmExpr
             $bodies .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
-        $switch .= "  ]\n";
+        $switch = $this->emitAdaptiveClassIdBranch($cid, $caseMap, $def);
         $out .= $switch . $bodies . $def . ":\n";
         $dg = $this->ssa->allocReg();
         $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $objPtr

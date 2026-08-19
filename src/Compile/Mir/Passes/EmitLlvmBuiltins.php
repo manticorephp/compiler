@@ -242,6 +242,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
         if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
+        if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
         if ($name === 'array_keys') {
@@ -374,6 +375,41 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /** Return an object's exact runtime class_id, or zero for non-objects. */
+    private function biObjectClassId(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $cell = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $out .= $this->cellTagIr($cell);
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        $objL = $this->ssa->allocLabel('cid.obj');
+        $doneL = $this->ssa->allocLabel('cid.done');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $doneL . "\n";
+        $out .= $objL . ":\n";
+        $masked = $this->ssa->allocReg();
+        $out .= '  ' . $masked . ' = and i64 ' . $cell . ", 281474976710655\n";
+        $objp = $this->ssa->allocReg();
+        $out .= '  ' . $objp . ' = inttoptr i64 ' . $masked . " to ptr\n";
+        $descI = $this->ssa->allocReg();
+        $out .= '  ' . $descI . ' = load i64, ptr ' . $objp . "\n";
+        $descP = $this->ssa->allocReg();
+        $out .= '  ' . $descP . ' = inttoptr i64 ' . $descI . " to ptr\n";
+        $cid = $this->ssa->allocReg();
+        $out .= '  ' . $cid . ' = load i64, ptr ' . $descP . "\n";
+        $out .= '  store i64 ' . $cid . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
     /**
      * Box for a slot that must be SELF-DESCRIBING without changing what it
      * holds: tag the value, never rebuild it.
@@ -5263,18 +5299,18 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
-        $switch = '  switch i64 ' . $cid . ', label %' . $defL . " [\n";
+        $caseMap = [];
         $bodies = '';
         foreach ($cands as $c) {
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
             $caseL = $this->ssa->allocLabel('gc.case');
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
+            $caseMap[$cd->classId] = $caseL;
             $bodies .= $caseL . ":\n";
             $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($c))) . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endL . "\n";
         }
-        $switch .= "  ]\n";
+        $switch = $this->emitAdaptiveClassIdBranch($cid, $caseMap, $defL);
         $out .= $switch . $bodies;
         $out .= $defL . ":\n";
         $out .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cls))) . ', ptr ' . $res . "\n";

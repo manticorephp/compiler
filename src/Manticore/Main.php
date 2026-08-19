@@ -3669,6 +3669,22 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $module->needsOb = $useOb;
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
+        $lower->walkerReachabilityKnown = true;
+        $walkerRoots = [];
+        $walkerDynamic = false;
+        foreach ($sources as $src) {
+            if (preg_match("/\\bnew\\s+\\$/", $src) || preg_match("/\\bunserialize\\s*\\(/", $src) || preg_match("/ReflectionClass|class_alias|class_exists|interface_exists|trait_exists|enum_exists/", $src)) {
+                $walkerDynamic = true;
+            }
+            preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/", $src, $m1);
+            preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $src, $m2);
+            preg_match_all("/\\b([A-Za-z_][A-Za-z0-9_\\\\]*)::[A-Za-z_][A-Za-z0-9_]*/", $src, $m3);
+            foreach ([$m1[1], $m2[1], $m3[1]] as $group) {
+                foreach ($group as $root) { $walkerRoots[$root] = true; }
+            }
+        }
+        if ($walkerDynamic) { $lower->walkerReachabilityKnown = false; }
+        else { foreach ($walkerRoots as $root => $_) { $lower->walkerReachableClasses[$root] = true; } }
         $lower->includeVarDump = $useVarDump;
         $lower->includeVarExport = $useVarExport;
         $lower->varExportSrc = $useVarExport ? $varExportSrc : "";

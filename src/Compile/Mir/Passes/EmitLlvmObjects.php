@@ -3984,7 +3984,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $endLabel = $this->ssa->allocLabel('vd.end');
         $defLabel = $this->ssa->allocLabel('vd.default');
-        $switch = '  switch i64 ' . $cid . ', label %' . $defLabel . " [\n";
+        $caseMap = [];
         $bodies = '';
         // Group the candidates that produce the SAME arm before emitting any.
         //
@@ -4033,8 +4033,9 @@ trait EmitLlvmObjects
                 $armCand[$key] = $c;
                 $armOrder[] = $key;
             }
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armLabel[$key] . "\n";
+            $caseMap[$cd->classId] = $armLabel[$key];
         }
+        $switch = $this->emitAdaptiveClassIdBranch($cid, $caseMap, $defLabel);
         foreach ($armOrder as $key) {
             $c = $armCand[$key];
             $caseLabel = $armLabel[$key];
@@ -4065,7 +4066,6 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endLabel . "\n";
         }
-        $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $rd = $this->ssa->allocReg();
         $out .= $defLabel . ":\n";
@@ -5394,4 +5394,47 @@ trait EmitLlvmObjects
         }
         return false;
     }
+    /** @param array<int,string> $cases */
+    private function emitAdaptiveClassIdBranch(string $cid, array $cases, string $default): string
+    {
+        $pairs = [];
+        foreach ($cases as $id => $label) { $pairs[] = [(int)$id, $label]; }
+        usort($pairs, static function (array $a, array $b): int { return $a[0] <=> $b[0]; });
+        return $this->emitAdaptiveClassIdNode($cid, $pairs, $default);
+    }
+
+    /** @param array<int,array{0:int,1:string}> $pairs */
+    private function emitAdaptiveClassIdNode(string $cid, array $pairs, string $default): string
+    {
+        $n = count($pairs);
+        if ($n === 0) { return "  br label %" . $default . "\n"; }
+        if ($n <= 4) {
+            $out = '';
+            foreach ($pairs as $i => $pair) {
+                $cmp = $this->ssa->allocReg();
+                $next = $i + 1 < $n ? $this->ssa->allocLabel('cid.next') : $default;
+                $out .= '  ' . $cmp . ' = icmp eq i64 ' . $cid . ', ' . (string)$pair[0] . "\n";
+                $out .= '  br i1 ' . $cmp . ', label %' . $pair[1] . ', label %' . $next . "\n";
+                if ($i + 1 < $n) { $out .= $next . ":\n"; }
+            }
+            return $out;
+        }
+        $mid = intdiv($n, 2);
+        $pivot = $pairs[$mid];
+        $left = array_slice($pairs, 0, $mid);
+        $right = array_slice($pairs, $mid + 1);
+        $cmpEq = $this->ssa->allocReg();
+        $cmpLt = $this->ssa->allocReg();
+        $cmpLabel = $this->ssa->allocLabel('cid.cmp');
+        $leftLabel = $this->ssa->allocLabel('cid.left');
+        $rightLabel = $this->ssa->allocLabel('cid.right');
+        return '  ' . $cmpEq . ' = icmp eq i64 ' . $cid . ', ' . (string)$pivot[0] . "\n"
+            . '  br i1 ' . $cmpEq . ', label %' . $pivot[1] . ', label %' . $cmpLabel . "\n"
+            . $cmpLabel . ":\n"
+            . '  ' . $cmpLt . ' = icmp ult i64 ' . $cid . ', ' . (string)$pivot[0] . "\n"
+            . '  br i1 ' . $cmpLt . ', label %' . $leftLabel . ', label %' . $rightLabel . "\n"
+            . $leftLabel . ":\n" . $this->emitAdaptiveClassIdNode($cid, $left, $default)
+            . $rightLabel . ":\n" . $this->emitAdaptiveClassIdNode($cid, $right, $default);
+    }
+
 }
