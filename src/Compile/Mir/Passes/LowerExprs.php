@@ -99,147 +99,8 @@ trait LowerExprs
         return $node;
     }
 
-    private function lowerExprInner(\Parser\Ast\Expr $expr): Node
+    private function lowerCallExpr(\Parser\Ast\CallExpr $expr): Node
     {
-        if ($expr->kind === 'IntLiteral') {
-            return new IntConst($expr->value, Type::int_());
-        }
-        if ($expr->kind === 'FloatLiteral') {
-            // Pin to the FloatLiteral subclass so `->value` is FLOAT-typed: a
-            // base-`Expr` read of `value` borrows a subclass type and resolves to
-            // INT (IntLiteral's `value`). The double's bits then ride an i64
-            // carrier TYPED int — harmless on its own (a bitcast round-trips it),
-            // but a float-param ctor coercion (`new FloatConst(float)`) would
-            // sitofp those bits to garbage. Type-pinned read keeps it float.
-            return new FloatConst($expr->value, Type::float_());
-        }
-        if ($expr->kind === 'StringLiteral') {
-            return new StringConst($expr->value, Type::string_());
-        }
-        if ($expr->kind === 'BoolLiteral') {
-            return new BoolConst($expr->value, Type::bool_());
-        }
-        if ($expr->kind === 'NullLiteral') {
-            return new NullConst(Type::null_());
-        }
-        if ($expr->kind === 'Variable') {
-            // A BARE `$GLOBALS` — every legal use ($GLOBALS['x']) is intercepted
-            // at the ArrayAccess above it, so reaching here means the whole array
-            // was read (foreach/count) or handed to a by-ref parameter.
-            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
-            return new LoadLocal($expr->name, Type::unknown());
-        }
-        if ($expr->kind === 'Assign') { return $this->lowerAssign($expr); }
-        if ($expr->kind === 'RefAssign') { return $this->lowerRefAssign($expr); }
-        if ($expr->kind === 'CompoundAssign') { return $this->lowerCompoundAssign($expr); }
-        if ($expr->kind === 'IncDec') { return $this->lowerIncDec($expr); }
-        if ($expr->kind === 'Ternary') { return $this->lowerTernary($expr); }
-        if ($expr->kind === 'Cast') { return $this->lowerCast($expr); }
-        if ($expr->kind === 'NullCoalesce') { return $this->lowerNullCoalesce($expr); }
-        if ($expr->kind === 'Instanceof') { return $this->lowerInstanceof($expr); }
-        if ($expr->kind === 'Match') { return $this->lowerMatch($expr); }
-        if ($expr->kind === 'MagicConstant') {
-            $mn = $expr->name;
-            if ($mn === '__LINE__') { return new IntConst($expr->span->line, Type::int_()); }
-            if ($mn === '__CLASS__') { return new StringConst($this->currentLowerClass, Type::string_()); }
-            if ($mn === '__FUNCTION__') { return new StringConst($this->currentLowerFn, Type::string_()); }
-            if ($mn === '__METHOD__') {
-                $m = $this->currentLowerClass !== ''
-                    ? $this->currentLowerClass . '::' . $this->currentLowerFn
-                    : $this->currentLowerFn;
-                return new StringConst($m, Type::string_());
-            }
-            return new StringConst('', Type::string_());
-        }
-        if ($expr->kind === 'Closure') { return $this->lowerClosure($expr); }
-        if ($expr->kind === 'ArrowFn') { return $this->lowerArrowFn($expr); }
-        if ($expr->kind === 'Invoke') { return $this->lowerInvoke($expr); }
-        if ($expr->kind === 'Clone')  { return $this->lowerClone($expr); }
-        if ($expr->kind === 'StaticAccess') {
-            // `$expr` is base-Expr-typed; StaticAccess's `class` / `name`
-            // collide with other subclasses' same-named fields at different
-            // offsets, so read them through a typed param (T5 pattern) — else
-            // a garbage class/name misses the enum table and falls through to
-            // the "unsupported expression" throw (uncaught → longjmp crash).
-            $saClass = $this->staticAccessClass($expr);
-            $saName = $this->staticAccessName($expr);
-            // `Class::class` / `self::class` / `parent::class` → the fully
-            // qualified name as a compile-time string. `static::class` under
-            // inheritance needs the runtime called-class (handled in lowerStatic
-            // ClassName below); here it folds to the lexical class, which is
-            // correct when the method isn't reached through a subclass.
-            if (\strtolower($saName) === 'class') {
-                return new StringConst($this->resolveStaticClass($saClass), Type::string_());
-            }
-            // EnumName::Case → ordinal int carrying the enum type. A non-case
-            // name (ordinal -1) is an enum CONSTANT — fall through to the
-            // const lookup below. Resolve `self`/`static`/`parent` first so a
-            // `self::Case` inside an enum method finds its own case table.
-            $ecls = \ltrim($this->resolveStaticClass($saClass), '\\');
-            if (isset($this->enumTable[$ecls])) {
-                $ord = $this->enumTable[$ecls]->ordinalOf($saName);
-                if ($ord >= 0) {
-                    $this->noteDeprecatedConstUse($ecls . '::' . $saName, $expr->span->line);
-                    return new IntConst($ord, Type::obj($ecls));
-                }
-            }
-            // Class::$prop → load the static-property global.
-            $sp = $this->staticPropRef($saClass, $saName);
-            if ($sp !== null) { return $sp; }
-            // Class::CONST → inline the constant's initializer. Lower it
-            // with the owning class as `self` so a `self::OTHER` inside
-            // the initializer (e.g. `COLOR_CLEAR_MASK = ~self::COLOR_MASK`)
-            // resolves against the declaring class, not the caller's.
-            $cname = $this->resolveStaticClass($saClass);
-            $cv = $this->findClassConst($cname, $saName);
-            if ($cv !== null) {
-                $this->noteDeprecatedConstUse($cname . '::' . $saName, $expr->span->line);
-                $prevC = $this->currentLowerClass;
-                $this->currentLowerClass = $cname;
-                $lowered = $this->lowerExpr($cv);
-                $this->currentLowerClass = $prevC;
-                return $lowered;
-            }
-            // Nothing matched — fall through. It does NOT reach the generic
-            // "unsupported expression kind" throw: the StaticAccess arm at that
-            // fallthrough converts an unresolvable class constant into php's own
-            // runtime Error (`Class "C" not found` / `Undefined constant C::K`),
-            // which is where php raises it and why symfony/cache can name
-            // `PDO::CASE_LOWER` in an adapter that never runs.
-            //
-            // ⚠ A build-time throw HERE was reintroduced by a merge from main,
-            // which had added it independently as a better diagnostic than
-            // "unsupported expression kind StaticAccess". Git saw "deleted on one
-            // side, added on the other" and kept the addition — no conflict, and
-            // undefined_constant_throws went red. The runtime rule wins; main's
-            // intent (say whether the CLASS or the CONSTANT is missing) is
-            // already served below, in php's own wording.
-        }
-        if ($expr->kind === 'DynamicStaticProp') {
-            // `Class::${expr}` in VALUE position. The candidate set is closed at
-            // compile time, so this is a chain over the concrete slots; an index
-            // chain above it (`self::${$p}[$k]`) lowers on top of the chain's
-            // value and needs nothing of its own, and so does `isset(...)`.
-            return $this->lowerDynStaticPropRead($this->asDynStaticProp($expr));
-        }
-        if ($expr->kind === 'DynamicStaticAccess') {
-            // `$obj::class` → the operand's class name as a string. Read the
-            // subclass `name` / `receiver` through a typed param (T5 offset).
-            if ($this->dynStaticName($expr) === 'class') {
-                return new ClassName_($this->lowerExpr($this->dynStaticReceiver($expr)), Type::string_());
-            }
-            return $this->lowerDynStaticAccess($expr);
-        }
-        if ($expr->kind === 'DynamicStaticCall') {
-            return $this->lowerDynStaticCall($expr);
-        }
-        if ($expr->kind === 'BinaryOp') {
-            return $this->lowerBinary($expr);
-        }
-        if ($expr->kind === 'UnaryOp') {
-            return $this->lowerUnary($expr);
-        }
-        if ($expr->kind === 'Call') {
             $fn = \strtolower($expr->function);
             // Every desugaring below matches the BARE name. A namespaced file
             // QUALIFIES an unqualified call ({@see Parser::resolveClassName}),
@@ -597,7 +458,149 @@ trait LowerExprs
             // lowering of any call overwrites it.
             $call->srcArgc = \count($expr->args);
             return $call;
+    }
+
+    private function lowerExprInner(\Parser\Ast\Expr $expr): Node
+    {
+        if ($expr->kind === 'IntLiteral') {
+            return new IntConst($expr->value, Type::int_());
         }
+        if ($expr->kind === 'FloatLiteral') {
+            // Pin to the FloatLiteral subclass so `->value` is FLOAT-typed: a
+            // base-`Expr` read of `value` borrows a subclass type and resolves to
+            // INT (IntLiteral's `value`). The double's bits then ride an i64
+            // carrier TYPED int — harmless on its own (a bitcast round-trips it),
+            // but a float-param ctor coercion (`new FloatConst(float)`) would
+            // sitofp those bits to garbage. Type-pinned read keeps it float.
+            return new FloatConst($expr->value, Type::float_());
+        }
+        if ($expr->kind === 'StringLiteral') {
+            return new StringConst($expr->value, Type::string_());
+        }
+        if ($expr->kind === 'BoolLiteral') {
+            return new BoolConst($expr->value, Type::bool_());
+        }
+        if ($expr->kind === 'NullLiteral') {
+            return new NullConst(Type::null_());
+        }
+        if ($expr->kind === 'Variable') {
+            // A BARE `$GLOBALS` — every legal use ($GLOBALS['x']) is intercepted
+            // at the ArrayAccess above it, so reaching here means the whole array
+            // was read (foreach/count) or handed to a by-ref parameter.
+            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
+            return new LoadLocal($expr->name, Type::unknown());
+        }
+        if ($expr->kind === 'Assign') { return $this->lowerAssign($expr); }
+        if ($expr->kind === 'RefAssign') { return $this->lowerRefAssign($expr); }
+        if ($expr->kind === 'CompoundAssign') { return $this->lowerCompoundAssign($expr); }
+        if ($expr->kind === 'IncDec') { return $this->lowerIncDec($expr); }
+        if ($expr->kind === 'Ternary') { return $this->lowerTernary($expr); }
+        if ($expr->kind === 'Cast') { return $this->lowerCast($expr); }
+        if ($expr->kind === 'NullCoalesce') { return $this->lowerNullCoalesce($expr); }
+        if ($expr->kind === 'Instanceof') { return $this->lowerInstanceof($expr); }
+        if ($expr->kind === 'Match') { return $this->lowerMatch($expr); }
+        if ($expr->kind === 'MagicConstant') {
+            $mn = $expr->name;
+            if ($mn === '__LINE__') { return new IntConst($expr->span->line, Type::int_()); }
+            if ($mn === '__CLASS__') { return new StringConst($this->currentLowerClass, Type::string_()); }
+            if ($mn === '__FUNCTION__') { return new StringConst($this->currentLowerFn, Type::string_()); }
+            if ($mn === '__METHOD__') {
+                $m = $this->currentLowerClass !== ''
+                    ? $this->currentLowerClass . '::' . $this->currentLowerFn
+                    : $this->currentLowerFn;
+                return new StringConst($m, Type::string_());
+            }
+            return new StringConst('', Type::string_());
+        }
+        if ($expr->kind === 'Closure') { return $this->lowerClosure($expr); }
+        if ($expr->kind === 'ArrowFn') { return $this->lowerArrowFn($expr); }
+        if ($expr->kind === 'Invoke') { return $this->lowerInvoke($expr); }
+        if ($expr->kind === 'Clone')  { return $this->lowerClone($expr); }
+        if ($expr->kind === 'StaticAccess') {
+            // `$expr` is base-Expr-typed; StaticAccess's `class` / `name`
+            // collide with other subclasses' same-named fields at different
+            // offsets, so read them through a typed param (T5 pattern) — else
+            // a garbage class/name misses the enum table and falls through to
+            // the "unsupported expression" throw (uncaught → longjmp crash).
+            $saClass = $this->staticAccessClass($expr);
+            $saName = $this->staticAccessName($expr);
+            // `Class::class` / `self::class` / `parent::class` → the fully
+            // qualified name as a compile-time string. `static::class` under
+            // inheritance needs the runtime called-class (handled in lowerStatic
+            // ClassName below); here it folds to the lexical class, which is
+            // correct when the method isn't reached through a subclass.
+            if (\strtolower($saName) === 'class') {
+                return new StringConst($this->resolveStaticClass($saClass), Type::string_());
+            }
+            // EnumName::Case → ordinal int carrying the enum type. A non-case
+            // name (ordinal -1) is an enum CONSTANT — fall through to the
+            // const lookup below. Resolve `self`/`static`/`parent` first so a
+            // `self::Case` inside an enum method finds its own case table.
+            $ecls = \ltrim($this->resolveStaticClass($saClass), '\\');
+            if (isset($this->enumTable[$ecls])) {
+                $ord = $this->enumTable[$ecls]->ordinalOf($saName);
+                if ($ord >= 0) {
+                    $this->noteDeprecatedConstUse($ecls . '::' . $saName, $expr->span->line);
+                    return new IntConst($ord, Type::obj($ecls));
+                }
+            }
+            // Class::$prop → load the static-property global.
+            $sp = $this->staticPropRef($saClass, $saName);
+            if ($sp !== null) { return $sp; }
+            // Class::CONST → inline the constant's initializer. Lower it
+            // with the owning class as `self` so a `self::OTHER` inside
+            // the initializer (e.g. `COLOR_CLEAR_MASK = ~self::COLOR_MASK`)
+            // resolves against the declaring class, not the caller's.
+            $cname = $this->resolveStaticClass($saClass);
+            $cv = $this->findClassConst($cname, $saName);
+            if ($cv !== null) {
+                $this->noteDeprecatedConstUse($cname . '::' . $saName, $expr->span->line);
+                $prevC = $this->currentLowerClass;
+                $this->currentLowerClass = $cname;
+                $lowered = $this->lowerExpr($cv);
+                $this->currentLowerClass = $prevC;
+                return $lowered;
+            }
+            // Nothing matched — fall through. It does NOT reach the generic
+            // "unsupported expression kind" throw: the StaticAccess arm at that
+            // fallthrough converts an unresolvable class constant into php's own
+            // runtime Error (`Class "C" not found` / `Undefined constant C::K`),
+            // which is where php raises it and why symfony/cache can name
+            // `PDO::CASE_LOWER` in an adapter that never runs.
+            //
+            // ⚠ A build-time throw HERE was reintroduced by a merge from main,
+            // which had added it independently as a better diagnostic than
+            // "unsupported expression kind StaticAccess". Git saw "deleted on one
+            // side, added on the other" and kept the addition — no conflict, and
+            // undefined_constant_throws went red. The runtime rule wins; main's
+            // intent (say whether the CLASS or the CONSTANT is missing) is
+            // already served below, in php's own wording.
+        }
+        if ($expr->kind === 'DynamicStaticProp') {
+            // `Class::${expr}` in VALUE position. The candidate set is closed at
+            // compile time, so this is a chain over the concrete slots; an index
+            // chain above it (`self::${$p}[$k]`) lowers on top of the chain's
+            // value and needs nothing of its own, and so does `isset(...)`.
+            return $this->lowerDynStaticPropRead($this->asDynStaticProp($expr));
+        }
+        if ($expr->kind === 'DynamicStaticAccess') {
+            // `$obj::class` → the operand's class name as a string. Read the
+            // subclass `name` / `receiver` through a typed param (T5 offset).
+            if ($this->dynStaticName($expr) === 'class') {
+                return new ClassName_($this->lowerExpr($this->dynStaticReceiver($expr)), Type::string_());
+            }
+            return $this->lowerDynStaticAccess($expr);
+        }
+        if ($expr->kind === 'DynamicStaticCall') {
+            return $this->lowerDynStaticCall($expr);
+        }
+        if ($expr->kind === 'BinaryOp') {
+            return $this->lowerBinary($expr);
+        }
+        if ($expr->kind === 'UnaryOp') {
+            return $this->lowerUnary($expr);
+        }
+        if ($expr->kind === 'Call') { return $this->lowerCallExpr($expr); }
         if ($expr->kind === 'Spread')         { return new Spread_($this->lowerExpr($expr->value), Type::unknown()); }
         if ($expr->kind === 'ArrayLit')       { return $this->lowerArrayLit($expr); }
         if ($expr->kind === 'ArrayAccess')    { return $this->lowerArrayAccess($expr); }
@@ -712,7 +715,7 @@ trait LowerExprs
      * and falls through to the normal call path, which reports the function as
      * unresolved rather than compiling something silently wrong.
      */
-    private function lowerMultisort(\Parser\Ast\Call $expr): ?Node
+    private function lowerMultisort(\Parser\Ast\CallExpr $expr): ?Node
     {
         $names = [];
         $orders = [];
