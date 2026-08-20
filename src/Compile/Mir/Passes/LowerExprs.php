@@ -116,7 +116,7 @@ trait LowerExprs
             // namespaced declaration; nothing in the corpus does that, and the
             // gates that were already bare (func_get_args, sscanf, …) have
             // always made the same trade.
-            $fnBare = ($bp = \strrpos($fn, '\\')) === false ? $fn : \substr($fn, $bp + 1);
+            $fnBare = $this->bareName($fn);
             // `call_user_func($cb, ...$rest)` → invoke $cb with the rest args,
             // reusing the Invoke path (literal / FCC / const-callable dispatch).
             if ($fnBare === 'call_user_func' && \count($expr->args) >= 1) {

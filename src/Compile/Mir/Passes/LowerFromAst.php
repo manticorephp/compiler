@@ -178,6 +178,8 @@ final class LowerFromAst implements Pass
      * declaration is added because the global agreement can change. */
     private array $methodReturnClassCache = [];
 
+    /** Cached trailing segments for repeatedly lowered names. */
+    private array $bareNameCache = [];
     /**
      * Namespace of the class / function whose signature or property
      * types are currently being lowered (e.g. `Compile\Mir` for
@@ -613,6 +615,7 @@ final class LowerFromAst implements Pass
         // A LowerFromAst instance is normally used once, but keeping this
         // state local to the run makes repeated invocations deterministic.
         $this->methodReturnClassCache = [];
+        $this->bareNameCache = [];
         $this->module = $module;
         // Lowering passes such as injectSuperglobals need the target kind
         // before they register globals; a vendor library must import app-owned
@@ -1305,9 +1308,14 @@ final class LowerFromAst implements Pass
     /** Trailing segment of a possibly-namespaced name. */
     private function bareName(string $n): string
     {
+        if (isset($this->bareNameCache[$n])) {
+            return $this->bareNameCache[$n];
+        }
         $nm = \ltrim($n, '\\');
         $pos = \strrpos($nm, '\\');
-        return $pos === false ? $nm : \substr($nm, $pos + 1);
+        $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
+        $this->bareNameCache[$n] = $bare;
+        return $bare;
     }
 
     /**
@@ -2336,8 +2344,7 @@ final class LowerFromAst implements Pass
     private function resolveCallName(string $name): string
     {
         if (isset($this->fnDecls[$name])) { return $name; }
-        $pos = \strrpos($name, '\\');
-        $bare = $pos === false ? $name : \substr($name, $pos + 1);
+        $bare = $this->bareName($name);
         if ($bare !== $name && isset($this->fnDecls[$bare])) { return $bare; }
         // `use function` / global builtin: an unqualified call namespaced
         // at parse time (`Foo\free`) — or a global `\strncmp` — with no
@@ -2946,8 +2953,7 @@ final class LowerFromAst implements Pass
     }
     private function constBareName(string $raw): string
     {
-        $bs = \strrpos($raw, '\\');
-        return $bs === false ? $raw : \substr($raw, $bs + 1);
+        return $this->bareName($raw);
     }
 
     /**
@@ -3818,8 +3824,7 @@ final class LowerFromAst implements Pass
         // a number and deciding a branch on it.
         if (\count($e->args) === 3) {
             $vqual = \ltrim($e->function, '\\');
-            $vpos = \strrpos($vqual, '\\');
-            $vfn = $vpos === false ? $vqual : \substr($vqual, $vpos + 1);
+            $vfn = $this->bareName($vqual);
             if (\strtolower($vfn) === 'version_compare'
                 && $this->isAbsentExtVersion($e->args[0])
                 && $e->args[1]->kind === 'StringLiteral'
@@ -3832,8 +3837,7 @@ final class LowerFromAst implements Pass
             }
         }
         $guardQual = \ltrim($e->function, '\\');
-        $guardPos = \strrpos($guardQual, '\\');
-        $guardFn = $guardPos === false ? $guardQual : \substr($guardQual, $guardPos + 1);
+        $guardFn = $this->bareName($guardQual);
         if (\count($e->args) === 2 && \strtolower($guardFn) === 'method_exists') {
             $cn = $this->guardClassArgName($e->args[0]);
             if ($cn === null || $e->args[1]->kind !== 'StringLiteral') {
@@ -3855,8 +3859,7 @@ final class LowerFromAst implements Pass
             // runtime); match on the trailing segment so the guard folds
             // regardless of the enclosing namespace.
             $qual = \ltrim($e->function, '\\');
-            $qpos = \strrpos($qual, '\\');
-            $fn = $qpos === false ? $qual : \substr($qual, $qpos + 1);
+            $fn = $this->bareName($qual);
             $a0 = $e->args[0];
             if ($fn === 'function_exists') {
                 // The name is usually a string literal, but symfony writes
@@ -3932,8 +3935,7 @@ final class LowerFromAst implements Pass
     private function isAbsentExtVersionCall(\Parser\Ast\CallExpr $call): bool
     {
         $qual = \ltrim($call->function, '\\');
-        $pos = \strrpos($qual, '\\');
-        $fn = $pos === false ? $qual : \substr($qual, $pos + 1);
+        $fn = $this->bareName($qual);
         if (\strtolower($fn) !== 'phpversion') { return false; }
         if (\count($call->args) !== 1) { return false; }
         if ($call->args[0]->kind !== 'StringLiteral') { return false; }
@@ -4044,8 +4046,7 @@ final class LowerFromAst implements Pass
     private function functionIsKnown(string $name): bool
     {
         $nm = \ltrim($name, '\\');
-        $pos = \strrpos($nm, '\\');
-        $bare = $pos === false ? $nm : \substr($nm, $pos + 1);
+        $bare = $this->bareName($name);
         if (isset(self::HIDDEN_FNS[$bare])) { return false; }
         if (isset(self::RESOLVED_FNS[\strtolower($bare)])) { return true; }
         // A CODEGEN BUILTIN is emitted inline, so it is declared nowhere and
@@ -4151,8 +4152,7 @@ final class LowerFromAst implements Pass
         $expanded = $this->expandBuiltinSpread($fnName, $astArgs);
         if ($expanded !== null) { $astArgs = $expanded; }
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
-        $pos = \strrpos($fnName, '\\');
-        $bare = $pos === false ? $fnName : \substr($fnName, $pos + 1);
+        $bare = $this->bareName($fnName);
         $isPreg = $bare === 'preg_match' || $bare === 'preg_match_all';
         if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable') {
             $name = $this->variableName($astArgs[2]);
