@@ -102,7 +102,7 @@ final class LowerFromAst implements Pass
 
     public const NAME = 'lower-from-ast';
 
-    public function __construct(public readonly Program $program) {}
+    public function __construct(public Program $program) {}
 
     public function name(): string { return self::NAME; }
 
@@ -684,6 +684,9 @@ final class LowerFromAst implements Pass
         // folds to UNKNOWN here and is picked up at the later pass, exactly as
         // before.
         $this->preregisterFoldableDecls(\array_slice($stmts, $preludeCount));
+        // The flattened local list is now the lowering owner; release the
+        // merged Program statement-array before class bodies are lowered.
+        $this->program = new Program([], "", [], $this->program->docComments);
         // Pre-pass: register every class layout first so method
         // bodies and `new` sites can resolve property offsets and
         // sibling classes regardless of source order.
@@ -896,6 +899,8 @@ final class LowerFromAst implements Pass
         // lowered yet — so a spec class is already in the class table when a body
         // first mentions it, and `new Box()` can be pointed at it.
         $this->reifyPreScan($module);
+        // Reification has consumed the only remaining Program metadata.
+        $this->program = new Program([], "", [], []);
 
         // Compute the closed-world class set before synthesizing the fat walkers.
         // Dynamic class construction and unserialize remain conservative and keep all arms.
