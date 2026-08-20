@@ -309,7 +309,7 @@ trait LowerPrelude
             $helper = '__mir_obj_to_str_arm_' . (string)$arm;
             $helperByOwner[$owner] = $helper;
             $body = $body . "function " . $helper . "(mixed \$v): string {\n"
-                . "  if (\$v instanceof \\" . $cname . ") { return \$v->__toString(); }\n"
+                . "  if (\$v instanceof \\" . $owner . ") { return \$v->__toString(); }\n"
                 . "  return '';\n}\n";
             $dispatch = $dispatch . "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
             $arm = $arm + 1;
@@ -437,6 +437,14 @@ trait LowerPrelude
                 while (!$keep && $cur !== "" && isset($this->classTable[$cur])) {
                     $keep = isset($this->walkerReachableClasses[$cur]);
                     $cur = $this->classTable[$cur]->parent;
+                }
+                // The XML prelude is demand-loaded from builtin calls, so its
+                // SimpleXMLElement classes do not appear in the user AST roots.
+                // Keep them as explicit walker roots: magic properties and
+                // ArrayAccess return these objects through erased `mixed` cells.
+                if (!$keep && $this->xmlSrc !== ''
+                    && ($cname === 'SimpleXMLElement' || $cname === 'SimpleXMLIterator')) {
+                    $keep = true;
                 }
                 if (!$keep) { continue; }
             }
@@ -657,6 +665,7 @@ trait LowerPrelude
             $disp = $cd->display();
             $helper = '__mir_export_object_arm_' . (string)$arm;
             $body = $body . "function " . $helper . "(mixed \$v, int \$indent, string \$pad, string \$ipad, string \$lead): string {\n"
+                . "  if (\$v instanceof \\" . $cname . ") {\n"
                 . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
                 $body = $body . "    \$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
@@ -668,7 +677,7 @@ trait LowerPrelude
                     . "    \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
                     . "  }\n";
             }
-            $body = $body . "  return \$out . \$pad . '))';\n}\n";
+            $body = $body . "  return \$out . \$pad . '))';\n  }\n}\n";
             $dispatch = $dispatch . "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead);\n";
             $arm = $arm + 1;
         }
@@ -680,14 +689,6 @@ trait LowerPrelude
             . "    \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n"
             . "  }\n"
             . "  return \$out . \$pad . ')';\n}\n";
-        if ($arm === 1) {
-            $mark = "  switch (__mir_object_class_id(\$v)) {\n";
-            $at = strpos($dispatch, $mark);
-            if ($at !== false) {
-                $prefix = substr($dispatch, 0, $at);
-                return $body . $prefix . "  return __mir_export_object_arm_0(\$v, \$indent, \$pad, \$ipad, \$lead);\n}\n";
-            }
-        }
         return $body . $dispatch;
     }
 
@@ -754,6 +755,8 @@ trait LowerPrelude
             . "  switch (__mir_object_class_id(\$o)) {\n";
         $call = "function __mc_unser_magic(mixed \$o, array \$props): void {\n"
             . "  switch (__mir_object_class_id(\$o)) {\n";
+        $callBody = '';
+        $magicArm = 0;
         $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
@@ -779,10 +782,15 @@ trait LowerPrelude
             if (!$this->declaresMethod($cname, '__unserialize')) { continue; }
             $cd = $this->classTable[$cname];
             $magic = $magic . "    case " . (string)$cd->classId . ": return true;\n";
-            $call = $call . "    case " . (string)$cd->classId . ": \$o->__unserialize(\$props); return;\n";
+            $callHelper = '__mc_unser_magic_arm_' . (string)$magicArm;
+            $call = $call . "    case " . (string)$cd->classId . ": if (\$o instanceof \\" . $cname . ") { " . $callHelper . "(\$o, \$props); } return;\n";
+            $callBody = $callBody . "function " . $callHelper . "(\\" . $cname . " \$o, array \$props): void {\n"
+                . "  \$o->__unserialize(\$props);\n"
+                . "}\n";
+            $magicArm = $magicArm + 1;
         }
         $magic = $magic . "  }\n  return false;\n}\n";
-        $call = $call . "  }\n}\n";
+        $call = $callBody . $call . "  }\n}\n";
         $fill = $fillDispatch . $magic . $call;
         $enum = "function __mc_unser_enum(string \$spec, \\__McUnSt \$st): mixed {\n";
         foreach ($this->enumTable as $ename => $ed) {

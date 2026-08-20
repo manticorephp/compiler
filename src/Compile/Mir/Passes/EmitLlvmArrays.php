@@ -632,6 +632,9 @@ trait EmitLlvmArrays
             $pp = $this->ssa->allocReg();
             $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
             $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetGet', [$keyCell]);
+            // ArrayAccess::offsetGet returns mixed: an erased implementation may hand back a raw object/array.
+            // Probe and box containers before the result enters the cell channel.
+            $out .= $this->boxUnknownShallowIr();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
             $out .= '  br label %' . $endL . "\n";
 
