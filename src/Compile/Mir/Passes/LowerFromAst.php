@@ -174,6 +174,9 @@ final class LowerFromAst implements Pass
      *  copies) passes through.
      *  @var array<string, string> */
     private array $methodOwner = [];
+    /** Resolved method-name return classes. Invalidated when a hoisted class
+     * declaration is added because the global agreement can change. */
+    private array $methodReturnClassCache = [];
 
     /**
      * Namespace of the class / function whose signature or property
@@ -607,6 +610,9 @@ final class LowerFromAst implements Pass
 
     public function run(Module $module): Module
     {
+        // A LowerFromAst instance is normally used once, but keeping this
+        // state local to the run makes repeated invocations deterministic.
+        $this->methodReturnClassCache = [];
         $this->module = $module;
         // Lowering passes such as injectSuperglobals need the target kind
         // before they register globals; a vendor library must import app-owned
@@ -3651,6 +3657,7 @@ final class LowerFromAst implements Pass
         $cname = $this->classDeclName($cdecl);
         if ($cname === '') { return; }
         $this->classDecls[$cname] = $cdecl;
+        $this->methodReturnClassCache = [];
         $this->knownClassNames[$cname] = true;
         $bs = \strrpos($cname, '\\');
         if ($bs !== false && $bs >= 0) {
@@ -4941,25 +4948,36 @@ final class LowerFromAst implements Pass
      */
     private function methodReturnClassByName(string $method): string
     {
+        if (\array_key_exists($method, $this->methodReturnClassCache)) {
+            return $this->methodReturnClassCache[$method];
+        }
         $ret = '';
         foreach ($this->classDecls as $cd) {
             foreach ($this->classDeclMethods($cd) as $m) {
                 if ($this->methodDeclName($m) !== $method) { continue; }
                 $rt = $this->methodDeclReturnType($m);
-                if ($rt === null || $rt === '') { return ''; }
+                if ($rt === null || $rt === '') {
+                    return $this->methodReturnClassCache[$method] = '';
+                }
                 $rt = \ltrim($rt, '\\');
                 if ($rt !== '' && $rt[0] === '?') { $rt = \substr($rt, 1); }
                 // A scalar / pseudo return type is not a class receiver.
                 $low = \strtolower($rt);
                 if ($low === 'int' || $low === 'float' || $low === 'string' || $low === 'bool'
                     || $low === 'array' || $low === 'void' || $low === 'mixed'
-                    || $low === 'self' || $low === 'static' || $low === 'never') { return ''; }
-                if (!isset($this->classDecls[$rt])) { return ''; }
-                if ($ret !== '' && $ret !== $rt) { return ''; }
+                    || $low === 'self' || $low === 'static' || $low === 'never') {
+                    return $this->methodReturnClassCache[$method] = '';
+                }
+                if (!isset($this->classDecls[$rt])) {
+                    return $this->methodReturnClassCache[$method] = '';
+                }
+                if ($ret !== '' && $ret !== $rt) {
+                    return $this->methodReturnClassCache[$method] = '';
+                }
                 $ret = $rt;
             }
         }
-        return $ret;
+        return $this->methodReturnClassCache[$method] = $ret;
     }
 
     private function resolveMethodParams(string $class, string $method): ?array
