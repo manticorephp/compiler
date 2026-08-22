@@ -139,6 +139,25 @@ final class EmitLlvm implements EmitVisitor
     private ?SsaBuilder $ssa = null;
     private int $switchCounter = 0;
 
+    /** Resolution caches are rebuilt for each module emission. T6 megamorphic
+     * dispatch repeatedly asks the same closed-world metadata questions. */
+    /** @var array<string, string> */
+    private array $resolveMethodClassCache = [];
+    /** @var array<string, bool> */
+    private array $classImplementsCache = [];
+    /** @var array<string, bool> */
+    private array $classImplementsIfaceCache = [];
+    /** @var array<string, bool> */
+    private array $classIsACache = [];
+    /** @var array<string, string[]> */
+    private array $selfDescendantsCache = [];
+    /** @var array<string, ClassDef[]> */
+    private array $fixedPropertyHoldersCache = [];
+    /** @var array<string, string[]> */
+    private array $bagClassNamesCache = [];
+    /** @var array<string, array<string, string>> */
+    private array $magicPropertyHoldersCache = [];
+
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
     private string $cellTagReg = '';
 
@@ -430,6 +449,14 @@ final class EmitLlvm implements EmitVisitor
         $this->locals = new LocalSlots();
         $this->lib = new RuntimeLibrary();
         $this->classes = $module->classes;
+        $this->resolveMethodClassCache = [];
+        $this->classImplementsCache = [];
+        $this->classImplementsIfaceCache = [];
+        $this->classIsACache = [];
+        $this->selfDescendantsCache = [];
+        $this->fixedPropertyHoldersCache = [];
+        $this->bagClassNamesCache = [];
+        $this->magicPropertyHoldersCache = [];
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
         $this->enums = $module->enums;
@@ -553,6 +580,13 @@ final class EmitLlvm implements EmitVisitor
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
         foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
+        $streaming = $this->streamIrPath !== '';
+        $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';
+        $bodyBytes = 0;
+        $hoistedAllocas = 0;
+        if ($streaming && !\Manticore\write_file($bodyPath, '')) {
+            throw new \RuntimeException('EmitLlvm: cannot create staged body file ' . $bodyPath);
+        }
         $functionBodies = '';
         // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
         // it is emitted — the last line printed before a codegen SIGSEGV names the
@@ -569,7 +603,18 @@ final class EmitLlvm implements EmitVisitor
             if (\Compile\Stats::$on && \strlen($body) >= $fatFn) {
                 \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
             }
-            $functionBodies .= $body;
+            if ($streaming) {
+                $h = new \Compile\Mir\HoistAllocas();
+                $body = $h->run($body);
+                $hoistedAllocas += $h->moved;
+                $nBody = \strlen($body);
+                if (!\Manticore\append_file_bytes($bodyPath, $body)) {
+                    throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
+                }
+                $bodyBytes += $nBody;
+            } else {
+                $functionBodies .= $body;
+            }
             // This function's MIR is spent: its text is in $functionBodies and
             // nothing below reads a body again — not the preamble, not
             // HoistAllocas or PruneIr (both run on the TEXT), not the driver,
@@ -583,12 +628,24 @@ final class EmitLlvm implements EmitVisitor
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
-        $functionBodies .= $this->emitClosureDropFns();
+        $extraBodies = $this->emitClosureDropFns();
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
-        if ($this->needsObjectVarsFn) { $functionBodies .= $this->emitObjectVarsFn(); }
-        if ($this->needsInclResolveFn) { $functionBodies .= $this->emitInclResolveFn(); }
-        \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
+        if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
+        if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
+        if ($streaming) {
+            $h = new \Compile\Mir\HoistAllocas();
+            $extraBodies = $h->run($extraBodies);
+            $hoistedAllocas += $h->moved;
+            if (!\Manticore\append_file_bytes($bodyPath, $extraBodies)) {
+                throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
+            }
+            $bodyBytes += \strlen($extraBodies);
+            \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
+        } else {
+            $functionBodies .= $extraBodies;
+            \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
+        }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
         // is linked against the prebuilt `stdlib.o` — both objects carry the
@@ -599,6 +656,23 @@ final class EmitLlvm implements EmitVisitor
         $preamble = $this->linkonceRuntime($this->emitPreamble());
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
+        if ($streaming) {
+            if (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
+                || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
+                throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+            }
+            if (\Compile\Debug::$framePointers
+                && !\Manticore\append_file_bytes($this->streamIrPath,
+                    "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n")) {
+                throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
+            }
+            \Manticore\system('rm -f ' . $bodyPath);
+            \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
+            \Compile\Stats::line('IR: staged at ' . $this->streamIrPath . ' ('
+                . (string)(\strlen($preamble) + $bodyBytes) . ' bytes)');
+            return "\x1eMANTICORE_STAGED_IR\n" . $this->streamIrPath . "\n"
+                . (string)(\strlen($preamble) + $bodyBytes);
+        }
         $ir = $preamble . $functionBodies;
         // Expression temporaries are emitted where the expression sits, so a
         // loop body's `alloca` runs once per iteration and the stack it takes is
@@ -634,6 +708,20 @@ final class EmitLlvm implements EmitVisitor
             \Compile\Stats::line('  prune IR skipped (MANTICORE_PRUNE_IR=off)');
         }
         return $ir;
+    }
+
+    /** Apply frame-pointer attributes to a streamed chunk without emitting the
+     * module-level attribute group; the group is appended once after all chunks. */
+    private function framePointerChunk(string $ir): string
+    {
+        if (!\Compile\Debug::$framePointers) { return $ir; }
+        $lines = \explode("\n", $ir);
+        foreach ($lines as $i => $l) {
+            if (\substr($l, 0, 7) !== 'define ') { continue; }
+            if (\substr($l, -3) !== ') {') { continue; }
+            $lines[$i] = \substr($l, 0, -2) . '#0 {';
+        }
+        return \implode("\n", $lines);
     }
 
     /**
@@ -1561,18 +1649,26 @@ final class EmitLlvm implements EmitVisitor
      */
     private function classImplements(string $class, string $iface): bool
     {
+        $key = $class . '|' . $iface;
+        if (isset($this->classImplementsCache[$key])) {
+            return $this->classImplementsCache[$key];
+        }
         $seen = [];
         $stack = [$class];
         while ($stack !== []) {
             $c = \array_pop($stack);
             if ($c === '' || isset($seen[$c])) { continue; }
             $seen[$c] = true;
-            if ($c === $iface) { return true; }
+            if ($c === $iface) {
+                $this->classImplementsCache[$key] = true;
+                return true;
+            }
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { continue; }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }
+        $this->classImplementsCache[$key] = false;
         return false;
     }
 
@@ -1871,6 +1967,9 @@ final class EmitLlvm implements EmitVisitor
      */
     /** Out-param reg for {@see emitClassIdMatch}. */
     private string $classIdMatchReg = '';
+
+    /** Optional final path for bounded, disk-backed application emission. */
+    public string $streamIrPath = '';
 
     /**
      * OR-chain of `class_id == id` over $ids; returns the IR, leaves the

@@ -18,10 +18,11 @@ final class FunctionDecl
         public readonly string $name,
         public readonly array $params,
         public readonly ?string $returnType,
-        public readonly Block $body,
+        public ?Block $body,
         public readonly Span $span,
         public readonly bool $returnsByRef = false,
         public readonly ?string $docComment = null,
         public readonly array $attributes = [],
+        public ?LazyBody $lazyBody = null,
     ) {}
 }

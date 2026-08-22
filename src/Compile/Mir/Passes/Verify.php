@@ -41,6 +41,11 @@ final class Verify implements Pass
 
     private string $fnName = '';
 
+    // PHP permits isset($possiblyUndefined) and treats it as false. Keep those
+    // reads out of the verifier's dangling-local set while retaining strict
+    // checking for ordinary LoadLocal uses.
+    private bool $allowUndefinedReads = false;
+
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
@@ -57,6 +62,7 @@ final class Verify implements Pass
         // collects only the USE side.
         $this->defined = \Compile\Mir\DefinedLocals::collect($fn);
         $this->used = [];
+        $this->allowUndefinedReads = false;
         $this->fnName = $fn->name;
         $this->walk($fn->body);
         foreach ($this->used as $name => $unused) {
@@ -122,9 +128,29 @@ final class Verify implements Pass
             return;
         }
 
+        // ── PHP's isset() explicitly probes an optionally undefined local. ──
+        if ($k === Node::KIND_ISSET) {
+            $old = $this->allowUndefinedReads;
+            $this->allowUndefinedReads = true;
+            foreach ($n->targets as $target) { $this->walk($target); }
+            $this->allowUndefinedReads = $old;
+            return;
+        }
+        // A successful isset() condition also guarantees the local in the
+        // then-branch, even when the optimizer removed its null initialization.
+        if ($k === Node::KIND_IF) {
+            $this->walk($n->cond);
+            $old = $this->allowUndefinedReads;
+            if ($n->cond->kind === Node::KIND_ISSET) { $this->allowUndefinedReads = true; }
+            $this->walk($n->then);
+            $this->allowUndefinedReads = $old;
+            if ($n->else !== null) { $this->walk($n->else); }
+            return;
+        }
+
         // ── use site ──
         if ($k === Node::KIND_LOAD_LOCAL) {
-            $this->used[$n->name] = true;
+            if (!$this->allowUndefinedReads) { $this->used[$n->name] = true; }
             return;
         }
 

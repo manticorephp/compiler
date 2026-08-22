@@ -21,6 +21,7 @@ use Parser\Ast\CatchClause;
 use Parser\Ast\ClosureUse;
 use Parser\Ast\ElseIfArm;
 use Parser\Ast\MatchArm;
+use Parser\Ast\LazyBody;
 use Parser\Ast\StaticLocalDecl;
 use Parser\Ast\Stmt;
 use Parser\Ast\SwitchArm;
@@ -50,6 +51,10 @@ final class Parser
     /** @var Token[] */
     private array $tokens = [];
     private int $pos = 0;
+    private string $sourceText = '';
+    /** @var int[] line number (1-based) → byte offset */
+    private array $lineOffsets = [];
+    private bool $lazyBodies = false;
 
     /**
      * Active PHP namespace; '' means the global namespace. Updated as
@@ -104,12 +109,43 @@ final class Parser
      * captured HERE. Empty (stdin, eval-like sources, the prelude blob) leaves both
      * as '', which is also what php reports for code with no file of its own.
      */
-    public static function parseSource(string $source, string $file = ''): Program
-    {
-        $tokens = (new Lexer())->scan($source);
-        $p = new self($tokens);
-        $p->sourceFile = $file;
+    public static function parseSource(
+        string $source,
+        string $file = '',
+        bool $lazyBodies = false,
+    ): Program {
+        // Constructing the parser consumes the lexer array into its filtered
+        // stream. Keep the original token-array temporary out of the
+        // parseProgram() lifetime: on large files it otherwise retains every
+        // token alongside the parser's filtered array and the AST being built.
+        $p = new self((new Lexer())->scan($source), $source, $file, $lazyBodies);
         return $p->parseProgram();
+    }
+
+    /** Materialize one deferred function/method body and release its source copy. */
+    public static function materializeLazyBody(LazyBody $lazy): Block
+    {
+        $raw = substr($lazy->source, $lazy->start, $lazy->end - $lazy->start);
+        $linePad = str_repeat("\n", $lazy->line - 1);
+        $wrapped = $linePad . "<?php function __manticore_lazy_body() " . $raw;
+        try {
+            $p = new self((new Lexer())->scan($wrapped), $wrapped, $lazy->file, false);
+            $p->sourceFile = $lazy->file;
+            $p->currentNamespace = $lazy->namespace;
+            $p->useAliases = $lazy->useAliases;
+            $program = $p->parseProgram();
+            $lazy->source = '';
+            foreach ($program->statements as $stmt) {
+                if ($stmt->kind === 'Function' && $stmt->decl->body !== null) {
+                    return $stmt->decl->body;
+                }
+            }
+            throw new \RuntimeException('manticore: failed to materialize lazy body');
+        } catch (\Throwable $e) {
+            $preview = substr(str_replace(["\n", "\r"], ' ', $raw), 0, 120);
+            throw new \RuntimeException('lazy body ' . $lazy->file . ':' . (string)$lazy->line
+                . ' [' . $preview . ']: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     /**
@@ -132,8 +168,19 @@ final class Parser
     /**
      * @param Token[] $tokens
      */
-    public function __construct(array $tokens)
-    {
+    public function __construct(
+        array $tokens,
+        string $source = '',
+        string $file = '',
+        bool $lazyBodies = false,
+    ) {
+        $this->sourceText = $source;
+        $this->sourceFile = $file;
+        $this->lazyBodies = $lazyBodies;
+        $this->lineOffsets = [0];
+        for ($i = 0; $i < strlen($source); $i = $i + 1) {
+            if ($source[$i] === "\n") { $this->lineOffsets[] = $i + 1; }
+        }
         // Filter out DocComment tokens but remember each one's
         // attachment point — the index of the next non-DocComment
         // token. Subsequent parsing operates on a clean token stream.
@@ -929,8 +976,13 @@ final class Parser
         }
 
         $body = null;
+        $lazyBody = null;
         if ($this->check(TokenKind::OpenBrace)) {
-            $body = $this->parseBlock();
+            if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+                $lazyBody = $this->skipLazyBody();
+            } else {
+                $body = $this->parseBlock();
+            }
         } else {
             $this->expect(TokenKind::Semicolon, "expected ';' on abstract / interface method");
         }
@@ -947,6 +999,7 @@ final class Parser
             $span,
             $returnsByRef,
             $docComment,
+            $lazyBody,
         );
     }
 
@@ -983,7 +1036,13 @@ final class Parser
             $returnType = $this->parseTypeHint();
         }
 
-        $body = $this->parseBlock();
+        $body = null;
+        $lazyBody = null;
+        if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+            $lazyBody = $this->skipLazyBody();
+        } else {
+            $body = $this->parseBlock();
+        }
         // Qualify the function name with the active namespace so it
         // matches the call sites' parseClassName-resolved form.
         $fnName = $nameTok->lexeme;
@@ -999,6 +1058,7 @@ final class Parser
             $returnsByRef,
             $docComment,
             $attrs,
+            $lazyBody,
         );
         return Stmt::function_($decl, $startSpan);
     }
@@ -1155,6 +1215,62 @@ final class Parser
             return $name;
         }
         throw $this->error('expected type name');
+    }
+
+    private function upcomingBlockHasAnonymousClass(): bool
+    {
+        $depth = 0;
+        $previousWasNew = false;
+        $n = count($this->tokens);
+        for ($i = $this->pos; $i < $n; $i = $i + 1) {
+            $tok = $this->tokens[$i];
+            if ($previousWasNew && strtolower($tok->lexeme) === 'class') {
+                return true;
+            }
+            if ($tok->kind === TokenKind::OpenBrace) {
+                $depth = $depth + 1;
+            } elseif ($tok->kind === TokenKind::CloseBrace) {
+                $depth = $depth - 1;
+                if ($depth === 0) { return false; }
+            }
+            $previousWasNew = strtolower($tok->lexeme) === 'new';
+        }
+        return false;
+    }
+
+    private function skipLazyBody(): LazyBody
+    {
+        $open = $this->expect(TokenKind::OpenBrace, "expected '{'");
+        $start = $this->offsetForToken($open);
+        $depth = 1;
+        $end = $start + strlen($open->lexeme);
+        while (!$this->isAtEnd() && $depth > 0) {
+            $tok = $this->advance();
+            if ($tok->kind === TokenKind::OpenBrace) { $depth = $depth + 1; }
+            if ($tok->kind === TokenKind::CloseBrace) {
+                $depth = $depth - 1;
+                if ($depth === 0) {
+                    $end = $this->offsetForToken($tok) + strlen($tok->lexeme);
+                }
+            }
+        }
+        if ($depth !== 0) { throw $this->error("expected '}'"); }
+        return new LazyBody(
+            $this->sourceText,
+            $start,
+            $end,
+            $open->line,
+            $this->currentNamespace,
+            $this->useAliases,
+            $this->sourceFile,
+        );
+    }
+
+    private function offsetForToken(Token $tok): int
+    {
+        $line = $tok->line - 1;
+        $base = $this->lineOffsets[$line] ?? 0;
+        return $base + $tok->column - 1;
     }
 
     private function parseBlock(): Block

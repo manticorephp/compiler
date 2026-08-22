@@ -23,10 +23,11 @@ final class MethodDecl
         public readonly bool $isAbstract,
         public readonly array $params,
         public readonly ?string $returnType,
-        public readonly ?Block $body,
+        public ?Block $body,
         public readonly array $attributes,
         public readonly Span $span,
         public readonly bool $returnsByRef = false,
         public readonly ?string $docComment = null,
+        public ?LazyBody $lazyBody = null,
     ) {}
 }

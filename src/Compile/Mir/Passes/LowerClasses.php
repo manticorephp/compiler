@@ -1036,11 +1036,13 @@ trait LowerClasses
                 $a->alias, $src->visibility, $src->isStatic, $src->isFinal, $src->isAbstract,
                 $src->params, $src->returnType, $src->body, $src->attributes, $src->span,
                 $src->returnsByRef, $src->docComment,
+                $src->lazyBody === null ? null : clone $src->lazyBody,
             );
         }
         $sawCtor = false;
         $isTypeDefDecl = $this->isTypeDef($decl->name);
         foreach ($methods as $m) {
+            $this->materializeMethodBody($m);
             if ($m->body === null) { continue; }
             // A `#[TypeDef]`'s constructor is Zend-only glue: it exists so `new C($x)`
             // builds a real object when `php` runs the same source. The compiler never
@@ -1180,7 +1182,20 @@ trait LowerClasses
     }
 
     /** Typed read of a method's body (T5). */
-    private function methodDeclBody(\Parser\Ast\MethodDecl $m): ?\Parser\Ast\Block { return $m->body; }
+    private function materializeMethodBody(\Parser\Ast\MethodDecl $m): void
+    {
+        if ($m->body === null && $m->lazyBody !== null) {
+            $lazy = $m->lazyBody;
+            $m->body = \Parser\Parser::materializeLazyBody($lazy);
+            $m->lazyBody = null;
+        }
+    }
+
+    private function methodDeclBody(\Parser\Ast\MethodDecl $m): ?\Parser\Ast\Block
+    {
+        $this->materializeMethodBody($m);
+        return $m->body;
+    }
 
     /**
      * Resolve `Class::CONST` to its initializer expression, walking the

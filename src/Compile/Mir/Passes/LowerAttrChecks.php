@@ -800,7 +800,13 @@ trait LowerAttrChecks
     private function callExprArgs(\Parser\Ast\CallExpr $c): array { return $c->args; }
     private function namedArgName(\Parser\Ast\NamedArg $a): string { return $a->name; }
     private function namedArgValue(\Parser\Ast\NamedArg $a): \Parser\Ast\Expr { return $a->value; }
-    private function methodDeclBodyIsNull(\Parser\Ast\MethodDecl $m): bool { return $m->body === null; }
+    private function methodDeclBodyIsNull(\Parser\Ast\MethodDecl $m): bool
+    {
+        // A deferred concrete body is semantically present. Do not materialize it
+        // during declaration diagnostics: doing so would recreate every method
+        // AST before the lowering loop and defeat lazy body ownership.
+        return $m->body === null && $m->lazyBody === null;
+    }
     /** @return \Parser\Ast\AttributeNode[] */
     private function enumCaseAttrs(\Parser\Ast\EnumCase $c): array { return $c->attributes; }
     private function enumCaseSpan(\Parser\Ast\EnumCase $c): ?\Parser\Ast\Span { return $c->span; }

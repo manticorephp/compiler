@@ -866,6 +866,40 @@ function write_file(string $path, string $bytes): bool {
     return $w === $n;
 }
 
+/** Append one already-materialized chunk without reopening the whole output. */
+function append_file_bytes(string $path, string $bytes): bool {
+    $fp = fopen($path, "ab");
+    if ($fp === null) { return false; }
+    $n = \strlen($bytes);
+    $w = fwrite($bytes, 1, $n, $fp);
+    fclose($fp);
+    return $w === $n;
+}
+
+/** Copy a staged file in bounded chunks; never materialize the source file. */
+function append_file_path(string $src, string $dst): bool {
+    if (\class_exists('FFI')) {
+        $bytes = @\file_get_contents($src);
+        if ($bytes === false) { return false; }
+        return @\file_put_contents($dst, $bytes, \FILE_APPEND) !== false;
+    }
+    $in = fopen($src, "rb");
+    if ($in === null) { return false; }
+    $out = fopen($dst, "ab");
+    if ($out === null) { fclose($in); return false; }
+    $buf = malloc(1048576);
+    if ($buf === null) { fclose($in); fclose($out); return false; }
+    $ok = true;
+    while (true) {
+        $n = fread($buf, 1, 1048576, $in);
+        if ($n <= 0) { break; }
+        if (fwrite_buf($buf, 1, $n, $out) !== $n) { $ok = false; break; }
+    }
+    fclose($in);
+    fclose($out);
+    return $ok;
+}
+
 /**
  * `MANTICORE_DUMP_SOURCES=<path>` — write the compile unit's RESOLVED file list
  * and stop being the only thing that knows it.
@@ -2061,7 +2095,7 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
  * @param string[] $sources
  * @param string[] $linkObjs
  */
-function build_compile_module(array $sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false, array $paths = []): int
+function build_compile_module(array &$sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false, array $paths = []): int
 {
     CompileArgs::$emitLibrary = $emitLibrary;
     // Ensure the output directory exists — a fresh checkout has no `lib/` (it is
@@ -2080,6 +2114,12 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
             return 65;
         }
     }
+    $keep = CompileArgs::$keepIr;
+    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
+    $llPath = $base . ".ll";
+    $streamMode = \getenv('MANTICORE_STREAM_IR');
+    $streamIr = $streamMode !== false && $streamMode !== ''
+        && $streamMode !== '0' && $streamMode !== 'off';
     $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
     /** @var string[] $undefTraps */
@@ -2089,6 +2129,7 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
+        if ($streamIr) { $emit->streamIrPath = $llPath; }
         $ir = $emit->emit($module);
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
@@ -2120,21 +2161,17 @@ function build_compile_module(array $sources, string $output, bool $emitLibrary,
             return 65;
         }
     }
-    // Staging path for the IR and the intermediate object. Under --keep-ir they
-    // sit next to the target (stable, one per target, and not swept from /tmp);
-    // otherwise a pid-derived /tmp base, removed once the target links. The
-    // staged files are deliberately LEFT BEHIND on failure — they are the only
-    // record of what the compiler emitted for a build that did not finish.
-    $keep = CompileArgs::$keepIr;
-    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
-    $llPath = $base . ".ll";
+    // The staging path was selected before lowering/emission so streamed LLVM
+    // can be written directly to the final .ll path. Under --keep-ir it sits next
+    // to the target; otherwise it is pid-derived and removed after a successful
+    // link. Staged files are deliberately left behind on failure.
     // Libraries keep one public `.o`/`.sig` pair. By default this remains the
     // historical single clang translation unit. When MANTICORE_SPLIT_JOBS is
     // explicitly set, split the IR into relocatable parts and merge them with
     // clang -r. This preserves the library artifact contract while avoiding
     // Clang's source-location ceiling on large vendor modules.
     if ($emitLibrary) {
-        if ($keep && !write_file($llPath, with_frame_pointers($ir))) {
+        if ($keep && !$streamIr && !write_file($llPath, with_frame_pointers($ir))) {
             dprint("build: cannot write " . $llPath); return 73;
         }
         if ($keep) { dprint("build: kept IR " . $llPath); }
@@ -2536,8 +2573,11 @@ function cmd_build(array $args): int
             dprint("build: cache hit application " . $name);
             $rc = 0;
         } else {
+            // lower_module releases raw source strings through the reference;
+            // retain the cache identity before that intentional mutation.
+            $cacheKey = build_cache_key($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib);
             $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
-            if ($rc === 0) { build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib); }
+            if ($rc === 0) { build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $cacheKey); }
         }
         if ($rc !== 0) { return $rc; }
     }
@@ -2622,8 +2662,11 @@ function build_manifest_libraries(array $libs, bool $appsOnly): int
             dprint("build: cache hit library " . $name);
             $rc = 0;
         } else {
+            // Preserve the cache identity before lower_module releases source
+            // contents through its reference parameter.
+            $cacheKey = build_cache_key($sources, $paths, $output, true, [], "", false);
             $rc = build_compile_module($sources, $output, true, [], "", false, $paths);
-            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", false); }
+            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", false, $cacheKey); }
         }
         CompileArgs::$exportTypes = true;
         if ($rc !== 0) { return $rc; }
@@ -3020,7 +3063,7 @@ function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $la
     return $s;
 }
 
-function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
+function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module {
     $stmts = [];
     $aliases = [];
     $docs = [];
@@ -3048,17 +3091,49 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     $lastIdx = \count($sources) - 1;
     /** @var array<string, string> resolved path → value-slot global name */
     $includeSlots = [];
+    // Compute all source-wide lexical metadata before releasing raw source
+    // strings during the parse loop. lower_module receives a copy-on-write
+    // source array, so clearing an element releases its bytes here without
+    // changing cmd_build's inputs or the build-cache key.
+    $statT = \Compile\Stats::now();
+    $demand = new \Compile\Mir\PreludeDemand($sources);
+    \Compile\Stats::step('prelude-demand (re-lex)', $statT, -1, -1);
+    $statT = \Compile\Stats::now();
+    $ownFns = [];
+    $walkerRoots = [];
+    $walkerDynamic = false;
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
             // parse time — statements are flattened across every file right below,
             // which loses the per-file identity for good.
-            $program = Parser::parseSource($source, __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : ''));
+            $program = Parser::parseSource(
+                $source,
+                __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : ''),
+                true,
+            );
         } catch (\Throwable $e) {
             $where = isset($paths[$i]) ? $paths[$i] : "<source>";
             dprint($where . ": parse failed: " . $e->getMessage());
             return null;
         }
+        foreach (\Compile\Mir\PreludeDemand::definedFunctions($source) as $fn) {
+            $ownFns[$fn] = true;
+        }
+        if (preg_match("/\\bnew\\s+\\$/", $source)
+            || preg_match("/\\bunserialize\\s*\\(/", $source)
+            || preg_match("/ReflectionClass|class_alias|class_exists|interface_exists|trait_exists|enum_exists/", $source)) {
+            $walkerDynamic = true;
+        }
+        preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/", $source, $m1);
+        preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m2);
+        preg_match_all("/\\b([A-Za-z_][A-Za-z0-9_\\\\]*)::[A-Za-z_][A-Za-z0-9_]*/", $source, $m3);
+        foreach ([$m1[1], $m2[1], $m3[1]] as $group) {
+            foreach ($group as $root) { $walkerRoots[$root] = true; }
+        }
+        // The AST now owns everything needed from this raw source. Release the
+        // string from this local copy before the merged AST grows further.
+        $sources[$i] = '';
         $isEntry = $i === $lastIdx;
         $incSlot = __mc_include_slot(isset($paths[$i]) ? $paths[$i] : '', $i);
         $incAbs = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
@@ -3184,14 +3259,6 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         foreach ($program->docComments as $d) { $docs[] = $d; }
     }
     \Compile\Stats::step('parse', $statT, \count($stmts), -1);
-    $statT = \Compile\Stats::now();
-    // What the program DEMANDS of the prelude, asked of the tokens. A substring
-    // gate cannot tell a call from a mention, and this compiler is made of the
-    // names it implements — `var_dump(` in a doc comment used to pull the whole
-    // var_dump runtime (per-class __mir_dump_object, ~58k IR lines) into the
-    // compiler's own binary. See Compile\Mir\PreludeDemand.
-    $demand = new \Compile\Mir\PreludeDemand($sources);
-    \Compile\Stats::step('prelude-demand (re-lex)', $statT, -1, -1);
 
     // The on-disk prelude sources. Reading them goes through the libc fopen
     // binding (a throwing stub under the Zend cold-seed), so guard: an
@@ -3355,10 +3422,6 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // two definitions of one symbol, which fails in clang with no useful
     // diagnostic. Bowing out is the readable answer.
     $sapiFns = \Compile\Mir\PreludeDemand::definedFunctions($sapiSrc);
-    $ownFns = [];
-    foreach ($sources as $usrc) {
-        foreach (\Compile\Mir\PreludeDemand::definedFunctions($usrc) as $fn) { $ownFns[$fn] = true; }
-    }
     $sapiClash = false;
     foreach ($sapiFns as $fn) { if (isset($ownFns[$fn])) { $sapiClash = true; } }
     $useSapi = !$sapiClash && $demand->callsAny($sapiFns);
@@ -3583,6 +3646,10 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
     // own `function getTrace(…)` definitions.
     $useBacktrace = $demand->callsAnyMethod(['getTrace', 'getTraceAsString', 'getLine', 'getFile'])
         || $demand->calls('debug_backtrace');
+    // PreludeDemand has scanned every input source and is no longer needed after
+    // the gates above. Its release drops the token-derived maps and, critically,
+    // the full source-array ownership it retained during the scan.
+    $demand = null;
 
     // The Throwable hierarchy is unconditional, and it calls __mir_bt_frames —
     // supplied either by the real frame builder or by the stub, never both.
@@ -3677,19 +3744,6 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $module->sourceFile = CompileArgs::$files[0] ?? '';
         $lower = new \Compile\Mir\Passes\LowerFromAst($program);
         $lower->walkerReachabilityKnown = true;
-        $walkerRoots = [];
-        $walkerDynamic = false;
-        foreach ($sources as $src) {
-            if (preg_match("/\\bnew\\s+\\$/", $src) || preg_match("/\\bunserialize\\s*\\(/", $src) || preg_match("/ReflectionClass|class_alias|class_exists|interface_exists|trait_exists|enum_exists/", $src)) {
-                $walkerDynamic = true;
-            }
-            preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/", $src, $m1);
-            preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $src, $m2);
-            preg_match_all("/\\b([A-Za-z_][A-Za-z0-9_\\\\]*)::[A-Za-z_][A-Za-z0-9_]*/", $src, $m3);
-            foreach ([$m1[1], $m2[1], $m3[1]] as $group) {
-                foreach ($group as $root) { $walkerRoots[$root] = true; }
-            }
-        }
         if ($walkerDynamic) { $lower->walkerReachabilityKnown = false; }
         else { foreach ($walkerRoots as $root => $_) { $lower->walkerReachableClasses[$root] = true; } }
         $lower->includeVarDump = $useVarDump;
@@ -3786,14 +3840,20 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
         \Compile\Stats::step('ConstFold', $statT, \count($module->functions), -1);
+        // ConstFold keeps per-function work state; no result is needed after run.
+        $fold = null;
         $statT = \Compile\Stats::now();
         $dse = new \Compile\Mir\Passes\DeadStore();
         $module = $dse->run($module);
         \Compile\Stats::step('DeadStore', $statT, \count($module->functions), -1);
+        // DeadStore's used-local map is only needed during this pass.
+        $dse = null;
         $statT = \Compile\Stats::now();
         $infer = new \Compile\Mir\Passes\InferTypes();
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
+        // InferTypes owns several module-wide maps; retain only annotations on Module.
+        $infer = null;
         // Define the locals whose only definition is a by-ref ARGUMENT position
         // (php's out-parameter spelling). Runs here because a MethodCall_
         // receiver has no class before inference, and because InferTypes #2
@@ -3819,6 +3879,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         );
         $module = $infer2->run($module);
         \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
+        $infer2 = null;
         // Eliminate the boxed-cell closure ABI where it's avoidable: inline
         // captureless single-expr arrow closures at known invoke sites, and
         // fuse array_map/array_filter/array_reduce over a concrete array with a
@@ -3828,6 +3889,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $inlineCl = new \Compile\Mir\Passes\InlineClosures();
         $module = $inlineCl->run($module);
         \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
+        $inlineCl = null;
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
@@ -3838,6 +3900,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $mono = new \Compile\Mir\Passes\Monomorphize();
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
+        $mono = null;
         // Fuse implode(explode()) split-join round-trips into one native
         // str_replace (zero intermediate array/segment allocs). After Mono so
         // types + explode arg-counts are settled; before InferEffects so the
@@ -3881,13 +3944,16 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
                 foreach ($tc->errors as $te) { $collect->lines[] = $te; }
             } elseif (\count($tc->errors) > 0) {
                 foreach ($tc->errors as $te) { dprint($te); }
+                $tc = null;
                 return null;
             }
+            $tc = null;
         }
         $statT = \Compile\Stats::now();
         $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
+        $narrow = null;
         // The `#[TypeDef]` soundness gate: an erased value must never reach a
         // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a
         // `mixed` slot). Runs once types are final and before any memory pass —
@@ -3900,10 +3966,12 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         \Compile\Stats::step('CheckTypeDefs', $statT, \count($module->functions), -1);
         if ($collect !== null) {
             foreach ($checkTypeDefs->errors as $te) { $collect->lines[] = $te; }
+            $checkTypeDefs = null;
             // Analysis needs nothing past the type checks; the memory passes are
             // codegen-only and can crash on the very unsoundness just collected.
             return $module;
         }
+        $checkTypeDefs = null;
         // `$s[$i]` mints a fresh 1-char string — a malloc per character read.
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
@@ -3930,6 +3998,7 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
             dprint('reflect: ' . (string)\count($rnames) . ' class(es) carry metadata: '
                 . \implode(', ', $rnames));
         }
+        $refl = null;
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         \Compile\Stats::step('DemoteCharLocals', $statT, -1, -1);
@@ -3937,22 +4006,27 @@ function lower_module(array $sources, ?\Analyze\MirDiags $collect = null, array 
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
         \Compile\Stats::step('InferEffects', $statT, -1, -1);
+        $effects = null;
         $statT = \Compile\Stats::now();
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
         $module = $allocKind->run($module);
         \Compile\Stats::step('InferAllocKind', $statT, -1, -1);
+        $allocKind = null;
         $statT = \Compile\Stats::now();
         $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
         $module = $memMode->run($module);
         \Compile\Stats::step('ApplyMemoryMode', $statT, -1, -1);
+        $memMode = null;
         $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
         $module = $memOps->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
+        $memOps = null;
         $statT = \Compile\Stats::now();
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
+        $verify = null;
         if ($analysisContext !== null) {
             $finalScope = $analysisContext->scope();
             \Compile\Stats::line('deps-final: changes=' . (string)\count($analysisContext->changes->functions)
@@ -4446,12 +4520,13 @@ function build_cache_hit(array $sources, array $paths, string $output, bool $emi
 }
 
 function build_cache_store(array $sources, array $paths, string $output, bool $emitLibrary,
-    array $linkObjs, string $linkFlags, bool $withStdlib): void
+    array $linkObjs, string $linkFlags, bool $withStdlib, string $precomputedKey = ''): void
 {
     $dir = build_cache_dir();
     if ($dir === '') { return; }
     if (!file_exists($dir)) { @mkdir($dir, 0777, true); }
     $stampPath = build_cache_stamp_path($output);
-    write_file($stampPath, build_cache_key($sources, $paths, $output, $emitLibrary,
-        $linkObjs, $linkFlags, $withStdlib));
+    write_file($stampPath, $precomputedKey !== '' ? $precomputedKey
+        : build_cache_key($sources, $paths, $output, $emitLibrary,
+            $linkObjs, $linkFlags, $withStdlib));
 }

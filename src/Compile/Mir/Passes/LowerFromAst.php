@@ -169,6 +169,10 @@ final class LowerFromAst implements Pass
      *  @var array<string, \Parser\Ast\ClassDecl> */
     private array $reifyMethodQueue = [];
 
+    /** Remaining ordinary class consumers for each trait's method bodies. */
+    private array $traitBodyUsers = [];
+    private bool $traitBodyUsersReady = false;
+
     /** Lowered method function name → the class whose body it is. Set in
      *  {@see lowerMethodFn}, the funnel every method (incl. the late-static-bound
      *  copies) passes through.
@@ -1190,6 +1194,9 @@ final class LowerFromAst implements Pass
                 if ($dk === 'class' || $dk === 'enum') {
                     $before = \count($module->functions);
                     $this->lowerClassMethods($stmt->decl, $module);
+                    $this->releaseLoweredMethodBodies($stmt->decl);
+                    $this->releaseConsumedTraitBodies($stmt->decl);
+                    $this->releaseLoweredClassMetadata($stmt->decl);
                     if ($isPrelude) {
                         $after = \count($module->functions);
                         for ($k = $before; $k < $after; $k = $k + 1) {
@@ -1225,6 +1232,8 @@ final class LowerFromAst implements Pass
         // The class table is now complete, so descendant sets are known —
         // materialise the late-static-binding specialisations.
         $this->emitLsbSpecializations($module);
+        $this->releaseAllTraitBodies();
+        $this->releaseAllClassMetadata();
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
         $mainStmts = $this->injectShutdownDrain($mainStmts);
@@ -1275,7 +1284,117 @@ final class LowerFromAst implements Pass
     }
 
     /**
-     * The names a dynamic `function_exists($v)` must answer true for.
+     * Drop method-body AST nodes after their ordinary lowering owner is done.
+     * Generic origins and methods queued for late-static specialisation retain
+     * their bodies because a later lowering pass still needs them. Constructors
+     * also remain available to inheritedCtorDecl() for descendant setup.
+     */
+    /** Drop class-local AST metadata after its class body has been lowered. */
+    private function releaseLoweredClassMetadata(\Parser\Ast\ClassDecl $decl): void
+    {
+        if (($decl->kind ?? 'class') !== 'class'
+            && ($decl->kind ?? 'class') !== 'enum') { return; }
+        if ($this->classTypeParams($decl->name) !== []
+            || isset($this->reifyOrigin[$decl->name])) { return; }
+        $decl->attributes = [];
+        $decl->cases = [];
+        $decl->traitAdaptations = [];
+    }
+    /** Drop declaration metadata no longer read after all specialisations. */
+    private function releaseAllClassMetadata(): void
+    {
+        foreach ($this->classDecls as $decl) {
+            if ($this->classTypeParams($decl->name) !== []
+                || isset($this->reifyOrigin[$decl->name])) { continue; }
+            $decl->properties = [];
+            $decl->attributes = [];
+            $decl->cases = [];
+            $decl->consts = [];
+            $decl->uses = [];
+            $decl->traitAdaptations = [];
+            $decl->useDocs = [];
+        }
+    }
+    private function releaseLoweredMethodBodies(\Parser\Ast\ClassDecl $decl): void
+    {
+        if (($decl->kind ?? 'class') !== 'class') { return; }
+        if ($this->classTypeParams($decl->name) !== []) { return; }
+        foreach ($decl->methods as $method) {
+            if ($method->body === null || $method->name === '__construct') {
+                continue;
+            }
+            $pending = false;
+            foreach ($this->lsbPending as $wait) {
+                if ($wait->decl === $decl && $wait->method === $method) {
+                    $pending = true;
+                    break;
+                }
+            }
+            if (!$pending) { $method->body = null; }
+        }
+    }
+
+    /**
+     * Release trait method bodies once every ordinary class that consumes the
+     * trait has been lowered. Generic traits remain owned by the reification
+     * path; LSB-pending methods remain owned by lsbPending until specialization.
+     */
+    private function releaseConsumedTraitBodies(\Parser\Ast\ClassDecl $decl): void
+    {
+        if (!$this->traitBodyUsersReady) {
+            foreach ($this->classDecls as $owner) {
+                if (($owner->kind ?? 'class') !== 'class') { continue; }
+                $seen = [];
+                foreach ($this->usedTraitsFlat($owner) as $traitName) {
+                    $traitName = \ltrim($traitName, '\\');
+                    if ($traitName === '' || isset($seen[$traitName])) { continue; }
+                    $seen[$traitName] = true;
+                    $this->traitBodyUsers[$traitName] =
+                        ($this->traitBodyUsers[$traitName] ?? 0) + 1;
+                }
+            }
+            $this->traitBodyUsersReady = true;
+        }
+        $seen = [];
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $traitName = \ltrim($traitName, '\\');
+            if ($traitName === '' || isset($seen[$traitName])) { continue; }
+            $seen[$traitName] = true;
+            $remaining = ($this->traitBodyUsers[$traitName] ?? 0) - 1;
+            $this->traitBodyUsers[$traitName] = $remaining;
+            if ($remaining === 0) {
+                $this->releaseTraitBodies($traitName);
+            }
+        }
+    }
+
+    /** Release all non-generic, non-pending bodies owned by one trait. */
+    private function releaseTraitBodies(string $traitName): void
+    {
+        $decl = $this->traitTable[$traitName] ?? null;
+        if ($decl === null || $this->docTemplates($decl->docComment) !== []) {
+            return;
+        }
+        foreach ($decl->methods as $method) {
+            if ($method->body === null) { continue; }
+            $pending = false;
+            foreach ($this->lsbPending as $wait) {
+                if ($wait->method === $method) { $pending = true; break; }
+            }
+            if (!$pending) { $method->body = null; }
+        }
+    }
+
+    /** Release any trait bodies still retained after LSB draining. */
+    private function releaseAllTraitBodies(): void
+    {
+        foreach ($this->traitTable as $traitName => $_) {
+            $this->releaseTraitBodies($traitName);
+        }
+    }
+
+    /**
+     * The names a dynamic `function_exists`($v) must answer true for.
      *
      * Every candidate is run through {@see functionIsKnown} — the same
      * predicate the literal fold uses — so the two forms cannot give different

@@ -91,6 +91,11 @@ trait LowerFns
 {
     private function lowerFunction(\Parser\Ast\FunctionDecl $decl): FunctionDef
     {
+        if ($decl->body === null && $decl->lazyBody !== null) {
+            $lazy = $decl->lazyBody;
+            $decl->body = \Parser\Parser::materializeLazyBody($lazy);
+            $decl->lazyBody = null;
+        }
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->constCallables = [];
         $this->setCurrentLowerParams($decl->params);
@@ -184,6 +189,12 @@ trait LowerFns
                 : $this->ffiCType($decl->returnType);
             $fn->ffiRetUnsigned = $retLlvm !== ''
                 && \Compile\Mir\FfiCTypes::isUnsigned($retTok);
+            // The declaration table keeps this object for call-site metadata
+            // (parameters/defaults), but no later lowering path needs the
+            // already-consumed AST body. Release it before returning so large
+            // free-function files do not remain rooted through fnDecls.
+            $decl->body = null;
+
             return $fn;
         }
         $savedSawYield = $this->sawYield;
@@ -219,6 +230,10 @@ trait LowerFns
             $elem = $declared->isGenerator() ? $declared->element : null;
             $fn->returnType = Type::generator($elem);
         }
+        // fnDecls remains available for names, parameter metadata and default
+        // argument filling; the lowered body itself is no longer needed.
+        $decl->body = null;
+
         return $fn;
     }
 

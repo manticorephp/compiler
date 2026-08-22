@@ -798,15 +798,40 @@ trait EmitLlvmObjects
      * Every arm yields a tagged cell so the erased-type consumer (echo /
      * var_dump / arithmetic) dispatches on the runtime tag.
      */
+    /** Fixed property holders are module metadata, so compute them once per
+     * property name instead of rescanning every class at every erased read. */
+    private function fixedPropertyHolders(string $prop): array
+    {
+        if (isset($this->fixedPropertyHoldersCache[$prop])) {
+            return $this->fixedPropertyHoldersCache[$prop];
+        }
+        $fixed = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+        }
+        $this->fixedPropertyHoldersCache[$prop] = $fixed;
+        return $fixed;
+    }
+
+    /** Names of classes with dynamic-property bags, cached once per module. */
+    private function bagClassNames(): array
+    {
+        if (isset($this->bagClassNamesCache['*'])) {
+            return $this->bagClassNamesCache['*'];
+        }
+        $names = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->usesBag()) { $names[] = $cd->name; }
+        }
+        $this->bagClassNamesCache['*'] = $names;
+        return $names;
+    }
+
     private function emitCellPropertyRead(PropertyAccess_ $pa): string
     {
         $prop = $pa->property;
-        $fixed = [];
-        $hasBag = false;
-        foreach ($this->classes as $cd) {
-            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
-            if ($cd->usesBag()) { $hasBag = true; }
-        }
+        $fixed = $this->fixedPropertyHolders($prop);
+        $hasBag = $this->bagClassNames() !== [];
         $out = $this->emitNode($pa->object);
         $out .= $this->cellToPtr();
         $objPtr = $this->lastValue;
@@ -941,6 +966,10 @@ trait EmitLlvmObjects
      */
     private function magicPropHolders(string $prop, string $method): array
     {
+        $key = $prop . '|' . $method;
+        if (isset($this->magicPropertyHoldersCache[$key])) {
+            return $this->magicPropertyHoldersCache[$key];
+        }
         $holders = [];
         foreach ($this->classes as $cd) {
             if ($cd->propertyOffset($prop) >= 0) { continue; }
@@ -950,6 +979,7 @@ trait EmitLlvmObjects
             if ($decl === '') { continue; }
             $holders[$cd->name] = $decl;
         }
+        $this->magicPropertyHoldersCache[$key] = $holders;
         return $holders;
     }
 
@@ -1013,8 +1043,8 @@ trait EmitLlvmObjects
     private function emitBagReadByClassId(PropertyAccess_ $pa, string $objPtr): string
     {
         $bagCds = [];
-        foreach ($this->classes as $cd) {
-            if ($cd->usesBag()) { $bagCds[] = $cd; }
+        foreach ($this->bagClassNames() as $name) {
+            if (isset($this->classes[$name])) { $bagCds[] = $this->classes[$name]; }
         }
         $this->rt->needsTagged = true;
         if ($bagCds === []) {
@@ -1094,10 +1124,7 @@ trait EmitLlvmObjects
     private function emitRawPropByClassId(PropertyAccess_ $pa): string
     {
         $prop = $pa->property;
-        $fixed = [];
-        foreach ($this->classes as $cd) {
-            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
-        }
+        $fixed = $this->fixedPropertyHolders($prop);
         // Property overloading on an ERASED receiver — see magicPropHolders.
         $magic = $this->magicPropHolders($prop, '__get');
         $out = $this->emitNode($pa->object);
@@ -3799,6 +3826,9 @@ trait EmitLlvmObjects
     private function selfAndDescendants(string $class): array
     {
         if ($class === '') { return []; }
+        if (isset($this->selfDescendantsCache[$class])) {
+            return $this->selfDescendantsCache[$class];
+        }
         $result = [$class];
         // Iterate values + use `$cd->name` (self-host assoc-key foreach
         // yields i64, which would push garbage descendant names).
@@ -3819,6 +3849,7 @@ trait EmitLlvmObjects
                 $c = $pc !== null ? $pc->parent : '';
             }
         }
+        $this->selfDescendantsCache[$class] = $result;
         return $result;
     }
 
@@ -4209,13 +4240,24 @@ trait EmitLlvmObjects
 
     private function resolveMethodClass(string $class, string $method): string
     {
+        $key = $class . '|' . $method;
+        if (isset($this->resolveMethodClassCache[$key])) {
+            return $this->resolveMethodClassCache[$key];
+        }
         $c = $class;
         while ($c !== '') {
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { return ''; }
-            if (isset($cd->methodNames[$method])) { return $c; }
+            if ($cd === null) {
+                $this->resolveMethodClassCache[$key] = '';
+                return '';
+            }
+            if (isset($cd->methodNames[$method])) {
+                $this->resolveMethodClassCache[$key] = $c;
+                return $c;
+            }
             $c = $cd->parent;
         }
+        $this->resolveMethodClassCache[$key] = '';
         return '';
     }
 
@@ -4292,6 +4334,15 @@ trait EmitLlvmObjects
             return $this->finishI64($out, $z);
         }
         throw new \RuntimeException('EmitLlvm: unsupported Generator method ' . $m);
+    }
+
+    /** The built-in Generator frame protocol; other method names must use the
+     * ordinary object dispatcher (interfaces may be inferred as Generator-like). */
+    private function isGeneratorProtocolMethod(string $m): bool
+    {
+        return $m === 'current' || $m === 'key' || $m === 'getReturn'
+            || $m === 'rewind' || $m === 'next' || $m === 'send'
+            || $m === 'throw' || $m === 'valid';
     }
 
     /** Resume a generator once iff it is not yet started (state == 0). */
@@ -4387,18 +4438,26 @@ trait EmitLlvmObjects
     /** Whether `$cls` (or an ancestor) implements `$iface`. */
     private function classImplementsIface(string $cls, string $iface): bool
     {
+        $key = $cls . '|' . $iface;
+        if (isset($this->classImplementsIfaceCache[$key])) {
+            return $this->classImplementsIfaceCache[$key];
+        }
         $seen = [];
         $stack = [$cls];
         while ($stack !== []) {
             $c = \ltrim((string)\array_pop($stack), '\\');
             if ($c === '' || isset($seen[$c])) { continue; }
             $seen[$c] = true;
-            if ($c === $iface) { return true; }
+            if ($c === $iface) {
+                $this->classImplementsIfaceCache[$key] = true;
+                return true;
+            }
             if (!isset($this->classes[$c])) { continue; }
             $cd = $this->classes[$c];
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
         }
+        $this->classImplementsIfaceCache[$key] = false;
         return false;
     }
 
@@ -4424,7 +4483,8 @@ trait EmitLlvmObjects
                 new \Compile\Mir\Call($td . '__' . $mc->method, $tdArgs, $n->type),
             );
         }
-        if ($this->isGeneratorType($mc->object->type)) {
+        if ($this->isGeneratorType($mc->object->type)
+            && $this->isGeneratorProtocolMethod($mc->method)) {
             return $this->emitGeneratorMethod($mc);
         }
         // Closure methods. `$fn->bindTo($obj, $scope?)` rebinds `$this`;

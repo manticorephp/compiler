@@ -29,24 +29,24 @@ final class ClassDecl
         public readonly string $name,
         public readonly array $extends,
         public readonly array $implements,
-        public readonly array $attributes,
-        public readonly array $properties,
+        public array $attributes,
+        public array $properties,
         public readonly array $methods,
-        public readonly array $consts,
-        public readonly array $cases,
+        public array $consts,
+        public array $cases,
         public readonly bool $isFinal,
         public readonly bool $isAbstract,
         public readonly bool $isReadonly,
         public readonly ?string $enumBackingType,
         public readonly Span $span,
-        public readonly array $uses = [],
+        public array $uses = [],
         /**
          * Trait `use A, B { … }` conflict-resolution adaptations. The `@var`
          * element type is REQUIRED: without it the bare-`array` element erases,
          * so a lowering read of `$a->kind` lands on a wrong offset (garbage).
          * @var TraitAdaptation[]
          */
-        public readonly array $traitAdaptations = [],
+        public array $traitAdaptations = [],
         /** The docblock preceding the declaration — carries `@template T`. */
         public readonly ?string $docComment = null,
         /**
@@ -54,6 +54,6 @@ final class ClassDecl
          * for a generic trait: `/** @use Items<string> *\/ use Items;`.
          * @var array<string, string>
          */
-        public readonly array $useDocs = [],
+        public array $useDocs = [],
     ) {}
 }
