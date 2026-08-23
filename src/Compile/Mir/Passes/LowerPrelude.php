@@ -112,75 +112,75 @@ trait LowerPrelude
     {
         $src = "<?php\n" . $this->exceptionsSrc . $this->resourceSrc . $this->fiberSrc . $this->backtraceSrc;
         if ($this->includeVarDump) {
-            $src = $src . $this->varDumpSrc;
+            $src .= $this->varDumpSrc;
         }
         if ($this->includeArrayClasses) {
-            $src = $src . $this->arrayClassesSrc;
+            $src .= $this->arrayClassesSrc;
         }
         if ($this->includeArrayFns) {
-            $src = $src . $this->arrayFnsSrc;
+            $src .= $this->arrayFnsSrc;
         }
         if ($this->includeArrayFnsExt) {
-            $src = $src . $this->arrayFnsExtSrc;
+            $src .= $this->arrayFnsExtSrc;
         }
         if ($this->includeCli) {
-            $src = $src . $this->cliSrc;
+            $src .= $this->cliSrc;
         }
         if ($this->includeVarExport) {
-            $src = $src . $this->varExportSrc;
+            $src .= $this->varExportSrc;
         }
         if ($this->includePrintR) {
-            $src = $src . $this->printRSrc;
+            $src .= $this->printRSrc;
         }
         if ($this->includeSerialize) {
-            $src = $src . $this->serializeSrc;
+            $src .= $this->serializeSrc;
         }
         if ($this->includeUnserialize) {
-            $src = $src . $this->unserializeSrc;
+            $src .= $this->unserializeSrc;
         }
         if ($this->includeReflection) {
             // After exceptions.php: ReflectionException extends Exception, and
             // the sources are concatenated then parsed as one unit.
-            $src = $src . $this->reflectionSrc;
+            $src .= $this->reflectionSrc;
         }
         if ($this->includeAttributes) {
             // Depends on nothing (and nothing depends on it) — placed beside
             // reflection because that is what gates it.
-            $src = $src . $this->attributesSrc;
+            $src .= $this->attributesSrc;
         }
         if ($this->includeDateTime) {
             // After exceptions.php (DateMalformedStringException extends
             // Exception, DateError extends Error) and after spl_arrays.php,
             // whose interfaces DatePeriod implements.
-            $src = $src . $this->dateTimeSrc;
+            $src .= $this->dateTimeSrc;
         }
         if ($this->binarySrc !== '') {
-            $src = $src . $this->binarySrc;
+            $src .= $this->binarySrc;
         }
         if ($this->errorsSrc !== '') {
             // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
-            $src = $src . $this->errorsSrc;
+            $src .= $this->errorsSrc;
         }
         if ($this->obSrc !== '') {
             // After errors.php: both are drained from the same atexit family,
             // and __mc_ob_shutdown must run after the shutdown queue it may be
             // buffering the output of.
-            $src = $src . $this->obSrc;
+            $src .= $this->obSrc;
         }
         if ($this->autoloadSrc !== '') {
             // Order-independent — the queue holds callables and calls nothing
             // else in the prelude.
-            $src = $src . $this->autoloadSrc;
+            $src .= $this->autoloadSrc;
         }
         if ($this->sapiSrc !== '') {
             // After exceptions.php (setcookie throws ValueError) and after
             // cli.php, which Main forces on: the request context seeds $_SERVER.
-            $src = $src . $this->sapiSrc;
+            $src .= $this->sapiSrc;
         }
         if ($this->sessionSrc !== '') {
             // LAST: it names __McSapi (sapi.php), __McUnSt (unserialize.php) and
             // the Throwable hierarchy, and Main forces every one of those on.
-            $src = $src . $this->sessionSrc;
+            $src .= $this->sessionSrc;
         }
         if ($this->xmlSrc !== '') {
             // ext/simplexml — global namespace, so it belongs to this blob and
@@ -192,7 +192,7 @@ trait LowerPrelude
             // objects walk off their own layout: xml.php defines
             // SimpleXMLElement before SimpleXMLIterator extends it, and
             // xml_dom.php defines DOMNode before every DOM subclass.
-            $src = $src . $this->xmlSrc . $this->xmlXpathSrc . $this->xmlDomSrc;
+            $src .= $this->xmlSrc . $this->xmlXpathSrc . $this->xmlDomSrc;
         }
         if ($this->curlSrc !== '') {
             // ext/curl — global namespace, so it rides this blob too. After
@@ -202,7 +202,7 @@ trait LowerPrelude
             //
             // ⚠ ORDER IS LOAD-BEARING, same rule as xml above: curl_multi.php
             // names __McCurl and CurlHandle, both defined in curl.php.
-            $src = $src . $this->curlSrc . $this->curlMultiSrc;
+            $src .= $this->curlSrc . $this->curlMultiSrc;
         }
         if ($this->pdoSrc !== '') {
             // ext/pdo — global namespace, so it rides this blob. After
@@ -214,12 +214,12 @@ trait LowerPrelude
             // pdo_sqlite.php implements the __McPdoDrv / __McPdoDrvStmt
             // interfaces pdo.php declares, and a class built before the
             // interface it implements inherits nothing.
-            $src = $src . $this->pdoSrc . $this->pdoSqliteSrc;
+            $src .= $this->pdoSrc . $this->pdoSqliteSrc;
         }
         if ($this->tokenizerSrc !== '') {
             // ext/tokenizer. Core BEFORE api — classes are built in source order
             // and token_get_all() constructs __McTok.
-            $src = $src . $this->tokenizerSrc . $this->tokenizerApiSrc;
+            $src .= $this->tokenizerSrc . $this->tokenizerApiSrc;
         }
         // Belt and braces: the concatenation ALREADY starts with the Throwable
         // prelude's own `<?php`, so this leading tag is redundant today and the
@@ -303,15 +303,15 @@ trait LowerPrelude
             if ($owner === "") { continue; }
             if (isset($helperByOwner[$owner])) {
                 $helper = $helperByOwner[$owner];
-                $dispatch = $dispatch . "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
+                $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
                 continue;
             }
             $helper = '__mir_obj_to_str_arm_' . (string)$arm;
             $helperByOwner[$owner] = $helper;
-            $body = $body . "function " . $helper . "(mixed \$v): string {\n"
+            $body .= "function " . $helper . "(mixed \$v): string {\n"
                 . "  if (\$v instanceof \\" . $owner . ") { return \$v->__toString(); }\n"
                 . "  return '';\n}\n";
-            $dispatch = $dispatch . "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
+            $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
             $arm = $arm + 1;
         }
         if ($arm === 1) {
@@ -349,14 +349,14 @@ trait LowerPrelude
             // `Box__of__float`) — but is still matched by its OWN name, so the
             // props read at the specialized (concrete) types. Depth-sorting puts
             // it before its origin, which is what makes the narrowing land here.
-            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n";
+            $body .= "  if (\$v instanceof \\" . $cname . ") {\n";
             // __debugInfo REPLACES the walk — both the declared slots and the
             // bag, exactly as php does. The count is the returned array's, and
             // its keys are printed as ARRAY keys (an int key is bare), because
             // that array is what php shows, not a property list.
             if ($this->declaresMethod($cname, '__debugInfo')) {
                 $sawDebugInfo = true;
-                $body = $body . "    \$d = \$v->__debugInfo();\n"
+                $body .= "    \$d = \$v->__debugInfo();\n"
                     . "    echo 'object(" . $cd->display() . ")#1 (', (string)count(\$d), \") {\\n\";\n"
                     . "    __mir_dump_debug_body(\$d, \$indent);\n"
                     . "    echo \$pad, \"}\\n\"; return;\n  }\n";
@@ -368,21 +368,21 @@ trait LowerPrelude
                 // entries print after the declared slots. Without this the arm
                 // claimed the object and printed `(0) {}` — the bag walk below is
                 // only reached by a class with NO arm (stdClass).
-                $body = $body . "    \$bag = \\__mir_obj_bag(\$v);\n"
+                $body .= "    \$bag = \\__mir_obj_bag(\$v);\n"
                     . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pc . " + count(\$bag)), \") {\\n\";\n";
             } else {
-                $body = $body . "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+                $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
             }
             foreach ($props as $p) {
-                $body = $body . "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
+                $body .= "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
             }
             if ($cd->usesBag()) {
-                $body = $body . "    foreach (\$bag as \$bk => \$bv) {\n"
+                $body .= "    foreach (\$bag as \$bk => \$bv) {\n"
                     . "      echo \$pad, '  [\"', \$bk, \"\\\"]=>\\n\", \$pad, '  ';\n"
                     . "      __mir_var_dump(\$bv, \$indent + 1);\n"
                     . "    }\n";
             }
-            $body = $body . "    echo \$pad, \"}\\n\"; return;\n  }\n";
+            $body .= "    echo \$pad, \"}\\n\"; return;\n  }\n";
             $ci = $ci + 1;
         }
         $body = $body
@@ -400,7 +400,7 @@ trait LowerPrelude
         // hand __mir_var_dump the raw word. Crossing a `mixed` parameter makes
         // it a cell array by construction — the one shape the walk can read.
         if ($sawDebugInfo) {
-            $body = $body . "function __mir_dump_debug_body(mixed \$d, int \$indent): void {\n"
+            $body .= "function __mir_dump_debug_body(mixed \$d, int \$indent): void {\n"
                 . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
                 . "  foreach (\$d as \$k => \$val) {\n"
                 . "    if (is_int(\$k)) { echo \$pad, '  [', (string)\$k, \"]=>\\n\", \$pad, '  '; }\n"
@@ -500,11 +500,11 @@ trait LowerPrelude
         while ($i < $n) {
             $c = \substr($s, $i, 1);
             $o = \ord($c);
-            if ($o === 0) { $out = $out . '\\000'; }
-            else if ($c === '\\') { $out = $out . '\\\\'; }
-            else if ($c === '"') { $out = $out . '\\"'; }
-            else if ($c === '$') { $out = $out . '\\$'; }
-            else { $out = $out . $c; }
+            if ($o === 0) { $out .= '\\000'; }
+            else if ($c === '\\') { $out .= '\\\\'; }
+            else if ($c === '"') { $out .= '\\"'; }
+            else if ($c === '$') { $out .= '\\$'; }
+            else { $out .= $c; }
             $i = $i + 1;
         }
         return $out;
@@ -575,15 +575,15 @@ trait LowerPrelude
             $entries = '';
             foreach ($props as $p) {
                 $key = $this->serPropKey($cname, $p);
-                $entries = $entries . "      . \"s:" . (string)\strlen($key) . ":\\\"" . $this->dqBody($key)
+                $entries .= "      . \"s:" . (string)\strlen($key) . ":\\\"" . $this->dqBody($key)
                     . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st)\n";
             }
-            $body = $body . "  if (\$v instanceof \\" . $cname . ") {\n";
+            $body .= "  if (\$v instanceof \\" . $cname . ") {\n";
             if ($this->declaresMethod($cname, '__serialize')) {
                 // php 7.4+: __serialize REPLACES the property walk entirely. Its
                 // keys go out verbatim — no visibility mangling — and may be int
                 // or string. The class name is still the object's own.
-                $body = $body . "    \$d = \$v->__serialize();\n"
+                $body .= "    \$d = \$v->__serialize();\n"
                     . "    \$b = '';\n"
                     . "    foreach (\$d as \$k => \$val) {\n"
                     . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
@@ -597,7 +597,7 @@ trait LowerPrelude
                 // #[AllowDynamicProperties]: the declared slots, then the bag.
                 // `__mir_obj_bag($v)` reads the BAG ONLY, which is exactly what is left
                 // to append — and the count cannot be baked in.
-                $body = $body . "    \$b = ''\n" . $entries . "      ;\n"
+                $body .= "    \$b = ''\n" . $entries . "      ;\n"
                     . "    \$cnt = " . (string)\count($props) . ";\n"
                     . "    foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
                     . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
@@ -607,7 +607,7 @@ trait LowerPrelude
                     . "    }\n"
                     . "    return \"" . $this->dqBody($head) . "\" . (string)\$cnt . ':{' . \$b . '}';\n  }\n";
             } else {
-                $body = $body . "    return \"" . $this->dqBody($head . (string)\count($props) . ':{') . "\"\n"
+                $body .= "    return \"" . $this->dqBody($head . (string)\count($props) . ':{') . "\"\n"
                     . $entries . "      . '}';\n  }\n";
             }
         }
@@ -664,21 +664,21 @@ trait LowerPrelude
             $cd = $this->classTable[$cname];
             $disp = $cd->display();
             $helper = '__mir_export_object_arm_' . (string)$arm;
-            $body = $body . "function " . $helper . "(mixed \$v, int \$indent, string \$pad, string \$ipad, string \$lead): string {\n"
+            $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad, string \$ipad, string \$lead): string {\n"
                 . "  if (\$v instanceof \\" . $cname . ") {\n"
                 . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
-                $body = $body . "    \$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
+                $body .= "    \$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
                     . $p . ", \$indent + 2) . \",\\n\";\n";
             }
             if ($cd->usesBag()) {
-                $body = $body . "  foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
+                $body .= "  foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
                     . "    \$ks = is_int(\$bk) ? (string)\$bk : (\"'\" . __mc_var_export_qstr((string)\$bk) . \"'\");\n"
                     . "    \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
                     . "  }\n";
             }
-            $body = $body . "  return \$out . \$pad . '))';\n  }\n}\n";
-            $dispatch = $dispatch . "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead);\n";
+            $body .= "  return \$out . \$pad . '))';\n  }\n}\n";
+            $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead);\n";
             $arm = $arm + 1;
         }
         $dispatch = $dispatch
@@ -699,7 +699,7 @@ trait LowerPrelude
             if ($this->declKind($decl) !== 'enum') { continue; }
             $backing = $this->declEnumBacking($decl);
             $q = $this->dqBody($cname);
-            $src = $src . "  if (\$cls === \"" . $q . "\") { return __mir_to_cell(['backing' => \""
+            $src .= "  if (\$cls === \"" . $q . "\") { return __mir_to_cell(['backing' => \""
                  . $this->dqBody($backing) . "\", 'cases' => \\" . $cname . "::cases()]); }\n";
         }
         return $src . "  return null;\n}\n";
@@ -719,7 +719,7 @@ trait LowerPrelude
         $src = "function __mc_refl_alloc(string \$cls): mixed {\n"
              . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
         foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            $src = $src . "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
+            $src .= "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
                  . $this->dqBody($cname) . "\"); }\n";
         }
         return $src . "  return null;\n}\n";
@@ -736,10 +736,10 @@ trait LowerPrelude
             . "  if (!\$st->allowAll && !isset(\$st->allowed[\$cls])) { return __mc_incomplete(\$cls); }\n"
             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
         foreach ($names as $cname) {
-            $alloc = $alloc . "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
+            $alloc .= "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
                 . $this->dqBody($cname) . "\"); }\n";
         }
-        $alloc = $alloc . "  return __mc_unser_unknown(\$cls, \$st);\n}\n";
+        $alloc .= "  return __mc_unser_unknown(\$cls, \$st);\n}\n";
 
         // ONE KEY AT A TIME, with the value as a `mixed` PARAMETER — not a
         // `$props[...]` read out of a bare-`array` param. A bare `array` hint
@@ -763,16 +763,16 @@ trait LowerPrelude
             if ($this->declaresMethod($cname, '__unserialize')) { continue; }
             if ($cd->propertyNames === [] && !$cd->usesBag()) { continue; }
             $helper = '__mc_unser_set_arm_' . (string)$arm;
-            $fillDispatch = $fillDispatch . "    case " . (string)$cd->classId . ": " . $helper . "(\$o, \$k, \$v); return;\n";
-            $fillBody = $fillBody . "function " . $helper . "(mixed \$o, string \$k, mixed \$v): void {\n"
+            $fillDispatch .= "    case " . (string)$cd->classId . ": " . $helper . "(\$o, \$k, \$v); return;\n";
+            $fillBody .= "function " . $helper . "(mixed \$o, string \$k, mixed \$v): void {\n"
                 . "  if (\$o instanceof \\" . $cname . ") {\n";
             foreach ($cd->propertyNames as $p) {
-                $fillBody = $fillBody . "  if (\$k === '" . $p . "') { \$o->" . $p . " = \$v; return; }\n";
+                $fillBody .= "  if (\$k === '" . $p . "') { \$o->" . $p . " = \$v; return; }\n";
             }
             if ($cd->usesBag()) {
-                $fillBody = $fillBody . "  \$o->\$k = \$v;\n";
+                $fillBody .= "  \$o->\$k = \$v;\n";
             }
-            $fillBody = $fillBody . "  }\n}\n";
+            $fillBody .= "  }\n}\n";
             $arm = $arm + 1;
         }
         $fillDispatch = $fillBody . $fillDispatch
@@ -781,25 +781,25 @@ trait LowerPrelude
         foreach ($names as $cname) {
             if (!$this->declaresMethod($cname, '__unserialize')) { continue; }
             $cd = $this->classTable[$cname];
-            $magic = $magic . "    case " . (string)$cd->classId . ": return true;\n";
+            $magic .= "    case " . (string)$cd->classId . ": return true;\n";
             $callHelper = '__mc_unser_magic_arm_' . (string)$magicArm;
-            $call = $call . "    case " . (string)$cd->classId . ": if (\$o instanceof \\" . $cname . ") { " . $callHelper . "(\$o, \$props); } return;\n";
-            $callBody = $callBody . "function " . $callHelper . "(\\" . $cname . " \$o, array \$props): void {\n"
+            $call .= "    case " . (string)$cd->classId . ": if (\$o instanceof \\" . $cname . ") { " . $callHelper . "(\$o, \$props); } return;\n";
+            $callBody .= "function " . $callHelper . "(\\" . $cname . " \$o, array \$props): void {\n"
                 . "  \$o->__unserialize(\$props);\n"
                 . "}\n";
             $magicArm = $magicArm + 1;
         }
-        $magic = $magic . "  }\n  return false;\n}\n";
+        $magic .= "  }\n  return false;\n}\n";
         $call = $callBody . $call . "  }\n}\n";
         $fill = $fillDispatch . $magic . $call;
         $enum = "function __mc_unser_enum(string \$spec, \\__McUnSt \$st): mixed {\n";
         foreach ($this->enumTable as $ename => $ed) {
             foreach ($ed->caseNames as $case) {
-                $enum = $enum . "  if (\$spec === \"" . $this->dqBody($ename . ':' . $case)
+                $enum .= "  if (\$spec === \"" . $this->dqBody($ename . ':' . $case)
                     . "\") { return \\" . $ename . "::" . $case . "; }\n";
             }
         }
-        $enum = $enum . "  \$st->ok = false;\n  return null;\n}\n";
+        $enum .= "  \$st->ok = false;\n  return null;\n}\n";
 
         return $alloc . $fill . $enum;
     }

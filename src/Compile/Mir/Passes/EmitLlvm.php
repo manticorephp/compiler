@@ -157,6 +157,8 @@ final class EmitLlvm implements EmitVisitor
     private array $bagClassNamesCache = [];
     /** @var array<string, array<string, string>> */
     private array $magicPropertyHoldersCache = [];
+    /** @var array<string, string> helper symbol → emitted LLVM body */
+    private array $propertyReadHelpers = [];
 
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
     private string $cellTagReg = '';
@@ -457,6 +459,7 @@ final class EmitLlvm implements EmitVisitor
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
         $this->magicPropertyHoldersCache = [];
+        $this->propertyReadHelpers = [];
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
         $this->enums = $module->enums;
@@ -633,6 +636,14 @@ final class EmitLlvm implements EmitVisitor
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
+        // Erased fixed-property readers are generated lazily while ordinary
+        // functions emit. Append each helper exactly once after the function
+        // loop; callers then contain only a small call instead of a repeated
+        // class-id switch. The preamble is emitted afterwards, so any runtime
+        // demand raised by the helper is still visible to emitPreamble().
+        foreach ($this->propertyReadHelpers as $helperBody) {
+            $extraBodies .= $helperBody;
+        }
         if ($streaming) {
             $h = new \Compile\Mir\HoistAllocas();
             $extraBodies = $h->run($extraBodies);

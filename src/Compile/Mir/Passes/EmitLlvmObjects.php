@@ -827,6 +827,63 @@ trait EmitLlvmObjects
         return $names;
     }
 
+    /**
+     * Emit one reusable class-id property reader. The old inline path repeated
+     * the complete switch at every erased `$obj->prop` site, which is especially
+     * expensive in Doctrine's large listener methods. This helper is restricted
+     * to fixed-slot properties with no bag, enum-name/value, or magic-property
+     * semantics; those cases remain on the exact inline path below.
+     */
+    private function fixedPropertyReadHelper(string $prop, array $fixed): string
+    {
+        $key = '__mc_prop_read_' . $this->mangle($prop);
+        $sym = '@manticore_' . $key;
+        if (isset($this->propertyReadHelpers[$key])) { return $sym; }
+
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $obj = '%obj';
+        $res = $this->ssa->allocReg();
+        $out = 'define internal i64 ' . $sym . "(ptr %obj) {\nentry:\n";
+        $out .= $this->emitLoadClassId($obj);
+        $cid = $this->classIdReg;
+        $out .= '  ' . $res . " = alloca i64\n";
+        $end = $this->ssa->allocLabel('pr.end');
+        $def = $this->ssa->allocLabel('pr.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        foreach ($fixed as $cd) {
+            $lbl = $this->ssa->allocLabel('pr.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitFixedPropLoad($obj, $cd, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        $this->rt->needsTagged = true;
+        $null = $this->ssa->allocReg();
+        $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n";
+        $ret = $this->ssa->allocReg();
+        $out .= '  ' . $ret . ' = load i64, ptr ' . $res . "\n";
+        $out .= '  ret i64 ' . $ret . "\n}\n\n";
+        $this->propertyReadHelpers[$key] = $out;
+
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        return $sym;
+    }
+
     private function emitCellPropertyRead(PropertyAccess_ $pa): string
     {
         $prop = $pa->property;
@@ -860,6 +917,17 @@ trait EmitLlvmObjects
         // cell can only be that class — read the slot with no class_id switch.
         if (\count($fixed) === 1 && !$hasBag && $enumArms === [] && $magic === []) {
             return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
+        }
+        // Runtime dispatch on the object's class_id. Fixed-slot-only reads are
+        // extracted once per property: the caller keeps only the object coercion
+        // and a normal call, while the helper owns the shared switch.
+        if (!$hasBag && $enumArms === [] && $magic === [] && \count($fixed) > 1) {
+            $helper = $this->fixedPropertyReadHelper($prop, $fixed);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
         }
         // Runtime dispatch on the object's class_id.
         $out .= $this->emitLoadClassId($objPtr);
