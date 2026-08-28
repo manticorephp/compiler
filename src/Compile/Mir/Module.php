@@ -157,6 +157,10 @@ final class Module
      *  any path that skips it correct-but-fat rather than silently wrong. */
     public bool $reflectAll = true;
 
+    /** Dynamic method calls need compiler-owned class metadata and uniform
+     *  method trampolines, even when the program never mentions Reflection. */
+    public bool $needsDynamicMethodMeta = false;
+
     /** Method FunctionDef name ("Class__method") → backtrace frame display
      *  ("Class->method" / "Class::method"). Built at lowering (stable string
      *  ops); EmitLlvm stamps the correct name at a method's entry, because the

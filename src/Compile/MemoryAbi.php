@@ -20,7 +20,7 @@ final class MemoryAbi
      * `bin/manticore version` output so vendored artefacts can
      * detect mismatches against a fresh build.
      */
-    public const VERSION = 7;
+    public const VERSION = 8;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -237,6 +237,10 @@ final class MemoryAbi
     public const STRING_POOL1_ALLOC = 128;
     public const STRING_POOL0_CAP = self::STRING_POOL0_ALLOC - self::STRING_HEADER_SIZE;
     public const STRING_POOL1_CAP = self::STRING_POOL1_ALLOC - self::STRING_HEADER_SIZE;
+    /** Maximum retained nodes per small-string free list. A self-host compiler
+     * may release hundreds of millions of tiny IR fragments; an unbounded list
+     * converts that legitimate churn into process-resident memory. */
+    public const STRING_POOL_MAX = 8192;
 
     /**
      * Small-OBJECT pool (objects, vec/unified-array buffers, hash bucket
@@ -311,9 +315,12 @@ final class MemoryAbi
      */
     public const DESCRIPTOR_RMETA_OFFSET = 16;
 
+    /** `ptr` — compiler-owned lightweight dynamic-method table, or null. */
+    public const DESCRIPTOR_DYN_METHODS_OFFSET = 24;
+
     /** Bytes. Nothing allocates a descriptor at runtime — they are static
      *  globals — so this exists for readers/asserts, not for a malloc. */
-    public const DESCRIPTOR_SIZE = 24;
+    public const DESCRIPTOR_SIZE = 32;
 
     // ─── Reflection metadata (`@__mc_rmeta_<id>`) ─────────────────
 

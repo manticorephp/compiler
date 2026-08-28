@@ -33,6 +33,8 @@ final class FunctionSignatures
     public array $returnsByRef = [];
     /** @var array<string, Type> fn name → declared return type */
     public array $returnType = [];
+    /** @var array<string, bool[]> fn name → which parameters are variadic */
+    public array $variadicParams = [];
     /** @var array<string, bool> fn name → body calls the func-args family, so a
      *  call site must push its as-written argument count onto the side channel
      *  ({@see FunctionDef::$usesFuncArgs}). */

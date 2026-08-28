@@ -438,7 +438,35 @@ final class UnifiedArrayRuntime
      */
     private function emitLiveLen(): void
     {
+        // Array consumers often receive erased values as a pointer-typed slot.
+        // The slot may actually contain a NaN-boxed cell, so classify the word
+        // before the raw implementation reads arr-8. A boxed ARRAY cell is
+        // unboxed and delegated; every other boxed tag is the PHP empty case.
+        $this->emitLiveLenRaw();
         $fn = $this->module->func('__mir_array_live_len', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $chk = $fn->block('cellchk');
+        $tagged = $fn->block('celltag');
+        $array = $fn->block('cellarray');
+        $z = $fn->block('z');
+        $raw = $fn->block('raw');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $ai = $chk->ptrtoint($arr, Type::i64());
+        $isTagged = $chk->icmp('ugt', $ai, Value::int(Type::i64(), -4503599627370496));
+        $chk->brIf($isTagged, $tagged, $raw);
+        $nib = $tagged->and_($tagged->lshr($ai, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $tagged->brIf($tagged->icmp('eq', $nib, Value::int(Type::i64(), 7)), $array, $z);
+        $payload = $array->and_($ai, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK));
+        $ap = $array->inttoptr($payload, Type::ptr());
+        $array->ret($array->call('__mir_array_live_len_raw', Type::i64(), [$ap]));
+        $raw->ret($raw->call('__mir_array_live_len_raw', Type::i64(), [$arr]));
+        $z->ret(Value::int(Type::i64(), 0));
+    }
+
+    private function emitLiveLenRaw(): void
+    {
+        $fn = $this->module->func('__mir_array_live_len_raw', Type::i64());
         $arr = $fn->param(Type::ptr(), 'arr');
         $e = $fn->block('entry');
         $chk = $fn->block('chk');
@@ -1381,12 +1409,18 @@ final class UnifiedArrayRuntime
         $b->call(Debug::$pool ? '__mir_pool_free' : 'free', Type::void(), [$ptr]);
     }
 
+    /** Emit one optional allocator telemetry counter increment. */
+    private function profCounter(Block $b, int $idx): void
+    {
+        if (!Debug::$profile && !Debug::$allocTrace) { return; }
+        $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), $idx)]);
+    }
+
     /** `bucket_alloc` (@__prof slot 22): hash index side-arrays, the one
      *  allocation an array pays that `arr_alloc_total` does not count. */
     private function profBucket(Block $b): void
     {
-        if (!Debug::$profile) { return; }
-        $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 22)]);
+        $this->profCounter($b, 22);
     }
 
     /**
@@ -1403,7 +1437,7 @@ final class UnifiedArrayRuntime
         $total = $b->add($size, Value::int(Type::i64(), 8));
         $base = $this->poolAlloc($b, $total);
         $b->store(Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_MAGIC), $base);
-        if (Debug::$profile) {
+        if (Debug::$profile || Debug::$allocTrace) {
             $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 14)]);
         }
         $data = $b->gep(Type::i8(), $base, [Value::int(Type::i64(), 8)]);
@@ -1423,7 +1457,7 @@ final class UnifiedArrayRuntime
         $b = $fn->block('entry');
         $neg = $b->icmp('slt', $capIn, Value::int(Type::i64(), 0));
         $cap = $b->select($neg, Value::int(Type::i64(), 0), $capIn);
-        if (Debug::$profile) {
+        if (Debug::$profile || Debug::$allocTrace) {
             $isEmpty = $b->icmp('eq', $capIn, Value::int(Type::i64(), 0));
             $bump = $fn->block('prof_empty');
             $cont = $fn->block('prof_cont');
@@ -1472,6 +1506,15 @@ final class UnifiedArrayRuntime
         $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
         $entry = $fn->block('entry');
+        $retainIdx = -1;
+        if ($bumpRc) {
+            if ($symbol === '__mir_array_retain') { $retainIdx = 43; }
+            elseif ($symbol === '__mir_array_retain_buf') { $retainIdx = 44; }
+            elseif ($symbol === '__mir_array_retain_obj') { $retainIdx = 45; }
+            elseif ($symbol === '__mir_array_retain_str') { $retainIdx = 46; }
+            elseif ($symbol === '__mir_array_retain_cell') { $retainIdx = 47; }
+            $this->profCounter($entry, 31);
+        }
         $cont = $fn->block('cont');
         $skipNull = $fn->block('skip_null');
         $bail = $fn->block('bail');
@@ -1502,6 +1545,8 @@ final class UnifiedArrayRuntime
         // ADOPT skips this and only walks the keys / elements below: the caller
         // already holds the buffer's single reference (a fresh copy).
         if ($bumpRc) {
+            $this->profCounter($bump, 33);
+            if ($retainIdx >= 0) { $this->profCounter($bump, $retainIdx); }
             $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
         }
 
@@ -1911,15 +1956,33 @@ final class UnifiedArrayRuntime
         $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
         $entry = $fn->block('entry');
+        $releaseIdx = -1;
+        if ($symbol === '__mir_array_release') { $releaseIdx = 35; }
+        elseif ($symbol === '__mir_array_release_buf') { $releaseIdx = 36; }
+        elseif ($symbol === '__mir_array_release_obj') { $releaseIdx = 37; }
+        elseif ($symbol === '__mir_array_release_str') { $releaseIdx = 38; }
+        elseif ($symbol === '__mir_array_release_cell') { $releaseIdx = 39; }
+        elseif ($symbol === '__mir_array_release_ownel_obj') { $releaseIdx = 40; }
+        elseif ($symbol === '__mir_array_release_ownel_str') { $releaseIdx = 41; }
+        elseif ($symbol === '__mir_array_release_ownel_cell') { $releaseIdx = 42; }
+        $this->profCounter($entry, 32);
         $cont = $fn->block('cont');
         $skipNull = $fn->block('skip_null');
+        $addrChk = $fn->block('addr_chk');
         $bail = $fn->block('bail');
         $dec = $fn->block('dec');
         $free = $fn->block('free');
         $keep = $dropAlways ? null : $fn->block('keep');
 
-        $entry->brIf($entry->icmp('eq', $arr, Value::null()), $skipNull, $cont);
+        $entry->brIf($entry->icmp('eq', $arr, Value::null()), $skipNull, $addrChk);
         $skipNull->retVoid();
+        // A raw array buffer must be a real heap/static address. During
+        // self-host lowering an erased empty-array default can transiently
+        // appear as the small sentinel 0x20; never form arr-8 from such a
+        // value. Valid allocations and compiler globals are far above this
+        // range on the supported 64-bit targets.
+        $ai = $addrChk->ptrtoint($arr, Type::i64());
+        $addrChk->brIf($addrChk->icmp('ule', $ai, Value::int(Type::i64(), 65535)), $skipNull, $cont);
 
         $tag = $cont->load(Type::i64(), $cont->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]));
         $cont->brIf($cont->icmp('eq', $tag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_MAGIC)), $dec, $bail);
@@ -1942,6 +2005,8 @@ final class UnifiedArrayRuntime
             $cur = $dec->load(Type::i64(), $rcAddr);
         }
         $next = $dec->sub($cur, Value::int(Type::i64(), 1));
+        $this->profCounter($dec, 34);
+        if ($releaseIdx >= 0) { $this->profCounter($dec, $releaseIdx); }
         $dec->store($next, $rcAddr);
         // `$dec` dominates every block below, so the symmetric variants can use
         // this i1 again at the reclaim gate.
@@ -2059,9 +2124,11 @@ final class UnifiedArrayRuntime
         $doFree = $fn->block('do_free');
         $freeb->brIf($freeb->icmp('ne', $bptr, Value::null()), $hasBuckets, $doFree);
         $this->poolFree($hasBuckets, $bptr);
+        $this->profCounter($hasBuckets, 29);
         $hasBuckets->br($doFree);
         // Free the tagged base (ptr-8), not the data ptr.
         $base = $doFree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+        $this->profCounter($doFree, 26);
         $this->poolFree($doFree, $base);
         $doFree->retVoid();
     }

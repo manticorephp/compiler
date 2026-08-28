@@ -184,6 +184,14 @@ final class LowerFromAst implements Pass
 
     /** Cached trailing segments for repeatedly lowered names. */
     private array $bareNameCache = [];
+    private ?bool $hasNamespacedGetenvCache = null;
+    /** @var array<string, array<int, \Parser\Ast\Param>|null> */
+    private array $methodParamsCache = [];
+    /** @var array<string, string> */
+    private array $methodDeclClassCache = [];
+    /** @var array<string, array<int, \Parser\Ast\Param>|null> */
+    private array $variadicMethodParamsCache = [];
+
     /**
      * Namespace of the class / function whose signature or property
      * types are currently being lowered (e.g. `Compile\Mir` for
@@ -620,6 +628,10 @@ final class LowerFromAst implements Pass
         // state local to the run makes repeated invocations deterministic.
         $this->methodReturnClassCache = [];
         $this->bareNameCache = [];
+        $this->hasNamespacedGetenvCache = null;
+        $this->methodParamsCache = [];
+        $this->methodDeclClassCache = [];
+        $this->variadicMethodParamsCache = [];
         $this->module = $module;
         // Lowering passes such as injectSuperglobals need the target kind
         // before they register globals; a vendor library must import app-owned
@@ -1164,6 +1176,13 @@ final class LowerFromAst implements Pass
 
         $mainStmts = [];
         $stmtIdx = 0;
+        $measureLower = \Compile\Stats::$on;
+        $lowerFnNs = 0;
+        $lowerClassNs = 0;
+        $lowerMainNs = 0;
+        $lowerFnCount = 0;
+        $lowerClassCount = 0;
+        $lowerMainCount = 0;
         foreach ($stmts as $stmt) {
             // Statements [0, $preludeCount) are the built-in Throwable /
             // Exception hierarchy; flag the functions they emit so
@@ -1175,7 +1194,10 @@ final class LowerFromAst implements Pass
             // discriminant is 'Function' (mirrors how ClassStmt
             // discriminates as 'Class').
             if ($stmt->kind === 'Function') {
+                $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
                 $fn = $this->lowerFunction($stmt->decl);
+                if ($measureLower) { $lowerFnNs += \Compile\Stats::now() - $lowerStart; }
+                $lowerFnCount = $lowerFnCount + 1;
                 if ($isPrelude) { $fn->isPrelude = true; }
                 $module->addFunction($fn);
                 continue;
@@ -1192,8 +1214,11 @@ final class LowerFromAst implements Pass
                     continue;
                 }
                 if ($dk === 'class' || $dk === 'enum') {
+                    $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
                     $before = \count($module->functions);
                     $this->lowerClassMethods($stmt->decl, $module);
+                    if ($measureLower) { $lowerClassNs += \Compile\Stats::now() - $lowerStart; }
+                    $lowerClassCount = $lowerClassCount + 1;
                     $this->releaseLoweredMethodBodies($stmt->decl);
                     $this->releaseConsumedTraitBodies($stmt->decl);
                     $this->releaseLoweredClassMetadata($stmt->decl);
@@ -1220,7 +1245,22 @@ final class LowerFromAst implements Pass
             $this->currentLowerClass = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
+            $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $mainStmts[] = $this->lowerStmt($stmt);
+            if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
+            $lowerMainCount = $lowerMainCount + 1;
+        }
+        if ($measureLower) {
+            \Compile\Stats::bump('lower.functions_ms', \intdiv($lowerFnNs, 1000000));
+            \Compile\Stats::bump('lower.functions_count', $lowerFnCount);
+            \Compile\Stats::bump('lower.class_methods_ms', \intdiv($lowerClassNs, 1000000));
+            \Compile\Stats::bump('lower.class_count', $lowerClassCount);
+            \Compile\Stats::bump('lower.main_stmts_ms', \intdiv($lowerMainNs, 1000000));
+            \Compile\Stats::bump('lower.main_stmts_count', $lowerMainCount);
+            \Compile\Stats::line('lower breakdown: functions=' . (string)\intdiv($lowerFnNs, 1000000)
+                . 'ms/' . (string)$lowerFnCount . ', classes=' . (string)\intdiv($lowerClassNs, 1000000)
+                . 'ms/' . (string)$lowerClassCount . ', main=' . (string)\intdiv($lowerMainNs, 1000000)
+                . 'ms/' . (string)$lowerMainCount);
         }
         // Bodies for the reified classes. Last: a body can itself bind a new
         // specialization (`@var Box<int>` inside a method), and the drain loops.
@@ -1278,9 +1318,116 @@ final class LowerFromAst implements Pass
         if ($this->sawDynFnExists) {
             $module->knownFnNames = $this->collectKnownFnNames();
         }
+        $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
+        $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
+        if ($hasDynamicMethodInvoke) {
+            // Keep the complete slow spread dispatcher in one compiler-owned
+            // function. Dynamic callers can try the lightweight table first;
+            // this helper is the semantic fallback for unsupported names and
+            // keeps its strcmp/method-call arms out of generator resume bodies.
+            $dynamicMethodNames = [];
+            $unsupportedDynamicNames = [];
+            foreach ($module->classes as $cd) {
+                if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+                foreach ($cd->methodNames as $mn => $_) {
+                    if ($mn === '__construct' || $mn === '__call') { continue; }
+                    $dynamicMethodNames[$mn] = true;
+                    if (!isset($cd->methodMeta[$mn])) {
+                        $unsupportedDynamicNames[$mn] = true;
+                    }
+                }
+                foreach ($cd->methodMeta as $mn => $mm) {
+                    // The helper is a free function and must not make a
+                    // non-public call legal. Unknown metadata also fails closed
+                    // below when a name cannot be proven public and fixed-shape.
+                    if ($mm->visibility !== 'public') {
+                        $unsupportedDynamicNames[$mn] = true;
+                        continue;
+                    }
+                    foreach ($mm->params as $param) {
+                        if ($param->byRef || $param->variadic) {
+                            $unsupportedDynamicNames[$mn] = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Synthesize only the method names safe for `...$a`. The decision to
+            // use this helper is made again at each dynamic call site from its own
+            // candidate set; a site containing any unsupported name stays inline.
+            $safeDynamicMethodNames = [];
+            if (\Compile\Stats::$on) {
+                \Compile\Stats::bump('dynamic.fallback.global_names', \count($dynamicMethodNames));
+                \Compile\Stats::bump('dynamic.fallback.global_unsupported', \count($unsupportedDynamicNames));
+            }
+            foreach ($dynamicMethodNames as $mn => $_) {
+                if (!isset($unsupportedDynamicNames[$mn])) {
+                    $safeDynamicMethodNames[$mn] = true;
+                }
+            }
+            // The helper contains only by-value/non-variadic names. It is
+            // emitted once as a staged body, so its size no longer multiplies
+            // into every dynamic caller; do not use the old module-wide count
+            // veto to disable extraction for a large but closed safe subset.
+            if ($safeDynamicMethodNames !== []) {
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('dynamic.fallback.global_safe', \count($safeDynamicMethodNames));
+                    \Compile\Stats::bump('dynamic.fallback.synthesized', 1);
+                }
+                $fallbackSrc = \Compile\Mir\Passes\TrampolineSynth::spreadFallbackSource($safeDynamicMethodNames);
+                $fallbackProg = \Parser\Parser::parseSource("<?php\n" . $fallbackSrc);
+                foreach ($fallbackProg->statements as $fstmt) {
+                    if ($fstmt->kind !== 'Function') { continue; }
+                    $this->fnDecls[$fstmt->decl->name] = $fstmt->decl;
+                    $module->addFunction($this->lowerFunction($fstmt->decl));
+                }
+            }
+            if (\Compile\Stats::$on && $safeDynamicMethodNames === []) {
+                \Compile\Stats::bump('dynamic.fallback.synthesized', 0);
+            }
+            // Reflection-enabled modules already synthesized these class
+            // trampolines in the earlier reflection block. Re-entering sourceFor
+            // here would define every constructor/method twice. Non-reflection
+            // modules still need the dynamic ABI trampolines here.
+            if (!$this->includeReflection) {
+                $dynamicTrampSrc = '';
+                foreach ($module->classes as $cd) {
+                    $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
+                }
+                if ($dynamicTrampSrc !== '') {
+                    $dynamicTrampProg = \Parser\Parser::parseSource("<?php\n" . $dynamicTrampSrc);
+                    foreach ($dynamicTrampProg->statements as $dstmt) {
+                        if ($dstmt->kind !== 'Function') { continue; }
+                        $this->fnDecls[$dstmt->decl->name] = $dstmt->decl;
+                        $module->addFunction($this->lowerFunction($dstmt->decl));
+                    }
+                }
+            }
+        }
         if ($this->emitLibrary) { $this->recordExportConstants($module); }
         $module->markPassApplied(self::NAME);
         return $module;
+    }
+
+    /** Whether a lowered module contains `$object->$name(...)`. */
+    private function moduleHasDynamicMethodInvoke(Module $module): bool
+    {
+        foreach ($module->functions as $fn) {
+            if ($this->nodeHasDynamicMethodInvoke($fn->body)) { return true; }
+        }
+        return false;
+    }
+
+    private function nodeHasDynamicMethodInvoke(Node $node): bool
+    {
+        if ($node->kind === Node::KIND_INVOKE) {
+            $children = Walk::children($node);
+            if (($children[0]->kind ?? '') === Node::KIND_DYN_PROP) { return true; }
+        }
+        foreach (Walk::children($node) as $child) {
+            if ($this->nodeHasDynamicMethodInvoke($child)) { return true; }
+        }
+        return false;
     }
 
     /**
@@ -2849,11 +2996,21 @@ final class LowerFromAst implements Pass
      *  `$scope`). Shared by `C::m(...)` and `["C","m"]` callable coercion. */
     private function synthStaticClosure(string $class, string $method, string $scope): Node
     {
+        /** @var \Parser\Ast\Param[]|null $resolvedParams */
+        $resolvedParams = null;
+        if ($class !== '') { $resolvedParams = $this->resolveMethodParams($class, $method); }
         /** @var \Parser\Ast\Param[] $declParams */
-        $declParams = $this->resolveMethodParams($class, $method) ?? [];
+        $declParams = [];
         $loads = [];
-        foreach ($declParams as $p) {
-            $loads[] = new LoadLocal($p->name, $this->lowerTypeHint($p->typeHint));
+        // Keep the nullable result narrowed by an explicit branch. A ternary or
+        // `?? []` here lifts the array arm through the self-host cell ABI; the
+        // later foreach then passes that boxed cell as a raw array pointer and
+        // faults in __mir_array_live_len during large Composer lowering.
+        if ($resolvedParams !== null) {
+            foreach ($resolvedParams as $p) {
+                $declParams[] = $p;
+                $loads[] = new LoadLocal($p->name, $this->lowerTypeHint($p->typeHint));
+            }
         }
         $call = new StaticCall_($class, $method, $loads, Type::unknown(), $scope);
         $body = new Block([new Return_($call, Type::void())], Type::void());
@@ -3788,6 +3945,9 @@ final class LowerFromAst implements Pass
         if ($cname === '') { return; }
         $this->classDecls[$cname] = $cdecl;
         $this->methodReturnClassCache = [];
+        $this->methodParamsCache = [];
+        $this->methodDeclClassCache = [];
+        $this->variadicMethodParamsCache = [];
         $this->knownClassNames[$cname] = true;
         $bs = \strrpos($cname, '\\');
         if ($bs !== false && $bs >= 0) {
@@ -4984,17 +5144,27 @@ final class LowerFromAst implements Pass
      */
     private function variadicMethodParams(string $method): ?array
     {
+        if (\array_key_exists($method, $this->variadicMethodParamsCache)) {
+            return $this->variadicMethodParamsCache[$method];
+        }
         $found = null;
         foreach ($this->classDecls as $cd) {
             foreach ($this->classDeclMethods($cd) as $m) {
                 if ($this->methodDeclName($m) !== $method) { continue; }
                 $mp = $this->methodDeclParams($m);
                 $np = \count($mp);
-                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) { return null; }
-                if ($found !== null && \count($found) !== $np) { return null; }
+                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) {
+                    $this->variadicMethodParamsCache[$method] = null;
+                    return null;
+                }
+                if ($found !== null && \count($found) !== $np) {
+                    $this->variadicMethodParamsCache[$method] = null;
+                    return null;
+                }
                 $found = $mp;
             }
         }
+        $this->variadicMethodParamsCache[$method] = $found;
         return $found;
     }
 
@@ -5106,6 +5276,10 @@ final class LowerFromAst implements Pass
 
     private function resolveMethodParams(string $class, string $method): ?array
     {
+        $key = $class . "\0" . $method;
+        if (\array_key_exists($key, $this->methodParamsCache)) {
+            return $this->methodParamsCache[$key];
+        }
         $c = $class;
         while ($c !== '' && isset($this->classDecls[$c])) {
             // `$cd` comes from an assoc whose docblock value type isn't
@@ -5114,11 +5288,16 @@ final class LowerFromAst implements Pass
             // field offset (garbage). Route through typed accessors. T5.
             $cd = $this->classDecls[$c];
             foreach ($this->classDeclMethods($cd) as $m) {
-                if ($this->methodDeclName($m) === $method) { return $this->methodDeclParams($m); }
+                if ($this->methodDeclName($m) === $method) {
+                    $params = $this->methodDeclParams($m);
+                    $this->methodParamsCache[$key] = $params;
+                    return $params;
+                }
             }
             $ext = $this->classDeclExtends($cd);
             $c = ($ext !== []) ? $ext[0] : '';
         }
+        $this->methodParamsCache[$key] = null;
         return null;
     }
 
@@ -5130,15 +5309,23 @@ final class LowerFromAst implements Pass
      */
     private function resolveMethodDeclClass(string $class, string $method): string
     {
+        $key = $class . "\0" . $method;
+        if (\array_key_exists($key, $this->methodDeclClassCache)) {
+            return $this->methodDeclClassCache[$key];
+        }
         $c = $class;
         while ($c !== '' && isset($this->classDecls[$c])) {
             $cd = $this->classDecls[$c];
             foreach ($this->classDeclMethods($cd) as $m) {
-                if ($this->methodDeclName($m) === $method) { return $c; }
+                if ($this->methodDeclName($m) === $method) {
+                    $this->methodDeclClassCache[$key] = $c;
+                    return $c;
+                }
             }
             $ext = $this->classDeclExtends($cd);
             $c = ($ext !== []) ? $ext[0] : '';
         }
+        $this->methodDeclClassCache[$key] = '';
         return '';
     }
 

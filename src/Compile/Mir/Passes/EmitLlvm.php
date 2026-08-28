@@ -138,11 +138,15 @@ final class EmitLlvm implements EmitVisitor
     /** Per-function SSA register + label allocator (fresh each {@see emit}). */
     private ?SsaBuilder $ssa = null;
     private int $switchCounter = 0;
+    /** Sequence for private per-function raw text sink files. */
+    private int $functionTextCounter = 0;
 
     /** Resolution caches are rebuilt for each module emission. T6 megamorphic
      * dispatch repeatedly asks the same closed-world metadata questions. */
     /** @var array<string, string> */
     private array $resolveMethodClassCache = [];
+    /** @var array<string, string> deterministic PHP-name → LLVM-name cache */
+    private array $mangleCache = [];
     /** @var array<string, bool> */
     private array $classImplementsCache = [];
     /** @var array<string, bool> */
@@ -159,6 +163,10 @@ final class EmitLlvm implements EmitVisitor
     private array $magicPropertyHoldersCache = [];
     /** @var array<string, string> helper symbol → emitted LLVM body */
     private array $propertyReadHelpers = [];
+    /** @var array<string, string> erased dynamic-method helper bodies */
+    private array $dynamicMethodHelpers = [];
+    /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
+    private bool $dynamicMethodAbiDisabled = false;
 
     // Out-slot for {@see cellTagIr}: the SSA reg holding the computed cell tag.
     private string $cellTagReg = '';
@@ -212,6 +220,9 @@ final class EmitLlvm implements EmitVisitor
      *  or never ran. Defaults true so a path that skips the pass stays
      *  correct-but-fat rather than silently answering "class not found". */
     private bool $reflectAll = true;
+
+    /** Compiler-owned lightweight method tables for erased dynamic calls. */
+    private bool $dynamicMethodMeta = false;
 
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
@@ -431,7 +442,10 @@ final class EmitLlvm implements EmitVisitor
         // Arena arrays force the arena runtime on: the unified-array grow /
         // promote / index paths reference @__mir_arena_* under this flag, so
         // those symbols must be emitted even if no string took the arena path.
-        if (\Compile\Debug::$arenaArrays) { $this->rt->needsArena = true; }
+        if (\Compile\Debug::$arenaArrays
+            || \Compile\Debug::$memoryMode === \Compile\Debug::MEM_ARENA) {
+            $this->rt->needsArena = true;
+        }
         // A program module (not the bundled stdlib) always links stdlib.o, which
         // CAN throw even when the user's own code never does. The exception
         // runtime — @main's depth:=1 + base landing pad and the process-global
@@ -442,6 +456,7 @@ final class EmitLlvm implements EmitVisitor
         // on for every program (a lone base setjmp + BSS; no-op if nothing throws).
         if (!$this->emitLibrary) { $this->rt->needsExceptions = true; }
         $this->pool = new StringPool();
+        $this->functionTextCounter = 0;
         $this->ssa = new SsaBuilder();
         $this->gen = new GeneratorContext();
         $this->cf = new ControlFlow();
@@ -460,8 +475,11 @@ final class EmitLlvm implements EmitVisitor
         $this->bagClassNamesCache = [];
         $this->magicPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
+        $this->dynamicMethodHelpers = [];
+        $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
+        $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
@@ -499,6 +517,7 @@ final class EmitLlvm implements EmitVisitor
             $tmask = [];
             $camask = [];
             $ahmask = [];
+            $vmask = [];
             $ptypes = [];
             $pdefs = [];
             foreach ($fn->params as $p) {
@@ -506,6 +525,7 @@ final class EmitLlvm implements EmitVisitor
                 $tmask[] = ($p->type->kind === Type::KIND_CELL);
                 $camask[] = $p->cellArg;
                 $ahmask[] = $p->arrayHinted;
+                $vmask[] = $p->variadic;
                 $ptypes[] = $p->type;
                 $pdefs[] = $p->default;
             }
@@ -513,6 +533,7 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->taggedParams[$fn->name] = $tmask;
             $this->sigs->cellArgParams[$fn->name] = $camask;
             $this->sigs->arrayHintedParams[$fn->name] = $ahmask;
+            $this->sigs->variadicParams[$fn->name] = $vmask;
             $this->sigs->paramTypes[$fn->name] = $ptypes;
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
@@ -587,47 +608,147 @@ final class EmitLlvm implements EmitVisitor
         $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';
         $bodyBytes = 0;
         $hoistedAllocas = 0;
+        $fileHoistThreshold = 262144;
+        $fileHoistedBodies = 0;
+        $fileHoistedBytes = 0;
         if ($streaming && !\Manticore\write_file($bodyPath, '')) {
             throw new \RuntimeException('EmitLlvm: cannot create staged body file ' . $bodyPath);
         }
-        $functionBodies = '';
+        /** @var string[] $functionBodyChunks */
+        $functionBodyChunks = [];
         // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
         // it is emitted — the last line printed before a codegen SIGSEGV names the
         // offending function. Off by default (one env read, not per-function).
         $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
+        $emitTraceFull = \getenv('MANTICORE_EMIT_TRACE') === 'full';
+        $emitIndex = 0;
         // Under MANTICORE_STATS, report every function whose IR crosses
         // FAT_FN_IR bytes. A megamorphic dispatch site (one switch arm per
         // implementing class) shows up here by name — the IR-size explosion is
         // per-function, so a top-N list beats a total.
         $fatFn = 262144;
-        foreach ($module->functions as $fn) {
+        // All module-wide pre-scans are complete above. Emit from a key snapshot
+        // so each finished FunctionDef can be removed from the MIR module table;
+        // keeping that table alive would retain params/defaults/types and any
+        // graph reachable from them for the whole late-Emit phase. The emitter
+        // already copied the signature facts into $this->sigs, and no code below
+        // this loop reads $module->functions again.
+        $functionKeys = \array_keys($module->functions);
+        foreach ($functionKeys as $functionKey) {
+            $fn = $module->functions[$functionKey];
+            $emitIndex = $emitIndex + 1;
             if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
             $body = $this->emitFunction($fn);
-            if (\Compile\Stats::$on && \strlen($body) >= $fatFn) {
-                \Compile\Stats::line('fat fn: ' . (string)\strlen($body) . ' bytes  ' . $fn->name);
+            $rawBodyPath = '';
+            if ($streaming && \strlen($body) > 0 && $body[0] === "\x1f") {
+                $meta = \explode("\n", $body);
+                if (\count($meta) < 3 || $meta[1] === '') {
+                    throw new \RuntimeException('EmitLlvm: malformed function sink marker');
+                }
+                $rawBodyPath = $meta[1];
+                $rawBodyBytes = (int)$meta[2];
+                unset($meta, $body);
+            } else {
+                $rawBodyBytes = \strlen($body);
+            }
+            if ($emitTraceFull) {
+                \error_log('emit-trace-body index=' . (string)$emitIndex . ' name=' . $fn->name
+                    . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes);
+            }
+            if (\Compile\Stats::$on && $rawBodyBytes >= $fatFn) {
+                \Compile\Stats::line('fat fn: ' . (string)$rawBodyBytes . ' bytes  ' . $fn->name);
             }
             if ($streaming) {
+                if ($rawBodyPath !== '') {
+                    // FunctionTextSink already wrote this fat body directly to a
+                    // private file. Hoist it without ever recreating the body as
+                    // a PHP string, then append the rewritten stream and retire
+                    // both temporary paths immediately.
+                    $hoistedPath = $rawBodyPath . '.hoisted';
+                    $h = new \Compile\Mir\HoistAllocas();
+                    if (!$h->runFile($rawBodyPath, $hoistedPath)) {
+                        throw new \RuntimeException('EmitLlvm: cannot hoist sink file ' . $rawBodyPath);
+                    }
+                    $hoistedAllocas += $h->moved;
+                    $fileHoistedBodies += 1;
+                    $fileHoistedBytes += $rawBodyBytes;
+                    if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
+                        throw new \RuntimeException('EmitLlvm: cannot append hoisted sink file ' . $hoistedPath);
+                    }
+                    \Manticore\system('rm -f ' . $rawBodyPath . ' ' . $hoistedPath);
+                    $bodyBytes += $rawBodyBytes;
+                } elseif ($rawBodyBytes < $fileHoistThreshold) {
+                    // Small functions do not justify a filesystem round-trip. Keep
+                // their bounded in-memory rewrite; only fat bodies use the file
+                // path, which avoids raw+hoisted duplication at the dangerous
+                // Doctrine/Symfony sizes while keeping ordinary emission fast.
                 $h = new \Compile\Mir\HoistAllocas();
                 $body = $h->run($body);
                 $hoistedAllocas += $h->moved;
-                $nBody = \strlen($body);
                 if (!\Manticore\append_file_bytes($bodyPath, $body)) {
-                    throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
+                    throw new \RuntimeException('EmitLlvm: cannot append in-memory body');
                 }
-                $bodyBytes += $nBody;
+                unset($body);
+                $bodyBytes += $rawBodyBytes;
+                } else {
+                    // This fallback covers special emitters that still return a
+                    // string larger than the threshold (for example a generator).
+                    // Do not keep the raw function body beside HoistAllocas' rewritten
+                    // copy. The old path materialized `$body`, then `run()` exploded
+                    // it into lines and joined a second full string. For a large
+                    // Doctrine function that creates a needless two-body peak.
+                    $fnPath = $bodyPath . '.fn.' . (string)$emitIndex;
+                    $hoistedPath = $fnPath . '.hoisted';
+                    if (!\Manticore\write_file($fnPath, $body)) {
+                        throw new \RuntimeException('EmitLlvm: cannot stage function body ' . $fnPath);
+                    }
+                    $nBody = $rawBodyBytes;
+                    unset($body);
+                    $h = new \Compile\Mir\HoistAllocas();
+                    if (!$h->runFile($fnPath, $hoistedPath)) {
+                        throw new \RuntimeException('EmitLlvm: cannot hoist staged function body ' . $fnPath);
+                    }
+                    $hoistedAllocas += $h->moved;
+                    $fileHoistedBodies += 1;
+                    $fileHoistedBytes += $nBody;
+                    if ($emitTraceFull) {
+                        \error_log('emit-trace-hoisted index=' . (string)$emitIndex . ' name=' . $fn->name
+                            . ' bytes=' . (string)$nBody . ' moved=' . (string)$h->moved
+                            . ' cumulative_after=' . (string)($bodyBytes + $nBody));
+                    }
+                    if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
+                        throw new \RuntimeException('EmitLlvm: cannot append staged hoisted body ' . $hoistedPath);
+                    }
+                    \Manticore\system('rm -f ' . $fnPath . ' ' . $hoistedPath);
+                    $bodyBytes += $nBody;
+                }
             } else {
-                $functionBodies .= $body;
+                $functionBodyChunks[] = $body;
+                $bodyBytes += $rawBodyBytes;
+                if ($emitTraceFull) {
+                    \error_log('emit-trace-kept index=' . (string)$emitIndex . ' name=' . $fn->name
+                        . ' cumulative_after=' . (string)$bodyBytes);
+                }
             }
             // This function's MIR is spent: its text is in $functionBodies and
             // nothing below reads a body again — not the preamble, not
             // HoistAllocas or PruneIr (both run on the TEXT), not the driver,
             // which only counts the functions. Dropping it here is what keeps
             // the whole MIR from standing alongside the whole IR text; the MIR
+            // Periodically run the compiler-only collector while Emit itself is
+            // long-lived. Pass-boundary releases cannot reclaim candidate roots
+            // accumulated by tens of thousands of emitted functions; this call
+            // never resets the target arena or changes ABI/COW semantics.
+            if (($emitIndex & 1023) === 0) {
+                \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
+            }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
             // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
             // nodes). An empty Block, not null: the field is typed.
             $fn->body = new Block([], Type::void());
+            unset($module->functions[$functionKey], $fn);
         }
+        unset($functionKeys);
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
@@ -644,6 +765,9 @@ final class EmitLlvm implements EmitVisitor
         foreach ($this->propertyReadHelpers as $helperBody) {
             $extraBodies .= $helperBody;
         }
+        foreach ($this->dynamicMethodHelpers as $helperBody) {
+            $extraBodies .= $helperBody;
+        }
         if ($streaming) {
             $h = new \Compile\Mir\HoistAllocas();
             $extraBodies = $h->run($extraBodies);
@@ -653,9 +777,13 @@ final class EmitLlvm implements EmitVisitor
             }
             $bodyBytes += \strlen($extraBodies);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
+            \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
+                . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
+                . (string)$fileHoistThreshold . ')');
         } else {
-            $functionBodies .= $extraBodies;
-            \Compile\Stats::line('IR: bodies ' . (string)\strlen($functionBodies) . ' bytes');
+            $functionBodyChunks[] = $extraBodies;
+            $bodyBytes += \strlen($extraBodies);
+            \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
@@ -684,7 +812,11 @@ final class EmitLlvm implements EmitVisitor
             return "\x1eMANTICORE_STAGED_IR\n" . $this->streamIrPath . "\n"
                 . (string)(\strlen($preamble) + $bodyBytes);
         }
-        $ir = $preamble . $functionBodies;
+        $ir = $preamble . \implode('', $functionBodyChunks);
+        // The one final IR string is now the sole owner of emitted body text;
+        // release the chunk array before hoist/prune to avoid retaining every
+        // per-function allocation alongside the complete module.
+        unset($functionBodyChunks);
         // Expression temporaries are emitted where the expression sits, so a
         // loop body's `alloca` runs once per iteration and the stack it takes is
         // not released until the function returns. -O2 hides this (mem2reg
@@ -1179,20 +1311,26 @@ final class EmitLlvm implements EmitVisitor
      */
     private function mangle(string $name): string
     {
-        $out = '';
+        if (isset($this->mangleCache[$name])) { return $this->mangleCache[$name]; }
+        // Keep fragments in an array: `.=` per byte has quadratic copy cost when
+        // a generated symbol is long, and mangle is called from nearly every
+        // emitter site. The resulting spelling is byte-for-byte unchanged.
+        /** @var string[] $parts */
+        $parts = [];
         $n = \strlen($name);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $c = \substr($name, $i, 1);
-            if ($c === '\\') { $out .= '_'; continue; }
+            if ($c === '\\') { $parts[] = '_'; continue; }
             // php identifiers admit every byte >= 0x80, so a class can be named
-            // in UTF-8 — symfony/cache declares `class \xa9`. An LLVM identifier
+            // in UTF-8 — symfony/cache declares `class \\xa9`. An LLVM identifier
             // cannot carry those bytes raw, so they are hex-escaped into a
             // still-unique ASCII name. `$u` keeps the escape from colliding with
             // an ordinary `_XX` in a source name.
             $b = \ord($c);
-            if ($b >= 0x80) { $out .= '_u' . \strtoupper(\dechex($b)); continue; }
-            $out .= $c;
+            $parts[] = $b >= 0x80 ? '_u' . \strtoupper(\dechex($b)) : $c;
         }
+        $out = \implode('', $parts);
+        $this->mangleCache[$name] = $out;
         return $out;
     }
 
@@ -1710,7 +1848,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function profBump(int $idx): string
     {
-        if (!\Compile\Debug::$profile) { return ''; }
+        if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
         return '  call void @__prof_bump(i64 ' . (string)$idx . ")\n";
     }
 

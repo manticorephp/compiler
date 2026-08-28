@@ -34,11 +34,11 @@ final class RuntimeLibrary
      * both MUST route through here.
      *
      * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
-     * rmeta@16.
+     * rmeta@16, dynamic_method_table@24.
      */
     public static function descriptorType(): string
     {
-        return '{ i64, ptr, ptr }';
+        return '{ i64, ptr, ptr, ptr }';
     }
 
     /**
@@ -48,10 +48,41 @@ final class RuntimeLibrary
      * gate. The field costs 8 rodata bytes per class either way; appending it
      * leaves class_id@0 and drop_fn@8 where they were, so no reader moves.
      */
-    public static function descriptorGlobal(int $id, string $dropFld, string $rmetaFld = 'ptr null'): string
+    public static function descriptorGlobal(int $id, string $dropFld, string $rmetaFld = 'ptr null', string $dynFld = 'ptr null'): string
     {
         return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
-            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . " }\n";
+            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld . " }\n";
+    }
+
+    /** Lightweight dynamic-method row: stable name plus uniform thunk pointer. */
+    public static function dynamicMethodRowType(): string
+    {
+        return '{ ptr, ptr }';
+    }
+
+    /** Lightweight per-class dynamic-method table: rows plus optional __call thunk. */
+    public static function dynamicMethodTableType(): string
+    {
+        // The third field is deliberately table-local rather than a descriptor
+        // field: it preserves the ABI-8 descriptor layout and lets an erased
+        // dynamic miss reroute to a class's ordinary __call implementation.
+        return '{ i64, ptr, ptr }';
+    }
+
+    /** Build one immutable dynamic-method table global. */
+    public static function dynamicMethodTable(string $sym, array $rowsIr): array
+    {
+        $n = \count($rowsIr);
+        if ($n === 0) { return ['', 'ptr null']; }
+        $def = $sym . ' = linkonce_odr constant [' . (string)$n . ' x '
+             . self::dynamicMethodRowType() . '] [' . \implode(', ', $rowsIr) . "]\n";
+        return [$def, 'ptr ' . $sym];
+    }
+
+    /** Build one `{ ptr name, ptr trampoline }` row. */
+    public static function dynamicMethodRow(string $nameIr, string $tramp): string
+    {
+        return self::dynamicMethodRowType() . ' { ptr ' . $nameIr . ', ptr ' . $tramp . ' }';
     }
 
     /**
@@ -683,6 +714,151 @@ final class RuntimeLibrary
         $out .= "  %done = icmp eq i64 %i1, %cnt\n";
         $out .= "  br i1 %done, label %miss, label %loop\n";
         $out .= "miss:\n  ret i64 0\n}\n";
+        return $out;
+    }
+
+    /**
+     * Uniform dynamic-method ABI for fixed-arity, non-reference, non-variadic
+     * methods. The caller passes the raw receiver pointer and a boxed argument
+     * vector; the method row resolves the compiler-owned trampoline once and the
+     * trampoline performs the typed call/default handling.
+     */
+    /** Runtime lookup in a lightweight `{ count, rows }` method table. */
+    public static function dynamicMethodRuntime(): string
+    {
+        $out = "define i64 @__mc_dyn_method_lookup(i64 %table, ptr %name) {\nentry:\n";
+        $out .= "  %tp = inttoptr i64 %table to ptr\n";
+        $out .= "  %cp = getelementptr i8, ptr %tp, i64 0\n";
+        $out .= "  %cnt = load i64, ptr %cp\n";
+        $out .= "  %rp = getelementptr i8, ptr %tp, i64 8\n";
+        $out .= "  %rows = load ptr, ptr %rp\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+        $out .= "  %done = icmp uge i64 %i, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %check\n";
+        $out .= "check:\n";
+        $out .= "  %off = mul i64 %i, 16\n";
+        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
+        $out .= "  %np = load ptr, ptr %row\n";
+        $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %next\n";
+        $out .= "hit:\n";
+        $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
+        $out .= "  %fv = load ptr, ptr %fp\n";
+        $out .= "  %fi = ptrtoint ptr %fv to i64\n";
+        $out .= "  ret i64 %fi\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
+        // A null trampoline means "declared but not eligible for the uniform
+        // ABI". This predicate keeps that case separate from a genuinely absent
+        // method, so a class __call fallback cannot steal a real variadic,
+        // by-reference, private, or otherwise unsupported method.
+        $out .= "define i1 @__mc_dyn_method_has(i64 %table, ptr %name) {\nentry:\n";
+        $out .= "  %tp = inttoptr i64 %table to ptr\n";
+        $out .= "  %cntp = getelementptr i8, ptr %tp, i64 0\n";
+        $out .= "  %cnt = load i64, ptr %cntp\n";
+        $out .= "  %rp = getelementptr i8, ptr %tp, i64 8\n";
+        $out .= "  %rows = load ptr, ptr %rp\n";
+        $out .= "  br label %hloop\n";
+        $out .= "hloop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %hnext ]\n";
+        $out .= "  %done = icmp uge i64 %i, %cnt\n";
+        $out .= "  br i1 %done, label %hmiss, label %hcheck\n";
+        $out .= "hcheck:\n";
+        $out .= "  %off = mul i64 %i, 16\n";
+        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
+        $out .= "  %np = load ptr, ptr %row\n";
+        $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
+        $out .= "  br i1 %eq, label %hhit, label %hnext\n";
+        $out .= "hhit:\n  ret i1 true\n";
+        $out .= "hnext:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %hloop\n";
+        $out .= "hmiss:\n  ret i1 false\n}\n";
+        $descOff = (string)\Compile\MemoryAbi::DESCRIPTOR_DYN_METHODS_OFFSET;
+        // Try-call is the semantics-preserving boundary for erased callers:
+        // ordinary rows and the class-specific __call fallback write the result
+        // and return 1; an unsupported/missing method returns 0 so the caller
+        // can execute the existing inline dispatcher instead of silently turning
+        // the PHP call into a null result.
+        $out .= "define i1 @__mc_dyn_method_try_call(i64 %obj, ptr %name, ptr %args, ptr %outp) {\nentry:\n";
+        $out .= "  %objp = inttoptr i64 %obj to ptr\n";
+        $out .= "  %descI = load i64, ptr %objp\n";
+        $out .= "  %descNull = icmp eq i64 %descI, 0\n";
+        $out .= "  br i1 %descNull, label %miss, label %haveDesc\n";
+        $out .= "haveDesc:\n";
+        $out .= "  %descp = inttoptr i64 %descI to ptr\n";
+        $out .= '  %dynP = getelementptr i8, ptr %descp, i64 ' . $descOff . "\n";
+        $out .= "  %dyn = load ptr, ptr %dynP\n";
+        $out .= "  %dynNull = icmp eq ptr %dyn, null\n";
+        $out .= "  br i1 %dynNull, label %miss, label %lookup\n";
+        $out .= "lookup:\n";
+        $out .= "  %tableI = ptrtoint ptr %dyn to i64\n";
+        $out .= "  %tramp = call i64 @__mc_dyn_method_lookup(i64 %tableI, ptr %name)\n";
+        $out .= "  %trampNull = icmp eq i64 %tramp, 0\n";
+        $out .= "  br i1 %trampNull, label %declaredCheck, label %invoke\n";
+        $out .= "declaredCheck:\n";
+        $out .= "  %declared = call i1 @__mc_dyn_method_has(i64 %tableI, ptr %name)\n";
+        $out .= "  br i1 %declared, label %miss, label %magicLookup\n";
+        $out .= "invoke:\n";
+        $out .= "  %fp = inttoptr i64 %tramp to ptr\n";
+        $out .= "  %argsI = ptrtoint ptr %args to i64\n";
+        $out .= "  %result = call i64 %fp(i64 %obj, i64 %argsI)\n";
+        $out .= "  store i64 %result, ptr %outp\n";
+        $out .= "  ret i1 true\n";
+        $out .= "magicLookup:\n";
+        $out .= "  %magicP = getelementptr i8, ptr %dyn, i64 16\n";
+        $out .= "  %magic = load ptr, ptr %magicP\n";
+        $out .= "  %magicNull = icmp eq ptr %magic, null\n";
+        $out .= "  br i1 %magicNull, label %miss, label %invokeMagic\n";
+        $out .= "invokeMagic:\n";
+        $out .= "  %magicI = ptrtoint ptr %magic to i64\n";
+        $out .= "  %nameI = ptrtoint ptr %name to i64\n";
+        $out .= "  %magicArgsI = ptrtoint ptr %args to i64\n";
+        $out .= "  %magicFp = inttoptr i64 %magicI to ptr\n";
+        $out .= "  %magicResult = call i64 %magicFp(i64 %obj, i64 %nameI, i64 %magicArgsI)\n";
+        $out .= "  store i64 %magicResult, ptr %outp\n";
+        $out .= "  ret i1 true\n";
+        $out .= "miss:\n  ret i1 false\n}\n";
+        $out .= "define i64 @__mc_dyn_method_call(i64 %obj, ptr %name, ptr %args) {\nentry:\n";
+        $out .= "  %objp = inttoptr i64 %obj to ptr\n";
+        $out .= "  %descI = load i64, ptr %objp\n";
+        $out .= "  %descNull = icmp eq i64 %descI, 0\n";
+        $out .= "  br i1 %descNull, label %miss2, label %haveDesc\n";
+        $out .= "haveDesc:\n";
+        $out .= "  %descp = inttoptr i64 %descI to ptr\n";
+        $out .= '  %dynP = getelementptr i8, ptr %descp, i64 ' . $descOff . "\n";
+        $out .= "  %dyn = load ptr, ptr %dynP\n";
+        $out .= "  %dynNull = icmp eq ptr %dyn, null\n";
+        $out .= "  br i1 %dynNull, label %miss2, label %lookup2\n";
+        $out .= "lookup2:\n";
+        $out .= "  %tableI = ptrtoint ptr %dyn to i64\n";
+        $out .= "  %tramp = call i64 @__mc_dyn_method_lookup(i64 %tableI, ptr %name)\n";
+        $out .= "  %trampNull = icmp eq i64 %tramp, 0\n";
+        $out .= "  br i1 %trampNull, label %magic2, label %invoke2\n";
+        $out .= "magic2:\n";
+        $out .= "  %magicP = getelementptr i8, ptr %dyn, i64 16\n";
+        $out .= "  %magic = load ptr, ptr %magicP\n";
+        $out .= "  %magicNull = icmp eq ptr %magic, null\n";
+        $out .= "  br i1 %magicNull, label %miss2, label %invokeMagic2\n";
+        $out .= "invokeMagic2:\n";
+        $out .= "  %magicI = ptrtoint ptr %magic to i64\n";
+        $out .= "  %nameI = ptrtoint ptr %name to i64\n";
+        $out .= "  %magicArgsI = ptrtoint ptr %args to i64\n";
+        $out .= "  %magicFp = inttoptr i64 %magicI to ptr\n";
+        $out .= "  %magicResult = call i64 %magicFp(i64 %obj, i64 %nameI, i64 %magicArgsI)\n";
+        $out .= "  ret i64 %magicResult\n";
+        $out .= "invoke2:\n";
+        $out .= "  %fp = inttoptr i64 %tramp to ptr\n";
+        $out .= "  %argsI = ptrtoint ptr %args to i64\n";
+        $out .= "  %result = call i64 %fp(i64 %obj, i64 %argsI)\n";
+        $out .= "  ret i64 %result\n";
+        $out .= "miss2:\n  ret i64 0\n}\n";
         return $out;
     }
 

@@ -99,6 +99,22 @@ trait LowerExprs
         return $node;
     }
 
+    private function hasNamespacedGetenv(): bool
+    {
+        if ($this->hasNamespacedGetenvCache !== null) {
+            return $this->hasNamespacedGetenvCache;
+        }
+        foreach ($this->fnDecls as $declName => $_decl) {
+            $dp = \strrpos($declName, \chr(92));
+            if ($dp !== false && \substr($declName, $dp + 1) === 'getenv') {
+                $this->hasNamespacedGetenvCache = true;
+                return true;
+            }
+        }
+        $this->hasNamespacedGetenvCache = false;
+        return false;
+    }
+
     private function lowerCallExpr(\Parser\Ast\CallExpr $expr): Node
     {
             $fn = \strtolower($expr->function);
@@ -181,11 +197,7 @@ trait LowerExprs
             // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
             // builder; a direct call would be tree-shaken (undefined at link). The
             // single-arg `getenv($name)` stays the codegen builtin.
-            $hasNamespacedGetenv = false;
-            foreach ($this->fnDecls as $declName => $_decl) {
-                $dp = \strrpos($declName, \chr(92));
-                if ($dp !== false && \substr($declName, $dp + 1) === $fnBare) { $hasNamespacedGetenv = true; break; }
-            }
+            $hasNamespacedGetenv = $this->hasNamespacedGetenv();
             if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$hasNamespacedGetenv) {
                 return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
             }

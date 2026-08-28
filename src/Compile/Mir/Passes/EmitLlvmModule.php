@@ -30,6 +30,7 @@ use Compile\Mir\Div;
 use Compile\Mir\Echo_;
 use Compile\Mir\FloatConst;
 use Compile\Mir\FunctionDef;
+use Compile\Mir\FunctionTextSink;
 use Compile\Mir\IncDec;
 use Compile\Mir\StaticProp_;
 use Compile\Mir\StoreStaticProp_;
@@ -112,6 +113,15 @@ trait EmitLlvmModule
         // (→ __mir_rc_release); force both — the unified runtime always emits.
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
+        // `__mir_str_reclaim` periodically asks macOS malloc to return empty
+        // zone pages. Register this before the declaration snapshot below;
+        // runtime body emitters run later and are deliberately too late here.
+        if (\Manticore\is_darwin()) {
+            $this->libcExtra['malloc_default_zone'] =
+                'declare ptr @malloc_default_zone()';
+            $this->libcExtra['malloc_zone_pressure_relief'] =
+                'declare i64 @malloc_zone_pressure_relief(ptr, i64)';
+        }
         // Settle the output funnel's own demand BEFORE anything below reads a
         // flag. @__mir_out_write calls @manticore_stdout(), whose shim is gated
         // by needsStdStreams a hundred lines down; @__mir_out_int uses the
@@ -454,7 +464,7 @@ trait EmitLlvmModule
         // deduped map so they don't collide with the uncaught handler's own
         // dprintf declare (a raw redeclare is a hard LLVM error — it made
         // MANTICORE_PROFILE unusable on any module with exceptions).
-        if (\Compile\Debug::$profile) {
+        if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
         }
@@ -846,14 +856,20 @@ trait EmitLlvmModule
             // Library build (stdlib.o): no entry point — the program supplies
             // its own `@main`. The bundled stdlib has no top-level code, so
             // dropping `__main` loses nothing.
-            if ($this->emitLibrary) { return ''; }
-            return $this->emitMain($fn);
+            if ($this->emitLibrary) { $this->frame->body = null; return ''; }
+            $mainBody = $this->emitMain($fn);
+            $this->frame->body = null;
+            return $mainBody;
         }
         if ($fn->ffiSymbol !== null) {
-            return $this->emitFfiWrapper($fn);
+            $ffiBody = $this->emitFfiWrapper($fn);
+            $this->frame->body = null;
+            return $ffiBody;
         }
         if ($fn->isGenerator) {
-            return $this->emitGenerator($fn);
+            $generatorBody = $this->emitGenerator($fn);
+            $this->frame->body = null;
+            return $generatorBody;
         }
 
         // A closure fn takes an env ptr (the closure struct) followed by
@@ -862,7 +878,6 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
-        $body = '';
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -904,23 +919,30 @@ trait EmitLlvmModule
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
             $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+            $sinkPath = '';
+            if ($this->streamIrPath !== '') {
+                $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
+                $this->functionTextCounter = $this->functionTextCounter + 1;
+            }
+            $bodySink = new FunctionTextSink($sinkPath);
+            $bodySink->write($header);
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$cn] = $slot;
-                $body .= '  ' . $slot . " = alloca i64\n";
+                $bodySink->write('  ' . $slot . " = alloca i64\n");
                 $gep = $this->ssa->allocReg();
-                $body .= '  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 ' . (string)($pi + 1) . "\n";
+                $bodySink->write('  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 ' . (string)($pi + 1) . "\n");
                 $cv = $this->ssa->allocReg();
-                $body .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
-                $body .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
+                $bodySink->write('  ' . $cv . ' = load i64, ptr ' . $gep . "\n");
+                $bodySink->write('  store i64 ' . $cv . ', ptr ' . $slot . "\n");
             }
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
                 $pp = $fn->params[$pi];
                 $cn = $pp->name;
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$cn] = $slot;
-                $body .= '  ' . $slot . " = alloca i64\n";
+                $bodySink->write('  ' . $slot . " = alloca i64\n");
                 // Uniform closure ABI: the caller passes every scalar arg as a
                 // tagged cell. A param declared a concrete scalar unboxes the
                 // cell back to its repr here (cell / array / obj params stay raw;
@@ -928,11 +950,11 @@ trait EmitLlvmModule
                 if (!$pp->byRef && $this->isCellScalarParam($pp->type)) {
                     $this->lastValue = '%arg.' . $cn;
                     $this->lastValueType = 'i64';
-                    $body .= $this->unboxCellToType($pp->type);
-                    $body .= $this->coerceToI64();
-                    $body .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+                    $bodySink->write($this->unboxCellToType($pp->type));
+                    $bodySink->write($this->coerceToI64());
+                    $bodySink->write('  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n");
                 } else {
-                    $body .= '  store i64 %arg.' . $cn . ', ptr ' . $slot . "\n";
+                    $bodySink->write('  store i64 %arg.' . $cn . ', ptr ' . $slot . "\n");
                 }
             }
         } else {
@@ -944,11 +966,18 @@ trait EmitLlvmModule
                 $paramSig .= 'i64 %arg.' . $p->name;
             }
             $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+            $sinkPath = '';
+            if ($this->streamIrPath !== '') {
+                $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
+                $this->functionTextCounter = $this->functionTextCounter + 1;
+            }
+            $bodySink = new FunctionTextSink($sinkPath);
+            $bodySink->write($header);
             foreach ($fn->params as $p) {
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$p->name] = $slot;
-                $body .= '  ' . $slot . " = alloca i64\n";
-                $body .= '  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n";
+                $bodySink->write('  ' . $slot . " = alloca i64\n");
+                $bodySink->write('  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n");
                 // A by-value array-hinted slot is read as a RAW buffer pointer
                 // throughout the body, so strip a NaN tag on entry. The call
                 // sites try to do this (`unboxCellArg` + the array-hint mask),
@@ -968,10 +997,10 @@ trait EmitLlvmModule
                 // the point, and stripping it hands `var_dump` a raw buffer.
                 if (!$p->byRef && $p->arrayHinted && $p->type->kind !== Type::KIND_CELL) {
                     $rw = $this->ssa->allocReg();
-                    $body .= '  ' . $rw . ' = load i64, ptr ' . $slot . "\n";
+                    $bodySink->write('  ' . $rw . ' = load i64, ptr ' . $slot . "\n");
                     $mk = $this->ssa->allocReg();
-                    $body .= '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n";
-                    $body .= '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
+                    $bodySink->write('  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n");
+                    $bodySink->write('  store i64 ' . $mk . ', ptr ' . $slot . "\n");
                 }
                 // PHP arrays are values: a by-VALUE array param the body mutates
                 // in place (`$x[] = …` / `$x[$k] = …` / nested `$x[0][] = …`) must
@@ -987,9 +1016,9 @@ trait EmitLlvmModule
                 if (!$p->byRef && $p->arrayHinted
                     && $this->localMutatedAsArray($fn->body, $p->name)) {
                     $ld = $this->ssa->allocReg();
-                    $body .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
+                    $bodySink->write('  ' . $ld . ' = load i64, ptr ' . $slot . "\n");
                     $lp = $this->ssa->allocReg();
-                    $body .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
+                    $bodySink->write('  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n");
                     $cp = $this->ssa->allocReg();
                     if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
                         // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so
@@ -997,23 +1026,23 @@ trait EmitLlvmModule
                         // nested `$x[0][] = …` on a het `[[1,2], "s"]` would else
                         // share the inner array). Safe only here — raw vecs can't
                         // be tag-inspected (a large/neg int could look boxed).
-                        $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
+                        $bodySink->write('  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n");
                     } else {
                         $depth = $this->arrayCopyDepth($p->type);
                         if ($depth < 0) { $depth = 0; }
-                        $body .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
-                              . ', i64 ' . (string)$depth . ")\n";
+                        $bodySink->write('  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+                              . ', i64 ' . (string)$depth . ")\n");
                     }
                     $ci = $this->ssa->allocReg();
-                    $body .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
-                    $body .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
+                    $bodySink->write('  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n");
+                    $bodySink->write('  store i64 ' . $ci . ', ptr ' . $slot . "\n");
                 }
             }
         }
         $paramNames = [];
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; }
-        $body .= $this->preallocateLocals($fn->body);
-        $body .= $this->initRcObjSlots($fn->body, $paramNames);
+        $bodySink->write($this->preallocateLocals($fn->body));
+        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames));
         // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
         // code is a function like any other to the language and unlike any other
         // to this file, and a prologue step added to only one of the two is
@@ -1035,29 +1064,63 @@ trait EmitLlvmModule
             if (!isset($this->locals->slots[$bname])) { continue; }
             if (isset($this->locals->refLocals[$bname])) { continue; }
             $box = $this->ssa->allocReg();
-            $body .= '  ' . $box . " = call ptr @__mir_alloc(i64 8)\n";
-            $body .= '  store i64 0, ptr ' . $box . "\n";
+            $bodySink->write('  ' . $box . " = call ptr @__mir_alloc(i64 8)\n");
+            $bodySink->write('  store i64 0, ptr ' . $box . "\n");
             $bi = $this->ssa->allocReg();
-            $body .= '  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n";
-            $body .= '  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n";
+            $bodySink->write('  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n");
+            $bodySink->write('  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n");
             $this->locals->refLocals[$bname] = true;
         }
-        $body .= $this->emitRefCellBoxes($fn->body, $paramNames);
+        $bodySink->write($this->emitRefCellBoxes($fn->body, $paramNames));
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
         // header). The caller pushed a bare method-name placeholder because a
         // stable receiver class isn't available at the call site under the
         // self-host. Overwrites this frame's name slot (index depth-1).
         if ($this->rt->needsBacktrace && isset($this->methodDisplay[$fn->name])) {
-            $body .= $this->btNameFix($this->methodDisplay[$fn->name]);
+            $bodySink->write($this->btNameFix($this->methodDisplay[$fn->name]));
         }
-        $body .= $this->emitNode($fn->body);
+        // Keep top-level statement fragments separate while the function is
+        // emitted. This is the same ordering contract as visitBlock(), but avoids
+        // making one intermediate block string before emitFunction() joins the
+        // prologue, body and implicit return. Nested blocks retain their visitor
+        // contract; non-Block bodies use the original fallback.
+        if ($fn->body->kind === Node::KIND_BLOCK) {
+            // All module-wide scans and all per-function collection passes have
+            // completed before emission. Once a top-level statement has produced
+            // its three ordered fragments, no later emitter reads that subtree;
+            // detach it immediately instead of retaining the entire MIR graph
+            // until the function's LLVM string is materialised. This is a
+            // compiler-only lifetime boundary: it does not touch target values,
+            // PHP COW, or the order/content of emitted instructions.
+            $stmtCount = \count($fn->body->stmts);
+            for ($stmtIndex = 0; $stmtIndex < $stmtCount; $stmtIndex = $stmtIndex + 1) {
+                $stmt = $fn->body->stmts[$stmtIndex];
+                $bodySink->write($this->emitNoDiscardWarn($stmt));
+                $bodySink->write($this->emitNode($stmt));
+                $bodySink->write($this->emitDiscardedCallRelease($stmt));
+                unset($fn->body->stmts[$stmtIndex], $stmt);
+            }
+            unset($stmtCount, $stmtIndex);
+        } else {
+            $bodySink->write($this->emitNode($fn->body));
+        }
         // Uniform closure ABI: a closure's IMPLICIT return (fall off the end, or a
         // bare `return;`) must be a BOXED null, not raw 0 — a dynamic `callable`
         // caller reads the result by tag, so raw 0 decoded as float and
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
-        $body .= '  ret i64 ' . $this->implicitReturnValue() . "\n";
-        return $header . $body . "}\n\n";
+        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n}");
+        $body = $bodySink->finish() . "\n\n";
+        // Do not keep the per-invocation chunk array alive through the return
+        // boundary. Doctrine emits tens of thousands of functions; explicit
+        // detachment is compiler-only lifetime management and does not affect
+        // target values, COW, or the emitted bytes.
+        unset($bodySink);
+        // The frame is only a per-function analysis view. The emitted text no
+        // longer needs the recursive MIR graph, so release this second owner
+        // before returning to the module loop; FunctionDef is detached there.
+        $this->frame->body = null;
+        return $body;
     }
 
     /**
@@ -1209,7 +1272,7 @@ trait EmitLlvmModule
 
     private function profileRuntime(): string
     {
-        if (!\Compile\Debug::$profile) { return ''; }
+        if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
         // atexit/dprintf are declared once via libcExtra (see the preamble) so
         // they don't collide with the uncaught handler's dprintf.
         // 0-6: per-flavor alloc/retain/release. 7-13: retain by SOURCE category
@@ -1229,15 +1292,28 @@ trait EmitLlvmModule
         $names = ['str_alloc', 'str_retain', 'str_release', 'rc_retain',
                   'rc_release', 'assoc_retain', 'assoc_release',
                   'retain_alias', 'retain_capture', 'retain_element',
-                  'retain_assoc', 'retain_prop', 'retain_static', 'retain_return',
+                  'retain_assoc', 'retain_prop',                   'retain_static', 'retain_return',
                   'arr_alloc_total', 'arr_alloc_empty',
                   'pool_alloc', 'pool_hit', 'pool_miss', 'pool_free',
-                  'pool_bypass', 'obj_alloc', 'bucket_alloc'];
+                  'pool_bypass', 'obj_alloc', 'bucket_alloc',
+                  'str_reclaim', 'tagged_alloc', 'tagged_reclaim',
+                  'array_reclaim', 'str_arena_alloc', 'array_arena_alloc',
+                  'bucket_reclaim', 'cc_reclaim', 'array_retain_call',
+                  'array_release_call', 'array_retain_rc', 'array_release_rc',
+                  'array_release_repr', 'array_release_buf', 'array_release_obj',
+                  'array_release_str', 'array_release_cell',
+                  'array_release_own_obj', 'array_release_own_str',
+                  'array_release_own_cell', 'array_retain_repr',
+                  'array_retain_buf', 'array_retain_obj', 'array_retain_str',
+                  'array_retain_cell'];
         // ONE spelling of the array length: the global, the bump GEP and the
         // dump loop all read it from the name list. They disagreed before — the
         // global was [16 x i64] while the dump indexed it as [14 x i64].
         $slots = (string)\count($names);
         $out  = "@__prof = linkonce_odr global [" . $slots . " x i64] zeroinitializer\n";
+        if (\Compile\Debug::$allocTrace) {
+            $out .= "@__prof.tick = linkonce_odr global i64 0\n";
+        }
         $i = 0;
         foreach ($names as $nm) {
             // Each escape (`\0A` newline, `\00` NUL) is one byte in the
@@ -1254,6 +1330,21 @@ trait EmitLlvmModule
         $out .= "  %v = load i64, ptr %p\n";
         $out .= "  %v1 = add i64 %v, 1\n";
         $out .= "  store i64 %v1, ptr %p\n";
+        if (\Compile\Debug::$allocTrace) {
+            // A capped compiler can be killed before atexit. Emit one aggregate
+            // snapshot every 2^24 counter events: enough resolution to catch a
+            // phase transition, but no per-allocation trace storm.
+            $out .= "  %t = load i64, ptr @__prof.tick\n";
+            $out .= "  %t1 = add i64 %t, 1\n";
+            $out .= "  store i64 %t1, ptr @__prof.tick\n";
+            $out .= "  %tm = and i64 %t1, 16777215\n";
+            $out .= "  %cp = icmp eq i64 %tm, 0\n";
+            $out .= "  br i1 %cp, label %checkpoint, label %done\n";
+            $out .= "checkpoint:\n";
+            $out .= "  call void @__manticore_profile_dump()\n";
+            $out .= "  br label %done\n";
+            $out .= "done:\n";
+        }
         $out .= "  ret void\n}\n";
         $out .= "define void @__manticore_profile_dump() {\nentry:\n";
         // Ordered after the program's own output, not spliced into it.
@@ -1410,7 +1501,7 @@ trait EmitLlvmModule
             $header .= "  unreachable\n";
             $header .= "__run:\n";
         }
-        if (\Compile\Debug::$profile) {
+        if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $header .= "  call i32 @atexit(ptr @__manticore_profile_dump)\n";
         }
         // register_shutdown_function's queue runs from an atexit hook, which is

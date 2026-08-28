@@ -18,14 +18,19 @@ namespace Compile;
  *                                         non-escaping arrays. ON by default.
  *   MANTICORE_EMPTY_SINGLETON=0         — opt OUT of the shared immortal empty
  *                                         `[]` buffer. ON by default.
- *   MANTICORE_POOL=0                    — opt OUT of the small-object pool
- *                                         allocator. ON by default; must be the
- *                                         same for the whole build (see $pool).
+ *   MANTICORE_POOL=1                    — opt IN to the small-object pool
+ *                                         allocator. OFF by default after the
+ *                                         arm64 reserved-address crash; must be
+ *                                         the same for the whole build (see $pool).
  *   MANTICORE_REF_CELLS=0               — opt OUT of reference cells. ON by
  *                                         default; must be the same for the
  *                                         whole build (see $refCells).
  *   MANTICORE_PROFILE=1                 — emit thread-local rc/alloc counters +
  *                                         an atexit tally (memory-traffic profile).
+ *   MANTICORE_ALLOC_TRACE=1              — emit allocation/reclaim balance
+ *                                         counters and an atexit tally; this is
+ *                                         statistics only and does not log each
+ *                                         allocation.
  *   MANTICORE_DEBUG_VERIFY=1            — slow-path invariant checks at memory ops
  *                                         (abort on failure); bisects rc-balance bugs.
  *   MANTICORE_REFLECT_REPORT=1          — report which classes reflection kept alive.
@@ -63,6 +68,13 @@ final class Debug
      * "how much refcount work does bin/manticore do to compile its own source?"
      */
     public static bool $profile = false;
+
+    /**
+     * Low-overhead allocator ownership telemetry. Unlike `$profile`, this flag
+     * is dedicated to allocator/reclaim balance counters and is opt-in via
+     * `MANTICORE_ALLOC_TRACE=1`.
+     */
+    public static bool $allocTrace = false;
 
     /**
      * Memory mode selector:
@@ -125,7 +137,9 @@ final class Debug
      * Size-classed small-object pool in front of libc for objects, unified
      * array buffers and hash bucket side-arrays (strings already had their own
      * two-class free list). See {@see \Compile\MemoryAbi::POOL_GRAIN} for the
-     * shape. DEFAULT ON. Disable with `MANTICORE_POOL=0`.
+     * shape. DEFAULT OFF: the mmap-backed arm64 pool hit a reserved-address
+     * SIGBUS during the large Doctrine self-host target. Enable explicitly with
+     * `MANTICORE_POOL=1` only for a controlled pool experiment.
      *
      * ⚠ The flag must hold for the WHOLE build. `__mir_pool_alloc` / `_free`
      * and the allocators calling them are `linkonce_odr`: link a stdlib `.o`
@@ -135,7 +149,7 @@ final class Debug
      * environment to both halves, so exporting the variable for the build is
      * enough — flipping it for a single file is not.
      */
-    public static bool $pool = true;
+    public static bool $pool = false;
 
     /**
      * Reference cells — a `&` whose result is a storable VALUE rather than an
@@ -191,6 +205,10 @@ final class Debug
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$profile = true;
         }
+        $env = \getenv('MANTICORE_ALLOC_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$allocTrace = true;
+        }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
@@ -224,7 +242,7 @@ final class Debug
         $env = \getenv('MANTICORE_POOL');
         if ($env === '0') {
             self::$pool = false;
-        } elseif ($env !== false && $env !== '') {
+        } elseif ($env === '1') {
             self::$pool = true;
         }
         $env = \getenv('MANTICORE_REF_CELLS');

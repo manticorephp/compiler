@@ -56,6 +56,23 @@ final class TrampolineSynth
         return '__mc_rtramp_' . $c . '__' . $method;
     }
 
+    /** Uniform erased fallback for `__call(string $name, array $arguments)`. */
+    public static function magicSymBase(string $class): string
+    {
+        $c = \str_replace('\\', '_', \ltrim($class, '\\'));
+        return '__mc_rmagic_' . $c;
+    }
+
+    /** Only the canonical two-parameter __call shape is safe to forward. */
+    public static function magicInvokable(MethodMeta $mm): bool
+    {
+        if ($mm->isAbstract || $mm->isStatic || \count($mm->params) !== 2) { return false; }
+        foreach ($mm->params as $p) {
+            if ($p->byRef || $p->variadic) { return false; }
+        }
+        return true;
+    }
+
     /**
      * True for any reflection-synthesized function whose `mixed` return shares
      * the trampoline's uniform cell-return ABI — a scalar slot must box on
@@ -66,6 +83,7 @@ final class TrampolineSynth
     public static function isSynthReturn(string $name): bool
     {
         return \str_contains($name, '__mc_rtramp_')
+            || \str_contains($name, '__mc_rmagic_')
             || \str_contains($name, '__mc_fntramp_')
             || \str_contains($name, '__mc_pget_')
             || \str_contains($name, '__mc_pset_')
@@ -119,8 +137,13 @@ final class TrampolineSynth
             $ctor = $cls->methodMeta['__construct'] ?? null;
             $out .= self::ctorTramp($cls->name, $ctor);
         }
+        $magic = $cls->methodMeta['__call'] ?? null;
+        if ($magic !== null && ($magic->declaringClass === '' || $magic->declaringClass === $cls->name)
+            && self::magicInvokable($magic)) {
+            $out .= self::magicTramp($cls->name);
+        }
         foreach ($cls->methodMeta as $mn => $mm) {
-            if ($mn === '__construct') { continue; }
+            if ($mn === '__construct' || $mn === '__call') { continue; }
             $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
             if ($decl !== $cls->name) { continue; }   // emitted by the declaring class
             if (!self::invokable($mm)) { continue; }
@@ -129,7 +152,38 @@ final class TrampolineSynth
         return $out;
     }
 
-    /** `new \C(args)` — recv ignored. Arms from the ctor's required..total. */
+    /** `__call(name, args)` with the same erased receiver ABI plus the name. */
+    private static function magicTramp(string $class): string
+    {
+        $fqn = '\\' . \ltrim($class, '\\');
+        $name = self::magicSymBase($class);
+        return self::ARGS_HINT . 'function ' . $name . '(' . $fqn
+             . " \$t, string \$name, array \$a): mixed { return \$t->__call(\$name, \$a); }\n";
+    }
+
+    /**
+     * One reusable slow path for erased `$o->$name(...$args)` calls. Each arm
+     * uses a literal method name, so normal lowering preserves by-ref/default/
+     * variadic argument rules; the caller only pays one call into this helper
+     * when the lightweight table has no supported row.
+     *
+     * @param array<string, true> $methods keyed by method name
+     */
+    public static function spreadFallbackSource(array $methods): string
+    {
+        $out = self::ARGS_HINT . "function __mc_dyn_spread_fallback(object \$o, string \$name, array \$a): mixed {\n";
+        foreach ($methods as $method => $_) {
+            if ($method === '' || $method === '__construct' || $method === '__call') { continue; }
+            // Method names come from parsed PHP declarations. Keep this path
+            // free of a runtime regex dependency: the self-hosted seed may not
+            // expose identical preg_match modifier behavior, while declaration
+            // names are already valid member identifiers here.
+            $out .= '  if ($name === ' . \var_export($method, true) . ") { return \$o->" . $method . "(...\$a); }\n";
+        }
+        return $out . "  return null;\n}\n";
+    }
+
+    /** `new \\C(args)` — recv ignored. Arms from the ctor's required..total. */
     private static function ctorTramp(string $class, ?MethodMeta $ctor): string
     {
         $fqn = '\\' . \ltrim($class, '\\');

@@ -2034,6 +2034,43 @@ trait EmitLlvmCalls
         $regs = [];
         $n = \count($ptypes);
         $pdefs = $fnKey !== '' ? ($this->sigs->paramDefaults[$fnKey] ?? []) : [];
+        // A variadic PHP parameter is represented in MIR as ONE vec parameter.
+        // Dynamic method fallback reaches this helper after the original spread
+        // node has already been preserved, so expanding the source array into
+        // scalar arguments would call `m($this, firstElement)` against a callee
+        // that expects `m($this, vec)`. Pass the raw array pointer as that one
+        // parameter when the source and target element representations agree.
+        // Incompatible/erased element representations deliberately retain the
+        // old path until a cell-array conversion fact is available; never guess
+        // that an arbitrary cell is a typed array.
+        $vmask = $fnKey !== '' ? ($this->sigs->variadicParams[$fnKey] ?? []) : [];
+        if (($vmask[$firstParam] ?? false) && $firstParam < $n) {
+            $target = $ptypes[$firstParam]->element ?? null;
+            $compatible = $target === null
+                || $target->kind === Type::KIND_CELL
+                || $target->kind === Type::KIND_UNKNOWN
+                || ($elemType !== null && $elemType->kind === $target->kind);
+            if ($compatible) {
+                $raw = $this->ssa->allocReg();
+                $out .= '  ' . $raw . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
+                return [$out, [$raw]];
+            }
+            if ($target !== null
+                && ($elemType === null
+                    || $elemType->kind === Type::KIND_CELL
+                    || $elemType->kind === Type::KIND_UNKNOWN)) {
+                // A synthesized PHP helper receives `mixed[]` (boxed cells),
+                // while a concrete variadic target expects a raw vec<T>. Rebuild
+                // the vector through the existing de-cellify boundary instead of
+                // handing tagged words to the typed method body.
+                $srcI = $this->ssa->allocReg();
+                $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
+                $this->lastValue = $srcI;
+                $this->lastValueType = 'i64';
+                $out .= $this->emitCellArrayToTyped(Type::vec($target));
+                return [$out, [$this->lastValue]];
+            }
+        }
         $cnt = '';
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
             $ev = $this->ssa->allocReg();

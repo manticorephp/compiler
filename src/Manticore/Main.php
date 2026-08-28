@@ -35,6 +35,9 @@ function malloc(int $size): \Ffi\Ptr {}
 #[Library('c'), Symbol('calloc')]
 function calloc(int $count, int $size): \Ffi\Ptr {}
 
+#[Library('c'), Symbol('free')]
+function free(\Ffi\Ptr $ptr): void {}
+
 #[Library('c'), Symbol('uname'), CType('int')]
 function uname(\Ffi\Ptr $buf): int { return 0; }
 
@@ -62,6 +65,10 @@ function fwrite_buf(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
 #[Library('c'), Symbol('fread')]
 function fread(\Ffi\Ptr $buf, #[CType('size_t')] int $size,
                #[CType('size_t')] int $count, \Ffi\Ptr $stream): int { return 0; }
+
+#[Library('c'), Symbol('fgets')]
+function fgets(\Ffi\Ptr $buf, #[CType('int')] int $size,
+               \Ffi\Ptr $stream): \Ffi\Ptr {}
 
 #[Library('c'), Symbol('fseek'), CType('int')]
 function fseek(\Ffi\Ptr $stream, #[CType('long')] int $offset,
@@ -878,11 +885,11 @@ function append_file_bytes(string $path, string $bytes): bool {
 
 /** Copy a staged file in bounded chunks; never materialize the source file. */
 function append_file_path(string $src, string $dst): bool {
-    if (\class_exists('FFI')) {
-        $bytes = @\file_get_contents($src);
-        if ($bytes === false) { return false; }
-        return @\file_put_contents($dst, $bytes, \FILE_APPEND) !== false;
-    }
+    // Never use file_get_contents here. In staged Emit the source is the complete
+    // `.bodies` file and can be hundreds of MiB; the old FFI branch materialized
+    // it as one headered compiler string exactly at the late-Emit peak. Use the
+    // same raw libc buffer path in every mode, so the source is never resident as
+    // a second PHP/Manticore string.
     $in = fopen($src, "rb");
     if ($in === null) { return false; }
     $out = fopen($dst, "ab");
@@ -895,6 +902,7 @@ function append_file_path(string $src, string $dst): bool {
         if ($n <= 0) { break; }
         if (fwrite_buf($buf, 1, $n, $out) !== $n) { $ok = false; break; }
     }
+    free($buf);
     fclose($in);
     fclose($out);
     return $ok;
@@ -1188,6 +1196,15 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool {
         return false;
     }
     $memory = $p->value("memory", "");
+    // The self-host launcher selects the compiler's host allocation policy via
+    // MANTICORE_MEMORY. A CLI flag remains an explicit per-build override; when
+    // absent, propagate the environment selector into ApplyMemoryMode instead
+    // of silently falling back to HYBRID. This is compiler policy only: the
+    // target ABI and PHP COW semantics are unchanged.
+    if ($memory === "") {
+        $envMemory = \getenv('MANTICORE_MEMORY');
+        if ($envMemory !== false && $envMemory !== '') { $memory = $envMemory; }
+    }
     CompileArgs::$output = $p->value("o", "a.out");
     CompileArgs::$files = $p->positional;
     CompileArgs::$memory = $memory;
@@ -1382,7 +1399,7 @@ function cmd_compile(array $args): int {
     $sources = [];
     /** @var string[] $paths */
     $paths = [];
-    foreach ($afiles as $sf) { $sources[] = $sf->contents; $paths[] = $sf->path; }
+    foreach ($afiles as $sf) { $sources[] = __mc_source_contents($sf); $paths[] = __mc_source_path($sf); }
 
     if ($analyze) {
         // Advisory by default: any failure inside the analyzer is swallowed so it
@@ -1761,7 +1778,15 @@ function composer_autoload_dirs(array $autoload, string $base): array
  *
  * @return array<string,bool>
  */
-function composer_autoload_file_entries(string $projRoot, bool $withVendor): array
+function composer_package_selected(array $allow, string $name): bool
+{
+    if ($allow === []) { return true; }
+    foreach ($allow as $wanted) {
+        if ((string)$wanted === $name) { return true; }
+    }
+    return false;
+}
+function composer_autoload_file_entries(string $projRoot, bool $withVendor, array $packageAllow = []): array
 {
     /** @var array<string,bool> $out */
     $out = [];
@@ -1788,6 +1813,7 @@ function composer_autoload_file_entries(string $projRoot, bool $withVendor): arr
             $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
             foreach ($pkgs as $pkg) {
                 if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                if (!composer_package_selected($packageAllow, (string)$pkg["name"])) { continue; }
                 if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
                     $add($pkg["autoload"], $projRoot . "/vendor/" . (string)$pkg["name"]);
                 }
@@ -1816,9 +1842,30 @@ function composer_autoload_file_entries(string $projRoot, bool $withVendor): arr
  * costs a little compile time; a false "drops it" would lose a declaration, and
  * a version-guarded `if (…) { class X {} }` must never be mistaken for a script.
  */
+/** Return SourceFile::path through a concrete typed receiver for self-host. */
+function __mc_source_path(\Analyze\SourceFile $sf): string
+{
+    return $sf->path;
+}
+/** Return SourceFile::contents through a concrete typed receiver for self-host. */
+function __mc_source_contents(\Analyze\SourceFile $sf): string
+{
+    return $sf->contents;
+}
 function __mc_source_may_declare(string $src): bool
 {
-    return \preg_match('/\b(class|interface|trait|enum|function)\b/i', $src) === 1;
+    // A conservative literal scan is deliberately used here instead of the
+    // regex engine. This function runs in the native self-host driver while it
+    // is deciding which Composer files become input units; a false negative
+    // silently erases a valid class, whereas a false positive only retains a
+    // harmless extra declaration/script candidate. PHP declaration syntax always
+    // contains one of these keyword-plus-space tokens, including final/abstract
+    // classes and namespaced traits.
+    return \str_contains($src, 'class ')
+        || \str_contains($src, 'interface ')
+        || \str_contains($src, 'trait ')
+        || \str_contains($src, 'enum ')
+        || \str_contains($src, 'function ');
 }
 
 /**
@@ -1942,7 +1989,7 @@ function __mc_stmt_children(\Parser\Ast\Stmt $s): array
  *
  * @return string[]
  */
-function composer_source_dirs(string $projRoot, bool $withVendor): array
+function composer_source_dirs(string $projRoot, bool $withVendor, array $packageAllow = []): array
 {
     /** @var string[] $dirs */
     $dirs = [];
@@ -1962,6 +2009,7 @@ function composer_source_dirs(string $projRoot, bool $withVendor): array
             $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
             foreach ($pkgs as $pkg) {
                 if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                if (!composer_package_selected($packageAllow, (string)$pkg["name"])) { continue; }
                 $pkgRoot = $projRoot . "/vendor/" . (string)$pkg["name"];
                 if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
                     foreach (composer_autoload_dirs($pkg["autoload"], $pkgRoot) as $d) { $dirs[] = $d; }
@@ -1998,7 +2046,7 @@ function composer_source_dirs(string $projRoot, bool $withVendor): array
  *
  * @return string[]
  */
-function composer_classmap_excludes(string $projRoot, bool $withVendor): array
+function composer_classmap_excludes(string $projRoot, bool $withVendor, array $packageAllow = []): array
 {
     /** @var string[] $out */
     $out = [];
@@ -2018,6 +2066,7 @@ function composer_classmap_excludes(string $projRoot, bool $withVendor): array
             $pkgs = (\is_array($lock) && isset($lock["packages"])) ? $lock["packages"] : [];
             foreach ($pkgs as $pkg) {
                 if (!\is_array($pkg) || !isset($pkg["name"])) { continue; }
+                if (!composer_package_selected($packageAllow, (string)$pkg["name"])) { continue; }
                 $pkgRoot = $projRoot . "/vendor/" . (string)$pkg["name"];
                 if (isset($pkg["autoload"]) && \is_array($pkg["autoload"])) {
                     foreach (classmap_exclude_paths($pkg["autoload"], $pkgRoot) as $p) { $out[] = $p; }
@@ -2117,9 +2166,15 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     $keep = CompileArgs::$keepIr;
     $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
+    // Stream function bodies by default. Keeping the complete module in one PHP
+    // string made large Symfony/Doctrine modules retain every body and every
+    // transient concatenation until clang started; g36 measured a 106.8 GiB
+    // physical-footprint peak (91 GiB swapped) on the bounded 1,170-file target.
+    // `MANTICORE_STREAM_IR=0|off` remains an explicit opt-out for small-module
+    // debugging and preserves the old in-memory path when deliberately requested.
     $streamMode = \getenv('MANTICORE_STREAM_IR');
-    $streamIr = $streamMode !== false && $streamMode !== ''
-        && $streamMode !== '0' && $streamMode !== 'off';
+    $streamIr = $streamMode === false || ($streamMode !== ''
+        && $streamMode !== '0' && $streamMode !== 'off');
     $module = lower_module($sources, null, $paths);
     if ($module === null) { dprint("build: front-end returned null for " . $output); return 65; }
     /** @var string[] $undefTraps */
@@ -2141,6 +2196,16 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         return 65;
     }
     if (\strlen($ir) === 0) { dprint("build: empty IR for " . $output); return 65; }
+    // The streamed IR marker/file is now the complete application input for
+    // clang. Keeping the typed Module and emitter alive across clang makes every
+    // lowered class, signature cache and empty FunctionDef shell coexist with
+    // the large LLVM translation unit. Release that compiler-only graph before
+    // assembly/link. Libraries retain Module until their .sig is written below.
+    if (!$emitLibrary) {
+        $emit = null;
+        $module = null;
+        unset($sources, $paths);
+    }
     // A call nothing defines compiled into a runtime throw rather than a link
     // error ({@see \Compile\Mir\Passes\EmitLlvmCalls::emitCall}). That is right
     // for a guarded `apcu_add`, and it is also exactly what a compiler ONE
@@ -2383,10 +2448,10 @@ function cmd_build(array $args): int
         /** @var array<string,bool> $seenPath */
         $seenPath = [];
         foreach (collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
-            if (isset($seenPath[$sf->path])) { continue; }
-            $seenPath[$sf->path] = true;
-            $sources[] = $sf->contents;
-            $paths[] = $sf->path;
+            if (isset($seenPath[__mc_source_path($sf)])) { continue; }
+            $seenPath[__mc_source_path($sf)] = true;
+            $sources[] = __mc_source_contents($sf);
+            $paths[] = __mc_source_path($sf);
         }
         // Composer discovery. "composer": true builds the project the way Composer
         // sees it — its own composer.json autoload (psr-4/psr-0 + classmap dirs)
@@ -2401,12 +2466,17 @@ function cmd_build(array $args): int
         if ($composerOn) {
             $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
             $withVendorBootstrap = $withVendor || (\is_array($composer) && isset($composer["bootstrap"]) && $composer["bootstrap"] === true);
+            /** @var string[] $packageAllow */
+            $packageAllow = [];
+            if (\is_array($composer) && isset($composer["packages"]) && \is_array($composer["packages"])) {
+                foreach ($composer["packages"] as $packageName) { $packageAllow[] = (string)$packageName; }
+            }
             // Composer's own exclusions join the manifest's. Applied to the
             // composer-discovered roots only: the manifest's `src` is the
             // project's own code, where the author's `exclude` is the authority.
             $moduleExcludes = \array_merge(
                 $moduleExcludes,
-                composer_classmap_excludes(".", $withVendor),
+                composer_classmap_excludes(".", $withVendor, $packageAllow),
             );
             /** @var array<string,bool> $covered */
             $covered = [];
@@ -2414,28 +2484,34 @@ function cmd_build(array $args): int
             // composer's BOOTSTRAP set. Everything else it autoloads is
             // demand-driven, so a file there that declares nothing is not a
             // compile unit at all ({@see __mc_source_may_declare}).
-            $bootFiles = composer_autoload_file_entries(".", $withVendorBootstrap);
+            $bootFiles = composer_autoload_file_entries(".", $withVendorBootstrap, $packageAllow);
             $skippedScripts = 0;
-            foreach (composer_source_dirs(".", $withVendor) as $cdir) {
+            foreach (composer_source_dirs(".", $withVendor, $packageAllow) as $cdir) {
                 $nd = \rtrim($cdir, "/");
                 if (isset($covered[$nd])) { continue; }
                 $covered[$nd] = true;
                 dprint("build: + composer autoload '" . $nd . "'");
                 foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
-                    if (isset($seenPath[$sf->path])) { continue; }
-                    $seenPath[$sf->path] = true;
-                    $sfNorm = \rtrim($sf->path, "/");
+                    if (isset($seenPath[__mc_source_path($sf)])) { continue; }
+                    $seenPath[__mc_source_path($sf)] = true;
+                    $sfNorm = \rtrim(__mc_source_path($sf), "/");
                     $isBoot = isset($bootFiles[$sfNorm]) || isset($bootFiles[$nd]);
-                    if (!$isBoot && !__mc_source_may_declare($sf->contents)) {
+                    $sfContents = __mc_source_contents($sf);
+                    $sfMayDeclare = __mc_source_may_declare($sfContents);
+                    $sfPath = __mc_source_path($sf);
+                    if (!$isBoot && !$sfMayDeclare) {
                         $skippedScripts = $skippedScripts + 1;
-                        dprint("build:   - script (declares nothing, never autoloaded): " . $sf->path);
+                        dprint("build:   - script (declares nothing, never autoloaded): " . $sfPath);
                         continue;
                     }
                     // Demand-loaded: keep its DECLARATIONS, drop its top-level
-                    // side effects ({@see CompileArgs::$demandLoadedPaths}).
+                    // side effects ({@see CompileArgs::$demandLoadedPaths}). The
+                    // The conservative detector is intentional here: Composer
+                    // class files are the reachability boundary, and a false
+                    // negative would silently erase a valid class from the AOT module.
                     if (!$isBoot) { CompileArgs::$demandLoadedPaths[$sfNorm] = true; }
-                    $sources[] = $sf->contents;
-                    $paths[] = $sf->path;
+                    $sources[] = $sfContents;
+                    $paths[] = $sfPath;
                 }
             }
             if (!$withVendor && $withVendorBootstrap) {
@@ -2470,8 +2546,8 @@ function cmd_build(array $args): int
             $ext = $extDefs[$en];
             $extSrc = (string)$ext["src"];
             foreach (collect_php_source_files($extSrc, []) as $sf) {
-                $sources[] = $sf->contents;
-                $paths[] = $sf->path;
+                $sources[] = __mc_source_contents($sf);
+                $paths[] = __mc_source_path($sf);
             }
             foreach ($ext["link"] as $lib) { $linkFlags = $linkFlags . " -l" . (string)$lib; }
             dprint("build: + extension '" . $en . "' (" . $extSrc . ")");
@@ -2610,24 +2686,29 @@ function build_manifest_libraries(array $libs, bool $appsOnly): int
                 && isset($libComposer["vendor"])
                 && $libComposer["vendor"] === false
             );
+            /** @var string[] $packageAllow */
+            $packageAllow = [];
+            if (\is_array($libComposer) && isset($libComposer["packages"]) && \is_array($libComposer["packages"])) {
+                foreach ($libComposer["packages"] as $packageName) { $packageAllow[] = (string)$packageName; }
+            }
             // Libraries can opt into the same Composer-resolved source set as
             // applications. This is deliberately opt-in: the old `src` walk
             // remains byte-for-byte the default for existing manifests.
             $libExcludes = \array_merge(
                 $excludes,
-                composer_classmap_excludes(".", $withVendor),
+                composer_classmap_excludes(".", $withVendor, $packageAllow),
             );
-            $bootFiles = composer_autoload_file_entries(".", $withVendor);
+            $bootFiles = composer_autoload_file_entries(".", $withVendor, $packageAllow);
             /** @var array<string,bool> $seenPath */
             $seenPath = [];
             /** @var array<string,bool> $covered */
             $covered = [];
-            foreach (composer_source_dirs(".", $withVendor) as $cdir) {
+            foreach (composer_source_dirs(".", $withVendor, $packageAllow) as $cdir) {
                 $nd = \rtrim($cdir, "/");
                 if (isset($covered[$nd])) { continue; }
                 $covered[$nd] = true;
                 foreach (collect_php_source_files($nd, $libExcludes) as $sf) {
-                    $sfNorm = \rtrim($sf->path, "/");
+                    $sfNorm = \rtrim(__mc_source_path($sf), "/");
                     if (\str_starts_with($sfNorm, "./")) {
                         $sfNorm = \substr($sfNorm, 2);
                     }
@@ -2637,15 +2718,15 @@ function build_manifest_libraries(array $libs, bool $appsOnly): int
                     // library declaration unit. The application-side
                     // `bootstrap:true` path adds them later.
                     if (isset($bootFiles[$sfNorm])) { continue; }
-                    if (!__mc_library_source_may_declare($sf->contents)) { continue; }
-                    $sources[] = $sf->contents;
-                    $paths[] = $sf->path;
+                    if (!__mc_library_source_may_declare(__mc_source_contents($sf))) { continue; }
+                    $sources[] = __mc_source_contents($sf);
+                    $paths[] = __mc_source_path($sf);
                 }
             }
         } else {
             foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
-                $sources[] = $sf->contents;
-                $paths[] = $sf->path;
+                $sources[] = __mc_source_contents($sf);
+                $paths[] = __mc_source_path($sf);
             }
         }
         if (\count($sources) === 0) {
@@ -3120,15 +3201,21 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         foreach (\Compile\Mir\PreludeDemand::definedFunctions($source) as $fn) {
             $ownFns[$fn] = true;
         }
+        // Literal class-existence guards are compile-time facts once Composer
+        // declarations are in the module. They must not disable the precise
+        // walker reachability pass: Symfony’s generated tier roots contain many
+        // such guards, while the genuinely open cases use a runtime name.
         if (preg_match("/\\bnew\\s+\\$/", $source)
             || preg_match("/\\bunserialize\\s*\\(/", $source)
-            || preg_match("/ReflectionClass|class_alias|class_exists|interface_exists|trait_exists|enum_exists/", $source)) {
+            || preg_match("/ReflectionClass|class_alias/", $source)
+            || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
         }
         preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/", $source, $m1);
         preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m2);
         preg_match_all("/\\b([A-Za-z_][A-Za-z0-9_\\\\]*)::[A-Za-z_][A-Za-z0-9_]*/", $source, $m3);
-        foreach ([$m1[1], $m2[1], $m3[1]] as $group) {
+        preg_match_all('/\\b(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*[\'\"]([A-Za-z_][A-Za-z0-9_\\\\]*)[\'\"]/', $source, $m4);
+        foreach ([$m1[1], $m2[1], $m3[1], $m4[2]] as $group) {
             foreach ($group as $root) { $walkerRoots[$root] = true; }
         }
         // The AST now owns everything needed from this raw source. Release the
@@ -3836,24 +3923,28 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $stmts = [];
         $program = null;
         $lower = null;
+        \Manticore\Allocator::release('after-lower');
         $statT = \Compile\Stats::now();
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
         \Compile\Stats::step('ConstFold', $statT, \count($module->functions), -1);
         // ConstFold keeps per-function work state; no result is needed after run.
         $fold = null;
+        \Manticore\Allocator::release('after-constfold');
         $statT = \Compile\Stats::now();
         $dse = new \Compile\Mir\Passes\DeadStore();
         $module = $dse->run($module);
         \Compile\Stats::step('DeadStore', $statT, \count($module->functions), -1);
         // DeadStore's used-local map is only needed during this pass.
         $dse = null;
+        \Manticore\Allocator::release('after-deadstore');
         $statT = \Compile\Stats::now();
         $infer = new \Compile\Mir\Passes\InferTypes();
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
         // InferTypes owns several module-wide maps; retain only annotations on Module.
         $infer = null;
+        \Manticore\Allocator::release('after-infer-1');
         // Define the locals whose only definition is a by-ref ARGUMENT position
         // (php's out-parameter spelling). Runs here because a MethodCall_
         // receiver has no class before inference, and because InferTypes #2
@@ -3880,6 +3971,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $infer2->run($module);
         \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
         $infer2 = null;
+        \Manticore\Allocator::release('after-infer-2');
         // Eliminate the boxed-cell closure ABI where it's avoidable: inline
         // captureless single-expr arrow closures at known invoke sites, and
         // fuse array_map/array_filter/array_reduce over a concrete array with a
@@ -3890,6 +3982,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $inlineCl->run($module);
         \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
         $inlineCl = null;
+        \Manticore\Allocator::release('after-inline-closures');
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
@@ -3901,6 +3994,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
         $mono = null;
+        \Manticore\Allocator::release('after-monomorphize');
         // Fuse implode(explode()) split-join round-trips into one native
         // str_replace (zero intermediate array/segment allocs). After Mono so
         // types + explode arg-counts are settled; before InferEffects so the
@@ -3945,15 +4039,18 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             } elseif (\count($tc->errors) > 0) {
                 foreach ($tc->errors as $te) { dprint($te); }
                 $tc = null;
+                \Manticore\Allocator::release('typecheck-error');
                 return null;
             }
             $tc = null;
         }
+        \Manticore\Allocator::release('after-typecheck');
         $statT = \Compile\Stats::now();
         $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         $narrow = null;
+        \Manticore\Allocator::release('after-narrow');
         // The `#[TypeDef]` soundness gate: an erased value must never reach a
         // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a
         // `mixed` slot). Runs once types are final and before any memory pass —
@@ -3999,6 +4096,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 . \implode(', ', $rnames));
         }
         $refl = null;
+        \Manticore\Allocator::release('after-reflect-analysis');
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         \Compile\Stats::step('DemoteCharLocals', $statT, -1, -1);
@@ -4007,26 +4105,31 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $effects->run($module);
         \Compile\Stats::step('InferEffects', $statT, -1, -1);
         $effects = null;
+        \Manticore\Allocator::release('after-infer-effects');
         $statT = \Compile\Stats::now();
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
         $module = $allocKind->run($module);
         \Compile\Stats::step('InferAllocKind', $statT, -1, -1);
         $allocKind = null;
+        \Manticore\Allocator::release('after-infer-alloc-kind');
         $statT = \Compile\Stats::now();
         $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
         $module = $memMode->run($module);
         \Compile\Stats::step('ApplyMemoryMode', $statT, -1, -1);
         $memMode = null;
+        \Manticore\Allocator::release('after-memory-mode');
         $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
         $module = $memOps->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
         $memOps = null;
+        \Manticore\Allocator::release('after-memory-ops');
         $statT = \Compile\Stats::now();
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
         $verify = null;
+        \Manticore\Allocator::release('before-emit');
         if ($analysisContext !== null) {
             $finalScope = $analysisContext->scope();
             \Compile\Stats::line('deps-final: changes=' . (string)\count($analysisContext->changes->functions)
@@ -4294,8 +4397,8 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array {
     $parsed = [];
     foreach ($files as $sf) {
         try {
-            $program = \Parser\Parser::parseSource($sf->contents);
-            $parsed[] = new \Analyze\ParsedFile($sf->path, $program);
+            $program = \Parser\Parser::parseSource(__mc_source_contents($sf));
+            $parsed[] = new \Analyze\ParsedFile(__mc_source_path($sf), $program);
         } catch (\Parser\ParseError $pe) {
             // ParseError appends ` at line N, column C`; the diagnostic already
             // prints that location, so strip the redundant tail.
@@ -4304,9 +4407,9 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array {
             if (\str_ends_with($msg, $suffix)) {
                 $msg = \substr($msg, 0, \strlen($msg) - \strlen($suffix));
             }
-            $diags[] = \Analyze\Diagnostic::error($sf->path, $pe->errLine, $pe->column, 'parse.error', $msg);
+            $diags[] = \Analyze\Diagnostic::error(__mc_source_path($sf), $pe->errLine, $pe->column, 'parse.error', $msg);
         } catch (\Throwable $e) {
-            $diags[] = \Analyze\Diagnostic::error($sf->path, 0, 0, 'parse.error', $e->getMessage());
+            $diags[] = \Analyze\Diagnostic::error(__mc_source_path($sf), 0, 0, 'parse.error', $e->getMessage());
         }
     }
 
@@ -4320,7 +4423,7 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array {
     if ($deep) {
         /** @var string[] $raw */
         $raw = [];
-        foreach ($files as $sf) { $raw[] = $sf->contents; }
+        foreach ($files as $sf) { $raw[] = __mc_source_contents($sf); }
         $collect = new \Analyze\MirDiags();
         lower_module($raw, $collect);
         $fileLabel = \count($files) === 1 ? $files[0]->path : "(project)";

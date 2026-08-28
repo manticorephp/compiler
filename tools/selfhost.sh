@@ -27,6 +27,16 @@ cd "$ROOT"
 # prelude) and g3 (built by the /tmp stage binary, which can't) diverge.
 export MANTICORE_PRELUDE="$ROOT/prelude"
 
+# The compiler being rebuilt is itself an arena-friendly workload: its transient
+# MIR/LLVM strings and arrays live until the process exits. Use arena for the
+# selfhost compiler by default so macOS malloc cannot retain the churn as huge
+# fragmented zones. This affects only the compiler process below; a later
+# `bin/manticore build ... --memory=rc|hybrid` still chooses the emitted target's
+# memory ABI. Preserve an explicit value for controlled rc/hybrid bootstrap runs.
+if [[ -z "${MANTICORE_MEMORY+x}" ]]; then
+    export MANTICORE_MEMORY=arena
+fi
+
 MANTICORE="${1:-bin/manticore}"
 OUT="${2:-bin/manticore_self}"
 OUT_DIR="$(dirname "$OUT")"

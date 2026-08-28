@@ -214,18 +214,35 @@ trait EmitLlvmVisit
 
     public function visitBlock(Block $n): string
     {
-            $out = '';
-            foreach ($n->stmts as $s) {
-                // Order matters: the #[\NoDiscard] warning is emitted BEFORE the
-                // call, like php's, so it precedes anything the call itself
-                // prints. This loop is the established "a call in statement
-                // position = its result is discarded" predicate — the same one
-                // emitDiscardedCallRelease keys on.
-                $out .= $this->emitNoDiscardWarn($s);
-                $out .= $this->emitNode($s);
-                $out .= $this->emitDiscardedCallRelease($s);
+        // Preserve the scalar fast path until the block has actually become
+        // large. A statement-count threshold misses nested blocks with a few
+        // expensive statements, while allocating a chunk array for every small
+        // block regresses narrow-return code. Once the accumulated text crosses
+        // 64 KiB, freeze that prefix as one chunk and stop copying it on every
+        // subsequent statement; the final join is still one ordered boundary.
+        $out = '';
+        /** @var string[]|null $chunks */
+        $chunks = null;
+        foreach ($n->stmts as $s) {
+            $fragment = $this->emitNoDiscardWarn($s);
+            $fragment .= $this->emitNode($s);
+            $fragment .= $this->emitDiscardedCallRelease($s);
+            if ($chunks === null) {
+                $out .= $fragment;
+                if (\strlen($out) >= 65536) {
+                    $chunks = [$out];
+                    $out = '';
+                }
+            } else {
+                $chunks[] = $fragment;
             }
-            return $out;
+        }
+        if ($chunks !== null) {
+            $chunks[] = $out;
+            $out = \implode('', $chunks);
+            unset($chunks);
+        }
+        return $out;
     }
 
     public function visitMemoryOp(MemoryOp_ $n): string

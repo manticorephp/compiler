@@ -149,19 +149,33 @@ function __mc_session_ctx_switch(int $from, int $to): void
     \__McSession::$lastRead = \__McSession::$savedLastRead[$to];
 }
 
+/** Invoke an array callable. Kept separate from the function/closure path so
+ * the erased dynamic-method and erased invoke dispatches do not accumulate in
+ * one megamorphic body. */
+function __mc_sess_call_array(mixed $cb, string $a, string $b, int $argc): mixed
+{
+    $o = $cb[0];
+    $m = $cb[1];
+    if ($argc === 0) { return $o->$m(); }
+    if ($argc === 1) { return $o->$m($a); }
+    return $o->$m($a, $b);
+}
+
+/** Invoke a non-array callable. */
+function __mc_sess_call_function(mixed $cb, string $a, string $b, int $argc): mixed
+{
+    if ($argc === 0) { return $cb(); }
+    if ($argc === 1) { return $cb($a); }
+    return $cb($a, $b);
+}
+
 /** Invoke a user handler callable, in either of the shapes php accepts. */
 function __mc_sess_call(mixed $cb, string $a, string $b, int $argc): mixed
 {
     if (\is_array($cb)) {
-        $o = $cb[0];
-        $m = $cb[1];
-        if ($argc === 0) { return $o->$m(); }
-        if ($argc === 1) { return $o->$m($a); }
-        return $o->$m($a, $b);
+        return __mc_sess_call_array($cb, $a, $b, $argc);
     }
-    if ($argc === 0) { return $cb(); }
-    if ($argc === 1) { return $cb($a); }
-    return $cb($a, $b);
+    return __mc_sess_call_function($cb, $a, $b, $argc);
 }
 
 /** The configured save path, resolved once per open. */

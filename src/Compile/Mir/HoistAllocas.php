@@ -100,6 +100,107 @@ final class HoistAllocas
     }
 
     /**
+     * File-backed equivalent of {@see run}. It is intentionally specialized to
+     * one complete emitted function, which is exactly what staged Emit hands to
+     * the hoist pass. The old `run(string)` path explodes the whole body into
+     * lines and then joins a second full string; this path keeps only one line,
+     * the static alloca side file, and the rest side file alive at a time.
+     *
+     * @return bool false when an input/output operation fails
+     */
+    public function runFile(string $input, string $output): bool
+    {
+        $in = \Manticore\fopen($input, 'rb');
+        if ($in === null) { return false; }
+        $out = \Manticore\fopen($output, 'wb');
+        if ($out === null) { \Manticore\fclose($in); return false; }
+        // One emitted MIR function can contain more than one LLVM top-level
+        // definition: generators emit the entry function and a `$resume`
+        // continuation in the same string. Keep the buffer bounded, but scan
+        // every top-level item rather than stopping at the first `}`.
+        $cap = 1048576;
+        $buf = \Manticore\malloc($cap);
+        if ($buf === null) {
+            \Manticore\fclose($in);
+            \Manticore\fclose($out);
+            return false;
+        }
+        $this->moved = 0;
+        $ok = true;
+        while ($ok) {
+            $p = \Manticore\fgets($buf, $cap, $in);
+            if ($p === 0) { break; }
+            $line = \cstr_to_str($p);
+            $n = \strlen($line);
+            if (\substr($line, 0, 7) !== 'define ') {
+                if (\Manticore\fwrite($line, 1, $n, $out) !== $n) { $ok = false; }
+                continue;
+            }
+            // Write the define header and the first body line unchanged. All
+            // static allocas are collected only from the remaining body lines.
+            if (\Manticore\fwrite($line, 1, $n, $out) !== $n) { $ok = false; break; }
+            $p = \Manticore\fgets($buf, $cap, $in);
+            if ($p === 0) { $ok = false; break; }
+            $first = \cstr_to_str($p);
+            $n = \strlen($first);
+            if (\Manticore\fwrite($first, 1, $n, $out) !== $n) { $ok = false; break; }
+            $allocPath = $input . '.allocas';
+            $restPath = $input . '.rest';
+            if (!\Manticore\write_file($allocPath, '') || !\Manticore\write_file($restPath, '')) {
+                $ok = false;
+                break;
+            }
+            $allocOut = \Manticore\fopen($allocPath, 'ab');
+            $restOut = \Manticore\fopen($restPath, 'ab');
+            if ($allocOut === null || $restOut === null) {
+                if ($allocOut !== null) { \Manticore\fclose($allocOut); }
+                if ($restOut !== null) { \Manticore\fclose($restOut); }
+                $ok = false;
+                break;
+            }
+            $sawEnd = false;
+            while ($ok) {
+                $q = \Manticore\fgets($buf, $cap, $in);
+                if ($q === 0) { break; }
+                $bodyLine = \cstr_to_str($q);
+                $bn = \strlen($bodyLine);
+                if (\rtrim($bodyLine) === '}') {
+                    $sawEnd = true;
+                    if (\Manticore\fwrite($bodyLine, 1, $bn, $restOut) !== $bn) { $ok = false; }
+                    break;
+                }
+                if ($this->isStaticAlloca($bodyLine)) {
+                    if (\Manticore\fwrite($bodyLine, 1, $bn, $allocOut) !== $bn) { $ok = false; }
+                    $this->moved = $this->moved + 1;
+                } elseif (\Manticore\fwrite($bodyLine, 1, $bn, $restOut) !== $bn) {
+                    $ok = false;
+                }
+            }
+            \Manticore\fclose($allocOut);
+            \Manticore\fclose($restOut);
+            if (!$sawEnd) { $ok = false; }
+            if ($ok) {
+                // Close before append_file_path: two libc FILE* handles on the
+                // same output otherwise risk independently buffered reordering.
+                \Manticore\fclose($out);
+                if (!\Manticore\append_file_path($allocPath, $output)
+                    || !\Manticore\append_file_path($restPath, $output)) { $ok = false; }
+                \Manticore\system('rm -f ' . $allocPath . ' ' . $restPath);
+                if ($ok) {
+                    $out = \Manticore\fopen($output, 'ab');
+                    if ($out === null) { $ok = false; }
+                }
+            } else {
+                \Manticore\system('rm -f ' . $allocPath . ' ' . $restPath);
+            }
+        }
+        \Manticore\free($buf);
+        \Manticore\fclose($in);
+        \Manticore\fclose($out);
+        return $ok;
+    }
+
+    /**
      * `  %r12 = alloca i64` — yes. `  %r12 = alloca i64, i64 %n` — no: a
      * variable-sized alloca means something different at the top of the
      * function than it does where it was written.

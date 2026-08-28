@@ -279,6 +279,7 @@ trait EmitLlvmRuntime
         $out .= "define ptr @__mir_alloc_tagged(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(21);
+        $out .= $this->profBump(24);
         $out .= "  %t = add i64 %n, 8\n";
         $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
@@ -379,6 +380,18 @@ trait EmitLlvmRuntime
         $p1a   = (string)\Compile\MemoryAbi::STRING_POOL1_ALLOC;
         $p0c   = (string)\Compile\MemoryAbi::STRING_POOL0_CAP;
         $p1c   = (string)\Compile\MemoryAbi::STRING_POOL1_CAP;
+        $pmax  = (string)\Compile\MemoryAbi::STRING_POOL_MAX;
+        $darwin = \Manticore\is_darwin();
+        if ($darwin) {
+            // macOS keeps empty malloc-zone pages resident after the compiler
+            // releases millions of short-lived IR fragments. Ask the default
+            // zone to return pressure-relief pages periodically; Linux does not
+            // get this declaration or call, so the generated ABI stays portable.
+            $this->libcExtra['malloc_default_zone'] =
+                'declare ptr @malloc_default_zone()';
+            $this->libcExtra['malloc_zone_pressure_relief'] =
+                'declare i64 @malloc_zone_pressure_relief(ptr, i64)';
+        }
         // linkonce_odr, NOT internal: __mir_str_alloc / __mir_str_reclaim are
         // linkonce_odr and every linked module (user .o + stdlib .o) carries a
         // copy referencing ITS OWN pool head. With internal pools that is an
@@ -391,6 +404,11 @@ trait EmitLlvmRuntime
         // linkonce_odr pools coalesce to one head, exactly like the functions.
         $out .= "@__mir_strpool0 = linkonce_odr global ptr null\n";
         $out .= "@__mir_strpool1 = linkonce_odr global ptr null\n";
+        $out .= "@__mir_strpool0_n = linkonce_odr global i64 0\n";
+        $out .= "@__mir_strpool1_n = linkonce_odr global i64 0\n";
+        if ($darwin) {
+            $out .= "@__mir_strreclaim_count = linkonce_odr global i64 0\n";
+        }
         $out .= "define ptr @__mir_str_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(0);
@@ -407,6 +425,9 @@ trait EmitLlvmRuntime
         $out .= "pop0:\n";
         $out .= "  %nx0 = load ptr, ptr %h0\n";
         $out .= "  store ptr %nx0, ptr @__mir_strpool0\n";
+        $out .= "  %pn0 = load i64, ptr @__mir_strpool0_n\n";
+        $out .= "  %pn01 = sub i64 %pn0, 1\n";
+        $out .= "  store i64 %pn01, ptr @__mir_strpool0_n\n";
         $out .= "  br label %i0\n";
         $out .= "m0:\n";
         $out .= "  %a0 = call ptr @malloc(i64 " . $p0a . ")\n";
@@ -424,6 +445,9 @@ trait EmitLlvmRuntime
         $out .= "pop1:\n";
         $out .= "  %nx1 = load ptr, ptr %h1\n";
         $out .= "  store ptr %nx1, ptr @__mir_strpool1\n";
+        $out .= "  %pn1 = load i64, ptr @__mir_strpool1_n\n";
+        $out .= "  %pn11 = sub i64 %pn1, 1\n";
+        $out .= "  store i64 %pn11, ptr @__mir_strpool1_n\n";
         $out .= "  br label %i1\n";
         $out .= "m1:\n";
         $out .= "  %a1 = call ptr @malloc(i64 " . $p1a . ")\n";
@@ -457,23 +481,53 @@ trait EmitLlvmRuntime
         // free (only ever called at rc==0, i.e. no live references).
         $out .= "define void @__mir_str_reclaim(ptr %sbase) {\n";
         $out .= "entry:\n";
+        $out .= $this->profBump(23);
+        if ($darwin) {
+            $out .= "  %q0 = load i64, ptr @__mir_strreclaim_count\n";
+            $out .= "  %q1 = add i64 %q0, 1\n";
+            $out .= "  store i64 %q1, ptr @__mir_strreclaim_count\n";
+            $out .= "  %qmask = and i64 %q1, 1048575\n";
+            $out .= "  %qdo = icmp eq i64 %qmask, 0\n";
+            $out .= "  br i1 %qdo, label %pressure, label %inspect\n";
+            $out .= "pressure:\n";
+            $out .= "  %zone = call ptr @malloc_default_zone()\n";
+            $out .= "  call i64 @malloc_zone_pressure_relief(ptr %zone, i64 0)\n";
+            $out .= "  br label %inspect\n";
+            $out .= "inspect:\n";
+        }
         $out .= "  %capp = getelementptr inbounds i8, ptr %sbase, i64 " . $capAt . "\n";
         $out .= "  %cap = load i64, ptr %capp\n";
         $out .= "  %is0 = icmp eq i64 %cap, " . $p0c . "\n";
         $out .= "  br i1 %is0, label %p0, label %k1\n";
         $out .= "p0:\n";
+        $out .= "  %pn0 = load i64, ptr @__mir_strpool0_n\n";
+        $out .= "  %pfull0 = icmp uge i64 %pn0, " . $pmax . "\n";
+        $out .= "  br i1 %pfull0, label %p0free, label %p0push\n";
+        $out .= "p0push:\n";
         $out .= "  %o0 = load ptr, ptr @__mir_strpool0\n";
         $out .= "  store ptr %o0, ptr %sbase\n";
         $out .= "  store ptr %sbase, ptr @__mir_strpool0\n";
+        $out .= "  %pn01 = add i64 %pn0, 1\n";
+        $out .= "  store i64 %pn01, ptr @__mir_strpool0_n\n";
         $out .= "  ret void\n";
+        $out .= "p0free:\n";
+        $out .= "  br label %df\n";
         $out .= "k1:\n";
         $out .= "  %is1 = icmp eq i64 %cap, " . $p1c . "\n";
         $out .= "  br i1 %is1, label %p1, label %df\n";
         $out .= "p1:\n";
+        $out .= "  %pn1 = load i64, ptr @__mir_strpool1_n\n";
+        $out .= "  %pfull1 = icmp uge i64 %pn1, " . $pmax . "\n";
+        $out .= "  br i1 %pfull1, label %p1free, label %p1push\n";
+        $out .= "p1push:\n";
         $out .= "  %o1 = load ptr, ptr @__mir_strpool1\n";
         $out .= "  store ptr %o1, ptr %sbase\n";
         $out .= "  store ptr %sbase, ptr @__mir_strpool1\n";
+        $out .= "  %pn11 = add i64 %pn1, 1\n";
+        $out .= "  store i64 %pn11, ptr @__mir_strpool1_n\n";
         $out .= "  ret void\n";
+        $out .= "p1free:\n";
+        $out .= "  br label %df\n";
         $out .= "df:\n";
         $out .= "  call void @free(ptr %sbase)\n";
         $out .= "  ret void\n";
@@ -482,6 +536,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsArena) {
             $out .= "define ptr @__mir_str_alloc_arena(i64 %n) {\n";
             $out .= "entry:\n";
+            $out .= $this->profBump(27);
             $out .= "  %t = add i64 %n, " . $H . "\n";
             $out .= "  %p = call ptr @__mir_arena_alloc(i64 %t)\n";
             $out .= "  %capp = getelementptr inbounds i8, ptr %p, i64 " . $capAt . "\n";
@@ -505,7 +560,8 @@ trait EmitLlvmRuntime
             // set to 1 (immaterial — retain/release bail on the tag — but a
             // stray cow sees rc<=1 and never clones/decrements). The arena
             // bulk-frees the whole buffer at scope exit; no free() ever runs.
-            if (\Compile\Debug::$arenaArrays) {
+            if (\Compile\Debug::$arenaArrays
+                || \Compile\Debug::$memoryMode === \Compile\Debug::MEM_ARENA) {
             $atag = (string)\Compile\MemoryAbi::ARRAY_TAG_ARENA;
             $ahdr = (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE;
             $aesz = (string)\Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
@@ -513,6 +569,7 @@ trait EmitLlvmRuntime
             $arc  = (string)\Compile\MemoryAbi::ARRAY_RC_OFFSET;
             $out .= "define ptr @__mir_alloc_array_tagged_arena(i64 %n) {\n";
             $out .= "entry:\n";
+            $out .= $this->profBump(28);
             $out .= "  %t = add i64 %n, 8\n";
             $out .= "  %base = call ptr @__mir_arena_alloc(i64 %t)\n";
             $out .= "  store i64 " . $atag . ", ptr %base\n";
@@ -631,6 +688,7 @@ trait EmitLlvmRuntime
             $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
             $out .= "  br i1 %isbuf, label %done, label %dofree\n";
             $out .= "dofree:\n";
+            $out .= $this->profBump(25);
             // Recursive drop: release this object's obj-typed properties
             // before freeing it, so nested objects don't leak.
             $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
@@ -645,9 +703,9 @@ trait EmitLlvmRuntime
             $out .= "  store i64 %src1, ptr %tagp\n";
             $out .= "  %szero = icmp sle i64 %src1, 0\n";
             $out .= "  br i1 %szero, label %sfree, label %done\n";
-            $out .= "sfree:\n";
-            $out .= "  %sbase = getelementptr i8, ptr %tagp, i64 -" . (string)\Compile\MemoryAbi::STRING_RC_AT . "\n";
-            $out .= "  call void @__mir_str_reclaim(ptr %sbase)\n";
+        $out .= "sfree:\n";
+        $out .= "  %sbase = getelementptr i8, ptr %tagp, i64 -" . (string)\Compile\MemoryAbi::STRING_RC_AT . "\n";
+        $out .= "  call void @__mir_str_reclaim(ptr %sbase)\n";
             $out .= "  br label %done\n";
             $out .= "done:\n";
             $out .= "  ret void\n";
@@ -1191,6 +1249,64 @@ trait EmitLlvmRuntime
         return isset($this->reflectNames[$name]);
     }
 
+    /** Build lightweight dynamic-method metadata for one class. */
+    private function dynamicMethodTableForClass(\Compile\Mir\ClassDef $cls, string $id): array
+    {
+        if ($cls->isStruct || $cls->isPreludeClass) { return ['', 'ptr null']; }
+        $rows = [];
+        $defs = '';
+        $i = 0;
+        foreach ($cls->methodMeta as $mn => $mm) {
+            if ($mn === '__construct' || $mn === '__call') { continue; }
+            $nameSym = '@.dynm.name.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($nameSym, $mn);
+            $trampFld = 'null';
+            if (\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) {
+                $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
+                $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $mn);
+                if (isset($this->sigs->paramTypes[$tramp])) {
+                    $trampFld = '@manticore_' . $this->mangle($tramp);
+                }
+            }
+            // Keep a null-pointer row for declared but unsupported methods.
+            // Runtime lookup can then distinguish them from a genuinely missing
+            // name and route the call to the old semantic fallback before trying
+            // the class's __call handler.
+            $rows[] = \Compile\Mir\RuntimeLibrary::dynamicMethodRow(
+                $this->strSymBytes($nameSym), $trampFld);
+            $i = $i + 1;
+        }
+        // A class may have no ordinary fixed-shape methods but still need a
+        // table because an erased miss must reach its canonical __call handler.
+        // The magic pointer is a separate field: ordinary lookup never treats
+        // __call as a named method, and the runtime only reads it after a miss.
+        $magicFld = 'ptr null';
+        $magicDecl = $this->resolveMethodClass($cls->name, '__call');
+        if ($magicDecl !== '' && isset($this->classes[$magicDecl])) {
+            $magicMm = $this->classes[$magicDecl]->methodMeta['__call'] ?? null;
+            if ($magicMm !== null
+                && \Compile\Mir\Passes\TrampolineSynth::magicInvokable($magicMm)) {
+                $magicTramp = \Compile\Mir\Passes\TrampolineSynth::magicSymBase($magicDecl);
+                if (isset($this->sigs->paramTypes[$magicTramp])) {
+                    $magicFld = 'ptr @manticore_' . $this->mangle($magicTramp);
+                }
+            }
+        }
+        if ($rows === [] && $magicFld === 'ptr null') { return [$defs, 'ptr null']; }
+        $rowFld = 'ptr null';
+        if ($rows !== []) {
+            $rowSym = '@.dynm.rows.' . $id;
+            $pair = \Compile\Mir\RuntimeLibrary::dynamicMethodTable($rowSym, $rows);
+            $defs .= $pair[0];
+            $rowFld = 'ptr ' . $rowSym;
+        }
+        $tableSym = '@.dynm.table.' . $id;
+        $defs .= $tableSym . ' = linkonce_odr constant '
+              . \Compile\Mir\RuntimeLibrary::dynamicMethodTableType()
+              . ' { i64 ' . (string)$i . ', ' . $rowFld . ', ' . $magicFld . " }\n";
+        return [$defs, 'ptr ' . $tableSym];
+    }
+
     /**
      * The method table for one class: `[{ ptr name, i64 flags }]` in php's
      * getMethods() order (own → trait → inherited), which is the order
@@ -1624,13 +1740,18 @@ trait EmitLlvmRuntime
                     . $body . "  ret void\n}\n";
                 $dropFld = 'ptr @__mir_drop_' . $id;
             }
+            $dynFld = 'ptr null';
+            if ($this->dynamicMethodMeta) {
+                $dynPair = $this->dynamicMethodTableForClass($cls, (string)$id);
+                $descs .= $dynPair[0];
+                $dynFld = $dynPair[1];
+            }
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
-            // `ptr null` in its descriptor and emits no block, no tables, no
-            // name string and no startup ctor. The analysis fails OPEN, so an
-            // unresolvable name simply puts every class back in.
+            // `ptr null` in its descriptor and emits no full reflection block.
             if (!$this->reflectWants($cls->name)) {
-                $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal((int)$id, $dropFld);
+                $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
+                    (int)$id, $dropFld, 'ptr null', $dynFld);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -1697,7 +1818,7 @@ trait EmitLlvmRuntime
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id));
+                (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id), $dynFld);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;
@@ -1727,7 +1848,12 @@ trait EmitLlvmRuntime
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.
-        $out = $descs . $defs;
+        $dynRuntime = '';
+        if ($this->dynamicMethodMeta) {
+            $this->rt->needsStrcmp = true;
+            $dynRuntime = \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
+        }
+        $out = $dynRuntime . $descs . $defs;
         $out .= "define void @__mir_drop_dispatch(ptr %p) {\nentry:\n";
         $out .= "  %descI = load i64, ptr %p\n";
         $out .= "  %dz = icmp eq i64 %descI, 0\n";
@@ -2044,6 +2170,7 @@ trait EmitLlvmRuntime
         // above) so collected cycles don't leak their strings.
         $out .= "  call void @__manticore_cc_drop_strings(ptr %s)\n";
         $out .= "  %base = getelementptr i8, ptr %s, i64 -8\n";
+        $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%base');
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
@@ -2088,6 +2215,7 @@ trait EmitLlvmRuntime
         $out .= "mrfree:\n";
         $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
+        $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%fbase');
         $out .= "  br label %mrn\n";
         $out .= "mrn:\n";

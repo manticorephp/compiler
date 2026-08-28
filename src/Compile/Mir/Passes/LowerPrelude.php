@@ -332,60 +332,53 @@ trait LowerPrelude
     private function dumpObjectSrc(): string
     {
         $names = $this->walkableClassesDerivedFirst();
-        $n = \count($names);
+        $body = '';
         $sawDebugInfo = false;
-        $body = "function __mir_dump_object(mixed \$v, int \$indent): void {\n"
+        $dispatch = "function __mir_dump_object(mixed \$v, int \$indent): void {\n"
             . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
             // An enum-case singleton renders `enum(Enum::Case)` — detected via its
-            // class descriptor before the instanceof walk (enums aren't classes here).
-            . "  \$en = __mir_enum_name(\$v); if (\$en !== '') { echo 'enum(', \$en, \")\\n\"; return; }\n";
-        $ci = 0;
-        while ($ci < $n) {
-            $cname = $names[$ci];
+            // class descriptor before the class-id dispatch (enums aren't classes here).
+            . "  \$en = __mir_enum_name(\$v); if (\$en !== '') { echo 'enum(', \$en, \")\\n\"; return; }\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $arm = 0;
+        foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
             $props = $cd->propertyNames;
             $pc = (string)\count($props);
-            // A reified specialization reports its ORIGIN's name (`Box`, not
-            // `Box__of__float`) — but is still matched by its OWN name, so the
-            // props read at the specialized (concrete) types. Depth-sorting puts
-            // it before its origin, which is what makes the narrowing land here.
-            $body .= "  if (\$v instanceof \\" . $cname . ") {\n";
+            $helper = '__mir_dump_object_arm_' . (string)$arm;
+            $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad): void {\n"
+                . "  if (\$v instanceof \\" . $cname . ") {\n";
             // __debugInfo REPLACES the walk — both the declared slots and the
             // bag, exactly as php does. The count is the returned array's, and
-            // its keys are printed as ARRAY keys (an int key is bare), because
-            // that array is what php shows, not a property list.
+            // its keys are printed as ARRAY keys (an int key is bare).
             if ($this->declaresMethod($cname, '__debugInfo')) {
                 $sawDebugInfo = true;
                 $body .= "    \$d = \$v->__debugInfo();\n"
                     . "    echo 'object(" . $cd->display() . ")#1 (', (string)count(\$d), \") {\\n\";\n"
                     . "    __mir_dump_debug_body(\$d, \$indent);\n"
-                    . "    echo \$pad, \"}\\n\"; return;\n  }\n";
-                $ci = $ci + 1;
-                continue;
-            }
-            if ($cd->usesBag()) {
-                // #[AllowDynamicProperties]: the count is not static, and the bag
-                // entries print after the declared slots. Without this the arm
-                // claimed the object and printed `(0) {}` — the bag walk below is
-                // only reached by a class with NO arm (stdClass).
-                $body .= "    \$bag = \\__mir_obj_bag(\$v);\n"
-                    . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pc . " + count(\$bag)), \") {\\n\";\n";
+                    . "    echo \$pad, \"}\\n\"; return;\n  }\n}\n";
             } else {
-                $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+                if ($cd->usesBag()) {
+                    $body .= "    \$bag = \\__mir_obj_bag(\$v);\n"
+                        . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pc . " + count(\$bag)), \") {\\n\";\n";
+                } else {
+                    $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+                }
+                foreach ($props as $p) {
+                    $body .= "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
+                }
+                if ($cd->usesBag()) {
+                    $body .= "    foreach (\$bag as \$bk => \$bv) {\n"
+                        . "      echo \$pad, '  [\"', \$bk, \"\\\"]=>\\n\", \$pad, '  ';\n"
+                        . "      __mir_var_dump(\$bv, \$indent + 1);\n"
+                        . "    }\n";
+                }
+                $body .= "    echo \$pad, \"}\\n\"; return;\n  }\n}\n";
             }
-            foreach ($props as $p) {
-                $body .= "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
-            }
-            if ($cd->usesBag()) {
-                $body .= "    foreach (\$bag as \$bk => \$bv) {\n"
-                    . "      echo \$pad, '  [\"', \$bk, \"\\\"]=>\\n\", \$pad, '  ';\n"
-                    . "      __mir_var_dump(\$bv, \$indent + 1);\n"
-                    . "    }\n";
-            }
-            $body .= "    echo \$pad, \"}\\n\"; return;\n  }\n";
-            $ci = $ci + 1;
+            $dispatch .= "    case " . (string)$cd->classId . ": " . $helper . "(\$v, \$indent, \$pad); return;\n";
+            $arm = $arm + 1;
         }
-        $body = $body
+        $dispatch .= "  }\n"
             . "  \$arr = \\__mir_obj_bag(\$v);\n"
             . "  echo 'object(stdClass)#1 (', (string)count(\$arr), \") {\\n\";\n"
             . "  foreach (\$arr as \$k => \$val) {\n"
@@ -408,7 +401,7 @@ trait LowerPrelude
                 . "    __mir_var_dump(\$val, \$indent + 1);\n"
                 . "  }\n}\n";
         }
-        return $body;
+        return $body . $dispatch;
     }
 
     /**
@@ -503,7 +496,7 @@ trait LowerPrelude
             if ($o === 0) { $out .= '\\000'; }
             else if ($c === '\\') { $out .= '\\\\'; }
             else if ($c === '"') { $out .= '\\"'; }
-            else if ($c === '$') { $out .= '\\$'; }
+            else if ($c === '$') { $out .= '\$'; }
             else { $out .= $c; }
             $i = $i + 1;
         }
@@ -542,8 +535,173 @@ trait LowerPrelude
      * Called only from `__mc_ser_val`, which has already counted this value, so
      * `$st->n` IS the slot php would record for a back-reference.
      */
+    /**
+     * Structural serializer split: keep reference/resource/enum bookkeeping in
+     * one compact dispatcher, and emit one ordinary PHP helper per reachable
+     * class for the property walk. This is the same ownership shape as the
+     * validated dump/export walkers and avoids one monolithic 39 MB MIR body.
+     */
+    /** Grouped serializer variant: a few helpers each own a bounded class-id switch.
+     * Keeping the helper count small avoids making the module itself carry thousands
+     * of extra MIR functions while still removing the monolithic serializer body. */
+    private function serObjectGroupedSrc(): string
+    {
+        $names = $this->walkableClassesDerivedFirst();
+        $groupSize = 64;
+        $groups = [];
+        $i = 0;
+        foreach ($names as $cname) {
+            $g = (int)($i / $groupSize);
+            if (!isset($groups[$g])) { $groups[$g] = []; }
+            $groups[$g][] = $cname;
+            $i = $i + 1;
+        }
+
+        $body = '';
+        $dispatch = "function __mc_ser_object(mixed \$v, __McSerSt \$st): string {\n"
+            . "  if (\$v instanceof \\Resource) { return 'i:0;'; }\n"
+            . "  \$id = spl_object_id(\$v);\n"
+            . "  if (isset(\$st->seen[\$id])) { return 'r:' . (string)\$st->seen[\$id] . ';'; }\n"
+            . "  \$st->seen[\$id] = \$st->n;\n"
+            . "  \$en = __mir_enum_name(\$v);\n"
+            . "  if (\$en !== '') {\n"
+            . "    \$nm = str_replace('::', ':', \$en);\n"
+            . "    return 'E:' . (string)strlen(\$nm) . ':\"' . \$nm . '\";';\n"
+            . "  }\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+
+        foreach ($groups as $g => $members) {
+            $helper = '__mc_ser_object_group_' . (string)$g;
+            $body .= "function " . $helper . "(mixed \$v, __McSerSt \$st): string {\n";
+            foreach ($members as $cname) {
+                $cd = $this->classTable[$cname];
+                $props = $cd->propertyNames;
+                $disp = $cd->display();
+                $head = 'O:' . (string)strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+                $entries = '';
+                foreach ($props as $p) {
+                    $key = $this->serPropKey($cname, $p);
+                    $entries .= "        . \"s:" . (string)strlen($key) . ":\\\"" . $this->dqBody($key)
+                        . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st)\n";
+                }
+                $body .= "  if (\$v instanceof \\" . $cname . ") {\n";
+                if ($this->declaresMethod($cname, '__serialize')) {
+                    $body .= "    \$d = \$v->__serialize();\n"
+                        . "    \$b = '';\n"
+                        . "    foreach (\$d as \$k => \$val) {\n"
+                        . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                        . "      else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                        . "      \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                        . "    }\n"
+                        . "    return \"" . $this->dqBody($head) . "\" . (string)count(\$d) . ':{' . \$b . '}';\n  }\n";
+                } elseif ($cd->usesBag()) {
+                    $body .= "        \$b = ''\n" . $entries . "          ;\n"
+                        . "        \$cnt = " . (string)count($props) . ";\n"
+                        . "        foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
+                        . "          if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                        . "          else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                        . "          \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                        . "          \$cnt = \$cnt + 1;\n"
+                        . "        }\n"
+                        . "        return \"" . $this->dqBody($head) . "\" . (string)\$cnt . ':{' . \$b . '}';\n      }\n";
+                } else {
+                    $body .= "        return \"" . $this->dqBody($head . (string)count($props) . ':{') . "\"\n"
+                        . $entries . "          . '}';\n      }\n";
+                }
+                $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$st);\n";
+            }
+            $body .= "  return '';\n}\n";
+        }
+        $dispatch .= "  }\n"
+            . "  if (\$v instanceof \\stdClass) {\n"
+            . "    \$arr = \\__mir_obj_bag(\$v);\n"
+            . "    \$out = 'O:8:\"stdClass\":' . (string)count(\$arr) . ':{';\n"
+            . "    foreach (\$arr as \$k => \$val) {\n"
+            . "      if (is_int(\$k)) { \$out = \$out . 'i:' . (string)\$k . ';'; }\n"
+            . "      else { \$out = \$out . __mc_ser_str((string)\$k); }\n"
+            . "      \$out = \$out . __mc_ser_val(\$val, \$st);\n"
+            . "    }\n"
+            . "    return \$out . '}';\n"
+            . "  }\n"
+            . "  throw new \\Exception(\"Serialization of 'Closure' is not allowed\");\n}\n";
+        return $body . $dispatch;
+    }
+
+    private function serObjectSplitSrc(): string
+    {
+        return $this->serObjectGroupedSrc();
+        $names = $this->walkableClassesDerivedFirst();
+        $body = '';
+        $dispatch = "function __mc_ser_object(mixed \$v, __McSerSt \$st): string {\n"
+            . "  if (\$v instanceof \\Resource) { return 'i:0;'; }\n"
+            . "  \$id = spl_object_id(\$v);\n"
+            . "  if (isset(\$st->seen[\$id])) { return 'r:' . (string)\$st->seen[\$id] . ';'; }\n"
+            . "  \$st->seen[\$id] = \$st->n;\n"
+            . "  \$en = __mir_enum_name(\$v);\n"
+            . "  if (\$en !== '') {\n"
+            . "    \$nm = str_replace('::', ':', \$en);\n"
+            . "    return 'E:' . (string)strlen(\$nm) . ':\"' . \$nm . '\";';\n"
+            . "  }\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $arm = 0;
+        foreach ($names as $cname) {
+            $cd = $this->classTable[$cname];
+            $props = $cd->propertyNames;
+            $disp = $cd->display();
+            $helper = '__mc_ser_object_arm_' . (string)$arm;
+            $head = 'O:' . (string)strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+            $entries = '';
+            foreach ($props as $p) {
+                $key = $this->serPropKey($cname, $p);
+                $entries .= "      . \"s:" . (string)strlen($key) . ":\\\"" . $this->dqBody($key)
+                    . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st)\n";
+            }
+            $body .= "function " . $helper . "(mixed \$v, __McSerSt \$st): string {\n"
+                . "  if (\$v instanceof \\" . $cname . ") {\n";
+            if ($this->declaresMethod($cname, '__serialize')) {
+                $body .= "    \$d = \$v->__serialize();\n"
+                    . "    \$b = '';\n"
+                    . "    foreach (\$d as \$k => \$val) {\n"
+                    . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                    . "      else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                    . "      \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                    . "    }\n"
+                    . "    return \"" . $this->dqBody($head) . "\" . (string)count(\$d) . ':{' . \$b . '}';\n  }\n}\n";
+            } elseif ($cd->usesBag()) {
+                $body .= "    \$b = ''\n" . $entries . "      ;\n"
+                    . "    \$cnt = " . (string)count($props) . ";\n"
+                    . "    foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
+                    . "      if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                    . "      else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                    . "      \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                    . "      \$cnt = \$cnt + 1;\n"
+                    . "    }\n"
+                    . "    return \"" . $this->dqBody($head) . "\" . (string)\$cnt . ':{' . \$b . '}';\n  }\n}\n";
+            } else {
+                $body .= "    return \"" . $this->dqBody($head . (string)count($props) . ':{') . "\"\n"
+                    . $entries . "      . '}';\n  }\n}\n";
+            }
+            $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$st);\n";
+            $arm = $arm + 1;
+        }
+        $dispatch .= "  }\n"
+            . "  if (\$v instanceof \\stdClass) {\n"
+            . "    \$arr = \\__mir_obj_bag(\$v);\n"
+            . "    \$out = 'O:8:\"stdClass\":' . (string)count(\$arr) . ':{';\n"
+            . "    foreach (\$arr as \$k => \$val) {\n"
+            . "      if (is_int(\$k)) { \$out = \$out . 'i:' . (string)\$k . ';'; }\n"
+            . "      else { \$out = \$out . __mc_ser_str((string)\$k); }\n"
+            . "      \$out = \$out . __mc_ser_val(\$val, \$st);\n"
+            . "    }\n"
+            . "    return \$out . '}';\n"
+            . "  }\n"
+            . "  throw new \\Exception(\"Serialization of 'Closure' is not allowed\");\n}\n";
+        return $body . $dispatch;
+    }
+
     private function serObjectSrc(): string
     {
+        return $this->serObjectSplitSrc();
         $names = $this->walkableClassesDerivedFirst();
         $body = "function __mc_ser_object(mixed \$v, __McSerSt \$st): string {\n"
             // BEFORE the id map: a \Resource IS an object to us (php says it is

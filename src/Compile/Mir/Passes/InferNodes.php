@@ -90,9 +90,16 @@ trait InferNodes
         while (true) {
             $this->loopPromoGrew = false;
             $this->inferFunctionOnce($fn);
-            if (\Compile\Stats::$on) { \Compile\Stats::bump('infer.fn_body_passes', 1); }
+            if (\Compile\Stats::$on) {
+                \Compile\Stats::bump('infer.fn_body_passes', 1);
+            }
             $rounds = $rounds + 1;
-            if (!$this->loopPromoGrew || $rounds >= 4) { break; }
+            if (!$this->loopPromoGrew || $rounds >= 4) {
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('infer.fn_rounds.' . (string)$rounds, 1);
+                }
+                break;
+            }
             $this->coercePromotedParams($fn);
         }
     }

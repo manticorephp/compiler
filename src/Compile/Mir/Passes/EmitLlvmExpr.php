@@ -3476,16 +3476,16 @@ trait EmitLlvmExpr
             && isset($looseNullKinds[($leftNull ? $c->right : $c->left)->type->kind])) {
             $other = $leftNull ? $c->right : $c->left;
             $ok = $other->type->kind;
-            $out = $this->emitNode($other);
+            $chunks = [$this->emitNode($other)];
             $res = null;
             if ($ok === Type::KIND_STRING) {
-                $out .= $this->coerceToPtr();
+                $chunks[] = $this->coerceToPtr();
                 $len = $this->ssa->allocReg();
-                $out .= '  ' . $len . ' = call i64 @__mir_strlen(ptr ' . $this->lastValue . ")\n";
+                $chunks[] = '  ' . $len . ' = call i64 @__mir_strlen(ptr ' . $this->lastValue . ")\n";
                 $b = $this->ssa->allocReg();
-                $out .= '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $len . ", 0\n";
+                $chunks[] = '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $len . ", 0\n";
                 $res = $this->ssa->allocReg();
-                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+                $chunks[] = '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
             } elseif ($ok === Type::KIND_NULL) {
                 $res = $isEq ? '1' : '0';
             } elseif ($ok === Type::KIND_OBJ || $ok === Type::KIND_CLOSURE) {
@@ -3493,47 +3493,47 @@ trait EmitLlvmExpr
                 $res = $isEq ? '0' : '1';
             } elseif ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN) {
                 $this->rt->needsTaggedEq = true;
-                $out .= $this->coerceToI64();
+                $chunks[] = $this->coerceToI64();
                 $cv = $this->lastValue;
                 $nb = $this->ssa->allocReg();
-                $out .= '  ' . $nb . " = call i64 @__manticore_box_null()\n";
+                $chunks[] = '  ' . $nb . " = call i64 @__manticore_box_null()\n";
                 $e = $this->ssa->allocReg();
-                $out .= '  ' . $e . ' = call i64 @__manticore_tagged_loose_eq(i64 ' . $nb . ', i64 ' . $cv . ")\n";
+                $chunks[] = '  ' . $e . ' = call i64 @__manticore_tagged_loose_eq(i64 ' . $nb . ', i64 ' . $cv . ")\n";
                 $res = $e;
                 if ($isNe) {
                     $res = $this->ssa->allocReg();
-                    $out .= '  ' . $res . ' = xor i64 ' . $e . ", 1\n";
+                    $chunks[] = '  ' . $res . ' = xor i64 ' . $e . ", 1\n";
                 }
             } elseif ($ok === Type::KIND_ARRAY) {
                 $this->rt->needsTagged = true;
                 $this->rt->needsTaggedTruthy = true;
-                $out .= $this->coerceToPtr();
+                $chunks[] = $this->coerceToPtr();
                 $ba = $this->ssa->allocReg();
-                $out .= '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+                $chunks[] = '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
                 $tv = $this->ssa->allocReg();
-                $out .= '  ' . $tv . ' = call i64 @__manticore_tagged_truthy(i64 ' . $ba . ")\n";
+                $chunks[] = '  ' . $tv . ' = call i64 @__manticore_tagged_truthy(i64 ' . $ba . ")\n";
                 $b = $this->ssa->allocReg();
-                $out .= '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $tv . ", 0\n";
+                $chunks[] = '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $tv . ", 0\n";
                 $res = $this->ssa->allocReg();
-                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+                $chunks[] = '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
             } elseif ($ok === Type::KIND_FLOAT) {
-                $out .= $this->coerceTo('double');
+                $chunks[] = $this->coerceTo('double');
                 $b = $this->ssa->allocReg();
-                $out .= '  ' . $b . ' = fcmp ' . ($isEq ? 'oeq' : 'une')
+                $chunks[] = '  ' . $b . ' = fcmp ' . ($isEq ? 'oeq' : 'une')
                       . ' double ' . $this->lastValue . ", 0.000000e+00\n";
                 $res = $this->ssa->allocReg();
-                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+                $chunks[] = '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
             } elseif ($ok === Type::KIND_INT || $ok === Type::KIND_BOOL) {
-                $out .= $this->coerceToI64();
+                $chunks[] = $this->coerceToI64();
                 $b = $this->ssa->allocReg();
-                $out .= '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $this->lastValue . ", 0\n";
+                $chunks[] = '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $this->lastValue . ", 0\n";
                 $res = $this->ssa->allocReg();
-                $out .= '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
+                $chunks[] = '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
             }
             if ($res !== null) {
                 $this->lastValue = $res;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
         if (($leftNull || $rightNull) && ($isEq || $isNe)) {
@@ -3561,18 +3561,18 @@ trait EmitLlvmExpr
             // dual test as an erased operand below.
             if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL
                 && !$this->cellOperandIsRawSlot($other)) {
-                $out = $this->emitNode($other);
-                $out .= $this->coerceToI64();
-                $out .= $this->cellTagIr($this->lastValue);
+                $chunks = [$this->emitNode($other)];
+                $chunks[] = $this->coerceToI64();
+                $chunks[] = $this->cellTagIr($this->lastValue);
                 $tag = $this->cellTagReg;
                 $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = icmp ' . ($isEq ? 'eq' : 'ne')
+                $chunks[] = '  ' . $r . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $tag . ", 3\n";
                 $z = $this->ssa->allocReg();
-                $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+                $chunks[] = '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
             // An ERASED operand carries EITHER shape, so both have to be tested:
             // a raw 0 pointer and a NaN-boxed NULL (tag 3). Testing only the
@@ -3583,50 +3583,51 @@ trait EmitLlvmExpr
             if (!($leftNull && $rightNull)
                 && ($ok === Type::KIND_UNKNOWN
                     || ($ok === Type::KIND_CELL && $this->cellOperandIsRawSlot($other)))) {
-                $out = $this->emitNode($other);
-                $out .= $this->coerceToI64();
+                $chunks = [$this->emitNode($other)];
+                $chunks[] = $this->coerceToI64();
                 $cv = $this->lastValue;
                 $zc = $this->ssa->allocReg();
-                $out .= '  ' . $zc . ' = icmp eq i64 ' . $cv . ", 0\n";
-                $out .= $this->cellTagIr($cv);
+                $chunks[] = '  ' . $zc . ' = icmp eq i64 ' . $cv . ", 0\n";
+                $chunks[] = $this->cellTagIr($cv);
                 $nc = $this->ssa->allocReg();
-                $out .= '  ' . $nc . ' = icmp eq i64 ' . $this->cellTagReg . ", 3\n";
+                $chunks[] = '  ' . $nc . ' = icmp eq i64 ' . $this->cellTagReg . ", 3\n";
                 $any = $this->ssa->allocReg();
-                $out .= '  ' . $any . ' = or i1 ' . $zc . ', ' . $nc . "\n";
+                $chunks[] = '  ' . $any . ' = or i1 ' . $zc . ', ' . $nc . "\n";
                 $r = $any;
                 if ($isNe) {
                     $r = $this->ssa->allocReg();
-                    $out .= '  ' . $r . ' = xor i1 ' . $any . ", true\n";
+                    $chunks[] = '  ' . $r . ' = xor i1 ' . $any . ", true\n";
                 }
                 $z = $this->ssa->allocReg();
-                $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+                $chunks[] = '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
             $ptrCarried = $ok === Type::KIND_STRING || $ok === Type::KIND_OBJ
                 || $ok === Type::KIND_ARRAY
                 || $ok === Type::KIND_CLOSURE;
             if (!($leftNull && $rightNull) && $ptrCarried) {
-                $out = $this->emitNode($other);
-                $out .= $this->coerceToI64();
+                $chunks = [$this->emitNode($other)];
+                $chunks[] = $this->coerceToI64();
                 $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = icmp ' . ($isEq ? 'eq' : 'ne')
+                $chunks[] = '  ' . $r . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $this->lastValue . ", 0\n";
                 $z = $this->ssa->allocReg();
-                $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+                $chunks[] = '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
-            $out = '';
-            if (!$leftNull)  { $out .= $this->emitNode($c->left); }
-            if (!$rightNull) { $out .= $this->emitNode($c->right); }
+            /** @var string[] $chunks */
+        $chunks = [];
+            if (!$leftNull)  { $chunks[] = $this->emitNode($c->left); }
+            if (!$rightNull) { $chunks[] = $this->emitNode($c->right); }
             $otherIsNull = ($leftNull && $rightNull) || $other->type->kind === Type::KIND_NULL;
             $res = $isEq ? ($otherIsNull ? '1' : '0') : ($otherIsNull ? '0' : '1');
             $this->lastValue = $res;
             $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // `===` / `!==` between two statically-different scalar kinds folds to
         // false / true: PHP's strict compare demands identical types, and
@@ -3641,11 +3642,11 @@ trait EmitLlvmExpr
         if (($op === '===' || $op === '!==')
             && isset($rawScalar[$lkS]) && isset($rawScalar[$rkS])
             && $lkS !== $rkS) {
-            $out = $this->emitNode($c->left);
-            $out .= $this->emitNode($c->right);
+            $chunks = [$this->emitNode($c->left)];
+            $chunks[] = $this->emitNode($c->right);
             $this->lastValue = ($op === '===') ? '0' : '1';
             $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
 
         // `cell === false` / `!== false` (e.g. `strpos(...) === false`).
@@ -3660,29 +3661,29 @@ trait EmitLlvmExpr
         $rFalse = $c->right->kind === Node::KIND_BOOL_CONST && !$c->right->value;
         if (($isEq || $isNe) && (($lCell && $rFalse) || ($rCell && $lFalse))) {
             $cellNode = $lCell ? $c->left : $c->right;
-            $out = $this->emitNode($cellNode);
-            $out .= $this->coerceToI64();
+            $chunks = [$this->emitNode($cellNode)];
+            $chunks[] = $this->coerceToI64();
             $v = $this->lastValue;
-            $out .= $this->cellTagIr($v);
+            $chunks[] = $this->cellTagIr($v);
             $tag = $this->cellTagReg;
             $isBool = $this->ssa->allocReg();
-            $out .= '  ' . $isBool . ' = icmp eq i64 ' . $tag . ", 2\n";
+            $chunks[] = '  ' . $isBool . ' = icmp eq i64 ' . $tag . ", 2\n";
             $payload = $this->ssa->allocReg();
-            $out .= '  ' . $payload . ' = and i64 ' . $v . ", 1\n";
+            $chunks[] = '  ' . $payload . ' = and i64 ' . $v . ", 1\n";
             $isZero = $this->ssa->allocReg();
-            $out .= '  ' . $isZero . ' = icmp eq i64 ' . $payload . ", 0\n";
+            $chunks[] = '  ' . $isZero . ' = icmp eq i64 ' . $payload . ", 0\n";
             $isFalse = $this->ssa->allocReg();
-            $out .= '  ' . $isFalse . ' = and i1 ' . $isBool . ', ' . $isZero . "\n";
+            $chunks[] = '  ' . $isFalse . ' = and i1 ' . $isBool . ', ' . $isZero . "\n";
             $cmpReg = $isFalse;
             if ($isNe) {
                 $cmpReg = $this->ssa->allocReg();
-                $out .= '  ' . $cmpReg . ' = xor i1 ' . $isFalse . ", true\n";
+                $chunks[] = '  ' . $cmpReg . ' = xor i1 ' . $isFalse . ", true\n";
             }
             $extReg = $this->ssa->allocReg();
-            $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+            $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
 
         // `$x === []` / `$x !== []` — PHP compares arrays by content, so an
@@ -3700,26 +3701,26 @@ trait EmitLlvmExpr
             $arrNode = $lEmptyLit ? $c->right : $c->left;
             $ak = $arrNode->type->kind;
             if ($ak === Type::KIND_ARRAY || $ak === Type::KIND_UNKNOWN) {
-                $out = $this->emitNode($arrNode);
-                $out .= $this->coerceToPtr();
+                $chunks = [$this->emitNode($arrNode)];
+                $chunks[] = $this->coerceToPtr();
                 $len = $this->ssa->allocReg();
-                $out .= '  ' . $len . ' = load i64, ptr ' . $this->lastValue . "\n";
+                $chunks[] = '  ' . $len . ' = load i64, ptr ' . $this->lastValue . "\n";
                 $cmpReg = $this->ssa->allocReg();
-                $out .= '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne')
+                $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $len . ", 0\n";
                 $extReg = $this->ssa->allocReg();
-                $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
                 $this->lastValue = $extReg;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
 
-        $out = $this->emitNode($c->left);
+        $chunks = [$this->emitNode($c->left)];
         $l = $this->lastValue;
         $lt = $this->lastValueType;
         $lk = $c->left->type->kind;
-        $out .= $this->emitNode($c->right);
+        $chunks[] = $this->emitNode($c->right);
         $r = $this->lastValue;
         $rt = $this->lastValueType;
         $rk = $c->right->type->kind;
@@ -3734,22 +3735,22 @@ trait EmitLlvmExpr
             if (($lk === Type::KIND_CELL && $rEnum) || ($lEnum && $rk === Type::KIND_CELL)) {
                 if ($lEnum) {
                     $this->lastValue = $l; $this->lastValueType = $lt;
-                    $out .= $this->boxToCell($c->left->type);
+                    $chunks[] = $this->boxToCell($c->left->type);
                     $l = $this->lastValue; $lt = $this->lastValueType;
                 } else {
                     $this->lastValue = $r; $this->lastValueType = $rt;
-                    $out .= $this->boxToCell($c->right->type);
+                    $chunks[] = $this->boxToCell($c->right->type);
                     $r = $this->lastValue; $rt = $this->lastValueType;
                 }
-                if ($lt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; }
-                if ($rt === 'ptr') { $tmp = $this->ssa->allocReg(); $out .= '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; }
+                if ($lt === 'ptr') { $tmp = $this->ssa->allocReg(); $chunks[] = '  ' . $tmp . ' = ptrtoint ptr ' . $l . " to i64\n"; $l = $tmp; }
+                if ($rt === 'ptr') { $tmp = $this->ssa->allocReg(); $chunks[] = '  ' . $tmp . ' = ptrtoint ptr ' . $r . " to i64\n"; $r = $tmp; }
                 $cmpReg = $this->ssa->allocReg();
-                $out .= '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $l . ', ' . $r . "\n";
+                $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $l . ', ' . $r . "\n";
                 $z = $this->ssa->allocReg();
-                $out .= '  ' . $z . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $chunks[] = '  ' . $z . ' = zext i1 ' . $cmpReg . " to i64\n";
                 $this->lastValue = $z;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
 
@@ -3777,21 +3778,21 @@ trait EmitLlvmExpr
             $strV  = $leftIsStr ? $l : $r;
             $strT  = $leftIsStr ? $lt : $rt;
             $ci = $cellI;
-            if ($cellT === 'ptr') { $ci = $this->ssa->allocReg(); $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cellI . " to i64\n"; }
+            if ($cellT === 'ptr') { $ci = $this->ssa->allocReg(); $chunks[] = '  ' . $ci . ' = ptrtoint ptr ' . $cellI . " to i64\n"; }
             $sp = $strV;
-            if ($strT !== 'ptr') { $sp = $this->ssa->allocReg(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $strV . " to ptr\n"; }
-            $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
-            $isStr = $this->ssa->allocReg(); $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
+            if ($strT !== 'ptr') { $sp = $this->ssa->allocReg(); $chunks[] = '  ' . $sp . ' = inttoptr i64 ' . $strV . " to ptr\n"; }
+            $chunks[] = $this->cellTagIr($ci); $tag = $this->cellTagReg;
+            $isStr = $this->ssa->allocReg(); $chunks[] = '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
             $payload = $this->ssa->allocReg(); $payIr = '  ' . $payload . ' = and i64 ' . $ci . ", 281474976710655\n";
             if ($cellK === Type::KIND_UNKNOWN) {
                 // Boxed carriers all sit above the NaN header; anything below is
                 // the raw pointer itself, comparable when non-null.
                 $isBox = $this->ssa->allocReg();
-                $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
+                $chunks[] = '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
                 $nn = $this->ssa->allocReg();
-                $out .= '  ' . $nn . ' = icmp ne i64 ' . $ci . ", 0\n";
+                $chunks[] = '  ' . $nn . ' = icmp ne i64 ' . $ci . ", 0\n";
                 $ok = $this->ssa->allocReg();
-                $out .= '  ' . $ok . ' = select i1 ' . $isBox . ', i1 ' . $isStr . ', i1 ' . $nn . "\n";
+                $chunks[] = '  ' . $ok . ' = select i1 ' . $isBox . ', i1 ' . $isStr . ', i1 ' . $nn . "\n";
                 $isStr = $ok;
                 $raw = $this->ssa->allocReg();
                 $payIr .= '  ' . $raw . ' = select i1 ' . $isBox . ', i64 ' . $payload . ', i64 ' . $ci . "\n";
@@ -3799,27 +3800,27 @@ trait EmitLlvmExpr
             }
             // Guard a null string carrier (a `?string` operand) — skip the deref.
             $stri = $strV;
-            if ($strT === 'ptr') { $stri = $this->ssa->allocReg(); $out .= '  ' . $stri . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
-            $spNN = $this->ssa->allocReg(); $out .= '  ' . $spNN . ' = icmp ne i64 ' . $stri . ", 0\n";
-            $can = $this->ssa->allocReg(); $out .= '  ' . $can . ' = and i1 ' . $isStr . ', ' . $spNN . "\n";
+            if ($strT === 'ptr') { $stri = $this->ssa->allocReg(); $chunks[] = '  ' . $stri . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
+            $spNN = $this->ssa->allocReg(); $chunks[] = '  ' . $spNN . ' = icmp ne i64 ' . $stri . ", 0\n";
+            $can = $this->ssa->allocReg(); $chunks[] = '  ' . $can . ' = and i1 ' . $isStr . ', ' . $spNN . "\n";
             $cmpL = $this->ssa->allocLabel('streqc.cmp');
             $nsL = $this->ssa->allocLabel('streqc.ns');
             $jnL = $this->ssa->allocLabel('streqc.join');
-            $out .= '  br i1 ' . $can . ', label %' . $cmpL . ', label %' . $nsL . "\n";
-            $out .= $cmpL . ":\n";
-            $out .= $payIr;
-            $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = inttoptr i64 ' . $payload . " to ptr\n";
-            $eqc = $this->ssa->allocReg(); $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
-            $out .= '  br label %' . $jnL . "\n";
-            $out .= $nsL . ":\n  br label %" . $jnL . "\n";
-            $out .= $jnL . ":\n";
+            $chunks[] = '  br i1 ' . $can . ', label %' . $cmpL . ', label %' . $nsL . "\n";
+            $chunks[] = $cmpL . ":\n";
+            $chunks[] = $payIr;
+            $cp = $this->ssa->allocReg(); $chunks[] = '  ' . $cp . ' = inttoptr i64 ' . $payload . " to ptr\n";
+            $eqc = $this->ssa->allocReg(); $chunks[] = '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+            $chunks[] = '  br label %' . $jnL . "\n";
+            $chunks[] = $nsL . ":\n  br label %" . $jnL . "\n";
+            $chunks[] = $jnL . ":\n";
             $phi = $this->ssa->allocReg();
-            $out .= '  ' . $phi . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
+            $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
             $res = $phi;
-            if ($op === '!==') { $res = $this->ssa->allocReg(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
-            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            if ($op === '!==') { $res = $this->ssa->allocReg(); $chunks[] = '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
+            $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // `obj === cell` / `cell === obj` (strict): PHP identity is "the same
         // instance", so this is a pointer compare — but one side may be NaN-boxed
@@ -3837,31 +3838,31 @@ trait EmitLlvmExpr
             $objT = $objIsLeft ? $lt : $rt;
             $ci   = $objIsLeft ? $r : $l;
             $cellT = $objIsLeft ? $rt : $lt;
-            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
+            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $chunks[] = '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
             $oi = $objV;
-            if ($objT === 'ptr') { $oi = $this->ssa->allocReg(); $out .= '  ' . $oi . ' = ptrtoint ptr ' . $objV . " to i64\n"; }
+            if ($objT === 'ptr') { $oi = $this->ssa->allocReg(); $chunks[] = '  ' . $oi . ' = ptrtoint ptr ' . $objV . " to i64\n"; }
             // Payload of a boxed carrier, the word itself when it was never boxed.
             $isBox = $this->ssa->allocReg();
-            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
+            $chunks[] = '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
             $pm = $this->ssa->allocReg();
-            $out .= '  ' . $pm . ' = and i64 ' . $ci . ", 281474976710655\n";
+            $chunks[] = '  ' . $pm . ' = and i64 ' . $ci . ", 281474976710655\n";
             $pay = $this->ssa->allocReg();
-            $out .= '  ' . $pay . ' = select i1 ' . $isBox . ', i64 ' . $pm . ', i64 ' . $ci . "\n";
+            $chunks[] = '  ' . $pay . ' = select i1 ' . $isBox . ', i64 ' . $pm . ', i64 ' . $ci . "\n";
             // A boxed NON-object cell (a string, an array, a scalar) can never be
             // the same instance, so its payload must not be compared.
-            $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
+            $chunks[] = $this->cellTagIr($ci); $tag = $this->cellTagReg;
             $isObjTag = $this->ssa->allocReg();
-            $out .= '  ' . $isObjTag . ' = icmp eq i64 ' . $tag . ", 8\n";
+            $chunks[] = '  ' . $isObjTag . ' = icmp eq i64 ' . $tag . ", 8\n";
             $okKind = $this->ssa->allocReg();
-            $out .= '  ' . $okKind . ' = select i1 ' . $isBox . ', i1 ' . $isObjTag . ", i1 true\n";
+            $chunks[] = '  ' . $okKind . ' = select i1 ' . $isBox . ', i1 ' . $isObjTag . ", i1 true\n";
             $same = $this->ssa->allocReg();
-            $out .= '  ' . $same . ' = icmp eq i64 ' . $pay . ', ' . $oi . "\n";
+            $chunks[] = '  ' . $same . ' = icmp eq i64 ' . $pay . ', ' . $oi . "\n";
             $res = $this->ssa->allocReg();
-            $out .= '  ' . $res . ' = and i1 ' . $okKind . ', ' . $same . "\n";
-            if ($op === '!==') { $nn = $this->ssa->allocReg(); $out .= '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
-            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            $chunks[] = '  ' . $res . ' = and i1 ' . $okKind . ', ' . $same . "\n";
+            if ($op === '!==') { $nn = $this->ssa->allocReg(); $chunks[] = '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
+            $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // `cell === float` / `float === cell` (strict): equal iff the cell is a
         // FLOAT (tag 6) whose value equals the float operand. A non-float cell is
@@ -3875,18 +3876,18 @@ trait EmitLlvmExpr
             $cellT = ($lk === Type::KIND_CELL) ? $lt : $rt;
             $fltV  = ($lk === Type::KIND_CELL) ? $r : $l;
             $fltT  = ($lk === Type::KIND_CELL) ? $rt : $lt;
-            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $out .= '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
+            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $chunks[] = '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
             $fd = $fltV;
-            if ($fltT !== 'double') { $fd = $this->ssa->allocReg(); $out .= '  ' . $fd . ' = bitcast i64 ' . $fltV . " to double\n"; }
-            $out .= $this->cellTagIr($ci); $tag = $this->cellTagReg;
-            $isFlt = $this->ssa->allocReg(); $out .= '  ' . $isFlt . ' = icmp eq i64 ' . $tag . ", 6\n";
-            $cd = $this->ssa->allocReg(); $out .= '  ' . $cd . ' = call double @__manticore_tagged_to_double(i64 ' . $ci . ")\n";
-            $eqf = $this->ssa->allocReg(); $out .= '  ' . $eqf . ' = fcmp oeq double ' . $cd . ', ' . $fd . "\n";
-            $res = $this->ssa->allocReg(); $out .= '  ' . $res . ' = and i1 ' . $isFlt . ', ' . $eqf . "\n";
-            if ($op === '!==') { $nn = $this->ssa->allocReg(); $out .= '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
-            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            if ($fltT !== 'double') { $fd = $this->ssa->allocReg(); $chunks[] = '  ' . $fd . ' = bitcast i64 ' . $fltV . " to double\n"; }
+            $chunks[] = $this->cellTagIr($ci); $tag = $this->cellTagReg;
+            $isFlt = $this->ssa->allocReg(); $chunks[] = '  ' . $isFlt . ' = icmp eq i64 ' . $tag . ", 6\n";
+            $cd = $this->ssa->allocReg(); $chunks[] = '  ' . $cd . ' = call double @__manticore_tagged_to_double(i64 ' . $ci . ")\n";
+            $eqf = $this->ssa->allocReg(); $chunks[] = '  ' . $eqf . ' = fcmp oeq double ' . $cd . ', ' . $fd . "\n";
+            $res = $this->ssa->allocReg(); $chunks[] = '  ' . $res . ' = and i1 ' . $isFlt . ', ' . $eqf . "\n";
+            if ($op === '!==') { $nn = $this->ssa->allocReg(); $chunks[] = '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
+            $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // Loose ==/!= between a STRING and a NUMBER (int/float): PHP numeric-string
         // juggling. A numeric string ("10", "1e2") compares BY VALUE; a
@@ -3905,41 +3906,41 @@ trait EmitLlvmExpr
             $numV = $lStr ? $r : $l; $numT = $lStr ? $rt : $lt;
             $numK = $lStr ? $rk : $lk;
             $si = $strV;
-            if ($strT === 'ptr') { $si = $this->ssa->allocReg(); $out .= '  ' . $si . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
-            $sp = $this->ssa->allocReg(); $out .= '  ' . $sp . ' = inttoptr i64 ' . $si . " to ptr\n";
+            if ($strT === 'ptr') { $si = $this->ssa->allocReg(); $chunks[] = '  ' . $si . ' = ptrtoint ptr ' . $strV . " to i64\n"; }
+            $sp = $this->ssa->allocReg(); $chunks[] = '  ' . $sp . ' = inttoptr i64 ' . $si . " to ptr\n";
             if ($numK === Type::KIND_FLOAT && $numT === 'double') {
                 $nd = $numV;
             } elseif ($numK === Type::KIND_FLOAT) {
-                $nd = $this->ssa->allocReg(); $out .= '  ' . $nd . ' = bitcast i64 ' . $numV . " to double\n";
+                $nd = $this->ssa->allocReg(); $chunks[] = '  ' . $nd . ' = bitcast i64 ' . $numV . " to double\n";
             } else {
-                $nd = $this->ssa->allocReg(); $out .= '  ' . $nd . ' = sitofp i64 ' . $numV . " to double\n";
+                $nd = $this->ssa->allocReg(); $chunks[] = '  ' . $nd . ' = sitofp i64 ' . $numV . " to double\n";
             }
-            $snz = $this->ssa->allocReg(); $out .= '  ' . $snz . ' = icmp ne i64 ' . $si . ", 0\n";
+            $snz = $this->ssa->allocReg(); $chunks[] = '  ' . $snz . ' = icmp ne i64 ' . $si . ", 0\n";
             $chkL = $this->ssa->allocLabel('nseq.chk');
             $nullL = $this->ssa->allocLabel('nseq.null');
             $numL = $this->ssa->allocLabel('nseq.num');
             $nnumL = $this->ssa->allocLabel('nseq.nnum');
             $joinL = $this->ssa->allocLabel('nseq.join');
-            $out .= '  br i1 ' . $snz . ', label %' . $chkL . ', label %' . $nullL . "\n";
-            $out .= $chkL . ":\n";
-            $isn = $this->ssa->allocReg(); $out .= '  ' . $isn . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
-            $out .= '  br i1 ' . $isn . ', label %' . $numL . ', label %' . $nnumL . "\n";
-            $out .= $numL . ":\n";
-            $sd = $this->ssa->allocReg(); $out .= '  ' . $sd . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
-            $eqn = $this->ssa->allocReg(); $out .= '  ' . $eqn . ' = fcmp oeq double ' . $sd . ', ' . $nd . "\n";
-            $out .= '  br label %' . $joinL . "\n";
-            $out .= $nnumL . ":\n  br label %" . $joinL . "\n";
-            $out .= $nullL . ":\n";
-            $eqz = $this->ssa->allocReg(); $out .= '  ' . $eqz . ' = fcmp oeq double 0.0, ' . $nd . "\n";
-            $out .= '  br label %' . $joinL . "\n";
-            $out .= $joinL . ":\n";
+            $chunks[] = '  br i1 ' . $snz . ', label %' . $chkL . ', label %' . $nullL . "\n";
+            $chunks[] = $chkL . ":\n";
+            $isn = $this->ssa->allocReg(); $chunks[] = '  ' . $isn . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
+            $chunks[] = '  br i1 ' . $isn . ', label %' . $numL . ', label %' . $nnumL . "\n";
+            $chunks[] = $numL . ":\n";
+            $sd = $this->ssa->allocReg(); $chunks[] = '  ' . $sd . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
+            $eqn = $this->ssa->allocReg(); $chunks[] = '  ' . $eqn . ' = fcmp oeq double ' . $sd . ', ' . $nd . "\n";
+            $chunks[] = '  br label %' . $joinL . "\n";
+            $chunks[] = $nnumL . ":\n  br label %" . $joinL . "\n";
+            $chunks[] = $nullL . ":\n";
+            $eqz = $this->ssa->allocReg(); $chunks[] = '  ' . $eqz . ' = fcmp oeq double 0.0, ' . $nd . "\n";
+            $chunks[] = '  br label %' . $joinL . "\n";
+            $chunks[] = $joinL . ":\n";
             $phi = $this->ssa->allocReg();
-            $out .= '  ' . $phi . ' = phi i1 [ ' . $eqn . ', %' . $numL . ' ], [ false, %' . $nnumL . ' ], [ ' . $eqz . ', %' . $nullL . " ]\n";
+            $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $eqn . ', %' . $numL . ' ], [ false, %' . $nnumL . ' ], [ ' . $eqz . ', %' . $nullL . " ]\n";
             $res = $phi;
-            if ($isNe) { $res = $this->ssa->allocReg(); $out .= '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
-            $z = $this->ssa->allocReg(); $out .= '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
+            if ($isNe) { $res = $this->ssa->allocReg(); $chunks[] = '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
+            $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // String ordering / equality → strcmp(l, r) <pred> 0. Fires when
         // one side is a known string and the other is a string OR unknown
@@ -3956,13 +3957,13 @@ trait EmitLlvmExpr
             // i64 carriers for the null guard (a `?string` operand carries 0
             // when null at runtime, e.g. an unset `?string` field).
             $li = $l;
-            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $chunks[] = '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
             $ri = $r;
-            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
             $lp = $this->ssa->allocReg();
-            $out .= '  ' . $lp . ' = inttoptr i64 ' . $li . " to ptr\n";
+            $chunks[] = '  ' . $lp . ' = inttoptr i64 ' . $li . " to ptr\n";
             $rp = $this->ssa->allocReg();
-            $out .= '  ' . $rp . ' = inttoptr i64 ' . $ri . " to ptr\n";
+            $chunks[] = '  ' . $rp . ' = inttoptr i64 ' . $ri . " to ptr\n";
             // Equality (=== / == / !== / !=): null is a valid operand value
             // (a string is never == to null). strcmp(null, …) dereferences
             // address 0 — guard it: strcmp only when both carriers are
@@ -3970,16 +3971,16 @@ trait EmitLlvmExpr
             // (both null → equal, one null → unequal).
             if ($isEq || $isNe) {
                 $lnz = $this->ssa->allocReg();
-                $out .= '  ' . $lnz . ' = icmp ne i64 ' . $li . ", 0\n";
+                $chunks[] = '  ' . $lnz . ' = icmp ne i64 ' . $li . ", 0\n";
                 $rnz = $this->ssa->allocReg();
-                $out .= '  ' . $rnz . ' = icmp ne i64 ' . $ri . ", 0\n";
+                $chunks[] = '  ' . $rnz . ' = icmp ne i64 ' . $ri . ", 0\n";
                 $both = $this->ssa->allocReg();
-                $out .= '  ' . $both . ' = and i1 ' . $lnz . ', ' . $rnz . "\n";
+                $chunks[] = '  ' . $both . ' = and i1 ' . $lnz . ', ' . $rnz . "\n";
                 $scLbl = $this->ssa->allocLabel('streq.cmp');
                 $idLbl = $this->ssa->allocLabel('streq.id');
                 $jnLbl = $this->ssa->allocLabel('streq.join');
-                $out .= '  br i1 ' . $both . ', label %' . $scLbl . ', label %' . $idLbl . "\n";
-                $out .= $scLbl . ":\n";
+                $chunks[] = '  br i1 ' . $both . ', label %' . $scLbl . ', label %' . $idLbl . "\n";
+                $chunks[] = $scLbl . ":\n";
                 // Two statically-known strings under LOOSE `==` compare
                 // NUMERICALLY when both are numeric strings, so `"1.0" == "1"`
                 // is true — byte equality alone answered false. An UNKNOWN-typed
@@ -3993,20 +3994,20 @@ trait EmitLlvmExpr
                     $this->rt->needsStrtod = true;
                 }
                 $eqr = $this->ssa->allocReg();
-                $out .= '  ' . $eqr . ' = call i1 ' . $eqFn . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
+                $chunks[] = '  ' . $eqr . ' = call i1 ' . $eqFn . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
                 $scRes = $eqr;
                 if ($isNe) {
                     $scRes = $this->ssa->allocReg();
-                    $out .= '  ' . $scRes . ' = xor i1 ' . $eqr . ", true\n";
+                    $chunks[] = '  ' . $scRes . ' = xor i1 ' . $eqr . ", true\n";
                 }
-                $out .= '  br label %' . $jnLbl . "\n";
-                $out .= $idLbl . ":\n";
+                $chunks[] = '  br label %' . $jnLbl . "\n";
+                $chunks[] = $idLbl . ":\n";
                 $idRes = $this->ssa->allocReg();
-                $out .= '  ' . $idRes . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $li . ', ' . $ri . "\n";
-                $out .= '  br label %' . $jnLbl . "\n";
-                $out .= $jnLbl . ":\n";
+                $chunks[] = '  ' . $idRes . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $li . ', ' . $ri . "\n";
+                $chunks[] = '  br label %' . $jnLbl . "\n";
+                $chunks[] = $jnLbl . ":\n";
                 $phi = $this->ssa->allocReg();
-                $out .= '  ' . $phi . ' = phi i1 [ ' . $scRes . ', %' . $scLbl . ' ], [ ' . $idRes . ', %' . $idLbl . " ]\n";
+                $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $scRes . ', %' . $scLbl . ' ], [ ' . $idRes . ', %' . $idLbl . " ]\n";
                 // A comparison CONSUMES its operands and keeps nothing, so a
                 // fresh one dies here — in the join, where both arms have had
                 // their read and the pointer registers still dominate. Emitted
@@ -4014,26 +4015,26 @@ trait EmitLlvmExpr
                 // EmitLlvm::freeStrTemp}); `if (strtolower($x) === 'y')` and
                 // `substr($s, 0, 3) === 'abc'` each leaked 64 B PER COMPARISON
                 // until this existed, in every scanner and every header path.
-                $out .= $this->freeStrTemp($c->left, $lp);
-                $out .= $this->freeStrTemp($c->right, $rp);
+                $chunks[] = $this->freeStrTemp($c->left, $lp);
+                $chunks[] = $this->freeStrTemp($c->right, $rp);
                 $extReg = $this->ssa->allocReg();
-                $out .= '  ' . $extReg . ' = zext i1 ' . $phi . " to i64\n";
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $phi . " to i64\n";
                 $this->lastValue = $extReg;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
             $call = $this->ssa->allocReg();
-            $out .= '  ' . $call . ' = call i64 @__mir_str_cmp(ptr ' . $lp . ', ptr ' . $rp . ")\n";
+            $chunks[] = '  ' . $call . ' = call i64 @__mir_str_cmp(ptr ' . $lp . ', ptr ' . $rp . ")\n";
             $cmpReg = $this->ssa->allocReg();
-            $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $call . ", 0\n";
+            $chunks[] = '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $call . ", 0\n";
             // Ordering consumes its operands exactly as equality does.
-            $out .= $this->freeStrTemp($c->left, $lp);
-            $out .= $this->freeStrTemp($c->right, $rp);
+            $chunks[] = $this->freeStrTemp($c->left, $lp);
+            $chunks[] = $this->freeStrTemp($c->right, $rp);
             $extReg = $this->ssa->allocReg();
-            $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+            $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
 
         // Two objects of the same statically-known class under LOOSE `==`: PHP
@@ -4071,81 +4072,81 @@ trait EmitLlvmExpr
                 if ($planOk && \count($plan) > 0) {
                     $this->rt->needsTaggedEq = true;
                     $lp = $l;
-                    if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+                    if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $chunks[] = '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
                     $rp = $r;
-                    if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+                    if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $chunks[] = '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
                     $yesL  = $this->ssa->allocLabel('objeq.same');
                     $nullL = $this->ssa->allocLabel('objeq.chknull');
                     $noL   = $this->ssa->allocLabel('objeq.no');
                     $propL = $this->ssa->allocLabel('objeq.props');
                     $joinL = $this->ssa->allocLabel('objeq.join');
                     $ideq = $this->ssa->allocReg();
-                    $out .= '  ' . $ideq . ' = icmp eq ptr ' . $lp . ', ' . $rp . "\n";
-                    $out .= '  br i1 ' . $ideq . ', label %' . $yesL . ', label %' . $nullL . "\n";
+                    $chunks[] = '  ' . $ideq . ' = icmp eq ptr ' . $lp . ', ' . $rp . "\n";
+                    $chunks[] = '  br i1 ' . $ideq . ', label %' . $yesL . ', label %' . $nullL . "\n";
                     // A `?C` null carrier can't be dereferenced. Both-null already
                     // went to the identity arm, so either-null here means unequal.
-                    $out .= $nullL . ":\n";
+                    $chunks[] = $nullL . ":\n";
                     $ln = $this->ssa->allocReg();
-                    $out .= '  ' . $ln . ' = icmp eq ptr ' . $lp . ", null\n";
+                    $chunks[] = '  ' . $ln . ' = icmp eq ptr ' . $lp . ", null\n";
                     $rn = $this->ssa->allocReg();
-                    $out .= '  ' . $rn . ' = icmp eq ptr ' . $rp . ", null\n";
+                    $chunks[] = '  ' . $rn . ' = icmp eq ptr ' . $rp . ", null\n";
                     $anyn = $this->ssa->allocReg();
-                    $out .= '  ' . $anyn . ' = or i1 ' . $ln . ', ' . $rn . "\n";
-                    $out .= '  br i1 ' . $anyn . ', label %' . $noL . ', label %' . $propL . "\n";
-                    $out .= $propL . ":\n";
+                    $chunks[] = '  ' . $anyn . ' = or i1 ' . $ln . ', ' . $rn . "\n";
+                    $chunks[] = '  br i1 ' . $anyn . ', label %' . $noL . ', label %' . $propL . "\n";
+                    $chunks[] = $propL . ":\n";
                     $acc = 'true';
                     foreach ($plan as $p) {
                         $pn = $p[0]; $pt = $p[1]; $isArr = $p[2]; $chain = $p[3];
                         $off = (string)$cd->propertyOffset($pn);
                         $lg = $this->ssa->allocReg();
-                        $out .= '  ' . $lg . ' = getelementptr inbounds i8, ptr ' . $lp . ', i64 ' . $off . "\n";
+                        $chunks[] = '  ' . $lg . ' = getelementptr inbounds i8, ptr ' . $lp . ', i64 ' . $off . "\n";
                         $lv = $this->ssa->allocReg();
-                        $out .= '  ' . $lv . ' = load i64, ptr ' . $lg . "\n";
+                        $chunks[] = '  ' . $lv . ' = load i64, ptr ' . $lg . "\n";
                         $rg = $this->ssa->allocReg();
-                        $out .= '  ' . $rg . ' = getelementptr inbounds i8, ptr ' . $rp . ', i64 ' . $off . "\n";
+                        $chunks[] = '  ' . $rg . ' = getelementptr inbounds i8, ptr ' . $rp . ', i64 ' . $off . "\n";
                         $rv = $this->ssa->allocReg();
-                        $out .= '  ' . $rv . ' = load i64, ptr ' . $rg . "\n";
+                        $chunks[] = '  ' . $rv . ' = load i64, ptr ' . $rg . "\n";
                         $peq = $this->ssa->allocReg();
                         if ($isArr) {
                             $lap = $this->ssa->allocReg();
-                            $out .= '  ' . $lap . ' = inttoptr i64 ' . $lv . " to ptr\n";
+                            $chunks[] = '  ' . $lap . ' = inttoptr i64 ' . $lv . " to ptr\n";
                             $rap = $this->ssa->allocReg();
-                            $out .= '  ' . $rap . ' = inttoptr i64 ' . $rv . " to ptr\n";
-                            $out .= '  ' . $peq . ' = call i1 @__mir_array_loose_eq(ptr ' . $lap
+                            $chunks[] = '  ' . $rap . ' = inttoptr i64 ' . $rv . " to ptr\n";
+                            $chunks[] = '  ' . $peq . ' = call i1 @__mir_array_loose_eq(ptr ' . $lap
                                   . ', i64 ' . $chain . ', ptr ' . $rap . ', i64 ' . $chain . ")\n";
                         } else {
                             $this->lastValue = $lv; $this->lastValueType = 'i64';
-                            $out .= $this->shallowBoxToCell($pt);
+                            $chunks[] = $this->shallowBoxToCell($pt);
                             $lc2 = $this->lastValue;
                             $this->lastValue = $rv; $this->lastValueType = 'i64';
-                            $out .= $this->shallowBoxToCell($pt);
+                            $chunks[] = $this->shallowBoxToCell($pt);
                             $rc2 = $this->lastValue;
                             $pe = $this->ssa->allocReg();
-                            $out .= '  ' . $pe . ' = call i64 @__manticore_tagged_loose_eq(i64 '
+                            $chunks[] = '  ' . $pe . ' = call i64 @__manticore_tagged_loose_eq(i64 '
                                   . $lc2 . ', i64 ' . $rc2 . ")\n";
-                            $out .= '  ' . $peq . ' = icmp ne i64 ' . $pe . ", 0\n";
+                            $chunks[] = '  ' . $peq . ' = icmp ne i64 ' . $pe . ", 0\n";
                         }
                         $nacc = $this->ssa->allocReg();
-                        $out .= '  ' . $nacc . ' = and i1 ' . $acc . ', ' . $peq . "\n";
+                        $chunks[] = '  ' . $nacc . ' = and i1 ' . $acc . ', ' . $peq . "\n";
                         $acc = $nacc;
                     }
-                    $out .= '  br label %' . $joinL . "\n";
-                    $out .= $yesL . ":\n  br label %" . $joinL . "\n";
-                    $out .= $noL . ":\n  br label %" . $joinL . "\n";
-                    $out .= $joinL . ":\n";
+                    $chunks[] = '  br label %' . $joinL . "\n";
+                    $chunks[] = $yesL . ":\n  br label %" . $joinL . "\n";
+                    $chunks[] = $noL . ":\n  br label %" . $joinL . "\n";
+                    $chunks[] = $joinL . ":\n";
                     $phi = $this->ssa->allocReg();
-                    $out .= '  ' . $phi . ' = phi i1 [ ' . $acc . ', %' . $propL . ' ], [ true, %'
+                    $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $acc . ', %' . $propL . ' ], [ true, %'
                           . $yesL . ' ], [ false, %' . $noL . " ]\n";
                     $fin = $phi;
                     if ($isNe) {
                         $fin = $this->ssa->allocReg();
-                        $out .= '  ' . $fin . ' = xor i1 ' . $phi . ", true\n";
+                        $chunks[] = '  ' . $fin . ' = xor i1 ' . $phi . ", true\n";
                     }
                     $res = $this->ssa->allocReg();
-                    $out .= '  ' . $res . ' = zext i1 ' . $fin . " to i64\n";
+                    $chunks[] = '  ' . $res . ' = zext i1 ' . $fin . " to i64\n";
                     $this->lastValue = $res;
                     $this->lastValueType = 'i64';
-                    return $out;
+                    return \implode('', $chunks);
                 }
             }
         }
@@ -4170,22 +4171,22 @@ trait EmitLlvmExpr
             if (isset($jug[$lk]) && isset($jug[$rk]) && ($boolMix || $bothStr || $arrMix)) {
                 $this->rt->needsTaggedEq = true;
                 $this->lastValue = $l; $this->lastValueType = $lt;
-                $out .= $this->shallowBoxToCell($c->left->type);
+                $chunks[] = $this->shallowBoxToCell($c->left->type);
                 $li = $this->lastValue;
                 $this->lastValue = $r; $this->lastValueType = $rt;
-                $out .= $this->shallowBoxToCell($c->right->type);
+                $chunks[] = $this->shallowBoxToCell($c->right->type);
                 $ri = $this->lastValue;
                 $eqr = $this->ssa->allocReg();
-                $out .= '  ' . $eqr . ' = call i64 @__manticore_tagged_loose_eq(i64 '
+                $chunks[] = '  ' . $eqr . ' = call i64 @__manticore_tagged_loose_eq(i64 '
                       . $li . ', i64 ' . $ri . ")\n";
                 $res = $eqr;
                 if ($isNe) {
                     $res = $this->ssa->allocReg();
-                    $out .= '  ' . $res . ' = xor i64 ' . $eqr . ", 1\n";
+                    $chunks[] = '  ' . $res . ' = xor i64 ' . $eqr . ", 1\n";
                 }
                 $this->lastValue = $res;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
         // A CELL against a statically-typed BOOL or STRING. PHP's table says a
@@ -4202,29 +4203,29 @@ trait EmitLlvmExpr
                 $this->rt->needsTaggedEq = true;
                 if ($lk !== Type::KIND_CELL) {
                     $this->lastValue = $l; $this->lastValueType = $lt;
-                    $out .= $this->boxToCell($c->left->type);
+                    $chunks[] = $this->boxToCell($c->left->type);
                     $l = $this->lastValue; $lt = 'i64';
                 }
                 if ($rk !== Type::KIND_CELL) {
                     $this->lastValue = $r; $this->lastValueType = $rt;
-                    $out .= $this->boxToCell($c->right->type);
+                    $chunks[] = $this->boxToCell($c->right->type);
                     $r = $this->lastValue; $rt = 'i64';
                 }
                 $li = $l;
-                if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+                if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $chunks[] = '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
                 $ri = $r;
-                if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+                if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
                 $fn = $strictEq ? '@__manticore_tagged_strict_eq' : '@__manticore_tagged_loose_eq';
                 $eqr = $this->ssa->allocReg();
-                $out .= '  ' . $eqr . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
+                $chunks[] = '  ' . $eqr . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
                 $res = $eqr;
                 if ($isNe) {
                     $res = $this->ssa->allocReg();
-                    $out .= '  ' . $res . ' = xor i64 ' . $eqr . ", 1\n";
+                    $chunks[] = '  ' . $res . ' = xor i64 ' . $eqr . ", 1\n";
                 }
                 $this->lastValue = $res;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
         // Two statically-typed ARRAYS compare BY VALUE in PHP, recursively: `==`
@@ -4240,31 +4241,31 @@ trait EmitLlvmExpr
                 && $this->chainsComparable($eka, $ekb)) {
                 $this->rt->needsTaggedCompare = true;
                 $lp = $l;
-                if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+                if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $chunks[] = '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
                 $rp = $r;
-                if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+                if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $chunks[] = '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
                 $args = '(ptr ' . $lp . ', i64 ' . $eka . ', ptr ' . $rp . ', i64 ' . $ekb . ')';
                 $res = $this->ssa->allocReg();
                 if ($isEq || $isNe) {
                     $fn = $strictEq ? '@__mir_array_strict_eq' : '@__mir_array_loose_eq';
                     $b1 = $this->ssa->allocReg();
-                    $out .= '  ' . $b1 . ' = call i1 ' . $fn . $args . "\n";
-                    $out .= '  ' . $res . ' = zext i1 ' . $b1 . " to i64\n";
+                    $chunks[] = '  ' . $b1 . ' = call i1 ' . $fn . $args . "\n";
+                    $chunks[] = '  ' . $res . ' = zext i1 ' . $b1 . " to i64\n";
                     if ($isNe) {
                         $neg = $this->ssa->allocReg();
-                        $out .= '  ' . $neg . ' = xor i64 ' . $res . ", 1\n";
+                        $chunks[] = '  ' . $neg . ' = xor i64 ' . $res . ", 1\n";
                         $res = $neg;
                     }
                 } else {
                     $cmp = $this->ssa->allocReg();
-                    $out .= '  ' . $cmp . ' = call i64 @__mir_array_compare' . $args . "\n";
+                    $chunks[] = '  ' . $cmp . ' = call i64 @__mir_array_compare' . $args . "\n";
                     $pr = $this->ssa->allocReg();
-                    $out .= '  ' . $pr . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
-                    $out .= '  ' . $res . ' = zext i1 ' . $pr . " to i64\n";
+                    $chunks[] = '  ' . $pr . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
+                    $chunks[] = '  ' . $res . ' = zext i1 ' . $pr . " to i64\n";
                 }
                 $this->lastValue = $res;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
         // A CELL compared to a RAW int/float: box the raw side so the tag-aware
@@ -4278,11 +4279,11 @@ trait EmitLlvmExpr
         // to a numeric raw side so a cell-vs-array/object identity is untouched.
         if ($lk === Type::KIND_CELL && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT)) {
             $this->lastValue = $r; $this->lastValueType = $rt;
-            $out .= $this->boxToCell($c->right->type);
+            $chunks[] = $this->boxToCell($c->right->type);
             $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
         } elseif ($rk === Type::KIND_CELL && ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT)) {
             $this->lastValue = $l; $this->lastValueType = $lt;
-            $out .= $this->boxToCell($c->left->type);
+            $chunks[] = $this->boxToCell($c->left->type);
             $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
         }
         // Both operands are statically CELL, EQ/NE — dispatch by tag with PHP
@@ -4295,20 +4296,20 @@ trait EmitLlvmExpr
             $this->rt->needsTagged = true;
             $this->rt->needsTaggedToFloat = true;
             $li = $l;
-            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $chunks[] = '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
             $ri = $r;
-            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
             $fn = $strictEq ? '@__manticore_tagged_strict_eq' : '@__manticore_tagged_loose_eq';
             $eq = $this->ssa->allocReg();
-            $out .= '  ' . $eq . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
+            $chunks[] = '  ' . $eq . ' = call i64 ' . $fn . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
             $res = $eq;
             if ($isNe) {
                 $res = $this->ssa->allocReg();
-                $out .= '  ' . $res . ' = xor i64 ' . $eq . ", 1\n";
+                $chunks[] = '  ' . $res . ' = xor i64 ' . $eq . ", 1\n";
             }
             $this->lastValue = $res;
             $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // Both operands are statically CELL (guaranteed NaN-boxed) in an ORDERING
         // compare — their runtime types (string / int / float) are only known at
@@ -4322,18 +4323,18 @@ trait EmitLlvmExpr
             $this->rt->needsTaggedToFloat = true;
             $this->rt->needsStrcmp = true;
             $li = $l;
-            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+            if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $chunks[] = '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
             $ri = $r;
-            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+            if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
             $cmp = $this->ssa->allocReg();
-            $out .= '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
+            $chunks[] = '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
             $cmpReg = $this->ssa->allocReg();
-            $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
+            $chunks[] = '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
             $extReg = $this->ssa->allocReg();
-            $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+            $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
             $this->lastValue = $extReg;
             $this->lastValueType = 'i64';
-            return $out;
+            return \implode('', $chunks);
         }
         // A NUMERIC cell (int|float) ordered against a RAW int carries either a
         // boxed int or a raw DOUBLE. The unbox_int below would read a double's
@@ -4354,31 +4355,31 @@ trait EmitLlvmExpr
                 $this->rt->needsStrcmp = true;
                 if ($lRawNum) {
                     $this->lastValue = $l; $this->lastValueType = $lt;
-                    $out .= $this->boxToCell($c->left->type);
+                    $chunks[] = $this->boxToCell($c->left->type);
                     $l = $this->lastValue; $lt = 'i64';
                 }
                 if ($rRawNum) {
                     $this->lastValue = $r; $this->lastValueType = $rt;
-                    $out .= $this->boxToCell($c->right->type);
+                    $chunks[] = $this->boxToCell($c->right->type);
                     $r = $this->lastValue; $rt = 'i64';
                 }
                 $li = $l;
-                if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $out .= '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
+                if ($lt === 'ptr') { $li = $this->ssa->allocReg(); $chunks[] = '  ' . $li . ' = ptrtoint ptr ' . $l . " to i64\n"; }
                 $ri = $r;
-                if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
+                if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
                 $cmp = $this->ssa->allocReg();
-                $out .= '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
+                $chunks[] = '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
                 $cmpReg = $this->ssa->allocReg();
-                $out .= '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
+                $chunks[] = '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
                 $extReg = $this->ssa->allocReg();
-                $out .= '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
                 $this->lastValue = $extReg;
                 $this->lastValueType = 'i64';
-                return $out;
+                return \implode('', $chunks);
             }
         }
 
-        return $this->emitNumericCmpTail($c, $out, $l, $r, $lt, $rt, $lk, $rk, $isEq, $isNe);
+        return $this->emitNumericCmpTail($c, \implode('', $chunks), $l, $r, $lt, $rt, $lk, $rk, $isEq, $isNe);
     }
     /**
      * The ONLY way to reach stdout from codegen.

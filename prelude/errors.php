@@ -82,16 +82,28 @@ function __mc_call_exception_handler(mixed $cb, mixed $e): mixed
     return $cb($e);
 }
 
+/** Invoke an array callable with the args it was registered with. */
+function __mc_call_shutdown_array(mixed $cb, array $args): mixed
+{
+    $o = $cb[0];
+    $m = $cb[1];
+    return $o->$m(...$args);
+}
+
+/** Invoke a non-array callable with the args it was registered with. */
+function __mc_call_shutdown_function(mixed $cb, array $args): mixed
+{
+    return $cb(...$args);
+}
+
 /** Invoke any callable shape with the args it was registered with.
  *  @param mixed[] $args */
 function __mc_call_shutdown(mixed $cb, array $args): mixed
 {
     if (\is_array($cb)) {
-        $o = $cb[0];
-        $m = $cb[1];
-        return $o->$m(...$args);
+        return __mc_call_shutdown_array($cb, $args);
     }
-    return $cb(...$args);
+    return __mc_call_shutdown_function($cb, $args);
 }
 
 /**

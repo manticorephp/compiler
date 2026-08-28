@@ -127,6 +127,7 @@ trait InferScans
     private function scanCtorPropContainers(Module $module): bool
     {
         $this->ctorPropChanged = false;
+        $this->ctorParamNamesCache = [];
         foreach ($module->functions as $fn) {
             $this->scanCtorPropNode($fn->body, $module);
         }
@@ -142,24 +143,32 @@ trait InferScans
             // four underscores (`Class____construct`).
             $ctorName = $n->class . '____construct';
             if ($cd !== null) {
-                // Collect ctor param names from the matching FunctionDef.
-                // Searching $module->functions (a typed FunctionDef[] prop)
-                // keeps each $cfn / $param class resolvable under self-host;
-                // a `name → Param[]` map would erase it through the assoc.
-                $pnames = [];
-                if (\Compile\Stats::$on) {
-                    \Compile\Stats::bump('scanCtorProp.new_sites', 1);
-                    \Compile\Stats::bump('scanCtorProp.fns_scanned', \count($module->functions));
-                }
-                foreach ($module->functions as $cfn) {
-                    if ($cfn->name === $ctorName) {
-                        // The ctor's first param is the implicit `$this`;
-                        // call args align with the rest, so drop it.
-                        foreach ($cfn->params as $param) {
-                            if ($param->name === 'this') { continue; }
-                            $pnames[] = $param->name;
+                // Collect ctor parameter names once per constructor. Symfony
+                // has many NewObj sites; rescanning the whole function list
+                // at every site made this scan O(new-sites × functions).
+                $pnames = $this->ctorParamNamesCache[$ctorName] ?? null;
+                if ($pnames === null) {
+                    $pnames = [];
+                    if (\Compile\Stats::$on) {
+                        \Compile\Stats::bump('scanCtorProp.fns_scanned', \count($module->functions));
+                    }
+                    // Searching $module->functions (a typed FunctionDef[] prop)
+                    // keeps each $cfn / $param class resolvable under self-host;
+                    // a `name → Param[]` map would erase it through the assoc.
+                    foreach ($module->functions as $cfn) {
+                        if ($cfn->name === $ctorName) {
+                            // The ctor's first param is the implicit `$this`;
+                            // call args align with the rest, so drop it.
+                            foreach ($cfn->params as $param) {
+                                if ($param->name === 'this') { continue; }
+                                $pnames[] = $param->name;
+                            }
                         }
                     }
+                    $this->ctorParamNamesCache[$ctorName] = $pnames;
+                }
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump('scanCtorProp.new_sites', 1);
                 }
                 $np = \count($pnames);
                 $i = 0;
@@ -1379,6 +1388,7 @@ trait InferScans
     private function scanLocalElemFromStores(Module $module): bool
     {
         $changed = false;
+        $this->lastInferenceChangedFunctions = [];
         foreach ($module->functions as $fn) {
             // A PRELUDE body is emitted linkonce_odr and SHARED with stdlib.o, so
             // it must never be specialized from module-local information: the
@@ -1436,6 +1446,7 @@ trait InferScans
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
                 $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $this->lastInferenceChangedFunctions[$fn->name] = true;
                 $changed = true;
             }
         }
@@ -1500,6 +1511,7 @@ trait InferScans
     private function scanUnshiftElemWiden(Module $module): bool
     {
         $changed = false;
+        $this->lastInferenceChangedFunctions = [];
         foreach ($module->functions as $fn) {
             // Same two exclusions as {@see scanLocalElemFromStores}: a shared
             // prelude body must not be specialized from module-local facts, and
@@ -1520,6 +1532,7 @@ trait InferScans
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
                 $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $this->lastInferenceChangedFunctions[$fn->name] = true;
                 $changed = true;
             }
         }
