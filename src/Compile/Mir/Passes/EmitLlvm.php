@@ -826,14 +826,35 @@ final class EmitLlvm implements EmitVisitor
         // loop; callers then contain only a small call instead of a repeated
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
-        foreach ($this->propertyReadHelpers as $helperBody) {
-            $extraBodies .= $helperBody;
-        }
-        foreach ($this->dynamicMethodHelpers as $helperBody) {
-            $extraBodies .= $helperBody;
-        }
         $this->rootSnapshot('post-lazy-helper-build', $module, true);
         if ($streaming) {
+            // Helper bodies are compiler-owned text and can be numerous on Doctrine.
+            // Do not join all of them into one temporary PHP string: stage, hoist,
+            // append, and release each body independently. This changes only the
+            // compiler lifetime; the emitted LLVM order and target ABI are stable.
+            $appendStreamedBody = function (string $rawBody, string $label) use (&$bodyBytes, &$hoistedAllocas, &$fileHoistedBodies, &$fileHoistedBytes, $bodyPath): void {
+                if ($rawBody === '') { return; }
+                $id = (string)(++$this->functionTextCounter);
+                $rawPath = $bodyPath . '.helper.' . $id;
+                $hoistedPath = $rawPath . '.hoisted';
+                if (!\Manticore\write_file($rawPath, $rawBody)) {
+                    throw new \RuntimeException('EmitLlvm: cannot stage helper body ' . $label);
+                }
+                $nBody = \strlen($rawBody);
+                unset($rawBody);
+                $h = new \Compile\Mir\HoistAllocas();
+                if (!$h->runFile($rawPath, $hoistedPath)) {
+                    throw new \RuntimeException('EmitLlvm: cannot hoist helper body ' . $label);
+                }
+                $hoistedAllocas += $h->moved;
+                $fileHoistedBodies += 1;
+                $fileHoistedBytes += $nBody;
+                if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
+                    throw new \RuntimeException('EmitLlvm: cannot append helper body ' . $label);
+                }
+                \Manticore\system('rm -f ' . $rawPath . ' ' . $hoistedPath);
+                $bodyBytes += $nBody;
+            };
             $h = new \Compile\Mir\HoistAllocas();
             $extraBodies = $h->run($extraBodies);
             $hoistedAllocas += $h->moved;
@@ -841,6 +862,16 @@ final class EmitLlvm implements EmitVisitor
                 throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
             }
             $bodyBytes += \strlen($extraBodies);
+            unset($extraBodies);
+            foreach ($this->propertyReadHelpers as $helperName => $helperBody) {
+                $appendStreamedBody($helperBody, (string)$helperName);
+                unset($this->propertyReadHelpers[$helperName]);
+            }
+            foreach ($this->dynamicMethodHelpers as $helperName => $helperBody) {
+                $appendStreamedBody($helperBody, (string)$helperName);
+                unset($this->dynamicMethodHelpers[$helperName]);
+            }
+            unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
