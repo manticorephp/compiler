@@ -132,6 +132,65 @@ final class EmitLlvm implements EmitVisitor
 
     public function name(): string { return 'emit-llvm'; }
 
+    /**
+     * Emit aggregate compiler-root telemetry without walking target values.
+     * The normal compiler path performs no extra counts or string scans.
+     */
+    /** Clear only pure per-emission memoization tables; helper bodies/registries stay live. */
+    private function compactEmissionCaches(): void
+    {
+        if (!\Compile\Debug::$compactCaches) { return; }
+        $this->resolveMethodClassCache = [];
+        $this->mangleCache = [];
+        $this->classImplementsCache = [];
+        $this->classImplementsIfaceCache = [];
+        $this->classIsACache = [];
+        $this->selfDescendantsCache = [];
+        $this->fixedPropertyHoldersCache = [];
+        $this->bagClassNamesCache = [];
+        $this->magicPropertyHoldersCache = [];
+    }
+
+    private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false): void
+    {
+        if (!\Compile\Debug::$rootTrace) { return; }
+        $cacheEntries = \count($this->resolveMethodClassCache)
+            + \count($this->mangleCache)
+            + \count($this->classImplementsCache)
+            + \count($this->classImplementsIfaceCache)
+            + \count($this->classIsACache)
+            + \count($this->selfDescendantsCache)
+            + \count($this->fixedPropertyHoldersCache)
+            + \count($this->bagClassNamesCache)
+            + \count($this->magicPropertyHoldersCache);
+        $helperBytes = 0;
+        if ($withBytes) {
+            foreach ($this->propertyReadHelpers as $text) { $helperBytes += \strlen($text); }
+            foreach ($this->dynamicMethodHelpers as $text) { $helperBytes += \strlen($text); }
+        }
+        \Compile\Stats::rootLine('roots phase=' . $phase
+            . ' module_fns=' . (string)\count($module->functions)
+            . ' module_classes=' . (string)\count($module->classes)
+            . ' module_globals=' . (string)\count($module->globalNames)
+            . ' emitter_classes=' . (string)\count($this->classes)
+            . ' defined_fns=' . (string)\count($this->definedFns)
+            . ' caches=' . (string)$cacheEntries
+            . ' resolve=' . (string)\count($this->resolveMethodClassCache)
+            . ' mangle=' . (string)\count($this->mangleCache)
+            . ' impl=' . (string)\count($this->classImplementsCache)
+            . ' iface=' . (string)\count($this->classImplementsIfaceCache)
+            . ' isa=' . (string)\count($this->classIsACache)
+            . ' desc=' . (string)\count($this->selfDescendantsCache)
+            . ' fixed=' . (string)\count($this->fixedPropertyHoldersCache)
+            . ' bag=' . (string)\count($this->bagClassNamesCache)
+            . ' magic=' . (string)\count($this->magicPropertyHoldersCache)
+            . ' prop_helpers=' . (string)\count($this->propertyReadHelpers)
+            . ' dyn_helpers=' . (string)\count($this->dynamicMethodHelpers)
+            . ' closures=' . (string)\count($this->closureCaptures)
+            . ' sigs=' . (string)\count($this->sigs->refParams)
+            . ' helper_bytes=' . (string)$helperBytes);
+    }
+
     /** Interned string-literal pool (fresh each {@see emit}). */
     private ?StringPool $pool = null;
 
@@ -614,6 +673,7 @@ final class EmitLlvm implements EmitVisitor
         if ($streaming && !\Manticore\write_file($bodyPath, '')) {
             throw new \RuntimeException('EmitLlvm: cannot create staged body file ' . $bodyPath);
         }
+        $this->rootSnapshot('pre-function-emission', $module, true);
         /** @var string[] $functionBodyChunks */
         $functionBodyChunks = [];
         // MANTICORE_EMIT_TRACE=1 logs each function name to stderr right BEFORE
@@ -741,6 +801,8 @@ final class EmitLlvm implements EmitVisitor
             // never resets the target arena or changes ABI/COW semantics.
             if (($emitIndex & 1023) === 0) {
                 \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
+                $this->compactEmissionCaches();
+                $this->rootSnapshot('emit-batch-' . (string)$emitIndex, $module);
             }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
             // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
@@ -749,10 +811,12 @@ final class EmitLlvm implements EmitVisitor
             unset($module->functions[$functionKey], $fn);
         }
         unset($functionKeys);
+        $this->rootSnapshot('post-function-emission', $module, true);
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
         $extraBodies = $this->emitClosureDropFns();
+        $this->rootSnapshot('post-closure-drop-build', $module, true);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
@@ -768,6 +832,7 @@ final class EmitLlvm implements EmitVisitor
         foreach ($this->dynamicMethodHelpers as $helperBody) {
             $extraBodies .= $helperBody;
         }
+        $this->rootSnapshot('post-lazy-helper-build', $module, true);
         if ($streaming) {
             $h = new \Compile\Mir\HoistAllocas();
             $extraBodies = $h->run($extraBodies);
@@ -780,6 +845,7 @@ final class EmitLlvm implements EmitVisitor
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
                 . (string)$fileHoistThreshold . ')');
+            $this->rootSnapshot('post-extra-body-merge', $module, true);
         } else {
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);

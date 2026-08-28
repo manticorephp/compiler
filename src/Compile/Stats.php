@@ -29,6 +29,8 @@ final class Stats
 
     /** Nanosecond clock reading at compiler startup. */
     private static int $t0 = 0;
+    /** Independent root-telemetry clock. */
+    private static int $rootT0 = 0;
 
     /** @var array<string, int> counter name → total */
     private static array $counts = [];
@@ -37,6 +39,18 @@ final class Stats
     {
         if (!self::$on) { return; }
         self::$t0 = self::now();
+    }
+
+    public static function rootInit(): void
+    {
+        self::$rootT0 = self::now();
+    }
+
+    public static function rootLine(string $s): void
+    {
+        $ms = self::$rootT0 > 0
+            ? \intdiv(self::now() - self::$rootT0, 1000000) : 0;
+        \error_log('stats: ' . (string)$ms . 'ms  ' . $s);
     }
 
     /** Monotonic nanoseconds. */

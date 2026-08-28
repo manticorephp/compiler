@@ -31,6 +31,12 @@ namespace Compile;
  *                                         counters and an atexit tally; this is
  *                                         statistics only and does not log each
  *                                         allocation.
+ *   MANTICORE_ROOT_TRACE=1               — emit aggregate compiler root/cache
+ *                                         snapshots at phase and emission-batch
+ *                                         boundaries; diagnostic only.
+ *   MANTICORE_COMPACT_CACHES=1           — clear pure emission memoization
+ *                                         tables at bounded batch boundaries;
+ *                                         compiler-only retention control.
  *   MANTICORE_DEBUG_VERIFY=1            — slow-path invariant checks at memory ops
  *                                         (abort on failure); bisects rc-balance bugs.
  *   MANTICORE_REFLECT_REPORT=1          — report which classes reflection kept alive.
@@ -75,6 +81,19 @@ final class Debug
      * `MANTICORE_ALLOC_TRACE=1`.
      */
     public static bool $allocTrace = false;
+
+    /**
+     * Aggregate compiler-root/cache telemetry. This never walks target values;
+     * it only counts existing compiler-owned tables and is opt-in via
+     * `MANTICORE_ROOT_TRACE=1`.
+     */
+    public static bool $rootTrace = false;
+
+    /**
+     * Bound pure emitter memoization tables at batch boundaries. These tables
+     * are performance caches; clearing them changes no emitted semantics.
+     */
+    public static bool $compactCaches = false;
 
     /**
      * Memory mode selector:
@@ -208,6 +227,15 @@ final class Debug
         $env = \getenv('MANTICORE_ALLOC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$allocTrace = true;
+        }
+        $env = \getenv('MANTICORE_ROOT_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$rootTrace = true;
+            Stats::rootInit();
+        }
+        $env = \getenv('MANTICORE_COMPACT_CACHES');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$compactCaches = true;
         }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
