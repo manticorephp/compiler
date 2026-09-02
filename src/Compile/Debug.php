@@ -146,20 +146,27 @@ final class Debug
     public static bool $rcElemOwns = false;
 
     /**
-     * `MANTICORE_RC_ELEM_TYPE=1` — let a CONCRETE element type refine a local's
-     * recorded release type after the first store.
+     * ON by default; `MANTICORE_RC_ELEM_TYPE=0` opts out. Let a CONCRETE element
+     * type refine a local's recorded release type after the first store.
      *
      * `$a = []` is `vec[unknown]`, and it is usually the ONLY store_local to the
      * name (appends are store_element), so first-write-wins froze the release as
      * a plain buffer drop while inference had long since retyped the loads to
      * `vec[obj<T>]`. Every element leaked. Upgrade is UNKNOWN -> concrete only:
      * it deepens a release that already ran, it never redirects one.
+     *
+     * ⚠ Load-bearing for {@see $rcPropDrop}, not merely additive: without the
+     * refinement {@see Mir\Passes\EmitLlvmMemory::arrayRetainFlavor} answers a
+     * plain `vec` for the store, the flavors disagree, and every slot is vetoed.
+     * The pair moves the probe 60000/20000 → 60000/60000; either one alone
+     * leaves it at 60000/20000.
      */
-    public static bool $rcElemType = false;
+    public static bool $rcElemType = true;
 
     /**
-     * `MANTICORE_RC_PROP_DROP=1` — let a CLASS DROP body give back the element
-     * refs its property slot owns, on every release rather than only at rc → 0.
+     * ON by default; `MANTICORE_RC_PROP_DROP=0` opts out. Let a CLASS DROP body
+     * give back the element refs its property slot owns, on every release
+     * rather than only at rc → 0.
      *
      * The slot's store retained at element depth ({@see
      * Mir\Passes\EmitLlvm::$propOwnElem} proves it for every store in the
@@ -173,8 +180,12 @@ final class Debug
      * must be identical in every module that emits the class. An IMPORTED or
      * PRELUDE class is therefore excluded outright, and a library module — which
      * cannot see its callers' stores at all — never proves a slot.
+     *
+     * The opt-out stays because the failure this guards against is an
+     * OVER-release: invisible under Zend, invisible at -O0, and often invisible
+     * until gen-2. One env var bisects it in a single run.
      */
-    public static bool $rcPropDrop = false;
+    public static bool $rcPropDrop = true;
 
     /**
      * Memory mode selector:
@@ -325,9 +336,9 @@ final class Debug
         $env = \getenv('MANTICORE_RC_ELEM_OWNS');
         if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
         $env = \getenv('MANTICORE_RC_ELEM_TYPE');
-        if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemType = true; }
+        if ($env === '0' || $env === 'off') { self::$rcElemType = false; }
         $env = \getenv('MANTICORE_RC_PROP_DROP');
-        if ($env !== false && $env !== '0' && $env !== '') { self::$rcPropDrop = true; }
+        if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
