@@ -96,7 +96,7 @@ final class Debug
     public static bool $compactCaches = false;
 
     /**
-     * `MANTICORE_RC_RETURN_OWNS=1` — stop vetoing a property slot's
+     * ON by default; `MANTICORE_RC_RETURN_OWNS=0` opts out. Stop vetoing a property slot's
      * release-before-overwrite because the slot is READ by a `return`.
      *
      * The veto exists because a property read normally hands out a raw borrow,
@@ -107,13 +107,16 @@ final class Debug
      * ordering — a property READ must own what it reads BEFORE a property WRITE
      * may drop it — already satisfied in this one position.
      *
-     * ⚠ Opt-in because a wrong ownership change is a double-free that is
-     * invisible under Zend, invisible at -O0, and often invisible in gen-1.
+     * Landed with `tests/aot/cases/prop_overwrite_destruct_getter.php` (which fails
+     * without it), a flat `tools/prof/rcbalance.php` table, and a green 1026/1028
+     * suite. The opt-out stays so a suspected double-free can be bisected in one
+     * run — that failure is invisible under Zend, invisible at -O0, and often
+     * invisible until gen-2.
      */
-    public static bool $rcReturnOwns = false;
+    public static bool $rcReturnOwns = true;
 
     /**
-     * `MANTICORE_RC_RECV_TEMP=1` — release the RECEIVER temp of a method call.
+     * ON by default; `MANTICORE_RC_RECV_TEMP=0` opts out. Release the RECEIVER temp of a method call.
      *
      * `f()->m()` evaluates `f()` into a temp, uses it as `$this`, and then drops
      * it on the floor. Argument position has released its fresh temps since
@@ -124,7 +127,7 @@ final class Debug
      * Safe against a fluent `return $this`: the callee retains a borrowed obj
      * return, so the caller's result owns a reference of its own.
      */
-    public static bool $rcRecvTemp = false;
+    public static bool $rcRecvTemp = true;
 
     /**
      * Memory mode selector:
@@ -269,13 +272,9 @@ final class Debug
             self::$compactCaches = true;
         }
         $env = \getenv('MANTICORE_RC_RETURN_OWNS');
-        if ($env !== false && $env !== '0' && $env !== '') {
-            self::$rcReturnOwns = true;
-        }
+        if ($env === '0' || $env === 'off') { self::$rcReturnOwns = false; }
         $env = \getenv('MANTICORE_RC_RECV_TEMP');
-        if ($env !== false && $env !== '0' && $env !== '') {
-            self::$rcRecvTemp = true;
-        }
+        if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
