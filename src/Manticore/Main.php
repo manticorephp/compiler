@@ -1878,7 +1878,7 @@ function __mc_source_may_declare(string $src): bool
 function __mc_library_source_may_declare(string $src): bool
 {
     try {
-        $program = Parser\Parser::parseSource($src);
+        $program = \Parser\Parser::parseSource($src);
         foreach ($program->statements as $stmt) {
             if (__mc_stmt_declares($stmt)) { return true; }
         }
@@ -1915,7 +1915,7 @@ function __mc_stmt_declares(\Parser\Ast\Stmt $s): bool
 {
     $k = $s->kind;
     if ($k === 'Expression' && $s instanceof \Parser\Ast\ExpressionStmt
-        && $s->expr instanceof \Parser\Ast\Call) {
+        && $s->expr instanceof \Parser\Ast\CallExpr) {
         $fn = $s->expr->function;
         $p = \strrpos($fn, '\\');
         $bare = $p === false ? $fn : \substr($fn, $p + 1);
