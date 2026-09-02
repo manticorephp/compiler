@@ -151,7 +151,7 @@ final class EmitLlvm implements EmitVisitor
         $this->magicPropertyHoldersCache = [];
     }
 
-    private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false): void
+    private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false, int $stagedBytes = 0): void
     {
         if (!\Compile\Debug::$rootTrace) { return; }
         $cacheEntries = \count($this->resolveMethodClassCache)
@@ -172,6 +172,7 @@ final class EmitLlvm implements EmitVisitor
             . ' module_fns=' . (string)\count($module->functions)
             . ' module_classes=' . (string)\count($module->classes)
             . ' module_globals=' . (string)\count($module->globalNames)
+            . ' staged_bytes=' . (string)$stagedBytes
             . ' emitter_classes=' . (string)\count($this->classes)
             . ' defined_fns=' . (string)\count($this->definedFns)
             . ' caches=' . (string)$cacheEntries
@@ -802,7 +803,7 @@ final class EmitLlvm implements EmitVisitor
             if (($emitIndex & 1023) === 0) {
                 \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
                 $this->compactEmissionCaches();
-                $this->rootSnapshot('emit-batch-' . (string)$emitIndex, $module);
+                $this->rootSnapshot('emit-batch-' . (string)$emitIndex, $module, true, $bodyBytes);
             }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
             // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
@@ -811,12 +812,12 @@ final class EmitLlvm implements EmitVisitor
             unset($module->functions[$functionKey], $fn);
         }
         unset($functionKeys);
-        $this->rootSnapshot('post-function-emission', $module, true);
+        $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
         $extraBodies = $this->emitClosureDropFns();
-        $this->rootSnapshot('post-closure-drop-build', $module, true);
+        $this->rootSnapshot('post-closure-drop-build', $module, true, $bodyBytes);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
@@ -826,7 +827,7 @@ final class EmitLlvm implements EmitVisitor
         // loop; callers then contain only a small call instead of a repeated
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
-        $this->rootSnapshot('post-lazy-helper-build', $module, true);
+        $this->rootSnapshot('post-lazy-helper-build', $module, true, $bodyBytes);
         if ($streaming) {
             // Helper bodies are compiler-owned text and can be numerous on Doctrine.
             // Do not join all of them into one temporary PHP string: stage, hoist,
@@ -876,7 +877,7 @@ final class EmitLlvm implements EmitVisitor
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
                 . (string)$fileHoistThreshold . ')');
-            $this->rootSnapshot('post-extra-body-merge', $module, true);
+            $this->rootSnapshot('post-extra-body-merge', $module, true, $bodyBytes);
         } else {
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);
