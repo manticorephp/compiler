@@ -353,6 +353,14 @@ final class Debug
             Stats::$on = true;
             Stats::init();
         }
+        // The phase timeline alone. Read AFTER the full flag so that setting
+        // both leaves the full report on ({@see Stats::$phaseTrace} says why a
+        // large target can only use this one).
+        $env = \getenv('MANTICORE_PHASE_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            Stats::$phaseTrace = true;
+            Stats::init();
+        }
         $env = \getenv('MANTICORE_MEMORY');
         if ($env !== false && $env !== '') {
             self::applyMemoryMode($env);
