@@ -115,11 +115,12 @@ final class Pin
     public string $s = '';
 }
 
-function main(): int
+// argv is read at TOP LEVEL and passed in: `global $argv` inside a function
+// silently bound nothing in the compiled binary, so every variant ran as the
+// default one and the whole table read FLAT. A harness that cannot fail is
+// worse than no harness.
+function main(string $variant, int $iters): int
 {
-    global $argv;
-    $variant = $argv[1] ?? 'ret_stmt';
-    $iters = (int)($argv[2] ?? 100000);
     $src = new Source();
     // One accumulated guard value, printed once. Without it dead-code
     // elimination is free to delete the whole loop and the variant measures
@@ -172,4 +173,7 @@ function main(): int
     return 0;
 }
 
-exit(main());
+$mcArgv = $argv;
+$mcVariant = \count($mcArgv) > 1 ? $mcArgv[1] : 'ret_stmt';
+$mcIters = \count($mcArgv) > 2 ? (int)$mcArgv[2] : 100000;
+exit(main($mcVariant, $mcIters));
