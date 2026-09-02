@@ -738,6 +738,14 @@ final class EmitLlvm implements EmitVisitor
         $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
         $emitTraceFull = \getenv('MANTICORE_EMIT_TRACE') === 'full';
         $emitIndex = 0;
+        // ⚠ The FATTEST body and the COSTLIEST one are different questions, and
+        // conflating them sent this hunt down a wrong path: a batch that jumped
+        // +5 GB was blamed on its fattest function, while a stand shows a fat
+        // body costs only 4-6x its own bytes (and the ratio FALLS with size).
+        // So track the RSS delta per function too, and report the max of each.
+        $batchMaxRss = 0;
+        $batchMaxRssIndex = 0;
+        $batchMaxRssName = '';
         // Fattest body seen since the last batch line. The name is captured
         // through `substr`, whose result is a FRESH owned string — a plain
         // `$n = $fn->name` would be a borrowed property read held across the
@@ -763,6 +771,9 @@ final class EmitLlvm implements EmitVisitor
             $fn = $module->functions[$functionKey];
             $emitIndex = $emitIndex + 1;
             if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
+            // Peak RSS before this body exists. Read here, OUTSIDE the sink-marker
+            // window that starts below.
+            $rssBefore = \Compile\Stats::reporting() ? \memory_get_usage() : 0;
             $body = $this->emitFunction($fn);
             $rawBodyPath = '';
             if ($streaming && \strlen($body) > 0 && $body[0] === "\x1f") {
@@ -777,8 +788,13 @@ final class EmitLlvm implements EmitVisitor
                 $rawBodyBytes = \strlen($body);
             }
             if ($emitTraceFull) {
+                // rss is the process PEAK, so the delta between two consecutive
+                // lines is what emitting THIS body cost that never came back —
+                // the only way to see the build multiplier of one fat function
+                // without a 20-minute tier run.
                 \error_log('emit-trace-body index=' . (string)$emitIndex . ' name=' . $fn->name
-                    . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes);
+                    . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes
+                    . ' rss=' . (string)\intdiv(\memory_get_usage(), 1048576) . 'MB');
             }
             // ⚠⚠ THIS LINE IS A LANDMINE, and it is deliberately left under the
             // full `Stats::$on` rather than promoted to the phase trace.
@@ -885,10 +901,20 @@ final class EmitLlvm implements EmitVisitor
             // `cannot hoist sink file …fnraw.46088.hoisted`, the path variable
             // holding the value of the `$hoistedPath` concat beside it. By this
             // point the marker is consumed and retired, so allocating is safe.
-            if ($rawBodyBytes > $batchMaxBytes && \Compile\Stats::reporting()) {
-                $batchMaxBytes = $rawBodyBytes;
-                $batchMaxIndex = $emitIndex;
-                $batchMaxName = \substr($fn->name, 0);
+            if (\Compile\Stats::reporting()) {
+                if ($rawBodyBytes > $batchMaxBytes) {
+                    $batchMaxBytes = $rawBodyBytes;
+                    $batchMaxIndex = $emitIndex;
+                    $batchMaxName = \substr($fn->name, 0);
+                }
+                // Peak RSS never falls, so this delta is what emitting THIS body
+                // added and never gave back.
+                $grew = \memory_get_usage() - $rssBefore;
+                if ($grew > $batchMaxRss) {
+                    $batchMaxRss = $grew;
+                    $batchMaxRssIndex = $emitIndex;
+                    $batchMaxRssName = \substr($fn->name, 0);
+                }
             }
             if (($emitIndex & 1023) === 0) {
                 \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
@@ -913,10 +939,15 @@ final class EmitLlvm implements EmitVisitor
                         . '/' . (string)\count($functionKeys)
                         . '  ir=' . (string)\intdiv($bodyBytes, 1048576) . 'MB'
                         . '  fattest=' . (string)\intdiv($batchMaxBytes, 1024) . 'KB @'
-                        . (string)$batchMaxIndex . ' ' . $batchMaxName);
+                        . (string)$batchMaxIndex . ' ' . $batchMaxName
+                        . '  costliest=' . (string)\intdiv($batchMaxRss, 1048576) . 'MB @'
+                        . (string)$batchMaxRssIndex . ' ' . $batchMaxRssName);
                     $batchMaxBytes = 0;
                     $batchMaxIndex = 0;
                     $batchMaxName = '';
+                    $batchMaxRss = 0;
+                    $batchMaxRssIndex = 0;
+                    $batchMaxRssName = '';
                 }
             }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
