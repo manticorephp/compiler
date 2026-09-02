@@ -1566,12 +1566,20 @@ trait EmitLlvmObjects
      *  name) for a classless receiver whose runtime class is a bag object. */
     private function emitCellBagStore(\Compile\Mir\StoreProperty $n, string $objPtr, string $cellVal): string
     {
+        return $this->emitCellBagStoreByName($n->property, $objPtr, $cellVal);
+    }
+
+    /** The bag store judged by NAME alone. {@see emitBagPtr} ignores the object
+     *  NODE it is handed (it works off `$objPtr`), so nothing here ever needed
+     *  one — which is what lets the whole store lift into a shared writer. */
+    private function emitCellBagStoreByName(string $prop, string $objPtr, string $cellVal): string
+    {
         $std = $this->classes['stdClass'] ?? null;
         $bagOff = $std === null ? 16 : $std->bagOffset();
-        $out = $this->emitBagPtr($n->object, $objPtr, $bagOff);
+        $out = $this->emitBagPtrAt($objPtr, $bagOff);
         $bagP = $this->bagPtrReg;
         $bg = $this->bagSlotReg;
-        $kid = $this->pool->intern($n->property);
+        $kid = $this->pool->intern($prop);
         $nb = $this->ssa->allocReg();
         $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
               . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
@@ -2437,6 +2445,14 @@ trait EmitLlvmObjects
     /** Emit the object → bag-assoc ptr; leaves bag ptr + slot gep regs. */
     private function emitBagPtr(Node $objNode, string $objPtr, int $bagOff): string
     {
+        return $this->emitBagPtrAt($objPtr, $bagOff);
+    }
+
+    /** The bag pointer from a raw object pointer. {@see emitBagPtr}'s node
+     *  parameter was never read; this is that function without it, so a caller
+     *  holding only `%obj` can use it. */
+    private function emitBagPtrAt(string $objPtr, int $bagOff): string
+    {
         $bg = $this->ssa->allocReg();
         $out = '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$bagOff . "\n";
@@ -2529,6 +2545,76 @@ trait EmitLlvmObjects
         $this->lastValue = $rv;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * The shared WRITER for `$prop`: `(ptr obj, i64 cell) -> void`, the class_id
+     * switch of {@see emitCellStoreProperty} lifted out of the call site.
+     *
+     * The value's retain stays at the SITE — it is a function of the value NODE
+     * and its type, which the helper cannot see. What the helper owns is
+     * everything that depends only on the class and the name: each holder's slot
+     * store, the `__set` arms, and the bag default.
+     */
+    private function cellPropertyWriteHelper(string $prop): string
+    {
+        $key = '__mc_prop_write_' . $this->mangle($prop);
+        $sym = '@manticore_' . $key;
+        if (isset($this->propertyReadHelpers[$key])) { return $sym; }
+
+        $fixed = [];
+        $hasBag = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+            if ($cd->usesBag()) { $hasBag = true; }
+        }
+        $magic = $this->magicPropHolders($prop, '__set');
+
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $obj = '%obj';
+        $cellVal = '%val';
+        $out = 'define internal void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
+        $out .= $this->emitLoadClassId($obj);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('pw.end');
+        $def = $this->ssa->allocLabel('pw.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        $seen = [];
+        foreach ($fixed as $cd) {
+            if (isset($seen[$cd->name])) { continue; }
+            $seen[$cd->name] = true;
+            $lbl = $this->ssa->allocLabel('pw.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n" . $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($magic as $cname => $declCls) {
+            if (isset($seen[$cname])) { continue; }
+            $seen[$cname] = true;
+            $lbl = $this->ssa->allocLabel('pw.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicCall($declCls, '__set', $obj, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        if ($hasBag) { $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal); }
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n  ret void\n}\n\n";
+        $this->propertyReadHelpers[$key] = $out;
+
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        return $sym;
     }
 
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
@@ -3406,7 +3492,77 @@ trait EmitLlvmObjects
         // fallback for an undeclared name. WITHOUT this the removed bag path below
         // wrote slot 16 as a bag pointer on a fixed-slot object → a wild write.
         $bagCd = $this->classes['stdClass'] ?? null;
-        return $this->emitStoreDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+        return $this->emitErasedStoreDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+    }
+
+    /**
+     * `$o->$name = v` on an ERASED receiver — the write twin of
+     * {@see emitErasedDynPropDispatch}, and the second half of the T6 emission
+     * peak (`PDOStatement::makeObject` is this shape).
+     *
+     * Object and value are evaluated ONCE up front — the general path could not,
+     * because it re-emits both inside every name arm — and each arm is a call to
+     * that property's shared writer instead of an inlined class_id switch.
+     *
+     * @param array<string, Type> $propTypes
+     */
+    private function emitErasedStoreDynPropDispatch(StoreDynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitDynMemberKey($n->name);
+        $keyP = $this->lastValue;
+        $out .= $this->emitObjPtrOf($n->object);
+        $objPtr = $this->lastValue;
+        // The RHS is evaluated and retained HERE, once: only one arm runs, and
+        // the retain depends on the value NODE and its type, which the shared
+        // writer cannot see.
+        //
+        // ⚠ Through {@see emitBagStoreValue}, not `rcRetainByType` directly. One
+        // hoisted value serves BOTH a fixed slot and the bag default, and the bag
+        // needs the stronger discipline: a CELL / UNKNOWN value is copy-retained
+        // by TAG ({@see byRefValueCopyRetainIr}), because `rcRetainByType` reads a
+        // NaN-boxed word as an object pointer and takes no reference on a boxed
+        // string. With the weaker retain the bag kept a BORROWED pointer into the
+        // unserialize parser's own buffer: `$o->t` came back as `"8"`, the class
+        // name length out of `O:8:"stdClass"`. Caught by `unser_object`.
+        $out .= $this->emitBagStoreValue($n->value);
+        $cellVal = $this->lastValue;
+        $endL = $this->ssa->allocLabel('dynsp.end');
+        foreach ($propTypes as $p => $pt) {
+            $hitL = $this->ssa->allocLabel('dynsp.hit');
+            $nextL = $this->ssa->allocLabel('dynsp.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($p) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= '  call void ' . $this->cellPropertyWriteHelper($p)
+                  . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        if ($bagCd !== null && $bagCd->usesBag()) {
+            // ⚠ The RUNTIME key, not an interned literal: the name is an
+            // expression here, so {@see emitCellBagStoreByName} (which interns a
+            // STATIC name) is the wrong tool. Same store as the general path's
+            // default arm.
+            $out .= $this->emitBagPtrAt($objPtr, $bagCd->bagOffset());
+            $bagP = $this->bagPtrReg;
+            $bg = $this->bagSlotReg;
+            $nb = $this->ssa->allocReg();
+            $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
+                  . ', ptr ' . $keyP . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+            $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
+            $nbI = $this->ssa->allocReg();
+            $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
+            $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** `$o->$name = v` on a receiver with a known member set (a class or a union):
