@@ -740,8 +740,14 @@ trait EmitLlvmMemory
     private function arrayRetainFlavor(Node $valueNode, ?Type $fallback): string
     {
         $at = $valueNode->type->kind === Type::KIND_ARRAY ? $valueNode->type : null;
-        if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY
-            && ($at === null || $at->element === null)) {
+        // An UNKNOWN element is as uninformative as a missing one, and it is the
+        // common case: `$a = []` types as `vec[unknown]`, whose `element` is a
+        // real Type — so the `=== null` test never fired and the fallback never
+        // won. The flavor then stayed a plain buffer drop while the destination
+        // had long since been refined to `vec[obj<T>]`, and every element leaked.
+        $uninformative = $at === null || $at->element === null
+            || (\Compile\Debug::$rcElemType && $at->element->kind === Type::KIND_UNKNOWN);
+        if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY && $uninformative) {
             $at = $fallback;
         }
         $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
