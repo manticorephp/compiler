@@ -1394,8 +1394,94 @@ trait EmitLlvmModule
             $out .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.fmt.'
                   . (string)$j . ', i64 %v' . (string)$j . ")\n";
         }
+        $out .= $this->classCensusDump();
         $out .= "  ret void\n}\n";
+        return $out . $this->classCensusRuntime();
+    }
+
+    /**
+     * Per-CLASS alloc/free census — `[CLASS] <name> alloc=<n> free=<m>` at exit,
+     * for every class this module actually allocated.
+     *
+     * The category counters say objects leak; this says WHOSE. The producing
+     * class is known STATICALLY at {@see EmitLlvmObjects::emitObjAllocInit}, and
+     * the free site reads the id back through the descriptor, so this needs no
+     * header change and no ABI change.
+     *
+     * ⚠ The table is sized from THIS module's class list while `@__prof_class`
+     * is linkonce_odr like every other runtime helper — a program linking a
+     * prebuilt stdlib keeps ONE body and one size. The bound check is therefore
+     * load-bearing, not defensive: an id from the other module has to be
+     * dropped, never written past the end. The 30-slot `@__prof` array fell into
+     * exactly that trap when a 31st counter was added, and it SIGSEGV'd.
+     */
+    private function classCensusRuntime(): string
+    {
+        $n = $this->classCensusSize();
+        $out  = '@__prof_class_tab = linkonce_odr global [' . (string)$n
+              . " x [2 x i64]] zeroinitializer\n";
+        $out .= "define void @__prof_class(i64 %id, i64 %slot) {\nentry:\n";
+        $out .= "  %lo = icmp slt i64 %id, 0\n";
+        $out .= '  %hi = icmp sge i64 %id, ' . (string)$n . "\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %done, label %ok\n";
+        $out .= "ok:\n";
+        $out .= '  %p = getelementptr inbounds [' . (string)$n
+              . " x [2 x i64]], ptr @__prof_class_tab, i64 0, i64 %id, i64 %slot\n";
+        $out .= "  %v = load i64, ptr %p\n";
+        $out .= "  %v1 = add i64 %v, 1\n";
+        $out .= "  store i64 %v1, ptr %p\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        // The per-class format strings are MODULE-scope constants and the dump
+        // half only reads them; emitting them from inside the dump would put a
+        // global in the middle of a function body.
+        foreach ($this->classes as $cd) {
+            $text = '[CLASS] ' . $cd->name . ' alloc=%lld free=%lld';
+            $out .= '@__prof.cls.' . (string)$cd->classId
+                  . ' = private unnamed_addr constant [' . (string)(\strlen($text) + 2)
+                  . ' x i8] c"' . $text . '\\0A\\00"' . "\n";
+        }
         return $out;
+    }
+
+    /** One spelling of the census table length — the global, the bound check
+     *  and the dump loop must not disagree. */
+    private function classCensusSize(): int
+    {
+        $maxId = 0;
+        foreach ($this->classes as $cd) {
+            if ($cd->classId > $maxId) { $maxId = $cd->classId; }
+        }
+        return $maxId + 1;
+    }
+
+    /** The dump half: one line per class that allocated at least once. */
+    private function classCensusDump(): string
+    {
+        $body = '';
+        $n = $this->classCensusSize();
+        foreach ($this->classes as $cd) {
+            $id = (string)$cd->classId;
+            $body .= '  %ca' . $id . ' = getelementptr inbounds [' . (string)$n
+                   . " x [2 x i64]], ptr @__prof_class_tab, i64 0, i64 " . $id . ", i64 0\n";
+            $body .= '  %cav' . $id . ' = load i64, ptr %ca' . $id . "\n";
+            $body .= '  %cf' . $id . ' = getelementptr inbounds [' . (string)$n
+                   . " x [2 x i64]], ptr @__prof_class_tab, i64 0, i64 " . $id . ", i64 1\n";
+            $body .= '  %cfv' . $id . ' = load i64, ptr %cf' . $id . "\n";
+            // Silent for a class that never allocated: on a real program the
+            // table is mostly zeroes and an unfiltered dump buries the answer.
+            $body .= '  %cnz' . $id . ' = icmp ne i64 %cav' . $id . ", 0\n";
+            $body .= '  br i1 %cnz' . $id . ', label %cyes' . $id . ', label %cno' . $id . "\n";
+            $body .= 'cyes' . $id . ":\n";
+            $body .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.cls.' . $id
+                   . ', i64 %cav' . $id . ', i64 %cfv' . $id . ")\n";
+            $body .= '  br label %cno' . $id . "\n";
+            $body .= 'cno' . $id . ":\n";
+        }
+        // The globals must precede the function they are read from; the driver
+        // splices this whole string into the preamble, so order is textual.
+        return $body;
     }
 
     /**

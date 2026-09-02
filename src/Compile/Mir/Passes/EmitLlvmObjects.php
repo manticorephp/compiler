@@ -55,6 +55,11 @@ trait EmitLlvmObjects
         $hdr = $isStruct ? 0 : 2;
         $obj = $this->ssa->allocReg();
         $out = '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
+        // Per-CLASS allocation census. The class is known STATICALLY here, and the
+        // matching free reads it back out of the descriptor, so the atexit dump can
+        // name the producer: `Doctrine\ORM\…\PathExpression: alloc=812004 free=0`.
+        // The category counters cannot — they answer "objects leak", never WHOSE.
+        if ($cd !== null && !$isStruct) { $out .= $this->profClass((string)$cd->classId, 0); }
         if ($isStruct) {
             // A struct has NO header — property slot 0 sits at +0 and there is
             // no rc at +8. Leaving the allocator's RC_TAG_MAGIC at ptr-8 would

@@ -2086,6 +2086,18 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
+     * Per-CLASS alloc (`$slot` 0) / free (`$slot` 1) tally. `$classIdReg` is a
+     * literal at the allocation site (the class is static there) and a loaded
+     * register at the free site (read back through the descriptor).
+     */
+    private function profClass(string $classIdReg, int $slot): string
+    {
+        if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
+        return '  call void @__prof_class(i64 ' . $classIdReg
+             . ', i64 ' . (string)$slot . ")\n";
+    }
+
+    /**
      * `@__mir_uncaught()` — the top-level fatal handler an uncaught throw
      * longjmps to (base setjmp installed in @main). Renders PHP's
      * `PHP Fatal error:  Uncaught <Class>: <message>` to stderr and exits 255.
