@@ -1951,6 +1951,16 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
+     * Add `$nReg` (an i64 register or literal) to counter `$idx` — the BYTE
+     * counters. Same gating as {@see profBump}, so production IR is unchanged.
+     */
+    private function profAdd(int $idx, string $nReg): string
+    {
+        if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
+        return '  call void @__prof_add(i64 ' . (string)$idx . ', i64 ' . $nReg . ")\n";
+    }
+
+    /**
      * `@__mir_uncaught()` — the top-level fatal handler an uncaught throw
      * longjmps to (base setjmp installed in @main). Renders PHP's
      * `PHP Fatal error:  Uncaught <Class>: <message>` to stderr and exits 255.

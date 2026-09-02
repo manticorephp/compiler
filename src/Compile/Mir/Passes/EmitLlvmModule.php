@@ -1305,7 +1305,34 @@ trait EmitLlvmModule
                   'array_release_own_obj', 'array_release_own_str',
                   'array_release_own_cell', 'array_retain_repr',
                   'array_retain_buf', 'array_retain_obj', 'array_retain_str',
-                  'array_retain_cell'];
+                  'array_retain_cell',
+                  // 48-53: the SELF-ROUTING helpers cross families in silence.
+                  // __mir_rc_retain/_release dispatch on the tag at ptr-8 and
+                  // their STRING arms bump nothing; __mir_rc_retain_str/_release_str
+                  // do the mirror image for objects. So rc_retain - rc_release is
+                  // obj-only increments minus obj-only decrements, MISSING every
+                  // object ref that arrived through a string helper. Until these
+                  // exist no imbalance equation over the two is valid.
+                  'rc_retain_misroute', 'rc_release_misroute',
+                  'str_retain_viaobj', 'str_release_viaobj',
+                  // 52-55: element/cell WALK traffic. An array release walks its
+                  // elements and calls the same __mir_rc_* helpers an emitted
+                  // retain site calls, so rc_retain/rc_release today mix "a site
+                  // ran" with "a walk touched one element". Subtract these to get
+                  // site-level traffic.
+                  'rc_retain_elemwalk', 'rc_release_elemwalk',
+                  'rc_retain_cellwalk', 'rc_release_cellwalk',
+                  // 56: a release that landed on an IMMORTAL buffer (rc < 0).
+                  // arr_alloc_total + array_retain_rc - array_release_rc reads
+                  // -314M against 23.6M live arrays on the g139 Doctrine dump;
+                  // this counter decides whether that is the immortal singleton
+                  // being decremented in a loop or a real uncounted retain.
+                  'array_release_immortal',
+                  // 57-61: BYTES, not counts. Counts cannot say which family
+                  // holds the gigabytes: 9.7M objects, 59.6M strings and 23.6M
+                  // arrays are three numbers with no common unit. These give one.
+                  'bytes_alloc_obj', 'bytes_alloc_str', 'bytes_alloc_arr',
+                  'bytes_free_str', 'bytes_free_arr'];
         // ONE spelling of the array length: the global, the bump GEP and the
         // dump loop all read it from the name list. They disagreed before — the
         // global was [16 x i64] while the dump indexed it as [14 x i64].
@@ -1345,6 +1372,16 @@ trait EmitLlvmModule
             $out .= "  br label %done\n";
             $out .= "done:\n";
         }
+        $out .= "  ret void\n}\n";
+        // Counts cannot express bytes, and reusing @__prof_bump would need one
+        // call per byte. Same array, same GEP, add N instead of 1. Deliberately
+        // NOT tick-aware: a byte counter must never drive a checkpoint dump,
+        // or the dump interval would depend on allocation SIZE.
+        $out .= "define void @__prof_add(i64 %i, i64 %n) {\nentry:\n";
+        $out .= "  %p = getelementptr inbounds [" . $slots . " x i64], ptr @__prof, i64 0, i64 %i\n";
+        $out .= "  %v = load i64, ptr %p\n";
+        $out .= "  %v1 = add i64 %v, %n\n";
+        $out .= "  store i64 %v1, ptr %p\n";
         $out .= "  ret void\n}\n";
         $out .= "define void @__manticore_profile_dump() {\nentry:\n";
         // Ordered after the program's own output, not spliced into it.

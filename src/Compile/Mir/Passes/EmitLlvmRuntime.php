@@ -280,6 +280,7 @@ trait EmitLlvmRuntime
         $out .= "entry:\n";
         $out .= $this->profBump(21);
         $out .= $this->profBump(24);
+        $out .= $this->profAdd(57, "%n");
         $out .= "  %t = add i64 %n, 8\n";
         $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
@@ -412,6 +413,7 @@ trait EmitLlvmRuntime
         $out .= "define ptr @__mir_str_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(0);
+        $out .= $this->profAdd(58, '%n');
         $out .= "  %le40 = icmp ule i64 %n, " . $p0c . "\n";
         $out .= "  br i1 %le40, label %c0, label %chk1\n";
         $out .= "chk1:\n";
@@ -624,6 +626,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sinc\n";
             $out .= "sinc:\n";
+            $out .= $this->profBump(50);
             $out .= "  %src1 = add i64 %tag, 1\n";
             $out .= "  store i64 %src1, ptr %tagp\n";
             $out .= "  br label %done\n";
@@ -699,6 +702,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sdec\n";
             $out .= "sdec:\n";
+            $out .= $this->profBump(51);
             $out .= "  %src1 = sub i64 %tag, 1\n";
             $out .= "  store i64 %src1, ptr %tagp\n";
             $out .= "  %szero = icmp sle i64 %src1, 0\n";
@@ -732,6 +736,7 @@ trait EmitLlvmRuntime
             $out .= "  %isov = icmp eq i64 %rc, " . $magic . "\n";
             $out .= "  br i1 %isov, label %ov, label %strchk\n";
             $out .= "ov:\n";
+            $out .= $this->profBump(48);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %orc = load i64, ptr %rcp\n";
             $out .= "  %orc1 = add i64 %orc, 1\n";
@@ -765,6 +770,7 @@ trait EmitLlvmRuntime
             $out .= "  %isov = icmp eq i64 %rc, " . $magic . "\n";
             $out .= "  br i1 %isov, label %ov, label %strchk\n";
             $out .= "ov:\n";
+            $out .= $this->profBump(49);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %orc = load i64, ptr %rcp\n";
             $out .= "  %orc1 = sub i64 %orc, 1\n";
