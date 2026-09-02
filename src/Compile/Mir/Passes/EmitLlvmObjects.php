@@ -5599,6 +5599,21 @@ trait EmitLlvmObjects
             $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
             $ci = $ci + 1;
         }
+        // The RECEIVER temp. `f()->m()` evaluates `f()` into `$thisArg`, hands it
+        // over as `$this`, and until now dropped it on the floor — one leaked
+        // object per execution, on the single most common shape in a Symfony or
+        // Doctrine call chain. Argument position has released its fresh temps
+        // since forever; this is the same rule for the receiver, using the same
+        // predicate (freshRcArgFlavor) and the same helper (rcReleaseReg).
+        //
+        // Placed AFTER the call and after the by-ref write-backs, so the callee
+        // has finished reading `$this`. Safe for a fluent `return $this`: a
+        // borrowed obj return is retained by the callee, so the result carries a
+        // reference of its own.
+        if (\Compile\Debug::$rcRecvTemp) {
+            $recvFlavor = $this->freshRcArgFlavor($mc->object);
+            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($thisArg, $recvFlavor); }
+        }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
         // (rawRefCall) keeps the raw address so RefBind can alias through it.

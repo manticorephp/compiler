@@ -113,6 +113,20 @@ final class Debug
     public static bool $rcReturnOwns = false;
 
     /**
+     * `MANTICORE_RC_RECV_TEMP=1` — release the RECEIVER temp of a method call.
+     *
+     * `f()->m()` evaluates `f()` into a temp, uses it as `$this`, and then drops
+     * it on the floor. Argument position has released its fresh temps since
+     * forever (freshRcArgFlavor + rcReleaseReg); receiver position never did, so
+     * every `$this->getFoo()->bar()` leaked one object per execution. The same
+     * temp is what a condition leaks — `if (f()->ok())` is a receiver too.
+     *
+     * Safe against a fluent `return $this`: the callee retains a borrowed obj
+     * return, so the caller's result owns a reference of its own.
+     */
+    public static bool $rcRecvTemp = false;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -257,6 +271,10 @@ final class Debug
         $env = \getenv('MANTICORE_RC_RETURN_OWNS');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$rcReturnOwns = true;
+        }
+        $env = \getenv('MANTICORE_RC_RECV_TEMP');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$rcRecvTemp = true;
         }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
