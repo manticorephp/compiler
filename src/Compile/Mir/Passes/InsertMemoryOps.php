@@ -86,6 +86,12 @@ final class InsertMemoryOps implements Pass
      *  about this has no single correct release flavor and is blocked. */
     private array $rcObjSlotBoxed = [];
 
+    /** @var array<string, string> census only: blocked local → which gate blocked it. */
+    private array $blockReason = [];
+
+    /** @var array<string, string> census only: blocked local → the value's type kind. */
+    private array $blockKind = [];
+
     /** @var array<string, bool> FFI function names (foreign, non-rc return) */
     private array $ffiFns = [];
 
@@ -125,6 +131,8 @@ final class InsertMemoryOps implements Pass
         $this->rcObjNeutral = [];
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
+        $this->blockReason = [];
+        $this->blockKind = [];
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -141,6 +149,7 @@ final class InsertMemoryOps implements Pass
         foreach ($fn->params as $p) {
             $this->blocked[$p->name] = true;
             $this->rcObjBlocked[$p->name] = true;
+            $this->noteBlock($p->name, 'param', $p->type);
         }
 
         $this->scanStores($fn->body);
@@ -206,6 +215,7 @@ final class InsertMemoryOps implements Pass
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
             $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "neutral", $t);
         }
 
         // Per-local releases for rc-mode confined allocations.
@@ -265,7 +275,36 @@ final class InsertMemoryOps implements Pass
             $stmts[] = new MemoryOp_('arena_leave', '', null, Type::void());
         }
 
+        $this->censusFunction(\count($releases), \count($rcReleases));
         $fn->body->stmts = $stmts;
+    }
+
+    /**
+     * Census hook — active only under `MANTICORE_STATS=1`, and it changes no
+     * plan. This pass refuses to schedule a release at five distinct gates and
+     * every refusal is a deliberate LEAK ("Block: a leak, never a free of a
+     * tag"). Which gate, and on what type kind, is the whole question: without
+     * it the retained memory has no attributable owner. First reason wins — a
+     * name is blocked once and the first gate is the one that decided it.
+     */
+    private function noteBlock(string $name, string $reason, ?Type $t): void
+    {
+        if (!\Compile\Stats::$on) { return; }
+        if (isset($this->blockReason[$name])) { return; }
+        $this->blockReason[$name] = $reason;
+        $this->blockKind[$name] = $t === null ? 'none' : $t->kind;
+    }
+
+    /** Locals that got a release vs locals that did not, by gate and by kind. */
+    private function censusFunction(int $releases, int $rcReleases): void
+    {
+        if (!\Compile\Stats::$on) { return; }
+        \Compile\Stats::bump('own.released.flavor', $releases);
+        \Compile\Stats::bump('own.released.rcobj', $rcReleases);
+        foreach ($this->blockReason as $name => $reason) {
+            \Compile\Stats::bump('own.blocked.' . $reason, 1);
+            \Compile\Stats::bump('own.blocked.kind.' . $this->blockKind[$name], 1);
+        }
     }
 
     /**
@@ -525,6 +564,7 @@ final class InsertMemoryOps implements Pass
             $fe = $n;
             $this->rcObjBlocked[$fe->valueVar] = true;
             $this->blocked[$fe->valueVar] = true;
+            $this->noteBlock($fe->valueVar, "foreach", null);
             if ($fe->keyVar !== null) {
                 $this->rcObjBlocked[$fe->keyVar] = true;
                 $this->blocked[$fe->keyVar] = true;
@@ -561,6 +601,7 @@ final class InsertMemoryOps implements Pass
                 if (isset($this->rcObjSlotBoxed[$name])
                     && $this->rcObjSlotBoxed[$name] !== $boxedSlot) {
                     $this->rcObjBlocked[$name] = true;
+                    $this->noteBlock($name, "repr", $slotType);
                 }
                 $this->rcObjSlotBoxed[$name] = $boxedSlot;
                 if (!isset($this->rcObjType[$name])) {
@@ -574,6 +615,7 @@ final class InsertMemoryOps implements Pass
                 $this->rcObjNeutral[$name] = true;
             } else {
                 $this->rcObjBlocked[$name] = true;
+                $this->noteBlock($name, "notowned", $value->type);
             }
             // Aliasing a vec (`$b = $a`) leaves two locals sharing one
             // buffer (no obj-style alias retain for vecs — they COW-copy
@@ -582,12 +624,14 @@ final class InsertMemoryOps implements Pass
             if ($value->kind === Node::KIND_LOAD_LOCAL
                 && $value->type->kind === Type::KIND_ARRAY) {
                 $this->rcObjBlocked[$value->name] = true;
+                $this->noteBlock($value->name, "vecalias", $value->type);
             }
             $flavor = $this->allocFlavor($value);
             if ($flavor === null) {
                 // Non-owning store (borrow / scalar / RcHeap escape):
                 // the frame can't free this local at scope exit.
                 $this->blocked[$name] = true;
+                $this->noteBlock($name, "noflavor", $value->type);
             } else {
                 if (!isset($this->ownedFlavor[$name])) {
                     $this->ownedOrder[] = $name;
