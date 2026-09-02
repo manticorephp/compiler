@@ -422,6 +422,48 @@ final class EmitLlvm implements EmitVisitor
 
     /** Declared return type of the function the borrow scan is walking. */
     private ?Type $scanReturnType = null;
+
+    /**
+     * Write every lazily generated property-read / dynamic-method helper body
+     * through `$sink`, to a FIXPOINT.
+     *
+     * Emitting a helper can register another one — a property-read helper may
+     * demand a dynamic-method helper, and a dynamic-method helper may demand a
+     * further one. `foreach` iterates a COPY of the array, so anything
+     * registered during the drain used to be dropped on the floor: the call
+     * site was emitted, the definition never was, and clang refused the module
+     * with `use of undefined value @manticore___mc_dyn_method0_…`. One AOT case
+     * (`sapi_ctx_two_tasks`) was red on exactly that.
+     *
+     * The registries double as the GENERATOR'S DEDUP TABLE — `emitDynamicMethod*`
+     * returns early on `isset($this->dynamicMethodHelpers[$key])`. So a key may
+     * never be removed before its body is written, or the next request would
+     * regenerate it and the module would carry two definitions. The body string
+     * is blanked instead: the key survives as a tombstone, the text is freed.
+     */
+    private function drainLazyHelpers(callable $sink): void
+    {
+        $writtenProp = [];
+        $writtenDyn = [];
+        $progress = true;
+        while ($progress) {
+            $progress = false;
+            foreach ($this->propertyReadHelpers as $name => $body) {
+                if (isset($writtenProp[$name])) { continue; }
+                $writtenProp[$name] = true;
+                $this->propertyReadHelpers[$name] = '';
+                $sink($body, (string)$name);
+                $progress = true;
+            }
+            foreach ($this->dynamicMethodHelpers as $name => $body) {
+                if (isset($writtenDyn[$name])) { continue; }
+                $writtenDyn[$name] = true;
+                $this->dynamicMethodHelpers[$name] = '';
+                $sink($body, (string)$name);
+                $progress = true;
+            }
+        }
+    }
     /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
      *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
     private bool $lastCallWasBuiltin = false;
@@ -891,14 +933,7 @@ final class EmitLlvm implements EmitVisitor
             }
             $bodyBytes += \strlen($extraBodies);
             unset($extraBodies);
-            foreach ($this->propertyReadHelpers as $helperName => $helperBody) {
-                $appendStreamedBody($helperBody, (string)$helperName);
-                unset($this->propertyReadHelpers[$helperName]);
-            }
-            foreach ($this->dynamicMethodHelpers as $helperName => $helperBody) {
-                $appendStreamedBody($helperBody, (string)$helperName);
-                unset($this->dynamicMethodHelpers[$helperName]);
-            }
+            $this->drainLazyHelpers($appendStreamedBody);
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
@@ -908,6 +943,14 @@ final class EmitLlvm implements EmitVisitor
         } else {
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);
+            // The buffered path needs the same drain. Streaming grew one and the
+            // in-memory branch was left with none, so with MANTICORE_STREAM_IR=0
+            // every lazy helper was generated, registered, and then dropped.
+            $this->drainLazyHelpers(function (string $body, string $label) use (&$functionBodyChunks, &$bodyBytes): void {
+                if ($body === '') { return; }
+                $functionBodyChunks[] = $body;
+                $bodyBytes += \strlen($body);
+            });
             \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
