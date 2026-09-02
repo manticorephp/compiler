@@ -178,6 +178,21 @@ else
 
     echo "── self-host pass 2: $OUT build --libs-only (stdlib rebuilt by the NEW compiler) ──"
     "$OUT" build --libs-only manticore.json
+    # A library's .sig is its whole reason to exist, and it can come out EMPTY
+    # while every other signal stays green: the .o is full of symbols, pass 2
+    # exits 0, and nothing fails until a user program calls one and clang says
+    # `use of undefined value`. That is exactly what happened — emission had
+    # been taught to drain `$module->functions`, which is the table Sig walks,
+    # and 531 of 1028 AOT cases went red behind a build that reported success.
+    # An interface with no functions in it is never correct, so say so here.
+    SIG="lib/manticore_stdlib.o.sig"
+    if [[ ! -s "$SIG" ]] || ! grep -q '"functions":\[{' "$SIG"; then
+        echo "" >&2
+        echo "bin/build: $SIG declares NO functions — the stdlib interface is empty." >&2
+        echo "  The object may still be full of symbols; every dependent will fail" >&2
+        echo "  clang with \`use of undefined value\`. Do not ship this build." >&2
+        exit 1
+    fi
     echo "ok: lib/manticore_stdlib.o (built by $OUT)"
 fi
 
