@@ -738,6 +738,15 @@ final class EmitLlvm implements EmitVisitor
         $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
         $emitTraceFull = \getenv('MANTICORE_EMIT_TRACE') === 'full';
         $emitIndex = 0;
+        // Fattest body seen since the last batch line. The name is captured
+        // through `substr`, whose result is a FRESH owned string — a plain
+        // `$n = $fn->name` would be a borrowed property read held across the
+        // rest of the loop, the same shape as the sink-marker landmine below,
+        // and `$module->functions` is DRAINED during emission, so resolving the
+        // name later from the index finds nothing (it printed `?`).
+        $batchMaxBytes = 0;
+        $batchMaxIndex = 0;
+        $batchMaxName = '';
         // Under MANTICORE_STATS, report every function whose IR crosses
         // FAT_FN_IR bytes. A megamorphic dispatch site (one switch arm per
         // implementing class) shows up here by name — the IR-size explosion is
@@ -766,6 +775,11 @@ final class EmitLlvm implements EmitVisitor
                 unset($meta, $body);
             } else {
                 $rawBodyBytes = \strlen($body);
+            }
+            if ($rawBodyBytes > $batchMaxBytes && \Compile\Stats::reporting()) {
+                $batchMaxBytes = $rawBodyBytes;
+                $batchMaxIndex = $emitIndex;
+                $batchMaxName = \substr($fn->name, 0);
             }
             if ($emitTraceFull) {
                 \error_log('emit-trace-body index=' . (string)$emitIndex . ' name=' . $fn->name
@@ -890,7 +904,12 @@ final class EmitLlvm implements EmitVisitor
                 if (\Compile\Stats::reporting()) {
                     \Compile\Stats::line('emit batch ' . (string)$emitIndex
                         . '/' . (string)\count($functionKeys)
-                        . '  ir=' . (string)\intdiv($bodyBytes, 1048576) . 'MB');
+                        . '  ir=' . (string)\intdiv($bodyBytes, 1048576) . 'MB'
+                        . '  fattest=' . (string)\intdiv($batchMaxBytes, 1024) . 'KB @'
+                        . (string)$batchMaxIndex . ' ' . $batchMaxName);
+                    $batchMaxBytes = 0;
+                    $batchMaxIndex = 0;
+                    $batchMaxName = '';
                 }
             }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
