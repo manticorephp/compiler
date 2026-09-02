@@ -96,6 +96,23 @@ final class Debug
     public static bool $compactCaches = false;
 
     /**
+     * `MANTICORE_RC_RETURN_OWNS=1` — stop vetoing a property slot's
+     * release-before-overwrite because the slot is READ by a `return`.
+     *
+     * The veto exists because a property read normally hands out a raw borrow,
+     * and dropping the old value would strand it. A RETURN is not that case:
+     * `EmitLlvmModule::emitReturn` already gates on `isBorrowedObjReturn` and
+     * retains a borrowed property read before handing it back, so the caller
+     * owns a reference of its own. This is `tools/prof/propleak.php`'s stated
+     * ordering — a property READ must own what it reads BEFORE a property WRITE
+     * may drop it — already satisfied in this one position.
+     *
+     * ⚠ Opt-in because a wrong ownership change is a double-free that is
+     * invisible under Zend, invisible at -O0, and often invisible in gen-1.
+     */
+    public static bool $rcReturnOwns = false;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -236,6 +253,10 @@ final class Debug
         $env = \getenv('MANTICORE_COMPACT_CACHES');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$compactCaches = true;
+        }
+        $env = \getenv('MANTICORE_RC_RETURN_OWNS');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$rcReturnOwns = true;
         }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {

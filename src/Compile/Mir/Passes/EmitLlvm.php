@@ -419,6 +419,9 @@ final class EmitLlvm implements EmitVisitor
     public bool $emitLibrary = false;
     /** Whether staged emission defers string globals to the body writer. */
     public bool $deferStringGlobals = false;
+
+    /** Declared return type of the function the borrow scan is walking. */
+    private ?Type $scanReturnType = null;
     /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
      *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
     private bool $lastCallWasBuiltin = false;
@@ -663,7 +666,14 @@ final class EmitLlvm implements EmitVisitor
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
-        foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
+        foreach ($module->functions as $fn) {
+            // The RETURN exemption below needs the DECLARED return type: it is
+            // what emitReturn falls back to for an unknown/cell value, and so
+            // what decides whether the return retains.
+            $this->scanReturnType = $fn->returnType;
+            $this->scanCellPropStores($fn->body);
+        }
+        $this->scanReturnType = null;
         $streaming = $this->streamIrPath !== '';
         $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';
         $bodyBytes = 0;
@@ -1764,6 +1774,22 @@ final class EmitLlvm implements EmitVisitor
             }
             return;
         }
+        // A RETURN already TAKES the reference. emitReturn gates on
+        // isBorrowedObjReturn and retains a borrowed property read before
+        // handing it back, so the caller owns a reference of its own and the
+        // slot may drop what it overwrites without stranding that borrow.
+        // `return $this->p;` is the shape every getter has, and the default
+        // arm below vetoed the whole DECLARING CLASS for it — which is why a
+        // class with a getter leaked every overwritten value while the same
+        // class without one was exactly flat (tools/prof/rcbalance.php,
+        // prop_ow_read vs prop_ow_noread).
+        if ($k === Node::KIND_RETURN && \Compile\Debug::$rcReturnOwns) {
+            $rv = $parent->value;
+            if ($rv !== null && $rv->kind === Node::KIND_PROPERTY_ACCESS
+                && $this->returnRetainsBorrow($rv)) {
+                return;
+            }
+        }
         foreach (\Compile\Mir\Walk::children($parent) as $c) {
             $this->markPropBorrowsIn($c, 'node kind ' . (string)$k);
         }
@@ -1776,6 +1802,45 @@ final class EmitLlvm implements EmitVisitor
         return $kind === Node::KIND_CALL || $kind === Node::KIND_METHOD_CALL
             || $kind === Node::KIND_STATIC_CALL || $kind === Node::KIND_INVOKE
             || $kind === Node::KIND_NEW_OBJ;
+    }
+
+    /**
+     * Does `emitReturn` retain this borrowed property read on the way out?
+     *
+     * Mirrors {@see EmitLlvmModule::isBorrowedObjReturn}'s type test, with
+     * {@see EmitLlvmModule::ownershipReturnType}'s fallback spelled against the
+     * scan's own copy of the declared return type (the emit frame does not
+     * exist yet during a module-wide scan).
+     *
+     * Deliberately narrower than the emitter's predicate: OBJ and STRING only.
+     * Those are the two kinds the borrow rule was strict about — "a string /
+     * object property read emits no retain at all" — and the two the fixture
+     * proves leak. An ARRAY return retains to a DEPTH chosen from the declared
+     * type, and matching that depth against what the slot's drop gives back is
+     * the delicate accounting {@see EmitLlvm::$propOwnElem} exists for; arrays
+     * keep their existing element / call-argument exemptions and are not
+     * widened here.
+     */
+    private function returnRetainsBorrow(Node $v): bool
+    {
+        $t = $v->type;
+        $tk = $t->kind;
+        if ($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) {
+            if ($this->scanReturnType === null) { return false; }
+            $t = $this->scanReturnType;
+            $tk = $t->kind;
+        }
+        if ($tk === Type::KIND_STRING) { return true; }
+        if ($tk !== Type::KIND_OBJ) { return false; }
+        // A struct has no rc header and a Closure is a header-less capture
+        // record; emitReturn refuses both, so neither is retained and the veto
+        // must stand.
+        $cls = $t->class ?? '';
+        if ($cls === '') { return false; }
+        if ($this->isClosureClass($cls)) { return false; }
+        if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        if ($this->isEnumClass($cls)) { return false; }
+        return true;
     }
 
     /** Mark `$n` as a raw borrow iff it IS a property read. Deliberately NOT
