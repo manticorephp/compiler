@@ -1727,7 +1727,7 @@ trait EmitLlvmRuntime
                 // Release obj / string / vec / assoc props (flavor picks the
                 // right element-walking helper). Flags were pre-set in
                 // scanDropFlags so the helper is already emitted.
-                $flavor = $this->discardReleaseFlavor($pt);
+                $flavor = $this->classDropFlavor($cls, $pn, $pt);
                 if ($flavor === '') { continue; }
                 $rel = $this->dropHelperFor($flavor);
                 if ($rel === '') { continue; }
@@ -2089,7 +2089,7 @@ trait EmitLlvmRuntime
             foreach ($cls->propertyNames as $pn) {
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
-                $flavor = $this->discardReleaseFlavor($pt);
+                $flavor = $this->classDropFlavor($cls, $pn, $pt);
                 if ($flavor === '' || $flavor === 'obj') { continue; }
                 $rel = $this->dropHelperFor($flavor);
                 if ($rel === '') { continue; }

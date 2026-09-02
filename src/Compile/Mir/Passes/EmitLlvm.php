@@ -2867,7 +2867,47 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return '@__mir_array_release_cell'; }
         if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
+        // PAIRWISE-SYMMETRIC: this slot took the element refs in its own store's
+        // retain, so its drop gives them back on EVERY release, not only at
+        // rc → 0 ({@see classDropFlavor}). Same vocabulary as
+        // {@see EmitLlvmMemory::rcReleaseReg}, so the two cannot drift.
+        if ($flavor === 'vecobjown' || $flavor === 'assocobjown') { return '@__mir_array_release_ownel_obj'; }
+        if ($flavor === 'vecstrown' || $flavor === 'assocstrown') { return '@__mir_array_release_ownel_str'; }
+        if ($flavor === 'veccellown' || $flavor === 'assoccellown') { return '@__mir_array_release_ownel_cell'; }
         return '';
+    }
+
+    /**
+     * The release flavor a CLASS DROP body uses for one property slot — the
+     * plain {@see discardReleaseFlavor}, or its `own` twin when the slot holds
+     * one element ref per element and may give it back on every release.
+     *
+     * The arithmetic that makes this the fix and not a double free: a buffer's
+     * elements carry ONE base ref plus one per retain, against retains+1
+     * releases, so every release returning EXACTLY one is balanced. Today the
+     * drop returns nothing whenever the buffer outlives the object — the local
+     * that built the array is still holding it — and every element is stranded.
+     *
+     * ⚠ Three ODR conditions, not heuristics. `__mir_drop_<id>` is `linkonce_odr`
+     * and coalesces BY NAME across every object file that emits the class, so a
+     * module-local verdict may only be used where this module is the only
+     * emitter: never for an IMPORTED or PRELUDE class, and never from a LIBRARY
+     * module (which cannot see the stores in the programs that link it, and
+     * whose {@see $propBorrowUnknown} already says so).
+     */
+    private function classDropFlavor(\Compile\Mir\ClassDef $cls, string $prop, Type $pt): string
+    {
+        $flavor = $this->discardReleaseFlavor($pt);
+        if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
+        if ($this->propBorrowUnknown || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
+        if (!$this->isOwnElemFlavor($flavor)) { return $flavor; }
+        $key = $this->cellPropKey($cls->name, $prop);
+        if (!isset($this->propOwnElem[$key]) || $this->propOwnElem[$key] !== $flavor) { return $flavor; }
+        if (isset($this->propOwnElemVeto[$key]) || isset($this->propOwnElemVeto[$prop])) { return $flavor; }
+        if (\getenv('MANTICORE_DROP_TRACE') !== false) {
+            \error_log('CLASSDROP ' . $cls->name . '::' . $prop . ' YES ' . $flavor . 'own');
+        }
+        return $flavor . 'own';
     }
 
     /**

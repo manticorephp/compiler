@@ -158,6 +158,25 @@ final class Debug
     public static bool $rcElemType = false;
 
     /**
+     * `MANTICORE_RC_PROP_DROP=1` — let a CLASS DROP body give back the element
+     * refs its property slot owns, on every release rather than only at rc → 0.
+     *
+     * The slot's store retained at element depth ({@see
+     * Mir\Passes\EmitLlvm::$propOwnElem} proves it for every store in the
+     * module), so the slot holds one ref per element. `__mir_array_release_obj`
+     * walks elements only at rc → 0, so an object dying while ANOTHER owner
+     * still holds the buffer returns nothing and strands what its own store
+     * took: `$tmp = []; $tmp[] = new Tok; $h->els = $tmp;` leaks every element
+     * — i.e. `Parser::$tokens`, the 9.2M `Lexer\Token`.
+     *
+     * ⚠ The drop body is `linkonce_odr` and coalesces by name, so the verdict
+     * must be identical in every module that emits the class. An IMPORTED or
+     * PRELUDE class is therefore excluded outright, and a library module — which
+     * cannot see its callers' stores at all — never proves a slot.
+     */
+    public static bool $rcPropDrop = false;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -307,6 +326,8 @@ final class Debug
         if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
         $env = \getenv('MANTICORE_RC_ELEM_TYPE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemType = true; }
+        $env = \getenv('MANTICORE_RC_PROP_DROP');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$rcPropDrop = true; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
