@@ -2843,6 +2843,42 @@ trait EmitLlvmObjects
      * imported class) keeps its arm — and so does an argc of -1, the call site
      * saying it does not know ({@see siteArgc}).
      */
+    /**
+     * Does ANY class that could answer one of these dynamic method names declare
+     * a BY-REF parameter for it? A by-ref argument needs the inline path's
+     * address discipline, which a value parameter cannot carry, so one such
+     * candidate anywhere vetoes the shared-helper extraction for the whole site.
+     *
+     * Conservative on purpose: a false positive only keeps today's inline path.
+     *
+     * @param array<string, Type> $methods candidate method names => return type
+     */
+    private function dynMethodHasRefParam(array $methods, int $argc): bool
+    {
+        foreach ($methods as $m => $_ignored) {
+            foreach ($this->classes as $cd) {
+                $decl = $this->resolveMethodClass($cd->name, (string)$m);
+                if ($decl === '') { continue; }
+                if (!$this->methodTakesArgc($decl, (string)$m, $argc)) { continue; }
+                $sym = $this->lsbTarget($decl, (string)$m, $cd->name);
+                // ⚠ `anyRefParam`, NOT `refParams[$sym] !== []`. That field is a
+                // per-parameter BOOL ARRAY, so an ordinary one-argument method
+                // has `[false]` — non-empty — and the veto fired on every
+                // candidate, silently keeping the inline path. The predicate has
+                // an owner; asking it is the whole point.
+                if ($this->anyRefParam($sym)
+                    || ($this->sigs->returnsByRef[$sym] ?? false)) {
+                    // ⚠ A conservative gate fails SILENTLY — name the veto.
+                    if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+                        \error_log('DYNM veto: ' . $cd->name . '::' . (string)$m . ' by-ref');
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private function methodTakesArgc(string $holder, string $m, int $argc): bool
     {
         if ($argc < 0) { return true; }
@@ -2966,16 +3002,37 @@ trait EmitLlvmObjects
      * receiver ABI erased (one i64), performs the ordinary fixed-name dispatch
      * once, and returns the already boxed cell result.
      *
-     * This path is deliberately limited to zero-argument calls whose receiver
-     * is a local with KIND_CELL/UNKNOWN type. Such a local read has no evaluation
-     * side effects, and there are no by-ref/spread/default argument contracts to
-     * preserve. Typed and argument-bearing dynamic calls retain the exact inline
-     * path below.
+     * Extended to a FIXED argument count. The zero-arg restriction was stated as
+     * "no by-ref/spread/default argument contracts to preserve", and those are
+     * now gated at the call site instead of assumed away: no spread among the
+     * site's args, and no candidate method with a by-ref parameter
+     * (`$this->sigs->refParams`). Everything else the arguments need is already
+     * register-based — {@see vdArmArgs} boxes/unboxes cell↔non-cell, pads the
+     * arity and handles the spread tail from a LIST STRING and two type arrays,
+     * never from nodes — so the args ride in as extra `i64` parameters.
+     *
+     * That restriction was not academic: `prelude/errors.php`'s
+     * `__mc_call_exception_handler` is `$o->$m($e)`, one argument, and it emitted
+     * **1 876 MB** on the T6 tier — the single costliest function of the run,
+     * with the next one at 78 MB. It is a prelude function, so every program
+     * paid for it.
+     *
+     * The receiver must still be a CELL/UNKNOWN/UNION local: that read has no
+     * evaluation side effects. Typed receivers keep the inline path.
+     *
+     * @param Type[] $argTypes the SITE's argument types, positionally
      */
-    private function dynamicMethodZeroArgHelper(string $method, Type $retT, int $line): string
+    private function dynamicMethodZeroArgHelper(string $method, Type $retT, int $line, array $argTypes = []): string
     {
         $key = $method . '|' . $retT->kind . '|' . ($retT->class ?? '');
-        $name = '__mc_dyn_method0_' . $this->mangle(\str_replace('|', '_', $key));
+        // The arg types are part of the KEY: two sites calling the same method
+        // name with differently-typed arguments need different coercion, and a
+        // helper that ignored that would silently serve one shape to the other.
+        foreach ($argTypes as $at) {
+            $key .= '|a' . $at->kind . ':' . ($at->class ?? '');
+        }
+        $argc = \count($argTypes);
+        $name = '__mc_dyn_method' . (string)$argc . '_' . $this->mangle(\str_replace(['|', ':'], '_', $key));
         $sym = '@manticore_' . $name;
         if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
 
@@ -3008,7 +3065,21 @@ trait EmitLlvmObjects
 
         $slot = $this->ssa->allocReg();
         $this->locals->slots['__mc_dyn_obj'] = $slot;
-        $body = 'define internal i64 ' . $sym . "(i64 %obj) {\nentry:\n";
+        $params = 'i64 %obj';
+        $argList = '';
+        /** @var Type[] $argOutTypes index 0 is the implicit $this */
+        $argOutTypes = [];
+        if ($argc > 0) {
+            $argOutTypes[] = $retT;   // slot 0 is never read by vdArmArgs
+            $i = 0;
+            while ($i < $argc) {
+                $params .= ', i64 %a' . (string)$i;
+                $argList .= ', i64 %a' . (string)$i;
+                $argOutTypes[] = $argTypes[$i];
+                $i = $i + 1;
+            }
+        }
+        $body = 'define internal i64 ' . $sym . '(' . $params . ") {\nentry:\n";
         $body .= '  ' . $slot . " = alloca i64\n";
         $body .= '  store i64 %obj, ptr ' . $slot . "\n";
         $objLoad = $this->ssa->allocReg();
@@ -3028,7 +3099,7 @@ trait EmitLlvmObjects
         foreach ($this->classes as $cd) {
             $decl = $this->resolveMethodClass($cd->name, $method);
             if ($decl === '') { continue; }
-            if (!$this->methodTakesArgc($decl, $method, 0)) { continue; }
+            if (!$this->methodTakesArgc($decl, $method, $argc)) { continue; }
             if ($fallback === '') { $fallback = $decl; }
             $fullPre = $this->lsbTarget($decl, $method, $cd->name);
             $full = $this->erasedEntry($cd->name, '', $method, $fullPre);
@@ -3061,20 +3132,20 @@ trait EmitLlvmObjects
         if (!$this->hasEmittedFunction($fallbackFull)) { $fallbackFull = $distinct[0]; }
         $faCands = $distinct;
         $faCands[] = $fallbackFull;
-        $this->vdSiteArgc = 1;
-        $body .= $this->faPushAny($faCands, -1, [], 1);
+        $this->vdSiteArgc = 1 + $argc;
+        $body .= $this->faPushAny($faCands, -1, [], 1 + $argc);
         if ($this->rt->needsBacktrace) { $body .= $this->btPush($method, $line); }
         $boxCell = $retT->kind === Type::KIND_CELL;
         $body .= $this->emitVirtualDispatch(
             $objArg,
-            'i64 ' . $objArg,
+            'i64 ' . $objArg . $argList,
             $cands,
             $targets,
             $fallbackFull,
             $method,
             $boxCell,
             $erasedSyms,
-            [],
+            $argOutTypes,
         );
         $result = $this->vdResult;
         if (!$boxCell) {
@@ -3211,18 +3282,50 @@ trait EmitLlvmObjects
         // then let each name arm call a reusable fixed-name helper. The helper
         // performs the same erased receiver masking and virtual dispatch as the
         // inline MethodCall path; only the repeated code moves out of this fn.
-        $canExtract = $iv->args === []
+        // A fixed argument list rides into the helper as extra i64 params. The
+        // two contracts the zero-arg gate assumed away are now CHECKED, not
+        // assumed: a SPREAD has no fixed arity to give the helper, and a by-ref
+        // parameter needs the inline path's address discipline, which a value
+        // parameter cannot carry. Anything unproven keeps the inline path.
+        $argsOk = true;
+        foreach ($iv->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { $argsOk = false; break; }
+        }
+        if ($argsOk && $iv->args !== []) {
+            $argsOk = !$this->dynMethodHasRefParam($methods, \count($iv->args));
+        }
+        $canExtract = $argsOk
             && $recv->kind === Node::KIND_LOAD_LOCAL
             && ($recv->type->kind === Type::KIND_CELL
                 || $recv->type->kind === Type::KIND_UNKNOWN
                 || $recv->type->kind === Type::KIND_UNION)
             && \count($methods) >= 16;
+        if (!$canExtract && \getenv('MANTICORE_DYNM_TRACE') !== false) {
+            \error_log('DYNM no: args=' . (string)\count($iv->args)
+                . ' argsOk=' . ($argsOk ? '1' : '0')
+                . ' recvKind=' . (string)$recv->kind
+                . ' recvType=' . (string)$recv->type->kind
+                . ' methods=' . (string)\count($methods));
+        }
         if ($canExtract) {
             $out = $this->emitNode($recv);
             $out .= $this->coerceToI64();
             $recvArg = $this->lastValue;
             $out .= $this->emitDynMemberKey($nameNode);
             $keyP = $this->lastValue;
+            // Arguments are evaluated ONCE here, before the name chain — only
+            // one arm runs, and the helper takes them as values. The inline path
+            // re-emits them inside every arm for the same reason it re-emits the
+            // receiver.
+            $argVals = '';
+            /** @var Type[] $argTypes */
+            $argTypes = [];
+            foreach ($iv->args as $a) {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceToI64();
+                $argVals .= ', i64 ' . $this->lastValue;
+                $argTypes[] = $a->type;
+            }
             $res = $this->ssa->allocReg();
             $out .= '  ' . $res . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -3236,9 +3339,9 @@ trait EmitLlvmObjects
                 $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
                 $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
                 $out .= $hitL . ":\n";
-                $helper = $this->dynamicMethodZeroArgHelper($m, $retT, $iv->line);
+                $helper = $this->dynamicMethodZeroArgHelper($m, $retT, $iv->line, $argTypes);
                 $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = call i64 ' . $helper . '(i64 ' . $recvArg . ")\n";
+                $out .= '  ' . $r . ' = call i64 ' . $helper . '(i64 ' . $recvArg . $argVals . ")\n";
                 $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
