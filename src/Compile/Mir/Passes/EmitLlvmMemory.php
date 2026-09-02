@@ -335,6 +335,25 @@ trait EmitLlvmMemory
         } elseif (!$value->type->isArray()) {
             return null;
         }
+        // `$a = []` is `vec[unknown]`, and it is usually the ONLY store_local to
+        // the name — the appends that give the local its real element type are
+        // store_element. Judging the pair by the LITERAL's type therefore answered
+        // "not an own-element flavor" and vetoed the local, so its release gave
+        // back no element reference at all while the property store's retain had
+        // taken one per element. Every element then leaked exactly once per
+        // iteration: precisely the `$m = build(); $h->set($m);` shape this
+        // method's own docblock describes, and 9,236,608 leaked Lexer\Token on
+        // the Doctrine tier. InsertMemoryOps has already refined the local's
+        // release type from the LOADS — use it rather than the literal's.
+        if (\Compile\Debug::$rcElemType && $store->kind === Node::KIND_STORE_LOCAL) {
+            $mo = $this->frame->rcObjLocals[$store->name] ?? null;
+            $known = $mo === null ? null : $mo->target->type;
+            if ($known !== null && $known->isArray() && $value->type->isArray()
+                && ($value->type->element === null
+                    || $value->type->element->kind === Type::KIND_UNKNOWN)) {
+                $fallback = $known;
+            }
+        }
         $flavor = $this->arrayRetainFlavor($value, $fallback);
         return $this->isOwnElemFlavor($flavor) ? $flavor : null;
     }
