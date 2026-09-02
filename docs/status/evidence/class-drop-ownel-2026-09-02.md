@@ -72,3 +72,94 @@ The gate is OFF by default. It has not run a self-host gen-2, difftest, or
 Linux. Those are what the other two ownership fixes cleared before shipping
 default-ON, and the failure this guards against — an over-release — is
 invisible under Zend, invisible at -O0, and often invisible until gen-2.
+
+---
+
+# Default ON — gen-2 / gen-3 (`31ed18f`)
+
+## Both gates are ONE fix, not two
+
+`MANTICORE_RC_PROP_DROP` alone does NOTHING. Measured on the probe with the
+gen-1 binary, which reads both env vars:
+
+| gates | `release_own_obj` | `release_obj` | alloc / reclaim |
+|---|---:|---:|---|
+| neither | 0 | 40000 | 60000 / 20000 |
+| `RC_PROP_DROP` only | **0** | 40000 | 60000 / 20000 |
+| `RC_ELEM_TYPE` only | 40000 | 20000 | 60000 / 20000 |
+| **both** | **60000** | **0** | **60000 / 60000** |
+
+Without the element-type refinement `arrayRetainFlavor` answers a plain `vec`
+for the store, so `markPropOwnElem`'s `retain === drop` test fails and EVERY
+slot is vetoed — the `own` flavor is never reached at all. Both defaults were
+therefore flipped together; either alone leaves the leak in place.
+
+## The regression test fails without the fix
+
+`tests/aot/cases/prop_elem_drop_symmetry.php` — an array built in a local, then
+stored into a property, with `__destruct` on the elements:
+
+```
+gate OFF: built 2 / between / built 2 / done          ← all four destructors MISSING
+gate ON:  built 2 / drop 1 / drop 2 / between / …     ← byte-identical to php
+```
+
+## Generations
+
+```
+gen-1  the pre-flip binary (defaults OFF)
+gen-2  built by gen-1 with both gates forced on
+gen-3  built by gen-2 on its own defaults
+```
+
+**gen-2 and gen-3 are BYTE-IDENTICAL** — binary and `lib/manticore_stdlib.o`
+both. The fixpoint is reached at gen-2, because gen-1-with-env and gen-2's own
+defaults emit the same codegen. gen-3 also reproduces the opt-out
+(`MANTICORE_RC_PROP_DROP=0` still drops the four destructors).
+
+AOT suite at gen-3, on defaults, no env: **passed 1027, failed 0, total 1029**
+(+1 case = the new regression test).
+
+## It reaches the slot the epic is about
+
+`MANTICORE_DROP_TRACE=1 bin/build` — 566 `CLASSDROP` verdicts in the compiler's
+own build, including the two that matter:
+
+```
+CLASSDROP Lexer\Lexer::tokens    YES vecobjown
+CLASSDROP Parser\Parser::tokens  YES vecobjown
+```
+
+⚠ The first attempt at this measurement read **zero**. `bin/build` runs pass 1
+as `bin/manticore build … 2>&1 | tee`, so the app pass's stderr is folded into
+bin/build's STDOUT — a `2>log` captures only pass 2, which is the LIBRARY, and a
+library module vetoes every slot by design. Redirect BOTH streams.
+
+## What it is worth
+
+Self-build (the compiler compiling `src/`), idle machine, one run each:
+
+| | gen-1 | gen-3 |
+|---|---:|---:|
+| peak RSS | 2 356 MB | **2 321 MB** (−1.5%) |
+| user CPU | 66.13 s | 66.49 s |
+
+Profile-instrumented compilers built by each generation, one `dump-mir`:
+
+| | gen-1 | gen-3 |
+|---|---:|---:|
+| `array_release_obj` (class drops) | 2 479 | **64** |
+| `rc_release` | 4 026 943 | **4 242 020** |
+| `rc_retain` | 5 201 067 | 5 200 858 |
+
+**+215 077 references handed back for the same number of retains.** That is the
+leak being repaid, directly.
+
+⚠ `tagged_reclaim` is 691 in BOTH against `tagged_alloc` 257 072 — a single
+`dump-mir` holds its whole AST and MIR live to exit, so this workload cannot
+show a reclaim delta no matter what is fixed. Read the RELEASE counters here;
+the reclaim number needs a many-file tier where objects actually die.
+
+**Still owed:** the T6 / Doctrine tier A/B (`tools/prof/tier.sh 6`, `BIN=` per
+generation) is the only workload that can price this in bytes; difftest and
+Linux are unrun for this branch.
