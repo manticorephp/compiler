@@ -146,6 +146,18 @@ final class Debug
     public static bool $rcElemOwns = false;
 
     /**
+     * `MANTICORE_RC_ELEM_TYPE=1` — let a CONCRETE element type refine a local's
+     * recorded release type after the first store.
+     *
+     * `$a = []` is `vec[unknown]`, and it is usually the ONLY store_local to the
+     * name (appends are store_element), so first-write-wins froze the release as
+     * a plain buffer drop while inference had long since retyped the loads to
+     * `vec[obj<T>]`. Every element leaked. Upgrade is UNKNOWN -> concrete only:
+     * it deepens a release that already ran, it never redirects one.
+     */
+    public static bool $rcElemType = false;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -293,6 +305,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_OWNS');
         if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
+        $env = \getenv('MANTICORE_RC_ELEM_TYPE');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemType = true; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;

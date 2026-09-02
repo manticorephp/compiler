@@ -453,6 +453,25 @@ final class InsertMemoryOps implements Pass
     }
 
     /**
+     * Is `$new` the same array shape as `$old` but with a CONCRETE element
+     * where `$old` had `unknown`? That is the one upgrade this pass accepts
+     * after the first store: it deepens the release, it cannot redirect it.
+     */
+    private function refinesElement(Type $old, Type $new): bool
+    {
+        if (!\Compile\Debug::$rcElemType) { return false; }
+        if ($old->kind !== $new->kind) { return false; }
+        if (!($old->isVec() && $new->isVec()) && !($old->isAssoc() && $new->isAssoc())) {
+            return false;
+        }
+        $oe = $old->element;
+        $ne = $new->element;
+        if ($oe === null || $ne === null) { return false; }
+        if ($oe->kind !== Type::KIND_UNKNOWN) { return false; }
+        return $ne->kind === Type::KIND_OBJ || $ne->kind === Type::KIND_STRING;
+    }
+
+    /**
      * The type of what the SLOT actually receives — which is NOT always the
      * value's type, and the release reads the SLOT.
      *
@@ -607,6 +626,21 @@ final class InsertMemoryOps implements Pass
                 if (!isset($this->rcObjType[$name])) {
                     $this->rcObjOrder[] = $name;
                     $this->rcObjType[$name] = $slotType;
+                } elseif ($this->refinesElement($this->rcObjType[$name], $slotType)) {
+                    // FIRST-WRITE-WINS was wrong for the element type. `$a = []`
+                    // is `vec[unknown]`, so the release flavor froze as a plain
+                    // `vec` — buffer only — while inference later refined the
+                    // local to `vec[obj<T>]`. Every element then leaked: the
+                    // emitter called __mir_array_release where
+                    // __mir_array_release_obj was needed. That is
+                    // `$filtered = []; $filtered[] = $tok; $this->tokens =
+                    // $filtered;` in Parser::__construct, i.e. 9,236,608 leaked
+                    // Lexer\\Token on the Doctrine tier.
+                    //
+                    // Only ever UNKNOWN -> concrete, and only the element: the
+                    // slot's own kind and boxedness are unchanged, so this adds
+                    // depth to a release that already ran, never a different one.
+                    $this->rcObjType[$name] = $slotType;
                 }
                 if (!CondOwn::isConditional($value)) { $this->rcObjPlainOwner[$name] = true; }
             } elseif ($this->isRcNeutralStore($value)) {
@@ -641,6 +675,15 @@ final class InsertMemoryOps implements Pass
             }
             $this->scanStores($value);
             return;
+        }
+        // A LOAD carries the refined type. `$a = []` is the only STORE to the
+        // name — the appends are store_element — so the concrete element type
+        // exists nowhere but on the loads inference later retyped. Reading it
+        // here is what turns `__mir_array_release` into
+        // `__mir_array_release_obj` for the slot.
+        if ($n->kind === Node::KIND_LOAD_LOCAL && isset($this->rcObjType[$n->name])
+            && $this->refinesElement($this->rcObjType[$n->name], $n->type)) {
+            $this->rcObjType[$n->name] = $n->type;
         }
         foreach (Walk::children($n) as $c) { $this->scanStores($c); }
     }
