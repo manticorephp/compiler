@@ -1,0 +1,202 @@
+build: application 'audit_t6' (tiers -> audit-t6_bin)
+build: + composer autoload 'src'
+build: + composer autoload './vendor/composer/semver/src'
+build: + composer autoload './vendor/dflydev/dot-access-data/src'
+build: + composer autoload './vendor/doctrine/collections/src'
+build: + composer autoload './vendor/doctrine/dbal/src'
+build: + composer autoload './vendor/doctrine/deprecations/src'
+build: + composer autoload './vendor/doctrine/doctrine-bundle/src'
+build: + composer autoload './vendor/doctrine/event-manager/src'
+build: + composer autoload './vendor/doctrine/inflector/src'
+build: + composer autoload './vendor/doctrine/instantiator/src/Doctrine/Instantiator'
+build: + composer autoload './vendor/doctrine/lexer/src'
+build: + composer autoload './vendor/doctrine/orm/src'
+build: + composer autoload './vendor/doctrine/persistence/src'
+build: + composer autoload './vendor/doctrine/sql-formatter/src'
+build: + composer autoload './vendor/egulias/email-validator/src'
+build: + composer autoload './vendor/league/commonmark/src'
+build: + composer autoload './vendor/league/config/src'
+build: + composer autoload './vendor/league/uri'
+build: + composer autoload './vendor/league/uri-interfaces'
+build: + composer autoload './vendor/monolog/monolog/src/Monolog'
+build: + composer autoload './vendor/nette/schema/src'
+build: + composer autoload './vendor/nette/utils/src'
+build: + composer autoload './vendor/psr/cache/src'
+build: + composer autoload './vendor/psr/clock/src'
+build: + composer autoload './vendor/psr/container/src'
+build: + composer autoload './vendor/psr/event-dispatcher/src'
+build: + composer autoload './vendor/psr/http-factory/src'
+build: + composer autoload './vendor/psr/http-message/src'
+build: + composer autoload './vendor/psr/log/src'
+build: + composer autoload './vendor/symfony/asset'
+build: + composer autoload './vendor/symfony/asset-mapper'
+build: + composer autoload './vendor/symfony/cache'
+build: + composer autoload './vendor/symfony/cache/Traits/ValueWrapper.php'
+build: + composer autoload './vendor/symfony/cache-contracts'
+build: + composer autoload './vendor/symfony/clock'
+build: + composer autoload './vendor/symfony/clock/Resources/now.php'
+build: + composer autoload './vendor/symfony/config'
+build: + composer autoload './vendor/symfony/console'
+build: + composer autoload './vendor/symfony/dependency-injection'
+build: + composer autoload './vendor/symfony/deprecation-contracts/function.php'
+build: + composer autoload './vendor/symfony/doctrine-bridge'
+build: + composer autoload './vendor/symfony/dotenv'
+build: + composer autoload './vendor/symfony/error-handler'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/assets/images/symfony-ghost.svg.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/views/error.html.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/views/exception_full.html.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/views/exception.html.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/views/logs.html.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/views/trace.html.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/error-handler/Resources/views/traces_text.html.php
+build: + composer autoload './vendor/symfony/event-dispatcher'
+build: + composer autoload './vendor/symfony/event-dispatcher-contracts'
+build: + composer autoload './vendor/symfony/expression-language'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/expression-language/Resources/bin/generate_operator_regex.php
+build: + composer autoload './vendor/symfony/filesystem'
+build: + composer autoload './vendor/symfony/finder'
+build: + composer autoload './vendor/symfony/flex/src'
+build: + composer autoload './vendor/symfony/form'
+build: + composer autoload './vendor/symfony/framework-bundle'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/framework-bundle/Resources/bin/check-unused-known-tags.php
+build: + composer autoload './vendor/symfony/html-sanitizer'
+build: + composer autoload './vendor/symfony/http-client'
+build: + composer autoload './vendor/symfony/http-client-contracts'
+build: + composer autoload './vendor/symfony/http-foundation'
+build: + composer autoload './vendor/symfony/http-kernel'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/http-kernel/Resources/welcome.html.php
+build: + composer autoload './vendor/symfony/intl'
+build: + composer autoload './vendor/symfony/mailer'
+build: + composer autoload './vendor/symfony/mime'
+build: + composer autoload './vendor/symfony/monolog-bridge'
+build: + composer autoload './vendor/symfony/monolog-bundle/src'
+build: + composer autoload './vendor/symfony/options-resolver'
+build: + composer autoload './vendor/symfony/password-hasher'
+build: + composer autoload './vendor/symfony/polyfill-deepclone'
+build: + composer autoload './vendor/symfony/polyfill-deepclone/Resources/stubs'
+build: + composer autoload './vendor/symfony/polyfill-deepclone/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-intl-grapheme'
+build: + composer autoload './vendor/symfony/polyfill-intl-grapheme/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-intl-icu'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-icu/Resources/currencies.php
+build: + composer autoload './vendor/symfony/polyfill-intl-icu/Resources/stubs'
+build: + composer autoload './vendor/symfony/polyfill-intl-icu/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-intl-idn'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/deviation.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/disallowed_STD3_mapped.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/disallowed_STD3_valid.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/disallowed.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/ignored.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/mapped.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-idn/Resources/unidata/virama.php
+build: + composer autoload './vendor/symfony/polyfill-intl-idn/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-intl-messageformatter'
+build: + composer autoload './vendor/symfony/polyfill-intl-messageformatter/Resources/stubs'
+build: + composer autoload './vendor/symfony/polyfill-intl-messageformatter/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-intl-normalizer'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-normalizer/Resources/unidata/canonicalComposition.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-normalizer/Resources/unidata/canonicalDecomposition.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-normalizer/Resources/unidata/combiningClass.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-normalizer/Resources/unidata/compatibilityDecomposition.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-normalizer/Resources/unidata/rawCanonicalDecomposition.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-intl-normalizer/Resources/unidata/rawCompatibilityDecomposition.php
+build: + composer autoload './vendor/symfony/polyfill-intl-normalizer/Resources/stubs'
+build: + composer autoload './vendor/symfony/polyfill-intl-normalizer/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-mbstring'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-mbstring/Resources/unidata/caseFolding.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-mbstring/Resources/unidata/lowerCase.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-mbstring/Resources/unidata/titleCaseRegexp.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/polyfill-mbstring/Resources/unidata/upperCase.php
+build: + composer autoload './vendor/symfony/polyfill-mbstring/bootstrap.php'
+build: + composer autoload './vendor/symfony/polyfill-php85'
+build: + composer autoload './vendor/symfony/polyfill-php85/Resources/stubs'
+build: + composer autoload './vendor/symfony/polyfill-php85/bootstrap.php'
+build: + composer autoload './vendor/symfony/process'
+build: + composer autoload './vendor/symfony/property-access'
+build: + composer autoload './vendor/symfony/property-info'
+build: + composer autoload './vendor/symfony/routing'
+build: + composer autoload './vendor/symfony/runtime'
+build: + composer autoload './vendor/symfony/runtime/Internal'
+build: + composer autoload './vendor/symfony/security-bundle'
+build: + composer autoload './vendor/symfony/security-core'
+build: + composer autoload './vendor/symfony/security-csrf'
+build: + composer autoload './vendor/symfony/security-http'
+build: + composer autoload './vendor/symfony/service-contracts'
+build: + composer autoload './vendor/symfony/stimulus-bundle/src'
+build: + composer autoload './vendor/symfony/string'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/string/Resources/data/wcswidth_table_wide.php
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/string/Resources/data/wcswidth_table_zero.php
+build: + composer autoload './vendor/symfony/string/Resources/functions.php'
+build: + composer autoload './vendor/symfony/translation'
+build:   - script (declares nothing, never autoloaded): ./vendor/symfony/translation/Resources/data/parents.php
+build: + composer autoload './vendor/symfony/translation/Resources/functions.php'
+build: + composer autoload './vendor/symfony/translation-contracts'
+build: + composer autoload './vendor/symfony/twig-bridge'
+build: + composer autoload './vendor/symfony/twig-bundle'
+build: + composer autoload './vendor/symfony/type-info'
+build: + composer autoload './vendor/symfony/ux-icons/src'
+build: + composer autoload './vendor/symfony/ux-live-component/src'
+build: + composer autoload './vendor/symfony/ux-twig-component/src'
+build: + composer autoload './vendor/symfony/validator'
+build: + composer autoload './vendor/symfony/var-dumper'
+build: + composer autoload './vendor/symfony/var-dumper/Resources/functions/dump.php'
+build: + composer autoload './vendor/symfony/var-exporter'
+build: + composer autoload './vendor/symfony/yaml'
+build: + composer autoload './vendor/symfonycasts/sass-bundle/src'
+build: + composer autoload './vendor/twig/extra-bundle'
+build: + composer autoload './vendor/twig/intl-extra'
+build: + composer autoload './vendor/twig/markdown-extra'
+build: + composer autoload './vendor/twig/markdown-extra/Resources/functions.php'
+build: + composer autoload './vendor/twig/twig/src'
+build: + composer autoload './vendor/twig/twig/src/Resources/core.php'
+build: + composer autoload './vendor/twig/twig/src/Resources/debug.php'
+build: + composer autoload './vendor/twig/twig/src/Resources/escaper.php'
+build: + composer autoload './vendor/twig/twig/src/Resources/string_loader.php'
+build: skipped 31 non-declaring script(s) under demand-loaded autoload roots
+stats: 1861ms  input: 3553 file(s), 13236168 bytes  rss=44MB
+stats: 2407ms +546ms  prelude-demand (re-lex)  rss=211MB
+stats: 6245ms +3837ms  parse  fns=21849  rss=608MB
+stats: 6246ms +1ms  prelude read (all files)  rss=610MB
+stats: 73654ms +67397ms  LowerFromAst  fns=72666 cls=3130  rss=1979MB
+stats: 73873ms +218ms  ConstFold  fns=72666  rss=2016MB
+stats: 74056ms +183ms  DeadStore  fns=72666  rss=2030MB
+stats: 139919ms +65862ms  InferTypes #1  fns=72666  rss=2691MB
+stats: 140439ms +519ms  VivifyRefArgs  fns=72666  rss=2710MB
+stats: 140635ms +195ms    narrow round 1 (narrowed 2427)  rss=2710MB
+stats: 187470ms +46835ms    narrow InferTypes round 1  fns=72666  rss=3099MB
+stats: 187664ms +193ms    narrow round 2 (narrowed 39)  rss=3099MB
+stats: 227366ms +39702ms    narrow InferTypes round 2  fns=72666  rss=3451MB
+stats: 227560ms +193ms    narrow round 3 (narrowed 11)  rss=3451MB
+stats: 268987ms +41427ms    narrow InferTypes round 3  fns=72666  rss=3803MB
+stats: 269182ms +194ms    narrow round 4 (narrowed 0)  rss=3803MB
+stats: 269185ms +128746ms  NarrowReturns (concreteOnly)  fns=72666  rss=3803MB
+stats: 310546ms +41361ms  InferTypes #2  fns=72666  rss=4155MB
+stats: 310695ms +148ms  InlineClosures  fns=73062  rss=4190MB
+stats: 352403ms +41707ms  InferTypes #3  fns=73062  rss=4558MB
+stats: 394098ms +41694ms    mono round 1  fns=73209  rss=4929MB
+stats: 437134ms +43035ms    mono round 2  fns=73288  rss=5296MB
+stats: 480654ms +43519ms    mono round 3  fns=73289  rss=5659MB
+stats: 480836ms +182ms    mono round 4  fns=73289  rss=5660MB
+stats: 480836ms +128432ms  Monomorphize  fns=73289  rss=5660MB
+stats: 480923ms +86ms  FuseSplitJoin  fns=73289  rss=5660MB
+stats: 481086ms +163ms  TypeCheck  fns=73289  rss=5660MB
+stats: 481288ms +201ms    narrow round 1 (narrowed 938)  rss=5660MB
+stats: 535876ms +54588ms    narrow InferTypes round 1  fns=73289  rss=6190MB
+stats: 537527ms +1651ms    narrow round 2 (narrowed 217)  rss=6190MB
+stats: 585132ms +47605ms    narrow InferTypes round 2  fns=73289  rss=6587MB
+stats: 585332ms +199ms    narrow round 3 (narrowed 51)  rss=6587MB
+stats: 630746ms +45414ms    narrow InferTypes round 3  fns=73289  rss=6962MB
+stats: 630946ms +200ms    narrow round 4 (narrowed 17)  rss=6962MB
+stats: 677122ms +46175ms    narrow InferTypes round 4  fns=73289  rss=7339MB
+stats: 677322ms +200ms    narrow round 5 (narrowed 5)  rss=7339MB
+stats: 724174ms +46852ms    narrow InferTypes round 5  fns=73289  rss=7714MB
+stats: 724374ms +199ms    narrow round 6 (narrowed 0)  rss=7714MB
+stats: 724377ms +243290ms  NarrowReturns (full)  fns=73289  rss=7714MB
+stats: 724377ms +0ms  CheckTypeDefs  fns=73289  rss=7714MB
+stats: 724439ms +62ms  ReflectAnalysis cls=3130  rss=7714MB
+stats: 724647ms +207ms  DemoteCharLocals  rss=7725MB
+stats: 724914ms +266ms  InferEffects  rss=7951MB
+stats: 725525ms +611ms  InferAllocKind  rss=7951MB
+stats: 725727ms +201ms  ApplyMemoryMode  rss=7952MB
+stats: 725933ms +205ms  InsertMemoryOps  rss=7959MB
+stats: 726181ms +248ms  Verify  fns=73289 cls=3130  rss=7970MB

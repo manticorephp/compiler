@@ -1,0 +1,58 @@
+Process:         manticore [95392]
+Path:            /Users/USER/*/manticore
+Load Address:    0x1023f8000
+Identifier:      manticore
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  bash [95385]
+Target Type:     live task
+
+Date/Time:       2026-09-02 17:18:53.888 +0300
+Launch Time:     2026-09-02 17:01:04.423 +0300
+OS Version:      macOS 26.6.2 (25G83)
+Report Version:  7
+Analysis Tool:   /usr/bin/vmmap
+
+Physical footprint:         40.8G
+Physical footprint (peak):  40.8G
+Idle exit:                  untracked
+----
+
+ReadOnly portion of Libraries: Total=593.5M resident=40.6M(7%) swapped_out_or_unallocated=552.9M(93%)
+Writable regions: Total=42.9G written=21.2M(0%) resident=5.2G(12%) swapped_out=35.6G(83%) unallocated=2.1G(5%)
+
+                                VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION 
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K       0K       0K      16K       0K       0K       0K        1 
+MALLOC guard page                 3456K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                  120.0M    40.8M    40.5M    78.5M       0K       0K       0K      243 
+MALLOC_LARGE                      13.3G     1.9G     1.9G     9.5G       0K       0K       0K      197         see MALLOC ZONE table below
+MALLOC_NANO metadata                32K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                      29.3G     3.2G     3.2G    26.0G       0K       0K       0K     7513         see MALLOC ZONE table below
+MALLOC_TINY                       4096K      16K      16K     336K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.0M       0K       0K       0K       0K       0K       0K        1 
+Stack                             8176K      16K      16K     128K       0K       0K       0K        1 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       226K     191K       0K       0K       0K       0K       0K       47 
+__DATA                             350K     221K     107K      80K       0K       0K       0K       40 
+__DATA_CONST                       650K     410K       0K      16K       0K       0K       0K       48 
+__DATA_DIRTY                       156K      67K      43K      89K       0K       0K       0K       36 
+__LINKEDIT                       574.1M    26.7M       0K       0K       0K       0K       0K        5 
+__OBJC_RO                         79.2M    52.1M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2208K       0K      23K       0K       0K       0K        1 
+__TEXT                            19.4M    13.9M       0K       0K       0K       0K       0K       51 
+__TPRO_CONST                       128K      16K      16K      32K       0K       0K       0K        2 
+page table in kernel              21.0M    21.0M    21.0M       0K       0K       0K       0K        1 
+shared memory                       32K      32K      32K       0K       0K       0K       0K        1 
+unused but dirty shlib __DATA       58K      42K      42K      16K       0K       0K       0K       19 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                             43.6G     5.3G     5.2G    35.6G       0K       0K       0K     8227 
+
+                                 VIRTUAL   RESIDENT      DIRTY    SWAPPED ALLOCATION      BYTES DIRTY+SWAP          REGION
+MALLOC ZONE                         SIZE       SIZE       SIZE       SIZE      COUNT  ALLOCATED  FRAG SIZE  % FRAG   COUNT
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+DefaultMallocZone_0x103294000      42.8G       5.1G       5.1G      35.6G  428912014      42.6G         0K      0%    7953
+

@@ -23,7 +23,9 @@
 #   sample.txt   `sample` stack profile at the cap (only when the cap is hit)
 #   status       one summary line, also printed
 #
-# CAP_GB=<n>    RSS ceiling in GiB; the compiler gets SIGTERM above it. Default 8.
+# CAP_GB=<n>    Memory ceiling in GiB; the compiler gets SIGTERM above it, judged
+#               on max(rss, physical footprint) — NOT rss alone, which collapses
+#               under memory pressure while the footprint climbs. Default 8.
 #               A run that reaches the cap is a CAPPED DIAGNOSTIC, never a build
 #               result — it produced no staged IR, no clang object, no binary.
 # EVERY=<s>     seconds between ticks, default 6 (a `vmmap -summary` per tick is
@@ -104,9 +106,19 @@ while kill -0 "$PID" 2>/dev/null; do
     (( RSS_KB * 1024 > PEAK_RSS )) && PEAK_RSS=$(( RSS_KB * 1024 ))
     (( PHYS > PEAK_PHYS )) && PEAK_PHYS=$PHYS
 
-    if (( RSS_KB * 1024 > CAP_BYTES )); then
+    # ⚠ THE CEILING MUST JUDGE THE LARGER OF THE TWO. `ps rss` is not the
+    # process's memory footprint under pressure: the kernel COMPRESSES pages, and
+    # rss then FALLS while the real footprint keeps climbing. A cap-20 T6 run was
+    # sampled at rss=2.9GB / footprint=26.4GB and sailed straight past the
+    # ceiling to 40.8GB on a 32GB machine — the same failure as the
+    # `/usr/bin/time` wrapper era (the ceiling silently never applied), with a
+    # different cause. `Physical footprint` is what Apple's own accounting uses,
+    # and this loop already samples it.
+    BIG=$(( RSS_KB * 1024 ))
+    (( PHYS > BIG )) && BIG=$PHYS
+    if (( BIG > CAP_BYTES )); then
         CAPPED=1
-        echo "prof: CAP HIT rss=${RSS_KB}kB > ${CAP_GB}GiB — capturing vmmap + sample, then SIGTERM"
+        echo "prof: CAP HIT rss=${RSS_KB}kB phys=${PHYS}B (judged ${BIG}B) > ${CAP_GB}GiB — capturing vmmap + sample, then SIGTERM"
         vmmap -summary "$PID" >"$OUTDIR/vmmap.txt" 2>&1 || true
         sample "$PID" 5 1 -mayDie -f "$OUTDIR/sample.txt" >/dev/null 2>&1 || true
         kill -TERM "$PID" 2>/dev/null || true
