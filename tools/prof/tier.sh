@@ -78,7 +78,9 @@ echo "prof: artifacts in $OUTDIR"
 
 START=$(date +%s)
 # The build must run from the fixture root: manifest paths are relative to it.
-( cd "$(dirname "$MANIFEST")" && exec "$BIN" build "${EXTRA[@]}" "$(basename "$MANIFEST")" ) \
+# `set -u` makes an EMPTY array expansion an error on the bash 3.2 macOS ships,
+# so the no-extra-args case must not spell "${EXTRA[@]}" bare.
+( cd "$(dirname "$MANIFEST")" && exec "$BIN" build ${EXTRA[@]+"${EXTRA[@]}"} "$(basename "$MANIFEST")" ) \
     >"$OUTDIR/build.log" 2>&1 &
 PID=$!
 echo "prof: direct pid=$PID"
