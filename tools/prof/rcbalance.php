@@ -52,6 +52,17 @@
  *                   the veto never fires. The pair is the whole experiment: the
  *                   veto is keyed per DECLARING CLASS, so the two shapes must
  *                   live in two DIFFERENT classes or they contaminate.
+ *   prop_from_literal control — an array LITERAL straight into the property.
+ *                   Measured balanced: 20 000 x (1 holder + 2 elements) gives
+ *                   tagged_alloc=60000 / tagged_reclaim=60000. The class drop
+ *                   walks and releases array elements correctly.
+ *   prop_from_local SUSPECT — the SAME array built in a local by append first,
+ *                   then stored. 60000 / 20000: every element leaks. The only
+ *                   difference is the intermediate local, whose reference to the
+ *                   buffer is never given back, so the buffer never reaches rc 0
+ *                   and its elements are never dropped. This is verbatim
+ *                   Parser::__construct — `$filtered = []; $filtered[] = $tok;
+ *                   $this->tokens = $filtered;` — i.e. the 9,236,608 Lexer\\Token.
  *   prop_elem_hold  SUSPECT — an ARRAY property whose elements are objects, read
  *                   by subscript. The slot's drop returns the BUFFER and leaks
  *                   every ELEMENT: measured 20 000 x (1 holder + 4 elements) gives
@@ -183,6 +194,21 @@ function main(string $variant, int $iters): int
             $eh->els = $tmp;
             $seen = $eh->at(0);
             $guard += $seen === null ? 0 : 1;
+        }
+    } elseif ($variant === 'prop_from_literal') {
+        for ($i = 0; $i < $iters; $i++) {
+            $eh = new ElemHolder();
+            $eh->els = [new Holder($i), new Holder($i + 1)];
+            $guard += \count($eh->els);
+        }
+    } elseif ($variant === 'prop_from_local') {
+        for ($i = 0; $i < $iters; $i++) {
+            $eh = new ElemHolder();
+            $tmp = [];
+            $tmp[] = new Holder($i);
+            $tmp[] = new Holder($i + 1);
+            $eh->els = $tmp;
+            $guard += \count($eh->els);
         }
     } elseif ($variant === 'append_pinned') {
         $pin = new Pin();

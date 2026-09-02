@@ -423,6 +423,9 @@ final class EmitLlvm implements EmitVisitor
     /** Declared return type of the function the borrow scan is walking. */
     private ?Type $scanReturnType = null;
 
+    /** Parent of the node the borrow scan is currently judging. */
+    private ?Node $scanParent = null;
+
     /**
      * Write every lazily generated property-read / dynamic-method helper body
      * through `$sink`, to a FIXPOINT.
@@ -1748,9 +1751,15 @@ final class EmitLlvm implements EmitVisitor
                 $this->cellPropElemAsIndex[$this->cellPropKey($idx->array->object->type->class ?? '', $idx->array->property)] = true;
             }
         }
+        // The elem-borrow arm needs to know its CONSUMER, and markChildBorrows
+        // only ever sees a node's direct children. One field, saved and restored
+        // around the descent, is enough — the walk is depth-first.
+        $savedParent = $this->scanParent;
+        $this->scanParent = $n;
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
         }
+        $this->scanParent = $savedParent;
     }
 
     /**
@@ -1818,7 +1827,20 @@ final class EmitLlvm implements EmitVisitor
             && ($parent->array->type->isArray()
                 || $this->slotIsArrayHinted($parent->array->object, $parent->array->property, $parent->array->type))) {
             $pa = $parent->array;
-            $this->propElemBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+            // An element read is a genuine BORROW — unlike a property read it
+            // emits no retain of its own (`retain_element` counts element
+            // STORES). So the veto here is load-bearing and must not simply be
+            // lifted. What CAN be lifted is the case where the CONSUMER takes a
+            // reference: the value of a StoreLocal is retained by
+            // rcRetainByType (an array-access is not an owned producer, so it
+            // is not skipped), and a returned one is retained by
+            // isBorrowedObjReturn. Those two own what they read, so they cannot
+            // strand anything, and vetoing the whole DECLARING CLASS for them
+            // is what leaks every element of the slot — 9,236,608 Lexer\\Token
+            // on the Doctrine tier, against ~0 reclaims.
+            if (!$this->elemReadIsOwned($parent)) {
+                $this->propElemBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+            }
             $idx = $parent->index;
             if ($idx !== null) { $this->markPropBorrowsIn($idx, 'subscript index'); }
             return;
@@ -1901,6 +1923,38 @@ final class EmitLlvm implements EmitVisitor
         if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
         if ($this->isEnumClass($cls)) { return false; }
         return true;
+    }
+
+    /**
+     * Does the CONSUMER of this element read take a reference of its own?
+     *
+     * Only two shapes are accepted, and both are proven elsewhere in the
+     * emitter rather than assumed here: the value of a StoreLocal (retained by
+     * {@see EmitLlvmMemory::rcRetainByType} — an array access is not an owned
+     * producer, so it is not skipped) and the value of a Return (retained by
+     * {@see EmitLlvmModule::isBorrowedObjReturn}).
+     *
+     * Narrowed to OBJ and STRING elements deliberately: an ARRAY element is
+     * retained to a DEPTH chosen from the destination type, and matching that
+     * against what the slot's drop gives back is the accounting
+     * {@see $propOwnElem} exists for. Widening it here is a separate step.
+     */
+    private function elemReadIsOwned(Node $aa): bool
+    {
+        if (!\Compile\Debug::$rcElemOwns) { return false; }
+        $p = $this->scanParent;
+        if ($p === null) { return false; }
+        $k = $aa->type->kind;
+        if ($k !== Type::KIND_OBJ && $k !== Type::KIND_STRING) { return false; }
+        if ($k === Type::KIND_OBJ) {
+            $cls = $aa->type->class ?? '';
+            if ($cls === '') { return false; }
+            if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return false; }
+            if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        }
+        if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
+        if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
+        return false;
     }
 
     /** Mark `$n` as a raw borrow iff it IS a property read. Deliberately NOT

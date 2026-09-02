@@ -130,6 +130,22 @@ final class Debug
     public static bool $rcRecvTemp = true;
 
     /**
+     * `MANTICORE_RC_ELEM_OWNS=1` — do not veto a property slot's element drop
+     * because of an element read whose CONSUMER takes a reference.
+     *
+     * An element read is a real borrow (it emits no retain — `retain_element`
+     * counts element STORES), so the veto is load-bearing in general. But the
+     * value of a StoreLocal is retained by rcRetainByType and a returned one by
+     * isBorrowedObjReturn; those own what they read. Vetoing the DECLARING CLASS
+     * for them leaks every element of the slot — `Parser::$tokens` is the case
+     * that put 9,236,608 Lexer\\Token allocations against ~0 reclaims.
+     *
+     * ⚠ OPT-IN. Getting this wrong is a use-after-free on a live element,
+     * invisible under Zend and at -O0.
+     */
+    public static bool $rcElemOwns = false;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -275,6 +291,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcReturnOwns = false; }
         $env = \getenv('MANTICORE_RC_RECV_TEMP');
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
+        $env = \getenv('MANTICORE_RC_ELEM_OWNS');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
