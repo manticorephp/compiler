@@ -848,13 +848,20 @@ trait EmitLlvmObjects
     }
 
     /**
-     * Emit one reusable class-id property reader. The old inline path repeated
-     * the complete switch at every erased `$obj->prop` site, which is especially
-     * expensive in Doctrine's large listener methods. This helper is restricted
-     * to fixed-slot properties with no bag, enum-name/value, or magic-property
-     * semantics; those cases remain on the exact inline path below.
+     * Emit one reusable class-id property reader for `$prop`, covering EVERY arm
+     * kind: fixed slots, enum `name`/`value`, `__get` holders, and the dynamic
+     * bag (or a boxed null) as the default. Returns a boxed cell, exactly as the
+     * inline path does for an erased receiver.
+     *
+     * It used to be restricted to the fixed-slot-only shape, and that restriction
+     * was the whole problem. `$hasBag` is a MODULE-WIDE fact — one class with a
+     * dynamic bag anywhere in the program, which every Symfony/Doctrine tree has
+     * — so the extraction was dead and each site inlined a full class_id switch.
+     * With 3 130 classes that is how one Doctrine function reached 101 MB of IR.
+     * Every arm is a function of the SLOT and the NAME, never of the call site,
+     * so there is exactly one correct body per property in the module.
      */
-    private function fixedPropertyReadHelper(string $prop, array $fixed): string
+    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag): string
     {
         $key = '__mc_prop_read_' . $this->mangle($prop);
         $sym = '@manticore_' . $key;
@@ -884,12 +891,33 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        foreach ($enumArms as $ename => $ed) {
+            $lbl = $this->ssa->allocLabel('pr.enum');
+            $switch .= '    i64 ' . (string)$ed->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitEnumCellPropLoad($obj, $ename, $ed, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($magic as $cname => $declCls) {
+            $lbl = $this->ssa->allocLabel('pr.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicGetCell($declCls, $obj, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
-        $this->rt->needsTagged = true;
-        $null = $this->ssa->allocReg();
-        $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
-        $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        if ($hasBag) {
+            $out .= $this->emitBagReadByName($prop, $obj);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        } else {
+            $this->rt->needsTagged = true;
+            $null = $this->ssa->allocReg();
+            $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
+            $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        }
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $ret = $this->ssa->allocReg();
@@ -942,8 +970,8 @@ trait EmitLlvmObjects
         // Runtime dispatch on the object's class_id. Fixed-slot-only reads are
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
-        if (!$hasBag && $enumArms === [] && $magic === [] && \count($fixed) > 1) {
-            $helper = $this->fixedPropertyReadHelper($prop, $fixed);
+        if (\count($fixed) + \count($enumArms) + \count($magic) > 1) {
+            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag);
             $r = $this->ssa->allocReg();
             $outChunks[] = '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
             $this->lastValue = $r;
@@ -1136,6 +1164,14 @@ trait EmitLlvmObjects
      */
     private function emitBagReadByClassId(PropertyAccess_ $pa, string $objPtr): string
     {
+        return $this->emitBagReadByName($pa->property, $objPtr);
+    }
+
+    /** The bag read judged by NAME alone — everything {@see emitBagReadByClassId}
+     *  ever used from its node. Split out so the whole dispatch can be lifted
+     *  into a helper that has a `%obj` pointer and no node at all. */
+    private function emitBagReadByName(string $prop, string $objPtr): string
+    {
         $bagCds = [];
         foreach ($this->bagClassNames() as $name) {
             if (isset($this->classes[$name])) { $bagCds[] = $this->classes[$name]; }
@@ -1158,7 +1194,7 @@ trait EmitLlvmObjects
         $switchChunks = ['  switch i64 ' . $cid . ', label %' . $def . " [\n"];
         /** @var string[] $bodyChunks */
         $bodyChunks = [];
-        $kid = $this->pool->intern($pa->property);
+        $kid = $this->pool->intern($prop);
         foreach ($bagCds as $cd) {
             $lbl = $this->ssa->allocLabel('bagr.case');
             $switchChunks[] = '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
@@ -2436,7 +2472,84 @@ trait EmitLlvmObjects
         // declared properties; each arm's PropertyAccess_ dispatches on the object's
         // class_id, with a stdClass bag fallback for an undeclared name.
         $bagCd = $this->classes['stdClass'] ?? null;
-        return $this->emitDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+        return $this->emitErasedDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+    }
+
+    /**
+     * `$o->$name` on an ERASED receiver — the shape that owns the T6 emission
+     * peak. The general path builds one arm per property NAME and inlines a full
+     * class_id switch inside each, so a single site carries the program's entire
+     * property surface: `ClosureExpressionVisitor::getObjectFieldValue` came out
+     * at 101 MB of IR, `PDOStatement::makeObject` at 53 MB.
+     *
+     * Here every arm is a CALL to that property's one shared reader, so a site
+     * costs a strcmp and a call per name instead of a class switch per name.
+     * The object is evaluated ONCE up front rather than re-emitted per arm,
+     * which the general path could not do because only one of its arms runs.
+     *
+     * @param array<string, Type> $propTypes
+     */
+    private function emitErasedDynPropDispatch(DynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitDynMemberKey($n->name);
+        $keyP = $this->lastValue;
+        $out .= $this->emitObjPtrOf($n->object);
+        $objPtr = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynp.end');
+        foreach ($propTypes as $p => $pt) {
+            $hitL = $this->ssa->allocLabel('dynp.hit');
+            $nextL = $this->ssa->allocLabel('dynp.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($p) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $this->cellPropReadHelperFor($p) . '(ptr ' . $objPtr . ")\n";
+            $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        if ($bagCd !== null && $bagCd->usesBag()) {
+            $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $this->bagPtrReg
+                  . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+            $out .= '  store i64 ' . $reg . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $rv = $this->ssa->allocReg();
+        $out .= '  ' . $rv . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $rv;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
+     *  path this asks for one even when a single class declares the name: the
+     *  point is that the SITE stays a call, whatever the arm count. */
+    private function cellPropReadHelperFor(string $prop): string
+    {
+        $enumArms = [];
+        if ($prop === 'name' || $prop === 'value') {
+            foreach ($this->enums as $ename => $ed) {
+                if ($prop === 'value' && $this->edBacking($ed) === '') { continue; }
+                $enumArms[$ename] = $ed;
+            }
+        }
+        return $this->cellPropertyReadHelper(
+            $prop,
+            $this->fixedPropertyHolders($prop),
+            $enumArms,
+            $this->magicPropHolders($prop, '__get'),
+            $this->bagClassNames() !== [],
+        );
     }
 
     /** Declared properties (offset >= 0) of a class as name => Type.
