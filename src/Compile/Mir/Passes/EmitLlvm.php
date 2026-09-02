@@ -2086,15 +2086,15 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
-     * Per-CLASS alloc (`$slot` 0) / free (`$slot` 1) tally. `$classIdReg` is a
-     * literal at the allocation site (the class is static there) and a loaded
-     * register at the free site (read back through the descriptor).
+     * Per-CLASS ALLOCATION tally. The index is a literal — the producing class is
+     * static at the allocation site. There is no free half: the free site holds
+     * only the descriptor's hashed class_id, and mapping that back to the dense
+     * index would need a switch over every class, i.e. code per class again.
      */
-    private function profClass(string $classIdReg, int $slot): string
+    private function profClass(string $classIdReg): string
     {
         if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
-        return '  call void @__prof_class(i64 ' . $classIdReg
-             . ', i64 ' . (string)$slot . ")\n";
+        return '  call void @__prof_class(i64 ' . $classIdReg . ")\n";
     }
 
     /**

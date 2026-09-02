@@ -1400,47 +1400,48 @@ trait EmitLlvmModule
     }
 
     /**
-     * Per-CLASS alloc/free census — `[CLASS] <name> alloc=<n> free=<m>` at exit,
-     * for every class this module actually allocated.
+     * Per-CLASS alloc/free census — `[CLASS] id=<n> alloc=<a> free=<f>` at exit
+     * for every class that allocated at least once. The id→name map is printed
+     * at COMPILE time (see EmitLlvm::classCensusMap), not carried in the binary.
      *
-     * The category counters say objects leak; this says WHOSE. The producing
-     * class is known STATICALLY at {@see EmitLlvmObjects::emitObjAllocInit}, and
-     * the free site reads the id back through the descriptor, so this needs no
-     * header change and no ABI change.
+     * ⚠ It must be a LOOP over an array, never code per class. The first cut
+     * unrolled a branch, a format global and a dprintf for each of ~2800 classes;
+     * clang answered `cannot encode offset of relocations; object file too large`
+     * on a six-line program. Diagnostic code has to stay O(1) in the class count.
      *
-     * ⚠ The table is sized from THIS module's class list while `@__prof_class`
-     * is linkonce_odr like every other runtime helper — a program linking a
-     * prebuilt stdlib keeps ONE body and one size. The bound check is therefore
-     * load-bearing, not defensive: an id from the other module has to be
-     * dropped, never written past the end. The 30-slot `@__prof` array fell into
-     * exactly that trap when a 31st counter was added, and it SIGSEGV'd.
+     * ⚠ The table is sized from THIS module while `@__prof_class` is linkonce_odr
+     * like every other runtime helper, so a program linking a prebuilt stdlib
+     * keeps ONE body and one size. The bound check is load-bearing: an id from
+     * the other module must be dropped, never written past the end — the exact
+     * trap the 30-slot @__prof array fell into when a 31st counter was added.
      */
     private function classCensusRuntime(): string
     {
         $n = $this->classCensusSize();
         $out  = '@__prof_class_tab = linkonce_odr global [' . (string)$n
-              . " x [2 x i64]] zeroinitializer\n";
-        $out .= "define void @__prof_class(i64 %id, i64 %slot) {\nentry:\n";
+              . " x i64] zeroinitializer\n";
+        $txt = '[CLASS] idx=%lld alloc=%lld';
+        $out .= '@__prof.clsfmt = private unnamed_addr constant ['
+              . (string)(\strlen($txt) + 2) . ' x i8] c"' . $txt . '\\0A\\00"' . "\n";
+        $out .= "define void @__prof_class(i64 %id) {\nentry:\n";
         $out .= "  %lo = icmp slt i64 %id, 0\n";
         $out .= '  %hi = icmp sge i64 %id, ' . (string)$n . "\n";
         $out .= "  %bad = or i1 %lo, %hi\n";
         $out .= "  br i1 %bad, label %done, label %ok\n";
         $out .= "ok:\n";
         $out .= '  %p = getelementptr inbounds [' . (string)$n
-              . " x [2 x i64]], ptr @__prof_class_tab, i64 0, i64 %id, i64 %slot\n";
+              . " x i64], ptr @__prof_class_tab, i64 0, i64 %id\n";
         $out .= "  %v = load i64, ptr %p\n";
         $out .= "  %v1 = add i64 %v, 1\n";
         $out .= "  store i64 %v1, ptr %p\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
-        // The per-class format strings are MODULE-scope constants and the dump
-        // half only reads them; emitting them from inside the dump would put a
-        // global in the middle of a function body.
-        foreach ($this->classes as $cd) {
-            $text = '[CLASS] ' . $cd->name . ' alloc=%lld free=%lld';
-            $out .= '@__prof.cls.' . (string)$cd->classId
-                  . ' = private unnamed_addr constant [' . (string)(\strlen($text) + 2)
-                  . ' x i8] c"' . $text . '\\0A\\00"' . "\n";
+        // The id→name map is a COMPILE-time artifact, not a runtime one: carrying
+        // 2800 name strings and their relocations is what blew the object file up.
+        // One line per class on stderr, which the harness captures beside the
+        // build log; `[CLASS] id=N` from the run then reads back through it.
+        foreach ($this->classCensusIndex() as $nm => $ix) {
+            \error_log('[CLASSMAP] ' . (string)$ix . ' ' . $nm);
         }
         return $out;
     }
@@ -1449,39 +1450,51 @@ trait EmitLlvmModule
      *  and the dump loop must not disagree. */
     private function classCensusSize(): int
     {
-        $maxId = 0;
-        foreach ($this->classes as $cd) {
-            if ($cd->classId > $maxId) { $maxId = $cd->classId; }
-        }
-        return $maxId + 1;
+        return \count($this->classCensusIndex());
     }
 
-    /** The dump half: one line per class that allocated at least once. */
+    /**
+     * class name → DENSE index. `ClassDef::$classId` is `stableClassId()`, a
+     * HASH — ids run to ~1e15 and an array indexed by one is not a table, it is
+     * a 7-petabyte allocation. The census needs its own contiguous numbering.
+     *
+     * @return array<string,int>
+     */
+    private function classCensusIndex(): array
+    {
+        $m = [];
+        $i = 0;
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct) { continue; }
+            $m[$cd->name] = $i;
+            $i = $i + 1;
+        }
+        return $m;
+    }
+
+    /** The dump half: ONE loop, silent for a class that never allocated. */
     private function classCensusDump(): string
     {
-        $body = '';
-        $n = $this->classCensusSize();
-        foreach ($this->classes as $cd) {
-            $id = (string)$cd->classId;
-            $body .= '  %ca' . $id . ' = getelementptr inbounds [' . (string)$n
-                   . " x [2 x i64]], ptr @__prof_class_tab, i64 0, i64 " . $id . ", i64 0\n";
-            $body .= '  %cav' . $id . ' = load i64, ptr %ca' . $id . "\n";
-            $body .= '  %cf' . $id . ' = getelementptr inbounds [' . (string)$n
-                   . " x [2 x i64]], ptr @__prof_class_tab, i64 0, i64 " . $id . ", i64 1\n";
-            $body .= '  %cfv' . $id . ' = load i64, ptr %cf' . $id . "\n";
-            // Silent for a class that never allocated: on a real program the
-            // table is mostly zeroes and an unfiltered dump buries the answer.
-            $body .= '  %cnz' . $id . ' = icmp ne i64 %cav' . $id . ", 0\n";
-            $body .= '  br i1 %cnz' . $id . ', label %cyes' . $id . ', label %cno' . $id . "\n";
-            $body .= 'cyes' . $id . ":\n";
-            $body .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.cls.' . $id
-                   . ', i64 %cav' . $id . ', i64 %cfv' . $id . ")\n";
-            $body .= '  br label %cno' . $id . "\n";
-            $body .= 'cno' . $id . ":\n";
-        }
-        // The globals must precede the function they are read from; the driver
-        // splices this whole string into the preamble, so order is textual.
-        return $body;
+        $n = (string)$this->classCensusSize();
+        $o  = "  br label %clsloop\nclsloop:\n";
+        $o .= "  %ci = phi i64 [0, %entry], [%ci2, %clsnext]\n";
+        $o .= '  %cdone = icmp sge i64 %ci, ' . $n . "\n";
+        $o .= "  br i1 %cdone, label %clsend, label %clsbody\n";
+        $o .= "clsbody:\n";
+        $o .= '  %cap = getelementptr inbounds [' . $n
+            . " x i64], ptr @__prof_class_tab, i64 0, i64 %ci\n";
+        $o .= "  %cav = load i64, ptr %cap\n";
+        $o .= "  %cnz = icmp ne i64 %cav, 0\n";
+        $o .= "  br i1 %cnz, label %clsprint, label %clsnext\n";
+        $o .= "clsprint:\n";
+        $o .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.clsfmt,"
+            . " i64 %ci, i64 %cav)\n";
+        $o .= "  br label %clsnext\n";
+        $o .= "clsnext:\n";
+        $o .= "  %ci2 = add i64 %ci, 1\n";
+        $o .= "  br label %clsloop\n";
+        $o .= "clsend:\n";
+        return $o;
     }
 
     /**

@@ -59,7 +59,10 @@ trait EmitLlvmObjects
         // matching free reads it back out of the descriptor, so the atexit dump can
         // name the producer: `Doctrine\ORM\…\PathExpression: alloc=812004 free=0`.
         // The category counters cannot — they answer "objects leak", never WHOSE.
-        if ($cd !== null && !$isStruct) { $out .= $this->profClass((string)$cd->classId, 0); }
+        if ($cd !== null && !$isStruct) {
+            $ix = $this->classCensusIndex();
+            if (isset($ix[$cd->name])) { $out .= $this->profClass((string)$ix[$cd->name]); }
+        }
         if ($isStruct) {
             // A struct has NO header — property slot 0 sits at +0 and there is
             // no rc at +8. Leaving the allocator's RC_TAG_MAGIC at ptr-8 would

@@ -692,22 +692,6 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %isbuf, label %done, label %dofree\n";
             $out .= "dofree:\n";
             $out .= $this->profBump(25);
-            // Per-CLASS census, free half. header[0] holds the descriptor as an
-            // i64 and class_id sits at descriptor+0, so the producing class is
-            // recoverable here with no header change. A descriptor of 0 is the
-            // unknown-class fallback — loading through it would fault, so the
-            // whole probe is guarded.
-            if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
-                $out .= "  %cdw = load i64, ptr %p\n";
-                $out .= "  %cdz = icmp eq i64 %cdw, 0\n";
-                $out .= "  br i1 %cdz, label %nocls, label %hascls\n";
-                $out .= "hascls:\n";
-                $out .= "  %cdp = inttoptr i64 %cdw to ptr\n";
-                $out .= "  %cid = load i64, ptr %cdp\n";
-                $out .= $this->profClass('%cid', 1);
-                $out .= "  br label %nocls\n";
-                $out .= "nocls:\n";
-            }
             // Recursive drop: release this object's obj-typed properties
             // before freeing it, so nested objects don't leak.
             $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
