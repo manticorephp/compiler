@@ -776,11 +776,6 @@ final class EmitLlvm implements EmitVisitor
             } else {
                 $rawBodyBytes = \strlen($body);
             }
-            if ($rawBodyBytes > $batchMaxBytes && \Compile\Stats::reporting()) {
-                $batchMaxBytes = $rawBodyBytes;
-                $batchMaxIndex = $emitIndex;
-                $batchMaxName = \substr($fn->name, 0);
-            }
             if ($emitTraceFull) {
                 \error_log('emit-trace-body index=' . (string)$emitIndex . ' name=' . $fn->name
                     . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes);
@@ -883,6 +878,18 @@ final class EmitLlvm implements EmitVisitor
             // long-lived. Pass-boundary releases cannot reclaim candidate roots
             // accumulated by tens of thousands of emitted functions; this call
             // never resets the target arena or changes ABI/COW semantics.
+            // ⚠ HERE, not up beside `$rawBodyBytes`. `substr` ALLOCATES, and up
+            // there it lands inside the sink-marker window and rewrites
+            // `$rawBodyPath` — which is not a theory: putting it there failed
+            // the T6 build at function 46088 with
+            // `cannot hoist sink file …fnraw.46088.hoisted`, the path variable
+            // holding the value of the `$hoistedPath` concat beside it. By this
+            // point the marker is consumed and retired, so allocating is safe.
+            if ($rawBodyBytes > $batchMaxBytes && \Compile\Stats::reporting()) {
+                $batchMaxBytes = $rawBodyBytes;
+                $batchMaxIndex = $emitIndex;
+                $batchMaxName = \substr($fn->name, 0);
+            }
             if (($emitIndex & 1023) === 0) {
                 \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
                 $this->compactEmissionCaches();
