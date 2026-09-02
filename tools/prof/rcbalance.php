@@ -52,6 +52,11 @@
  *                   the veto never fires. The pair is the whole experiment: the
  *                   veto is keyed per DECLARING CLASS, so the two shapes must
  *                   live in two DIFFERENT classes or they contaminate.
+ *   prop_elem_hold  SUSPECT — an ARRAY property whose elements are objects, read
+ *                   by subscript. The slot's drop returns the BUFFER and leaks
+ *                   every ELEMENT: measured 20 000 x (1 holder + 4 elements) gives
+ *                   tagged_alloc=100000 / tagged_reclaim=20000. This is the
+ *                   Lexer\\Token leak in miniature.
  *   append_pinned   SUSPECT (quadratic) — `$s .= …` on an accumulator that a
  *                   property also references. __mir_str_append takes its
  *                   in-place path only at rc == 1 (RuntimeLibrary.php:1213), so
@@ -109,6 +114,21 @@ final class SlotNoRead
     public ?Holder $p = null;
 }
 
+/**
+ * An ARRAY property read by subscript. `$this->els[$i]` makes markChildBorrows
+ * mark the slot element-borrowed, and propSlotDropsOldValue then answers
+ * `assocbuf` — it gives the BUFFER back and leaves every element. On the
+ * compiler itself that is `Parser::$tokens`, and it is why `Lexer\\Token`
+ * reached 9,236,608 allocations against ~0 reclaims on the Doctrine tier.
+ */
+final class ElemHolder
+{
+    /** @var Holder[] */
+    public array $els = [];
+
+    public function at(int $i): ?Holder { return $this->els[$i] ?? null; }
+}
+
 /** Holds a second reference to a string, pinning its refcount above 1. */
 final class Pin
 {
@@ -154,6 +174,16 @@ function main(string $variant, int $iters): int
         $slot2 = new SlotNoRead();
         for ($i = 0; $i < $iters; $i++) { $slot2->p = new Holder($i); }
         $guard += 1;
+    } elseif ($variant === 'prop_elem_hold') {
+        for ($i = 0; $i < $iters; $i++) {
+            $eh = new ElemHolder();
+            $tmp = [];
+            $tmp[] = new Holder($i);
+            $tmp[] = new Holder($i + 1);
+            $eh->els = $tmp;
+            $seen = $eh->at(0);
+            $guard += $seen === null ? 0 : 1;
+        }
     } elseif ($variant === 'append_pinned') {
         $pin = new Pin();
         $acc = '';
