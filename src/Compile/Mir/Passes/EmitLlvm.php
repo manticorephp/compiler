@@ -819,7 +819,24 @@ final class EmitLlvm implements EmitVisitor
             // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
             // nodes). An empty Block, not null: the field is typed.
             $fn->body = new Block([], Type::void());
-            unset($module->functions[$functionKey], $fn);
+            // ⚠ A LIBRARY's interface is written AFTER emission, and
+            // {@see \Manticore\Sig::emitModule} builds it by walking exactly this
+            // table. Draining it for a library therefore produced
+            // `"functions":[],"classes":[],"constants":[]` — a stdlib .o full of
+            // symbols behind an interface that declares none of them, so every
+            // program that called one failed clang with `use of undefined value`.
+            // 531 of 1028 AOT cases were red on that alone, and it was invisible
+            // because `bin/build` had been refusing its own preflight since the
+            // day the drain landed. The body above is already emptied, which is
+            // the retention term; the FunctionDef shell that Sig reads is small.
+            //
+            // $this->emitLibrary, NOT $module->isLibraryModule: the latter is
+            // `emitLibrary && exportTypes` (Main.php:3852) and is false for the
+            // stdlib, so guarding on it kept the sig empty. This is the same flag
+            // the driver tests before writing the .sig (Main.php:2185, :2270).
+            if (!$this->emitLibrary) {
+                unset($module->functions[$functionKey], $fn);
+            }
         }
         unset($functionKeys);
         $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
