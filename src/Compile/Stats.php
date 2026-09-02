@@ -46,8 +46,8 @@ final class Stats
      */
     public static bool $phaseTrace = false;
 
-    /** Is any reporting on? */
-    private static function reporting(): bool
+    /** Is any reporting on? Public so a hot loop can skip building its message. */
+    public static function reporting(): bool
     {
         return self::$on || self::$phaseTrace;
     }

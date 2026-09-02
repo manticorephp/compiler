@@ -771,6 +771,20 @@ final class EmitLlvm implements EmitVisitor
                 \error_log('emit-trace-body index=' . (string)$emitIndex . ' name=' . $fn->name
                     . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes);
             }
+            // ⚠⚠ THIS LINE IS A LANDMINE, and it is deliberately left under the
+            // full `Stats::$on` rather than promoted to the phase trace.
+            // `$rawBodyPath` above is a BORROWED array element whose buffer
+            // `unset($meta, $body)` has already freed — the emitter takes no
+            // reference for `$x = $arr[$i]` ({@see EmitLlvmLocals::emitStoreLocal}
+            // retains only a LOAD_LOCAL obj/string and an array PROPERTY read).
+            // This `Stats::line` then allocates into that freed buffer, and the
+            // throw at the end of the streaming branch reports
+            // `cannot hoist sink file stats: 17810ms fat fn: …`. Reproduces on
+            // the SELF-BUILD in 18 s, identically before and after the rc work.
+            // Do not add another allocation between the marker read and its use.
+            // The real fix is ownership, not placement: an element read stored
+            // into a local must OWN, which also needs InsertMemoryOps to plant
+            // the matching release, or the retain leaks. Own epic.
             if (\Compile\Stats::$on && $rawBodyBytes >= $fatFn) {
                 \Compile\Stats::line('fat fn: ' . (string)$rawBodyBytes . ' bytes  ' . $fn->name);
             }
@@ -859,6 +873,25 @@ final class EmitLlvm implements EmitVisitor
                 \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
                 $this->compactEmissionCaches();
                 $this->rootSnapshot('emit-batch-' . (string)$emitIndex, $module, true, $bodyBytes);
+                // EMISSION is ONE opaque line in the phase timeline while it is
+                // the stage that owns the peak: on T6 the whole front finishes
+                // at 7 970 MB and emission takes the run past 40 GB. A line per
+                // batch names WHERE inside emission the memory goes, which no
+                // outside sampler can do.
+                //
+                // ⚠ Placed at the BATCH BOUNDARY on purpose, not for tidiness.
+                // Anywhere between the sink-marker read and its use (`$rawBodyPath
+                // = $meta[1]` … `unset($meta, $body)` … `if ($rawBodyPath !== '')`)
+                // an allocation lands in the freed buffer of that BORROWED array
+                // element and rewrites the path — which is exactly how
+                // `Stats::line`'s fat-fn report below turns the next throw into
+                // `cannot hoist sink file stats: 17810ms fat fn: …`. Here the
+                // path is already consumed and retired.
+                if (\Compile\Stats::reporting()) {
+                    \Compile\Stats::line('emit batch ' . (string)$emitIndex
+                        . '/' . (string)\count($functionKeys)
+                        . '  ir=' . (string)\intdiv($bodyBytes, 1048576) . 'MB');
+                }
             }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
             // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
