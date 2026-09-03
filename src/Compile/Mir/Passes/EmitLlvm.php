@@ -707,7 +707,13 @@ final class EmitLlvm implements EmitVisitor
                 }
                 $rawBodyPath = $meta[1];
                 $rawBodyBytes = (int)$meta[2];
-                unset($meta, $body);
+                // $meta MUST outlive $rawBodyPath: the element read hands the string
+                // over BORROWED, so unsetting the array here freed the very bytes
+                // $rawBodyPath points at. It then read back empty, the marker branch
+                // below was skipped, and the fallback staged an already-unset $body —
+                // the fat function silently lost its `define` and its .fnraw file was
+                // orphaned. $meta is three short strings; it costs nothing to keep.
+                unset($body);
             } else {
                 $rawBodyBytes = \strlen($body);
             }
