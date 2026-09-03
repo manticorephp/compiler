@@ -75,3 +75,74 @@ Steps 3-4 are the invasive part: the extract block currently `return`s, and the
 general path allocates its own result and has a separate trailing-spread branch.
 That restructure is the next work item and was NOT attempted here — this branch
 has already shown twice what a hurried guess in this emitter costs.
+
+---
+
+# Per-name veto (`96a4e0f`): the 1 876 MB function is gone
+
+The seam was already there: `emitDynMethodInlineFallback($dp, $iv, $methods)`
+takes the METHOD SET, so the split needed no restructure of the emitter.
+
+- names split clean / dirty by `anyRefParam` **per name** (memoised — otherwise
+  201 names x 3 130 classes at every site);
+- the clean chain calls the shared helper;
+- if no clean name matched, control falls into that same inline dispatcher over
+  the DIRTY SUBSET ONLY;
+- both halves merge into one `$res`.
+
+⚠ One condition had to come with it: the inline fallback RE-EMITS the receiver,
+the name and the arguments. Only one branch runs at runtime, but the operands are
+emitted twice, so each must be side-effect free to be evaluated twice — hence
+`LOAD_LOCAL`/const is required of the name and every argument, for the same
+reason the receiver already had to be a local. Anything else keeps the whole site
+inline, as before.
+
+Poison stand (one `taint(array &$r)` class among 200):
+
+| | before | after |
+|---|---:|---:|
+| `call1`, no by-ref class | 70 820 B | 70 820 B |
+| `call1`, with one | **152 081 B** | **71 930 B** |
+
+A by-ref method now costs its own arm (1 110 B), not the site's extraction.
+
+Suite **1030 passed, 0 failed, 1032 total**, plus
+`dyn_method_byref_neighbour` (a by-ref method beside ordinary ones; both halves
+must work, and the by-ref array really is mutated).
+
+## T6, at equal work
+
+```
+batch    before (dynm)          after (per-name)
+47104    ir=201MB rss= 8960MB   ir=201MB rss=8845MB
+48128    ir=313MB rss=14364MB   ir=275MB rss=8845MB
+50176    ir=353MB rss=14462MB   ir=315MB rss=8845MB
+52224    ir=411MB rss=14485MB   ir=366MB rss=8898MB
+```
+
+**The +5.5 GB step is gone** — RSS is flat across four batches where it used to
+jump. −5.6 GB at batch 52224. `__mc_call_exception_handler` no longer appears in
+the costliest list at all; the leaders are now `__mc_unser_set` (78 MB) and
+`EventManager::dispatchEvent` (29 MB), two orders of magnitude smaller.
+
+## ⚠⚠ But the run still caps, and the two memory metrics disagree by 2x
+
+At the last batch the compiler's own `memory_get_usage()` peak reads
+**9 265 MB**, while the harness recorded **20.79 GB of physical footprint** (and
+`ps rss` 11.0 GB) for the same process.
+
+`ru_maxrss` is a RESIDENT peak; the physical footprint includes compressed pages.
+A 2x gap therefore means roughly half the process's memory is allocated, written
+once and never touched again — cold RETAINED memory, not working set. That points
+at retention (caches, stranded structures), not at the size of the computation,
+and it is invisible to any `ps rss` reading — which is exactly why the cap had to
+judge the footprint.
+
+**Peak comparisons across the session remain near-meaningless**: every run still
+hits the ceiling (23.19 / 21.69 / 20.89 / 21.19 / 21.19 / 20.79 GB), so those
+numbers describe the cap, not the demand. The equal-work RSS column is the honest
+measurement, and it improved by 5.6 GB.
+
+**Next**: chase the cold half. A run under a cap high enough to FINISH would give
+a true peak for the first time; failing that, the retention has to be attributed
+with allocation counters rather than RSS.
