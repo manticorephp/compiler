@@ -233,6 +233,18 @@ final class Debug
      */
     public static bool $autoGc = false;
 
+    /**
+     * `MANTICORE_CC_TRACE=1` — print every object the collector frees and every
+     * object ordinary rc frees, plus the root buffer's address and count around
+     * each collection.
+     *
+     * The collector's own double free is a claim about WHO freed a pointer
+     * first; only a per-pointer log answers it. The buffer address answers the
+     * second question in the same run: whether a push during a collection
+     * reallocs the array the collection is walking.
+     */
+    public static bool $ccTrace = false;
+
     /** Roots buffered before an automatic collection. php uses 10 000. */
     public static int $autoGcThreshold = 10000;
 
@@ -392,6 +404,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
+        $env = \getenv('MANTICORE_CC_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$ccTrace = true; }
         $env = \getenv('MANTICORE_AUTO_GC');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$autoGc = true;
