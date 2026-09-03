@@ -164,3 +164,79 @@ tokens) and stores that — so a token is referenced by the scan array, by
 
 That is the next hunt, and it starts from a working instrument rather than a
 guess.
+
+---
+
+# The token leak, narrowed to one line — and two changes reverted for being no-ops
+
+## A millisecond reproducer inside the compiler
+
+```
+census-built compiler, dump-ast on a 3-line file
+[CLASS] idx=143 alloc=25 free=0        Lexer\Token
+```
+
+Lex + parse alone, 25 tokens, none freed. `Lexer\Lexer` is 1/1 and
+`Parser\Parser` is 1/1 — the HOLDERS die. Reducing `Parser::parseSource` to
+`(new Lexer())->scan($source);` with the result discarded still leaks all 25.
+
+## ⚠ Every standalone probe of that shape is BALANCED
+
+A faithful model — append into a property, return it, copy into `$filtered` in a
+constructor, store that — is 24 000 / 24 000. So is the discarded-result form,
+and so is the version with the Lexer's own `$this->tokens[$n-1]->kind` read-back.
+
+That is the finding: **the cause is not the local shape, it is module-wide
+analysis state.** The veto tables (`propRawBorrow`, `propElemBorrow`,
+`propOwnElemVeto`, `elementSharedLocals`) are computed over the whole program, so
+a probe can never reproduce them — the same pattern as `$hasBag`, the bare-name
+borrow key and the site-wide by-ref veto earlier on this branch.
+
+## The one site, named
+
+```
+MANTICORE_BORROW_TRACE=tokens bin/manticore build --apps-only
+BORROW Lexer\Lexer::tokens <- node kind return line 100
+```
+
+One site in the whole codebase: `Lexer.php:100`, `return $this->tokens;`.
+
+The exemption for exactly this shape exists — `Debug::$rcReturnOwns`, whose doc
+says a RETURN already takes the reference. But it is gated on
+`returnRetainsBorrow()`, and that function answers for **STRING and OBJ only**:
+
+```php
+if ($tk === Type::KIND_STRING) { return true; }
+if ($tk !== Type::KIND_OBJ)    { return false; }   // ← an ARRAY return, always
+```
+
+So `return $this->tokens;` — an ARRAY property return, the shape of every
+`getTokens()` / `all()` / `scan()` accessor — is never exempted and vetoes its
+slot. That is the next thing to test, and it is a one-line hypothesis.
+
+## Two changes reverted, and why
+
+**Promoted-parameter `@var`.** The AST classes annotate promoted constructor
+properties as `/** @var TraitAdaptation[] */` on the PARAMETER, and nothing read
+it (`Param` had no `docComment` field at all). Wired it end to end — parser
+captures it, `LowerClasses` falls back to it. Effect on real code: **283
+element-owning class drops before, 283 after, zero new.** `LowerClasses` already
+recovers those element types by usage inference. Reverted: a fix with no
+measurable effect is not a fix, and it cost a field on a hot AST node.
+
+**Owned-result element flavor.** A discarded call result releasing an
+element-bearing array with the plain flavor looked like the leak. Probe with the
+change: 22 000 / 22 000. Probe WITHOUT it: 22 000 / 22 000. Reverted for the same
+reason.
+
+⚠ Both were written before a failing test existed. The rule this branch keeps
+re-learning: **get the red first, then fix it** — otherwise "it should help" and
+"it helps" are indistinguishable.
+
+## Also disproved this session
+
+The plan "annotate the 237 bare arrays and the erased channel closes" is NOT
+established. The promoted-parameter experiment is direct evidence against it:
+where usage inference already recovers the element type, an annotation changes
+nothing. The 237 should be attacked only where a measurement shows the channel
+actually erases.
