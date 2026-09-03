@@ -638,6 +638,11 @@ trait EmitLlvmRuntime
             // the ptr is a string ⇒ its rc@ptr-8, free base=ptr-24 at zero
             // (the string header is [cap@-24, len@-16, rc@-8]; obj/vec base -8).
             $out .= $this->rcVerifyAliveFormat();
+            if (\Compile\Debug::$arrRcTrace) {
+                $orcRaw = '[ORC] rel obj=%p rc=%lld';
+                $out .= '@.orc.rel = private unnamed_addr constant ['
+                    . (string)(\strlen($orcRaw) + 2) . ' x i8] c"' . $orcRaw . '\0A\00", align 1' . "\n";
+            }
             $out .= "define void @__mir_rc_release(ptr %p) {\n";
             $out .= "entry:\n";
             $out .= "  %z = icmp eq ptr %p, null\n";
@@ -670,6 +675,13 @@ trait EmitLlvmRuntime
             $out .= $this->rcVerifyAlive();
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %rcp\n";
+            if (\Compile\Debug::$arrRcTrace) {
+                // The OBJECT half of the rc trace. The array half proved every
+                // token buffer reaches rc 0 with an element-walking release, so
+                // the remaining question is one level down: what each ELEMENT's
+                // rc actually does. Same flag — the two halves are one story.
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.orc.rel, ptr %p, i64 %rc1)\n";
+            }
             $out .= "  %rcsh = shl i64 %rc1, 8\n";
             $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
             $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
@@ -1919,6 +1931,7 @@ trait EmitLlvmRuntime
         $out .= "@__manticore_cc_roots = linkonce_odr global ptr null\n";
         $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
@@ -2008,7 +2021,34 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %s, ptr %slot\n";
         $out .= "  %cnt1 = add i64 %cnt, 1\n";
         $out .= "  store i64 %cnt1, ptr @__manticore_cc_count\n";
-        $out .= "  br label %done\n";
+        if (\Compile\Debug::$autoGc) {
+            // ⚠⚠ THE ROOT BUFFER HAD NO DRAIN. A decrement that leaves rc > 0
+            // buffers the object as a possible cycle root (purple + buffered),
+            // and `__mir_rc_release` then REFUSES to free it at rc 0 because
+            // "the collector owns it". The collector ran only from an explicit
+            // `gc_collect_cycles()`, which nothing in the compiler calls — so
+            // every object retained more than once leaked by construction.
+            // That is 0.27% of objects freed against 96% of arrays (arrays are
+            // not cycle candidates), and 0 of 9.2M `Lexer\Token`.
+            //
+            // php drains the same buffer at a threshold; so do we. The guard is
+            // load-bearing: collection frees objects, which releases their
+            // children, which re-enters here — without it the first collection
+            // recurses.
+            $out .= "  %act = load i64, ptr @__manticore_cc_active\n";
+            $out .= "  %busy = icmp ne i64 %act, 0\n";
+            $out .= "  br i1 %busy, label %done, label %thresh\n";
+            $out .= "thresh:\n";
+            $out .= '  %hit = icmp sge i64 %cnt1, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
+            $out .= "  br i1 %hit, label %docollect, label %done\n";
+            $out .= "docollect:\n";
+            $out .= "  store i64 1, ptr @__manticore_cc_active\n";
+            $out .= "  %ignored = call i64 @__manticore_cc_collect_cycles()\n";
+            $out .= "  store i64 0, ptr @__manticore_cc_active\n";
+            $out .= "  br label %done\n";
+        } else {
+            $out .= "  br label %done\n";
+        }
         $out .= "done:\n  ret void\n}\n";
 
         // ── per-child action dispatch ──

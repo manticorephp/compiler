@@ -209,6 +209,34 @@ final class Debug
     public static bool $rcCtorArgTemp = true;
 
     /**
+     * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
+     * buffer address, its length and the RESULTING rc.
+     *
+     * Whole-program counters say how many refs are unbalanced; they cannot say
+     * WHICH buffer never reaches zero. Reading emitter predicates instead cost
+     * two no-op fixes and one masked one, so this observes the thing itself.
+     * Volume is fine on a small input: one 3-line file lexes into a few hundred
+     * array ops.
+     */
+    public static bool $arrRcTrace = false;
+
+    /**
+     * `MANTICORE_AUTO_GC=1` — drain the cycle-collector root buffer at a
+     * threshold, the way php does.
+     *
+     * The buffer had NO drain. A decrement leaving rc > 0 buffers the object as
+     * a possible cycle root, and `__mir_rc_release` then refuses to free it at
+     * rc 0 because the collector owns it — but the collector only ever ran from
+     * an explicit `gc_collect_cycles()`, which the compiler never calls. So
+     * every object retained more than once leaked BY CONSTRUCTION: 0.27%% of
+     * objects freed against 96%% of arrays, and 0 of 9.2M `Lexer\Token`.
+     */
+    public static bool $autoGc = false;
+
+    /** Roots buffered before an automatic collection. php uses 10 000. */
+    public static int $autoGcThreshold = 10000;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -362,6 +390,13 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
+        $env = \getenv('MANTICORE_ARR_RC_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
+        $env = \getenv('MANTICORE_AUTO_GC');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$autoGc = true;
+            if (\ctype_digit($env)) { self::$autoGcThreshold = (int)$env; }
+        }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
