@@ -106,12 +106,28 @@ final class SplitModule
             $header[] = $l;
         }
 
+        // Everything the partitioning needs from a definition is its header line
+        // and the symbols it names — never the body. Deriving both up front is
+        // what lets {@see runFile} answer the same questions from an index of
+        // byte offsets, without a module-sized string.
+        /** @var array<string, string> symbol => its `define …` header line */
+        $defHead = [];
+        /** @var array<string, array<string, bool>> symbol => symbols it names */
+        $defRefs = [];
+        /** @var array<string, int> symbol => body size, for load balancing */
+        $defSize = [];
+        foreach ($defOrder as $s) {
+            $defHead[$s] = $this->head($defs[$s]);
+            $defRefs[$s] = $this->refsOf($s, $defs[$s]);
+            $defSize[$s] = \strlen($defs[$s]);
+        }
+
         /** @var array<string, bool> */
         $internal = [];
         /** @var string[] */
         $shared = [];
         foreach ($defOrder as $s) {
-            $head = $this->head($defs[$s]);
+            $head = $defHead[$s];
             if (\str_contains($head, ' internal ') || \str_contains($head, ' private ')) {
                 $internal[$s] = true;
                 continue;
@@ -121,29 +137,7 @@ final class SplitModule
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
 
-        // Largest first into the lightest part, so one fat function does not
-        // decide the wall clock on its own.
-        $bySize = [];
-        foreach ($shared as $s) { $bySize[$s] = \strlen($defs[$s]); }
-        \arsort($bySize);
-        // ⚠ NOT array_fill(0, $parts, 0): the array it hands back does not
-        // survive a write-then-read natively. Filled here, written on iteration
-        // 1 and read on iteration 2, it faulted on a garbage address (0x56413 —
-        // an integer read as a pointer) in a self-built compiler while Zend ran
-        // the identical code fine. An explicit loop is correct; the array_fill
-        // repr bug is real and outlives this file.
-        $load = [];
-        for ($q = 0; $q < $parts; $q = $q + 1) { $load[] = 0; }
-        /** @var array<string, int> */
-        $assign = [];
-        foreach ($bySize as $sym => $sz) {
-            $min = 0;
-            for ($p = 1; $p < $parts; $p++) {
-                if ($load[$p] < $load[$min]) { $min = $p; }
-            }
-            $assign[$sym] = $min;
-            $load[$min] = $load[$min] + $sz;
-        }
+        $assign = $this->assignParts($shared, $defSize, $parts);
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -158,23 +152,65 @@ final class SplitModule
             if ($p !== 0) {
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
-            $out[] = $this->emitPart($p, $parts, $defOrder, $defs, $assign,
-                                     $internal, $globalOrder, $globals, $partHeader, $declText);
+            $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $assign,
+                                    $internal, $globalOrder, $globals);
+            $body = '';
+            foreach ($plan->mine as $s) { $body = $body . $defs[$s] . "\n"; }
+            $out[] = $partHeader . "\n" . $declText . "\n"
+                   . $plan->gtext . $plan->dtext . $plan->usedText . $body;
         }
         return $out;
     }
 
     /**
-     * @param string[]              $defOrder
-     * @param array<string, string> $defs
-     * @param array<string, int>    $assign
-     * @param array<string, bool>   $internal
-     * @param string[]              $globalOrder
-     * @param array<string, string> $globals
+     * Largest first into the lightest part, so one fat function does not decide
+     * the wall clock on its own.
+     *
+     * ⚠ NOT array_fill(0, $parts, 0): the array it hands back does not survive a
+     * write-then-read natively. Filled here, written on iteration 1 and read on
+     * iteration 2, it faulted on a garbage address (0x56413 — an integer read as
+     * a pointer) in a self-built compiler while Zend ran the identical code fine.
+     * An explicit loop is correct; the array_fill repr bug is real and outlives
+     * this file.
+     *
+     * @param string[]           $shared
+     * @param array<string, int> $defSize
+     * @return array<string, int> symbol => part index
      */
-    private function emitPart(int $p, int $parts, array $defOrder, array $defs, array $assign,
-                              array $internal, array $globalOrder, array $globals,
-                              string $headerText, string $declText): string
+    private function assignParts(array $shared, array $defSize, int $parts): array
+    {
+        $bySize = [];
+        foreach ($shared as $s) { $bySize[$s] = $defSize[$s]; }
+        \arsort($bySize);
+        $load = [];
+        for ($q = 0; $q < $parts; $q = $q + 1) { $load[] = 0; }
+        /** @var array<string, int> */
+        $assign = [];
+        foreach ($bySize as $sym => $sz) {
+            $min = 0;
+            for ($p = 1; $p < $parts; $p++) {
+                if ($load[$p] < $load[$min]) { $min = $p; }
+            }
+            $assign[$sym] = $min;
+            $load[$min] = $load[$min] + $sz;
+        }
+        return $assign;
+    }
+
+    /**
+     * Decide a part's contents from the index alone — never from body text.
+     *
+     * @param string[]                            $defOrder
+     * @param array<string, string>               $defHead
+     * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, int>                  $assign
+     * @param array<string, bool>                 $internal
+     * @param string[]                            $globalOrder
+     * @param array<string, string>               $globals
+     */
+    private function planPart(int $p, array $defOrder, array $defHead, array $defRefs,
+                              array $assign, array $internal, array $globalOrder,
+                              array $globals): PartPlan
     {
         /** @var string[] */
         $mine = [];
@@ -185,7 +221,7 @@ final class SplitModule
         /** @var array<string, bool> */
         $refs = [];
         foreach ($mine as $s) {
-            foreach ($this->refsOf($s, $defs[$s]) as $r => $_) { $refs[$r] = true; }
+            foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
         }
         // Every file-local definition reachable from here, to a fixpoint.
         /** @var array<string, bool> */
@@ -196,7 +232,7 @@ final class SplitModule
             foreach ($defOrder as $s) {
                 if (!isset($internal[$s]) || isset($haveInternal[$s]) || !isset($refs[$s])) { continue; }
                 $haveInternal[$s] = true;
-                foreach ($this->refsOf($s, $defs[$s]) as $r => $_) { $refs[$r] = true; }
+                foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
                 $changed = true;
             }
         }
@@ -244,17 +280,15 @@ final class SplitModule
         // Declares for what this part calls but another part defines.
         $dtext = '';
         foreach ($refs as $r => $_) {
-            if (!isset($defs[$r]) || isset($internal[$r])) { continue; }
+            if (!isset($defHead[$r]) || isset($internal[$r])) { continue; }
             if (($assign[$r] ?? -1) === $p) { continue; }
-            $d = $this->declareFromDefine($defs[$r]);
+            $d = $this->declareFromDefine($defHead[$r]);
             if ($d !== '') { $dtext = $dtext . $d . "\n"; }
         }
-        $body = '';
         /** @var string[] */
         $keep = [];
         foreach ($mine as $s) {
-            $body = $body . $defs[$s] . "\n";
-            if (\str_contains($this->head($defs[$s]), ' linkonce_odr ')) { $keep[] = $s; }
+            if (\str_contains($defHead[$s], ' linkonce_odr ')) { $keep[] = $s; }
         }
         $usedText = '';
         if ($keep !== []) {
@@ -263,7 +297,169 @@ final class SplitModule
             $usedText = '@llvm.compiler.used = appending global [' . (string)\count($keep)
                 . ' x ptr] [' . \implode(', ', $refsList) . '], section "llvm.metadata"' . "\n";
         }
-        return $headerText . "\n" . $declText . "\n" . $gtext . $dtext . $usedText . $body;
+        $plan = new PartPlan();
+        $plan->mine = $mine;
+        $plan->gtext = $gtext;
+        $plan->dtext = $dtext;
+        $plan->usedText = $usedText;
+        return $plan;
+    }
+
+    /**
+     * Split a STAGED module file into part files without ever holding the module.
+     *
+     * Same partitioning as {@see run} — it shares planPart/assignParts, so the
+     * internal-duplication fixpoint, the global linkage classes and the
+     * linkonce_odr pinning are decided by one owner, not two. The difference is
+     * only where a definition's bytes come from: `run` concatenates strings,
+     * this copies byte ranges straight from the source file.
+     *
+     * That matters because streaming exists precisely for modules that must not
+     * be resident: `run` would need the text, an exploded line array AND a
+     * symbol=>text map at once. Here the resident cost is the index — one header
+     * line and one reference set per definition.
+     *
+     * @return string[] the written part paths, or [] on failure
+     */
+    public function runFile(string $llPath, int $parts, string $outBase): array
+    {
+        if ($parts < 2) { return []; }
+        $this->refsCache = [];
+        $in = \Manticore\fopen($llPath, 'rb');
+        $cap = 1048576;
+        $buf = \Manticore\malloc($cap);
+
+        /** @var string[] */
+        $header = [];
+        /** @var array<string, string> */
+        $globals = [];
+        /** @var string[] */
+        $globalOrder = [];
+        /** @var string[] */
+        $declares = [];
+        /** @var string[] */
+        $defOrder = [];
+        /** @var array<string, string> */
+        $defHead = [];
+        /** @var array<string, array<string, bool>> */
+        $defRefs = [];
+        /** @var array<string, int> */
+        $defOff = [];
+        /** @var array<string, int> */
+        $defSize = [];
+
+        $pos = 0;
+        $cur = '';
+        $start = 0;
+        /** @var array<string, bool> */
+        $refs = [];
+        while (true) {
+            $p = \Manticore\fgets($buf, $cap, $in);
+            if ($p === 0) { break; }
+            $line = \cstr_to_str($p);
+            $n = \strlen($line);
+            // The stored text must match `run`'s: lines joined by "\n" with the
+            // closing brace's newline included, since run appends one itself.
+            $bare = \rtrim($line, "\n");
+            if ($cur !== '') {
+                $this->collectRefs($bare, $refs);
+                $pos = $pos + $n;
+                if (\rtrim($bare) === '}') {
+                    $defOff[$cur] = $start;
+                    $defSize[$cur] = $pos - $start;
+                    $defRefs[$cur] = $refs;
+                    $defOrder[] = $cur;
+                    $refs = [];
+                    $cur = '';
+                }
+                continue;
+            }
+            if (\strlen($bare) > 7 && \substr($bare, 0, 7) === 'define ') {
+                $sym = $this->defineSymbol($bare);
+                if ($sym === '') { $header[] = $bare; $pos = $pos + $n; continue; }
+                $cur = $sym;
+                $start = $pos;
+                $defHead[$sym] = $bare;
+                $refs = [];
+                $this->collectRefs($bare, $refs);
+                $pos = $pos + $n;
+                continue;
+            }
+            $pos = $pos + $n;
+            if ($bare !== '' && $bare[0] === '@') {
+                $sym = $this->globalName($bare);
+                if ($sym === '') { $header[] = $bare; continue; }
+                $globals[$sym] = $bare;
+                $globalOrder[] = $sym;
+                continue;
+            }
+            if (\str_starts_with($bare, 'declare ')) { $declares[] = $bare; continue; }
+            $header[] = $bare;
+        }
+
+        /** @var array<string, bool> */
+        $internal = [];
+        /** @var string[] */
+        $shared = [];
+        foreach ($defOrder as $s) {
+            if (\str_contains($defHead[$s], ' internal ') || \str_contains($defHead[$s], ' private ')) {
+                $internal[$s] = true;
+                continue;
+            }
+            $shared[] = $s;
+        }
+        $this->sharedDefs = \count($shared);
+        $this->internalDefs = \count($internal);
+        $assign = $this->assignParts($shared, $defSize, $parts);
+
+        $headerText = \implode("\n", $header);
+        $declText = \implode("\n", $declares);
+        /** @var string[] */
+        $out = [];
+        for ($p = 0; $p < $parts; $p = $p + 1) {
+            $partHeader = $headerText;
+            if ($p !== 0) {
+                $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
+            }
+            $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $assign,
+                                    $internal, $globalOrder, $globals);
+            $path = $outBase . '.p' . (string)$p . '.ll';
+            if (!\Manticore\write_file($path,
+                    $partHeader . "\n" . $declText . "\n" . $plan->gtext . $plan->dtext . $plan->usedText)) {
+                \Manticore\free($buf);
+                \Manticore\fclose($in);
+                return [];
+            }
+            $o = \Manticore\fopen($path, 'ab');
+            foreach ($plan->mine as $s) {
+                if (!$this->copyRange($in, $o, $buf, $cap, $defOff[$s], $defSize[$s])) {
+                    \Manticore\fclose($o);
+                    \Manticore\free($buf);
+                    \Manticore\fclose($in);
+                    return [];
+                }
+            }
+            \Manticore\fclose($o);
+            $out[] = $path;
+        }
+        \Manticore\free($buf);
+        \Manticore\fclose($in);
+        return $out;
+    }
+
+    /** Copy $len bytes at $off from $in to $o through the shared buffer. */
+    private function copyRange(\Ffi\Ptr $in, \Ffi\Ptr $o, \Ffi\Ptr $buf, int $cap, int $off, int $len): bool
+    {
+        if (\Manticore\fseek($in, $off, 0) !== 0) { return false; }
+        $left = $len;
+        while ($left > 0) {
+            $want = $left < $cap ? $left : $cap;
+            $got = \Manticore\fread($buf, 1, $want, $in);
+            if ($got <= 0) { return false; }
+            if (\Manticore\fwrite_buf($buf, 1, $got, $o) !== $got) { return false; }
+            $left = $left - $got;
+        }
+        return true;
     }
 
     private function head(string $def): string

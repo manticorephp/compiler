@@ -741,6 +741,17 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                         throw new \RuntimeException('EmitLlvm: cannot append hoisted sink file ' . $hoistedPath);
                     }
+                    // The separator every OTHER body carries. emitFunction appends
+                    // "\n\n" to what it returns, but for a spilled body that is the
+                    // MARKER, not the text — so the file ends at `}` and the next
+                    // body lands on the same line as `}define …`. LLVM does not
+                    // care, but every line-oriented consumer does: HoistAllocas
+                    // stops recognising the define, and SplitModule never sees the
+                    // body close, so it swallows the following functions and the
+                    // part that calls them gets neither a define nor a declare.
+                    if (!\Manticore\append_file_bytes($bodyPath, "\n\n")) {
+                        throw new \RuntimeException('EmitLlvm: cannot append sink separator');
+                    }
                     \Manticore\system('rm -f ' . $rawBodyPath . ' ' . $hoistedPath);
                     $bodyBytes += $rawBodyBytes;
                 } elseif ($rawBodyBytes < $fileHoistThreshold) {
@@ -910,10 +921,34 @@ final class EmitLlvm implements EmitVisitor
             }
             \Manticore\system('rm -f ' . $bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
+            $stagedBytes = \strlen($preamble) + $bodyBytes;
+            // PruneIr used to be unreachable from here: this branch returns the
+            // staged marker before the in-memory pruner below ever runs, so every
+            // manifest build has been handing clang the discardable helpers it
+            // could have dropped. Same gate as that pruner — never for a library,
+            // whose `.sig` makes "unreferenced here" say nothing about need.
+            $pruneMode = \getenv('MANTICORE_PRUNE_IR');
+            if (!$this->emitLibrary && $pruneMode !== 'off'
+                && \Compile\Mir\PruneIr::shouldRunFile($stagedBytes)) {
+                $statT = \Compile\Stats::now();
+                $prune = new \Compile\Mir\PruneIr();
+                $prunedPath = $this->streamIrPath . '.pruned';
+                if (!$prune->runFile($this->streamIrPath, $prunedPath)) {
+                    throw new \RuntimeException('EmitLlvm: cannot prune staged IR ' . $this->streamIrPath);
+                }
+                if ($prune->dropped > 0) {
+                    \Manticore\system('mv -f ' . $prunedPath . ' ' . $this->streamIrPath);
+                    $stagedBytes = $stagedBytes - $prune->droppedBytes;
+                }
+                \Compile\Stats::step('  prune staged IR', $statT, $prune->kept, $prune->dropped);
+                \Compile\Stats::line('IR: pruned ' . (string)$prune->dropped . ' of '
+                    . (string)($prune->dropped + $prune->kept) . ' defs, '
+                    . (string)$stagedBytes . ' bytes');
+            }
             \Compile\Stats::line('IR: staged at ' . $this->streamIrPath . ' ('
-                . (string)(\strlen($preamble) + $bodyBytes) . ' bytes)');
+                . (string)$stagedBytes . ' bytes)');
             return "\x1eMANTICORE_STAGED_IR\n" . $this->streamIrPath . "\n"
-                . (string)(\strlen($preamble) + $bodyBytes);
+                . (string)$stagedBytes;
         }
         $ir = $preamble . \implode('', $functionBodyChunks);
         // The one final IR string is now the sole owner of emitted body text;

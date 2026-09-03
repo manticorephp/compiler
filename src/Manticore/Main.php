@@ -598,7 +598,16 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         $payload = \substr($ir, \strlen($stagedPrefix));
         $cut = \strrpos($payload, "\n");
         if ($cut === false) { dprint('assemble: malformed staged IR marker'); return []; }
-        return assemble_ir_file(\substr($payload, 0, $cut), $base, $cflags, (int)\substr($payload, $cut + 1));
+        // The staged branch used to be unconditionally serial, which made
+        // MANTICORE_SPLIT_JOBS a silent no-op for every manifest build (the only
+        // builds that stage). Decide the job count HERE, on the same rule the
+        // in-memory path uses, and let the file splitter honour it.
+        $forcedSplit = \getenv('MANTICORE_SPLIT_JOBS');
+        $forcedJobs = $forcedSplit === false ? 0 : (int)$forcedSplit;
+        if ($forcedJobs > 64) { $forcedJobs = 64; }
+        $stagedJobs = $forcedJobs >= 2 ? $forcedJobs : assemble_jobs();
+        return assemble_ir_file(\substr($payload, 0, $cut), $base, $cflags,
+                                (int)\substr($payload, $cut + 1), $stagedJobs);
     }
     $irBytes = \strlen($ir);
     $largeModule = $irBytes > 536870912;
@@ -661,14 +670,118 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
 }
 
 /** Assemble already-staged large IR without reading it back into PHP. */
-function assemble_ir_file(string $llPath, string $base, string $cflags, int $irBytes): array {
+function assemble_ir_file(string $llPath, string $base, string $cflags, int $irBytes,
+                          int $jobs = 1): array {
     $objPath = $base . '.o';
+    if ($jobs >= 2) {
+        $objs = assemble_ir_file_split($llPath, $base, $cflags, $irBytes, $jobs);
+        if ($objs !== []) { return $objs; }
+        dprint('assemble: staged split failed; falling back to the serial path');
+    }
     \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
     $statT = \Compile\Stats::now();
     $rc = system('clang -O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
     \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c staged IR', $statT, -1, -1);
     if ($rc !== 0) { dprint('assemble: clang -c staged IR failed (rc=' . (string)$rc . '); IR at ' . $llPath); return []; }
     return [$objPath];
+}
+
+/**
+ * Split a staged module into $jobs part files and assemble them concurrently.
+ *
+ * ⚠ A part boundary is an INLINING boundary: the compiler built as 8 plain parts
+ * runs ~69% slower, which then makes every later build slower. That is what
+ * `-flto=thin` is for — it defers the cross-module inlining to the link and
+ * measured +3.4% instead. Splitting WITHOUT it is a build-time win paid for out
+ * of the produced program, so this stays opt-in.
+ *
+ * @return string[] the part objects, or [] so the caller can fall back
+ */
+function assemble_ir_file_split(string $llPath, string $base, string $cflags,
+                                int $irBytes, int $jobs): array {
+    $statT = \Compile\Stats::now();
+    $splitter = new \Compile\Mir\SplitModule();
+    $parts = $splitter->runFile($llPath, $jobs, $base);
+    if ($parts === []) { dprint('assemble: staged split produced no parts'); return []; }
+    \Compile\Stats::step('  split staged module (' . (string)\count($parts) . ' parts, '
+        . (string)$irBytes . ' bytes)', $statT, $splitter->sharedDefs, $splitter->internalDefs);
+    $lto = thinlto_flags();
+    $objs = [];
+    $cmd = '';
+    foreach ($parts as $i => $partPath) {
+        $pobj = $base . '.p' . (string)$i . '.o';
+        if ($cmd !== '') { $cmd = $cmd . ' & '; }
+        $cmd = $cmd . 'clang -O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags
+             . ' -c -x ir ' . $partPath . ' -o ' . $pobj . ' -Wno-override-module';
+        $objs[] = $pobj;
+    }
+    // Existence is what decides success below, so a leftover from an earlier run
+    // must not read as a part that built.
+    foreach ($objs as $o) { system('rm -f ' . $o); }
+    $statT = \Compile\Stats::now();
+    // `wait` must be INSIDE the subshell: the background jobs are ITS children.
+    system('( ' . $cmd . ' ; wait )');
+    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($parts)
+        . ($lto === '' ? '' : ' (thinlto)'), $statT, -1, -1);
+    // Count the objects. A "parallel build" that finished suspiciously fast has
+    // simply failed to build most of its parts.
+    foreach ($objs as $i => $o) {
+        if (!\file_exists($o)) {
+            dprint('assemble: staged part ' . (string)$i . ' failed to build; IR at '
+                . $base . '.p' . (string)$i . '.ll');
+            return [];
+        }
+    }
+    return $objs;
+}
+
+/**
+ * `-flto=thin` for the split assembly, off unless asked.
+ *
+ * ThinLTO recovers the inlining a part boundary costs (measured: a plain 8-way
+ * split made the compiler 69% slower, ThinLTO 3.4%), but its link is parallel
+ * and CPU-hungry — 20 s wall for 142 s of CPU on a 10-core box. On a small
+ * runner that trade can invert, so it is measured per platform before it can
+ * become a default.
+ */
+function thinlto_flags(): string {
+    $e = \getenv('MANTICORE_THINLTO');
+    if ($e === false || $e === '' || $e === '0' || $e === 'off') { return ''; }
+    return ' -flto=thin';
+}
+
+/**
+ * Link-side ThinLTO flags.
+ *
+ * `-flto=thin` MUST be on the link too, not only on the part compiles: with it
+ * only on the compiles, ld64 still consumed the bitcode but did a lesser job —
+ * link 28.6 s and the produced compiler 4.3% slower than a serial build. With it
+ * on both, the link is 13.5 s and the compiler is at PARITY (0.91 vs 0.92 user
+ * CPU). The whole cost of a part boundary is recovered at the link, but only if
+ * the link is told what it is linking.
+ *
+ * ── The incremental cache is OPT-IN, and measured to be worth little ──
+ * ThinLTO's backend is keyed by MODULE CONTENT, and our parts are balanced by
+ * size: one new function shifts the assignment, so every part's content changes
+ * and every key misses. Measured — cold 35.86 s, one real code change 34.95 s
+ * (i.e. nothing saved), identical source re-linked 22.07 s. It pays only for
+ * rebuilding the SAME source, and it grew 23 MB per distinct build with no bound.
+ * So: off unless `MANTICORE_THINLTO_CACHE` names a directory, and capped when it
+ * does — this repo has run its disk to zero twice already.
+ */
+function thinlto_link_flags(): string {
+    if (thinlto_flags() === '') { return ''; }
+    $dir = \getenv('MANTICORE_THINLTO_CACHE');
+    if ($dir === false || $dir === '' || $dir === '0' || $dir === 'off') { return ' -flto=thin'; }
+    if (is_darwin()) {
+        // Prune on every link, drop entries a day old, and never exceed 5% of
+        // the volume — an uncapped cache is how a build eats a disk.
+        return ' -flto=thin -Wl,-cache_path_lto,' . $dir
+             . ' -Wl,-prune_interval_lto,0 -Wl,-prune_after_lto,86400'
+             . ' -Wl,-max_relative_cache_size_lto,5';
+    }
+    return ' -flto=thin -Wl,--thinlto-cache-dir=' . $dir
+         . ' -Wl,--thinlto-cache-policy=prune_after=24h:cache_size=5%';
 }
 
 function collect_stdlib_extern_decls(): array
@@ -2328,6 +2441,10 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) { $linkExtra = $linkExtra . weak_undef_flags($weak); }
+    // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
+    // cache pays: between self-host generations most modules are unchanged and
+    // their backend output can be reused wholesale.
+    $linkExtra = $linkExtra . thinlto_link_flags();
     // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
