@@ -820,9 +820,9 @@ trait EmitLlvmMemory
         // Self-guarded, so a `Closure` slot holding anything else is untouched.
         elseif ($flavor === 'closure') { $this->rt->needsClosureRc = true; $fn = '@__mir_closure_release'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_release_buf'; }
-        elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
-        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
-        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_cell'; }
+        elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
+        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
         // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
         // retain, so its release gives them back — every time, not only at
         // rc → 0 ({@see collectOwnElemLocals}).

@@ -209,6 +209,28 @@ final class Debug
     public static bool $rcCtorArgTemp = true;
 
     /**
+     * `MANTICORE_RC_SYM_ELEM=1` — every release of an element-owning array
+     * gives one element ref back, not only at rc → 0.
+     *
+     * The arithmetic: element refs are `base + 1 per retain`, and there is
+     * one more release than there are retains. A symmetric release therefore
+     * hands back `retains + 1 = base + retains` — exactly what was taken. Mix
+     * ONE buffer-only release into that chain and its element ref is never
+     * returned: `$this->stmts = $s` retains at element depth while the
+     * caller's local release is buffer-only, so overwriting a `?Block $body`
+     * freed the Block and nothing under it — 1 object where php frees 149,
+     * which is why a build's MIR is 2.5%% reclaimed.
+     *
+     * ON by default; `MANTICORE_RC_SYM_ELEM=0` is the kill switch. The
+     * element-drop epic recorded that making this symmetric turned 5 AOT cases
+     * red — measured before the class drop, the ctor arg temp, `array_merge`'s
+     * element copy and `get_object_vars` were fixed. Re-counted on top of those:
+     * **zero**, suite 1034/1036.
+     */
+    public static bool $rcSymElem = true;
+
+
+    /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
      * buffer address, its length and the RESULTING rc.
      *
@@ -417,6 +439,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
+        $env = \getenv('MANTICORE_RC_SYM_ELEM');
+        if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
         $env = \getenv('MANTICORE_CC_TRACE');
