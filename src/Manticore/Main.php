@@ -760,19 +760,30 @@ function thinlto_flags(): string {
  * CPU). The whole cost of a part boundary is recovered at the link, but only if
  * the link is told what it is linking.
  *
- * ── The incremental cache is OPT-IN, and measured to be worth little ──
- * ThinLTO's backend is keyed by MODULE CONTENT, and our parts are balanced by
- * size: one new function shifts the assignment, so every part's content changes
- * and every key misses. Measured — cold 35.86 s, one real code change 34.95 s
- * (i.e. nothing saved), identical source re-linked 22.07 s. It pays only for
- * rebuilding the SAME source, and it grew 23 MB per distinct build with no bound.
- * So: off unless `MANTICORE_THINLTO_CACHE` names a directory, and capped when it
- * does — this repo has run its disk to zero twice already.
+ * ── The cache directory is ON by default, for a reason that is NOT caching ──
+ * Naming a cache path makes the LINK ITSELF cheaper on a COLD cache, which no
+ * amount of reasoning about cache hits predicts. Controlled A/B, one compiler,
+ * cache wiped before every run, interleaved 2x2:
+ *
+ *   no cache dir   wall 47.83 / 48.09 s   link 25 987 / 26 128 ms   CPU 190 s
+ *   cache dir      wall 35.36 / 35.04 s   link 13 297 / 13 182 ms   CPU 110 s
+ *
+ * Part compilation is unchanged (1674-1701 ms either way), and USER CPU drops
+ * 42% — so this is less total work, not more parallelism. Mechanism unconfirmed;
+ * the likely one is that a cache path makes ld64 spill each backend's output to
+ * disk instead of holding the whole link in memory.
+ *
+ * Its value as an actual CACHE is separately measured and near zero: parts are
+ * balanced by size, so one new function shifts the assignment and every module
+ * key misses (cold 35.86 s, one real change 34.95 s, identical source 22.07 s).
+ * It pays only for re-linking unchanged source. Capped regardless — it grew
+ * 23 MB per distinct build, and this repo has run its disk to zero twice.
  */
 function thinlto_link_flags(): string {
     if (thinlto_flags() === '') { return ''; }
     $dir = \getenv('MANTICORE_THINLTO_CACHE');
-    if ($dir === false || $dir === '' || $dir === '0' || $dir === 'off') { return ' -flto=thin'; }
+    if ($dir === '0' || $dir === 'off') { return ' -flto=thin'; }
+    if ($dir === false || $dir === '') { $dir = '/tmp/manticore_thinlto_cache'; }
     if (is_darwin()) {
         // Prune on every link, drop entries a day old, and never exceed 5% of
         // the volume — an uncapped cache is how a build eats a disk.
