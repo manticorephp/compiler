@@ -86,3 +86,68 @@ is now clear and each step is checkable:
 ⚠ Three earlier attempts to explain this by reading emitter predicates produced
 two no-ops and one masked fix. The rc trace answered it in one run. Build the
 observation before arguing about the mechanism.
+
+---
+
+# Finishing the collector: the safe point, and what it exposed next
+
+## The trigger belongs at an ALLOCATION, not at the buffering site
+
+Draining from `cc_add_root` means running a full mark/scan from inside
+`__mir_rc_release` — the inliner even flattens the two — on a graph that is
+mid-release. It crashed at once:
+
+```
+frame #0  __manticore_cc_children + 4      ← ldr x8,[x8] on a NULL descriptor
+frame #1  __manticore_cc_collect_cycles
+frame #2  __mir_rc_release
+frame #3  __mir_array_release_ownel_cell
+```
+
+Moved to `__mir_alloc_tagged`, which is the safe point php uses for the same
+reason: nothing is half-released and the object being allocated is not yet
+reachable. The `active` guard stays — collection releases children, and a
+release allocates nothing but must not re-enter a running collection.
+
+That crash is gone.
+
+## ⚠ What the collector does next: a double free
+
+With the drain at the allocation and a threshold of 8 on a 3-line file:
+
+```
+stop reason = EXC_BREAKPOINT   libsystem_malloc mfm_free.cold
+frame #1  mfm_free
+frame #2  __mir_rc_release + 88
+frame #3  __mir_array_release_ownel_obj
+frame #4  __mir_drop_958367453006147
+frame #5  __mir_rc_release
+```
+
+libmalloc's own abort: the block is freed twice. The collector frees a white
+object and ordinary rc then releases the same pointer — the surviving references
+were never accounted for.
+
+This is the expected shape for code that has never run: `cc_collect_cycles` had
+exactly one caller (`gc_collect_cycles()`), which nothing invokes, so its
+mark / scan / collect-white phases have never been exercised against a real
+object graph.
+
+## State
+
+- `MANTICORE_AUTO_GC=<threshold>` is default OFF; suite **1031 passed, 0 failed,
+  1033 total** with it off, and the emitted code is unchanged when off.
+- Two failure modes are now characterised and separated: the re-entrancy one is
+  FIXED (safe point), the double free is the collector's own.
+- Smallest reproducer for what remains: `MANTICORE_AUTO_GC=8` on a 3-line file
+  through `dump-ast`. Seconds per iteration.
+
+## The order from here
+
+1. Make the trial-deletion phases balance: an object freed by `collect_white`
+   must be removed from every surviving reference's accounting, and the buffered
+   bit must be cleared exactly once. The malloc abort names the double free
+   precisely, so this is now a debuggable loop rather than a search.
+2. Then threshold 10 000 and re-census — the prediction remains that object
+   reclaim leaves 0.27% for the first time.
+3. Then T6.

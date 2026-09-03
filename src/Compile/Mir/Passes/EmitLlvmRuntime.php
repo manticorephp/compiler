@@ -285,6 +285,32 @@ trait EmitLlvmRuntime
         $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %base, i64 8\n";
+        if (\Compile\Debug::$autoGc && $this->rt->needsCc) {
+            // ⚠ The collection runs HERE, at an allocation, and NOT where the
+            // root is buffered. Triggering it from `cc_add_root` means running a
+            // full mark/scan from INSIDE `__mir_rc_release` — the inliner even
+            // flattens the two — while objects are mid-release and the graph is
+            // transient. That crashed immediately: `cc_children` dereferenced a
+            // null class descriptor, four frames under `__mir_rc_release`.
+            //
+            // An allocation is the safe point php uses for the same reason:
+            // nothing is half-released, and the object being allocated is not
+            // yet reachable. The `active` guard still stands, because collection
+            // frees objects, which allocates nothing but does release children.
+            $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
+            $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+            $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
+            $out .= "gccheck:\n";
+            $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
+            $out .= '  %gchit = icmp sge i64 %gccnt, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
+            $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+            $out .= "gcrun:\n";
+            $out .= "  store i64 1, ptr @__manticore_cc_active\n";
+            $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+            $out .= "  store i64 0, ptr @__manticore_cc_active\n";
+            $out .= "  br label %gcskip\n";
+            $out .= "gcskip:\n";
+        }
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
         // Tagged realloc (vec grow): realloc the BASE (ptr-8), the tag
@@ -2021,34 +2047,19 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %s, ptr %slot\n";
         $out .= "  %cnt1 = add i64 %cnt, 1\n";
         $out .= "  store i64 %cnt1, ptr @__manticore_cc_count\n";
-        if (\Compile\Debug::$autoGc) {
-            // ⚠⚠ THE ROOT BUFFER HAD NO DRAIN. A decrement that leaves rc > 0
-            // buffers the object as a possible cycle root (purple + buffered),
-            // and `__mir_rc_release` then REFUSES to free it at rc 0 because
-            // "the collector owns it". The collector ran only from an explicit
-            // `gc_collect_cycles()`, which nothing in the compiler calls — so
-            // every object retained more than once leaked by construction.
-            // That is 0.27% of objects freed against 96% of arrays (arrays are
-            // not cycle candidates), and 0 of 9.2M `Lexer\Token`.
-            //
-            // php drains the same buffer at a threshold; so do we. The guard is
-            // load-bearing: collection frees objects, which releases their
-            // children, which re-enters here — without it the first collection
-            // recurses.
-            $out .= "  %act = load i64, ptr @__manticore_cc_active\n";
-            $out .= "  %busy = icmp ne i64 %act, 0\n";
-            $out .= "  br i1 %busy, label %done, label %thresh\n";
-            $out .= "thresh:\n";
-            $out .= '  %hit = icmp sge i64 %cnt1, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
-            $out .= "  br i1 %hit, label %docollect, label %done\n";
-            $out .= "docollect:\n";
-            $out .= "  store i64 1, ptr @__manticore_cc_active\n";
-            $out .= "  %ignored = call i64 @__manticore_cc_collect_cycles()\n";
-            $out .= "  store i64 0, ptr @__manticore_cc_active\n";
-            $out .= "  br label %done\n";
-        } else {
-            $out .= "  br label %done\n";
-        }
+        // ⚠⚠ THE ROOT BUFFER HAD NO DRAIN. A decrement that leaves rc > 0 buffers
+        // the object as a possible cycle root (purple + buffered), and
+        // `__mir_rc_release` then REFUSES to free it at rc 0 because "the
+        // collector owns it". The collector ran only from an explicit
+        // `gc_collect_cycles()`, which nothing in the compiler calls — so every
+        // object retained more than once leaked by construction: 0.27% of
+        // objects freed against 96% of arrays (arrays are not cycle
+        // candidates), and 0 of 9.2M `Lexer\Token`.
+        //
+        // The drain lives in `__mir_alloc_tagged`, NOT here: collecting from
+        // this point runs a full mark/scan from inside `__mir_rc_release`, on a
+        // graph that is mid-release. {@see Debug::$autoGc}.
+        $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
 
         // ── per-child action dispatch ──
