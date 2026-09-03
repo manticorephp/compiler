@@ -2853,6 +2853,18 @@ trait EmitLlvmObjects
      *
      * @param array<string, Type> $methods candidate method names => return type
      */
+    private function dynMethodNameHasRefParam(string $method, int $argc): bool
+    {
+        $memo = $method . '/' . (string)$argc;
+        if (isset($this->dynRefParamMemo[$memo])) { return $this->dynRefParamMemo[$memo]; }
+        $hit = $this->dynMethodHasRefParam([$method => true], $argc);
+        $this->dynRefParamMemo[$memo] = $hit;
+        return $hit;
+    }
+
+    /** @var array<string, bool> name/argc => does any candidate take a by-ref param */
+    private array $dynRefParamMemo = [];
+
     private function dynMethodHasRefParam(array $methods, int $argc): bool
     {
         foreach ($methods as $m => $_ignored) {
@@ -3291,21 +3303,53 @@ trait EmitLlvmObjects
         foreach ($iv->args as $a) {
             if ($a->kind === Node::KIND_SPREAD) { $argsOk = false; break; }
         }
-        if ($argsOk && $iv->args !== []) {
-            $argsOk = !$this->dynMethodHasRefParam($methods, \count($iv->args));
+        // ⚠ The by-ref veto is PER NAME, not per site. Keyed at the site it was
+        // useless: ONE class anywhere in the program declaring a by-ref method
+        // disabled the extraction for every erased dynamic call, and with 3 130
+        // Symfony/Doctrine classes such a method certainly exists — the T6
+        // prelude site stayed inline at 1 876 MB with the site-wide test.
+        // (Third instance of this shape: `$hasBag` killed the property-reader
+        // extraction the same way, and the bare-name borrow veto before it.)
+        /** @var array<string, Type> $clean names the shared helper may serve */
+        $clean = [];
+        /** @var array<string, Type> $dirty names that must keep the inline path */
+        $dirty = [];
+        $argc = \count($iv->args);
+        foreach ($methods as $m => $retT) {
+            if ($argc > 0 && $this->dynMethodNameHasRefParam((string)$m, $argc)) {
+                $dirty[$m] = $retT;
+            } else {
+                $clean[$m] = $retT;
+            }
+        }
+        // A dirty remainder means the inline fallback is emitted BELOW the clean
+        // chain, and it re-emits the receiver, the name and the arguments. Only
+        // one of the two runs at runtime, but the operands are emitted twice, so
+        // every one of them must be side-effect free to be evaluated twice. That
+        // is the same reason the receiver is already required to be a local.
+        $reEmitSafe = $nameNode->kind === Node::KIND_LOAD_LOCAL
+            || $nameNode->kind === Node::KIND_STRING_CONST;
+        foreach ($iv->args as $a) {
+            if ($a->kind !== Node::KIND_LOAD_LOCAL && $a->kind !== Node::KIND_STRING_CONST) {
+                $reEmitSafe = false;
+                break;
+            }
         }
         $canExtract = $argsOk
+            && ($dirty === [] || $reEmitSafe)
             && $recv->kind === Node::KIND_LOAD_LOCAL
             && ($recv->type->kind === Type::KIND_CELL
                 || $recv->type->kind === Type::KIND_UNKNOWN
                 || $recv->type->kind === Type::KIND_UNION)
-            && \count($methods) >= 16;
-        if (!$canExtract && \getenv('MANTICORE_DYNM_TRACE') !== false) {
-            \error_log('DYNM no: args=' . (string)\count($iv->args)
+            && \count($clean) >= 16;
+        if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+            \error_log('DYNM ' . ($canExtract ? 'yes' : 'no')
+                . ': args=' . (string)$argc
                 . ' argsOk=' . ($argsOk ? '1' : '0')
+                . ' reEmitSafe=' . ($reEmitSafe ? '1' : '0')
                 . ' recvKind=' . (string)$recv->kind
                 . ' recvType=' . (string)$recv->type->kind
-                . ' methods=' . (string)\count($methods));
+                . ' clean=' . (string)\count($clean) . ' dirty=' . (string)\count($dirty));
         }
         if ($canExtract) {
             $out = $this->emitNode($recv);
@@ -3330,7 +3374,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $res . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $res . "\n";
             $endL = $this->ssa->allocLabel('dynm.end');
-            foreach ($methods as $m => $retT) {
+            foreach ($clean as $m => $retT) {
                 $hitL = $this->ssa->allocLabel('dynm.hit');
                 $nextL = $this->ssa->allocLabel('dynm.next');
                 $cmp = $this->ssa->allocReg();
@@ -3345,6 +3389,13 @@ trait EmitLlvmObjects
                 $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
+            }
+            // No clean name matched. The by-ref names keep the exact inline
+            // dispatcher, over the DIRTY subset only — so one such method in the
+            // program costs its own arm, not the whole site's extraction.
+            if ($dirty !== []) {
+                $out .= $this->emitDynMethodInlineFallback($dp, $iv, $dirty);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             }
             $out .= '  br label %' . $endL . "\n";
             $out .= $endL . ":\n";
