@@ -2185,7 +2185,17 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         $emit->emitLibrary = $emitLibrary;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
         if ($streamIr) { $emit->streamIrPath = $llPath; }
+        // A library's `.sig` is written from $module AFTER emission, but emission
+        // DRAINS $module->functions to release each body as it is emitted. Without
+        // this snapshot Sig walks an empty table and the library ships a 155-byte
+        // `.sig` with ZERO functions and zero classes (classes too: Sig decides what
+        // to export by walking functions first). Dependents then import nothing and
+        // link_stubs quietly stubs every call to 0 — a green-looking build that
+        // reds the suite. Bodies are cleared in place; the signatures Sig reads
+        // survive in the FunctionDef objects, so this keeps no body text alive.
+        $sigFunctions = $emitLibrary ? $module->functions : [];
         $ir = $emit->emit($module);
+        if ($emitLibrary) { $module->functions = $sigFunctions; }
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
         $undefTraps = \array_keys($emit->undefinedCalls);
