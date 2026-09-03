@@ -25,12 +25,23 @@ echo "── Stage 2: bin/manticore compiles src ──"
 bash tools/selfhost.sh bin/manticore /tmp/manticore_g2
 echo "── Stage 3: Stage-2 compiles src ──"
 bash tools/selfhost.sh /tmp/manticore_g2 /tmp/manticore_g3
+echo "── Stage 4: Stage-3 compiles src ──"
+bash tools/selfhost.sh /tmp/manticore_g3 /tmp/manticore_g4
 
-echo "── fixpoint: Stage-2 IR == Stage-3 IR? ──"
-if cmp -s /tmp/manticore_g2.ll /tmp/manticore_g3.ll; then
-    echo "FIXPOINT OK: IR byte-identical across generations"
+# ⚠ Compare Stage-3 against Stage-4, NOT Stage-2 against Stage-3.
+# The fixpoint claim is "a SELF-HOSTED compiler reproduces itself". Stage-2 is
+# built by whatever bin/manticore happens to be — and after `bin/compile`, that
+# is the ZEND SEED, whose emission differs structurally (measured on Linux:
+# g2 64 330 667 B vs g3 57 597 509 B, 368 181 lines apart even modulo SSA
+# numbering). Stage-2 is therefore not yet self-emitted and can never match.
+# g3 == g4 byte-identically, so the property holds one generation later.
+# This passed on macOS only because bin/manticore there is already self-hosted
+# via `bin/build`, which made Stage-2 self-emitted by accident of setup.
+echo "── fixpoint: Stage-3 IR == Stage-4 IR? ──"
+if cmp -s /tmp/manticore_g3.ll /tmp/manticore_g4.ll; then
+    echo "FIXPOINT OK: IR byte-identical across self-hosted generations"
 else
-    echo "FIXPOINT BROKEN: Stage-2 and Stage-3 IR differ" >&2
+    echo "FIXPOINT BROKEN: Stage-3 and Stage-4 IR differ" >&2
     exit 1
 fi
 
@@ -45,7 +56,11 @@ install_binary() {
 }
 
 cp bin/manticore /tmp/manticore_stage1.bak
-install_binary /tmp/manticore_g2 bin/manticore
+# Stage-3, not Stage-2: after a cold `bin/compile` seed, Stage-2 is emitted by the
+# ZEND SEED and is not self-hosted, so running the suite through it does not test
+# what this stage claims to. Stage-3 is the first generation a self-hosted
+# compiler produced, and it is the one the fixpoint above proves stable.
+install_binary /tmp/manticore_g3 bin/manticore
 set +e
 SUITE="$(bash tests/aot/run.sh 2>&1 | tail -1)"
 set -e

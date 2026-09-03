@@ -27,15 +27,23 @@ cd "$ROOT"
 # prelude) and g3 (built by the /tmp stage binary, which can't) diverge.
 export MANTICORE_PRELUDE="$ROOT/prelude"
 
-# The compiler being rebuilt is itself an arena-friendly workload: its transient
-# MIR/LLVM strings and arrays live until the process exits. Use arena for the
-# selfhost compiler by default so macOS malloc cannot retain the churn as huge
-# fragmented zones. This affects only the compiler process below; a later
-# `bin/manticore build ... --memory=rc|hybrid` still chooses the emitted target's
-# memory ABI. Preserve an explicit value for controlled rc/hybrid bootstrap runs.
-if [[ -z "${MANTICORE_MEMORY+x}" ]]; then
-    export MANTICORE_MEMORY=arena
-fi
+# ⚠ DO NOT default MANTICORE_MEMORY here. It was set to `arena` on the belief that
+# it only tuned the compiler PROCESS — the comment said "this affects only the
+# compiler process below". It does not: {@see \Manticore\parse_compile_args} feeds
+# it straight into CompileArgs::$memory, i.e. the EMITTED target's memory mode,
+# and `arena` means "process-wide bump pointer, refcount ops elided".
+#
+# Every self-host generation was therefore built with refcounting elided, and the
+# resulting binary CRASHES: gen-2 segfaults on `--version`, before it parses an
+# argument. Measured — array releases 2804 -> 713, IR 64.33 MB -> 63.50 MB, and
+# the crash follows the BUILD mode, not the run mode (built-arena dies whether or
+# not the env is set at runtime; built-plain survives either way). That is what
+# broke the Linux fixpoint gate, and macOS is no different — it simply had not
+# run the gate. An explicit MANTICORE_MEMORY in the environment is still honoured.
+#
+# The compiler's own default is HYBRID (escape analysis decides per allocation,
+# {@see \Compile\Debug}). Unset and `hybrid` emit byte-identical IR — measured,
+# 64 330 667 B either way — so leaving this alone IS choosing hybrid.
 
 MANTICORE="${1:-bin/manticore}"
 OUT="${2:-bin/manticore_self}"
