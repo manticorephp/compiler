@@ -781,6 +781,11 @@ trait EmitLlvmRuntime
             // must take the rc@+8 path, never write the tag word.
             $out .= "define void @__mir_rc_retain_str(ptr %p) {\n";
             $out .= "entry:\n";
+            if (\Compile\Debug::$ccTrace) {
+                $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+                $out .= "  %sra = call ptr @llvm.returnaddress(i32 0)\n";
+                $out .= $this->ccTrace('sret', 'ptr %p, ptr %sra');
+            }
             $out .= "  %z = icmp eq ptr %p, null\n";
             $out .= "  br i1 %z, label %done, label %hdr\n";
             $out .= "hdr:\n";
@@ -815,6 +820,11 @@ trait EmitLlvmRuntime
             // (no drop_dispatch — a leak is safe; never corrupt the tag).
             $out .= "define void @__mir_rc_release_str(ptr %p) {\n";
             $out .= "entry:\n";
+            if (\Compile\Debug::$ccTrace) {
+                $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+                $out .= "  %srb = call ptr @llvm.returnaddress(i32 0)\n";
+                $out .= $this->ccTrace('srel', 'ptr %p, ptr %srb');
+            }
             $out .= "  %z = icmp eq ptr %p, null\n";
             $out .= "  br i1 %z, label %done, label %hdr\n";
             $out .= "hdr:\n";
@@ -1973,6 +1983,8 @@ trait EmitLlvmRuntime
         'white'   => '[CC] white %p',
         'rel'     => '[RC] rel %p rc=%lld from=%p',
         'ret'     => '[RC] ret %p rc=%lld from=%p',
+        'sret'    => '[SR] ret %p from=%p',
+        'srel'    => '[SR] rel %p from=%p',
     ];
 
     /** The trace's format strings, at module scope (a global cannot sit in a body). */

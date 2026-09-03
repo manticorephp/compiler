@@ -618,7 +618,12 @@ final class InsertMemoryOps implements Pass
             // buffer at `str x8, [x0]` with x0 == 0. An allocation-owned producer
             // (a call's +1) keeps its reference through the same arm, so only the
             // retain-owned one is dropped here.
-            $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS;
+            // An ELEMENT read owns by retain exactly as a property read does
+            // ({@see \Compile\Debug::$rcElemReadOwns}), so it inherits the same
+            // exclusion: the box-back arm returns before the retain, and
+            // claiming ownership there is a release with no matching retain.
+            $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
+                || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS);
             if ($this->isOwnedObj($value) && !($ownedByRetain && $boxedSlot)) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit
