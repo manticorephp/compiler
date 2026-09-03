@@ -221,17 +221,32 @@ final class Debug
     public static bool $arrRcTrace = false;
 
     /**
-     * `MANTICORE_AUTO_GC=1` — drain the cycle-collector root buffer at a
-     * threshold, the way php does.
+     * Drain the cycle-collector root buffer at a threshold, the way php does.
+     * ON by default; `MANTICORE_AUTO_GC=0` (or `off`) disables it, any other
+     * value sets the threshold.
      *
-     * The buffer had NO drain. A decrement leaving rc > 0 buffers the object as
+     * A default is a claim about what a php PROGRAM should do, and php collects
+     * cycles. What kept this off was one defect, not the design: with the
+     * collector running objects finally DIED, and a `get_object_vars()` that had
+     * always given back a reference it never took became a double free instead
+     * of a leak. With that closed the whole corpus passes either way (1032/1034,
+     * 0 failed, same builder), and the collector is worth **-42.5%% RSS /
+     * -49.8%% peak footprint on the FRONT** (`dump-mir`, no clang) for ~6%% more
+     * CPU on a full build; objects reclaimed go from 0.20%% to 33.06%%.
+     *
+     * ⚠ Reclaim still stops well short of everything: a ref held through an
+     * ARRAY element is never trial-deleted, so a cycle closed through an array
+     * is not collected.
+     *
+     * The buffer used to have NO drain at all. A decrement leaving rc > 0
+     * buffers the object as
      * a possible cycle root, and `__mir_rc_release` then refuses to free it at
      * rc 0 because the collector owns it — but the collector only ever ran from
      * an explicit `gc_collect_cycles()`, which the compiler never calls. So
      * every object retained more than once leaked BY CONSTRUCTION: 0.27%% of
      * objects freed against 96%% of arrays, and 0 of 9.2M `Lexer\Token`.
      */
-    public static bool $autoGc = false;
+    public static bool $autoGc = true;
 
     /**
      * `MANTICORE_CC_TRACE=1` — print every object the collector frees and every
@@ -407,7 +422,9 @@ final class Debug
         $env = \getenv('MANTICORE_CC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$ccTrace = true; }
         $env = \getenv('MANTICORE_AUTO_GC');
-        if ($env !== false && $env !== '0' && $env !== '') {
+        if ($env === '0' || $env === 'off') {
+            self::$autoGc = false;
+        } elseif ($env !== false && $env !== '') {
             self::$autoGc = true;
             if (\ctype_digit($env)) { self::$autoGcThreshold = (int)$env; }
         }
