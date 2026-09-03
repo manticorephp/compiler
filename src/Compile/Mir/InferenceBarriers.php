@@ -9,12 +9,18 @@ final class InferenceBarriers
 {
     private array $reasons = [];
     private int $nodes = 0;
+    /** Functions carrying at least one barrier construct. */
+    private array $escapers = [];
+    /** reason => how many functions carry it. */
+    private array $reasonFns = [];
+    private string $fn = '';
 
     public static function scan(Module $module): self
     {
         $out = new self();
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude) { continue; }
+            $out->fn = $fn->name;
             $out->scanNode($fn->body);
         }
         return $out;
@@ -25,7 +31,19 @@ final class InferenceBarriers
     public function reasonCount(): int { return \count($this->reasons); }
     public function reasons(): array { return \array_keys($this->reasons); }
 
-    private function add(string $reason): void { $this->reasons[$reason] = true; }
+    public function escaperCount(): int { return \count($this->escapers); }
+    /** @return array<string, int> */
+    public function reasonFnCounts(): array { return $this->reasonFns; }
+
+    private function add(string $reason): void
+    {
+        $this->reasons[$reason] = true;
+        if ($this->fn === '') { return; }
+        if (!isset($this->escapers[$this->fn])) { $this->escapers[$this->fn] = true; }
+        $key = $reason . '|' . $this->fn;
+        if (isset($this->reasonFns[$key])) { return; }
+        $this->reasonFns[$key] = 1;
+    }
 
     private function scanNode(Node $node): void
     {
