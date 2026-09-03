@@ -407,6 +407,30 @@ trait EmitLlvmLocals
         return $out;
     }
 
+
+    /**
+     * Retain what an ELEMENT READ hands a local, so the local's own release
+     * has something to give back. Paired with the ownership verdict in
+     * {@see \Compile\Mir\Passes\InsertMemoryOps::isOwnedObj} — both halves
+     * ride {@see \Compile\Debug::$rcElemReadOwns}, and shipping one alone is
+     * a leak or a double free.
+     */
+    private function elemReadCoOwn(Node $v): string
+    {
+        if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
+        if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
+        $k = $v->type->kind;
+        if ($k !== Type::KIND_OBJ && $k !== Type::KIND_STRING
+            && $k !== Type::KIND_CELL && $k !== Type::KIND_ARRAY) { return ''; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out = $this->coerceToI64();
+        $out .= $this->rcRetainByType($v, $this->lastValue);
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
+    }
+
     private function emitStoreLocal(StoreLocal $n): string
     {
         $sl = $n;
@@ -606,6 +630,7 @@ trait EmitLlvmLocals
         }
         $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
         // The value just emitted an arena vec → this local owns it, so
         // its `$x[] =` appends must realloc through the arena.
         if ($this->arena->vecAllocated) {

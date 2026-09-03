@@ -417,6 +417,13 @@ final class InsertMemoryOps implements Pass
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return true;
         }
+        // An ELEMENT READ co-owns what it hands out — the emitter retains it in
+        // {@see EmitLlvmLocals::emitStoreLocal}, so the local must release it.
+        // The two are one change: see {@see \Compile\Debug::$rcElemReadOwns}.
+        // Without it `$keep = $m['a']; unset($m);` hands back freed memory.
+        if (\Compile\Debug::$rcElemReadOwns && $k === Node::KIND_ARRAY_ACCESS) {
+            return true;
+        }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
         // allocation — the one producer this pass could not see, because it gates
         // on `effects->alloc`. {@see EmitLlvmLocals::emitStoreLocal}'s snapshot
