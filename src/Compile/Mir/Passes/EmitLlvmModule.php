@@ -1332,7 +1332,14 @@ trait EmitLlvmModule
                   // holds the gigabytes: 9.7M objects, 59.6M strings and 23.6M
                   // arrays are three numbers with no common unit. These give one.
                   'bytes_alloc_obj', 'bytes_alloc_str', 'bytes_alloc_arr',
-                  'bytes_free_str', 'bytes_free_arr'];
+                  'bytes_free_str', 'bytes_free_arr',
+                  // 62-65: why a possible cycle root was NOT buffered. The
+                  // number of tokens a build ever frees is ~375 000 no matter
+                  // whether 0.8M or 2.75M are allocated, which reads as the
+                  // collector SATURATING rather than as one leaking site. These
+                  // four say which arm of `cc_add_root` swallows the rest.
+                  'cc_root_busy', 'cc_root_purple', 'cc_root_buffered',
+                  'cc_root_push'];
         // ONE spelling of the array length: the global, the bump GEP and the
         // dump loop all read it from the name list. They disagreed before — the
         // global was [16 x i64] while the dump indexed it as [14 x i64].

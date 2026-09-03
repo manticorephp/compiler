@@ -2090,7 +2090,10 @@ trait EmitLlvmRuntime
         // during a collection be freed right there, unbuffered.
         $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
         $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
-        $out .= "  br i1 %gcbusy, label %done, label %live\n";
+        $out .= "  br i1 %gcbusy, label %busyc, label %live\n";
+        $out .= "busyc:\n";
+        $out .= $this->profBump(62);
+        $out .= "  br label %done\n";
         $out .= "live:\n";
         $out .= "  %col = call i64 @__cc_color(ptr %s)\n";
         if (\Compile\Debug::$ccTrace) {
@@ -2103,13 +2106,20 @@ trait EmitLlvmRuntime
             $out .= "noact:\n";
         }
         $out .= "  %isp = icmp eq i64 %col, " . $PURPLE . "\n";
-        $out .= "  br i1 %isp, label %done, label %mark\n";
+        $out .= "  br i1 %isp, label %purplec, label %mark\n";
+        $out .= "purplec:\n";
+        $out .= $this->profBump(63);
+        $out .= "  br label %done\n";
         $out .= "mark:\n";
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $PURPLE . ")\n";
         $out .= "  %b = call i64 @__cc_buffered(ptr %s)\n";
         $out .= "  %isb = icmp ne i64 %b, 0\n";
-        $out .= "  br i1 %isb, label %done, label %push\n";
+        $out .= "  br i1 %isb, label %bufc, label %push\n";
+        $out .= "bufc:\n";
+        $out .= $this->profBump(64);
+        $out .= "  br label %done\n";
         $out .= "push:\n";
+        $out .= $this->profBump(65);
         $out .= "  call void @__cc_setbuffered(ptr %s, i64 1)\n";
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %cap = load i64, ptr @__manticore_cc_cap\n";
@@ -2297,6 +2307,33 @@ trait EmitLlvmRuntime
             $out .= "end:\n  ret void\n}\n";
         }
 
+        // ⚠ THE CENSUS CANNOT SEE A COLLECTOR FREE. Its `free` counter is
+        // bumped inside `__mir_drop_<id>`, and `collect_white` does not call
+        // the drop — it recurses over obj children and drops the non-obj
+        // props itself. So every object the collector reclaims counted as
+        // ALLOCATED AND NEVER FREED: a build read 5.4%% freed while
+        // `cc_reclaim` alone said 2 227 854 objects. One id→index switch,
+        // emitted only under the census, closes the blind spot.
+        if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
+            $cf = "define void @__mir_cc_census_free(ptr %s) {\nentry:\n";
+            $cf .= "  %cdesc = load i64, ptr %s\n";
+            $cf .= "  %cdescp = inttoptr i64 %cdesc to ptr\n";
+            $cf .= "  %cid = load i64, ptr %cdescp\n";
+            $cases = ''; $arms = '';
+            $ix = $this->classCensusIndex();
+            foreach ($this->classes as $cn => $cd) {
+                if (!isset($ix[$cn])) { continue; }
+                $lbl = 'cf' . (string)$cd->classId;
+                $cases .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+                $arms .= $lbl . ":\n  call void @__prof_class_free(i64 " . (string)$ix[$cn] . ")\n  br label %cfend\n";
+            }
+            if ($cases === '') { $cf .= "  ret void\n}\n"; }
+            else {
+                $cf .= "  switch i64 %cid, label %cfend [\n" . $cases . "  ]\n" . $arms . "cfend:\n  ret void\n}\n";
+            }
+            $out .= $cf;
+        }
+
         // ── walkers ──
         $out .= "define void @__manticore_cc_mark_gray(ptr %s) {\n";
         $out .= "entry:\n";
@@ -2351,6 +2388,9 @@ trait EmitLlvmRuntime
         $out .= "  br label %done\n";
         $out .= "go:\n";
         $out .= $this->ccTrace('cwfree', 'ptr %s');
+        if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
+            $out .= "  call void @__mir_cc_census_free(ptr %s)\n";
+        }
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $BLACK . ")\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 3)\n";
         $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
