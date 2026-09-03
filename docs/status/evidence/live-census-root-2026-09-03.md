@@ -101,3 +101,66 @@ not a proof — `coOwnedArgFlavor` now tests the callee's flavor too.
 uses (and the same lesson as the `unser_object` fix earlier on this branch: a
 retain discipline has ONE owner). With that in place `MANTICORE_RC_CTOR_ARG`
 can default on, and the census should move for the first time.
+
+---
+
+# Update: the erased copy retain landed, and generics are already read
+
+## `array_merge` fixed (a correctness bug, not a leak)
+
+An ERASED element copy — value cell/unknown INTO a container whose element
+channel is cell/unknown — emitted no retain at all, so the destination kept a
+BORROW. Now it retains through the tag-dispatched `retainCellPayload`, the
+mirror of the `__mir_cell_drop` the release walk already uses on that same
+channel. It is SELF-GUARDED (no NaN tag, small payload, or missing
+RC_TAG_MAGIC ⇒ no-op), so a raw slot is left alone rather than misread.
+
+```
+php:    direct=direct   merged=merged
+before: direct=direct   merged=            ← use-after-free
+after:  direct=direct   merged=merged
+```
+
+With it, `MANTICORE_RC_CTOR_ARG` is default ON: suite **1031 passed, 0 failed,
+1033 total**, and both leak reproducers are balanced (24 000 / 24 000).
+
+## ⚠ Docblock generics are ALREADY read by the compiler
+
+`Analyze\DocType`'s own doc says it is "a faithful port of the compiler's own
+`LowerTypes::docTagType`", and that function is applied to properties (`@var`),
+parameters (`@param`, `@param-out`), returns (`@return`), locals, `@use` and
+`@extends`. Native `array<K,V>` / `T[]` hints work too and are already used in
+`src/` (`Session.php`, `Pcre.php`) and even EMITTED by `Sig.php`.
+
+So the generics MECHANISM is not missing. What is missing is the annotations:
+
+```
+bin/manticore analyze src --only array.no-value-type   →   237 findings
+```
+
+Top files: `Main.php` 31, `LowerFromAst.php` 28, `EmitLlvmBuiltins.php` 21,
+`EmitLlvmFiber.php` 14, `EmitLlvm.php` 14, `EmitLlvmObjects.php` 13.
+
+Each one is a place where the type engine is handed `KIND_UNKNOWN` and every
+ownership decision downstream — retain depth, drop flavor, the co-ownership
+proof — has to fail safe, which means leak. Annotating them is a direct,
+bounded attack on the erased channel, and it needs no compiler change.
+
+## Where the token leak stands
+
+Both token properties now take the element-owning drop:
+
+```
+CLASSDROP Lexer\Lexer::tokens    YES vecobjown
+CLASSDROP Parser\Parser::tokens  YES vecobjown
+```
+
+and the constructor arg temp is released. **Yet the compiler still frees 0 of
+168 705 `Lexer\Token`.** So at least one more holder exists that none of the
+three reproducers models. The real chain is longer than they are: the ctor does
+not store `$tokens`, it COPIES from it into `$filtered` (dropping DocComment
+tokens) and stores that — so a token is referenced by the scan array, by
+`$filtered`, and by `Parser::$tokens`.
+
+That is the next hunt, and it starts from a working instrument rather than a
+guess.

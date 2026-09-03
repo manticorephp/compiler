@@ -1007,6 +1007,20 @@ trait EmitLlvmArrays
      * An UNKNOWN value is raw, and that is the one the element type must cover
      * (`$out[] = $s` off a bare-`array` property, whose caller sees `Node[]`).
      */
+    /** Both ends of this element store are erased: the value carries a cell /
+     *  unknown and the destination's element channel names no type either. Such
+     *  a store copies a WORD whose ownership nobody static can speak for, which
+     *  is precisely when the runtime tag has to. */
+    private function erasedElemCopy(StoreElement $se): bool
+    {
+        $vk = $se->value->type->kind;
+        if ($vk !== Type::KIND_CELL && $vk !== Type::KIND_UNKNOWN) { return false; }
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return true; }
+        $el = $at->element;
+        return $el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
+    }
+
     private function storeRetainFallback(StoreElement $se): ?Type
     {
         if ($se->value->type->kind === Type::KIND_CELL) { return null; }
@@ -1141,7 +1155,29 @@ trait EmitLlvmArrays
         if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
-        $out .= $this->rcRetainByType($se->value, $val, $dcT ?? $this->storeRetainFallback($se), 3);
+        $fallback = $dcT ?? $this->storeRetainFallback($se);
+        $retain = $this->rcRetainByType($se->value, $val, $fallback, 3);
+        if ($retain === '' && $fallback === null && $this->erasedElemCopy($se)) {
+            // An ERASED element COPY: both the value and the destination's
+            // element channel are unknown, so `rcRetainByType` can name no
+            // flavor and emitted NOTHING — the destination kept a BORROW.
+            // `array_merge`'s `foreach ($arr as $k => $v) { $out[$k] = $v; }` is
+            // the shape (its arrays are bare `array` by design, for call-site
+            // element inference), and the merged array's elements were freed
+            // under it the moment the source went away.
+            //
+            // The tag-dispatched retain is the mirror of `__mir_cell_drop`,
+            // which is exactly what the release walk already uses on this same
+            // erased channel. It is SELF-GUARDED — a word with no NaN tag, a
+            // small payload, or no RC_TAG_MAGIC is left alone — so a raw slot
+            // is a no-op rather than a misread.
+            $saved = $this->lastValue;
+            $savedT = $this->lastValueType;
+            $retain = $this->retainCellPayload($se->value);
+            $this->lastValue = $saved;
+            $this->lastValueType = $savedT;
+        }
+        $out .= $retain;
         $this->elemValReg = $val;
         return $out;
     }

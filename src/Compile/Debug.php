@@ -206,7 +206,7 @@ final class Debug
      * same tag-dispatched discipline the bag store already uses; until it lands,
      * this stays off and the leak stays.
      */
-    public static bool $rcCtorArgTemp = false;
+    public static bool $rcCtorArgTemp = true;
 
     /**
      * Memory mode selector:
@@ -361,7 +361,7 @@ final class Debug
         $env = \getenv('MANTICORE_RC_PROP_DROP');
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');
-        if ($env !== false && $env !== '0' && $env !== '') { self::$rcCtorArgTemp = true; }
+        if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
