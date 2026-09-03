@@ -2319,20 +2319,56 @@ final class EmitLlvm implements EmitVisitor
         $this->frame->transferredLocals[$name] = true;
     }
 
-    /** @param Node[] $args */
-    private function shareCallArgs(array $args): void
+    /**
+     * Mark array locals handed to a callee as element-SHARED, so their release
+     * gives back the buffer and not the elements.
+     *
+     * ⚠ The veto is real: where the callee CONSUMES the caller's element refs,
+     * giving them back too is the parser `$args` double-free. But it is not
+     * universal, and keyed at "any argument" it was costing the compiler its
+     * largest live population. A by-VALUE array parameter of a KNOWN callee
+     * takes an ENTRY RETAIN ({@see EmitLlvmMemory::initRcObjSlots}) at exactly
+     * element depth — the callee co-owns, it does not consume — so the caller
+     * must keep its own release or the reference is stranded forever.
+     *
+     * That is the `Lexer::tokenize()` → `new Parser($toks)` chain: three
+     * references (the append's base, the borrowed-return retain, the property
+     * store's retain) against two releases, leaking one ref per token — 168 411
+     * live `Lexer\Token` from ONE compiled file, 64% of the compiler's live
+     * objects, none ever freed.
+     *
+     * Narrowed, never removed. The veto stands wherever the discipline is not
+     * PROVEN: an unknown or builtin callee, a by-REF parameter (whose callee
+     * "co-owns nothing"), a variadic tail, or an argument past the signature.
+     *
+     * @param Node[] $args
+     */
+    private function shareCallArgs(array $args, string $sym = ''): void
     {
+        $callee = $sym !== '' ? ($this->sigs->paramTypes[$sym] ?? null) : null;
+        $refs = $sym !== '' ? ($this->sigs->refParams[$sym] ?? []) : [];
+        $i = 0;
         foreach ($args as $a) {
-            if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                $t = $a->type;
-                if ($t->isVec() || $t->isAssoc()) {
-                    $el = $t->element;
-                    if ($el !== null
-                        && ($el->kind === Type::KIND_OBJ || $el->kind === Type::KIND_STRING)) {
-                        $this->frame->elementSharedLocals[$a->name] = true;
-                    }
-                }
+            $pos = $i;
+            $i = $i + 1;
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $t = $a->type;
+            if (!$t->isVec() && !$t->isAssoc()) { continue; }
+            $el = $t->element;
+            if ($el === null
+                || ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING)) {
+                continue;
             }
+            // Proven co-owning: the callee is known, this position is a real
+            // by-value parameter of it, and its slot is retained on entry.
+            if ($callee !== null && isset($callee[$pos])
+                && !($refs[$pos] ?? false)) {
+                if (\getenv('MANTICORE_OWNEL_TRACE') !== false) {
+                    \error_log('SHARE? $' . $a->name . ' kept (co-owning param ' . (string)$pos . ' of ' . $sym . ')');
+                }
+                continue;
+            }
+            $this->frame->elementSharedLocals[$a->name] = true;
         }
     }
 
@@ -3008,6 +3044,43 @@ final class EmitLlvm implements EmitVisitor
      * element — `current()` etc. — so it is excluded, as is a closure
      * invoke). Mirrors {@see isFreshStringTemp} for the string flavor.
      */
+    /**
+     * The release flavor for a fresh rc ARG TEMP, deepened to element level when
+     * the callee is proven to CO-OWN rather than consume.
+     *
+     * The temp holds the producer's BASE reference, which owns one ref per
+     * element. Releasing it with the plain flavor gives that back only at
+     * rc → 0 — and a callee that stored the value into a property has already
+     * taken rc to 2, so the plain release returns nothing and every element is
+     * stranded. A by-VALUE parameter of a known callee is retained on entry
+     * ({@see EmitLlvmMemory::initRcObjSlots}), which is exactly that proof.
+     *
+     * Unproven cases keep the plain flavor: an unknown signature, a by-REF
+     * parameter (the callee "co-owns nothing"), or a position past the
+     * declaration. One owner for this question, so the ctor / call / method
+     * paths cannot drift apart.
+     *
+     * @param Type[]   $ptypes callee parameter types, `$this` at 0 where present
+     * @param bool[]   $mask   by-ref flags, same indexing
+     */
+    private function coOwnedArgFlavor(string $flavor, array $ptypes, array $mask, int $pos): string
+    {
+        if (!$this->isOwnElemFlavor($flavor)) { return $flavor; }
+        if (!isset($ptypes[$pos]) || ($mask[$pos] ?? false)) { return $flavor; }
+        // ⚠ BOTH ends must carry elements. The entry retain uses the PARAMETER's
+        // own flavor, so a parameter declared as a bare `array` retains in repr
+        // mode and co-owns NOTHING at element depth — the callee holds the
+        // elements only as borrows. Giving one back here then frees a live
+        // object under it: `new Cell('yo', ['style' => new Style('bold')])`
+        // printed an empty string for `$d->style()->n`, caught by
+        // `hetero_prop_default_vs_getter`. A proof checked at one end is not a
+        // proof.
+        if (!$this->isOwnElemFlavor($this->discardReleaseFlavor($ptypes[$pos]))) {
+            return $flavor;
+        }
+        return $flavor . 'own';
+    }
+
     private function freshRcArgFlavor(Node $a): string
     {
         // A normalized conditional is +1 from every arm, so a borrowed-arg temp

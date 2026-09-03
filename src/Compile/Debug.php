@@ -188,6 +188,27 @@ final class Debug
     public static bool $rcPropDrop = true;
 
     /**
+     * `MANTICORE_RC_CTOR_ARG=1` — release a fresh obj / vec / assoc TEMP passed
+     * to a constructor, the way `emitCall` already does for a free function.
+     *
+     * Without it `new Parser((new Lexer())->scan($src))` strands the array's own
+     * reference and one element ref per token, forever: 168 411 live
+     * `Lexer\Token` from ONE compiled file, 64% of the compiler's live objects,
+     * never freed. The census that found it is `[CLASS] idx= alloc= free=`.
+     *
+     * ⚠ OPT-IN, because releasing it correctly EXPOSES a second, older bug it
+     * was masking: `array_merge` copies elements with no retain (its arrays are
+     * bare `array`, so the element channel is erased and `rcRetainByType`
+     * answers '' for a cell), so the merged array holds BORROWS. Freeing the
+     * caller's temp then frees a live object under it — `hetero_prop_default_vs_getter`
+     * prints an empty `$d->style()->n`. The fix for THAT is an erased element
+     * copy retaining through {@see Mir\Passes\EmitLlvm::retainCellPayload}, the
+     * same tag-dispatched discipline the bag store already uses; until it lands,
+     * this stays off and the leak stays.
+     */
+    public static bool $rcCtorArgTemp = false;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -339,6 +360,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemType = false; }
         $env = \getenv('MANTICORE_RC_PROP_DROP');
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
+        $env = \getenv('MANTICORE_RC_CTOR_ARG');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$rcCtorArgTemp = true; }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;

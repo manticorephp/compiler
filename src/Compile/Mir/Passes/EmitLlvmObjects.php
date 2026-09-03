@@ -317,6 +317,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
+            $rcArgRegs = [];
+            $rcArgFlavs = [];
             $cellBoxSlots = [];
             $cellBoxTmps = [];
             $cellBoxTypes = [];
@@ -394,7 +396,21 @@ trait EmitLlvmObjects
                     }
                     $out .= $this->coerceToI64();
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
-                    if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
+                    if ($this->isFreshStringTemp($a)) {
+                        $argTemps[] = $this->lastValue;
+                    } else {
+                        // A fresh obj / vec / assoc temp handed to a CONSTRUCTOR
+                        // was never released: only `emitCall` (free functions)
+                        // did this, so `new Parser((new Lexer())->scan($src))`
+                        // stranded the array's own reference — and with it one
+                        // element ref per token, forever. 168 411 live
+                        // `Lexer\Token` from one compiled file came through here.
+                        $rf = \Compile\Debug::$rcCtorArgTemp ? $this->freshRcArgFlavor($a) : '';
+                        if ($rf !== '') {
+                            $rcArgRegs[] = $this->lastValue;
+                            $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
+                        }
+                    }
                 }
                 $argList .= ', i64 ' . $this->lastValue;
                 $ai = $ai + 1;
@@ -421,6 +437,11 @@ trait EmitLlvmObjects
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
+            $ri = 0;
+            foreach ($rcArgRegs as $rg) {
+                $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
+                $ri = $ri + 1;
+            }
         }
         // Capture the thrown location + call stack into a Throwable at `new`
         // (PHP records these at construction), when the program queries a trace.

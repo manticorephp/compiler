@@ -1712,6 +1712,16 @@ trait EmitLlvmRuntime
             $id = (string)$cls->classId;
             $body = '';
             $i = 0;
+            // The FREE half of the class census. Here rather than at the raw
+            // free: this body is already per-class, so the dense index is a
+            // compile-time constant and no id→index switch is needed — the very
+            // cost that keeps the ALLOC side at the `new` sites.
+            if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
+                $censusIx = $this->classCensusIndex()[$cls->name] ?? -1;
+                if ($censusIx >= 0) {
+                    $body .= '  call void @__prof_class_free(i64 ' . (string)$censusIx . ")\n";
+                }
+            }
             // __destruct runs FIRST (PHP calls it before properties are
             // released), on the most-derived __destruct the class resolves.
             $dtorCls = $this->resolveMethodClass($cls->name, '__destruct');
@@ -1740,7 +1750,12 @@ trait EmitLlvmRuntime
                 $i = $i + 1;
             }
             $dropFld = 'ptr null';
-            if ($i > 0 || $hasDtor) {
+            // ⚠ A class with no rc property and no __destruct normally emits NO
+            // drop body at all. Under the census that would report alloc > 0,
+            // free = 0 and read as a leak for every such class, so the counter
+            // itself is reason enough to emit the body.
+            $censusOnly = ($body !== '' && $i === 0 && !$hasDtor);
+            if ($i > 0 || $hasDtor || $censusOnly) {
                 // Plain define → linkonceRuntime promotes it; coalesces by name.
                 $defs .= 'define void @__mir_drop_' . $id . "(ptr %o) {\nentry:\n"
                     . $body . "  ret void\n}\n";

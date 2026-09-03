@@ -200,14 +200,28 @@ trait EmitLlvmMemory
      * (else its elements leak). A false positive here only leaks (the safe
      * direction); element-drop on a genuinely co-owned buffer would UAF.
      */
+    /** The emitted symbol of `$class`'s constructor, or '' when there is none to
+     *  speak for (no class, no declared `__construct`). '' keeps the veto. */
+    private function ctorSymbolFor(string $class): string
+    {
+        if ($class === '' || !isset($this->classes[$class])) { return ''; }
+        $decl = $this->resolveMethodClass($class, '__construct');
+        if ($decl === '') { return ''; }
+        return $this->lsbTarget($decl, '__construct', $class);
+    }
+
     private function collectElementSharedLocals(Node $n): void
     {
         $k = $n->kind;
         if ($k === Node::KIND_NEW_OBJ) {
-            $this->shareCallArgs($n->args);
+            // The constructor is resolvable from the class, so its parameters'
+            // retain discipline is knowable — which is what lets
+            // {@see EmitLlvm::shareCallArgs} keep the caller's element release
+            // instead of vetoing it blind. `new Parser($toks)` is the shape.
+            $this->shareCallArgs($n->args, $this->ctorSymbolFor($n->class ?? ''));
         } elseif ($n->type->kind === Type::KIND_OBJ) {
             if ($k === Node::KIND_CALL) {
-                $this->shareCallArgs($n->args);
+                $this->shareCallArgs($n->args, $n->function);
             } elseif ($k === Node::KIND_METHOD_CALL) {
                 $this->shareCallArgs($n->args);
             } elseif ($k === Node::KIND_STATIC_CALL) {

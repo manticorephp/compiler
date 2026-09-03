@@ -1415,27 +1415,43 @@ trait EmitLlvmModule
      * the other module must be dropped, never written past the end — the exact
      * trap the 30-slot @__prof array fell into when a 31st counter was added.
      */
-    private function classCensusRuntime(): string
+    /** One bounds-checked `tab[id]++` body. Two tables, one shape — so the alloc
+     *  and free halves cannot drift apart. The bound check is load-bearing: an id
+     *  from another module must be dropped, never written past the end. */
+    private function classCensusBump(string $fn, string $tab, int $n): string
     {
-        $n = $this->classCensusSize();
-        $out  = '@__prof_class_tab = linkonce_odr global [' . (string)$n
-              . " x i64] zeroinitializer\n";
-        $txt = '[CLASS] idx=%lld alloc=%lld';
-        $out .= '@__prof.clsfmt = private unnamed_addr constant ['
-              . (string)(\strlen($txt) + 2) . ' x i8] c"' . $txt . '\\0A\\00"' . "\n";
-        $out .= "define void @__prof_class(i64 %id) {\nentry:\n";
+        $out  = 'define void @' . $fn . "(i64 %id) {\nentry:\n";
         $out .= "  %lo = icmp slt i64 %id, 0\n";
         $out .= '  %hi = icmp sge i64 %id, ' . (string)$n . "\n";
         $out .= "  %bad = or i1 %lo, %hi\n";
         $out .= "  br i1 %bad, label %done, label %ok\n";
         $out .= "ok:\n";
         $out .= '  %p = getelementptr inbounds [' . (string)$n
-              . " x i64], ptr @__prof_class_tab, i64 0, i64 %id\n";
+              . ' x i64], ptr @' . $tab . ", i64 0, i64 %id\n";
         $out .= "  %v = load i64, ptr %p\n";
         $out .= "  %v1 = add i64 %v, 1\n";
         $out .= "  store i64 %v1, ptr %p\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
+        return $out;
+    }
+
+    private function classCensusRuntime(): string
+    {
+        $n = $this->classCensusSize();
+        $out  = '@__prof_class_tab = linkonce_odr global [' . (string)$n
+              . " x i64] zeroinitializer\n";
+        // The FREE half. An allocation census answers "what does this program
+        // churn"; only alloc MINUS free answers "what is still alive at the
+        // peak", which is the question that decides whether a peak is the cost
+        // of holding the program or the cost of not letting go of it.
+        $out .= '@__prof_class_free_tab = linkonce_odr global [' . (string)$n
+              . " x i64] zeroinitializer\n";
+        $txt = '[CLASS] idx=%lld alloc=%lld free=%lld';
+        $out .= '@__prof.clsfmt = private unnamed_addr constant ['
+              . (string)(\strlen($txt) + 2) . ' x i8] c"' . $txt . '\\0A\\00"' . "\n";
+        $out .= $this->classCensusBump('__prof_class', '__prof_class_tab', $n);
+        $out .= $this->classCensusBump('__prof_class_free', '__prof_class_free_tab', $n);
         // The id→name map is a COMPILE-time artifact, not a runtime one: carrying
         // 2800 name strings and their relocations is what blew the object file up.
         // One line per class on stderr, which the harness captures beside the
@@ -1487,8 +1503,11 @@ trait EmitLlvmModule
         $o .= "  %cnz = icmp ne i64 %cav, 0\n";
         $o .= "  br i1 %cnz, label %clsprint, label %clsnext\n";
         $o .= "clsprint:\n";
+        $o .= '  %cfp = getelementptr inbounds [' . $n
+            . " x i64], ptr @__prof_class_free_tab, i64 0, i64 %ci\n";
+        $o .= "  %cfv = load i64, ptr %cfp\n";
         $o .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.clsfmt,"
-            . " i64 %ci, i64 %cav)\n";
+            . " i64 %ci, i64 %cav, i64 %cfv)\n";
         $o .= "  br label %clsnext\n";
         $o .= "clsnext:\n";
         $o .= "  %ci2 = add i64 %ci, 1\n";
