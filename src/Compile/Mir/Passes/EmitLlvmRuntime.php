@@ -305,9 +305,7 @@ trait EmitLlvmRuntime
             $out .= '  %gchit = icmp sge i64 %gccnt, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
             $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
             $out .= "gcrun:\n";
-            $out .= "  store i64 1, ptr @__manticore_cc_active\n";
             $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
-            $out .= "  store i64 0, ptr @__manticore_cc_active\n";
             $out .= "  br label %gcskip\n";
             $out .= "gcskip:\n";
         }
@@ -2074,6 +2072,26 @@ trait EmitLlvmRuntime
         // ── candidate-buffer push (grow x2, min 8) ──
         $out .= "define void @__manticore_cc_add_root(ptr %s) {\n";
         $out .= "entry:\n";
+        // ⚠ NOT WHILE A COLLECTION IS RUNNING — php's `gc_possible_root()`
+        // opens with the same guard. Freeing a white node runs its non-obj
+        // drop, and every array / string property released there can leave
+        // some OTHER object at rc > 0, which lands here. The push goes in
+        // past the `cnt` snapshot this collection is walking, so the entry
+        // is thrown away by the `count = 0` at the end — while the object
+        // KEEPS its buffered bit. `__mir_rc_release` then refuses to free
+        // it at rc 0 forever (the collector "owns" it) and `cc_add_root`
+        // will not re-push it either, since it is already purple. A
+        // permanent leak, and a `__destruct` that php runs and we never
+        // did: two nodes of a dead cycle each holding the same `Leaf` in
+        // an array prop lost it for good.
+        //
+        // Skipping the push costs a cycle root that is rediscovered on the
+        // object's next decrement, and it lets an object that reaches rc 0
+        // during a collection be freed right there, unbuffered.
+        $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+        $out .= "  br i1 %gcbusy, label %done, label %live\n";
+        $out .= "live:\n";
         $out .= "  %col = call i64 @__cc_color(ptr %s)\n";
         if (\Compile\Debug::$ccTrace) {
             $out .= "  %act = load i64, ptr @__manticore_cc_active\n";
@@ -2350,6 +2368,13 @@ trait EmitLlvmRuntime
         // ── gc_collect_cycles(): MarkRoots → ScanRoots → CollectRoots ──
         $out .= "define i64 @__manticore_cc_collect_cycles() {\n";
         $out .= "entry:\n";
+        // ⚠ THE COLLECTION OWNS THIS FLAG, not its callers. It used to be
+        // set around the AUTO trigger in `__mir_alloc_tagged` only, so a
+        // plain `gc_collect_cycles()` — the builtin, which calls straight
+        // in — ran with the flag CLEAR and `cc_add_root` happily buffered
+        // objects mid-phase. One guard at the one entry point, and every
+        // caller is covered.
+        $out .= "  store i64 1, ptr @__manticore_cc_active\n";
         $out .= "  store i64 0, ptr @__manticore_cc_freed\n";
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
@@ -2425,7 +2450,32 @@ trait EmitLlvmRuntime
         $out .= "  %csp = getelementptr ptr, ptr %buf, i64 %ci\n";
         $out .= "  %cs = load ptr, ptr %csp\n";
         $out .= "  call void @__cc_setbuffered(ptr %cs, i64 0)\n";
+        // ⚠ A ROOT CAN DIE WHILE THIS COLLECTION IS RUNNING, and until its
+        // buffered bit came off just above, NOTHING could free it: an
+        // earlier root's `collect_white` drops its array / string props,
+        // and any object those release takes the `free` path in
+        // `__mir_rc_release`, which refuses on a buffered object. Such a
+        // node was SCANNED ALIVE (black), so `collect_white` skips it too,
+        // and it is leaked with its `__destruct` never run — php runs it.
+        // MarkRoots already frees `black && rc == 0` in `mrfree`; this is
+        // the same test at the other end of the same collection.
+        $out .= "  %ccol = call i64 @__cc_color(ptr %cs)\n";
+        $out .= "  %cisbk = icmp eq i64 %ccol, " . $BLACK . "\n";
+        $out .= "  %crcv = call i64 @__cc_rcval(ptr %cs)\n";
+        $out .= "  %crc0 = icmp sle i64 %crcv, 0\n";
+        $out .= "  %cdead = and i1 %cisbk, %crc0\n";
+        $out .= "  br i1 %cdead, label %crfree, label %crwhite\n";
+        $out .= "crfree:\n";
+        $out .= $this->ccTrace('mrfree', 'ptr %cs');
+        $out .= "  call void @__mir_drop_dispatch(ptr %cs)\n";
+        $out .= "  %cfbase = getelementptr i8, ptr %cs, i64 -8\n";
+        $out .= $this->profBump(30);
+        $out .= $this->poolFreeCall('%cfbase');
+        $out .= "  br label %crn\n";
+        $out .= "crwhite:\n";
         $out .= "  call void @__manticore_cc_collect_white(ptr %cs)\n";
+        $out .= "  br label %crn\n";
+        $out .= "crn:\n";
         $out .= "  %cin = add i64 %ci, 1\n";
         $out .= "  store i64 %cin, ptr %ip\n";
         $out .= "  br label %cr\n";
@@ -2434,6 +2484,7 @@ trait EmitLlvmRuntime
         $out .= "  %endbuf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= $this->ccTrace('end', 'i64 %endcnt, ptr %endbuf');
         $out .= "  store i64 0, ptr @__manticore_cc_count\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_active\n";
         $out .= "  %freed = load i64, ptr @__manticore_cc_freed\n";
         $out .= "  ret i64 %freed\n";
         $out .= "}\n";
