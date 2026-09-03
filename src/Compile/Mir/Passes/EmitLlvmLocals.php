@@ -488,6 +488,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
             $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
             $out .= '  store i64 ' . $boxed . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
@@ -506,6 +507,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
             $out .= $this->unboxCellToType($sl->type);
             // A float unboxes to a `double`; the slot is an i64, so put the bits
             // back the way the float-slot plant below does.
@@ -534,6 +536,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
             $out .= $this->coerceToI64();
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
@@ -554,6 +557,7 @@ trait EmitLlvmLocals
         if ($this->needsDeCellify($sl->type, $sl->value->type)
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
             if (isset($this->locals->globalBacked[$sl->name])) {
@@ -600,6 +604,7 @@ trait EmitLlvmLocals
             && $sl->value->type->kind !== Type::KIND_CELL
             && $this->isCellBoxableArg($sl->value->type)) {
             $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
             $out .= $this->boxToCell($sl->value->type);
             $dv = $this->lastValue;
             $addr = $this->ssa->allocReg();
@@ -616,6 +621,7 @@ trait EmitLlvmLocals
             && ($this->needsRefOutCellify($sl->value->type)
                 || $this->refStoreNeedsCellify($sl->name, $sl->value->type))) {
             $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
             $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
             $out .= $this->coerceToI64();
             $dv = $this->lastValue;
@@ -630,6 +636,7 @@ trait EmitLlvmLocals
         }
         $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
+        $out .= $this->elemReadCoOwn($sl->value);
         $out .= $this->elemReadCoOwn($sl->value);
         // The value just emitted an arena vec → this local owns it, so
         // its `$x[] =` appends must realloc through the arena.
