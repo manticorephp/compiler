@@ -240,3 +240,37 @@ established. The promoted-parameter experiment is direct evidence against it:
 where usage inference already recovers the element type, an annotation changes
 nothing. The 237 should be attacked only where a measurement shows the channel
 actually erases.
+
+## Tested: the array-return veto was real, and it was not the leak
+
+`returnRetainsBorrow` now mirrors `isBorrowedObjReturn` for arrays. The two had
+genuinely disagreed — the emitter retains a borrowed ARRAY property read on
+return (`$isArr = isVec() || isAssoc()`), the veto predicate answered only for
+STRING and OBJ — and `storeLocalRetainsProp`'s own doc states what a
+disagreement costs: "either leaks (harmless) or blesses a borrow as owned (a free
+of a live value)".
+
+Result: the `BORROW Lexer\Lexer::tokens <- node kind return` mark is GONE and the
+overwrite now drops. Suite **1031 passed, 0 failed, 1033 total**.
+
+⚠ But the leak is unchanged — `Lexer\Token` is still `alloc=25 free=0`. The only
+counter that moved is `array_release_buf` 10 → 11. The gain is masked by a
+SECOND veto on the same slot: `propElemBorrow`, set by `scan()`'s own
+`$this->tokens[$n - 1]->kind` read-back, which makes the slot's release
+`assocbuf` — buffer only, elements untouched.
+
+Kept anyway, and deliberately: unlike the two reverted changes it repairs an
+invariant the codebase states explicitly, and it is suite-green. It is simply not
+the leak.
+
+## Where to point the next instrument
+
+Both class drops are `vecobjown`, so at rc → 0 the elements WOULD be returned.
+They are not, which means **the token buffer never reaches rc 0**. That is now a
+counting question about one buffer, not a predicate-reading question — every
+predicate on this path has been read and two of them corrected.
+
+The instrument that answers it is a per-BUFFER rc trace (retain/release site +
+resulting rc for one allocation), which does not exist yet. Reading more
+emitter gates will not answer it; three attempts here produced two no-ops and
+one masked fix.

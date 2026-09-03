@@ -2003,6 +2003,16 @@ final class EmitLlvm implements EmitVisitor
             $tk = $t->kind;
         }
         if ($tk === Type::KIND_STRING) { return true; }
+        // ⚠ ARRAY too, and its absence was the whole `Lexer\Token` leak.
+        // {@see EmitLlvmModule::isBorrowedObjReturn} — the code that actually
+        // emits the retain — covers OBJ, STRING and ARRAY alike (`$isArr =
+        // isVec() || isAssoc()`), so `return $this->tokens;` DOES hand the
+        // caller a reference of its own. Answering `false` here made this scan
+        // disagree with the emitter, and {@see storeLocalRetainsProp} states
+        // what a disagreement costs: it either leaks or frees a live value.
+        // This one leaked — one site, `Lexer.php:100`, vetoed the slot and
+        // stranded every token: 9.2M of them on the Doctrine tier.
+        if ($t->isVec() || $t->isAssoc()) { return true; }
         if ($tk !== Type::KIND_OBJ) { return false; }
         // A struct has no rc header and a Closure is a header-less capture
         // record; emitReturn refuses both, so neither is retained and the veto
