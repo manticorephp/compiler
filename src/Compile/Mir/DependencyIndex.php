@@ -7,6 +7,20 @@ final class DependencyIndex
     private array $callers = [];
     private array $functions = [];
     private array $dynamicCallers = [];
+    /** Callees that are not module functions: builtins, FFI bindings, .sig imports. */
+    private array $externCallees = [];
+    /** Bare method name => the functions that dispatch on it. */
+    private array $methodCallers = [];
+    /** Functions containing a `new $cls(...)`, i.e. callers of every constructor. */
+    private array $dynNewCallers = [];
+    /**
+     * A method's own symbol => its bare name.
+     *
+     * Composed from the class table (`Class` ⧺ `__` ⧺ `method`), never split out
+     * of the symbol: `__` is also legal inside a class name, so parsing it back
+     * is ambiguous while composing it is exact.
+     */
+    private array $methodOf = [];
     private array $unknownReasons = [];
     private bool $unknownEscape = false;
 
@@ -19,6 +33,12 @@ final class DependencyIndex
             $functions[$fn->name] = true;
         }
         $index = new self($functions);
+        foreach ($module->classes as $cd) {
+            foreach ($cd->methodNames as $m => $_) {
+                $sym = $cd->name . '__' . $m;
+                if (isset($functions[$sym])) { $index->methodOf[$sym] = $m; }
+            }
+        }
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude) { continue; }
             $index->callees[$fn->name] = [];
@@ -53,6 +73,22 @@ final class DependencyIndex
                 $seen[$caller] = true;
                 $queue[] = $caller;
             }
+            // A changed method is reachable through every site dispatching on its
+            // name, and a changed constructor through every dynamic `new`.
+            $bare = $this->methodOf[$name] ?? '';
+            if ($bare === '') { continue; }
+            foreach (($this->methodCallers[$bare] ?? []) as $caller => $_) {
+                if (isset($seen[$caller])) { continue; }
+                $seen[$caller] = true;
+                $queue[] = $caller;
+            }
+            if ($bare === '__construct') {
+                foreach ($this->dynNewCallers as $caller => $_) {
+                    if (isset($seen[$caller])) { continue; }
+                    $seen[$caller] = true;
+                    $queue[] = $caller;
+                }
+            }
         }
         return $queue;
     }
@@ -65,6 +101,7 @@ final class DependencyIndex
         return $this->invalidate(\array_keys($changes->functions));
     }
     public function dynamicCallerCount(): int { return \count($this->dynamicCallers); }
+    public function externCalleeCount(): int { return \count($this->externCallees); }
     public function unknownReasonCount(): int { return \count($this->unknownReasons); }
 
     private function collect(Node $node, string $caller): void
@@ -76,16 +113,31 @@ final class DependencyIndex
                 $this->callees[$caller][$callee] = true;
                 $this->callers[$callee][$caller] = true;
             } else {
-                $this->dynamicCallers[$caller] = true;
-                $this->unknownEscape = true;
-                $this->unknownReasons['call:' . $callee] = true;
+                // Not a module function, so it is a builtin, an FFI binding or a
+                // symbol imported through a library `.sig`. Invalidation flows
+                // from a CHANGED function to its callers, and none of those can
+                // ever be the changed one — this analysis only mutates functions
+                // it can see. A leaf needs no reverse edge, and treating it as an
+                // unknown escape is what made every real module conservative:
+                // one `strlen()` disabled targeted inference for the whole build.
+                $this->externCallees[$callee] = true;
             }
         }
-        if ($node->kind === Node::KIND_METHOD_CALL
-            || $node->kind === Node::KIND_NEW_DYN_OBJ) {
+        // A dispatch does not make the whole module unanalysable — it makes ONE
+        // edge imprecise. Key it by the method NAME instead: whatever class the
+        // receiver turns out to be, the body reached is some `C::m`, so a change
+        // to any `C::m` can only be observed by a site that calls `m`. That is a
+        // sound over-approximation and a far narrower one than "every function".
+        if ($node->kind === Node::KIND_METHOD_CALL) {
+            /** @var MethodCall_ $node */
+            $this->methodCallers[$node->method][$caller] = true;
             $this->dynamicCallers[$caller] = true;
-            $this->unknownEscape = true;
-            $this->unknownReasons['dispatch:' . $caller] = true;
+        }
+        // `new $cls(...)` reaches an unknown constructor, so it is a caller of
+        // every `__construct` for invalidation purposes — and of nothing else.
+        if ($node->kind === Node::KIND_NEW_DYN_OBJ) {
+            $this->dynNewCallers[$caller] = true;
+            $this->dynamicCallers[$caller] = true;
         }
         foreach (Walk::children($node) as $child) { $this->collect($child, $caller); }
     }

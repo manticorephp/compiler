@@ -104,6 +104,18 @@ final class NarrowReturns implements Pass
             \Compile\Stats::bump('narrow.rounds', 1);
             if (!$changed) { break; }
             $inferT = \Compile\Stats::now();
+            // Report the closure this round WOULD infer over, whether or not the
+            // scope is actually applied. Nothing measured this before, which is
+            // why nobody noticed the targeted mode never engaged: a single method
+            // call anywhere in the module made every round conservative.
+            if ($this->analysis !== null) {
+                \Compile\Stats::line('  narrow scope: changed='
+                    . (string)\count($this->analysis->changes->functions)
+                    . ' would-target=' . (string)\count($this->analysis->invalidated())
+                    . ' of ' . (string)\count($module->functions)
+                    . ' | escapers=' . (string)$this->analysis->barriers->escaperCount()
+                    . ' fallback=' . ($this->analysis->isConservativeFallback() ? 'yes' : 'no'));
+            }
             $scope = ($this->targetedInfer && $this->analysis !== null)
                 ? $this->analysis->scope() : null;
             $infer = new InferTypes($scope);
