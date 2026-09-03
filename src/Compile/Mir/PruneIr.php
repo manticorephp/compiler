@@ -65,6 +65,8 @@ final class PruneIr
     public int $dropped = 0;
     /** Definitions kept by the last {@see run}. */
     public int $kept = 0;
+    /** Bytes the last {@see runFile} sweep removed. */
+    public int $droppedBytes = 0;
 
     /**
      * @param string $ir the complete module text (preamble ⧺ bodies)
@@ -164,6 +166,199 @@ final class PruneIr
             $out[] = $lines[$i];
         }
         return \implode("\n", $out);
+    }
+
+    /**
+     * The staged path's ceiling, far above {@see MAX_INPUT_BYTES}.
+     *
+     * That 64 MiB cap exists because {@see run} explodes the module into lines
+     * and rebuilds it — several full-text copies at once. This path holds only
+     * the index, so the memory argument does not apply and the real cost is one
+     * extra read plus one write. The cap that remains is about I/O: Symfony Tier
+     * 4 emits ~1.8 GiB of IR for 73 discardable helpers, where copying the file
+     * twice to save clang 73 bodies is plainly the wrong trade.
+     */
+    public const MAX_FILE_BYTES = 512 * 1024 * 1024;
+
+    /** Whether pruning a staged module file is worth its two passes. */
+    public static function shouldRunFile(int $bytes): bool
+    {
+        return $bytes <= self::MAX_FILE_BYTES;
+    }
+
+    /**
+     * Prune a STAGED module file, writing the result to $tmpPath.
+     *
+     * Same mark-and-sweep as {@see run}, addressed by byte offsets instead of
+     * line indices, so the module is never resident. The sweep is the reason
+     * this is cheap: dropping a definition means NOT copying its byte range, so
+     * the output is the input minus those ranges — nothing is reconstructed and
+     * the preamble, globals and declares pass through untouched.
+     *
+     * Streaming made this pass dead code: `EmitLlvm::emit` returns the staged
+     * marker before it ever reaches the pruner, so every manifest build has been
+     * handing clang the discardable helpers it could have dropped.
+     *
+     * @return bool false on an I/O failure; true otherwise, with $this->dropped
+     *              telling the caller whether $tmpPath was actually written
+     */
+    public function runFile(string $path, string $tmpPath): bool
+    {
+        $in = \Manticore\fopen($path, 'rb');
+        $cap = 1048576;
+        $buf = \Manticore\malloc($cap);
+
+        /** @var string[] */
+        $defName = [];
+        /** @var bool[] */
+        $defDrop = [];
+        /** @var int[] */
+        $defOff = [];
+        /** @var int[] */
+        $defEnd = [];
+        /** @var array<string, array<string, bool>> */
+        $defRefs = [];
+        /** @var array<string, int> */
+        $index = [];
+        /** @var array<string, bool> */
+        $roots = [];
+
+        $pos = 0;
+        $cur = -1;
+        /** @var array<string, bool> */
+        $refs = [];
+        while (true) {
+            $p = \Manticore\fgets($buf, $cap, $in);
+            if ($p === 0) { break; }
+            $line = \cstr_to_str($p);
+            $n = \strlen($line);
+            $bare = \rtrim($line, "\n");
+            $isDefine = \strlen($bare) > 7 && $bare[0] === 'd' && \substr($bare, 0, 7) === 'define ';
+            if ($cur >= 0) {
+                if (\rtrim($bare) === '}') {
+                    $pos = $pos + $n;
+                    $defEnd[$cur] = $pos;
+                    $defRefs[$defName[$cur]] = $refs;
+                    $refs = [];
+                    $cur = -1;
+                    continue;
+                }
+                // A define that never closed would swallow every later one and
+                // silently disable the sweep. Close it at the next header.
+                if (!$isDefine) {
+                    $this->collectRefs($bare, $refs);
+                    $pos = $pos + $n;
+                    continue;
+                }
+                $defEnd[$cur] = $pos;
+                $defRefs[$defName[$cur]] = $refs;
+                $refs = [];
+                $cur = -1;
+            }
+            if ($isDefine) {
+                $sym = $this->defineSymbol($bare);
+                if ($sym === '') { $pos = $pos + $n; continue; }
+                $k = \count($defName);
+                $defName[] = $sym;
+                $defDrop[] = \strpos($bare, ' linkonce_odr ') !== false;
+                $defOff[] = $pos;
+                $defEnd[] = $pos + $n;
+                $index[$sym] = $k;
+                $refs = [];
+                $this->collectRefs($bare, $refs);
+                $cur = $k;
+                $pos = $pos + $n;
+                continue;
+            }
+            if ($bare !== '' && $bare[0] === '@') { $this->collectRefs($bare, $roots); }
+            $pos = $pos + $n;
+        }
+        $total = $pos;
+        $count = \count($defName);
+        $this->dropped = 0;
+        $this->kept = 0;
+        $this->droppedBytes = 0;
+        if ($count === 0) {
+            \Manticore\free($buf);
+            \Manticore\fclose($in);
+            return true;
+        }
+
+        /** @var string[] */
+        $work = [];
+        /** @var array<string, bool> */
+        $live = [];
+        for ($k = 0; $k < $count; $k = $k + 1) {
+            if (!$defDrop[$k]) { $work[] = $defName[$k]; }
+        }
+        foreach ($roots as $sym => $_) { $work[] = $sym; }
+        while ($work !== []) {
+            $sym = \array_pop($work);
+            if (isset($live[$sym])) { continue; }
+            $live[$sym] = true;
+            if (!isset($defRefs[$sym])) { continue; }
+            foreach ($defRefs[$sym] as $r => $_) {
+                if (!isset($live[$r])) { $work[] = $r; }
+            }
+        }
+
+        /** @var int[] */
+        $cutOff = [];
+        /** @var int[] */
+        $cutEnd = [];
+        for ($k = 0; $k < $count; $k = $k + 1) {
+            if (!$defDrop[$k] || isset($live[$defName[$k]])) { $this->kept = $this->kept + 1; continue; }
+            $this->dropped = $this->dropped + 1;
+            $cutOff[] = $defOff[$k];
+            $cutEnd[] = $defEnd[$k];
+            $this->droppedBytes = $this->droppedBytes + ($defEnd[$k] - $defOff[$k]);
+        }
+        if ($this->dropped === 0) {
+            \Manticore\free($buf);
+            \Manticore\fclose($in);
+            return true;
+        }
+
+        // Definitions were indexed in file order, so the cut ranges already are.
+        $out = \Manticore\fopen($tmpPath, 'wb');
+        $at = 0;
+        $nCut = \count($cutOff);
+        for ($k = 0; $k < $nCut; $k = $k + 1) {
+            if ($cutOff[$k] > $at
+                && !$this->copySpan($in, $out, $buf, $cap, $at, $cutOff[$k] - $at)) {
+                \Manticore\fclose($out);
+                \Manticore\free($buf);
+                \Manticore\fclose($in);
+                return false;
+            }
+            $at = $cutEnd[$k];
+        }
+        if ($total > $at && !$this->copySpan($in, $out, $buf, $cap, $at, $total - $at)) {
+            \Manticore\fclose($out);
+            \Manticore\free($buf);
+            \Manticore\fclose($in);
+            return false;
+        }
+        \Manticore\fclose($out);
+        \Manticore\free($buf);
+        \Manticore\fclose($in);
+        return true;
+    }
+
+    /** Copy $len bytes at $off from $in to $out through the shared buffer. */
+    private function copySpan(\Ffi\Ptr $in, \Ffi\Ptr $out, \Ffi\Ptr $buf, int $cap,
+                              int $off, int $len): bool
+    {
+        if (\Manticore\fseek($in, $off, 0) !== 0) { return false; }
+        $left = $len;
+        while ($left > 0) {
+            $want = $left < $cap ? $left : $cap;
+            $got = \Manticore\fread($buf, 1, $want, $in);
+            if ($got <= 0) { return false; }
+            if (\Manticore\fwrite_buf($buf, 1, $got, $out) !== $got) { return false; }
+            $left = $left - $got;
+        }
+        return true;
     }
 
     /**
