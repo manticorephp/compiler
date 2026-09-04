@@ -271,32 +271,28 @@ final class Debug
      * Which ELEMENT KINDS {@see $rcElemSlotDrop} may drop — `MANTICORE_ELEM_DROP_KINDS`
      * overrides, and an empty value means ALL.
      *
-     * `str` is OUT of the default and that is a KNOWN OPEN BUG, not caution:
-     * a compiler built with string-element drops MISCOMPILES — it emits a
-     * second, plain-linkage copy of a runtime helper past the end of the
-     * module (`invalid redefinition of function '__mir_str_canon_int'`), which
-     * reddens 29 AOT cases (reflection, unser_*, destruct). obj and arr are
-     * each green on a two-generation self-build; str alone reproduces the
-     * whole cluster. Repro:
-     *
-     *   MANTICORE_ELEM_DROP_KINDS=str bin/build && bin/build
-     *   bin/manticore compile tests/aot/cases/cell_local_destruct.php -o /tmp/x
-     *
-     * The front is clean (`dump-ast` / `dump-mir` are byte-identical), so the
-     * corruption is in EmitLlvm's TEXT assembly, downstream of MIR.
+     * `str` was OUT of the default for a while: a compiler built with string
+     * element drops emitted a second, plain-linkage copy of a runtime helper
+     * past the end of the module (`invalid redefinition of function
+     * '__mir_str_canon_int'`) and reddened 29 AOT cases. That was never a
+     * codegen bug — it was `EmitLlvm::drainLazyHelpers` reading IR text out of
+     * a slot this drop had just freed, because a `foreach` handed the loop
+     * variable a BORROW. {@see $rcForeachValueOwns} closes that, and the two
+     * ship together: `str` needs it, and turning it off REQUIRES dropping
+     * `str` from this list again.
      */
-    public static string $elemDropKinds = 'obj,arr';
+    public static string $elemDropKinds = 'obj,arr,str';
 
     /**
      * A `foreach` VALUE var CO-OWNS what the loop hands it.
      *
-     * ⛔ OFF by default — `MANTICORE_RC_FOREACH_VALUE_OWNS=1` opts in. The
-     * DIVERGENCE below is real and reproducible (`probe/fe2.php`, `fe3.php`),
-     * but every version of the retain written so far builds a compiler that
-     * SIGSEGVs in `Walk::children` from a recursive scan — `InferScans::
-     * spreadElemOrigin` with the per-name veto in place, `scanByRefCaptureNode`
-     * without it. A cold seed with this OFF and string element drops ON is
-     * GREEN, so the two are independent: this is the open half.
+     * ON by default — `MANTICORE_RC_FOREACH_VALUE_OWNS=0` turns it off, and
+     * doing so means dropping `str` from {@see $elemDropKinds} in the same
+     * breath. Two earlier attempts built a compiler that SIGSEGVd in
+     * `Walk::children` from a recursive scan, because the pass registered an
+     * owner per NAME while the emitter decided per SITE; the emitter now reads
+     * the pass's answer instead of re-deriving it, and the divergence probe
+     * (`tools/prof/foreach_borrow_uaf.php`, ~3 s, no self-build) matches php.
      * php gives the loop variable a VALUE (rc++), so `foreach ($m as $k => $v)
      * { $m[$k] = ''; use($v); }` keeps $v intact. We handed out a pure BORROW of
      * the element word, which was harmless only while nothing ever dropped an
@@ -313,7 +309,7 @@ final class Debug
      * Traversable or an erased carrier classifies at RUNTIME and the two halves
      * could not agree about it.
      */
-    public static bool $rcForeachValueOwns = false;
+    public static bool $rcForeachValueOwns = true;
 
     /**
      * Compact tombstones instead of growing, when `tomb * $tombRatio >= len`.
@@ -549,7 +545,8 @@ final class Debug
         $env = \getenv('MANTICORE_RC_ELEM_SLOT_DROP');
         if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
         $env = \getenv('MANTICORE_RC_FOREACH_VALUE_OWNS');
-        if ($env !== false && $env !== '0' && $env !== '' && $env !== 'off') { self::$rcForeachValueOwns = true; }
+        if ($env === '0' || $env === 'off') { self::$rcForeachValueOwns = false; }
+        elseif ($env !== false && $env !== '') { self::$rcForeachValueOwns = true; }
         $env = \getenv('MANTICORE_TOMB_RATIO');
         if ($env !== false && $env !== '') { self::$tombRatio = (int)$env; }
         $env = \getenv('MANTICORE_FE_ONLY');
