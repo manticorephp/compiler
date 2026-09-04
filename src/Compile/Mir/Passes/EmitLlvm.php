@@ -3045,6 +3045,18 @@ final class EmitLlvm implements EmitVisitor
         if ($el === null) { return ''; }
         $k = $el->kind;
         if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_CELL) { return ''; }
+        // Which element KINDS may drop — `obj,arr` by default, because a
+        // compiler built with STRING-element drops miscompiles itself
+        // ({@see \Compile\Debug::$elemDropKinds} carries the repro). Also the
+        // bisect hook that attributed the cluster to one flavor in three
+        // builds instead of three branches.
+        $only = \Compile\Debug::$elemDropKinds;
+        if ($only !== '') {
+            $tag = $k === Type::KIND_OBJ ? 'obj'
+                : ($k === Type::KIND_STRING ? 'str'
+                : ($k === Type::KIND_ARRAY ? 'arr' : 'other'));
+            if (!\str_contains($only, $tag)) { return ''; }
+        }
         return $this->discardReleaseFlavor($el);
     }
 

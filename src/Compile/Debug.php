@@ -267,6 +267,26 @@ final class Debug
      */
     public static bool $rcElemSlotDrop = true;
 
+    /**
+     * Which ELEMENT KINDS {@see $rcElemSlotDrop} may drop — `MANTICORE_ELEM_DROP_KINDS`
+     * overrides, and an empty value means ALL.
+     *
+     * `str` is OUT of the default and that is a KNOWN OPEN BUG, not caution:
+     * a compiler built with string-element drops MISCOMPILES — it emits a
+     * second, plain-linkage copy of a runtime helper past the end of the
+     * module (`invalid redefinition of function '__mir_str_canon_int'`), which
+     * reddens 29 AOT cases (reflection, unser_*, destruct). obj and arr are
+     * each green on a two-generation self-build; str alone reproduces the
+     * whole cluster. Repro:
+     *
+     *   MANTICORE_ELEM_DROP_KINDS=str bin/build && bin/build
+     *   bin/manticore compile tests/aot/cases/cell_local_destruct.php -o /tmp/x
+     *
+     * The front is clean (`dump-ast` / `dump-mir` are byte-identical), so the
+     * corruption is in EmitLlvm's TEXT assembly, downstream of MIR.
+     */
+    public static string $elemDropKinds = 'obj,arr';
+
 
     /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
@@ -481,6 +501,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemReadOwns = false; }
         $env = \getenv('MANTICORE_RC_ELEM_SLOT_DROP');
         if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
+        $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
+        if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
