@@ -866,30 +866,58 @@ trait EmitLlvmControl
         return $out;
     }
 
-    /** Does this foreach's body `unset()` an element of the very local it walks?
-     *  Syntactic and deliberately narrow — the snapshot copy it triggers costs
-     *  an allocation, so only the shape that actually needs it pays. */
-    private function foreachBodyUnsetsBase(Foreach_ $fe): bool
+    /** Does this foreach's body MUTATE the very local it walks — `unset()`, an
+     *  element store, an append, a by-ref builtin, a reference taken into it?
+     *  Every one of those can RELOCATE the entry buffer under the walk (a grow
+     *  reallocs, an unset promotes packed → hashed, a full buffer with holes
+     *  compacts), and php's by-value foreach iterates a SNAPSHOT anyway.
+     *  Syntactic and deliberately narrow — the copy it triggers costs an
+     *  allocation, so only the shape that actually needs it pays. A BY-REF
+     *  foreach writes back through the element addresses, so it must keep
+     *  walking the real buffer and never takes the copy. */
+    private function foreachBodyMutatesBase(Foreach_ $fe): bool
     {
+        if ($fe->byRef) { return false; }
         if ($fe->array->kind !== Node::KIND_LOAD_LOCAL) { return false; }
-        return $this->nodeUnsetsLocalElem($fe->body, $fe->array->name);
+        return $this->nodeMutatesLocalElem($fe->body, $fe->array->name);
     }
 
-    private function nodeUnsetsLocalElem(Node $n, string $name): bool
+    /** The mutation shapes of {@see EmitLlvmMemory::collectMutatedVecs}, asked
+     *  of ONE name: the two scans must agree about what "mutates an array" is. */
+    private function nodeMutatesLocalElem(Node $n, string $name): bool
     {
         if ($n->kind === Node::KIND_UNSET) {
             foreach ($n->targets as $t) {
-                if ($t->kind === Node::KIND_ARRAY_ACCESS
-                    && $t->array->kind === Node::KIND_LOAD_LOCAL
-                    && $t->array->name === $name) {
-                    return true;
-                }
+                if ($this->elemRootIs($t, $name)) { return true; }
             }
         }
+        if ($n->kind === Node::KIND_STORE_ELEMENT && $this->elemRootIs($n->array, $name, true)) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_REF_ADDR && $this->elemRootIs($n->lvalue, $name)) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_CALL && \count($n->args) > 0
+            && $this->mutatesArg0($n->function)
+            && $this->elemRootIs($n->args[0], $name, true)) {
+            return true;
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
-            if ($this->nodeUnsetsLocalElem($c, $name)) { return true; }
+            if ($this->nodeMutatesLocalElem($c, $name)) { return true; }
         }
         return false;
+    }
+
+    /** Is `$n` an element chain (or, with `$bare`, the local itself) rooted at
+     *  the local `$name`? `$a[0][1]` roots at `$a` — a nested store relocates
+     *  the outer buffer too. */
+    private function elemRootIs(Node $n, string $name, bool $bare = false): bool
+    {
+        $base = $n;
+        $depth = 0;
+        while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; $depth++; }
+        if (!$bare && $depth === 0) { return false; }
+        return $base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name;
     }
 
     /**
@@ -1031,7 +1059,7 @@ trait EmitLlvmControl
         // walking the freed base. Copy up front for this shape only; the copy
         // is a bounded leak (conservative direction — never free a buffer the
         // body may still hand out).
-        if ($this->foreachBodyUnsetsBase($fe)) {
+        if ($this->foreachBodyMutatesBase($fe)) {
             $snap = $this->ssa->allocReg();
             $out .= '  ' . $snap . ' = call ptr @__mir_array_copy(ptr ' . $arr . ")\n";
             $arr = $snap;
