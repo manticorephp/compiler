@@ -1983,12 +1983,21 @@ final class EmitLlvm implements EmitVisitor
             return;
         }
         if ($this->isCallLike($k)) {
+            // A callee CAN keep what it is handed, so a call operand is a
+            // borrow by default. The exception is a builtin that provably
+            // reads its argument and keeps nothing: `strlen($this->buf)` is
+            // the single most common property read there is, and it alone
+            // vetoed `Buffer\ByteBuffer::buf` for the whole program.
+            // A NAME list, like {@see EmitLlvmMemory::mutatesArg0} — the
+            // contract is php's, not our implementation's.
+            $pureArg = $k === Node::KIND_CALL && $this->callKeepsNoArg($parent->function);
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c->kind === Node::KIND_PROPERTY_ACCESS
                     && ($c->type->isArray()
                         || $this->slotIsArrayHinted($c->object, $c->property, $c->type))) {
                     continue;
                 }
+                if ($pureArg) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand');
             }
             return;
@@ -2008,6 +2017,27 @@ final class EmitLlvm implements EmitVisitor
                 && $this->returnRetainsBorrow($rv)) {
                 return;
             }
+        }
+        // ★★★ An operand CONSUMED INSIDE THE EXPRESSION cannot outlive the
+        // store. `$this->buf = $this->buf . $s`, `$this->block === ''`,
+        // `strlen($this->buf) - $this->pos` — every one of these reads the
+        // bytes and keeps nothing, yet each vetoed the slot for the whole
+        // class, so an overwritten string property was NEVER released. That is
+        // 1806 B per request in `http_parse`: 345.8 MB of its 362 MB peak.
+        //
+        // The shape the veto exists for is a read that ESCAPES the statement —
+        // `$s = $o->buf; $o->set(…); return $s;` — and those are STORE_LOCAL /
+        // RETURN / a container store / a call that may retain, every one of
+        // which is handled above or falls through to the default arm below.
+        // Arithmetic, comparison, concat and the bitwise operators produce a
+        // FRESH value from the bytes; none of them can hold the pointer.
+        if ($k === Node::KIND_CONCAT || $k === Node::KIND_CMP
+            || $k === Node::KIND_ADD || $k === Node::KIND_SUB
+            || $k === Node::KIND_MUL || $k === Node::KIND_DIV
+            || $k === Node::KIND_MOD || $k === Node::KIND_NEG
+            || $k === Node::KIND_NOT || $k === Node::KIND_BITOP
+            || $k === Node::KIND_BITNOT || $k === Node::KIND_ISSET) {
+            return;
         }
         foreach (\Compile\Mir\Walk::children($parent) as $c) {
             $this->markPropBorrowsIn($c, 'node kind ' . (string)$k);
@@ -2101,6 +2131,41 @@ final class EmitLlvm implements EmitVisitor
         }
         if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
         if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
+        return false;
+    }
+
+    /**
+     * Whether this builtin READS its arguments and keeps nothing — so a
+     * property read handed to it cannot outlive the call and must not veto the
+     * slot's release ({@see markPropBorrowsIn}).
+     *
+     * A NAME list on purpose, exactly like {@see EmitLlvmMemory::mutatesArg0}:
+     * the contract is php's, not our implementation's, and a name belongs here
+     * only when php's own semantics say the callee cannot retain the argument.
+     * Anything absent stays a borrow, so the conservative direction is a leak.
+     */
+    private function callKeepsNoArg(string $fn): bool
+    {
+        $p = \strrpos($fn, chr(92));
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        foreach ([
+            'strlen', 'mb_strlen', 'count', 'sizeof', 'ord', 'trim', 'ltrim', 'rtrim',
+            'strtolower', 'strtoupper', 'ucfirst', 'lcfirst', 'strrev', 'md5', 'sha1',
+            'crc32', 'intval', 'floatval', 'boolval', 'strval', 'is_string', 'is_int',
+            'is_float', 'is_bool', 'is_array', 'is_object', 'is_null', 'is_numeric',
+            'is_callable', 'is_iterable', 'is_scalar', 'strpos', 'stripos', 'strrpos',
+            'str_contains', 'str_starts_with', 'str_ends_with', 'substr_count',
+            'number_format', 'dechex', 'hexdec', 'decbin', 'bindec', 'decoct', 'octdec',
+            'abs', 'floor', 'ceil', 'round', 'sqrt', 'intdiv', 'json_last_error',
+            // These ALLOCATE their result — verified at the runtime body:
+            // `__mir_substr` / `__mir_str_repeat` have a single `ret` of a fresh
+            // `__mir_str_alloc` buffer and can never hand back the argument. A
+            // name whose fast path returns its input UNCHANGED must NOT be here:
+            // the result would alias the property and outlive the store.
+            'substr', 'mb_substr', 'str_repeat',
+        ] as $n) {
+            if ($n === $bare) { return true; }
+        }
         return false;
     }
 

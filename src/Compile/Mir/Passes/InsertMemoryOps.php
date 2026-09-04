@@ -592,10 +592,24 @@ final class InsertMemoryOps implements Pass
     private function refinesElement(Type $old, Type $new): bool
     {
         if (!\Compile\Debug::$rcElemType) { return false; }
-        if ($old->kind !== $new->kind) { return false; }
-        if (!($old->isVec() && $new->isVec()) && !($old->isAssoc() && $new->isAssoc())) {
-            return false;
-        }
+        // ★★★ vec → assoc IS still a deepening, not a redirect. `$l = [];` types
+        // the local `vec[unknown]` and pins the release flavor there
+        // first-write-wins; the very next store, `$l = f();`, is
+        // `assoc[string,string]` — a different SHAPE, so this refused, and the
+        // slot kept the plain repr-driven release for the rest of the function.
+        // The buffer it then dropped carried only a shape HINT and no ownership
+        // repr, so every key and every value of every array the loop built
+        // leaked: 780 B per iteration, 149 MB where php is flat at 28
+        // (`tools/prof/propleak.php arrlocal`). `$x = []` before a loop is
+        // ubiquitous, which is why this one predicate is worth the note.
+        //
+        // Safe on the pass's own terms: a vec and an assoc are ONE buffer type
+        // (packed vs hashed is a runtime flag) and both release through the same
+        // `__mir_array_release*` family, so the flavor deepens rather than moves.
+        // The old element must still be UNKNOWN — the old release therefore drops
+        // nothing but the buffer — so the upgrade can only ADD drops, and on the
+        // empty literal that pinned the name those drops walk zero elements.
+        if (!$old->isArray() || !$new->isArray()) { return false; }
         $oe = $old->element;
         $ne = $new->element;
         if ($oe === null || $ne === null) { return false; }
