@@ -2200,7 +2200,8 @@ final class EmitLlvm implements EmitVisitor
                 $guard = 0;
                 while ($cur !== '' && $guard < 256) {
                     if ($cur === $root) { $family[$name] = $cd; break; }
-                    $cur = $this->classes[$cur]->parent ?? '';
+                    $cur = isset($this->classes[$cur])
+                    ? ($this->classes[$cur]->parent ?? '') : '';
                     $guard = $guard + 1;
                 }
             }
@@ -2246,7 +2247,8 @@ final class EmitLlvm implements EmitVisitor
             $guard = 0;
             while ($cur !== '' && $guard < 256) {
                 if ($cur === $cls) { return true; }
-                $cur = $this->classes[$cur]->parent ?? '';
+                $cur = isset($this->classes[$cur])
+                    ? ($this->classes[$cur]->parent ?? '') : '';
                 $guard = $guard + 1;
             }
         }
