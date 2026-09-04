@@ -899,7 +899,7 @@ trait EmitLlvmControl
      */
     private function foreachValueOwns(Foreach_ $fe): bool
     {
-        if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums)) { return false; }
+        if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums, $this->classes)) { return false; }
         // …and the NAME must be co-owned by every foreach that binds it, or this
         // loop's +1 pays for another loop's borrow ({@see InsertMemoryOps::
         // foreachOwnVetoes} — `scanByRefCaptureNode`'s two `$c` loops are the
@@ -908,7 +908,7 @@ trait EmitLlvmControl
         $body = $this->frame->body;
         if ($body !== null && $this->feVetoBody !== $body) {
             $this->feVetoBody = $body;
-            $this->feVeto = InsertMemoryOps::foreachOwnVetoes($body, $this->enums);
+            $this->feVeto = InsertMemoryOps::foreachOwnVetoes($body, $this->enums, $this->classes);
         }
         return !isset($this->feVeto[$fe->valueVar]);
     }
@@ -1095,7 +1095,20 @@ trait EmitLlvmControl
         // and php's rule that `$v` survives the loop is untouched (the slot is
         // written before the body ever reads it).
         if ($this->foreachValueOwns($fe)) {
-            $out .= '  store i64 0, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+            // RELEASE, then zero. A second loop over the same NAME arrives here
+            // with the first loop's last element still held at +1 (the
+            // per-iteration drop only ever gives back the PREVIOUS one), and
+            // zeroing alone stranded it — one leaked ref per loop, which is
+            // exactly what `InferScans::scanByRefCaptureNode`'s two `$c` loops
+            // do on every node of every function.
+            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
+            $slot = $this->locals->slots[$fe->valueVar];
+            if ($fvFlavor !== '') {
+                $stale = $this->ssa->allocReg();
+                $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
+                $out .= $this->rcReleaseReg($stale, $fvFlavor);
+            }
+            $out .= '  store i64 0, ptr ' . $slot . "\n";
         }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";

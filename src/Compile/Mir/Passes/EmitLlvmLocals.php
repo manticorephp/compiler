@@ -420,7 +420,7 @@ trait EmitLlvmLocals
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
         // The SAME predicate the pass half decides on — one condition, two halves.
-        if (!InsertMemoryOps::elemReadCoOwns($v->type, $this->enums)) { return ''; }
+        if (!InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes)) { return ''; }
         $sv = $this->lastValue;
         $st = $this->lastValueType;
         $out = $this->coerceToI64();

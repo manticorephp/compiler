@@ -139,7 +139,7 @@ final class InsertMemoryOps implements Pass
         // binding it does ({@see foreachOwnVetoes}). Computed BEFORE the walk,
         // because the arm that registers a name runs before the later loop that
         // would veto it.
-        $this->feOwnVeto = self::foreachOwnVetoes($fn->body, $this->enums);
+        $this->feOwnVeto = self::foreachOwnVetoes($fn->body, $this->enums, $this->classes);
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -354,7 +354,7 @@ final class InsertMemoryOps implements Pass
      *
      * @param array<string, mixed> $enums enum name → def; enum values are non-rc
      */
-    public static function elemReadCoOwns(?Type $t, array $enums): bool
+    public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
     {
         if ($t === null) { return false; }
         if ($t->isVec() || $t->isAssoc()) { return true; }
@@ -368,7 +368,29 @@ final class InsertMemoryOps implements Pass
         if ($t->kind === Type::KIND_STRING) { return true; }
         if ($t->kind === Type::KIND_OBJ) {
             $c = $t->class ?? '';
-            return !($c !== '' && isset($enums[$c]));
+            if ($c === '') { return true; }
+            // ★★★ REFUSE EXACTLY WHAT THE RETAIN MACHINERY REFUSES. This used to
+            // exclude enums ALONE, while the emitter's half takes its +1 through
+            // {@see EmitLlvmMemory::rcRetainByType}, which SILENTLY returns ''
+            // for a closure, a `#[Struct]`, an `Ffi\Ptr` and a `Generator` too.
+            // Agreeing with itself is not enough — a predicate that says "owned"
+            // where the retain emits nothing leaves the pass's scope-exit
+            // release with NOTHING to balance it, and these are precisely the
+            // records with NO rc header, so the decrement lands in the
+            // allocator's own metadata. The corruption then surfaces anywhere
+            // (a SIGSEGV in `Walk::children` on a Node that was fine), and
+            // never as an rc<=0 abort, because the word being decremented is
+            // not a refcount at all.
+            if (isset($enums[$c])) { return false; }
+            if ($c === 'Ffi\\Ptr') { return false; }
+            if ($c === 'Closure' || \str_starts_with($c, '__closure_')) { return false; }
+            // A Generator retains through the STRING rc path and would be
+            // released through the object one — a flavor disagreement of the
+            // same family [[rc-flavor-disagreement]]. Left out entirely.
+            if ($c === 'Generator') { return false; }
+            $cd = $classes[$c] ?? null;
+            if ($cd !== null && $cd->isStruct) { return false; }
+            return true;
         }
         return false;
     }
@@ -388,13 +410,13 @@ final class InsertMemoryOps implements Pass
      *
      * @param array<string, mixed> $enums enum name → def; enum values are non-rc
      */
-    public static function foreachValueCoOwns(\Compile\Mir\Foreach_ $fe, array $enums): bool
+    public static function foreachValueCoOwns(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): bool
     {
         if (!\Compile\Debug::$rcForeachValueOwns) { return false; }
         if ($fe->byRef) { return false; }
         $at = $fe->array->type;
         if (!$at->isVec() && !$at->isAssoc()) { return false; }
-        return self::elemReadCoOwns($at->element, $enums);
+        return self::elemReadCoOwns($at->element, $enums, $classes);
     }
 
     /**
@@ -417,21 +439,21 @@ final class InsertMemoryOps implements Pass
      * @param array<string, mixed> $enums
      * @return array<string, bool> name → vetoed
      */
-    public static function foreachOwnVetoes(Node $body, array $enums): array
+    public static function foreachOwnVetoes(Node $body, array $enums, array $classes = []): array
     {
         $veto = [];
-        self::collectForeachVetoes($body, $enums, $veto);
+        self::collectForeachVetoes($body, $enums, $classes, $veto);
         return $veto;
     }
 
     /** @param array<string, bool> $veto */
-    private static function collectForeachVetoes(Node $n, array $enums, array &$veto): void
+    private static function collectForeachVetoes(Node $n, array $enums, array $classes, array &$veto): void
     {
         if ($n->kind === Node::KIND_FOREACH) {
             $fe = $n;
-            if (!self::foreachValueCoOwns($fe, $enums)) { $veto[$fe->valueVar] = true; }
+            if (!self::foreachValueCoOwns($fe, $enums, $classes)) { $veto[$fe->valueVar] = true; }
         }
-        foreach (Walk::children($n) as $c) { self::collectForeachVetoes($c, $enums, $veto); }
+        foreach (Walk::children($n) as $c) { self::collectForeachVetoes($c, $enums, $classes, $veto); }
     }
 
     private function isOwnedObj(Node $value): bool
@@ -520,7 +542,7 @@ final class InsertMemoryOps implements Pass
         // on a name and leave a retain with no release — the extra `dtor elem`
         // php never runs. {@see EmitLlvmLocals::elemReadCoOwn} is the other half.
         if (\Compile\Debug::$rcElemReadOwns && $k === Node::KIND_ARRAY_ACCESS
-            && self::elemReadCoOwns($value->type, $this->enums)) {
+            && self::elemReadCoOwns($value->type, $this->enums, $this->classes)) {
             return true;
         }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
@@ -692,7 +714,7 @@ final class InsertMemoryOps implements Pass
             // reason is gone and the release is the other half of it
             // ({@see foreachValueCoOwns}). Registered at the ELEMENT's type —
             // depth follows the DESTINATION slot, never the container.
-            $feOwns = self::foreachValueCoOwns($fe, $this->enums)
+            $feOwns = self::foreachValueCoOwns($fe, $this->enums, $this->classes)
                 && !isset($this->feOwnVeto[$fe->valueVar]);
             if ($feOwns) {
                 $et = $fe->array->type->element;
