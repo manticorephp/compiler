@@ -897,6 +897,23 @@ final class EmitLlvm implements EmitVisitor
         } else {
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);
+            // The SAME helper maps the streamed branch drains above. They used
+            // to be drained only there, so a module small enough not to stream
+            // emitted every lazily-generated helper's CALL and none of their
+            // BODIES: `sapi_ctx_two_tasks` referenced 103 `__mc_dyn_method0_*`
+            // helpers and defined 0, and clang rejected the module with "use of
+            // undefined value". Hoisting is applied to the joined IR below, so
+            // these need no per-body hoist pass of their own.
+            foreach ($this->propertyReadHelpers as $helperName => $helperBody) {
+                $functionBodyChunks[] = $helperBody;
+                $bodyBytes += \strlen($helperBody);
+                unset($this->propertyReadHelpers[$helperName]);
+            }
+            foreach ($this->dynamicMethodHelpers as $helperName => $helperBody) {
+                $functionBodyChunks[] = $helperBody;
+                $bodyBytes += \strlen($helperBody);
+                unset($this->dynamicMethodHelpers[$helperName]);
+            }
             \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
