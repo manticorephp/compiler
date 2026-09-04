@@ -2126,6 +2126,13 @@ trait EmitLlvmModule
             && isset($this->frame->rcObjLocals[$returnedLocal])) {
             return false; // transfer of an owned local
         }
+        // A normalized conditional is +1 from whichever arm ran — the same
+        // sentence {@see isBorrowedObjReturn} has always carried, and the cell
+        // half was missing it. `: string|false` returning `$c ? substr(…) : false`
+        // is THE union idiom, and every call of one leaked its whole payload:
+        // the arm's fresh +1, plus this retain, against the caller's single
+        // drop. 12.3 → 43.8 MB over 200k→800k calls, flat once the retain goes.
+        if ($this->condOwnsResult($v)) { return false; }
         return true;
     }
 
