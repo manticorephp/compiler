@@ -177,7 +177,7 @@ else
     printf '%s\n' "-------------------------------------------------------------------"
 fi
 
-total=0; faster=0
+total=0; faster=0; diffs=0; diffnames=""
 for f in "$cases_dir"/*.php; do
     name="$(basename "$f" .php)"
     [ -n "$filter" ] && [[ "$name" != *"$filter"* ]] && continue
@@ -207,6 +207,7 @@ for f in "$cases_dir"/*.php; do
     p_out="$("$php_bin" "$f" 2>/dev/null)"
     if [ "$n_out" != "$p_out" ]; then
         printf '%-20s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "DIFF"
+        diffs=$((diffs + 1)); diffnames="$diffnames $name"
         continue
     fi
 
@@ -225,3 +226,10 @@ for f in "$cases_dir"/*.php; do
 done
 printf '%s\n' "-------------------------------------------------------------------"
 echo "ran $total · native faster on $faster · php $($php_bin -r 'echo PHP_VERSION;')"
+# A parity DIFF is a WRONG ANSWER, not a slow one. It used to print in a column
+# and exit 0, so `json_objects` sat there returning false from every
+# json_encode($object) for as long as the row existed. Fail the run instead.
+if [ "$diffs" -gt 0 ]; then
+    printf '\nPARITY FAILURES (%d):%s\n' "$diffs" "$diffnames" >&2
+    exit 1
+fi
