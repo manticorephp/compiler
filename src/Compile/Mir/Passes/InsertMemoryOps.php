@@ -538,7 +538,8 @@ final class InsertMemoryOps implements Pass
         // it did not see allocated.
         if ($k === Node::KIND_CAST && $value->type->kind === Type::KIND_STRING) {
             $ok = $value->operand->type->kind;
-            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT;
+            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_CELL;
         }
         // A call transfers a +1 owned ref (the return convention) for
         // any flavor (incl. string builtins: substr / strtolower / …).

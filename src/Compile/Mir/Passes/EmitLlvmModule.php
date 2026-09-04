@@ -2164,6 +2164,20 @@ trait EmitLlvmModule
         // circuit here so the convention reads clearly.)
         if ($tk === Type::KIND_STRING
             && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return false; }
+        // …and so is a `(string)` cast of an int or a float: __mir_int_to_str /
+        // __mir_float_to_str mint a fresh rc=1 buffer. Judged a BORROW, the
+        // return took a second retain and the caller's single release left it at
+        // rc 1 — `return (string)$v;` leaked EVERY string it ever produced, which
+        // is `__mc_json_enc`'s int arm and 100% of that walker's scalar output.
+        // Third of the three predicates that have to agree about a cast:
+        // {@see Passes\InsertMemoryOps::isOwnedObj} schedules the local's
+        // release, {@see EmitLlvm::isFreshStringTemp} frees a fresh argument,
+        // and this one decides the RETURN convention.
+        if ($tk === Type::KIND_STRING && $k === Node::KIND_CAST) {
+            $ok = $v->operand->type->kind;
+            if ($ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_CELL) { return false; }
+        }
         if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
             && isset($this->frame->rcObjLocals[$returnedLocal])) {
             return false; // transfer of an owned local

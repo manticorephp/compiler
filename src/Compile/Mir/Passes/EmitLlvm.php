@@ -2996,7 +2996,8 @@ final class EmitLlvm implements EmitVisitor
         // returns the raw payload, both borrows: only int and float allocate.
         if ($k === Node::KIND_CAST) {
             $ok = $node->operand->type->kind;
-            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT;
+            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_CELL;
         }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
