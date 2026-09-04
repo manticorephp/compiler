@@ -4270,6 +4270,21 @@ trait EmitLlvmObjects
                     $out .= $this->emitNode($aa->index);
                     $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                     $key = $this->lastValue;
+                    // `unset($a[$k])` takes the slot's value away and, until
+                    // now, released nothing — the array analogue of the
+                    // overwrite leak ({@see \Compile\Debug::$rcElemSlotDrop}).
+                    // Read the word BEFORE the helper removes the entry; drop it
+                    // after, so the array never observes a freed element.
+                    $dropFlavor = $this->elemSlotDropFlavor($aa->array->type);
+                    $curE = '';
+                    if ($dropFlavor !== '') {
+                        $curE = $this->ssa->allocReg();
+                        $getFn = $keyIsCell ? '@__mir_array_get_cell'
+                            : ($keyIsString ? '@__mir_array_get_str' : '@__mir_array_get_int');
+                        $out .= '  ' . $curE . ' = call i64 ' . $getFn . '(ptr ' . $arrPtr . ', '
+                              . ($keyIsString ? 'ptr ' : 'i64 ') . $key
+                              . ($keyIsString ? $this->litKeyHashArgs($aa->index) : '') . ")\n";
+                    }
                     if ($keyIsCell) {
                         $this->rt->needsCellKey = true;
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
@@ -4296,6 +4311,7 @@ trait EmitLlvmObjects
                     if ($keyIsCell || $keyIsString) {
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
+                    if ($dropFlavor !== '') { $out .= $this->rcReleaseReg($curE, $dropFlavor); }
                 }
             }
             // Property overloading: `unset($obj->undeclaredProp)` on a class

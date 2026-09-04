@@ -242,6 +242,12 @@ final class EmitLlvm implements EmitVisitor
     // that pattern miscompiles under self-host ({@see cellTagIr}).
     private string $elemValReg = '';
 
+    /** The `i1` saying the last element store wrote THROUGH a reference cell
+     *  ({@see EmitLlvmArrays::emitElemWriteThrough}), '' when that path is not
+     *  live. A store that wrote through displaced nothing at the SLOT, so the
+     *  slot drop must skip it. */
+    private string $elemWroteThroughRef = '';
+
     // Out-slot for {@see magicMatchIr}: the IR computing the `ptr-8` magic test.
     private string $magicMatchOut = '';
 
@@ -3009,6 +3015,37 @@ final class EmitLlvm implements EmitVisitor
             return 'assoc';
         }
         return '';
+    }
+
+    /**
+     * The flavor with which an ELEMENT SLOT of `$arrType` releases the value an
+     * overwrite or an `unset` takes off it — the array analogue of
+     * {@see EmitLlvmObjects::propSlotDropsOldValue}, '' when nothing may drop.
+     *
+     * The slot owns what it holds: every element store retains the value it
+     * writes ({@see EmitLlvmArrays::emitStoreElemValue}), so the reference the
+     * slot loses is one the slot itself took. That is the whole argument, and it
+     * is why the answer is read off the CONTAINER's element type and never off
+     * the value being written — depth follows the DESTINATION.
+     *
+     * Refused, deliberately:
+     *  - a base that is not a proven vec/assoc (a `cell` / erased base carries
+     *    no element type we may trust);
+     *  - an UNKNOWN element — the erased channel is not self-describing, and
+     *    the repr nibble it does carry is stamped only by the stores that erase;
+     *  - a CELL element — `cell` is a static CLAIM, not a runtime guarantee, so
+     *    `__mir_cell_drop` would dispatch on bits that may be a bare address
+     *    (the same refusal the property slot drop makes).
+     */
+    private function elemSlotDropFlavor(Type $arrType): string
+    {
+        if (!\Compile\Debug::$rcElemSlotDrop) { return ''; }
+        if (!$arrType->isVec() && !$arrType->isAssoc()) { return ''; }
+        $el = $arrType->element;
+        if ($el === null) { return ''; }
+        $k = $el->kind;
+        if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_CELL) { return ''; }
+        return $this->discardReleaseFlavor($el);
     }
 
     /**

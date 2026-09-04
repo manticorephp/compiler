@@ -437,6 +437,21 @@ trait EmitLlvmMemory
                 $this->frame->mutatedVecLocals[$base->name] = true;
             }
         }
+        // `unset($a[$k])` REMOVES an entry — a mutation of `$a` exactly like a
+        // store, and it was the one lvalue shape this scan did not see. So
+        // `$b = $a; unset($a['x']);` never took the copy and the unset removed
+        // the entry from `$b` as well (php: `$b` keeps it). Same root-walk as
+        // the store arm: `unset($x[0][1])` mutates `$x`.
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach ($n->targets as $t) {
+                if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
+                $base = $t;
+                while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
+                if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
+                    $this->frame->mutatedVecLocals[$base->name] = true;
+                }
+            }
+        }
         // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
         // or passed as a call argument that may be by-ref) can mutate the vec —
         // mark it so a prior `$b = $a` copy-on-assigns instead of sharing the

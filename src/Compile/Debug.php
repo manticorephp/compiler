@@ -248,6 +248,25 @@ final class Debug
      */
     public static bool $rcElemReadOwns = true;
 
+    /**
+     * The element SLOT releases the value an overwrite or an unset takes off it.
+     *
+     * ON by default; `MANTICORE_RC_ELEM_SLOT_DROP=0` is the kill switch.
+     * `$a[$k] = $new` and `unset($a[$k])` retained the new value and dropped
+     * NOTHING, so every value an array ever displaced was immortal — the array
+     * analogue of the property leak {@see $rcPropDrop} closed.
+     *
+     * Its PRECONDITION is {@see $rcElemReadOwns}: while an element read was a
+     * pure borrow, a local could still point at what the slot was about to
+     * free, and this drop would have been a use-after-free. The two ship as one
+     * ladder — turning the read back into a borrow REQUIRES turning this off.
+     *
+     * Gated on a slot whose element type NAMES an rc flavor
+     * ({@see EmitLlvm::elemSlotDropFlavor}); an erased or cell element is left
+     * alone, because `cell` is a static CLAIM and not a runtime guarantee.
+     */
+    public static bool $rcElemSlotDrop = true;
+
 
     /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
@@ -460,6 +479,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_READ_OWNS');
         if ($env === '0' || $env === 'off') { self::$rcElemReadOwns = false; }
+        $env = \getenv('MANTICORE_RC_ELEM_SLOT_DROP');
+        if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
