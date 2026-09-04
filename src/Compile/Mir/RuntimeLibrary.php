@@ -980,9 +980,18 @@ final class RuntimeLibrary
         $out .= "  ret i64 %sl\n";
         $out .= "ret:\n  ret i64 %l\n}\n";
 
+        // A new LENGTH invalidates the cached hash. The header carries an FNV at
+        // -32 that lookups trust (hashPrefilter skips a byte compare when two
+        // known hashes differ), and a string mutated IN PLACE — which is the
+        // whole point of __mir_str_append — kept the hash of its shorter self.
+        // A stale hash makes the filter answer NOT EQUAL for two identical
+        // strings: a lookup MISS, not a slow path. 0 means \"uncomputed\"
+        // everywhere, so one store restores the invariant.
         $out .= "\ndefine void @__mir_str_set_len(ptr %s, i64 %n) {\nentry:\n";
         $out .= "  %lp = getelementptr inbounds i8, ptr %s, i64 -16\n";
         $out .= "  store i64 %n, ptr %lp\n";
+        $out .= "  %hp = getelementptr inbounds i8, ptr %s, i64 -32\n";
+        $out .= "  store i64 0, ptr %hp\n";
         $out .= "  ret void\n}\n";
 
         $nH     = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
