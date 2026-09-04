@@ -661,6 +661,13 @@ trait EmitLlvmObjects
             $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$bo . "\n";
             $out .= '  store i64 ' . $bv . ', ptr ' . $dg . "\n";
+            // Two objects now name ONE bag, so the alias takes a reference: the
+            // class drop releases the bag ({@see EmitLlvmRuntime::
+            // dropRuntimeBody}) and without this the second drop would free a
+            // buffer the first already returned.
+            $bp = $this->ssa->allocReg();
+            $out .= '  ' . $bp . ' = inttoptr i64 ' . $bv . " to ptr\n";
+            $out .= '  call void @__mir_array_retain(ptr ' . $bp . ")\n";
         }
         // __clone() hook on the fresh copy.
         $cloneCls = $this->resolveMethodClass($cls, '__clone');

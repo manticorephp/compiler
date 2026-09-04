@@ -3217,6 +3217,42 @@ final class EmitLlvm implements EmitVisitor
         return $out . $this->rcReleaseReg($v, $flavor);
     }
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */
+    /**
+     * A fresh, OWNED cell temp — the cell twin of {@see isFreshStringTemp}.
+     *
+     * The +1 return convention covers cells: `EmitLlvmModule::emitReturn`
+     * retains a BORROWED cell payload before handing it back (both the
+     * boxing arm and the already-a-cell arm), for the stated reason that the
+     * caller may `__mir_cell_drop` a discarded result. So a call result IS the
+     * caller's to drop — the evidence is the one {@see
+     * EmitLlvmCalls::emitDiscardedCallRelease} already trusts: a user body was
+     * called (a name in paramTypes), and it does not return by reference.
+     *
+     * A BUILTIN result is not owned in general (many hand back a borrowed
+     * element), so only the emitters that provably MINT their result are named.
+     */
+    private function isFreshCellTemp(Node $n): bool
+    {
+        if ($n->type->kind !== Type::KIND_CELL) { return false; }
+        $k = $n->kind;
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        if ($k !== Node::KIND_CALL) { return false; }
+        $fn = $n->function;
+        // `json_encode` boxes a buffer `__mir_json_enc` just allocated;
+        // `json_decode` boxes the value its parser just built. Both are fresh
+        // whichever path ran — the native builtin (flags 0) and the stdlib body
+        // alike — so the name answers for both.
+        if ($fn === 'json_encode' || $fn === 'json_decode') { return true; }
+        if ($this->lastCallWasBuiltin) { return false; }
+        return isset($this->sigs->paramTypes[$fn])
+            && !($this->sigs->returnsByRef[$fn] ?? false);
+    }
+
+    /** The tagged cell of the last {@see EmitLlvmBuiltins::emitPtrArg} operand
+     *  when it was a fresh temp, '' otherwise. Read IMMEDIATELY after the call,
+     *  like `lastValue`. */
+    private string $ptrArgCell = '';
+
     private function freeStrTemp(Node $node, string $ptr): string
     {
         if (!$this->isFreshStringTemp($node)) { return ''; }
@@ -3570,6 +3606,11 @@ final class EmitLlvm implements EmitVisitor
             $cf = $this->condFlavor($a->type);
             return $cf === 'cell' ? '' : $cf;
         }
+        // A cell CALL result is owned by the caller under the same +1 return
+        // convention ({@see isFreshCellTemp}); `f(json_encode($v))` leaked the
+        // whole document. `__mir_cell_drop` dispatches on the tag, so a `false`
+        // or an int payload is a no-op.
+        if ($this->isFreshCellTemp($a)) { return 'cell'; }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;

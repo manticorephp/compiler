@@ -4552,7 +4552,12 @@ trait EmitLlvmExpr
         // print nothing, matching PHP echo.
         if ($kind === Type::KIND_CELL) {
             $out .= $this->coerceToI64();
-            return $out . $this->emitEchoCellIr($this->lastValue);
+            $cv = $this->lastValue;
+            $out .= $this->emitEchoCellIr($cv);
+            // `echo json_encode($v);` — a fresh cell temp is dead once printed,
+            // the same sentence the string arm below has always carried.
+            if ($this->isFreshCellTemp($e)) { $out .= $this->rcReleaseReg($cv, 'cell'); }
+            return $out;
         }
         // An ERASED operand may carry a boxed cell or a raw i64, and the
         // integer render at the bottom printed the tagged word itself —

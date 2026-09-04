@@ -1812,6 +1812,22 @@ trait EmitLlvmRuntime
                 $body .= '  call void ' . $rel . '(ptr %p' . $s . ")\n";
                 $i = $i + 1;
             }
+            // ★ The DYNAMIC-PROPERTY BAG is a slot like any other, but it is not
+            // in propertyNames, so the loop above never saw it and no `$o->dyn =
+            // …` object ever gave its bag back: 215 B an object, every stdClass
+            // json_decode builds. It is an assoc of cells stamped
+            // ARRAY_REPR_CELL whose stores retain the payload, so release_cell
+            // is its partner — element-walking at rc → 0 only, which is what
+            // lets `clone` share the pointer (it retains, {@see
+            // EmitLlvmObjects::emitClone}). Null-safe: the bag is null until the
+            // first dynamic store and the helper self-guards.
+            if ($cls->usesBag()) {
+                $body .= '  %bg = getelementptr i8, ptr %o, i64 ' . (string)$cls->bagOffset() . "\n";
+                $body .= "  %bv = load i64, ptr %bg\n";
+                $body .= "  %bp = inttoptr i64 %bv to ptr\n";
+                $body .= "  call void @__mir_array_release_cell(ptr %bp)\n";
+                $i = $i + 1;
+            }
             $dropFld = 'ptr null';
             // ⚠ A class with no rc property and no __destruct normally emits NO
             // drop body at all. Under the census that would report alloc > 0,

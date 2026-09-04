@@ -1144,6 +1144,15 @@ trait EmitLlvmBuiltins
     private function emitPtrArg(Node $arg): string
     {
         $out = $this->emitNode($arg);
+        // Keep the TAGGED word of a fresh cell temp: the payload pointer below
+        // cannot be released on its own (a `string|false` result may carry a
+        // boxed bool, whose untagged word is not an address). The consumer
+        // reads this immediately, like lastValue.
+        $this->ptrArgCell = '';
+        if ($this->isFreshCellTemp($arg)) {
+            $out .= $this->coerceToI64();
+            $this->ptrArgCell = $this->lastValue;
+        }
         if ($arg->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
         } elseif ($arg->type->kind === Type::KIND_UNKNOWN) {
@@ -1894,9 +1903,12 @@ trait EmitLlvmBuiltins
         // reach a string only via str_from_buffer / cstr_to_str).
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
+        $c0 = $this->ptrArgCell;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_strlen(ptr ' . $a0 . ")\n";
         $out .= $this->freeStrTemp($args[0], $a0);
+        // `strlen(json_encode($rows))` — the cell twin of the line above.
+        if ($c0 !== '') { $out .= $this->rcReleaseReg($c0, 'cell'); }
         return $this->finishI64($out, $reg);
     }
 
