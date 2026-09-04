@@ -1224,7 +1224,7 @@ final class RuntimeLibrary
         $out .= "  %capp = getelementptr i8, ptr %s, i64 -24\n";
         $out .= "  %cap = load i64, ptr %capp\n";
         $out .= "  %fits = icmp slt i64 %need, %cap\n"; // need+1 (NUL) <= cap
-        $out .= "  br i1 %fits, label %inplace, label %grow\n";
+        $out .= "  br i1 %fits, label %inplace, label %growsole\n";
         $out .= "inplace:\n";
         $out .= "  %dst = getelementptr inbounds i8, ptr %s, i64 %la\n";
         $out .= "  %lb1 = add i64 %lb, 1\n";          // copy b + its NUL
@@ -1234,6 +1234,53 @@ final class RuntimeLibrary
         $out .= "  %hinv = getelementptr inbounds i8, ptr %s, i64 " . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
         $out .= "  store i64 0, ptr %hinv\n";
         $out .= "  ret ptr %s\n";
+        // ── SOLE-OWNER grow: extend the block instead of replacing it ──
+        // Reached only from `chkcap`, i.e. rc == 1 AND the capacity ran out.
+        // The old path allocates a NEW buffer, memcpy's the whole accumulator
+        // into it and frees the old one, so a `$s .= …` loop leaves the sum of
+        // every previous capacity resident: peak ≈ 2·L (the doubling chain) + L,
+        // measured at 82.97 MB for a 30 MB result where php holds ~1.03·L.
+        // `realloc` lets the allocator extend in place (or mremap), so nothing
+        // but the live buffer stays resident and the copy disappears too.
+        //
+        // TWO guards, and both are load-bearing:
+        //  - rc == 1 (inherited from `chkcap`) — an IMMORTAL literal and an
+        //    ARENA string both carry rc = -1 ({@see EmitLlvmRuntime}'s
+        //    `__mir_str_alloc_arena`), so neither can reach here; reallocating
+        //    either would hand libc an address it never owned.
+        //  - cap > the class-1 pool cap — a POOLED block came off a free list
+        //    ({@see EmitLlvmRuntime}'s `__mir_str_alloc` classes 0/1) and must
+        //    go back to it, never to `realloc`. Only the `big` arm is a plain
+        //    `malloc(n + HEADER)`, which is exactly what `realloc` may take.
+        $out .= "growsole:\n";
+        $out .= "  %isbig = icmp ugt i64 %cap, "
+              . (string)\Compile\MemoryAbi::STRING_POOL1_CAP . "\n";
+        $out .= "  br i1 %isbig, label %rgrow, label %grow\n";
+        $out .= "rgrow:\n";
+        // 1.5× + slack rather than the copy path's 2×: with an in-place extend
+        // the growth factor no longer buys amortization, so the tighter one is
+        // free and halves the steady-state resident.
+        $out .= "  %rhalf = lshr i64 %need, 1\n";
+        $out .= "  %rsum = add i64 %need, %rhalf\n";
+        $out .= "  %rcap = add i64 %rsum, 16\n";
+        $out .= "  %rbase = getelementptr inbounds i8, ptr %s, i64 -"
+              . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
+        $out .= "  %rtot = add i64 %rcap, "
+              . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
+        $out .= "  %rnb = call ptr @realloc(ptr %rbase, i64 %rtot)\n";
+        $out .= "  %rnd = getelementptr inbounds i8, ptr %rnb, i64 "
+              . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
+        $out .= "  %rdst = getelementptr inbounds i8, ptr %rnd, i64 %la\n";
+        $out .= "  %rlb1 = add i64 %lb, 1\n";        // copy b + its NUL
+        $out .= "  call ptr @memcpy(ptr %rdst, ptr %b, i64 %rlb1)\n";
+        $out .= "  %rcapp = getelementptr inbounds i8, ptr %rnd, i64 -24\n";
+        $out .= "  store i64 %rcap, ptr %rcapp\n";
+        $out .= "  call void @__mir_str_set_len(ptr %rnd, i64 %need)\n";
+        // Content moved and changed → the cached hash is stale.
+        $out .= "  %rhinv = getelementptr inbounds i8, ptr %rnd, i64 "
+              . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $out .= "  store i64 0, ptr %rhinv\n";
+        $out .= "  ret ptr %rnd\n";
         $out .= "grow:\n";
         $out .= "  %la2 = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %lb2 = call i64 @__mir_strlen(ptr %b)\n";
