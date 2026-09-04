@@ -230,24 +230,23 @@ final class Debug
     public static bool $rcSymElem = true;
 
     /**
-     * `MANTICORE_RC_ELEM_READ_OWNS=1` — a local initialised from an ELEMENT
-     * READ co-owns what the read hands it.
+     * A local initialised from an ELEMENT READ co-owns what the read hands it.
      *
-     * Today the read is a pure borrow, and that is a LIVE use-after-free:
+     * ON by default; `MANTICORE_RC_ELEM_READ_OWNS=0` is the kill switch.
+     * Without it the read is a pure borrow, which is a LIVE use-after-free:
      * `$keep = $m['a']; unset($m); return $keep;` returns freed memory
-     * (php: `alive`, ours: empty), silently and with DEBUG_VERIFY clean.
-     * It is also the precondition the element SLOT drop waits on — an
-     * overwrite or an unset cannot release the old value while a borrowed
-     * local may still point at it.
+     * (php: `alive`, ours: empty), silently and with DEBUG_VERIFY clean —
+     * `tests/aot/cases/elem_read_borrow_uaf.php`. It is also the precondition
+     * the element SLOT drop waits on: an overwrite or an unset cannot release
+     * the old value while a borrowed local may still point at it.
      *
-     * ⚠ BOTH HALVES OR NEITHER, the rule stated beside {@see
-     * Mir\Passes\InsertMemoryOps::isOwnedObj}: if only the emitter says
-     * owned the value LEAKS, if only the pass does the release has no
-     * matching retain and the value is DOUBLE-FREED. This flag gates the
-     * pair — the retain in `EmitLlvmLocals::emitStoreLocal` and the
-     * ownership verdict in `InsertMemoryOps::isOwnedObj`.
+     * ⚠ BOTH HALVES OR NEITHER: if only the emitter says owned the value
+     * LEAKS, if only the pass does the release has no matching retain and the
+     * value is DOUBLE-FREED. Neither half decides on its own — both ask
+     * {@see Mir\Passes\InsertMemoryOps::elemReadCoOwns}, and the retain is
+     * taken at the DESTINATION SLOT's depth, never the value's.
      */
-    public static bool $rcElemReadOwns = false;
+    public static bool $rcElemReadOwns = true;
 
 
     /**
@@ -460,7 +459,7 @@ final class Debug
         $env = \getenv('MANTICORE_RC_CTOR_ARG');
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_READ_OWNS');
-        if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemReadOwns = true; }
+        if ($env === '0' || $env === 'off') { self::$rcElemReadOwns = false; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');

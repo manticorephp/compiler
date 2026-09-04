@@ -339,6 +339,25 @@ final class InsertMemoryOps implements Pass
      * property / array read — are excluded: releasing them would
      * over-release the real owner's count.
      */
+    /**
+     * The ONE condition behind element-read co-ownership, shared by both halves
+     * of it: this pass, which makes the destination local release, and
+     * {@see EmitLlvmLocals::elemReadCoOwn}, which takes the matching +1. A type
+     * either gets both or neither — one half alone is a leak or a double free.
+     *
+     * @param array<string, mixed> $enums enum name → def; enum values are non-rc
+     */
+    public static function elemReadCoOwns(?Type $t, array $enums): bool
+    {
+        if ($t === null) { return false; }
+        if ($t->isVec() || $t->isAssoc()) { return true; }
+        if ($t->kind === Type::KIND_OBJ) {
+            $c = $t->class ?? '';
+            return !($c !== '' && isset($enums[$c]));
+        }
+        return false;
+    }
+
     private function isOwnedObj(Node $value): bool
     {
         // A conditional (ternary / `?:` / `??` / match) the contract covers is an
@@ -421,7 +440,11 @@ final class InsertMemoryOps implements Pass
         // {@see EmitLlvmLocals::emitStoreLocal}, so the local must release it.
         // The two are one change: see {@see \Compile\Debug::$rcElemReadOwns}.
         // Without it `$keep = $m['a']; unset($m);` hands back freed memory.
-        if (\Compile\Debug::$rcElemReadOwns && $k === Node::KIND_ARRAY_ACCESS) {
+        // ⚠ The two halves must decide on the SAME predicate, or they disagree
+        // on a name and leave a retain with no release — the extra `dtor elem`
+        // php never runs. {@see EmitLlvmLocals::elemReadCoOwn} is the other half.
+        if (\Compile\Debug::$rcElemReadOwns && $k === Node::KIND_ARRAY_ACCESS
+            && self::elemReadCoOwns($value->type, $this->enums)) {
             return true;
         }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
