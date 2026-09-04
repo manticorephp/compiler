@@ -420,7 +420,7 @@ trait EmitLlvmLocals
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
         // The SAME predicate the pass half decides on — one condition, two halves.
-        if (!InsertMemoryOps::elemReadCoOwns($v->type, $this->enums)) { return ''; }
+        if (!InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes)) { return ''; }
         $sv = $this->lastValue;
         $st = $this->lastValueType;
         $out = $this->coerceToI64();
@@ -659,6 +659,18 @@ trait EmitLlvmLocals
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
+            // ★ The copy duplicates the element WORDS, not the ownership of what
+            // they point at — `__mir_array_copy` is a flat buffer copy. Two
+            // buffers then held one ref, and whichever released first freed a
+            // value the other still names. It stayed dormant only because
+            // nothing ever dropped an element off a live buffer; the element
+            // SLOT drop ({@see \Compile\Debug::$rcElemSlotDrop}) does, so
+            // `$b = $a; $a['x'] = $new;` read FREED memory out of `$b`.
+            // Adopt takes exactly the element refs the copy's own release gives
+            // back — the same pairing the copied vec PROPERTY below already has.
+            $ci = $this->ssa->allocReg();
+            $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
+            $out .= $this->arrayAdoptIr($ci, $this->arrayRetainFlavor($v, $sl->type));
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
             // The copy is heap-owned + independent, so it is no longer an

@@ -26,3 +26,4 @@ examples/http/*_bin
 # The audit HARNESS (probes, expected, data) lives in tests/audit/ and IS tracked.
 docs/audit/
 docs/status/
+probe/

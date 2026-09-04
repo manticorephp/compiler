@@ -66,6 +66,10 @@ final class InsertMemoryOps implements Pass
     /** @var array<string, bool> locals re-bound to a non-(rc-obj-alloc)
      *  value — releasing them would double-free, so they're excluded. */
     private array $rcObjBlocked = [];
+    /** @var array<string, bool> loop-var names at least one non-co-owning foreach binds */
+    private array $feOwnVeto = [];
+    /** BISECT: whether the function being lowered is in the feOnly subset. */
+    private bool $feFnEnabled = true;
 
     /** @var string[] owned RcHeap obj locals, first-seen order. */
     private array $rcObjOrder = [];
@@ -133,6 +137,13 @@ final class InsertMemoryOps implements Pass
         $this->rcObjSlotBoxed = [];
         $this->blockReason = [];
         $this->blockKind = [];
+        // Per-name, whole-function: a loop variable co-owns only if EVERY foreach
+        // binding it does ({@see foreachOwnVetoes}). Computed BEFORE the walk,
+        // because the arm that registers a name runs before the later loop that
+        // would veto it.
+        $this->feFnEnabled = \Compile\Debug::$feOnly === ''
+            || \str_contains($fn->name, \Compile\Debug::$feOnly);
+        $this->feOwnVeto = self::foreachOwnVetoes($fn->body, $this->enums, $this->classes);
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -347,15 +358,106 @@ final class InsertMemoryOps implements Pass
      *
      * @param array<string, mixed> $enums enum name → def; enum values are non-rc
      */
-    public static function elemReadCoOwns(?Type $t, array $enums): bool
+    public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
     {
         if ($t === null) { return false; }
         if ($t->isVec() || $t->isAssoc()) { return true; }
+        // A STRING element is co-owned on exactly the same terms, and leaving it
+        // out was the last hole: `$s = $m['k']; $m['k'] = '';` and its `foreach`
+        // twin handed back FREED bytes the moment the element SLOT started
+        // dropping ({@see \Compile\Debug::$rcElemSlotDrop}). Both rc helpers
+        // self-guard — `__mir_rc_retain_str` / `__mir_rc_release_str` no-op on
+        // null and on an IMMORTAL literal (negative rc) — so a slot holding a
+        // constant costs nothing and a heap string is counted like any other.
+        if ($t->kind === Type::KIND_STRING) { return true; }
         if ($t->kind === Type::KIND_OBJ) {
             $c = $t->class ?? '';
-            return !($c !== '' && isset($enums[$c]));
+            if ($c === '') { return true; }
+            // ★★★ REFUSE EXACTLY WHAT THE RETAIN MACHINERY REFUSES. This used to
+            // exclude enums ALONE, while the emitter's half takes its +1 through
+            // {@see EmitLlvmMemory::rcRetainByType}, which SILENTLY returns ''
+            // for a closure, a `#[Struct]`, an `Ffi\Ptr` and a `Generator` too.
+            // Agreeing with itself is not enough — a predicate that says "owned"
+            // where the retain emits nothing leaves the pass's scope-exit
+            // release with NOTHING to balance it, and these are precisely the
+            // records with NO rc header, so the decrement lands in the
+            // allocator's own metadata. The corruption then surfaces anywhere
+            // (a SIGSEGV in `Walk::children` on a Node that was fine), and
+            // never as an rc<=0 abort, because the word being decremented is
+            // not a refcount at all.
+            if (isset($enums[$c])) { return false; }
+            if ($c === 'Ffi\\Ptr') { return false; }
+            if ($c === 'Closure' || \str_starts_with($c, '__closure_')) { return false; }
+            // A Generator retains through the STRING rc path and would be
+            // released through the object one — a flavor disagreement of the
+            // same family [[rc-flavor-disagreement]]. Left out entirely.
+            if ($c === 'Generator') { return false; }
+            $cd = $classes[$c] ?? null;
+            if ($cd !== null && $cd->isStruct) { return false; }
+            return true;
         }
         return false;
+    }
+
+    /**
+     * The ONE condition behind foreach-value co-ownership, shared by both
+     * halves: this pass, which stops BLOCKING the loop variable so scope exit
+     * releases it, and {@see EmitLlvmControl}'s unified-array loop, which takes
+     * the matching +1 and drops the previous iteration's. One half alone is a
+     * leak or a double free ({@see \Compile\Debug::$rcForeachValueOwns}).
+     *
+     * A PROVEN vec/assoc base only. That is not caution, it is the agreement
+     * itself: `emitForeach` routes a generator, a Traversable and an erased
+     * carrier elsewhere — the last of those CLASSIFIES AT RUNTIME — and this
+     * pass cannot know which arm will run. `byRef` is out because `&$v` binds
+     * the slot, it does not copy it.
+     *
+     * @param array<string, mixed> $enums enum name → def; enum values are non-rc
+     */
+    public static function foreachValueCoOwns(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): bool
+    {
+        if (!\Compile\Debug::$rcForeachValueOwns) { return false; }
+        if ($fe->byRef) { return false; }
+        $at = $fe->array->type;
+        if (!$at->isVec() && !$at->isAssoc()) { return false; }
+        return self::elemReadCoOwns($at->element, $enums, $classes);
+    }
+
+    /**
+     * Loop-variable NAMES this function must not co-own, because at least one
+     * `foreach` binding the name does NOT co-own.
+     *
+     * ★★★ The pass decides per NAME and the emitter per SITE, and that is the
+     * whole reason this exists. `InferScans::scanByRefCaptureNode` binds `$c`
+     * TWICE — once over `$n->captures`, once over `Walk::children($n)`. Let one
+     * loop co-own and the other store a borrow into the same slot, and the
+     * scope-exit release the first loop earned is paid by the second loop's
+     * BORROWED node: the child is freed while the tree still holds it, and the
+     * next walk faults inside `Walk::children`. That is a gen-2 compiler that
+     * cannot compile hello world.
+     *
+     * So a name is co-owned only when EVERY foreach that binds it agrees —
+     * the same "every store or none" rule {@see EmitLlvmMemory::collectOwnElemLocals}
+     * applies to element-owning locals. Both halves call this.
+     *
+     * @param array<string, mixed> $enums
+     * @return array<string, bool> name → vetoed
+     */
+    public static function foreachOwnVetoes(Node $body, array $enums, array $classes = []): array
+    {
+        $veto = [];
+        self::collectForeachVetoes($body, $enums, $classes, $veto);
+        return $veto;
+    }
+
+    /** @param array<string, bool> $veto */
+    private static function collectForeachVetoes(Node $n, array $enums, array $classes, array &$veto): void
+    {
+        if ($n->kind === Node::KIND_FOREACH) {
+            $fe = $n;
+            if (!self::foreachValueCoOwns($fe, $enums, $classes)) { $veto[$fe->valueVar] = true; }
+        }
+        foreach (Walk::children($n) as $c) { self::collectForeachVetoes($c, $enums, $classes, $veto); }
     }
 
     private function isOwnedObj(Node $value): bool
@@ -419,6 +521,26 @@ final class InsertMemoryOps implements Pass
             // the str rc path). Its producer is a call/invoke (the creator).
         }
         $k = $value->kind;
+        // `(string)$int` / `(string)$float` ALLOCATE — __mir_int_to_str and
+        // __mir_float_to_str hand back a fresh rc=1 buffer exactly as a string
+        // builtin does. This was the one producer nobody owned: the local took
+        // the +1, no release was ever scheduled, and a rebind in a loop dropped
+        // the reference on the floor. `for (…) { $s = (string)$i; }` leaked one
+        // string per iteration — 63 MB per 1M where php is flat, and every
+        // decorate/serialize loop that stringifies a counter pays it.
+        //
+        // ONLY int and float. A STRING operand is returned unchanged
+        // ({@see EmitLlvmExpr::emitCast}) — a borrow, and owning it would free
+        // the source. A CELL or an ERASED operand goes through
+        // `__mir_tagged_to_str`, which hands back the RAW payload pointer,
+        // also a borrow. bool/array reach immortal literals, where a release is
+        // a no-op; they are excluded anyway, so the arm never claims anything
+        // it did not see allocated.
+        if ($k === Node::KIND_CAST && $value->type->kind === Type::KIND_STRING) {
+            $ok = $value->operand->type->kind;
+            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_CELL;
+        }
         // A call transfers a +1 owned ref (the return convention) for
         // any flavor (incl. string builtins: substr / strtolower / …).
         // EXCEPT an FFI call: it returns a foreign libc buffer/pointer
@@ -444,7 +566,7 @@ final class InsertMemoryOps implements Pass
         // on a name and leave a retain with no release — the extra `dtor elem`
         // php never runs. {@see EmitLlvmLocals::elemReadCoOwn} is the other half.
         if (\Compile\Debug::$rcElemReadOwns && $k === Node::KIND_ARRAY_ACCESS
-            && self::elemReadCoOwns($value->type, $this->enums)) {
+            && self::elemReadCoOwns($value->type, $this->enums, $this->classes)) {
             return true;
         }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
@@ -490,10 +612,24 @@ final class InsertMemoryOps implements Pass
     private function refinesElement(Type $old, Type $new): bool
     {
         if (!\Compile\Debug::$rcElemType) { return false; }
-        if ($old->kind !== $new->kind) { return false; }
-        if (!($old->isVec() && $new->isVec()) && !($old->isAssoc() && $new->isAssoc())) {
-            return false;
-        }
+        // ★★★ vec → assoc IS still a deepening, not a redirect. `$l = [];` types
+        // the local `vec[unknown]` and pins the release flavor there
+        // first-write-wins; the very next store, `$l = f();`, is
+        // `assoc[string,string]` — a different SHAPE, so this refused, and the
+        // slot kept the plain repr-driven release for the rest of the function.
+        // The buffer it then dropped carried only a shape HINT and no ownership
+        // repr, so every key and every value of every array the loop built
+        // leaked: 780 B per iteration, 149 MB where php is flat at 28
+        // (`tools/prof/propleak.php arrlocal`). `$x = []` before a loop is
+        // ubiquitous, which is why this one predicate is worth the note.
+        //
+        // Safe on the pass's own terms: a vec and an assoc are ONE buffer type
+        // (packed vs hashed is a runtime flag) and both release through the same
+        // `__mir_array_release*` family, so the flavor deepens rather than moves.
+        // The old element must still be UNKNOWN — the old release therefore drops
+        // nothing but the buffer — so the upgrade can only ADD drops, and on the
+        // empty literal that pinned the name those drops walk zero elements.
+        if (!$old->isArray() || !$new->isArray()) { return false; }
         $oe = $old->element;
         $ne = $new->element;
         if ($oe === null || $ne === null) { return false; }
@@ -628,9 +764,47 @@ final class InsertMemoryOps implements Pass
         // parent still owns it). Disqualify foreach loop vars from release.
         if ($n->kind === Node::KIND_FOREACH) {
             $fe = $n;
-            $this->rcObjBlocked[$fe->valueVar] = true;
+            // …UNLESS the loop now takes a +1 of its own. The block above exists
+            // precisely BECAUSE the store was a raw borrow; with the retain the
+            // reason is gone and the release is the other half of it
+            // ({@see foreachValueCoOwns}). Registered at the ELEMENT's type —
+            // depth follows the DESTINATION slot, never the container.
+            $feOwns = $this->feFnEnabled
+                && self::foreachValueCoOwns($fe, $this->enums, $this->classes)
+                && !isset($this->feOwnVeto[$fe->valueVar]);
+            if ($feOwns) {
+                $et = $fe->array->type->element;
+                // ★★★ The loop variable is a STORE like any other, so it owes the
+                // same FLAVOR agreement {@see rcSlotFlavor} enforces on
+                // KIND_STORE_LOCAL. Registering `rcObjType` directly here walked
+                // straight past that check: a name bound by a foreach over
+                // `Node[]` and stored as a string elsewhere kept ONE release,
+                // first-write-wins, and an object released through
+                // `__mir_rc_release_str` reads rc at ptr-8 and frees from ptr-16
+                // — a WILD WRITE through the wrong header offset, which is why
+                // no rc<=0 verify ever fired and why the faulting word was never
+                // a plausible heap pointer.
+                if ($et !== null && isset($this->rcObjType[$fe->valueVar])) {
+                    $prev = $this->rcSlotFlavor($this->rcObjType[$fe->valueVar]);
+                    $now = $this->rcSlotFlavor($et);
+                    if ($prev !== '' && $now !== '' && $prev !== $now) {
+                        $this->rcObjBlocked[$fe->valueVar] = true;
+                        $this->noteBlock($fe->valueVar, "flavor", $et);
+                    }
+                }
+                if ($et !== null && !isset($this->rcObjType[$fe->valueVar])) {
+                    $this->rcObjOrder[] = $fe->valueVar;
+                    $this->rcObjType[$fe->valueVar] = $et;
+                    $this->rcObjSlotBoxed[$fe->valueVar] = $et->kind === Type::KIND_CELL;
+                    $this->rcObjPlainOwner[$fe->valueVar] = true;
+                }
+            } else {
+                $this->rcObjBlocked[$fe->valueVar] = true;
+                $this->noteBlock($fe->valueVar, "foreach", null);
+            }
+            // `blocked` is the ARENA/alloc-flavor set, not the rc one: the loop
+            // var is never an allocation of this frame either way.
             $this->blocked[$fe->valueVar] = true;
-            $this->noteBlock($fe->valueVar, "foreach", null);
             if ($fe->keyVar !== null) {
                 $this->rcObjBlocked[$fe->keyVar] = true;
                 $this->blocked[$fe->keyVar] = true;

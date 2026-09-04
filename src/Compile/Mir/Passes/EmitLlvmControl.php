@@ -866,30 +866,85 @@ trait EmitLlvmControl
         return $out;
     }
 
-    /** Does this foreach's body `unset()` an element of the very local it walks?
-     *  Syntactic and deliberately narrow — the snapshot copy it triggers costs
-     *  an allocation, so only the shape that actually needs it pays. */
-    private function foreachBodyUnsetsBase(Foreach_ $fe): bool
+    /** Does this foreach's body MUTATE the very local it walks — `unset()`, an
+     *  element store, an append, a by-ref builtin, a reference taken into it?
+     *  Every one of those can RELOCATE the entry buffer under the walk (a grow
+     *  reallocs, an unset promotes packed → hashed, a full buffer with holes
+     *  compacts), and php's by-value foreach iterates a SNAPSHOT anyway.
+     *  Syntactic and deliberately narrow — the copy it triggers costs an
+     *  allocation, so only the shape that actually needs it pays. A BY-REF
+     *  foreach writes back through the element addresses, so it must keep
+     *  walking the real buffer and never takes the copy. */
+    private function foreachBodyMutatesBase(Foreach_ $fe): bool
     {
+        if ($fe->byRef) { return false; }
         if ($fe->array->kind !== Node::KIND_LOAD_LOCAL) { return false; }
-        return $this->nodeUnsetsLocalElem($fe->body, $fe->array->name);
+        return $this->nodeMutatesLocalElem($fe->body, $fe->array->name);
     }
 
-    private function nodeUnsetsLocalElem(Node $n, string $name): bool
+    /** The mutation shapes of {@see EmitLlvmMemory::collectMutatedVecs}, asked
+     *  of ONE name: the two scans must agree about what "mutates an array" is. */
+    private function nodeMutatesLocalElem(Node $n, string $name): bool
     {
         if ($n->kind === Node::KIND_UNSET) {
             foreach ($n->targets as $t) {
-                if ($t->kind === Node::KIND_ARRAY_ACCESS
-                    && $t->array->kind === Node::KIND_LOAD_LOCAL
-                    && $t->array->name === $name) {
-                    return true;
-                }
+                if ($this->elemRootIs($t, $name)) { return true; }
             }
         }
+        if ($n->kind === Node::KIND_STORE_ELEMENT && $this->elemRootIs($n->array, $name, true)) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_REF_ADDR && $this->elemRootIs($n->lvalue, $name)) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_CALL && \count($n->args) > 0
+            && $this->mutatesArg0($n->function)
+            && $this->elemRootIs($n->args[0], $name, true)) {
+            return true;
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
-            if ($this->nodeUnsetsLocalElem($c, $name)) { return true; }
+            if ($this->nodeMutatesLocalElem($c, $name)) { return true; }
         }
         return false;
+    }
+
+    /** Is `$n` an element chain (or, with `$bare`, the local itself) rooted at
+     *  the local `$name`? `$a[0][1]` roots at `$a` — a nested store relocates
+     *  the outer buffer too. */
+    private function elemRootIs(Node $n, string $name, bool $bare = false): bool
+    {
+        $base = $n;
+        $depth = 0;
+        while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; $depth++; }
+        if (!$bare && $depth === 0) { return false; }
+        return $base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name;
+    }
+
+    /**
+     * The emitter half of foreach-value co-ownership — it asks the SAME
+     * predicate the pass does, so the two cannot decide differently about a
+     * name ({@see InsertMemoryOps::foreachValueCoOwns}).
+     */
+    private function foreachValueOwns(Foreach_ $fe): bool
+    {
+        if (\Compile\Debug::$feOnly !== ''
+            && !\str_contains($this->frame->name, \Compile\Debug::$feOnly)) { return false; }
+        if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums, $this->classes)) { return false; }
+        // ★★★ THE PASS DECIDES; THE EMITTER OBEYS. `rcObjLocals` IS that
+        // decision, already transported through the IR and collected per
+        // function ({@see EmitLlvmMemory::initRcObjSlots}) — so the retain here
+        // and the scope-exit release there cannot disagree about a name.
+        //
+        // This used to RE-DERIVE the answer from `frame->body`, cached on that
+        // body's identity. `EmitLlvmModule` NULLS `frame->body` at five points
+        // during emission, and on every one of them the cache silently kept the
+        // PREVIOUS function's veto set: the emitter then answered for the wrong
+        // function, took a +1 the pass had planted no release for (or skipped
+        // one it had), and the resulting over-release was a wild write with no
+        // rc underflow to catch it. Every `InferTypes` method family reproduced
+        // it independently, which is what a per-function bookkeeping bug looks
+        // like and what a per-site one never does.
+        return isset($this->frame->rcObjLocals[$fe->valueVar]);
     }
 
     private function emitForeach(Foreach_ $n): string
@@ -1004,7 +1059,7 @@ trait EmitLlvmControl
         // walking the freed base. Copy up front for this shape only; the copy
         // is a bounded leak (conservative direction — never free a buffer the
         // body may still hand out).
-        if ($this->foreachBodyUnsetsBase($fe)) {
+        if ($this->foreachBodyMutatesBase($fe)) {
             $snap = $this->ssa->allocReg();
             $out .= '  ' . $snap . ' = call ptr @__mir_array_copy(ptr ' . $arr . ")\n";
             $arr = $snap;
@@ -1066,6 +1121,29 @@ trait EmitLlvmControl
         $reset = !$fe->byRef && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
+        // The co-owning loop drops the slot's PREVIOUS word on every iteration,
+        // and on the first one that word is whatever the frame happened to hold
+        // — an uninitialised `alloca`, or a value from an outer use of the same
+        // name that this loop is about to overwrite anyway. Zero it here, where
+        // the store dominates the body: the drop then no-ops on iteration one,
+        // and php's rule that `$v` survives the loop is untouched (the slot is
+        // written before the body ever reads it).
+        if ($this->foreachValueOwns($fe)) {
+            // RELEASE, then zero. A second loop over the same NAME arrives here
+            // with the first loop's last element still held at +1 (the
+            // per-iteration drop only ever gives back the PREVIOUS one), and
+            // zeroing alone stranded it — one leaked ref per loop, which is
+            // exactly what `InferScans::scanByRefCaptureNode`'s two `$c` loops
+            // do on every node of every function.
+            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
+            $slot = $this->locals->slots[$fe->valueVar];
+            if ($fvFlavor !== '') {
+                $stale = $this->ssa->allocReg();
+                $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
+                $out .= $this->rcReleaseReg($stale, $fvFlavor);
+            }
+            $out .= '  store i64 0, ptr ' . $slot . "\n";
+        }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -1115,6 +1193,22 @@ trait EmitLlvmControl
             $out .= '  ' . $eu . ' = call i64 @__mir_elem_untag(ptr ' . $arr
                   . ', i64 ' . $ev . ")\n";
             $ev = $eu;
+        }
+        // ★ The loop variable CO-OWNS the element php would have copied into it.
+        // Order is the property-slot order and for the same reason: take the +1
+        // FIRST, then drop what the slot is losing, so a loop that meets the
+        // same value twice goes 1 → 2 → 1 instead of freeing it. The retain and
+        // this release are one emitter-local pair, so a disagreement with
+        // {@see InsertMemoryOps::foreachValueCoOwns} can only STRAND the final
+        // iteration's ref — never double-free it.
+        if ($this->foreachValueOwns($fe)) {
+            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
+            if ($fvFlavor !== '') {
+                $out .= $this->rcRetainReg($ev, $fvFlavor);
+                $prev = $this->ssa->allocReg();
+                $out .= '  ' . $prev . ' = load i64, ptr ' . $valSlot . "\n";
+                $out .= $this->rcReleaseReg($prev, $fvFlavor);
+            }
         }
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {

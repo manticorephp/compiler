@@ -38,8 +38,11 @@ final class RuntimeLibrary
      */
     public static function descriptorType(): string
     {
-        return '{ i64, ptr, ptr, ptr }';
+        return '{ i64, ptr, ptr, ptr, ptr }';
     }
+
+    /** Byte offset of the props_fn field inside {@see descriptorType}. */
+    public const DESC_PROPS_AT = 32;
 
     /**
      * The full `@__mir_cd_<id> = linkonce_odr global …` definition.
@@ -48,10 +51,36 @@ final class RuntimeLibrary
      * gate. The field costs 8 rodata bytes per class either way; appending it
      * leaves class_id@0 and drop_fn@8 where they were, so no reader moves.
      */
-    public static function descriptorGlobal(int $id, string $dropFld, string $rmetaFld = 'ptr null', string $dynFld = 'ptr null'): string
-    {
+    public static function descriptorGlobal(
+        int $id,
+        string $dropFld,
+        string $rmetaFld = 'ptr null',
+        string $dynFld = 'ptr null',
+        string $propsFld = 'ptr null',
+    ): string {
         return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
-            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld . " }\n";
+            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld
+            . ', ' . $propsFld . " }\n";
+    }
+
+    /**
+     * `@__mir_props_<id>(ptr %o) -> i64` — the class's DECLARED properties as an
+     * `assoc[string, cell]`, keyed and ordered by declaration.
+     *
+     * A generic runtime helper cannot enumerate a user class: it is
+     * `linkonce_odr` and coalesces BY NAME, so it must never be specialized from
+     * module-local information. The class table it would need does not exist in
+     * `manticore_stdlib.o` at all — which is why `json_encode($object)` answered
+     * `{}` for every object even after the argument bug above was fixed.
+     *
+     * A pointer ON THE DESCRIPTOR closes that: the function is a pure function
+     * of the CLASS, emitted beside the descriptor wherever the class is defined,
+     * so every module agrees on it and `linkonce_odr` may coalesce it. The
+     * generic side just loads the field and calls it.
+     */
+    public static function propsFnSymbol(int $id): string
+    {
+        return '@__mir_props_' . (string)$id;
     }
 
     /** Lightweight dynamic-method row: stable name plus uniform thunk pointer. */
@@ -1224,7 +1253,7 @@ final class RuntimeLibrary
         $out .= "  %capp = getelementptr i8, ptr %s, i64 -24\n";
         $out .= "  %cap = load i64, ptr %capp\n";
         $out .= "  %fits = icmp slt i64 %need, %cap\n"; // need+1 (NUL) <= cap
-        $out .= "  br i1 %fits, label %inplace, label %grow\n";
+        $out .= "  br i1 %fits, label %inplace, label %growsole\n";
         $out .= "inplace:\n";
         $out .= "  %dst = getelementptr inbounds i8, ptr %s, i64 %la\n";
         $out .= "  %lb1 = add i64 %lb, 1\n";          // copy b + its NUL
@@ -1234,6 +1263,53 @@ final class RuntimeLibrary
         $out .= "  %hinv = getelementptr inbounds i8, ptr %s, i64 " . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
         $out .= "  store i64 0, ptr %hinv\n";
         $out .= "  ret ptr %s\n";
+        // ── SOLE-OWNER grow: extend the block instead of replacing it ──
+        // Reached only from `chkcap`, i.e. rc == 1 AND the capacity ran out.
+        // The old path allocates a NEW buffer, memcpy's the whole accumulator
+        // into it and frees the old one, so a `$s .= …` loop leaves the sum of
+        // every previous capacity resident: peak ≈ 2·L (the doubling chain) + L,
+        // measured at 82.97 MB for a 30 MB result where php holds ~1.03·L.
+        // `realloc` lets the allocator extend in place (or mremap), so nothing
+        // but the live buffer stays resident and the copy disappears too.
+        //
+        // TWO guards, and both are load-bearing:
+        //  - rc == 1 (inherited from `chkcap`) — an IMMORTAL literal and an
+        //    ARENA string both carry rc = -1 ({@see EmitLlvmRuntime}'s
+        //    `__mir_str_alloc_arena`), so neither can reach here; reallocating
+        //    either would hand libc an address it never owned.
+        //  - cap > the class-1 pool cap — a POOLED block came off a free list
+        //    ({@see EmitLlvmRuntime}'s `__mir_str_alloc` classes 0/1) and must
+        //    go back to it, never to `realloc`. Only the `big` arm is a plain
+        //    `malloc(n + HEADER)`, which is exactly what `realloc` may take.
+        $out .= "growsole:\n";
+        $out .= "  %isbig = icmp ugt i64 %cap, "
+              . (string)\Compile\MemoryAbi::STRING_POOL1_CAP . "\n";
+        $out .= "  br i1 %isbig, label %rgrow, label %grow\n";
+        $out .= "rgrow:\n";
+        // 1.5× + slack rather than the copy path's 2×: with an in-place extend
+        // the growth factor no longer buys amortization, so the tighter one is
+        // free and halves the steady-state resident.
+        $out .= "  %rhalf = lshr i64 %need, 1\n";
+        $out .= "  %rsum = add i64 %need, %rhalf\n";
+        $out .= "  %rcap = add i64 %rsum, 16\n";
+        $out .= "  %rbase = getelementptr inbounds i8, ptr %s, i64 -"
+              . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
+        $out .= "  %rtot = add i64 %rcap, "
+              . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
+        $out .= "  %rnb = call ptr @realloc(ptr %rbase, i64 %rtot)\n";
+        $out .= "  %rnd = getelementptr inbounds i8, ptr %rnb, i64 "
+              . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
+        $out .= "  %rdst = getelementptr inbounds i8, ptr %rnd, i64 %la\n";
+        $out .= "  %rlb1 = add i64 %lb, 1\n";        // copy b + its NUL
+        $out .= "  call ptr @memcpy(ptr %rdst, ptr %b, i64 %rlb1)\n";
+        $out .= "  %rcapp = getelementptr inbounds i8, ptr %rnd, i64 -24\n";
+        $out .= "  store i64 %rcap, ptr %rcapp\n";
+        $out .= "  call void @__mir_str_set_len(ptr %rnd, i64 %need)\n";
+        // Content moved and changed → the cached hash is stale.
+        $out .= "  %rhinv = getelementptr inbounds i8, ptr %rnd, i64 "
+              . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $out .= "  store i64 0, ptr %rhinv\n";
+        $out .= "  ret ptr %rnd\n";
         $out .= "grow:\n";
         $out .= "  %la2 = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %lb2 = call i64 @__mir_strlen(ptr %b)\n";
@@ -2343,7 +2419,44 @@ final class RuntimeLibrary
         $out .= "  %isarr = icmp eq i64 %nib, 7\n";
         $out .= "  br i1 %isarr, label %tarr, label %tobj\n";
         $out .= "tobj:\n";
-        $out .= "  %osi = call i64 @manticore___mc_json_enc(i64 %cell)\n";
+        // A class that carries a props_fn on its DESCRIPTOR encodes from its
+        // declared properties, right here in the generic helper — the class
+        // table this would otherwise need does not exist in the stdlib, which
+        // is why every object used to answer `{}`. The result is an
+        // `assoc[string,cell]`, so hand it back to this same walker as an ARRAY
+        // cell and let the existing `tarr` arm do the work.
+        $out .= "  %opay = and i64 %cell, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= "  %optr = inttoptr i64 %opay to ptr\n";
+        $out .= "  %odesc = load ptr, ptr %optr\n";
+        $out .= "  %odn = icmp eq ptr %odesc, null\n";
+        $out .= "  br i1 %odn, label %tobjpunt, label %tobjpf\n";
+        $out .= "tobjpf:\n";
+        $out .= "  %opfp = getelementptr inbounds i8, ptr %odesc, i64 "
+              . (string)self::DESC_PROPS_AT . "\n";
+        $out .= "  %opf = load ptr, ptr %opfp\n";
+        $out .= "  %ohas = icmp ne ptr %opf, null\n";
+        $out .= "  br i1 %ohas, label %tobjprops, label %tobjpunt\n";
+        $out .= "tobjprops:\n";
+        $out .= "  %oarr = call i64 %opf(ptr %optr)\n";
+        $out .= "  %oarrp = inttoptr i64 %oarr to ptr\n";
+        $out .= "  %oacell = call i64 @__manticore_box_array(ptr %oarrp)\n";
+        $out .= "  call void @__mir_json_app(ptr %slotp, ptr %lp, i64 %oacell)\n";
+        // The props array co-owns every value it boxed ({@see
+        // EmitLlvmBuiltins::emitDeclaredPropsArray} mirror-retains a borrowed
+        // one), so it is ours to give back.
+        $out .= "  call void @__mir_array_release_cell(ptr %oarrp)\n";
+        $out .= "  ret void\n";
+        $out .= "tobjpunt:\n";
+        // ★ ALL FOUR ARGUMENTS. `__mc_json_enc(mixed $v, int $flags = 0,
+        // int $maxDepth = 512, int $depth = 0)` is a four-parameter PHP body —
+        // a DEFAULT in php is not a default in the ABI, it is filled by the
+        // CALLER. This punt passed the cell alone, so `$flags`, `$maxDepth` and
+        // `$depth` were whatever the argument registers happened to hold; a
+        // `$maxDepth` of 0 makes the walker's own `$depth >= $maxDepth` guard
+        // true on entry, raise error 1, and `json_encode` turn that into
+        // `false`. Every `json_encode($object)` returned false — the whole
+        // `json_objects` bench row, and every API serializer.
+        $out .= "  %osi = call i64 @manticore___mc_json_enc(i64 %cell, i64 0, i64 512, i64 0)\n";
         $out .= "  %os = inttoptr i64 %osi to ptr\n";
         $out .= "  %on = call i64 @__mir_strlen(ptr %os)\n";
         $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %os, i64 %on)\n";

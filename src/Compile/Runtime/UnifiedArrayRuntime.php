@@ -196,7 +196,7 @@ final class UnifiedArrayRuntime
         $kp = $hs->load(Type::ptr(), $this->entryAddr($hs, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $hs->store($hs->call('__mir_array_hash_str', Type::i64(), [$kp]), $hSlot);
         $hs->br($linit);
-        $hi->store($hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)), $hSlot);
+        $hi->store($this->intBucketHash($hi, $hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $hSlot);
         $hi->br($linit);
         $h0 = $linit->load(Type::i64(), $hSlot);
         $linit->store($linit->and_($h0, $mask), $sSlot);
@@ -231,7 +231,7 @@ final class UnifiedArrayRuntime
         $kp2 = $bsHomeS->load(Type::ptr(), $this->entryAddr($bsHomeS, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $bsHomeS->store($bsHomeS->call('__mir_array_hash_str', Type::i64(), [$kp2]), $h2Slot);
         $bsHomeS->br($bsCmp);
-        $bsHomeI->store($bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)), $h2Slot);
+        $bsHomeI->store($this->intBucketHash($bsHomeI, $bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $h2Slot);
         $bsHomeI->br($bsCmp);
         // Move back iff dist(home → t) >= dist(gap → t), i.e. the gap sits on
         // the probe path from this slot's home.
@@ -260,6 +260,37 @@ final class UnifiedArrayRuntime
         $swNext->store($swNext->add($swNext->load(Type::i64(), $cSlot), Value::int(Type::i64(), 1)), $cSlot);
         $swNext->br($swHead);
         $ret->retVoid();
+    }
+
+    /**
+     * Bucket home for an INT key. The key ITSELF is a terrible open-addressing
+     * hash: sequential keys (`$v[0..n]`, the shape every list has) land in one
+     * contiguous run, and backshift deletion has to walk to the END of that run
+     * — so `unset($v[$k])` measured exactly O(n), 0.40 s at 2k live entries and
+     * 7.92 s at 40k over 200k operations, while the SAME churn over STRING keys
+     * stayed flat at 0.03 s because FNV spreads them. php is O(1) (it chains
+     * instead of probing, so the identity hash costs it nothing).
+     *
+     * Multiply by the 64-bit golden ratio, wrapping. An ODD multiplier is a
+     * bijection modulo any power of two, so the low bits the bucket mask reads
+     * are a scrambled permutation of the key — enough to break the run, and one
+     * instruction. (An xor-fold of the high half measured identically: the cost
+     * of scattering is the cache miss, not the arithmetic.)
+     *
+     * The trade is real and measured: a SPARSE int build+read (1M `$v[$i * 7]`
+     * writes then reads) goes 0.02 s -> 0.07 s, because the identity hash walked
+     * the bucket table in order. A dense list (`$v[] =`, PACKED, no index) and
+     * every string-keyed shape are untouched. Bucket TOMBSTONES instead of
+     * backshift deletion would buy the locality back at the cost of a rebuild
+     * policy; not attempted.
+     *
+     * EVERY site that computes an int home must agree — index build, add, find,
+     * unset and both backshift loops — or a key is inserted at one slot and
+     * hunted at another, which is a silent miss, not a crash.
+     */
+    private function intBucketHash(Block $b, Value $k): Value
+    {
+        return $b->mulWrap($k, Value::int(Type::i64(), -7046029254386353131));   // 0x9E3779B97F4A7C15
     }
 
     /**
@@ -311,7 +342,7 @@ final class UnifiedArrayRuntime
         $kp = $hs->load(Type::ptr(), $this->entryAddr($hs, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $hs->store($hs->call('__mir_array_hash_str', Type::i64(), [$kp]), $hSlot);
         $hs->br($linit);
-        $hi->store($hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)), $hSlot);
+        $hi->store($this->intBucketHash($hi, $hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $hSlot);
         $hi->br($linit);
         $h0 = $linit->load(Type::i64(), $hSlot);
         $linit->store($linit->and_($h0, $mask), $sSlot);
@@ -343,7 +374,7 @@ final class UnifiedArrayRuntime
         $kp2 = $bsHomeS->load(Type::ptr(), $this->entryAddr($bsHomeS, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $bsHomeS->store($bsHomeS->call('__mir_array_hash_str', Type::i64(), [$kp2]), $h2Slot);
         $bsHomeS->br($bsCmp);
-        $bsHomeI->store($bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET)), $h2Slot);
+        $bsHomeI->store($this->intBucketHash($bsHomeI, $bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $h2Slot);
         $bsHomeI->br($bsCmp);
         $home = $bsCmp->and_($bsCmp->load(Type::i64(), $h2Slot), $mask);
         $tc = $bsCmp->load(Type::i64(), $tSlot);
@@ -865,7 +896,7 @@ final class UnifiedArrayRuntime
         $bstr->store($bstr->call('__mir_array_hash_str', Type::i64(), [$skp]), $hSlot);
         $bstr->br($probe);
         $iki = $bint->load(Type::i64(), $this->entryAddr($bint, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $bint->store($iki, $hSlot);
+        $bint->store($this->intBucketHash($bint, $iki), $hSlot);
         $bint->br($probe);
 
         $h = $probe->load(Type::i64(), $hSlot);
@@ -933,7 +964,7 @@ final class UnifiedArrayRuntime
         $kstr->store($kstr->call('__mir_array_hash_str', Type::i64(), [$skp]), $hSlot);
         $kstr->br($probe);
         $iki = $kint->load(Type::i64(), $this->entryAddr($kint, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $kint->store($iki, $hSlot);
+        $kint->store($this->intBucketHash($kint, $iki), $hSlot);
         $kint->br($probe);
 
         $h = $probe->load(Type::i64(), $hSlot);
@@ -1016,7 +1047,7 @@ final class UnifiedArrayRuntime
         $hstrHave->br($startp);
         $hstrComp->store($hstrComp->call('__mir_array_hash_str', Type::i64(), [$keyptr]), $hSlot);
         $hstrComp->br($startp);
-        $hint->store($keyint, $hSlot);
+        $hint->store($this->intBucketHash($hint, $keyint), $hSlot);
         $hint->br($startp);
 
         $h = $startp->load(Type::i64(), $hSlot);
@@ -1203,14 +1234,16 @@ final class UnifiedArrayRuntime
         $sres = $strk->load(Type::ptr(), $resSlot);
         $sk = $strk->load(Type::i64(), $this->entryAddr($strk, $b, $bi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $skp = $strk->inttoptr($sk, Type::ptr());
-        $shas = $strk->call('__mir_array_isset_str', Type::i64(), [$sres, $skp]);
+        $shas = $strk->call('__mir_array_isset_str', Type::i64(),
+            [$sres, $skp, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $strk->brIf($strk->icmp('ne', $shas, Value::int(Type::i64(), 0)), $next, $sset);
         $sv = $sset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
         $sset->call('__mir_retain_by_repr', Type::void(), [$sv, $brepr]);
         // The key string gains a second owner (the result's entry).
         $sset->call('__mir_rc_retain_str', Type::void(), [$skp]);
         $snew = $sset->call('__mir_array_set_str', Type::ptr(),
-            [$sset->load(Type::ptr(), $resSlot), $skp, $sv]);
+            [$sset->load(Type::ptr(), $resSlot), $skp, $sv,
+             Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $sset->store($snew, $resSlot);
         $sset->br($next);
 
@@ -2587,7 +2620,7 @@ final class UnifiedArrayRuntime
         $acur = $app->load(Type::ptr(), $arrSlot);
         $alen = $app->load(Type::i64(), $acur);
         $cap = $app->load(Type::i64(), $this->hdr($app, $acur, MemoryAbi::ARRAY_CAPACITY_OFFSET));
-        $app->brIf($app->icmp('sge', $alen, $cap), $grow, $store);
+        $this->emitAppendCompactGate($fn, $app, $grow, $store, $acur, $alen, $cap, 'hi');
         $double = $grow->mul($cap, Value::int(Type::i64(), 2));
         $newcap = $grow->select($grow->icmp('slt', $double, Value::int(Type::i64(), 4)), Value::int(Type::i64(), 4), $double);
         $newBytes = $grow->add($grow->mul($newcap, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE)), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
@@ -2721,7 +2754,7 @@ final class UnifiedArrayRuntime
         $acur = $app->load(Type::ptr(), $arrSlot);
         $alen = $app->load(Type::i64(), $acur);
         $cap = $app->load(Type::i64(), $this->hdr($app, $acur, MemoryAbi::ARRAY_CAPACITY_OFFSET));
-        $app->brIf($app->icmp('sge', $alen, $cap), $grow, $store);
+        $this->emitAppendCompactGate($fn, $app, $grow, $store, $acur, $alen, $cap, 's');
         $double = $grow->mul($cap, Value::int(Type::i64(), 2));
         $newcap = $grow->select($grow->icmp('slt', $double, Value::int(Type::i64(), 4)), Value::int(Type::i64(), 4), $double);
         $newBytes = $grow->add($grow->mul($newcap, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE)), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
@@ -2740,6 +2773,59 @@ final class UnifiedArrayRuntime
         // is built yet; drops past load factor) — keeps a large build O(n).
         $store->call('__mir_array_index_add', Type::void(), [$buf, $blen]);
         $store->ret($buf);
+    }
+
+    /**
+     * The append path's FULL-BUFFER decision: compact the tombstones away
+     * instead of growing, when there are enough of them to be worth an O(n)
+     * pass. Wires `$app` to `$grow` / `$store` and returns nothing.
+     *
+     * `unset($a[$k])` leaves a TOMBSTONE and the insert path never looked at
+     * one, so re-inserting the SAME key appended a fresh entry every time and
+     * the entry array grew without bound: `$m['hot'] = $i; unset($m['hot']);`
+     * is 74.4 MB over 1M cycles where php is flat at 28, with `count($m)`
+     * answering 1 the whole way. php does exactly this — it rehashes on resize
+     * when the used count has run ahead of the live one.
+     *
+     * ⚠ Compaction MOVES entries, where a grow does not. A `foreach` that
+     * inserts into the array it is walking would hold an index into the very
+     * entries that move — but that shape now takes a SNAPSHOT copy up front
+     * ({@see \Compile\Mir\Passes\EmitLlvmControl::foreachBodyMutatesBase}),
+     * and it had to: a plain GROW already relocated the buffer under it, so it
+     * SIGSEGVed with this gate switched off. {@see \Compile\Debug::$tombRatio}
+     * is the knob; the default is measured, not guessed.
+     */
+    private function emitAppendCompactGate(
+        FunctionDef $fn,
+        \Codegen\Llvm\Block $app,
+        \Codegen\Llvm\Block $grow,
+        \Codegen\Llvm\Block $store,
+        Value $acur,
+        Value $alen,
+        Value $cap,
+        string $tag,
+    ): void {
+        $ratio = Debug::$tombRatio;
+        if ($ratio < 0) {                       // knob off: always grow
+            $app->brIf($app->icmp('sge', $alen, $cap), $grow, $store);
+            return;
+        }
+        $tchk = $fn->block($this->host->rtFreshLabel($tag . '_tchk'));
+        $comp = $fn->block($this->host->rtFreshLabel($tag . '_comp'));
+        $app->brIf($app->icmp('sge', $alen, $cap), $tchk, $store);
+        $fl = $tchk->load(Type::i64(), $this->hdr($tchk, $acur, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $tombRaw = $tchk->lshr($fl, Value::int(Type::i64(), MemoryAbi::ARRAY_TOMB_SHIFT));
+        $tomb = $tchk->and_($tombRaw, Value::int(Type::i64(), MemoryAbi::ARRAY_TOMB_VALUE_MASK));
+        if ($ratio === 0) {
+            // Any hole at all is enough.
+            $tchk->brIf($tchk->icmp('eq', $tomb, Value::int(Type::i64(), 0)), $grow, $comp);
+        } else {
+            // tomb * ratio >= len — holes are at least 1/ratio of the entries.
+            $scaled = $tchk->mul($tomb, Value::int(Type::i64(), $ratio));
+            $tchk->brIf($tchk->icmp('sge', $scaled, $alen), $comp, $grow);
+        }
+        $comp->call('__mir_array_compact', Type::void(), [$acur]);
+        $comp->br($store);
     }
 
     /**

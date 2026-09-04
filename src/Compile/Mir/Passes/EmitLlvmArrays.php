@@ -234,6 +234,12 @@ trait EmitLlvmArrays
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
                   . $base . ', i64 ' . $idx . ")\n";
+            // `mkstr($i)[0]` — the BASE string was a fresh temp and char_at mints
+            // a NEW one-char buffer, so the result cannot alias it: free the
+            // base. (The generic {@see EmitLlvm::baseTempRelease} refuses this
+            // one — its result is a string, which for every OTHER read shape is
+            // borrowed from the base.)
+            $out .= $this->freeStrTemp($aa->array, $base);
             $this->lastValue = $buf;
             $this->lastValueType = 'ptr';
             return $out;
@@ -748,6 +754,9 @@ trait EmitLlvmArrays
         if ($keyIsCell || $keyIsString) {
             $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
         }
+        // …and it keeps no BASE either: `mkarr($i)[0]` built an array for one
+        // element. {@see EmitLlvm::baseTempRelease}.
+        $out .= $this->baseTempRelease($aa->array, $arrPtr, true, $self->type);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // A REFERENCE element yields what it refers to. This is not the decode
@@ -1231,7 +1240,36 @@ trait EmitLlvmArrays
         $out .= '  ' . $keep . ' = select i1 ' . $both . ', i64 ' . $cur
               . ', i64 ' . $val . "\n";
         $this->elemValReg = $keep;
+        $this->elemWroteThroughRef = $both;
         return $out;
+    }
+
+    /**
+     * Release the value the SLOT just lost — the other half of the retain
+     * {@see emitStoreElemValue} took on the value it wrote.
+     *
+     * `$cur` is the element as it was BEFORE the set (the caller's
+     * `__mir_array_get_*`), `$flavor` comes from the container's element type
+     * ({@see EmitLlvm::elemSlotDropFlavor}). Emitted AFTER the set, so
+     * `$a[$k] = $a[$k]` goes 1 → 2 → 1 rather than freeing itself, and a missing
+     * key hands back 0, which every release helper self-guards.
+     *
+     * ⚠ When the slot held a REFERENCE cell the store wrote THROUGH it
+     * ({@see emitElemWriteThrough}) and the slot lost NOTHING — the binding is
+     * still there. Select the word to 0 in that case rather than branching: the
+     * whole write-through path is deliberately branch-free.
+     */
+    private function emitElemSlotDrop(string $cur, string $flavor): string
+    {
+        $word = $cur;
+        if ($this->elemWroteThroughRef !== '') {
+            $sel = $this->ssa->allocReg();
+            $word = $sel;
+            return '  ' . $sel . ' = select i1 ' . $this->elemWroteThroughRef
+                 . ', i64 0, i64 ' . $cur . "\n"
+                 . $this->rcReleaseReg($word, $flavor);
+        }
+        return $this->rcReleaseReg($word, $flavor);
     }
 
     private function emitStoreElementUnified(StoreElement $se): string
@@ -1275,6 +1313,15 @@ trait EmitLlvmArrays
         // literal path's $cellVals. Without it a read-back / var_dump misreads
         // a raw i64 as a tagged cell (`$e["s"]="hi"; $e["a"]=[1,2]`).
         $boxVal = $this->storeElemBoxesValue($se);
+        // Release-before-overwrite for the ELEMENT slot: the value this store
+        // displaces is one the slot itself owns, and nothing ever gave it back
+        // ({@see \Compile\Debug::$rcElemSlotDrop}). An APPEND displaces nothing,
+        // so only the keyed arms read the old word — and each of them already
+        // reads it when reference cells are live, so the extra lookup is paid
+        // only where the drop is what needs it.
+        $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type);
+        $readsOld = $dropFlavor !== '' || $this->rt->needsRefCells;
+        $this->elemWroteThroughRef = '';
         $next = $this->ssa->allocReg();
         if ($isAppend) {
             $out .= $this->emitStoreElemValue($se, $boxVal);
@@ -1290,13 +1337,17 @@ trait EmitLlvmArrays
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
-            if ($this->rt->needsRefCells) {
+            $curE = '';
+            if ($readsOld) {
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
+            }
+            if ($this->rt->needsRefCells) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
+            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor); }
             // set_cell's string arm RETAINS the stored key exactly like set_str
             // below — release our own +1 on a FRESH key cell (a mixed-returning
             // call / concat used directly as `$o[f()] = v`), or every dynamic
@@ -1317,13 +1368,17 @@ trait EmitLlvmArrays
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
-            if ($this->rt->needsRefCells) {
+            $curE = '';
+            if ($readsOld) {
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
+            }
+            if ($this->rt->needsRefCells) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
+            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor); }
             // set_str RETAINS the stored key (append) — release our own +1 on a
             // fresh key temp (`$m["k".$i]`), or it leaks (borrowed locals/literals
             // stay untouched, balanced by their own later release). Without this the
@@ -1335,13 +1390,17 @@ trait EmitLlvmArrays
             $idx = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
             $val = $this->elemValReg;
-            if ($this->rt->needsRefCells) {
+            $curE = '';
+            if ($readsOld) {
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
+            }
+            if ($this->rt->needsRefCells) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
+            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor); }
         }
         // Stamp the element repr on the persisted buffer ($next may be a
         // realloced / promoted / deimmortalised buffer) so the plain repr

@@ -1408,7 +1408,6 @@ final class LowerFromAst implements Pass
         $module->markPassApplied(self::NAME);
         return $module;
     }
-
     /** Whether a lowered module contains `$object->$name(...)`. */
     private function moduleHasDynamicMethodInvoke(Module $module): bool
     {

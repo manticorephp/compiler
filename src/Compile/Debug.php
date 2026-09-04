@@ -130,6 +130,49 @@ final class Debug
     public static bool $rcRecvTemp = true;
 
     /**
+     * The BASE temp of a READ owns nothing after the read.
+     *
+     * `mk($i)->v` and `mkarr($i)[0]` evaluate a fresh +1, read one word out
+     * of it and drop the container on the floor — one leaked object per
+     * property read (32 MB per 1M) and one leaked array per element read
+     * (78 MB per 1M), where php is flat. The RECEIVER of a method call has
+     * been released since {@see $rcRecvTemp}; this is the same rule for the
+     * base of a read, asking the same predicate
+     * ({@see Mir\\Passes\\EmitLlvm::freshRcArgFlavor}).
+     *
+     * ⚠ ONLY for a SCALAR result. A property or element whose value is an
+     * object / array / string is handed out BORROWED from the base, so
+     * freeing the base would free what the read just returned. That half
+     * needs the read to co-own first.
+     */
+    public static bool $rcBaseTemp = true;
+
+    /**
+     * Let a property slot drop what it overwrites even when the property was
+     * handed to a USER function, provided that function keeps none of its
+     * arguments ({@see Mir\Passes\EmitLlvm::computeKeepsNoArg}).
+     *
+     * The veto was a name list of BUILTINS only, so one call — `splitStr("\r\n",
+     * $this->block)` inside Http\Headers::lines() — vetoed the slot for the
+     * whole program, and every rebuild of that block leaked the old string
+     * (735 B per response on the http bench, and it never had a reader).
+     *
+     * MANTICORE_PROP_BORROW_ESCAPE=0 restores the name-list-only behaviour.
+     */
+    public static bool $propBorrowEscape = true;
+
+    /**
+     * Give a dynamic-property BAG to a class this module stores an undeclared
+     * property on ({@see Mir\Passes\LowerFromAst::grantBagsForDynamicStores}).
+     *
+     * php deprecates that store and performs it; without the bag it wrote
+     * through an offset the class does not have — a SIGSEGV on `$o->dyn = 5`
+     * for any class without #[AllowDynamicProperties].
+     * MANTICORE_DYN_PROP_BAG=0 restores the old layout.
+     */
+    public static bool $dynPropBag = true;
+
+    /**
      * `MANTICORE_RC_ELEM_OWNS=1` — do not veto a property slot's element drop
      * because of an element read whose CONSUMER takes a reference.
      *
@@ -247,6 +290,88 @@ final class Debug
      * taken at the DESTINATION SLOT's depth, never the value's.
      */
     public static bool $rcElemReadOwns = true;
+
+    /**
+     * The element SLOT releases the value an overwrite or an unset takes off it.
+     *
+     * ON by default; `MANTICORE_RC_ELEM_SLOT_DROP=0` is the kill switch.
+     * `$a[$k] = $new` and `unset($a[$k])` retained the new value and dropped
+     * NOTHING, so every value an array ever displaced was immortal — the array
+     * analogue of the property leak {@see $rcPropDrop} closed.
+     *
+     * Its PRECONDITION is {@see $rcElemReadOwns}: while an element read was a
+     * pure borrow, a local could still point at what the slot was about to
+     * free, and this drop would have been a use-after-free. The two ship as one
+     * ladder — turning the read back into a borrow REQUIRES turning this off.
+     *
+     * Gated on a slot whose element type NAMES an rc flavor
+     * ({@see EmitLlvm::elemSlotDropFlavor}); an erased or cell element is left
+     * alone, because `cell` is a static CLAIM and not a runtime guarantee.
+     */
+    public static bool $rcElemSlotDrop = true;
+
+    /**
+     * Which ELEMENT KINDS {@see $rcElemSlotDrop} may drop — `MANTICORE_ELEM_DROP_KINDS`
+     * overrides, and an empty value means ALL.
+     *
+     * `str` was OUT of the default for a while: a compiler built with string
+     * element drops emitted a second, plain-linkage copy of a runtime helper
+     * past the end of the module (`invalid redefinition of function
+     * '__mir_str_canon_int'`) and reddened 29 AOT cases. That was never a
+     * codegen bug — it was `EmitLlvm::drainLazyHelpers` reading IR text out of
+     * a slot this drop had just freed, because a `foreach` handed the loop
+     * variable a BORROW. {@see $rcForeachValueOwns} closes that, and the two
+     * ship together: `str` needs it, and turning it off REQUIRES dropping
+     * `str` from this list again.
+     */
+    public static string $elemDropKinds = 'obj,arr,str';
+
+    /**
+     * A `foreach` VALUE var CO-OWNS what the loop hands it.
+     *
+     * ON by default — `MANTICORE_RC_FOREACH_VALUE_OWNS=0` turns it off, and
+     * doing so means dropping `str` from {@see $elemDropKinds} in the same
+     * breath. Two earlier attempts built a compiler that SIGSEGVd in
+     * `Walk::children` from a recursive scan, because the pass registered an
+     * owner per NAME while the emitter decided per SITE; the emitter now reads
+     * the pass's answer instead of re-deriving it, and the divergence probe
+     * (`tools/prof/foreach_borrow_uaf.php`, ~3 s, no self-build) matches php.
+     * php gives the loop variable a VALUE (rc++), so `foreach ($m as $k => $v)
+     * { $m[$k] = ''; use($v); }` keeps $v intact. We handed out a pure BORROW of
+     * the element word, which was harmless only while nothing ever dropped an
+     * element off a LIVE array — {@see $rcElemSlotDrop} does, and that pattern
+     * is `EmitLlvm::drainLazyHelpers` itself: it blanks the slot it is iterating
+     * and then writes the value it just freed. That is the whole 29-case
+     * self-host cluster.
+     *
+     * ⚠ BOTH HALVES OR NEITHER, and they ask one predicate
+     * ({@see Mir\Passes\InsertMemoryOps::foreachValueCoOwns}): the emitter takes
+     * the +1 and the pass stops BLOCKING the name so scope exit gives it back.
+     * Restricted to a PROVEN vec/assoc base, which is exactly the condition
+     * under which `emitForeach` takes its unified-array path — a generator, a
+     * Traversable or an erased carrier classifies at RUNTIME and the two halves
+     * could not agree about it.
+     */
+    public static bool $rcForeachValueOwns = true;
+
+    /**
+     * Compact tombstones instead of growing, when `tomb * $tombRatio >= len`.
+     * 0 = compact on ANY hole · N>0 = when holes are at least 1/N of the
+     * entries · -1 = never (the old always-grow behaviour).
+     * `MANTICORE_TOMB_RATIO` overrides. The default is MEASURED, not guessed:
+     * on `tools/prof/tombchurn.php int 200000 20000` (20k live int keys, a
+     * key evicted and re-inserted every iteration) ratio 0 compacts on nearly
+     * every insert — O(len) per insert — and costs **8.9 GB / 40 s** where 8
+     * costs 8.7 MB / 3.96 s and the knob OFF costs 20.9 MB / 3.96 s. 64 and 2
+     * measure the same as 8; 8 is the middle of the flat region.
+     */
+    public static int $tombRatio = 8;
+
+    /** BISECT ONLY: when non-empty, foreach co-ownership applies to a function
+     *  whose name CONTAINS this substring, and to no other. `MANTICORE_FE_ONLY`.
+     *  Lets the self-host crash be narrowed to one emitting function in ~log2(N)
+     *  builds instead of by hypothesis. */
+    public static string $feOnly = '';
 
 
     /**
@@ -450,6 +575,12 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcReturnOwns = false; }
         $env = \getenv('MANTICORE_RC_RECV_TEMP');
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
+        $env = \getenv('MANTICORE_DYN_PROP_BAG');
+        if ($env === '0' || $env === 'off') { self::$dynPropBag = false; }
+        $env = \getenv('MANTICORE_PROP_BORROW_ESCAPE');
+        if ($env === '0' || $env === 'off') { self::$propBorrowEscape = false; }
+        $env = \getenv('MANTICORE_RC_BASE_TEMP');
+        if ($env === '0' || $env === 'off') { self::$rcBaseTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_OWNS');
         if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
         $env = \getenv('MANTICORE_RC_ELEM_TYPE');
@@ -460,6 +591,17 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_READ_OWNS');
         if ($env === '0' || $env === 'off') { self::$rcElemReadOwns = false; }
+        $env = \getenv('MANTICORE_RC_ELEM_SLOT_DROP');
+        if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
+        $env = \getenv('MANTICORE_RC_FOREACH_VALUE_OWNS');
+        if ($env === '0' || $env === 'off') { self::$rcForeachValueOwns = false; }
+        elseif ($env !== false && $env !== '') { self::$rcForeachValueOwns = true; }
+        $env = \getenv('MANTICORE_TOMB_RATIO');
+        if ($env !== false && $env !== '') { self::$tombRatio = (int)$env; }
+        $env = \getenv('MANTICORE_FE_ONLY');
+        if ($env !== false && $env !== '') { self::$feOnly = $env; }
+        $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
+        if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');

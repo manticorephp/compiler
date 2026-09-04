@@ -1830,12 +1830,50 @@ trait EmitLlvmRuntime
                 $descs .= $dynPair[0];
                 $dynFld = $dynPair[1];
             }
+            // The class's DECLARED properties, reachable from a GENERIC runtime
+            // helper. `manticore_stdlib.o` holds no user class table, so the
+            // json walker's `(array)$v` there yielded `[]` and every object
+            // encoded as `{}` ({@see \Compile\Mir\RuntimeLibrary::propsFnSymbol}).
+            // Derived from the class alone — identical bytes in every module
+            // that emits it, which is what the linkonce_odr coalescing needs.
+            $propsFld = 'ptr null';
+            $hasProps = false;
+            foreach ($cls->propertyNames as $pn) {
+                if (($cls->propertyTypes[$pn] ?? null) !== null) { $hasProps = true; break; }
+            }
+            if (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
+                $pIr = $this->emitDeclaredPropsArray('%o', $cls->name, true);
+                $pRes = $this->lastValue;
+                // …then the DYNAMIC bag, in php's order: declared first, then
+                // whatever was set on the instance. `stdClass` — every
+                // `json_decode` result and every `(object)` cast — declares
+                // nothing at all, so without this arm it is the one shape that
+                // still encoded as `{}`. `__mir_array_union` is php's `+`: a
+                // copy of the left plus the right's missing keys, so the
+                // object's own bag is never mutated.
+                if ($cls->usesBag()) {
+                    $bg = $this->ssa->allocReg();
+                    $bv = $this->ssa->allocReg();
+                    $un = $this->ssa->allocReg();
+                    $pIr .= '  ' . $bg . ' = getelementptr inbounds i8, ptr %o, i64 '
+                          . (string)$cls->bagOffset() . "\n";
+                    $pIr .= '  ' . $bv . ' = load ptr, ptr ' . $bg . "\n";
+                    $pIr .= '  ' . $un . ' = call ptr @__mir_array_union(ptr '
+                          . $pRes . ', ptr ' . $bv . ")\n";
+                    $pRes = $un;
+                }
+                $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol((int)$id);
+                $defs .= 'define i64 ' . $sym . "(ptr %o) {\nentry:\n" . $pIr
+                    . '  %pri = ptrtoint ptr ' . $pRes . " to i64\n"
+                    . "  ret i64 %pri\n}\n";
+                $propsFld = 'ptr ' . $sym;
+            }
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
             // `ptr null` in its descriptor and emits no full reflection block.
             if (!$this->reflectWants($cls->name)) {
                 $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                    (int)$id, $dropFld, 'ptr null', $dynFld);
+                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -1902,7 +1940,8 @@ trait EmitLlvmRuntime
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id), $dynFld);
+                (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
+                $dynFld, $propsFld);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;

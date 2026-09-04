@@ -6558,7 +6558,47 @@ trait EmitLlvmBuiltins
         if ($cls !== '' && isset($this->classes[$cls])) {
             $out = $this->emitNode($obj);
             $out .= $this->coerceToPtr();
-            return $out . $this->emitDeclaredPropsArray($this->lastValue, $cls);
+            $objPtr = $this->lastValue;
+            $out .= $this->emitDeclaredPropsArray($objPtr, $cls);
+            // Declared first, bag second — php's order, and the same union the
+            // erased arm ({@see emitObjectVarsByClassId}) already does. This arm
+            // answered the declared half alone, so a dynamic property was
+            // invisible to get_object_vars() while `(array)$o` showed it.
+            $cd = $this->classes[$cls];
+            if ($cd->usesBag()) {
+                $props = $this->lastValue;
+                $bg = $this->ssa->allocReg();
+                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                      . ', i64 ' . (string)$cd->bagOffset() . "\n";
+                $bagI = $this->ssa->allocReg();
+                $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+                $bagP = $this->ssa->allocReg();
+                $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+                // The bag is null until the first dynamic store, and a fresh
+                // instance of a class that takes one SOMEWHERE has never written
+                // it. Branch rather than call: an empty channel is the common
+                // case, and it costs a compare.
+                $isNull = $this->ssa->allocReg();
+                $out .= '  ' . $isNull . ' = icmp eq ptr ' . $bagP . ", null\n";
+                $slot = $this->ssa->allocReg();
+                $doL = $this->ssa->allocLabel('gov.bag');
+                $endL = $this->ssa->allocLabel('gov.end');
+                $out = '  ' . $slot . " = alloca ptr\n" . $out;
+                $out .= '  store ptr ' . $props . ', ptr ' . $slot . "\n";
+                $out .= '  br i1 ' . $isNull . ', label %' . $endL . ', label %' . $doL . "\n";
+                $out .= $doL . ":\n";
+                $un = $this->ssa->allocReg();
+                $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
+                      . ', ptr ' . $bagP . ")\n";
+                $out .= '  store ptr ' . $un . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $endL . ":\n";
+                $fin = $this->ssa->allocReg();
+                $out .= '  ' . $fin . ' = load ptr, ptr ' . $slot . "\n";
+                $this->lastValue = $fin;
+                $this->lastValueType = 'ptr';
+            }
+            return $out;
         }
         return $this->emitObjectVarsByClassId($obj);
     }
@@ -6722,7 +6762,7 @@ trait EmitLlvmBuiltins
      * cast can reuse it without emitting its operand a SECOND time (which would
      * run the operand's side effects twice).
      */
-    private function emitDeclaredPropsArray(string $objp, string $cls): string
+    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -6734,6 +6774,14 @@ trait EmitLlvmBuiltins
             foreach ($cd->propertyNames as $pn) {
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
+                // php serializes ONLY public properties from an object; a
+                // missing meta entry is a compiler-synthesised slot, which is
+                // public by construction. `(array)$o` and an in-scope
+                // get_object_vars() still want them all, so this is opt-in.
+                if ($publicOnly) {
+                    $pm = $cd->propertyMeta[$pn] ?? null;
+                    if ($pm !== null && $pm->visibility !== 'public') { continue; }
+                }
                 $off = (string)$cd->propertyOffset($pn);
                 $key = $this->litStr($pn);
                 $g = $this->ssa->allocReg();

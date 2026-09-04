@@ -993,11 +993,11 @@ trait EmitLlvmExpr
             $out .= "skey:\n";
             $out .= "  %kp = and i64 %k, " . $mask . "\n";
             $out .= "  %kpp = inttoptr i64 %kp to ptr\n";
-            $out .= "  %hass = call i64 @__mir_array_isset_str(ptr %b, ptr %kpp)\n";
+            $out .= "  %hass = call i64 @__mir_array_isset_str(ptr %b, ptr %kpp, i64 0, i64 0)\n";
             $out .= "  %hassb = icmp ne i64 %hass, 0\n";
             $out .= "  br i1 %hassb, label %sget, label %no\n";
             $out .= "sget:\n";
-            $out .= "  %rawb1 = call i64 @__mir_array_get_str(ptr %b, ptr %kpp)\n";
+            $out .= "  %rawb1 = call i64 @__mir_array_get_str(ptr %b, ptr %kpp, i64 0, i64 0)\n";
             $out .= "  br label %have\n";
             $out .= "ikey:\n";
             $out .= "  %ki = call i64 @__manticore_unbox_int(i64 %k)\n";
@@ -3091,12 +3091,47 @@ trait EmitLlvmExpr
      * whether it generated `__mir_obj_to_str` ({@see LowerPrelude::objToStrSrc}).
      * A module with no `__toString` class emits the plain call exactly as before.
      */
+    /**
+     * Make a `(string)$cell` result uniformly OWNED.
+     *
+     * `__manticore_tagged_to_str` hands back the RAW payload pointer for a
+     * string cell (a borrow) and a fresh buffer for everything else, so the
+     * ownership of the result was decided at RUNTIME — and the three static
+     * predicates therefore had to call it a borrow. Nothing then freed the
+     * fresh half: `return (string)$v;` over a mixed value leaked EVERY string
+     * it produced, which is `__mc_json_enc`'s scalar arm (json_pretty 62 MB,
+     * json_utf8 80 MB, and both grew linearly with the work).
+     *
+     * The guard is the same pointer compare the runtime's own free walk uses:
+     * result == the cell's payload means the borrow arm ran, so take the +1 the
+     * caller is about to give back. An immortal literal no-ops on both sides.
+     */
+    private function cellStrResultOwnIr(string $cellI64, string $resPtr): string
+    {
+        $this->rt->needsStrRc = true;
+        $pay = $this->ssa->allocReg();
+        $payp = $this->ssa->allocReg();
+        $same = $this->ssa->allocReg();
+        $retL = $this->ssa->allocLabel('c2s.own');
+        $endL = $this->ssa->allocLabel('c2s.owned');
+        $out  = '  ' . $pay . ' = and i64 ' . $cellI64 . ', '
+              . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= '  ' . $payp . ' = inttoptr i64 ' . $pay . " to ptr\n";
+        $out .= '  ' . $same . ' = icmp eq ptr ' . $resPtr . ', ' . $payp . "\n";
+        $out .= '  br i1 ' . $same . ', label %' . $retL . ', label %' . $endL . "\n";
+        $out .= $retL . ":\n";
+        $out .= '  call void @__mir_rc_retain_str(ptr ' . $resPtr . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        return $out;
+    }
     private function coerceCellToStr(string $v): string
     {
         $this->rt->needsTaggedToStr = true;
         if (!$this->hasObjToStr) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
+            $out .= $this->cellStrResultOwnIr($v, $r);
             $this->lastValue = $r;
             $this->lastValueType = 'ptr';
             return $out;
@@ -3132,6 +3167,7 @@ trait EmitLlvmExpr
         $out .= $endL . ":\n";
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+        $out .= $this->cellStrResultOwnIr($v, $res);
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
         return $out;

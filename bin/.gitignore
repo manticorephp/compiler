@@ -18,3 +18,12 @@ manticore.base
 manticore.chg*
 manticore.noarena
 manticore.g*
+
+# Anything ELSE compiled into bin/ is a probe: name-by-name rules kept losing
+# the race (bin/scan1, and a dozen http/leak probes in one `git add -A`), so
+# ignore the whole directory and list what is genuinely checked in.
+/*
+!/.gitignore
+!/build
+!/compile
+!/manticore-install

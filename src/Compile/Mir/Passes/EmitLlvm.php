@@ -242,6 +242,12 @@ final class EmitLlvm implements EmitVisitor
     // that pattern miscompiles under self-host ({@see cellTagIr}).
     private string $elemValReg = '';
 
+    /** The `i1` saying the last element store wrote THROUGH a reference cell
+     *  ({@see EmitLlvmArrays::emitElemWriteThrough}), '' when that path is not
+     *  live. A store that wrote through displaced nothing at the SLOT, so the
+     *  slot drop must skip it. */
+    private string $elemWroteThroughRef = '';
+
     // Out-slot for {@see magicMatchIr}: the IR computing the `ptr-8` magic test.
     private string $magicMatchOut = '';
 
@@ -711,6 +717,8 @@ final class EmitLlvm implements EmitVisitor
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
+        $this->computeKeepsNoArg($module);
+        $this->grantBagsForDynamicStores($module);
         foreach ($module->functions as $fn) {
             // The RETURN exemption below needs the DECLARED return type: it is
             // what emitReturn falls back to for an unknown/cell value, and so
@@ -1749,6 +1757,21 @@ final class EmitLlvm implements EmitVisitor
     private array $propRawBorrow = [];
 
     /**
+     * User functions PROVEN to keep none of their arguments — the
+     * interprocedural half of {@see $propRawBorrow}.
+     *
+     * `foreach (splitStr("\r\n", $this->block) as $line)` vetoed
+     * `Http\\Headers::block` for the whole program, because a callee CAN keep
+     * what it is handed and the veto had no way to ask. So the block string
+     * was retained by every store and released by none — the header half of
+     * the http bench, 735 B per response.
+     *
+     * {@see computeKeepsNoArg} answers it for the module's OWN functions;
+     * {@see callKeepsNoArg} stays the php-contract name list for builtins.
+     */
+    private array $fnKeepsNoArg = [];
+
+    /**
      * Prop keys whose SLOT owns one element ref per element — every store to
      * them hands the slot a reference that carries the element refs the drop
      * flavor names, so the slot's release-before-overwrite can give them back on
@@ -1977,12 +2000,23 @@ final class EmitLlvm implements EmitVisitor
             return;
         }
         if ($this->isCallLike($k)) {
+            // A callee CAN keep what it is handed, so a call operand is a
+            // borrow by default. The exception is a builtin that provably
+            // reads its argument and keeps nothing: `strlen($this->buf)` is
+            // the single most common property read there is, and it alone
+            // vetoed `Buffer\ByteBuffer::buf` for the whole program.
+            // A NAME list, like {@see EmitLlvmMemory::mutatesArg0} — the
+            // contract is php's, not our implementation's.
+            $pureArg = $k === Node::KIND_CALL
+                && ($this->callKeepsNoArg($parent->function)
+                    || ($this->fnKeepsNoArg[$parent->function] ?? false));
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c->kind === Node::KIND_PROPERTY_ACCESS
                     && ($c->type->isArray()
                         || $this->slotIsArrayHinted($c->object, $c->property, $c->type))) {
                     continue;
                 }
+                if ($pureArg) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand');
             }
             return;
@@ -2002,6 +2036,27 @@ final class EmitLlvm implements EmitVisitor
                 && $this->returnRetainsBorrow($rv)) {
                 return;
             }
+        }
+        // ★★★ An operand CONSUMED INSIDE THE EXPRESSION cannot outlive the
+        // store. `$this->buf = $this->buf . $s`, `$this->block === ''`,
+        // `strlen($this->buf) - $this->pos` — every one of these reads the
+        // bytes and keeps nothing, yet each vetoed the slot for the whole
+        // class, so an overwritten string property was NEVER released. That is
+        // 1806 B per request in `http_parse`: 345.8 MB of its 362 MB peak.
+        //
+        // The shape the veto exists for is a read that ESCAPES the statement —
+        // `$s = $o->buf; $o->set(…); return $s;` — and those are STORE_LOCAL /
+        // RETURN / a container store / a call that may retain, every one of
+        // which is handled above or falls through to the default arm below.
+        // Arithmetic, comparison, concat and the bitwise operators produce a
+        // FRESH value from the bytes; none of them can hold the pointer.
+        if ($k === Node::KIND_CONCAT || $k === Node::KIND_CMP
+            || $k === Node::KIND_ADD || $k === Node::KIND_SUB
+            || $k === Node::KIND_MUL || $k === Node::KIND_DIV
+            || $k === Node::KIND_MOD || $k === Node::KIND_NEG
+            || $k === Node::KIND_NOT || $k === Node::KIND_BITOP
+            || $k === Node::KIND_BITNOT || $k === Node::KIND_ISSET) {
+            return;
         }
         foreach (\Compile\Mir\Walk::children($parent) as $c) {
             $this->markPropBorrowsIn($c, 'node kind ' . (string)$k);
@@ -2095,6 +2150,277 @@ final class EmitLlvm implements EmitVisitor
         }
         if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
         if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
+        return false;
+    }
+
+    /**
+     * A class this module actually stores an UNDECLARED property on gets a
+     * dynamic-property bag.
+     *
+     * php 8.2+ only DEPRECATES the creation of a dynamic property; the write
+     * still happens. Without a bag the store fell through to the fixed-slot
+     * path and wrote through an offset the class does not have — `$o->dyn = 5`
+     * on a plain class SIGSEGVed, and `isset($o->nope)` answered true where php
+     * answers false.
+     *
+     * Granted from the STORE, so an object pays the extra word only where the
+     * program needs one. Descendants inherit it, the rule
+     * `#[AllowDynamicProperties]` already follows — a subclass without the slot
+     * would take the parent's offset and land in one of its own properties. A
+     * prelude / extern class is left alone (its layout is a published fact this
+     * module does not get to change) and a `#[Struct]` has no header to hold a
+     * bag at all.
+     *
+     * ⚠ HERE, not in LowerFromAst: the receiver's CLASS comes from inference,
+     * which has not run when lowering ends — the same scan there matched
+     * nothing at all. Layout is read during emission, which is after this.
+     */
+    private function grantBagsForDynamicStores(\Compile\Mir\Module $module): void
+    {
+        if (!\Compile\Debug::$dynPropBag) { return; }
+        $want = [];
+        foreach ($module->functions as $fn) {
+            $this->scanDynamicPropStores($fn->body, $want);
+        }
+        if ($want === [] || $module->isLibraryModule) { return; }
+        // ⚠ The bag sits at the END of a class's own layout, which is the MIDDLE
+        // of every subclass's — a base-typed pointer writing it would land in a
+        // property the child declares. Granting one to `Compile\Mir\Node` (the
+        // compiler's own base node) built a compiler that SIGSEGVed on hello
+        // world. So the whole HIERARCHY takes the bag together, at ONE offset:
+        // the deepest layoutEnd in it, which every member then agrees on.
+        //
+        // A library module is skipped outright: its class layouts go into a
+        // `.sig` that other modules compile against, and this offset is not in
+        // it.
+        foreach ($want as $root => $ignored) {
+            $family = [];
+            foreach ($this->classes as $name => $cd) {
+                $cur = $name;
+                $guard = 0;
+                while ($cur !== '' && $guard < 256) {
+                    if ($cur === $root) { $family[$name] = $cd; break; }
+                    $cur = $this->classes[$cur]->parent ?? '';
+                    $guard = $guard + 1;
+                }
+            }
+            // Someone in the family already has a bag (an inherited
+            // #[AllowDynamicProperties]): its layout is already published to the
+            // rest of this module, so leave the family exactly as it is.
+            $taken = false;
+            foreach ($family as $cd) {
+                if ($cd->usesBag()) { $taken = true; }
+            }
+            if ($taken || $family === []) { continue; }
+            $off = 0;
+            foreach ($family as $cd) {
+                $end = $cd->instanceSize();   // no bag yet, so this IS layoutEnd
+                if ($end > $off) { $off = $end; }
+            }
+            if (\getenv('MANTICORE_BAG_TRACE') !== false) {
+                \error_log('BAG-GRANT ' . $root . ' family=' . (string)\count($family)
+                    . ' offset=' . (string)$off);
+            }
+            foreach ($family as $cd) {
+                $cd->bagOffsetFixed = $off;
+                $cd->hasBag = true;
+            }
+        }
+    }
+
+    /**
+     * Does a SUBCLASS of `$cls` declare `$prop`?
+     *
+     * Then the store is not a dynamic property at all — it is a write through
+     * an imprecise static type (`$node->name = …` where `$node` is typed as the
+     * base `Compile\Mir\Node` and is really a `LoadLocal`). Routing that into a
+     * bag would hide the value from every read through the concrete class, and
+     * it is what first proposed a bag for the compiler's own node hierarchy.
+     */
+    private function subclassDeclares(string $cls, string $prop): bool
+    {
+        foreach ($this->classes as $name => $other) {
+            if ($name === $cls) { continue; }
+            if ($other->propertyOffset($prop) === -1) { continue; }
+            $cur = $other->parent ?? '';
+            $guard = 0;
+            while ($cur !== '' && $guard < 256) {
+                if ($cur === $cls) { return true; }
+                $cur = $this->classes[$cur]->parent ?? '';
+                $guard = $guard + 1;
+            }
+        }
+        return false;
+    }
+    /**
+     * A class that defines `__set` is NOT a dynamic-property case: php routes
+     * the undeclared store to the magic method, and giving it a bag made
+     * `__get`/`__set` stop firing (magic_get_set, magic_isset_unset_erased,
+     * magic_get_erased_receiver).
+     * @param array<string,bool> $want classes seen taking an undeclared store
+     */
+    private function scanDynamicPropStores(Node $n, array &$want): void
+    {
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $cls = $n->object->type->class ?? '';
+            if ($cls !== '' && isset($this->classes[$cls])) {
+                $cd = $this->classes[$cls];
+                if (!$cd->isStruct && !$cd->isExternClass && !$cd->isPreludeClass
+                    && !$cd->usesBag() && $cd->propertyOffset($n->property) === -1
+                    && !$this->subclassDeclares($cls, $n->property)
+                    && $this->resolveMethodClass($cls, "__set") === "") {
+                    $want[$cls] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $this->scanDynamicPropStores($c, $want);
+        }
+    }
+
+    /**
+     * Which of the module's OWN functions keep none of their arguments.
+     *
+     * A may-escape fixpoint, started optimistic (everything keeps nothing) and
+     * only ever ADDING escapes, so recursion terminates and the answer is the
+     * least fixpoint. A parameter ESCAPES when the body can make it outlive the
+     * call: returned, stored into a property / static / element / array literal,
+     * captured by a closure, reached by a by-ref parameter, or handed to a
+     * callee that itself keeps it. Everything unproven escapes — the
+     * conservative direction here is a leak, never a free.
+     *
+     * `splitStr($sep, $s) { return \explode($sep, $s); }` is the shape this
+     * exists for: `explode` allocates its result, so nothing of `$s` survives
+     * the call, and the caller's property slot may drop what it overwrites.
+     */
+    private function computeKeepsNoArg(\Compile\Mir\Module $module): void
+    {
+        if (!\Compile\Debug::$propBorrowEscape) { $this->fnKeepsNoArg = []; return; }
+        $keeps = [];
+        foreach ($module->functions as $fn) { $keeps[$fn->name] = true; }
+        for ($round = 0; $round < 6; $round++) {
+            $changed = false;
+            foreach ($module->functions as $fn) {
+                if (!($keeps[$fn->name] ?? false)) { continue; }
+                if ($this->fnEscapesAParam($fn, $keeps)) {
+                    $keeps[$fn->name] = false;
+                    $changed = true;
+                }
+            }
+            if (!$changed) { break; }
+        }
+        $this->fnKeepsNoArg = $keeps;
+        $want = \getenv('MANTICORE_KEEPS_TRACE');
+        if ($want !== false && $want !== '') {
+            foreach ($keeps as $kn => $kv) {
+                if (\str_contains($kn, $want)) { \error_log('KEEPS ' . $kn . ' = ' . ($kv ? 'no-keep' : 'ESCAPES')); }
+            }
+        }
+    }
+
+    /** @param array<string,bool> $keeps the round's summary, read for callees */
+    private function fnEscapesAParam(\Compile\Mir\FunctionDef $fn, array $keeps): bool
+    {
+        $taint = [];
+        foreach ($fn->params as $p) {
+            if ($p->byRef) { return true; }
+            $taint[$p->name] = true;
+        }
+        if ($taint === []) { return false; }
+        return $this->nodeEscapes($fn->body, $taint, $keeps);
+    }
+
+    /**
+     * @param array<string,bool> $taint locals that may alias a parameter
+     * @param array<string,bool> $keeps
+     */
+    private function nodeEscapes(Node $n, array &$taint, array $keeps): bool
+    {
+        $k = $n->kind;
+        // An alias store SPREADS the taint; it does not itself escape.
+        if ($k === Node::KIND_STORE_LOCAL) {
+            if ($this->aliasesTaint($n->value, $taint)) { $taint[$n->name] = true; }
+        }
+        if ($k === Node::KIND_RETURN) {
+            if ($n->value !== null && $this->aliasesTaint($n->value, $taint)) { return true; }
+        }
+        // Anything that can OUTLIVE the frame.
+        if ($k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_STORE_STATIC_PROP
+            || $k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_LIT
+            || $k === Node::KIND_CLOSURE || $k === Node::KIND_REF_ADDR) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if ($this->aliasesTaint($c, $taint)) { return true; }
+            }
+        }
+        if ($this->isCallLike($k)) {
+            $safe = false;
+            if ($k === Node::KIND_CALL) {
+                $safe = $this->callKeepsNoArg($n->function) || ($keeps[$n->function] ?? false);
+            }
+            if (!$safe) {
+                foreach (\Compile\Mir\Walk::children($n) as $c) {
+                    if ($this->aliasesTaint($c, $taint)) { return true; }
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->nodeEscapes($c, $taint, $keeps)) { return true; }
+        }
+        return false;
+    }
+
+    /** Does `$n` hand over a REFERENCE to a tainted value (rather than a fresh
+     *  one derived from it)? A concat, a cast and every builtin result are
+     *  fresh buffers; only a direct read, or a conditional over such reads,
+     *  aliases the parameter. */
+    private function aliasesTaint(Node $n, array $taint): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL) { return isset($taint[$n->name]); }
+        if ($k === Node::KIND_TERNARY) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if ($this->aliasesTaint($c, $taint)) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether this builtin READS its arguments and keeps nothing — so a
+     * property read handed to it cannot outlive the call and must not veto the
+     * slot's release ({@see markPropBorrowsIn}).
+     *
+     * A NAME list on purpose, exactly like {@see EmitLlvmMemory::mutatesArg0}:
+     * the contract is php's, not our implementation's, and a name belongs here
+     * only when php's own semantics say the callee cannot retain the argument.
+     * Anything absent stays a borrow, so the conservative direction is a leak.
+     */
+    private function callKeepsNoArg(string $fn): bool
+    {
+        $p = \strrpos($fn, chr(92));
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        foreach ([
+            'strlen', 'mb_strlen', 'count', 'sizeof', 'ord', 'trim', 'ltrim', 'rtrim',
+            'strtolower', 'strtoupper', 'ucfirst', 'lcfirst', 'strrev', 'md5', 'sha1',
+            'crc32', 'intval', 'floatval', 'boolval', 'strval', 'is_string', 'is_int',
+            'is_float', 'is_bool', 'is_array', 'is_object', 'is_null', 'is_numeric',
+            'is_callable', 'is_iterable', 'is_scalar', 'strpos', 'stripos', 'strrpos',
+            'str_contains', 'str_starts_with', 'str_ends_with', 'substr_count',
+            'number_format', 'dechex', 'hexdec', 'decbin', 'bindec', 'decoct', 'octdec',
+            'abs', 'floor', 'ceil', 'round', 'sqrt', 'intdiv', 'json_last_error',
+            // These ALLOCATE their result — verified at the runtime body:
+            // `__mir_substr` / `__mir_str_repeat` have a single `ret` of a fresh
+            // `__mir_str_alloc` buffer and can never hand back the argument. A
+            // name whose fast path returns its input UNCHANGED must NOT be here:
+            // the result would alias the property and outlive the store.
+            // `__mir_str_explode` gives every segment its own pooled
+            // `__mir_str_alloc` + memcpy, so no piece of the subject survives
+            // in the result. It is what `Http\splitStr` delegates to, and the
+            // one call that vetoed `Headers::block` for the whole program.
+            'substr', 'mb_substr', 'str_repeat', 'explode',
+        ] as $n) {
+            if ($n === $bare) { return true; }
+        }
         return false;
     }
 
@@ -2786,6 +3112,19 @@ final class EmitLlvm implements EmitVisitor
         // owned qualify — one with an erased arm stays borrowed.
         if ($this->condOwnsResult($node)) { return true; }
         if ($this->isStrCharRead($node)) { return true; }
+        // `(string)$int` / `(string)$float` MINT a buffer (__mir_int_to_str /
+        // __mir_float_to_str), so a consumer that frees its fresh operands must
+        // free this one: `strlen((string)$i)` and `$m[(string)$i] = 1` each
+        // leaked one string per call. The same arm is asked by the ownership
+        // pass ({@see Mir\Passes\InsertMemoryOps::isOwnedObj}) — the two sides
+        // have to answer identically, or a temp is freed twice or never.
+        // A STRING operand returns the SAME pointer and a CELL / erased one
+        // returns the raw payload, both borrows: only int and float allocate.
+        if ($k === Node::KIND_CAST) {
+            $ok = $node->operand->type->kind;
+            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_CELL;
+        }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;
@@ -2840,6 +3179,35 @@ final class EmitLlvm implements EmitVisitor
         return '  call void @__mir_cell_drop(i64 ' . $key . ")\n";
     }
 
+    /**
+     * Release the BASE temp of a read. `mk($i)->v` and `mkarr($i)[0]` evaluate a
+     * fresh +1, take one word out of it and never free the container — the
+     * mirror of {@see keyTempRelease} on the other operand, and of the receiver
+     * release a method call already does ({@see \Compile\Debug::$rcRecvTemp}).
+     *
+     * `$reg` is the base value; `$regIsPtr` says whether it is a `ptr` register
+     * (property / array reads carry one) so the release helper, which takes the
+     * i64 carrier, gets a ptrtoint first.
+     *
+     * ⚠ Gated on a SCALAR result. A property or element that yields an object,
+     * an array or a string hands it out BORROWED from the base, and freeing the
+     * base would free the value the read just returned.
+     */
+    private function baseTempRelease(Node $base, string $reg, bool $regIsPtr, Type $resultType): string
+    {
+        if (!\Compile\Debug::$rcBaseTemp) { return ''; }
+        $rk = $resultType->kind;
+        if ($rk !== Type::KIND_INT && $rk !== Type::KIND_FLOAT && $rk !== Type::KIND_BOOL) { return ''; }
+        $flavor = $this->freshRcArgFlavor($base);
+        if ($flavor === '') { return ''; }
+        $out = '';
+        $v = $reg;
+        if ($regIsPtr) {
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = ptrtoint ptr ' . $reg . " to i64\n";
+        }
+        return $out . $this->rcReleaseReg($v, $flavor);
+    }
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */
     private function freeStrTemp(Node $node, string $ptr): string
     {
@@ -3012,6 +3380,49 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
+     * The flavor with which an ELEMENT SLOT of `$arrType` releases the value an
+     * overwrite or an `unset` takes off it — the array analogue of
+     * {@see EmitLlvmObjects::propSlotDropsOldValue}, '' when nothing may drop.
+     *
+     * The slot owns what it holds: every element store retains the value it
+     * writes ({@see EmitLlvmArrays::emitStoreElemValue}), so the reference the
+     * slot loses is one the slot itself took. That is the whole argument, and it
+     * is why the answer is read off the CONTAINER's element type and never off
+     * the value being written — depth follows the DESTINATION.
+     *
+     * Refused, deliberately:
+     *  - a base that is not a proven vec/assoc (a `cell` / erased base carries
+     *    no element type we may trust);
+     *  - an UNKNOWN element — the erased channel is not self-describing, and
+     *    the repr nibble it does carry is stamped only by the stores that erase;
+     *  - a CELL element — `cell` is a static CLAIM, not a runtime guarantee, so
+     *    `__mir_cell_drop` would dispatch on bits that may be a bare address
+     *    (the same refusal the property slot drop makes).
+     */
+    private function elemSlotDropFlavor(Type $arrType): string
+    {
+        if (!\Compile\Debug::$rcElemSlotDrop) { return ''; }
+        if (!$arrType->isVec() && !$arrType->isAssoc()) { return ''; }
+        $el = $arrType->element;
+        if ($el === null) { return ''; }
+        $k = $el->kind;
+        if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_CELL) { return ''; }
+        // Which element KINDS may drop — `obj,arr` by default, because a
+        // compiler built with STRING-element drops miscompiles itself
+        // ({@see \Compile\Debug::$elemDropKinds} carries the repro). Also the
+        // bisect hook that attributed the cluster to one flavor in three
+        // builds instead of three branches.
+        $only = \Compile\Debug::$elemDropKinds;
+        if ($only !== '') {
+            $tag = $k === Type::KIND_OBJ ? 'obj'
+                : ($k === Type::KIND_STRING ? 'str'
+                : ($k === Type::KIND_ARRAY ? 'arr' : 'other'));
+            if (!\str_contains($only, $tag)) { return ''; }
+        }
+        return $this->discardReleaseFlavor($el);
+    }
+
+    /**
      * Set the rc-runtime flags for every non-struct class property's release
      * flavor, so the helpers drop_dispatch references (vec / assoc element
      * walkers, str rc) are emitted. Runs before any helper is built (top of
@@ -3019,6 +3430,15 @@ final class EmitLlvm implements EmitVisitor
      */
     private function scanDropFlags(): void
     {
+        // Every declared property NAME is a key in that class's generated
+        // `@__mir_props_<id>` ({@see EmitLlvmRuntime}), and that body is emitted
+        // with the descriptors — LONG after the string pool has rendered. Intern
+        // the names HERE, at the top of the preamble, or `litStr` mints an id
+        // whose global no longer exists and clang rejects the module with
+        // `use of undefined value '@.str.N'`.
+        foreach ($this->classes as $cls) {
+            foreach ($cls->propertyNames as $pn) { $this->pool->intern($pn); }
+        }
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             foreach ($cls->propertyNames as $pn) {
