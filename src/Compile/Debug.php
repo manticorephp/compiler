@@ -315,6 +315,12 @@ final class Debug
      */
     public static bool $rcForeachValueOwns = false;
 
+    /** BISECT ONLY: when non-empty, foreach co-ownership applies to a function
+     *  whose name CONTAINS this substring, and to no other. `MANTICORE_FE_ONLY`.
+     *  Lets the self-host crash be narrowed to one emitting function in ~log2(N)
+     *  builds instead of by hypothesis. */
+    public static string $feOnly = '';
+
 
     /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
@@ -531,6 +537,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
         $env = \getenv('MANTICORE_RC_FOREACH_VALUE_OWNS');
         if ($env !== false && $env !== '0' && $env !== '' && $env !== 'off') { self::$rcForeachValueOwns = true; }
+        $env = \getenv('MANTICORE_FE_ONLY');
+        if ($env !== false && $env !== '') { self::$feOnly = $env; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
         if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');

@@ -68,6 +68,8 @@ final class InsertMemoryOps implements Pass
     private array $rcObjBlocked = [];
     /** @var array<string, bool> loop-var names at least one non-co-owning foreach binds */
     private array $feOwnVeto = [];
+    /** BISECT: whether the function being lowered is in the feOnly subset. */
+    private bool $feFnEnabled = true;
 
     /** @var string[] owned RcHeap obj locals, first-seen order. */
     private array $rcObjOrder = [];
@@ -139,6 +141,8 @@ final class InsertMemoryOps implements Pass
         // binding it does ({@see foreachOwnVetoes}). Computed BEFORE the walk,
         // because the arm that registers a name runs before the later loop that
         // would veto it.
+        $this->feFnEnabled = \Compile\Debug::$feOnly === ''
+            || \str_contains($fn->name, \Compile\Debug::$feOnly);
         $this->feOwnVeto = self::foreachOwnVetoes($fn->body, $this->enums, $this->classes);
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
@@ -731,10 +735,29 @@ final class InsertMemoryOps implements Pass
             // reason is gone and the release is the other half of it
             // ({@see foreachValueCoOwns}). Registered at the ELEMENT's type —
             // depth follows the DESTINATION slot, never the container.
-            $feOwns = self::foreachValueCoOwns($fe, $this->enums, $this->classes)
+            $feOwns = $this->feFnEnabled
+                && self::foreachValueCoOwns($fe, $this->enums, $this->classes)
                 && !isset($this->feOwnVeto[$fe->valueVar]);
             if ($feOwns) {
                 $et = $fe->array->type->element;
+                // ★★★ The loop variable is a STORE like any other, so it owes the
+                // same FLAVOR agreement {@see rcSlotFlavor} enforces on
+                // KIND_STORE_LOCAL. Registering `rcObjType` directly here walked
+                // straight past that check: a name bound by a foreach over
+                // `Node[]` and stored as a string elsewhere kept ONE release,
+                // first-write-wins, and an object released through
+                // `__mir_rc_release_str` reads rc at ptr-8 and frees from ptr-16
+                // — a WILD WRITE through the wrong header offset, which is why
+                // no rc<=0 verify ever fired and why the faulting word was never
+                // a plausible heap pointer.
+                if ($et !== null && isset($this->rcObjType[$fe->valueVar])) {
+                    $prev = $this->rcSlotFlavor($this->rcObjType[$fe->valueVar]);
+                    $now = $this->rcSlotFlavor($et);
+                    if ($prev !== '' && $now !== '' && $prev !== $now) {
+                        $this->rcObjBlocked[$fe->valueVar] = true;
+                        $this->noteBlock($fe->valueVar, "flavor", $et);
+                    }
+                }
                 if ($et !== null && !isset($this->rcObjType[$fe->valueVar])) {
                     $this->rcObjOrder[] = $fe->valueVar;
                     $this->rcObjType[$fe->valueVar] = $et;

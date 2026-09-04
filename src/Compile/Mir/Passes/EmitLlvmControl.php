@@ -899,18 +899,24 @@ trait EmitLlvmControl
      */
     private function foreachValueOwns(Foreach_ $fe): bool
     {
+        if (\Compile\Debug::$feOnly !== ''
+            && !\str_contains($this->frame->name, \Compile\Debug::$feOnly)) { return false; }
         if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums, $this->classes)) { return false; }
-        // …and the NAME must be co-owned by every foreach that binds it, or this
-        // loop's +1 pays for another loop's borrow ({@see InsertMemoryOps::
-        // foreachOwnVetoes} — `scanByRefCaptureNode`'s two `$c` loops are the
-        // shape that produced a gen-2 compiler which could not compile hello
-        // world). Whole-function answer, so it is computed once per body.
-        $body = $this->frame->body;
-        if ($body !== null && $this->feVetoBody !== $body) {
-            $this->feVetoBody = $body;
-            $this->feVeto = InsertMemoryOps::foreachOwnVetoes($body, $this->enums, $this->classes);
-        }
-        return !isset($this->feVeto[$fe->valueVar]);
+        // ★★★ THE PASS DECIDES; THE EMITTER OBEYS. `rcObjLocals` IS that
+        // decision, already transported through the IR and collected per
+        // function ({@see EmitLlvmMemory::initRcObjSlots}) — so the retain here
+        // and the scope-exit release there cannot disagree about a name.
+        //
+        // This used to RE-DERIVE the answer from `frame->body`, cached on that
+        // body's identity. `EmitLlvmModule` NULLS `frame->body` at five points
+        // during emission, and on every one of them the cache silently kept the
+        // PREVIOUS function's veto set: the emitter then answered for the wrong
+        // function, took a +1 the pass had planted no release for (or skipped
+        // one it had), and the resulting over-release was a wild write with no
+        // rc underflow to catch it. Every `InferTypes` method family reproduced
+        // it independently, which is what a per-function bookkeeping bug looks
+        // like and what a per-site one never does.
+        return isset($this->frame->rcObjLocals[$fe->valueVar]);
     }
 
     private function emitForeach(Foreach_ $n): string
