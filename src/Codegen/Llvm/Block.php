@@ -94,6 +94,9 @@ final class Block
     public function add(Value $a, Value $b): Value  { return $this->binop('add nsw', $a, $b); }
     public function sub(Value $a, Value $b): Value  { return $this->binop('sub nsw', $a, $b); }
     public function mul(Value $a, Value $b): Value  { return $this->binop('mul nsw', $a, $b); }
+    /** Wrapping multiply — `mul` without `nsw`, for arithmetic whose whole point
+     *  is to overflow (hash mixing). Signed overflow under `nsw` is UB. */
+    public function mulWrap(Value $a, Value $b): Value { return $this->binop('mul', $a, $b); }
     public function sdiv(Value $a, Value $b): Value { return $this->binop('sdiv', $a, $b); }
     public function srem(Value $a, Value $b): Value { return $this->binop('srem', $a, $b); }
     public function and_(Value $a, Value $b): Value { return $this->binop('and', $a, $b); }
