@@ -34,7 +34,7 @@ if ($tier === '') {
 $tierKey = str_starts_with($tier, 'T') ? $tier : 'T' . $tier;
 if ($out === '') { $out = $app . '/manticore.' . strtolower($tierKey) . '.json'; }
 
-$j = json_decode((string)@file_get_contents('docs/audit/tiers.json'), true);
+$j = json_decode((string)@file_get_contents('tests/audit/tiers.json'), true);
 if (!isset($j['tiers'][$tierKey])) {
     fwrite(STDERR, "gen_manifest: unknown tier $tierKey — run gen_tiers.php first\n");
     exit(2);

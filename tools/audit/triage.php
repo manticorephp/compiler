@@ -34,7 +34,7 @@ if ($tier === '') { fwrite(STDERR, "triage: usage: triage.php <tier>\n"); exit(2
 $tierKey = str_starts_with($tier, 'T') ? $tier : 'T' . $tier;
 $num = (int)substr($tierKey, 1);
 
-$diagPath = "docs/audit/data/analyze-t$num.json";
+$diagPath = "tests/audit/data/analyze-t$num.json";
 // Absent and UNPARSEABLE are different failures, and saying "no analyze output"
 // for a 741 KB file that simply does not decode is the audit lying about its own
 // instrument. `manticore analyze --json` currently emits malformed UTF-8 for
@@ -52,7 +52,7 @@ if (!is_array($d)) {
     exit(2);
 }
 
-$ladder = json_decode((string)file_get_contents('docs/audit/tiers.json'), true);
+$ladder = json_decode((string)file_get_contents('tests/audit/tiers.json'), true);
 
 /** Declared symbols per directory set. */
 function scan(array $dirs): array

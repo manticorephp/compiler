@@ -23,7 +23,7 @@
 #                   plain cc and hard-fails on a missing symbol; only the
 #                   manifest path calls link_stubs.sh.
 #
-# Findings are written under docs/audit/data/. A crash is captured, not fixed.
+# Findings are written under tests/audit/data/. A crash is captured, not fixed.
 #
 # Usage: bash tools/audit/run_tier.sh <N> [--skip-deep] [--skip-build]
 
@@ -43,7 +43,7 @@ done
 
 APP=/Users/taras/var/projects/symfony-demo-probe/app
 PROBE=/Users/taras/var/projects/symfony-demo-probe
-DATA="$ROOT/docs/audit/data"
+DATA="$ROOT/tests/audit/data"
 mkdir -p "$DATA" "$PROBE/audit-data"
 
 export MANTICORE_PRELUDE="$ROOT/prelude"
@@ -105,7 +105,7 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
     if [ -f "$PROBE/audit-data/t${TIER}_stubs.c" ]; then
         php tools/audit/demangle_stubs.php "$PROBE/audit-data/t${TIER}_stubs.c" \
             > "$DATA/stubs-t$TIER.txt"
-        echo "   $(wc -l < "$DATA/stubs-t$TIER.txt") missing symbol(s) -> docs/audit/data/stubs-t$TIER.txt"
+        echo "   $(wc -l < "$DATA/stubs-t$TIER.txt") missing symbol(s) -> tests/audit/data/stubs-t$TIER.txt"
     else
         echo "   no stubs.c — build did not reach the link stage"
         tail -12 "$PROBE/audit-data/build-t$TIER.log"

@@ -7,13 +7,13 @@
  * reach is present. Handing analyze one tier in isolation would report its
  * lower-tier dependencies as undefined and drown the real findings.
  *
- * Usage: php tools/audit/tier_dirs.php <N> [--tiers docs/audit/tiers.json]
+ * Usage: php tools/audit/tier_dirs.php <N> [--tiers tests/audit/tiers.json]
  *                                          [--app <probe-app-dir>]
  *                                          [--only]   only tier N's own dirs
  */
 
 $tier = $argv[1] ?? '';
-$tiersPath = 'docs/audit/tiers.json';
+$tiersPath = 'tests/audit/tiers.json';
 $app = '/Users/taras/var/projects/symfony-demo-probe/app';
 $only = false;
 for ($i = 2; $i < count($argv); $i++) {

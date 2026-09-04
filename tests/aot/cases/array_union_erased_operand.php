@@ -17,7 +17,7 @@
 // ⚠ Only the KEYS are asserted for the erased operand. The elements it
 // contributes stay NaN-boxed while the raw side's do not, so the result mixes
 // two representations in one array — the standing element-repr root, witnessed
-// on its own by docs/audit/probes/cap_bare_array_channel_elems.php. What this
+// on its own by tests/audit/probes/cap_bare_array_channel_elems.php. What this
 // case pins is that the union HAPPENS: right keys fill the gaps, left keys win.
 function wrap(mixed $carrier, array $base): array
 {

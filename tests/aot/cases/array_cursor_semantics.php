@@ -13,7 +13,7 @@
 // builtins (biArrayCursor) before the declaration is consulted at all. Restoring
 // the `&` and rebuilding leaves every line below passing.
 //
-// The by-value change is gated by docs/audit/data/byref-arity.tsv instead — the
+// The by-value change is gated by tests/audit/data/byref-arity.tsv instead — the
 // ReflectionFunction diff against Zend, where the row simply disappears. What is
 // locked here is that neither spelling disturbs the array: only next/prev/reset/
 // end move the cursor, and only they COW.
