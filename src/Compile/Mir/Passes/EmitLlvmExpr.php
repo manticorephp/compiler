@@ -993,11 +993,11 @@ trait EmitLlvmExpr
             $out .= "skey:\n";
             $out .= "  %kp = and i64 %k, " . $mask . "\n";
             $out .= "  %kpp = inttoptr i64 %kp to ptr\n";
-            $out .= "  %hass = call i64 @__mir_array_isset_str(ptr %b, ptr %kpp)\n";
+            $out .= "  %hass = call i64 @__mir_array_isset_str(ptr %b, ptr %kpp, i64 0, i64 0)\n";
             $out .= "  %hassb = icmp ne i64 %hass, 0\n";
             $out .= "  br i1 %hassb, label %sget, label %no\n";
             $out .= "sget:\n";
-            $out .= "  %rawb1 = call i64 @__mir_array_get_str(ptr %b, ptr %kpp)\n";
+            $out .= "  %rawb1 = call i64 @__mir_array_get_str(ptr %b, ptr %kpp, i64 0, i64 0)\n";
             $out .= "  br label %have\n";
             $out .= "ikey:\n";
             $out .= "  %ki = call i64 @__manticore_unbox_int(i64 %k)\n";

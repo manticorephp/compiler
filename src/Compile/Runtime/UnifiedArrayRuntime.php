@@ -1203,14 +1203,16 @@ final class UnifiedArrayRuntime
         $sres = $strk->load(Type::ptr(), $resSlot);
         $sk = $strk->load(Type::i64(), $this->entryAddr($strk, $b, $bi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $skp = $strk->inttoptr($sk, Type::ptr());
-        $shas = $strk->call('__mir_array_isset_str', Type::i64(), [$sres, $skp]);
+        $shas = $strk->call('__mir_array_isset_str', Type::i64(),
+            [$sres, $skp, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $strk->brIf($strk->icmp('ne', $shas, Value::int(Type::i64(), 0)), $next, $sset);
         $sv = $sset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
         $sset->call('__mir_retain_by_repr', Type::void(), [$sv, $brepr]);
         // The key string gains a second owner (the result's entry).
         $sset->call('__mir_rc_retain_str', Type::void(), [$skp]);
         $snew = $sset->call('__mir_array_set_str', Type::ptr(),
-            [$sset->load(Type::ptr(), $resSlot), $skp, $sv]);
+            [$sset->load(Type::ptr(), $resSlot), $skp, $sv,
+             Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $sset->store($snew, $resSlot);
         $sset->br($next);
 
